@@ -42,21 +42,24 @@ pub fn init_app() {
 
 // ---------------------------------------------------------------------------
 // Phase 2 — Native audio capture + on-device wake-word detection.
+// Phase 3 — Wyoming client: on detection, the engine discovers the Mac's
+//           Wyoming host over mDNS, opens a TCP turn, streams PCM up, and reads
+//           `transcript` events back (Plan.MD §3, Phase 3; architecture.md §4).
 //
-// Flutter starts the engine and consumes a stream of events; Rust owns capture,
-// the ring buffer, resampling, and `tract-onnx` wake-word scoring (Plan.MD §3,
-// Phase 2; architecture.md §2.1, §3). The events below are the Phase-2 slice of
-// the Rust -> Dart stream contract; the full state machine (transcript/reply
-// streams, Wyoming client) arrives in later phases.
+// Flutter starts the engine and consumes a single stream of events; Rust owns
+// capture, the ring buffer, resampling, `tract-onnx` wake-word scoring, and the
+// Wyoming turn state machine. The events below are the device -> Dart contract;
+// the dedicated transcript/reply UI streams are built on top in Phase 5.
 // ---------------------------------------------------------------------------
 
 use crate::frb_generated::StreamSink;
 use flutter_rust_bridge::frb;
 
-/// Paths and tuning for the openWakeWord three-model chain. The Flutter layer
-/// resolves these from bundled/assets or the settings screen (Phase 6) and hands
-/// them to the engine; discovery of the Wyoming host is a separate concern
-/// (Phase 3), so nothing here touches the network.
+/// Paths and tuning for the openWakeWord three-model chain plus the Phase-3
+/// Wyoming turn. The Flutter layer resolves the model paths from bundled assets
+/// or the settings screen (Phase 6) and hands them to the engine. The Wyoming
+/// host itself is discovered over mDNS at turn time, so no address is configured
+/// here (architecture.md §5).
 pub struct WakeWordConfig {
     /// Path to the melspectrogram ONNX model (`melspectrogram.onnx`).
     pub melspec_model_path: String,
@@ -66,12 +69,25 @@ pub struct WakeWordConfig {
     pub wakeword_model_path: String,
     /// Human-readable wake-word name, echoed back on detection events.
     pub model_name: String,
-    /// Confidence in [0, 1] above which a detection is reported.
+    /// Confidence in [0, 1] above which a detection is reported while idle.
     pub threshold: f32,
+    /// Higher confidence required to fire *while a turn is already active*
+    /// (streaming/speaking). This is the AEC-interim mitigation from the locked
+    /// decisions: raise the bar during playback so the device's own speaker is
+    /// less likely to self-trigger (Plan.MD §4). Set equal to `threshold` to
+    /// disable. Clamped to at least `threshold` at runtime.
+    pub active_threshold: f32,
+    /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+    /// (0 = use the built-in default).
+    pub discovery_timeout_secs: u64,
+    /// Seconds of server silence before a turn is defensively abandoned
+    /// (0 = use the built-in default).
+    pub turn_timeout_secs: u64,
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
 /// to a plain Dart `enum` (no `freezed` codegen dependency needed).
+#[derive(Clone)]
 pub enum WakeWordEventKind {
     /// Capture started; `device`/`device_sample_rate`/`channels` are populated.
     Started,
@@ -82,16 +98,29 @@ pub enum WakeWordEventKind {
     Level,
     /// The wake word fired; `model` and `score` are populated.
     Detected,
+    /// Phase 3: a turn began — discovering/dialing the Wyoming host. `message`
+    /// describes the resolved endpoint when known.
+    Connecting,
+    /// Phase 3: connected to the Wyoming host; PCM is now streaming up.
+    Streaming,
+    /// Phase 3: a transcript arrived from the STT server; `transcript` carries
+    /// the recognized text.
+    Transcript,
+    /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
+    /// The engine returns to idle wake-word listening.
+    Disconnected,
     /// The engine loop has stopped and capture has been torn down.
     Stopped,
     /// A fatal error in `message`; the engine has stopped.
     Error,
 }
 
-/// A single event streamed from the Rust engine to the Flutter UI during Phase
-/// 2. Modeled as a flat struct with a `kind` tag (rather than a data-carrying
-/// enum) so the FRB boundary stays dependency-free; fields not relevant to a
-/// given `kind` carry neutral defaults.
+/// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
+/// flat struct with a `kind` tag (rather than a data-carrying enum) so the FRB
+/// boundary stays dependency-free; fields not relevant to a given `kind` carry
+/// neutral defaults. `Clone` lets the engine fan the sink out to the Phase-3
+/// Wyoming turn task (which emits on the same stream).
+#[derive(Clone)]
 pub struct WakeWordEvent {
     pub kind: WakeWordEventKind,
     /// Status / error text (`Status`, `Error`).
@@ -108,6 +137,8 @@ pub struct WakeWordEvent {
     pub score: f32,
     /// Wake-word name that fired (`Detected`).
     pub model: String,
+    /// Recognized speech (`Transcript`).
+    pub transcript: String,
 }
 
 impl WakeWordEvent {
@@ -121,6 +152,7 @@ impl WakeWordEvent {
             rms: 0.0,
             score: 0.0,
             model: String::new(),
+            transcript: String::new(),
         }
     }
 
@@ -152,6 +184,31 @@ impl WakeWordEvent {
             model,
             score,
             ..Self::base(WakeWordEventKind::Detected)
+        }
+    }
+
+    pub(crate) fn connecting(message: String) -> Self {
+        Self {
+            message,
+            ..Self::base(WakeWordEventKind::Connecting)
+        }
+    }
+
+    pub(crate) fn streaming() -> Self {
+        Self::base(WakeWordEventKind::Streaming)
+    }
+
+    pub(crate) fn transcript(text: String) -> Self {
+        Self {
+            transcript: text,
+            ..Self::base(WakeWordEventKind::Transcript)
+        }
+    }
+
+    pub(crate) fn disconnected(message: String) -> Self {
+        Self {
+            message,
+            ..Self::base(WakeWordEventKind::Disconnected)
         }
     }
 

@@ -164,19 +164,54 @@ Echo Show speakers → return to idle.
 > a flat struct + unit-only-enum tag (not a data-carrying enum) to avoid pulling
 > the Dart `freezed` codegen dependency into the app.
 
-### Phase 3 — Wyoming Client Core Logic (Rust)
-- mDNS discovery of `_wyoming._tcp`; cache the resolved host/port.
-- Connection-state struct over `tokio::net::TcpStream`.
-- **State machine:**
-  - **Idle:** analyze audio for wake word; socket dormant/closed.
-  - **Triggered:** wake word fires → open TCP → send Wyoming `audio-start` header.
-  - **Streaming:** send PCM chunks in Wyoming frames; concurrently read `transcript`
-    events on the same socket. End-of-speech is decided **server-side** (VAD on the
-    STT server), which signals when to stop.
-  - **Silence/Timeout:** on the server's end-of-speech signal (or timeout) send
-    `audio-stop`; tear down / reset.
-- Wake-word evaluation keeps running **during playback** (full-duplex). AEC is
-  deferred for v1, so guard against obvious self-triggers pragmatically.
+### Phase 3 — Wyoming Client Core Logic (Rust) ✅ (implemented 2026-09-15)
+- mDNS discovery of `_wyoming._tcp`; cache the resolved host/port. **Done** —
+  `rust/src/wyoming/discovery.rs` browses `_wyoming._tcp.local.` via `mdns-sd`,
+  returns the first resolved `WyomingEndpoint` (address/port/hostname) within a
+  timeout, and always tears the daemon down. An `EndpointCache` holds the
+  last-known host; `resolve()` prefers a fresh browse and falls back to the cache
+  when the browse times out (the plan's "cached fallback"; full reconnect/back-off
+  is Phase 5). No static IP is ever configured.
+- Connection-state struct over `tokio::net::TcpStream`. **Done** —
+  `rust/src/wyoming/client.rs` `WyomingConnection` owns the split buffered
+  read/write halves plus the PCM format, sets `TCP_NODELAY`, and exposes
+  `send_audio_start`/`send_chunk`/`send_audio_stop`/`read_event`. It is generic
+  over the IO so the turn driver is testable against an in-memory duplex.
+- **State machine.** **Done** — `rust/src/wyoming/state.rs` is a *pure* transition
+  function (`Idle → Triggered → Streaming → Closing → Idle`; the plan's
+  "Silence/Timeout" is `Closing`). Keeping it side-effect-free makes the whole turn
+  lifecycle exhaustively unit-testable. The async driver `client::run_turn` binds
+  it to a socket: on connect it sends `audio-start`, streams PCM pulled from an
+  mpsc channel as `audio-chunk`s, and reads events back; a server `transcript`
+  (server-side VAD's end-of-speech) or an idle timeout drives `audio-stop` +
+  teardown.
+- **Wire format.** **Done** — `rust/src/wyoming/protocol.rs` encodes/decodes the
+  Wyoming framing (newline-delimited JSON header + length-prefixed `data` block +
+  binary `payload`), matching the reference `rhasspy/wyoming` implementation so we
+  interoperate with off-the-shelf servers (Phase 4).
+- **Engine integration.** **Done** — `rust/src/engine/net.rs` bridges the `!Send`
+  capture thread to the async client: a single-worker tokio runtime spawns a turn
+  task on wake-word detection, and the inference loop forwards resampled 16 kHz PCM
+  to it over a bounded channel (drops on overflow — never blocks the RT path).
+  Turn progress surfaces to Dart as new `WakeWordEvent` kinds (`Connecting`,
+  `Streaming`, `Transcript`, `Disconnected`).
+- Wake-word evaluation keeps running **during** a turn (full-duplex). AEC is
+  deferred for v1; the interim mitigation is wired here as a configurable
+  `active_threshold` — the engine requires a higher wake-word confidence (never
+  below the idle `threshold`) whenever a turn is active. **Done.**
+- Verified: `cargo test` (25 tests: protocol round-trips, state-machine
+  transitions, discovery cache fallback, a duplex mock-server turn, an idle
+  timeout, and a real-`TcpStream` loopback dial), `cargo clippy -- -D warnings`
+  (clean), `dart analyze` (clean after FRB regen), and a release `android-arm`
+  APK cross-compile (25.5 MB) — so `tokio` + `mdns-sd` + `serde` all link on the
+  32-bit device target.
+
+> **Dep note (Phase 3):** added `tokio` (rt-multi-thread/net/io-util/sync/time/
+> macros), `serde`+`serde_json` (Wyoming JSON framing), and `mdns-sd` 0.11
+> (`_wyoming._tcp` discovery). `tokio` was already transitively present via FRB, so
+> this only promotes it to a direct dependency. The Wyoming networking uses one
+> worker thread to stay light on the ~1 GB budget. `minSdk` is unchanged (still 26,
+> set in Phase 2); none of the new crates raise the floor.
 
 ### Phase 4 — Assistant Pipeline (Mac Mini)
 - Wyoming STT (Whisper/CoreML) with **server-side VAD** emits the final transcript.

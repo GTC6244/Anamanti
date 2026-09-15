@@ -325,6 +325,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt dco_decode_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeU64(raw);
+  }
+
+  @protected
   int dco_decode_u_8(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
@@ -340,14 +346,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordConfig dco_decode_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return WakeWordConfig(
       melspecModelPath: dco_decode_String(arr[0]),
       embeddingModelPath: dco_decode_String(arr[1]),
       wakewordModelPath: dco_decode_String(arr[2]),
       modelName: dco_decode_String(arr[3]),
       threshold: dco_decode_f_32(arr[4]),
+      activeThreshold: dco_decode_f_32(arr[5]),
+      discoveryTimeoutSecs: dco_decode_u_64(arr[6]),
+      turnTimeoutSecs: dco_decode_u_64(arr[7]),
     );
   }
 
@@ -355,8 +364,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -366,6 +375,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       rms: dco_decode_f_32(arr[5]),
       score: dco_decode_f_32(arr[6]),
       model: dco_decode_String(arr[7]),
+      transcript: dco_decode_String(arr[8]),
     );
   }
 
@@ -443,6 +453,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getBigUint64();
+  }
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8();
@@ -461,12 +477,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_wakewordModelPath = sse_decode_String(deserializer);
     var var_modelName = sse_decode_String(deserializer);
     var var_threshold = sse_decode_f_32(deserializer);
+    var var_activeThreshold = sse_decode_f_32(deserializer);
+    var var_discoveryTimeoutSecs = sse_decode_u_64(deserializer);
+    var var_turnTimeoutSecs = sse_decode_u_64(deserializer);
     return WakeWordConfig(
       melspecModelPath: var_melspecModelPath,
       embeddingModelPath: var_embeddingModelPath,
       wakewordModelPath: var_wakewordModelPath,
       modelName: var_modelName,
       threshold: var_threshold,
+      activeThreshold: var_activeThreshold,
+      discoveryTimeoutSecs: var_discoveryTimeoutSecs,
+      turnTimeoutSecs: var_turnTimeoutSecs,
     );
   }
 
@@ -481,6 +503,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_rms = sse_decode_f_32(deserializer);
     var var_score = sse_decode_f_32(deserializer);
     var var_model = sse_decode_String(deserializer);
+    var var_transcript = sse_decode_String(deserializer);
     return WakeWordEvent(
       kind: var_kind,
       message: var_message,
@@ -490,6 +513,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       rms: var_rms,
       score: var_score,
       model: var_model,
+      transcript: var_transcript,
     );
   }
 
@@ -584,6 +608,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putBigUint64(self);
+  }
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self);
@@ -605,6 +635,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.wakewordModelPath, serializer);
     sse_encode_String(self.modelName, serializer);
     sse_encode_f_32(self.threshold, serializer);
+    sse_encode_f_32(self.activeThreshold, serializer);
+    sse_encode_u_64(self.discoveryTimeoutSecs, serializer);
+    sse_encode_u_64(self.turnTimeoutSecs, serializer);
   }
 
   @protected
@@ -621,6 +654,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_32(self.rms, serializer);
     sse_encode_f_32(self.score, serializer);
     sse_encode_String(self.model, serializer);
+    sse_encode_String(self.transcript, serializer);
   }
 
   @protected
