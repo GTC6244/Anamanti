@@ -59,8 +59,12 @@ impl Resampler {
         }
 
         // Drop fully consumed input, keeping the sample the next output still
-        // needs to interpolate from, and rebase the fractional position.
-        let consumed = self.pos as usize;
+        // needs to interpolate from, and rebase the fractional position. The
+        // interpolation loop's final `pos += step` can advance `pos` past the end
+        // of `carry` (e.g. at a 48 kHz→16 kHz integer step of 3), so clamp the
+        // drain to what actually exists — draining past `carry.len()` panics. The
+        // overshoot is preserved in `pos` and consumed against the next block.
+        let consumed = (self.pos as usize).min(self.carry.len());
         if consumed > 0 {
             self.carry.drain(0..consumed);
             self.pos -= consumed as f64;

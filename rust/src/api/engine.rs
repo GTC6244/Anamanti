@@ -38,6 +38,23 @@ fn engine_target() -> String {
 pub fn init_app() {
     // Default utilities - feel free to customize
     flutter_rust_bridge::setup_default_user_utils();
+    // `setup_default_user_utils()` installs a logcat logger at the *Trace* max
+    // level, so every `log` record is formatted and written synchronously. On the
+    // 32-bit device that firehose — especially `tract`'s per-node graph tracing at
+    // model-load time and per-frame inference logging — starves the real-time
+    // audio thread, stalling wake-word detection and tripping the engine's
+    // error/reconnect loop. Cap it at Info so lifecycle logs survive but the
+    // Debug/Trace flood is dropped before any string formatting happens.
+    log::set_max_level(log::LevelFilter::Info);
+
+    // Surface panics through the `log` crate. The engine runs its capture/inference
+    // loop on a background thread; without this a panic there dies silently (the
+    // default hook writes to stderr, which Android discards), so the only symptom
+    // is the FRB event stream ending and the UI looping on "reconnecting". Logging
+    // the panic makes such crashes visible in logcat.
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("rust panic: {info}");
+    }));
 }
 
 // ---------------------------------------------------------------------------

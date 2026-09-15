@@ -146,18 +146,30 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // stream must live on this thread (like capture); the `Send` sink is handed to
     // the network layer. If no output device is available the turn still runs — it
     // just can't play audio — so degrade to `None`.
-    let (playback_stream, playback_sink) = match start_playback() {
-        Ok((stream, sink_handle)) => {
+    // `start_playback()` can *panic* on Android: cpal's output-device query hits
+    // the Java `AudioManager` via `ndk_context`, which isn't initialized when the
+    // library is `dlopen`'d by Dart. Catch the unwind so a playback failure never
+    // takes down the whole engine — wake-word detection and the Wyoming turn still
+    // run; only the spoken reply is lost.
+    let playback_init = std::panic::catch_unwind(std::panic::AssertUnwindSafe(start_playback));
+    let (playback_stream, playback_sink) = match playback_init {
+        Ok(Ok((stream, sink_handle))) => {
             let _ = sink.add(WakeWordEvent::status(format!(
                 "playback ready on '{}' ({} Hz, {} ch)",
                 stream.info.device_name, stream.info.sample_rate, stream.info.channels
             )));
             (Some(stream), Some(Arc::new(sink_handle)))
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let _ = sink.add(WakeWordEvent::status(format!(
                 "no audio output ({e}); replies won't be spoken"
             )));
+            (None, None)
+        }
+        Err(_) => {
+            let _ = sink.add(WakeWordEvent::status(
+                "audio output unavailable (init panicked); replies won't be spoken".to_string(),
+            ));
             (None, None)
         }
     };

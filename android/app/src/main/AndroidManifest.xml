@@ -4,6 +4,15 @@
          permission; without it `cpal` cannot open the input device. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-feature android:name="android.hardware.microphone" android:required="true"/>
+    <!-- Phase 3: the Rust engine opens a TCP (Wyoming) connection to the Mac Mini
+         orchestrator. A release build needs INTERNET explicitly — Flutter only
+         adds it to the debug/profile manifests by default. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Phase 3: the orchestrator is discovered via multicast mDNS (_wyoming._tcp).
+         Android drops inbound multicast unless the app holds a WifiManager
+         MulticastLock, which requires these permissions. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <application
         android:label="ambient_display"
         android:name="${applicationName}"
