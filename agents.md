@@ -69,21 +69,28 @@ README.md         Product overview + setup
 ## Environment & build
 
 ```bash
-# Rust Android target (one-time)
-rustup target add aarch64-linux-android
+# Rust Android target (one-time). Echo Show 8 (crown) LineageOS is 32-bit:
+rustup target add armv7-linux-androideabi
 
 # Generate the Dart/JNI bindings from Rust signatures
 flutter_rust_bridge_codegen generate
 
-# Build the engine for the device
-cargo build --release --target aarch64-linux-android
+# Build a device APK (cargokit cross-compiles the Rust engine into it).
+# Echo Show 8 (crown) is 32-bit armeabi-v7a — use android-arm, NOT android-arm64
+# (arm64 fails with INSTALL_FAILED_NO_MATCHING_ABIS on this device).
+flutter build apk --release --target-platform android-arm
 
 # Run the app on the Echo Show (LineageOS) via adb
-flutter run -d <echo-show-device>
+adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d <echo-show-device>
 ```
 
 - Requires: Flutter SDK, Android SDK + NDK, Rust toolchain, `adb`.
 - Mac side: a Wyoming STT server (Whisper/CoreML) and Piper TTS on the LAN.
+- **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
+  cargokit plugin (`rust_builder/cargokit`) uses the legacy AGP variant API and
+  `project.exec`, which Gradle 9 / AGP 9 removed. Pinned in
+  `android/settings.gradle.kts` (AGP 8.7.3, Kotlin 2.1.0) and the Gradle wrapper
+  (8.11.1). Revisit only when cargokit ships AGP-9 support. NDK: `28.2.13676358`.
 
 ## Conventions
 
