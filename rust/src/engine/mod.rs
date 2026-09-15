@@ -14,7 +14,6 @@
 //! the engine just raises the confidence bar while a turn is active to suppress
 //! self-triggers (the AEC-interim mitigation, Plan.MD §4).
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -33,7 +32,9 @@ use crate::audio::ring_buffer::new_audio_ring;
 use crate::audio::TARGET_SAMPLE_RATE;
 use crate::wakeword::{WakeWordDetector, WakeWordModelPaths};
 
+mod gate;
 mod net;
+use gate::DetectionGate;
 use net::Network;
 
 /// Ring capacity in samples (~2 s at 48 kHz; ≈192 KB of `i16`). Absorbs
@@ -249,9 +250,9 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
 
     // VACA-style detection smoothing + debounce (WakeWordDetection.md §4.1): fire
     // on the moving average of the last `SMOOTH_WINDOW` block scores rather than a
-    // single frame, and enforce a cooldown so one utterance fires exactly once.
-    let mut score_window: VecDeque<f32> = VecDeque::with_capacity(SMOOTH_WINDOW);
-    let mut last_fire: Option<Instant> = None;
+    // single frame, and enforce a cooldown so one utterance fires exactly once. The
+    // gating logic is a pure, unit-tested state machine (see `gate`).
+    let mut gate = DetectionGate::new(SMOOTH_WINDOW, DETECTION_COOLDOWN);
     // Rolling peak score between diagnostic log emissions, so the logcat trace shows
     // both that audio is flowing (rms) and how high the model scored (peak) even
     // when nothing crosses the detection threshold.
@@ -292,42 +293,42 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         match detector.as_mut() {
             Some(d) => match d.push_audio(&resampled) {
                 Ok(Some(score)) => {
-                    // Periodic diagnostic (rms + rolling peak) so live debugging can
-                    // confirm the mic is actually hearing input and see how the model
-                    // scores it, independent of whether anything fires.
-                    diag_peak = diag_peak.max(score);
-                    block_counter = block_counter.wrapping_add(1);
-                    if block_counter.is_multiple_of(LEVEL_EVERY_N_BLOCKS) {
-                        let rms = capture::rms_level(&resampled);
-                        log::info!("wake-word diag: rms={rms:.4} peak_score={diag_peak:.4}");
-                        diag_peak = 0.0;
-                    }
-
-                    if score_window.len() == SMOOTH_WINDOW {
-                        score_window.pop_front();
-                    }
-                    score_window.push_back(score);
-                    let avg =
-                        score_window.iter().sum::<f32>() / score_window.len().max(1) as f32;
                     let threshold = if turn_active {
                         active_threshold
                     } else {
                         idle_threshold
                     };
 
+                    // Periodic diagnostic + live mic level. The RMS is emitted as a
+                    // `Level` event even while a model is loaded (not just in
+                    // capture-only mode) so the UI meter and on-hardware tuning stay
+                    // live during detection (WakeWordDetection.md §4.4), and logged
+                    // alongside the rolling peak score for logcat debugging.
+                    diag_peak = diag_peak.max(score);
+                    block_counter = block_counter.wrapping_add(1);
+                    if block_counter.is_multiple_of(LEVEL_EVERY_N_BLOCKS) {
+                        let rms = capture::rms_level(&resampled);
+                        log::info!("wake-word diag: rms={rms:.4} peak_score={diag_peak:.4}");
+                        diag_peak = 0.0;
+                        if sink.add(WakeWordEvent::level(rms)).is_err() {
+                            break;
+                        }
+                    }
+
+                    let fired = gate.observe(score, threshold, Instant::now());
+
                     // Live tuning trace: show the confidence climbing toward the
                     // wake word without flooding logcat (one line per drained block,
                     // and only once a score is meaningfully above the noise floor).
+                    // `gate.avg()` now includes this block's score.
                     if score >= SCORE_LOG_FLOOR {
                         log::info!(
-                            "wake-word score={score:.3} avg{}={avg:.3} thr={threshold:.2}",
-                            score_window.len()
+                            "wake-word score={score:.3} avg={:.3} thr={threshold:.2}",
+                            gate.avg()
                         );
                     }
 
-                    let cooled = last_fire.is_none_or(|t| t.elapsed() >= DETECTION_COOLDOWN);
-                    if score_window.len() == SMOOTH_WINDOW && avg >= threshold && cooled {
-                        last_fire = Some(Instant::now());
+                    if let Some(avg) = fired {
                         log::info!(
                             "WAKE WORD DETECTED '{}' (avg={avg:.3}, peak={score:.3})",
                             config.model_name
