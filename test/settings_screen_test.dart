@@ -1,0 +1,136 @@
+// Widget tests for the Phase-6 settings screen.
+//
+// The screen mixes device-local settings (persisted via [SettingsStore]) with
+// orchestrator-managed settings (a [FakeOrchestratorClient], no native library).
+// An in-memory store keeps `pumpAndSettle` reliable (fake-async can't drive real
+// file IO); the real file round trip is covered by `settings_store_test.dart`.
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:ambient_display/src/settings/app_settings.dart';
+import 'package:ambient_display/src/ui/settings_screen.dart';
+
+import 'support/fake_orchestrator_client.dart';
+import 'support/in_memory_settings_store.dart';
+
+void main() {
+  testWidgets('loads remote settings and applies both halves on Save',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+    AppSettings? applied;
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (s) => applied = s,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // Remote settings were fetched and the backend dropdown reflects them.
+    expect(client.fetchCount, 1);
+    expect(find.text('Local (Ollama)'), findsOneWidget);
+
+    // Change the wake word.
+    await tester.tap(find.byKey(const Key('settings-wakeword')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('hey jarvis').last);
+    await tester.pumpAndSettle();
+
+    // Save.
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    // Device-local settings persisted + surfaced to the parent.
+    expect(applied, isNotNull);
+    expect(applied!.wakeWord, 'hey_jarvis');
+    expect(store.value.wakeWord, 'hey_jarvis');
+
+    // Orchestrator settings applied once (with the loaded backend + a voice write).
+    expect(client.applyCalls.length, 1);
+    expect(client.applyCalls.single['llmBackend'], 'ollama');
+    expect(client.applyCalls.single['setTtsVoice'], true);
+  });
+
+  testWidgets('changing the backend is sent to the orchestrator', (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-backend')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloud (Claude)').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(client.applyCalls.single['llmBackend'], 'anthropic');
+  });
+
+  testWidgets('offline assistant still saves device-local settings',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(throwOnFetch: true);
+    AppSettings? applied;
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (s) => applied = s,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Assistant offline'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    // Local settings saved; no remote apply attempted while offline.
+    expect(applied, isNotNull);
+    expect(client.applyCalls, isEmpty);
+    expect(store.value, isNotNull);
+  });
+
+  testWidgets('memory tile navigates to the memory screen', (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // The memory tile sits at the bottom of the settings list; scroll it into view.
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-memory')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('settings-memory')));
+    await tester.pumpAndSettle();
+
+    // The memory screen's app bar title is shown.
+    expect(find.text('Memory'), findsOneWidget);
+  });
+}

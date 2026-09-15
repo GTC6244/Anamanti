@@ -43,6 +43,34 @@ pub mod types {
     /// generated. A project-local extension on the device↔Mac hop (no off-the-shelf
     /// Wyoming server is on that hop).
     pub const REPLY_TOKEN: &str = "reply-token";
+
+    // ---- Phase 6: project-local settings + memory control frames ----
+    //
+    // These ride the same Wyoming framing on the device↔orchestrator hop only (no
+    // off-the-shelf Wyoming server ever sees them). They let the on-device settings
+    // screen read/change the orchestrator's runtime LLM backend + TTS voice and
+    // view/delete persistent memory entries. Kept byte-identical to the device
+    // crate's `types` (guarded by the round-trip tests in both crates).
+
+    /// device → orchestrator: request the current runtime settings (no data).
+    pub const DESCRIBE_SETTINGS: &str = "ambient-describe-settings";
+    /// device → orchestrator: change runtime settings (data: optional
+    /// `llm_backend`, `llm_model`, and `tts_voice` — where a present `tts_voice:
+    /// null` clears the voice and an absent key leaves it unchanged).
+    pub const SET_SETTINGS: &str = "ambient-set-settings";
+    /// orchestrator → device: the resulting settings (data: `ok`, `message`,
+    /// `llm_backend`, `llm_model`, `tts_voice`).
+    pub const SETTINGS: &str = "ambient-settings";
+    /// device → orchestrator: list all stored memory entries (no data).
+    pub const LIST_MEMORIES: &str = "ambient-list-memories";
+    /// orchestrator → device: the stored entries (data: `entries` array).
+    pub const MEMORIES: &str = "ambient-memories";
+    /// device → orchestrator: delete one entry by id (data: `id`).
+    pub const DELETE_MEMORY: &str = "ambient-delete-memory";
+    /// device → orchestrator: delete every stored entry (no data).
+    pub const CLEAR_MEMORIES: &str = "ambient-clear-memories";
+    /// orchestrator → device: result of a delete/clear (data: `ok`, `count`).
+    pub const MEMORY_RESULT: &str = "ambient-memory-result";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams

@@ -30,7 +30,8 @@ pub enum MemoryKind {
 }
 
 impl MemoryKind {
-    fn as_str(self) -> &'static str {
+    /// Stable wire/storage label (also used by the Phase-6 control protocol).
+    pub fn as_str(self) -> &'static str {
         match self {
             MemoryKind::Fact => "fact",
             MemoryKind::Preference => "preference",
@@ -52,7 +53,8 @@ pub enum MemorySource {
 }
 
 impl MemorySource {
-    fn as_str(self) -> &'static str {
+    /// Stable wire/storage label (also used by the Phase-6 control protocol).
+    pub fn as_str(self) -> &'static str {
         match self {
             MemorySource::Explicit => "explicit",
             MemorySource::Inferred => "inferred",

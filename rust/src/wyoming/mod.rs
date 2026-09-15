@@ -20,6 +20,7 @@
 //! Phase 4.
 
 pub mod client;
+pub mod control;
 pub mod discovery;
 pub mod protocol;
 pub mod state;

@@ -36,13 +36,16 @@ async fn main() -> Result<()> {
     let memory = Arc::new(MemoryStore::open(&config.db_path).context("opening memory store")?);
     log::info!("memory store holds {} entries", memory.count()?);
 
-    let llm = config.build_llm().context("initializing LLM backend")?;
+    // Runtime-swappable settings (Phase 6): the initial backend/voice come from
+    // config; the on-device settings screen can change them between turns.
+    let settings = config
+        .shared_settings()
+        .context("initializing LLM backend")?;
 
-    let pipeline = Pipeline::new(
-        llm,
+    let pipeline = Pipeline::with_settings(
+        settings,
         memory,
         config.system_prompt.clone(),
-        config.tts_voice.clone(),
         config.turn_timeout,
     );
 

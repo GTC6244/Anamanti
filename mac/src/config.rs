@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
+use crate::settings::{LlmFactory, RuntimeSettings, SharedSettings};
 
 /// Default persona/system prompt: concise, speakable replies for an ambient
 /// display. Kept short because the reply is spoken aloud via Piper.
@@ -141,6 +142,52 @@ impl Config {
                 ))
             }
         })
+    }
+
+    /// The immutable inputs a runtime backend swap (Phase 6) needs, captured from
+    /// the environment once so a later swap never re-reads `env`. `ANTHROPIC_API_KEY`
+    /// is read here: if absent, the cloud backend simply can't be selected at
+    /// runtime (the request is rejected in-band).
+    pub fn llm_factory(&self) -> LlmFactory {
+        let anthropic_max_tokens = match &self.llm {
+            LlmChoice::Anthropic { max_tokens, .. } => *max_tokens,
+            _ => env::var("AMBIENT_ANTHROPIC_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+        };
+        LlmFactory {
+            ollama_url: env::var("AMBIENT_OLLAMA_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string()),
+            anthropic_base_url: "https://api.anthropic.com".to_string(),
+            anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty()),
+            anthropic_max_tokens,
+        }
+    }
+
+    /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
+    /// selected by config plus the factory that rebuilds backends when the device
+    /// changes them. The initial backend must build successfully (anthropic still
+    /// needs its key at startup, matching [`Self::build_llm`]).
+    pub fn shared_settings(&self) -> Result<Arc<SharedSettings>> {
+        let factory = self.llm_factory();
+        let (backend, model) = match &self.llm {
+            LlmChoice::Mock => ("mock", None),
+            LlmChoice::Ollama { model, .. } => ("ollama", Some(model.clone())),
+            LlmChoice::Anthropic { model, .. } => ("anthropic", Some(model.clone())),
+        };
+        let (llm, llm_backend, llm_model) = factory
+            .build(backend, model.as_deref())
+            .context("building the initial LLM backend")?;
+        Ok(SharedSettings::new(
+            factory,
+            RuntimeSettings {
+                llm,
+                llm_backend,
+                llm_model,
+                tts_voice: self.tts_voice.clone(),
+            },
+        ))
     }
 
     /// A short label for the selected backend (logging/settings).

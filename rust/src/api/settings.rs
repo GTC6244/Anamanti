@@ -1,0 +1,127 @@
+//! FRB surface for the Phase-6 settings screen (Plan.MD §3, Phase 6).
+//!
+//! The on-device settings screen manages state that lives on the **orchestrator**:
+//! the runtime LLM backend + Piper voice, and the persistent memory list. These
+//! functions are the Dart→Rust control calls (architecture.md §3): each discovers
+//! the Mac's Wyoming host over mDNS, opens a short-lived connection, sends one
+//! project-local `ambient-*` control frame, and returns the parsed response.
+//!
+//! Device-local settings (wake word, thresholds, photo source) do **not** go
+//! through here — they are applied by restarting the engine with a new
+//! [`crate::api::engine::WakeWordConfig`] and are persisted on the Flutter side.
+//!
+//! Each call is a self-contained blocking operation: it stands up a tiny
+//! current-thread `tokio` runtime and drives the async round trip to completion.
+//! FRB runs these off the Dart UI isolate, so the returned `Future` never blocks
+//! the UI. They are deliberately *not* `#[frb(sync)]`.
+
+use std::time::Duration;
+
+use anyhow::Result;
+
+use crate::wyoming::control;
+use crate::wyoming::discovery::{EndpointCache, DEFAULT_DISCOVERY_TIMEOUT};
+
+/// The orchestrator's runtime settings, as reported by a describe/set response.
+#[derive(Debug, Clone)]
+pub struct OrchestratorSettings {
+    /// Whether the request succeeded (a rejected change reports `false` with a
+    /// human-readable `message`, leaving the previous settings in effect).
+    pub ok: bool,
+    /// Human-readable status/error (e.g. why a backend change was rejected).
+    pub message: String,
+    /// The active LLM backend label (`ollama` / `anthropic` / `mock`).
+    pub llm_backend: String,
+    /// The active model name, if the backend uses one.
+    pub llm_model: Option<String>,
+    /// The active Piper voice, or `None` for the server default.
+    pub tts_voice: Option<String>,
+}
+
+/// One persistent memory entry, for the settings memory list.
+#[derive(Debug, Clone)]
+pub struct MemoryEntry {
+    pub id: i64,
+    /// `fact` or `preference`.
+    pub kind: String,
+    pub content: String,
+    /// `explicit` (user asked) or `inferred` (auto-extracted).
+    pub source: String,
+    /// Unix seconds when the entry was stored.
+    pub created_at: i64,
+}
+
+/// A requested settings change from the screen. Absent fields are left unchanged.
+#[derive(Debug, Clone)]
+pub struct SettingsUpdate {
+    /// New LLM backend label, or `None` to leave it unchanged.
+    pub llm_backend: Option<String>,
+    /// New model name, or `None` to leave it unchanged.
+    pub llm_model: Option<String>,
+    /// When `true`, apply `tts_voice` (a `None`/empty value clears the voice); when
+    /// `false`, leave the voice unchanged.
+    pub set_tts_voice: bool,
+    /// The voice to set when `set_tts_voice` is `true`.
+    pub tts_voice: Option<String>,
+}
+
+fn timeout(secs: u64) -> Duration {
+    match secs {
+        0 => DEFAULT_DISCOVERY_TIMEOUT,
+        n => Duration::from_secs(n),
+    }
+}
+
+/// Run one async control op to completion on a private current-thread runtime.
+fn block_on<F, T>(fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(fut)
+}
+
+/// Read the orchestrator's current runtime settings.
+pub fn fetch_orchestrator_settings(discovery_timeout_secs: u64) -> Result<OrchestratorSettings> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::describe_settings(&cache, timeout(discovery_timeout_secs)).await
+    })
+}
+
+/// Apply a settings change on the orchestrator and return the resulting settings.
+pub fn update_orchestrator_settings(
+    update: SettingsUpdate,
+    discovery_timeout_secs: u64,
+) -> Result<OrchestratorSettings> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::update_settings(&cache, timeout(discovery_timeout_secs), &update).await
+    })
+}
+
+/// List all persistent memory entries (settings memory management view).
+pub fn list_memories(discovery_timeout_secs: u64) -> Result<Vec<MemoryEntry>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_memories(&cache, timeout(discovery_timeout_secs)).await
+    })
+}
+
+/// Delete one memory entry by id. Returns whether a row was removed.
+pub fn delete_memory(id: i64, discovery_timeout_secs: u64) -> Result<bool> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::delete_memory(&cache, timeout(discovery_timeout_secs), id).await
+    })
+}
+
+/// Delete every memory entry. Returns the number removed.
+pub fn clear_memories(discovery_timeout_secs: u64) -> Result<u32> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::clear_memories(&cache, timeout(discovery_timeout_secs)).await
+    })
+}

@@ -24,6 +24,7 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::llm::{LlmBackend, LlmTurn};
 use crate::memory::{infer_memories, parse_command, MemoryCommand, MemorySource, MemoryStore};
+use crate::settings::SharedSettings;
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::stt::SttSession;
 use crate::wyoming::tts::TtsSession;
@@ -90,14 +91,33 @@ impl ServiceConnector for TcpConnector {
 /// every connection.
 #[derive(Clone)]
 pub struct Pipeline {
-    llm: Arc<dyn LlmBackend>,
+    settings: Arc<SharedSettings>,
     memory: Arc<MemoryStore>,
     system_prompt: String,
-    tts_voice: Option<String>,
     turn_timeout: Duration,
 }
 
 impl Pipeline {
+    /// Build a pipeline around the runtime-swappable [`SharedSettings`] (Phase 6):
+    /// the LLM backend and TTS voice are read from a per-turn snapshot, so the
+    /// device settings screen can change them between turns without a restart.
+    pub fn with_settings(
+        settings: Arc<SharedSettings>,
+        memory: Arc<MemoryStore>,
+        system_prompt: impl Into<String>,
+        turn_timeout: Duration,
+    ) -> Self {
+        Self {
+            settings,
+            memory,
+            system_prompt: system_prompt.into(),
+            turn_timeout,
+        }
+    }
+
+    /// Build a pipeline around a fixed LLM backend + voice (the Phase-4 behavior).
+    /// The backend cannot be swapped at runtime (its settings holder has no
+    /// credentials); the TTS voice can still be changed via a control frame.
     pub fn new(
         llm: Arc<dyn LlmBackend>,
         memory: Arc<MemoryStore>,
@@ -105,13 +125,18 @@ impl Pipeline {
         tts_voice: Option<String>,
         turn_timeout: Duration,
     ) -> Self {
-        Self {
-            llm,
-            memory,
-            system_prompt: system_prompt.into(),
-            tts_voice,
-            turn_timeout,
-        }
+        let settings = SharedSettings::fixed(llm, "custom", tts_voice);
+        Self::with_settings(settings, memory, system_prompt, turn_timeout)
+    }
+
+    /// The persistent memory store (the Phase-6 control handler lists/deletes it).
+    pub fn memory(&self) -> &Arc<MemoryStore> {
+        &self.memory
+    }
+
+    /// The runtime-swappable settings (the Phase-6 control handler reads/updates it).
+    pub fn settings(&self) -> &Arc<SharedSettings> {
+        &self.settings
     }
 
     /// Drive one voice turn over `device`. Returns `Ok(())` on a completed turn or
@@ -134,6 +159,24 @@ impl Pipeline {
                 None => return Ok(TurnOutcome::Disconnected),
             }
         };
+        self.run_turn_after_start(device, connector, format, on_event)
+            .await
+    }
+
+    /// Drive a turn whose opening `audio-start` has already been read (the server
+    /// consumes it to distinguish a turn from a Phase-6 control frame). Splitting
+    /// this out lets one accept loop serve both turns and control on the same
+    /// socket.
+    pub async fn run_turn_after_start(
+        &self,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        format: AudioFormat,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+    ) -> Result<TurnOutcome> {
+        // Take one settings snapshot for the whole turn so a concurrent control
+        // swap never changes the backend/voice mid-reply.
+        let runtime = self.settings.snapshot();
 
         // 2. Open the STT stream and pump device PCM into it until the transcript.
         let stt_conn = connector.connect_stt().await?;
@@ -161,12 +204,15 @@ impl Pipeline {
 
         // 3. Memory + LLM → reply text, relaying each reply token to the device
         //    so it can render the reply token-by-token (Phase 5).
-        let reply = self.generate_reply(&transcript, device, on_event).await?;
+        let reply = self
+            .generate_reply(&runtime, &transcript, device, on_event)
+            .await?;
         on_event(TurnEvent::Reply(reply.clone()));
 
         // 4. Synthesize and stream the reply audio back to the device.
         if !reply.trim().is_empty() {
-            self.speak(device, connector, &reply, on_event).await?;
+            self.speak(&runtime, device, connector, &reply, on_event)
+                .await?;
         }
 
         on_event(TurnEvent::Finished);
@@ -224,6 +270,7 @@ impl Pipeline {
     /// they stream and relaying each one to `device` for token-by-token rendering.
     async fn generate_reply(
         &self,
+        runtime: &crate::settings::RuntimeSettings,
         transcript: &str,
         device: &mut DynConnection,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
@@ -253,11 +300,11 @@ impl Pipeline {
             )
         };
 
-        let mut stream = self
+        let mut stream = runtime
             .llm
             .respond(LlmTurn::new(system_prompt, transcript))
             .await
-            .with_context(|| format!("LLM backend `{}` failed", self.llm.name()))?;
+            .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?;
 
         let mut reply = String::new();
         while let Some(tok) = stream.next().await {
@@ -311,13 +358,14 @@ impl Pipeline {
     /// is treated as a graceful stop, not a turn failure.
     async fn speak(
         &self,
+        runtime: &crate::settings::RuntimeSettings,
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
         reply: &str,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<()> {
         let tts_conn = connector.connect_tts().await?;
-        let mut tts = TtsSession::begin(tts_conn, reply, self.tts_voice.as_deref()).await?;
+        let mut tts = TtsSession::begin(tts_conn, reply, runtime.tts_voice.as_deref()).await?;
         on_event(TurnEvent::Speaking);
 
         while let Some(ev) = tts.next_audio().await? {

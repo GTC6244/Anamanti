@@ -107,6 +107,32 @@ cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp,
   `android/settings.gradle.kts` (AGP 8.7.3, Kotlin 2.1.0) and the Gradle wrapper
   (8.11.1). Revisit only when cargokit ships AGP-9 support. NDK: `28.2.13676358`.
 
+### Build output goes on the external drive (disk is tight)
+
+The main volume runs near-full (often <1 GiB free), which is not enough for Rust
+target dirs, a release APK, and Gradle caches. **Route all build output to the
+external drive** at `/Volumes/External/DeveloperSupport`, which has plenty of
+space. Set these for every Cargo / Flutter / Gradle build in this repo:
+
+```bash
+# Host-side Cargo builds/tests (both /rust host tests and /mac):
+export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
+
+# Gradle caches + a scratch TMPDIR for the APK build:
+export GRADLE_USER_HOME=/Volumes/External/DeveloperSupport/mac-caches/gradle
+export TMPDIR=/Volumes/External/DeveloperSupport/ambient-build/tmp
+
+# Flutter/cargokit write to ./build — symlink it onto the external drive:
+ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
+```
+
+- `/Volumes/External` root is not user-writable; use the `DeveloperSupport/`
+  subtree (owned by the user). Create dirs there as needed.
+- `~/.cargo/registry` (cache + src) is a re-downloadable global cache — safe to
+  clear to reclaim space; Cargo refetches on the next build.
+- Do **not** commit the `build` symlink (it's git-ignored) or these paths — they
+  are machine-local.
+
 ## Conventions
 
 - **Rust:** async via `tokio`; keep the audio callback allocation-free; use the

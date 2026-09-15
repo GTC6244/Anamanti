@@ -47,6 +47,32 @@ pub mod types {
     /// no off-the-shelf Wyoming server is on this hop — so the UI can render the
     /// reply token-by-token as it is generated (Plan.MD §3, Phase 5).
     pub const REPLY_TOKEN: &str = "reply-token";
+
+    // ---- Phase 6: project-local settings + memory control frames ----
+    //
+    // Sent by the device settings screen to the orchestrator (device↔Mac hop only)
+    // to read/change the runtime LLM backend + TTS voice and view/delete persistent
+    // memory. Kept byte-identical to the orchestrator crate's `types` (guarded by
+    // the round-trip tests in both crates).
+
+    /// device → orchestrator: request the current runtime settings (no data).
+    pub const DESCRIBE_SETTINGS: &str = "ambient-describe-settings";
+    /// device → orchestrator: change runtime settings (data: optional
+    /// `llm_backend`, `llm_model`, `tts_voice`).
+    pub const SET_SETTINGS: &str = "ambient-set-settings";
+    /// orchestrator → device: the resulting settings (data: `ok`, `message`,
+    /// `llm_backend`, `llm_model`, `tts_voice`).
+    pub const SETTINGS: &str = "ambient-settings";
+    /// device → orchestrator: list all stored memory entries (no data).
+    pub const LIST_MEMORIES: &str = "ambient-list-memories";
+    /// orchestrator → device: the stored entries (data: `entries` array).
+    pub const MEMORIES: &str = "ambient-memories";
+    /// device → orchestrator: delete one entry by id (data: `id`).
+    pub const DELETE_MEMORY: &str = "ambient-delete-memory";
+    /// device → orchestrator: delete every stored entry (no data).
+    pub const CLEAR_MEMORIES: &str = "ambient-clear-memories";
+    /// orchestrator → device: result of a delete/clear (data: `ok`, `count`).
+    pub const MEMORY_RESULT: &str = "ambient-memory-result";
 }
 
 /// A decoded Wyoming event: a `type` tag, an optional structured `data` object,

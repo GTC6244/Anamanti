@@ -10,9 +10,11 @@
 //! the integration tests drive the same code.
 
 pub mod config;
+pub mod control;
 pub mod discovery;
 pub mod llm;
 pub mod memory;
 pub mod orchestrator;
 pub mod server;
+pub mod settings;
 pub mod wyoming;

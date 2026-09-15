@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/engine.dart';
+import 'api/settings.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
@@ -33,6 +34,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  SettingsUpdate dco_decode_box_autoadd_settings_update(dynamic raw);
+
+  @protected
   WakeWordConfig dco_decode_box_autoadd_wake_word_config(dynamic raw);
 
   @protected
@@ -42,7 +46,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  List<MemoryEntry> dco_decode_list_memory_entry(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  MemoryEntry dco_decode_memory_entry(dynamic raw);
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  OrchestratorSettings dco_decode_orchestrator_settings(dynamic raw);
+
+  @protected
+  SettingsUpdate dco_decode_settings_update(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -83,6 +105,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  SettingsUpdate sse_decode_box_autoadd_settings_update(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   WakeWordConfig sse_decode_box_autoadd_wake_word_config(
     SseDeserializer deserializer,
   );
@@ -94,7 +121,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  List<MemoryEntry> sse_decode_list_memory_entry(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  MemoryEntry sse_decode_memory_entry(SseDeserializer deserializer);
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  OrchestratorSettings sse_decode_orchestrator_settings(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SettingsUpdate sse_decode_settings_update(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -141,6 +188,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_settings_update(
+    SettingsUpdate self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_wake_word_config(
     WakeWordConfig self,
     SseSerializer serializer,
@@ -153,8 +206,35 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_memory_entry(
+    List<MemoryEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_memory_entry(MemoryEntry self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_orchestrator_settings(
+    OrchestratorSettings self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_settings_update(
+    SettingsUpdate self,
     SseSerializer serializer,
   );
 
