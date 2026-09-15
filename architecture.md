@@ -114,6 +114,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
   to the device.
 
+> **Implementation (Phase 4, `/mac`):** the STT, LLM, memory, and TTS pieces above
+> are wired by a standalone Rust crate `ambient_orchestrator` (`/mac`). It is a
+> Wyoming **server** to the Echo Show and a Wyoming **client** to the off-the-shelf
+> Whisper (STT) and Piper (TTS) Wyoming servers, with the pluggable `LlmBackend`
+> trait (Ollama / Claude / mock) and the SQLite+FTS5 memory store in the middle
+> (`mac/src/{orchestrator,server,discovery,llm,memory,wyoming}.rs`). It advertises
+> `_wyoming._tcp` over mDNS, symmetric with the device's Phase-3 browse. The
+> Wyoming wire codec is re-implemented there (byte-identical to the device's) since
+> the device crate is an Android `cdylib` and can't be shared as a Mac library.
+
 ---
 
 ## 3. Interop boundary (flutter_rust_bridge v2)
