@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/engine.dart';
+import 'api/settings.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -66,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 385738546;
+  int get rustContentHash => -1294313178;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -77,19 +78,41 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Future<int> crateApiSettingsClearMemories({
+    required BigInt discoveryTimeoutSecs,
+  });
+
+  Future<bool> crateApiSettingsDeleteMemory({
+    required PlatformInt64 id,
+    required BigInt discoveryTimeoutSecs,
+  });
+
   String crateApiEngineEngineGreeting({required String name});
 
   String crateApiEngineEngineVersion();
 
+  Future<OrchestratorSettings> crateApiSettingsFetchOrchestratorSettings({
+    required BigInt discoveryTimeoutSecs,
+  });
+
   Future<void> crateApiEngineInitApp();
 
   bool crateApiEngineIsWakeWordEngineRunning();
+
+  Future<List<MemoryEntry>> crateApiSettingsListMemories({
+    required BigInt discoveryTimeoutSecs,
+  });
 
   Stream<WakeWordEvent> crateApiEngineStartWakeWordEngine({
     required WakeWordConfig config,
   });
 
   Future<void> crateApiEngineStopWakeWordEngine();
+
+  Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
+    required SettingsUpdate update,
+    required BigInt discoveryTimeoutSecs,
+  });
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -101,13 +124,81 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Future<int> crateApiSettingsClearMemories({
+    required BigInt discoveryTimeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_64(discoveryTimeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_32,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSettingsClearMemoriesConstMeta,
+        argValues: [discoveryTimeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSettingsClearMemoriesConstMeta =>
+      const TaskConstMeta(
+        debugName: "clear_memories",
+        argNames: ["discoveryTimeoutSecs"],
+      );
+
+  @override
+  Future<bool> crateApiSettingsDeleteMemory({
+    required PlatformInt64 id,
+    required BigInt discoveryTimeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(id, serializer);
+          sse_encode_u_64(discoveryTimeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 2,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSettingsDeleteMemoryConstMeta,
+        argValues: [id, discoveryTimeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSettingsDeleteMemoryConstMeta =>
+      const TaskConstMeta(
+        debugName: "delete_memory",
+        argNames: ["id", "discoveryTimeoutSecs"],
+      );
+
+  @override
   String crateApiEngineEngineGreeting({required String name}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(name, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -129,7 +220,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -146,6 +237,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "engine_version", argNames: []);
 
   @override
+  Future<OrchestratorSettings> crateApiSettingsFetchOrchestratorSettings({
+    required BigInt discoveryTimeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_64(discoveryTimeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_orchestrator_settings,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSettingsFetchOrchestratorSettingsConstMeta,
+        argValues: [discoveryTimeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSettingsFetchOrchestratorSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "fetch_orchestrator_settings",
+        argNames: ["discoveryTimeoutSecs"],
+      );
+
+  @override
   Future<void> crateApiEngineInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -154,7 +278,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 6,
             port: port_,
           );
         },
@@ -178,7 +302,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -198,6 +322,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<List<MemoryEntry>> crateApiSettingsListMemories({
+    required BigInt discoveryTimeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_64(discoveryTimeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_memory_entry,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSettingsListMemoriesConstMeta,
+        argValues: [discoveryTimeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSettingsListMemoriesConstMeta =>
+      const TaskConstMeta(
+        debugName: "list_memories",
+        argNames: ["discoveryTimeoutSecs"],
+      );
+
+  @override
   Stream<WakeWordEvent> crateApiEngineStartWakeWordEngine({
     required WakeWordConfig config,
   }) {
@@ -212,7 +369,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 5,
+              funcId: 9,
               port: port_,
             );
           },
@@ -244,7 +401,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 10,
             port: port_,
           );
         },
@@ -261,6 +418,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiEngineStopWakeWordEngineConstMeta =>
       const TaskConstMeta(debugName: "stop_wake_word_engine", argNames: []);
+
+  @override
+  Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
+    required SettingsUpdate update,
+    required BigInt discoveryTimeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_settings_update(update, serializer);
+          sse_encode_u_64(discoveryTimeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_orchestrator_settings,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSettingsUpdateOrchestratorSettingsConstMeta,
+        argValues: [update, discoveryTimeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSettingsUpdateOrchestratorSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "update_orchestrator_settings",
+        argNames: ["update", "discoveryTimeoutSecs"],
+      );
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
@@ -289,6 +481,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SettingsUpdate dco_decode_box_autoadd_settings_update(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_settings_update(raw);
+  }
+
+  @protected
   WakeWordConfig dco_decode_box_autoadd_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_wake_word_config(raw);
@@ -307,9 +505,71 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeI64(raw);
+  }
+
+  @protected
+  List<MemoryEntry> dco_decode_list_memory_entry(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_memory_entry).toList();
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  MemoryEntry dco_decode_memory_entry(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return MemoryEntry(
+      id: dco_decode_i_64(arr[0]),
+      kind: dco_decode_String(arr[1]),
+      content: dco_decode_String(arr[2]),
+      source: dco_decode_String(arr[3]),
+      createdAt: dco_decode_i_64(arr[4]),
+    );
+  }
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
+  OrchestratorSettings dco_decode_orchestrator_settings(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return OrchestratorSettings(
+      ok: dco_decode_bool(arr[0]),
+      message: dco_decode_String(arr[1]),
+      llmBackend: dco_decode_String(arr[2]),
+      llmModel: dco_decode_opt_String(arr[3]),
+      ttsVoice: dco_decode_opt_String(arr[4]),
+    );
+  }
+
+  @protected
+  SettingsUpdate dco_decode_settings_update(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return SettingsUpdate(
+      llmBackend: dco_decode_opt_String(arr[0]),
+      llmModel: dco_decode_opt_String(arr[1]),
+      setTtsVoice: dco_decode_bool(arr[2]),
+      ttsVoice: dco_decode_opt_String(arr[3]),
+    );
   }
 
   @protected
@@ -415,6 +675,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SettingsUpdate sse_decode_box_autoadd_settings_update(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_settings_update(deserializer));
+  }
+
+  @protected
   WakeWordConfig sse_decode_box_autoadd_wake_word_config(
     SseDeserializer deserializer,
   ) {
@@ -435,10 +703,90 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
+  List<MemoryEntry> sse_decode_list_memory_entry(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <MemoryEntry>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_memory_entry(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  MemoryEntry sse_decode_memory_entry(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_kind = sse_decode_String(deserializer);
+    var var_content = sse_decode_String(deserializer);
+    var var_source = sse_decode_String(deserializer);
+    var var_createdAt = sse_decode_i_64(deserializer);
+    return MemoryEntry(
+      id: var_id,
+      kind: var_kind,
+      content: var_content,
+      source: var_source,
+      createdAt: var_createdAt,
+    );
+  }
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  OrchestratorSettings sse_decode_orchestrator_settings(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_ok = sse_decode_bool(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    var var_llmBackend = sse_decode_String(deserializer);
+    var var_llmModel = sse_decode_opt_String(deserializer);
+    var var_ttsVoice = sse_decode_opt_String(deserializer);
+    return OrchestratorSettings(
+      ok: var_ok,
+      message: var_message,
+      llmBackend: var_llmBackend,
+      llmModel: var_llmModel,
+      ttsVoice: var_ttsVoice,
+    );
+  }
+
+  @protected
+  SettingsUpdate sse_decode_settings_update(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_llmBackend = sse_decode_opt_String(deserializer);
+    var var_llmModel = sse_decode_opt_String(deserializer);
+    var var_setTtsVoice = sse_decode_bool(deserializer);
+    var var_ttsVoice = sse_decode_opt_String(deserializer);
+    return SettingsUpdate(
+      llmBackend: var_llmBackend,
+      llmModel: var_llmModel,
+      setTtsVoice: var_setTtsVoice,
+      ttsVoice: var_ttsVoice,
+    );
   }
 
   @protected
@@ -568,6 +916,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_settings_update(
+    SettingsUpdate self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_settings_update(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_wake_word_config(
     WakeWordConfig self,
     SseSerializer serializer,
@@ -589,6 +946,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
+  void sse_encode_list_memory_entry(
+    List<MemoryEntry> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_memory_entry(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -596,6 +971,51 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_memory_entry(MemoryEntry self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_String(self.kind, serializer);
+    sse_encode_String(self.content, serializer);
+    sse_encode_String(self.source, serializer);
+    sse_encode_i_64(self.createdAt, serializer);
+  }
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_orchestrator_settings(
+    OrchestratorSettings self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.ok, serializer);
+    sse_encode_String(self.message, serializer);
+    sse_encode_String(self.llmBackend, serializer);
+    sse_encode_opt_String(self.llmModel, serializer);
+    sse_encode_opt_String(self.ttsVoice, serializer);
+  }
+
+  @protected
+  void sse_encode_settings_update(
+    SettingsUpdate self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.llmBackend, serializer);
+    sse_encode_opt_String(self.llmModel, serializer);
+    sse_encode_bool(self.setTtsVoice, serializer);
+    sse_encode_opt_String(self.ttsVoice, serializer);
   }
 
   @protected

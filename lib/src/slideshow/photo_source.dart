@@ -15,6 +15,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'package:ambient_display/src/settings/app_settings.dart';
+
 /// One slide: either a remote image (with a graceful gradient fallback) or a
 /// built-in ambient gradient. Kept intentionally small so sources can be mocked.
 @immutable
@@ -114,6 +116,69 @@ class GooglePhotoSource implements PhotoSource {
       for (final url in photoUrls) PhotoItem.network(url, caption: folderName),
     ];
   }
+}
+
+/// The outcome of the on-device Google consent flow (Phase 6): an access token
+/// plus the resolved photo URLs for the chosen folder.
+@immutable
+class GoogleLinkResult {
+  const GoogleLinkResult({
+    required this.folderName,
+    required this.accessToken,
+    this.photoUrls = const [],
+  });
+
+  final String folderName;
+  final String accessToken;
+  final List<String> photoUrls;
+}
+
+/// The on-device Google consent + folder-picker seam (Plan.MD §4: on-device
+/// OAuth). The settings screen calls [link] to run the flow. A real implementation
+/// needs a registered Google client ID and the `google_sign_in` / `googleapis`
+/// packages; those cannot be provisioned in this environment, so the default
+/// [StubGoogleAuthenticator] reports that clearly instead of silently pretending.
+abstract class GoogleAuthenticator {
+  /// Run the consent flow + folder picker, returning the linked folder + token.
+  /// Throws with a human-readable reason if the flow can't complete.
+  Future<GoogleLinkResult> link();
+}
+
+/// Honest placeholder used until real OAuth is wired (see class docs on
+/// [GoogleAuthenticator]). Always throws with an explanatory message so the
+/// settings screen surfaces *why* linking is unavailable rather than failing
+/// opaquely or faking a link.
+class StubGoogleAuthenticator implements GoogleAuthenticator {
+  const StubGoogleAuthenticator();
+
+  @override
+  Future<GoogleLinkResult> link() async {
+    throw UnimplementedError(
+      'Google account linking needs a registered OAuth client ID. '
+      'Add google_sign_in with your client ID to enable on-device consent.',
+    );
+  }
+}
+
+/// Build the [PhotoSource] the slideshow should use for the given [settings].
+/// Falls back to [LocalPhotoSource] whenever Google is selected but not linked, so
+/// the idle screen is always populated. `accessToken`/`photoUrls` are supplied by a
+/// completed [GoogleLinkResult] (held in memory by the app for the session).
+PhotoSource photoSourceFromSettings(
+  AppSettings settings, {
+  String? googleAccessToken,
+  List<String> googlePhotoUrls = const [],
+}) {
+  if (settings.photoSource == PhotoSourceKind.google &&
+      settings.googleLinked &&
+      googleAccessToken != null) {
+    return GooglePhotoSource(
+      folderName: settings.googleFolderName,
+      accessToken: googleAccessToken,
+      photoUrls: googlePhotoUrls,
+    );
+  }
+  return const LocalPhotoSource();
 }
 
 /// Cycles through a [PhotoSource]'s photos on a timer, independent of the

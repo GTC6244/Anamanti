@@ -140,10 +140,37 @@ predictable memory use and no GC pauses under the 1 GB limit.
   - `transcript_stream` — live/partial + final transcripts.
   - `reply_token_stream` — LLM reply tokens for on-screen rendering.
   - `state_stream` — assistant state transitions (idle/listening/thinking/speaking).
-- Control flows **Dart → Rust** via generated function calls (e.g. start engine,
-  cancel/reset, select LLM backend).
+- Control flows **Dart → Rust** via generated function calls: `start_wake_word_engine`
+  / `stop_wake_word_engine` (Phase 2–3) plus the Phase-6 settings functions
+  (`fetch_orchestrator_settings`, `update_orchestrator_settings`, `list_memories`,
+  `delete_memory`, `clear_memories` in `rust/src/api/settings.rs`). The settings
+  functions are async: each stands up a small current-thread `tokio` runtime and
+  drives one Wyoming control round trip, so FRB returns a `Future` off the UI
+  isolate.
 - Zero-copy is preferred for audio-adjacent buffers; UI text uses ordinary
   generated types.
+
+### Phase 6 — settings + memory control protocol
+
+- The **wake word, thresholds, and photo source** are device-local: the Flutter
+  settings screen persists them (`SettingsStore` → JSON) and applies them by
+  rebuilding the `WakeWordConfig` and restarting the engine / refreshing the
+  slideshow.
+- The **LLM backend + model and TTS voice** live on the Mac and are read/changed
+  over a **project-local control protocol** on the device↔orchestrator hop —
+  `ambient-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
+  memories) that ride the existing framing (byte-identical `types` in both crates,
+  no off-the-shelf server sees them). The orchestrator's `Pipeline` reads a per-turn
+  snapshot of runtime-swappable `SharedSettings`, so a backend/voice change takes
+  effect on the next turn with no restart; the accept loop routes control frames to
+  `control::respond` and audio-start frames to a turn. Selecting the cloud backend
+  still needs `ANTHROPIC_API_KEY` on the Mac; if absent the change is rejected
+  in-band (never dropping the connection).
+- **Memory management** is dual: the settings list (this control protocol) plus
+  voice ("remember…", "forget that") applied on the Mac during a turn (Phase 4).
+- **On-device Google OAuth** for the photo folder is wired as a seam
+  (`GoogleAuthenticator`); the default is an honest stub because a real client ID
+  can't be provisioned in this environment.
 
 ---
 

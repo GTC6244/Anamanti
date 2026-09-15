@@ -22,10 +22,15 @@ class AmbientScreen extends StatelessWidget {
     super.key,
     required this.assistant,
     required this.slideshow,
+    this.onOpenSettings,
   });
 
   final AssistantController assistant;
   final SlideshowController slideshow;
+
+  /// Opens the settings screen (Phase 6). When null, no settings control is shown
+  /// (e.g. in widget tests that only exercise the reactive turn UI).
+  final VoidCallback? onOpenSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -78,6 +83,27 @@ class AmbientScreen extends StatelessWidget {
                 top: 18,
                 child: StatusIndicator(state: state),
               ),
+
+              // Discreet settings control, top-left. Fades out during a turn so it
+              // never competes with the live conversation.
+              if (onOpenSettings != null)
+                Positioned(
+                  left: 12,
+                  top: 10,
+                  child: AnimatedOpacity(
+                    opacity: active ? 0 : 0.7,
+                    duration: const Duration(milliseconds: 300),
+                    child: IconButton(
+                      key: const Key('open-settings'),
+                      tooltip: 'Settings',
+                      onPressed: active ? null : onOpenSettings,
+                      icon: Icon(
+                        Icons.settings,
+                        color: Colors.white.withValues(alpha: 0.9),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           );
         },

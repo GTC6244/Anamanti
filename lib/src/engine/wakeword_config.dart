@@ -11,6 +11,7 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
 import 'package:ambient_display/src/rust/api/engine.dart';
+import 'package:ambient_display/src/settings/app_settings.dart';
 
 /// Tuning defaults for the wake-word turn. `activeThreshold > threshold` is the
 /// AEC-interim mitigation: raise the confidence bar while a turn is active so the
@@ -56,5 +57,16 @@ Future<WakeWordConfig> buildWakeWordConfig({
     activeThreshold: activeThreshold,
     discoveryTimeoutSecs: BigInt.from(WakeWordDefaults.discoveryTimeoutSecs),
     turnTimeoutSecs: BigInt.from(WakeWordDefaults.turnTimeoutSecs),
+  );
+}
+
+/// Build a [WakeWordConfig] from the user's persisted [AppSettings] (Phase 6):
+/// the settings screen chooses the wake word and thresholds, and this maps them to
+/// the native engine config (resolving the model paths under the app model dir).
+Future<WakeWordConfig> buildWakeWordConfigFrom(AppSettings settings) {
+  return buildWakeWordConfig(
+    modelName: settings.wakeWord,
+    threshold: settings.threshold,
+    activeThreshold: settings.activeThreshold,
   );
 }

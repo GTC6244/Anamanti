@@ -329,12 +329,62 @@ services, inserting the pluggable LLM + persistent memory between them.
 > the codec is kept byte-identical on both sides (`rust/` and `mac/`). TTS audio
 > continues to use standard `audio-start`/`audio-chunk`/`audio-stop`.
 
-### Phase 6 — Settings & Persistence
+### Phase 6 — Settings & Persistence ✅ (implemented 2026-09-15)
 - Settings screen exposing: **LLM backend**, **TTS voice**, **wake word**, and
-  **photo source** (with on-device Google auth + folder picker).
+  **photo source** (with on-device Google auth + folder picker). **Done** —
+  `lib/src/ui/settings_screen.dart` groups the four areas. Wake word + detection
+  thresholds and photo source are **device-local** (persisted); LLM backend/model
+  + TTS voice are **orchestrator-managed** (read/changed over the network). Device
+  settings persist to a JSON file via `lib/src/settings/settings_store.dart`
+  (`AppSettings`, `path_provider`; injectable file path for tests — no
+  `shared_preferences` plugin). The Google photo source is wired as a testable
+  **seam** (`GoogleAuthenticator` + `photoSourceFromSettings` in
+  `photo_source.dart`): the default `StubGoogleAuthenticator` reports honestly that
+  real OAuth needs a registered client ID (per Plan §4, the environment can't
+  provision one), while the folder-name/link UI and the `GooglePhotoSource` path
+  are in place for it.
 - **Memory management** in settings: view/delete stored items; voice commands
-  ("remember…", "forget that").
-- Wire settings through FRB to the Rust engine and the Mac orchestrator.
+  ("remember…", "forget that"). **Done** — `lib/src/ui/memory_screen.dart` lists
+  the orchestrator's stored facts/preferences and deletes individual entries or
+  clears all, over the control protocol. The **voice** half already lands on the
+  Mac during a turn (Phase 4 `parse_command`); this is the settings-list half.
+- Wire settings through FRB to the Rust engine and the Mac orchestrator. **Done** —
+  two wiring paths:
+  - *Device-local → Rust engine:* changing the wake word/thresholds rebuilds the
+    `WakeWordConfig` (`buildWakeWordConfigFrom`) and restarts the engine from
+    `main.dart`; the photo source change refreshes the slideshow.
+  - *Device → Mac orchestrator:* a **project-local Wyoming control protocol** on
+    the device↔Mac hop (symmetric with the Phase-5 `reply-token` extension). New
+    `ambient-*` frames (`ambient-describe-settings` / `ambient-set-settings` /
+    `ambient-list-memories` / `ambient-delete-memory` / `ambient-clear-memories`
+    and their responses) ride the existing framing. The orchestrator's
+    `Pipeline` now reads a per-turn snapshot of runtime-swappable
+    `SharedSettings` (`mac/src/settings.rs`), so the LLM backend + Piper voice
+    change between turns with **no restart**; `mac/src/control.rs` answers the
+    frames from the memory store + settings, and `mac/src/server.rs` routes control
+    vs. turn frames on one accept loop. The device speaks the protocol from
+    `rust/src/wyoming/control.rs`, exposed to Flutter as async FRB functions
+    (`rust/src/api/settings.rs`: `fetch_orchestrator_settings`,
+    `update_orchestrator_settings`, `list_memories`, `delete_memory`,
+    `clear_memories`).
+- Verified: `cargo test` (mac 42 tests incl. `SharedSettings` swap/atomic-reject,
+  the `control::respond` surface, and a loopback control-protocol integration test;
+  device 38 tests incl. control round-trips against a loopback orchestrator),
+  `cargo clippy --all-targets -- -D warnings` + `cargo fmt --check` (both crates
+  clean), FRB regenerated, `flutter analyze` clean (app code), `flutter test`
+  (15 tests: settings store round-trip, settings-screen apply/offline/navigation,
+  memory view/delete, plus the Phase-5 reactive-UI tests), and a release
+  `android-arm` APK cross-compile (28.6 MB) — so the new FRB control functions +
+  settings UI build and link on the 32-bit device target.
+
+> **Wire note (Phase 6):** the `ambient-*` control frames are project-local to the
+> device↔orchestrator hop (no off-the-shelf Wyoming server sees them), kept
+> byte-identical in `rust/` and `mac/` `wyoming::protocol::types` and guarded by
+> round-trip tests on both sides. Selecting the cloud (anthropic) backend at
+> runtime still requires `ANTHROPIC_API_KEY` on the orchestrator; if it's absent
+> the change is rejected **in-band** (the response's `ok:false` + message) and the
+> previous backend stays in force, so a control error never drops the device
+> connection or the turn.
 
 ---
 
