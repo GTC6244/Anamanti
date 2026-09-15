@@ -205,3 +205,59 @@ fn load_model(path: &Path, input_shape: &[usize]) -> Result<Plan> {
         .with_context(|| format!("making {} runnable", path.display()))?;
     Ok(model)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bundled openWakeWord models shipped in `assets/models/` (see
+    /// `pubspec.yaml` + `lib/src/engine/model_assets.dart`). Resolved relative to
+    /// this crate so the test runs from `cargo test` in `/rust`.
+    fn bundled_models() -> WakeWordModelPaths {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/models");
+        WakeWordModelPaths {
+            melspec: root.join("melspectrogram.onnx"),
+            embedding: root.join("embedding_model.onnx"),
+            wakeword: root.join("hey_jarvis.onnx"),
+        }
+    }
+
+    /// The real bundled model chain loads on `tract` and scores a live stream.
+    /// This is the guardrail that the shipped `.onnx` files parse and their shapes
+    /// line up with the pipeline (melspec → embedding → classifier). Skipped if the
+    /// assets aren't present (e.g. a checkout without the model download).
+    #[test]
+    fn bundled_openwakeword_models_load_and_score() {
+        let paths = bundled_models();
+        if !paths.melspec.exists() || !paths.embedding.exists() || !paths.wakeword.exists() {
+            eprintln!("skipping: bundled models not present at {:?}", paths);
+            return;
+        }
+
+        let mut detector = WakeWordDetector::load(&paths).expect("bundled models load");
+
+        // Feed ~6 s of 16 kHz audio (a quiet 220 Hz tone) — comfortably more than
+        // the ~200 mel frames the chain needs before its first 16-embedding score.
+        // We don't assert a detection, only that inference runs end-to-end and
+        // yields an in-range confidence once enough context has accumulated.
+        let mut produced_score = false;
+        for block in 0..120 {
+            let mut samples = [0f32; 800]; // 50 ms blocks
+            for (i, s) in samples.iter_mut().enumerate() {
+                let t = (block * 800 + i) as f32 / 16_000.0;
+                *s = (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 1000.0;
+            }
+            if let Some(score) = detector.push_audio(&samples).expect("inference runs") {
+                assert!(
+                    (0.0..=1.0).contains(&score),
+                    "confidence {score} out of range"
+                );
+                produced_score = true;
+            }
+        }
+        assert!(
+            produced_score,
+            "detector should produce at least one score over ~2 s of audio"
+        );
+    }
+}

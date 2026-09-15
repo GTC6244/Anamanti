@@ -17,7 +17,7 @@ import 'package:ambient_display/src/settings/app_settings.dart';
 /// AEC-interim mitigation: raise the confidence bar while a turn is active so the
 /// device's own speaker is less likely to self-trigger during playback.
 class WakeWordDefaults {
-  static const String modelName = 'alexa';
+  static const String modelName = 'hey_jarvis';
   static const double threshold = 0.5;
   static const double activeThreshold = 0.7;
   static const int discoveryTimeoutSecs = 3;

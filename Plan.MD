@@ -369,13 +369,26 @@ services, inserting the pluggable LLM + persistent memory between them.
     `clear_memories`).
 - Verified: `cargo test` (mac 42 tests incl. `SharedSettings` swap/atomic-reject,
   the `control::respond` surface, and a loopback control-protocol integration test;
-  device 38 tests incl. control round-trips against a loopback orchestrator),
+  device 39 tests incl. control round-trips against a loopback orchestrator and a
+  real bundled-model load/score on `tract`),
   `cargo clippy --all-targets -- -D warnings` + `cargo fmt --check` (both crates
   clean), FRB regenerated, `flutter analyze` clean (app code), `flutter test`
   (15 tests: settings store round-trip, settings-screen apply/offline/navigation,
   memory view/delete, plus the Phase-5 reactive-UI tests), and a release
-  `android-arm` APK cross-compile (28.6 MB) — so the new FRB control functions +
-  settings UI build and link on the 32-bit device target.
+  `android-arm` APK cross-compile (31.6 MB, incl. the bundled wake-word models) —
+  so the new FRB control functions + settings UI build and link on the 32-bit
+  device target.
+
+> **Wake-word models (Phase 6):** the openWakeWord ONNX chain is now **bundled**
+> in the app (`assets/models/`: `melspectrogram.onnx`, `embedding_model.onnx`, and
+> the `hey_jarvis.onnx` classifier — from the dscripka/openWakeWord v0.5.1 release).
+> `lib/src/engine/model_assets.dart` unpacks them to the on-device model dir on
+> first run (preserving any user-dropped models), so a fresh install detects the
+> wake word with no manual `adb push`. The default wake word is now `hey_jarvis`
+> (the bundled classifier); the other names in the settings list work once their
+> `<name>.onnx` is dropped in. A device-crate test loads the real bundled chain on
+> `tract` and scores a stream, guarding that the shipped models parse and their
+> shapes line up. Server-side VAD is used, so `silero_vad.onnx` is not needed.
 
 > **Wire note (Phase 6):** the `ambient-*` control frames are project-local to the
 > device↔orchestrator hop (no off-the-shelf Wyoming server sees them), kept
