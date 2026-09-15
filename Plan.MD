@@ -213,14 +213,66 @@ Echo Show speakers → return to idle.
 > worker thread to stay light on the ~1 GB budget. `minSdk` is unchanged (still 26,
 > set in Phase 2); none of the new crates raise the floor.
 
-### Phase 4 — Assistant Pipeline (Mac Mini)
+### Phase 4 — Assistant Pipeline (Mac Mini) ✅ (implemented 2026-09-15)
+Implemented as a new standalone Rust crate in `/mac` (`ambient_orchestrator`,
+binary `ambient-orchestrator`) — the "brain". It is a Wyoming **server** to the
+Echo Show and a Wyoming **client** to the downstream Whisper (STT) and Piper (TTS)
+services, inserting the pluggable LLM + persistent memory between them.
 - Wyoming STT (Whisper/CoreML) with **server-side VAD** emits the final transcript.
+  **Done** — `mac/src/wyoming/stt.rs` (`SttSession`) opens a `transcribe` +
+  `audio-start` stream to the Whisper service, forwards the device's PCM, and waits
+  for the server's `transcript` (server-side VAD end-of-speech) before sending
+  `audio-stop`. The orchestrator relays that transcript back to the device.
 - **Pluggable LLM orchestrator** consumes the transcript, streams reply tokens.
+  **Done** — `mac/src/llm/` defines the `LlmBackend` trait
+  (`respond(turn) -> ReplyStream` of reply-token fragments) with three config-
+  selected implementations: local `ollama` (streaming NDJSON `/api/chat`), cloud
+  `anthropic` (Claude Messages API over SSE via raw HTTP — Rust has no official
+  Anthropic SDK), and an offline `mock` echo backend. The pipeline only ever holds
+  a `dyn LlmBackend`, so backends swap without touching the turn logic.
 - **Persistent memory store** (**SQLite** on the Mac) supplies context and records
   facts/preferences across sessions; feeds the LLM prompt. Policy: **explicit +
-  inferred** (store on request and auto-extract from turns).
-- Wyoming TTS (Piper) synthesizes the reply into audio frames.
-- Frames stream back to the Echo Show over the Wyoming socket.
+  inferred**. **Done** — `mac/src/memory/` is a `rusqlite` (bundled SQLite) store
+  with an **FTS5** index. `parse_command` handles voice "remember…"/"forget…"/
+  "forget that" (applied directly with a spoken confirmation, skipping the LLM);
+  `infer_memories` auto-extracts facts/prefs from ordinary turns with deterministic
+  heuristics (no embedding model, no extra LLM pass in v1). Relevant entries are
+  FTS-searched each turn and injected into the LLM system prompt. `list`/`delete`/
+  `forget_*`/`clear` back the settings UI (Phase 6).
+- Wyoming TTS (Piper) synthesizes the reply into audio frames. **Done** —
+  `mac/src/wyoming/tts.rs` (`TtsSession`) sends one `synthesize` request and reads
+  back the `audio-start` → `audio-chunk`… → `audio-stop` stream.
+- Frames stream back to the Echo Show over the Wyoming socket. **Done** —
+  `mac/src/orchestrator.rs` (`Pipeline::run_turn`) drives the full turn and relays
+  each TTS frame to the device (a device that closed early — Phase-3 clients end on
+  the transcript — is tolerated, not an error). `mac/src/server.rs` accepts device
+  connections and `mac/src/discovery.rs` advertises `_wyoming._tcp` over mDNS so the
+  device discovers the host with no hardcoded IP (symmetric with the Phase-3 browse).
+- Verified: `cargo test` (28 tests: Wyoming codec round-trips, STT/TTS session
+  framing, Ollama-NDJSON + Claude-SSE stream parsing against loopback HTTP servers,
+  memory FTS/commands/inference, and three full-pipeline integration tests that
+  drive a mock device + mock Whisper/Piper through the real `Pipeline`),
+  `cargo clippy --all-targets -- -D warnings` (clean), `cargo fmt --check` (clean),
+  and a `--release` build of the `ambient-orchestrator` binary.
+
+> **Config note (Phase 4):** the orchestrator is environment-driven
+> (`mac/src/config.rs`). `AMBIENT_LLM_BACKEND=ollama|anthropic|mock` selects the
+> backend (default `ollama`, model `llama3.2`; `anthropic` needs `ANTHROPIC_API_KEY`,
+> default model `claude-opus-5`, small `max_tokens` for spoken replies).
+> `AMBIENT_STT_ADDR` / `AMBIENT_TTS_ADDR` point at the Whisper (10300) and Piper
+> (10200) Wyoming servers, and the host advertises `_wyoming._tcp` on
+> `AMBIENT_BIND_ADDR` (default `0.0.0.0:10700`). Whisper and Piper themselves are
+> **off-the-shelf Wyoming servers** (rhasspy ecosystem); the orchestrator is a
+> client to them, not a reimplementation.
+
+> **Dep note (Phase 4):** a host-only crate, independent of the device `/rust`
+> crate (which is an Android `cdylib` linking `cpal`/`tract`/JNI and cannot be
+> shared as a library on the Mac). Uses `tokio`, `serde`/`serde_json`, `reqwest`
+> (rustls-tls; NDJSON + SSE streaming), `rusqlite` (bundled SQLite + FTS5),
+> `mdns-sd` (advertise), `async-trait`/`async-stream`/`futures-util`, and
+> `env_logger`. The Wyoming wire codec is re-implemented in `mac/src/wyoming/
+> protocol.rs` (kept byte-identical to the device's, guarded by round-trip tests)
+> rather than shared across the two crates.
 
 ### Phase 5 — Reactive UI & Playback (Flutter + Rust)
 - Dart screen state consumes FRB `StreamSink` events (transcript + reply tokens).

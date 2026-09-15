@@ -44,8 +44,11 @@ If a task seems to require changing one of these, stop and confirm first.
 
 ```
 /lib      Flutter app (Dart) — UI, state, FRB Dart API
-/rust     Rust engine — audio capture/playback, ring buffer, wake word,
-          Wyoming client, mDNS discovery
+/rust     Rust engine (Echo Show device) — audio capture/playback, ring buffer,
+          wake word, Wyoming client, mDNS discovery
+/mac      Rust orchestrator (Mac Mini "brain", crate `ambient_orchestrator`) —
+          Wyoming server to the device + Wyoming client to Whisper/Piper,
+          pluggable LLM, persistent SQLite memory, mDNS advertise
 Plan.MD           Living plan + decision table
 architecture.md   Technical design (source of truth)
 agents.md         This file
@@ -86,6 +89,18 @@ adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d
 
 - Requires: Flutter SDK, Android SDK + NDK, Rust toolchain, `adb`.
 - Mac side: a Wyoming STT server (Whisper/CoreML) and Piper TTS on the LAN.
+
+```bash
+# Mac Mini orchestrator (the "brain"). Runs on the Mac, not the device.
+cargo test  --manifest-path mac/Cargo.toml           # unit + pipeline integration tests
+cargo clippy --manifest-path mac/Cargo.toml --all-targets -- -D warnings
+cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp, serves turns
+
+# Backend selection + endpoints are env-driven (see mac/src/config.rs), e.g.:
+#   AMBIENT_LLM_BACKEND=ollama|anthropic|mock   (default ollama; anthropic needs ANTHROPIC_API_KEY)
+#   AMBIENT_STT_ADDR=127.0.0.1:10300  AMBIENT_TTS_ADDR=127.0.0.1:10200
+#   AMBIENT_BIND_ADDR=0.0.0.0:10700   AMBIENT_TTS_VOICE=en_US-amy-medium
+```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
   cargokit plugin (`rust_builder/cargokit`) uses the legacy AGP variant API and
   `project.exec`, which Gradle 9 / AGP 9 removed. Pinned in

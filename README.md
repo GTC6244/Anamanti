@@ -61,7 +61,8 @@ See [`architecture.md`](./architecture.md) for the full design and
 
 ```
 /lib      Flutter application (Dart)
-/rust     Rust systems engine (audio, wake word, Wyoming client)
+/rust     Rust systems engine — device (audio, wake word, Wyoming client)
+/mac      Rust orchestrator — Mac Mini brain (STT ↔ LLM + memory ↔ TTS)
 Plan.MD           Living project plan + confirmed decisions
 architecture.md   Detailed technical design
 agents.md         Build guidance for AI agents & contributors
@@ -70,8 +71,8 @@ README.md         You are here
 
 ## Getting started
 
-> ⚠️ Pre-implementation. These are the intended bootstrap steps; see `Plan.MD`
-> Phase 1 for the current state.
+> Phases 1–4 are implemented (device engine + Mac orchestrator); the reactive UI
+> and settings phases are still in progress. See `Plan.MD` for current state.
 
 ### Prerequisites
 
@@ -105,6 +106,26 @@ flutter run -d <echo-show-device>
 On first launch the device discovers the Mac's Wyoming service via mDNS. No
 static IP configuration is required.
 
+### Run the Mac Mini orchestrator (the brain)
+
+The `/mac` crate (`ambient_orchestrator`) is the Wyoming host the device
+discovers. It relays audio to a Whisper (STT) server, runs the pluggable LLM with
+persistent memory, and streams a Piper (TTS) reply back — advertising
+`_wyoming._tcp` over mDNS so the device finds it automatically.
+
+```bash
+# Point at your local Whisper + Piper Wyoming servers and pick an LLM backend.
+AMBIENT_LLM_BACKEND=ollama \
+AMBIENT_STT_ADDR=127.0.0.1:10300 \
+AMBIENT_TTS_ADDR=127.0.0.1:10200 \
+cargo run --manifest-path mac/Cargo.toml --release
+```
+
+- `AMBIENT_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
+  `ANTHROPIC_API_KEY`), or `mock` (offline echo, no servers needed).
+- Whisper and Piper are off-the-shelf Wyoming servers; the orchestrator is a
+  client to them. See `mac/src/config.rs` for all environment variables.
+
 > **Android toolchain note:** the project pins **AGP 8.7.3 / Kotlin 2.1.0 /
 > Gradle 8.11.1** because the bundled cargokit Gradle plugin does not yet support
 > Gradle 9 / AGP 9. See `Plan.MD` Phase 1.
@@ -123,8 +144,23 @@ through a pre-allocated lock-free ring buffer, resamples to 16 kHz, and scores
 wake-word confidence continuously and offline with the openWakeWord model chain on
 `tract-onnx` — all on one low-overhead background thread. Flutter starts/stops the
 engine over FRB and consumes a `Stream<WakeWordEvent>` (capture status, input
-level, detections). Remaining phases (Wyoming client, Mac pipeline, UI, settings)
-are planned — see the decision table and phases in `Plan.MD`.
+level, detections).
+
+**Phase 3 complete — Wyoming client + mDNS + turn state machine.** The device now
+discovers the Mac's `_wyoming._tcp` service, opens a `tokio` TCP connection on
+wake-word detection, and streams PCM through a pure, unit-tested turn state machine
+(`Idle → Triggered → Streaming → Closing`), rendering the server's transcript.
+Wake-word scoring keeps running during a turn (full-duplex), with a configurable
+raised confidence threshold as the interim self-trigger mitigation.
+
+**Phase 4 complete — Mac Mini assistant pipeline.** The new `/mac` orchestrator
+(`ambient_orchestrator`) ties the brain together: a Wyoming server to the device
+and a Wyoming client to Whisper (STT, server-side VAD) and Piper (TTS), with a
+**pluggable LLM** trait (Ollama / Claude / mock) and a **persistent SQLite + FTS5
+memory** store (explicit "remember…"/"forget…" commands plus inferred fact/pref
+extraction) in the middle. It advertises `_wyoming._tcp` over mDNS and streams the
+synthesized reply back to the device. Remaining phases (reactive UI + playback,
+settings) are planned — see the decision table and phases in `Plan.MD`.
 
 ## License
 
