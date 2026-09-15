@@ -37,6 +37,8 @@ dependencies:
   rust_lib_ambient_display:
     path: rust_builder
   flutter_rust_bridge: 2.11.1
+  # Resolves the on-device model directory for the wake-word engine (Phase 5).
+  path_provider: ^2.1.4
 
 dev_dependencies:
   flutter_test:

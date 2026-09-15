@@ -6,10 +6,11 @@
 //! real-time capture callback from the wake-word consumer via a pre-allocated
 //! ring buffer.
 //!
-//! Playback (returned TTS frames) is symmetric and lands in a later phase; only
-//! capture is required for Phase 2.
+//! Playback (returned TTS frames) is the symmetric twin and lands in Phase 5
+//! ([`playback`]); it reuses the same `cpal` layer and the [`resample`] path.
 
 pub mod capture;
+pub mod playback;
 pub mod resample;
 pub mod ring_buffer;
 

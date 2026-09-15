@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `started`, `status`, `stopped`, `streaming`, `transcript`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `reply_token`, `speaking`, `started`, `status`, `stopped`, `streaming`, `transcript`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
@@ -138,6 +138,9 @@ class WakeWordEvent {
   /// Recognized speech (`Transcript`).
   final String transcript;
 
+  /// One streamed reply-token fragment (`ReplyToken`).
+  final String reply;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -148,6 +151,7 @@ class WakeWordEvent {
     required this.score,
     required this.model,
     required this.transcript,
+    required this.reply,
   });
 
   @override
@@ -160,7 +164,8 @@ class WakeWordEvent {
       rms.hashCode ^
       score.hashCode ^
       model.hashCode ^
-      transcript.hashCode;
+      transcript.hashCode ^
+      reply.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -175,7 +180,8 @@ class WakeWordEvent {
           rms == other.rms &&
           score == other.score &&
           model == other.model &&
-          transcript == other.transcript;
+          transcript == other.transcript &&
+          reply == other.reply;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -204,6 +210,14 @@ enum WakeWordEventKind {
   /// Phase 3: a transcript arrived from the STT server; `transcript` carries
   /// the recognized text.
   transcript,
+
+  /// Phase 5: one streamed LLM reply-token fragment; `reply` carries the text.
+  /// The UI appends these to render the reply token-by-token.
+  replyToken,
+
+  /// Phase 5: the reply's TTS audio has started and is now playing back through
+  /// the speakers.
+  speaking,
 
   /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
   /// The engine returns to idle wake-word listening.

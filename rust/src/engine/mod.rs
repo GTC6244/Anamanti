@@ -26,6 +26,7 @@ use crate::frb_generated::StreamSink;
 
 use crate::api::engine::{WakeWordConfig, WakeWordEvent};
 use crate::audio::capture::{self, start_capture};
+use crate::audio::playback::start_playback;
 use crate::audio::resample::Resampler;
 use crate::audio::ring_buffer::new_audio_ring;
 use crate::audio::TARGET_SAMPLE_RATE;
@@ -141,10 +142,30 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     };
 
+    // Phase 5: speaker playback of returned TTS frames. The `!Send` cpal output
+    // stream must live on this thread (like capture); the `Send` sink is handed to
+    // the network layer. If no output device is available the turn still runs — it
+    // just can't play audio — so degrade to `None`.
+    let (playback_stream, playback_sink) = match start_playback() {
+        Ok((stream, sink_handle)) => {
+            let _ = sink.add(WakeWordEvent::status(format!(
+                "playback ready on '{}' ({} Hz, {} ch)",
+                stream.info.device_name, stream.info.sample_rate, stream.info.channels
+            )));
+            (Some(stream), Some(Arc::new(sink_handle)))
+        }
+        Err(e) => {
+            let _ = sink.add(WakeWordEvent::status(format!(
+                "no audio output ({e}); replies won't be spoken"
+            )));
+            (None, None)
+        }
+    };
+
     // Phase 3: the Wyoming turn bridge. If the runtime can't be built the engine
     // still runs wake-word detection (it just can't open a turn), so degrade to
     // `None` rather than failing the whole engine.
-    let network = match Network::new(&config, sink.clone()) {
+    let network = match Network::new(&config, sink.clone(), playback_sink) {
         Ok(n) => Some(n),
         Err(e) => {
             let _ = sink.add(WakeWordEvent::status(format!(
@@ -215,8 +236,8 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                         break;
                     }
                     // Fire a Wyoming turn. When one is already active this is a
-                    // no-op (barge-in restart is Phase 5), so it is safe to call
-                    // on every over-threshold detection.
+                    // barge-in: the network layer flushes playback, interrupts the
+                    // running turn, and restarts a fresh one (Plan.MD §3, Phase 5).
                     if let Some(net) = network.as_ref() {
                         net.on_wake_word();
                     }
@@ -241,8 +262,11 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     }
 
-    // Drop the network first so its runtime stops forwarding before capture ends.
+    // Drop the network first so its runtime stops forwarding (and stops handing
+    // audio to the playback sink) before the streams are torn down; then drop the
+    // playback and capture streams.
     drop(network);
+    drop(playback_stream);
     drop(capture);
     running.store(false, Ordering::SeqCst);
     let _ = sink.add(WakeWordEvent::stopped());

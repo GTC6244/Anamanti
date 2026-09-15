@@ -373,6 +373,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_score = <f32>::sse_decode(deserializer);
         let mut var_model = <String>::sse_decode(deserializer);
         let mut var_transcript = <String>::sse_decode(deserializer);
+        let mut var_reply = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
             message: var_message,
@@ -383,6 +384,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             score: var_score,
             model: var_model,
             transcript: var_transcript,
+            reply: var_reply,
         };
     }
 }
@@ -399,9 +401,11 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             4 => crate::api::engine::WakeWordEventKind::Connecting,
             5 => crate::api::engine::WakeWordEventKind::Streaming,
             6 => crate::api::engine::WakeWordEventKind::Transcript,
-            7 => crate::api::engine::WakeWordEventKind::Disconnected,
-            8 => crate::api::engine::WakeWordEventKind::Stopped,
-            9 => crate::api::engine::WakeWordEventKind::Error,
+            7 => crate::api::engine::WakeWordEventKind::ReplyToken,
+            8 => crate::api::engine::WakeWordEventKind::Speaking,
+            9 => crate::api::engine::WakeWordEventKind::Disconnected,
+            10 => crate::api::engine::WakeWordEventKind::Stopped,
+            11 => crate::api::engine::WakeWordEventKind::Error,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -486,6 +490,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.score.into_into_dart().into_dart(),
             self.model.into_into_dart().into_dart(),
             self.transcript.into_into_dart().into_dart(),
+            self.reply.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -512,9 +517,11 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::Connecting => 4.into_dart(),
             Self::Streaming => 5.into_dart(),
             Self::Transcript => 6.into_dart(),
-            Self::Disconnected => 7.into_dart(),
-            Self::Stopped => 8.into_dart(),
-            Self::Error => 9.into_dart(),
+            Self::ReplyToken => 7.into_dart(),
+            Self::Speaking => 8.into_dart(),
+            Self::Disconnected => 9.into_dart(),
+            Self::Stopped => 10.into_dart(),
+            Self::Error => 11.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -644,6 +651,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <f32>::sse_encode(self.score, serializer);
         <String>::sse_encode(self.model, serializer);
         <String>::sse_encode(self.transcript, serializer);
+        <String>::sse_encode(self.reply, serializer);
     }
 }
 
@@ -659,9 +667,11 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::Connecting => 4,
                 crate::api::engine::WakeWordEventKind::Streaming => 5,
                 crate::api::engine::WakeWordEventKind::Transcript => 6,
-                crate::api::engine::WakeWordEventKind::Disconnected => 7,
-                crate::api::engine::WakeWordEventKind::Stopped => 8,
-                crate::api::engine::WakeWordEventKind::Error => 9,
+                crate::api::engine::WakeWordEventKind::ReplyToken => 7,
+                crate::api::engine::WakeWordEventKind::Speaking => 8,
+                crate::api::engine::WakeWordEventKind::Disconnected => 9,
+                crate::api::engine::WakeWordEventKind::Stopped => 10,
+                crate::api::engine::WakeWordEventKind::Error => 11,
                 _ => {
                     unimplemented!("");
                 }

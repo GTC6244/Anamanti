@@ -106,6 +106,12 @@ pub enum WakeWordEventKind {
     /// Phase 3: a transcript arrived from the STT server; `transcript` carries
     /// the recognized text.
     Transcript,
+    /// Phase 5: one streamed LLM reply-token fragment; `reply` carries the text.
+    /// The UI appends these to render the reply token-by-token.
+    ReplyToken,
+    /// Phase 5: the reply's TTS audio has started and is now playing back through
+    /// the speakers.
+    Speaking,
     /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
     /// The engine returns to idle wake-word listening.
     Disconnected,
@@ -139,6 +145,8 @@ pub struct WakeWordEvent {
     pub model: String,
     /// Recognized speech (`Transcript`).
     pub transcript: String,
+    /// One streamed reply-token fragment (`ReplyToken`).
+    pub reply: String,
 }
 
 impl WakeWordEvent {
@@ -153,6 +161,7 @@ impl WakeWordEvent {
             score: 0.0,
             model: String::new(),
             transcript: String::new(),
+            reply: String::new(),
         }
     }
 
@@ -203,6 +212,17 @@ impl WakeWordEvent {
             transcript: text,
             ..Self::base(WakeWordEventKind::Transcript)
         }
+    }
+
+    pub(crate) fn reply_token(text: String) -> Self {
+        Self {
+            reply: text,
+            ..Self::base(WakeWordEventKind::ReplyToken)
+        }
+    }
+
+    pub(crate) fn speaking() -> Self {
+        Self::base(WakeWordEventKind::Speaking)
     }
 
     pub(crate) fn disconnected(message: String) -> Self {
