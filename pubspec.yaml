@@ -64,10 +64,14 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  # Bundled openWakeWord ONNX models (Phase 2/6). Unpacked to the app-support
+  # model dir on first run by `lib/src/engine/model_assets.dart` so the native
+  # engine (which reads from the filesystem, not Flutter assets) can load them.
+  # `melspectrogram.onnx` + `embedding_model.onnx` are the shared chain; each
+  # `<wake_word>.onnx` is a classifier. Source:
+  # github.com/dscripka/openWakeWord release v0.5.1.
+  assets:
+    - assets/models/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

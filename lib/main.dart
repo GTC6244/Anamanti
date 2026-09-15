@@ -10,6 +10,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:ambient_display/src/engine/assistant_controller.dart';
+import 'package:ambient_display/src/engine/model_assets.dart';
 import 'package:ambient_display/src/engine/wakeword_config.dart';
 import 'package:ambient_display/src/settings/app_settings.dart';
 import 'package:ambient_display/src/settings/orchestrator_client.dart';
@@ -69,6 +70,9 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   Future<void> _boot() async {
     _settings = await _store.load();
+    // Unpack the bundled wake-word models to the filesystem before the native
+    // engine tries to load them (no-op on later runs / user-dropped models).
+    await ensureWakeWordModels();
     await _applyPhotoSource();
     await _startEngine();
   }

@@ -13,12 +13,14 @@ import 'package:flutter/foundation.dart';
 /// Which idle-screen photo source to use.
 enum PhotoSourceKind { local, google }
 
-/// The set of wake words the app offers in settings. These map to bundled/dropped
-/// openWakeWord `.onnx` classifier files (`<name>.onnx`); if the file is absent the
-/// engine degrades to capture-only, so the list is safe to show regardless.
+/// The set of wake words the app offers in settings. These map to openWakeWord
+/// `.onnx` classifier files (`<name>.onnx`) in the model dir. Only `hey_jarvis`
+/// ships bundled in the app (see `assets/models/`); the others work once the
+/// matching classifier is dropped into the model dir — otherwise the engine
+/// degrades to capture-only, so the list is safe to show regardless.
 const List<String> kAvailableWakeWords = <String>[
-  'alexa',
   'hey_jarvis',
+  'alexa',
   'hey_mycroft',
   'ok_nabu',
 ];
@@ -26,7 +28,7 @@ const List<String> kAvailableWakeWords = <String>[
 @immutable
 class AppSettings {
   const AppSettings({
-    this.wakeWord = 'alexa',
+    this.wakeWord = 'hey_jarvis',
     this.threshold = 0.5,
     this.activeThreshold = 0.7,
     this.photoSource = PhotoSourceKind.local,

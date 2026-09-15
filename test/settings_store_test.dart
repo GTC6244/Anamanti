@@ -29,7 +29,7 @@ void main() {
   test('load returns defaults when no file exists', () async {
     final loaded = await store.load();
     expect(loaded, const AppSettings());
-    expect(loaded.wakeWord, 'alexa');
+    expect(loaded.wakeWord, 'hey_jarvis');
     expect(loaded.photoSource, PhotoSourceKind.local);
   });
 
@@ -54,7 +54,7 @@ void main() {
       'photoSource': 'bogus',
     });
     // Falls back to defaults rather than throwing.
-    expect(loaded.wakeWord, 'alexa');
+    expect(loaded.wakeWord, 'hey_jarvis');
     expect(loaded.threshold, 0.5);
     expect(loaded.photoSource, PhotoSourceKind.local);
   });

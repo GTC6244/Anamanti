@@ -35,10 +35,10 @@ void main() {
     expect(client.fetchCount, 1);
     expect(find.text('Local (Ollama)'), findsOneWidget);
 
-    // Change the wake word.
+    // Change the wake word away from the default (hey_jarvis).
     await tester.tap(find.byKey(const Key('settings-wakeword')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('hey jarvis').last);
+    await tester.tap(find.text('alexa').last);
     await tester.pumpAndSettle();
 
     // Save.
@@ -47,8 +47,8 @@ void main() {
 
     // Device-local settings persisted + surfaced to the parent.
     expect(applied, isNotNull);
-    expect(applied!.wakeWord, 'hey_jarvis');
-    expect(store.value.wakeWord, 'hey_jarvis');
+    expect(applied!.wakeWord, 'alexa');
+    expect(store.value.wakeWord, 'alexa');
 
     // Orchestrator settings applied once (with the loaded backend + a voice write).
     expect(client.applyCalls.length, 1);
