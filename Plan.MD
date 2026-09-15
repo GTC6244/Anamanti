@@ -66,7 +66,9 @@ Echo Show speakers → return to idle.
 
 - **Frontend:** Flutter — always-on landscape layout, smooth live text rendering,
   simple image/status grids, tuned for the 8-inch display.
-- **Systems layer:** Rust cross-compiled for Android (`aarch64-linux-android`).
+- **Systems layer:** Rust cross-compiled for Android. **The Echo Show 8 (`crown`)
+  LineageOS build is 32-bit**, so the device target is `armv7-linux-androideabi`
+  (armeabi-v7a), not `aarch64` — see Phase 1 ABI note in §3.
 - **Interop:** `flutter_rust_bridge` v2 (FRB) — zero-copy Dart↔Rust data flow,
   generated stream sinks and callbacks.
 - **Audio capture + playback:** `cpal` crate on the native Android `oboe-shared`
@@ -82,11 +84,37 @@ Echo Show speakers → return to idle.
 
 ## 3. Implementation Phases
 
-### Phase 1 — Workspace Setup & Cross-Compilation
-- Unified monorepo: `/lib` (Flutter) and `/rust` (systems layer).
+### Phase 1 — Workspace Setup & Cross-Compilation ✅ (implemented 2026-09-15)
+- Unified monorepo: `/lib` (Flutter) and `/rust` (systems layer). **Done** —
+  Flutter app scaffolded (`ambient_display`, Android-only), FRB v2 integrated via
+  `flutter_rust_bridge_codegen integrate` (adds `/rust` cdylib + `rust_builder`
+  cargokit plugin).
 - Configure `flutter_rust_bridge_codegen` to watch and generate JNI bindings.
-- Install the NDK target: `rustup target add aarch64-linux-android`.
+  **Done** — `flutter_rust_bridge.yaml` (`rust_input: crate::api`, output
+  `lib/src/rust`). Hello-world API in `rust/src/api/engine.rs` (`engine_greeting`,
+  `engine_version`); regenerate with `flutter_rust_bridge_codegen generate`.
+- Install the NDK target: `rustup target add aarch64-linux-android`. **Done.**
 - Validate a hello-world cross-compile onto the LineageOS target via `adb`.
+  **Done and verified on real hardware.** Built, installed, and launched on the
+  physical Echo Show 8; the on-screen greeting text is returned by the Rust engine
+  over the FRB bridge (`android/arm`). Deploy command:
+  `adb install -r build/app/outputs/flutter-apk/app-release.apk`.
+
+> **⚠️ ABI correction (measured on-device):** the plan originally assumed
+> **`aarch64-linux-android`**, but the real Echo Show 8 (`crown`) LineageOS build
+> is **32-bit only** — `ro.product.cpu.abilist = armeabi-v7a,armeabi`, empty
+> `abilist64`, **Android 11 (SDK 30)**. An arm64 APK fails to install with
+> `INSTALL_FAILED_NO_MATCHING_ABIS`. **The real device target is
+> `armv7-linux-androideabi` (armeabi-v7a).** Build with `flutter build apk
+> --release --target-platform android-arm` (`rustup target add
+> armv7-linux-androideabi`). Keep arm64 only for any future 64-bit device.
+
+> **Toolchain pin (decision):** `flutter create` (Flutter 3.44) scaffolded
+> **Gradle 9.1 / AGP 9.0**, but the bundled cargokit Gradle plugin uses the
+> legacy AGP variant API + `project.exec` that Gradle 9 removed. Pinned
+> `android/settings.gradle.kts` to **AGP 8.7.3 / Kotlin 2.1.0** and the wrapper to
+> **Gradle 8.11.1**. Revisit if/when cargokit ships AGP-9 support. NDK in use:
+> `28.2.13676358`; Rust `1.94.0`; FRB `2.11.1`.
 
 ### Phase 2 — Native Audio & Local Inference (Rust)
 - Initialize `cpal` to pull raw 16 kHz / mono / 16-bit PCM from the mic array.

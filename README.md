@@ -76,9 +76,11 @@ README.md         You are here
 ### Prerequisites
 
 - Flutter SDK + Android SDK/NDK
-- Rust toolchain with the Android target:
+- Rust toolchain with the Android target. The Echo Show 8 (`crown`) LineageOS
+  build is **32-bit** (`armeabi-v7a`), so use the armv7 target:
   ```bash
-  rustup target add aarch64-linux-android
+  rustup target add armv7-linux-androideabi   # 32-bit Echo Show 8 (crown)
+  # rustup target add aarch64-linux-android   # only for a 64-bit device
   ```
 - `flutter_rust_bridge_codegen`
 - An Echo Show 8 running LineageOS with `adb` access
@@ -87,23 +89,35 @@ README.md         You are here
 ### Build & run (target)
 
 ```bash
-# 1. Generate FRB bindings
+# 1. (Re)generate FRB bindings after changing Rust signatures
 flutter_rust_bridge_codegen generate
 
-# 2. Build the Rust engine for the device
-cargo build --release --target aarch64-linux-android
+# 2. Build a device APK — cargokit cross-compiles the Rust engine into it.
+#    Echo Show 8 (crown) is 32-bit, so target android-arm (armeabi-v7a).
+flutter build apk --release --target-platform android-arm
 
-# 3. Deploy the Flutter app to the Echo Show
+# 3. Deploy to the Echo Show (LineageOS) over adb
+adb install build/app/outputs/flutter-apk/app-release.apk
+# ...or, for live development:
 flutter run -d <echo-show-device>
 ```
 
 On first launch the device discovers the Mac's Wyoming service via mDNS. No
 static IP configuration is required.
 
+> **Android toolchain note:** the project pins **AGP 8.7.3 / Kotlin 2.1.0 /
+> Gradle 8.11.1** because the bundled cargokit Gradle plugin does not yet support
+> Gradle 9 / AGP 9. See `Plan.MD` Phase 1.
+
 ## Status
 
-Planning / pre-implementation. Scope, discovery, wake-word, LLM, TTS, and
-playback decisions are locked in — see the decision table in `Plan.MD`.
+**Phase 1 complete — verified on real hardware.** The monorepo is scaffolded
+(`/lib` Flutter + `/rust` engine), `flutter_rust_bridge` v2 is wired, and a
+hello-world Rust API cross-compiles into an `armeabi-v7a` APK that installs, runs,
+and renders engine text over the FRB bridge on the physical Echo Show 8
+(LineageOS, Android 11). Remaining phases (audio, wake word, Wyoming client, Mac
+pipeline, UI, settings) are planned — see the decision table and phases in
+`Plan.MD`.
 
 ## License
 
