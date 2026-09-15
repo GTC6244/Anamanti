@@ -42,6 +42,11 @@ pub mod types {
     pub const VOICE_STARTED: &str = "voice-started";
     /// STT/VAD → client: server-side VAD detected the end of speech.
     pub const VOICE_STOPPED: &str = "voice-stopped";
+    /// Orchestrator → device (Phase 5): one streamed LLM reply-token fragment
+    /// (data: `text`). This is a project-local extension on the device↔Mac hop —
+    /// no off-the-shelf Wyoming server is on this hop — so the UI can render the
+    /// reply token-by-token as it is generated (Plan.MD §3, Phase 5).
+    pub const REPLY_TOKEN: &str = "reply-token";
 }
 
 /// A decoded Wyoming event: a `type` tag, an optional structured `data` object,
@@ -134,6 +139,21 @@ impl WyomingEvent {
     /// Extract the recognized text from a `transcript` event's `data.text`.
     pub fn transcript_text(&self) -> Option<&str> {
         if self.is_transcript() {
+            self.data.get("text").and_then(Value::as_str)
+        } else {
+            None
+        }
+    }
+
+    /// A `reply-token` event carrying one streamed LLM reply fragment (used by
+    /// tests and the mock server; the orchestrator emits the wire form directly).
+    pub fn reply_token(text: impl Into<String>) -> Self {
+        Self::with_data(types::REPLY_TOKEN, json!({ "text": text.into() }))
+    }
+
+    /// Extract the fragment text from a `reply-token` event's `data.text`.
+    pub fn reply_token_text(&self) -> Option<&str> {
+        if self.event_type == types::REPLY_TOKEN {
             self.data.get("text").and_then(Value::as_str)
         } else {
             None

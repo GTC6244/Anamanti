@@ -274,16 +274,60 @@ services, inserting the pluggable LLM + persistent memory between them.
 > protocol.rs` (kept byte-identical to the device's, guarded by round-trip tests)
 > rather than shared across the two crates.
 
-### Phase 5 — Reactive UI & Playback (Flutter + Rust)
+### Phase 5 — Reactive UI & Playback (Flutter + Rust) ✅ (implemented 2026-09-15)
 - Dart screen state consumes FRB `StreamSink` events (transcript + reply tokens).
-- Modular responsive 8-inch layout; smooth token-by-token rendering.
+  **Done** — `lib/src/engine/assistant_controller.dart` folds the single
+  `Stream<WakeWordEvent>` into an observable `AssistantState` (phase, transcript,
+  streamed reply, connection status). The engine stream is **injected** so
+  widget tests drive synthetic events with no native `.so`.
+- Modular responsive 8-inch layout; smooth token-by-token rendering. **Done** —
+  `lib/src/ui/`: `ambient_screen.dart` (layered slideshow + scrim + conversation +
+  clock + status), `conversation_view.dart` (transcript/reply bubbles with a
+  streaming caret, reading-column capped for the 8-inch display),
+  `status_indicator.dart`. Reply tokens accumulate into the reply bubble as they
+  arrive (`WakeWordEventKind::ReplyToken`).
 - **Idle ambient screen:** photo slideshow from a chosen Google Photos/Drive folder
-  (**on-device OAuth**). Slideshow keeps running when disconnected.
+  (**on-device OAuth**). Slideshow keeps running when disconnected. **Done** —
+  `lib/src/slideshow/photo_source.dart`: a pluggable `PhotoSource`
+  (`LocalPhotoSource` offline ambient gradients + `GooglePhotoSource` seam for the
+  Phase-6 on-device OAuth folder picker) driven by a timer-based
+  `SlideshowController` that is fully decoupled from connectivity and falls back to
+  local imagery if the source fails. *(Per Plan §4, the real Google consent flow +
+  folder picker land in the Phase-6 settings screen; the slideshow talks to the
+  `GooglePhotoSource` seam.)*
 - **Resilience:** auto-reconnect with backoff via mDNS + a subtle **disconnected**
-  status indicator; wake words queue until reconnected.
-- Rust (`cpal`/`oboe`) plays returned TTS audio frames through the speakers.
+  status indicator; wake words queue until reconnected. **Done** — the controller
+  restarts capture with exponential backoff on a fatal engine error/stop (the
+  engine-side half); the network-side half is the Rust turn's per-attempt mDNS
+  re-discovery + cached fallback. A `disconnected` reason other than "turn
+  complete" flags the subtle **Offline** chip while the slideshow keeps running.
+- Rust (`cpal`) plays returned TTS audio frames through the speakers. **Done** —
+  `rust/src/audio/playback.rs` opens the default output device (AAudio on-device),
+  resamples each TTS `audio-chunk` to the output rate, fans mono → N channels, and
+  feeds a lock-free ring the RT output callback drains (silence on underrun). The
+  `!Send` output stream lives on the engine thread beside capture; the `Send`
+  `PlaybackSink` goes to the turn task.
 - **Full-duplex barge-in:** a wake word during playback interrupts and starts a new
   turn; **raise the wake-word threshold during playback** to suppress self-triggers.
+  **Done** — the device turn state machine gained a `Speaking` state (kept
+  `is_active()`, so the higher `active_threshold` stays in force during playback).
+  A mid-turn detection calls `Network::on_wake_word`, which flushes playback,
+  interrupts the running turn over a channel, and the finishing turn spawns a fresh
+  one (`pending_restart`).
+- Verified: `cargo test` (device 32 tests incl. playback resample/channel-fan-out,
+  the SPEAKING transition, a full transcript→reply-token→TTS-playback turn, and a
+  barge-in interrupt; mac 28 tests incl. the reply-token relay), `cargo clippy
+  --all-targets -D warnings` + `cargo fmt --check` (both crates clean), FRB
+  regenerated, `flutter analyze` clean, `flutter test` (3 reactive-UI widget
+  tests), and a release `android-arm` APK cross-compile (26.3 MB) — so cpal's
+  AAudio **output** and `path_provider` link on the 32-bit device target.
+
+> **Wire note (Phase 5):** the device↔Mac hop gained one project-local event,
+> `reply-token` (`data.text`), so the orchestrator streams LLM reply fragments to
+> the device for token-by-token rendering. It rides the existing Wyoming framing
+> and is only on the device↔orchestrator hop (no off-the-shelf server sees it);
+> the codec is kept byte-identical on both sides (`rust/` and `mac/`). TTS audio
+> continues to use standard `audio-start`/`audio-chunk`/`audio-stop`.
 
 ### Phase 6 — Settings & Persistence
 - Settings screen exposing: **LLM backend**, **TTS voice**, **wake word**, and

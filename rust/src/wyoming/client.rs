@@ -143,13 +143,19 @@ where
 }
 
 /// Updates surfaced from a turn as it progresses. The engine translates these
-/// into FRB events for the UI (transcript render, connection status).
+/// into FRB events for the UI (transcript render, reply text, connection status).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnUpdate {
     /// The socket opened and `audio-start` was sent; now streaming PCM.
     Streaming,
     /// A (final) transcript arrived from the STT server.
     Transcript(String),
+    /// One streamed LLM reply-token fragment (Phase 5). The UI appends these to
+    /// render the reply token-by-token.
+    ReplyToken(String),
+    /// The reply's TTS audio has started arriving and is now being played back
+    /// through the speakers (Phase 5 SPEAKING).
+    Speaking,
     /// The turn ended cleanly and the client is back to idle.
     Finished,
 }
@@ -159,15 +165,25 @@ pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Drive one voice turn over an already-connected [`WyomingConnection`], applying
 /// the pure [`Session`] state machine. Streams PCM pulled from `pcm_rx` up to the
-/// server and reads `transcript` events down, reporting progress via `on_update`.
+/// server, reads `transcript` / `reply-token` / TTS-audio events down, reporting
+/// progress via `on_update` and handing decoded playback PCM to `on_audio`.
+///
+/// `on_audio(pcm, rate)` receives each TTS `audio-chunk` as little-endian `i16`
+/// samples plus the stream's sample rate; the engine forwards it to the speaker
+/// playback sink. `interrupt` is the barge-in channel: a message on it (a new
+/// wake word fired mid-turn) injects a `Stop`, cutting the turn short so a fresh
+/// one can begin.
 ///
 /// The caller has already opened the socket, so the machine starts by consuming a
 /// synthetic `WakeWord`→`Connected` pair; from there real IO drives it. Returns
 /// when the turn reaches [`SessionState::Idle`] again.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn<R, W>(
     conn: &mut WyomingConnection<R, W>,
     mut pcm_rx: mpsc::Receiver<Vec<i16>>,
     mut on_update: impl FnMut(TurnUpdate),
+    mut on_audio: impl FnMut(&[i16], u32),
+    mut interrupt: mpsc::Receiver<()>,
     timeout: Duration,
 ) -> Result<()>
 where
@@ -185,11 +201,20 @@ where
     .await?;
     on_update(TurnUpdate::Streaming);
 
+    // Sample rate of the inbound TTS stream, learned from its `audio-start`.
+    let mut playback_rate: u32 = crate::audio::TARGET_SAMPLE_RATE;
     let mut deadline = Instant::now() + timeout;
 
     while session.state().is_active() {
         tokio::select! {
             biased;
+
+            // Barge-in: a new wake word fired mid-turn → stop and let a fresh turn
+            // start. Draining the receiver value is enough; we only need the signal.
+            _ = interrupt.recv() => {
+                let actions = session.on_input(ControlInput::Stop);
+                run_actions(conn, actions, &mut on_update).await?;
+            }
 
             // Idle watchdog: no server activity for `timeout` → abandon the turn.
             _ = tokio::time::sleep_until(deadline) => {
@@ -198,11 +223,16 @@ where
                 deadline = Instant::now() + timeout;
             }
 
-            // Downstream: transcript / VAD events from the STT server.
+            // Downstream: transcript / reply-token / TTS-audio events.
             event = conn.read_event() => {
                 deadline = Instant::now() + timeout;
                 match event? {
-                    Some(ev) => handle_server_event(&mut session, conn, ev, &mut on_update).await?,
+                    Some(ev) => {
+                        handle_server_event(
+                            &mut session, conn, ev,
+                            &mut playback_rate, &mut on_update, &mut on_audio,
+                        ).await?
+                    }
                     None => {
                         // Peer closed the socket.
                         let actions = session.on_input(ControlInput::Closed);
@@ -217,7 +247,7 @@ where
                     Some(samples) if session.is_streaming() => {
                         conn.send_chunk(&samples).await?;
                     }
-                    Some(_) => { /* draining/closing: drop late chunks */ }
+                    Some(_) => { /* speaking/closing: drop late mic chunks */ }
                     None => {
                         // Capture side hung up: stop the turn gracefully.
                         let actions = session.on_input(ControlInput::Stop);
@@ -238,25 +268,72 @@ where
     Ok(())
 }
 
-/// Handle one inbound server event, mapping `transcript` (server-side VAD's
-/// end-of-speech signal) into an `EndOfSpeech` transition.
+/// Handle one inbound server event.
+///
+/// - `transcript` (server-side VAD end-of-speech) → render it and transition
+///   `STREAMING → SPEAKING` (sends the mic `audio-stop`).
+/// - `reply-token` (Phase 5) → surface the streamed reply fragment.
+/// - TTS `audio-start` → note the playback rate and report `Speaking`.
+/// - TTS `audio-chunk` → decode the little-endian `i16` payload and hand it to
+///   `on_audio` for playback.
+/// - TTS `audio-stop` → `PlaybackFinished`, ending the turn.
 async fn handle_server_event<R, W>(
     session: &mut Session,
     conn: &mut WyomingConnection<R, W>,
     event: WyomingEvent,
+    playback_rate: &mut u32,
     on_update: &mut impl FnMut(TurnUpdate),
+    on_audio: &mut impl FnMut(&[i16], u32),
 ) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    use protocol::types;
+
     if let Some(text) = event.transcript_text() {
         on_update(TurnUpdate::Transcript(text.to_string()));
         let actions = session.on_input(ControlInput::EndOfSpeech);
         run_actions(conn, actions, on_update).await?;
+        return Ok(());
     }
-    // Other events (voice-started, info, etc.) don't change the Phase-3 turn.
+    if let Some(text) = event.reply_token_text() {
+        on_update(TurnUpdate::ReplyToken(text.to_string()));
+        return Ok(());
+    }
+
+    match event.event_type.as_str() {
+        types::AUDIO_START => {
+            if let Some((rate, _width, _channels)) = protocol::audio_format(&event.data) {
+                *playback_rate = rate;
+            }
+            on_update(TurnUpdate::Speaking);
+        }
+        types::AUDIO_CHUNK => {
+            if let Some(payload) = &event.payload {
+                let pcm = decode_pcm_i16(payload);
+                if !pcm.is_empty() {
+                    on_audio(&pcm, *playback_rate);
+                }
+            }
+        }
+        types::AUDIO_STOP => {
+            let actions = session.on_input(ControlInput::PlaybackFinished);
+            run_actions(conn, actions, on_update).await?;
+        }
+        // voice-started / info / etc. don't change the turn.
+        _ => {}
+    }
     Ok(())
+}
+
+/// Decode a little-endian `i16` PCM payload into samples. A trailing odd byte
+/// (never expected from a well-formed server) is ignored.
+fn decode_pcm_i16(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect()
 }
 
 /// Execute the side effects a transition asked for.
@@ -327,14 +404,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_turn_streams_then_finishes_on_transcript() {
+    async fn run_turn_streams_transcript_reply_and_plays_tts() {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (cr, cw) = tokio::io::split(client_io);
         let mut conn =
             WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default());
 
-        // Mock STT server: read audio-start, read a chunk, then reply with a
-        // transcript (server-side VAD end-of-speech), then read audio-stop.
+        // Mock orchestrator: read audio-start + a mic chunk, return a transcript,
+        // read the device's audio-stop, then stream a reply token and a TTS
+        // audio-start → audio-chunk → audio-stop back for playback.
         let server = tokio::spawn(async move {
             let (sr, sw) = tokio::io::split(server_io);
             let mut reader = TokioBufReader::new(sr);
@@ -351,21 +429,46 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Device stops its mic stream once it sees the transcript.
             let stop = read_event(&mut reader).await.unwrap().unwrap();
             assert_eq!(stop.event_type, types::AUDIO_STOP);
+
+            // Reply token + TTS audio back to the device.
+            protocol::write_event(&mut writer, &WyomingEvent::reply_token("Hi "))
+                .await
+                .unwrap();
+            protocol::write_event(&mut writer, &WyomingEvent::reply_token("there"))
+                .await
+                .unwrap();
+            let tts_pcm: Vec<u8> = [100i16, -100, 200, -200]
+                .iter()
+                .flat_map(|s| s.to_le_bytes())
+                .collect();
+            for ev in [
+                WyomingEvent::audio_start(22_050, 2, 1, 0),
+                WyomingEvent::audio_chunk(22_050, 2, 1, 0, tts_pcm),
+                WyomingEvent::audio_stop(0),
+            ] {
+                protocol::write_event(&mut writer, &ev).await.unwrap();
+            }
         });
 
         let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(8);
         pcm_tx.send(vec![7i16; 160]).await.unwrap();
-        // Keep `pcm_tx` alive for the whole turn (as the real capture loop does):
-        // the turn must end on the server's transcript, not on the channel
-        // closing. An empty-but-open channel simply pends in the select.
+        let (_int_tx, int_rx) = mpsc::channel::<()>(1);
 
         let mut updates = Vec::new();
+        let mut played: Vec<i16> = Vec::new();
+        let mut played_rate = 0u32;
         run_turn(
             &mut conn,
             pcm_rx,
             |u| updates.push(u),
+            |pcm, rate| {
+                played.extend_from_slice(pcm);
+                played_rate = rate;
+            },
+            int_rx,
             Duration::from_secs(5),
         )
         .await
@@ -376,7 +479,50 @@ mod tests {
 
         assert!(updates.contains(&TurnUpdate::Streaming));
         assert!(updates.contains(&TurnUpdate::Transcript("hello world".to_string())));
+        assert!(updates.contains(&TurnUpdate::ReplyToken("Hi ".to_string())));
+        assert!(updates.contains(&TurnUpdate::ReplyToken("there".to_string())));
+        assert!(updates.contains(&TurnUpdate::Speaking));
         assert_eq!(updates.last(), Some(&TurnUpdate::Finished));
+        assert_eq!(played, vec![100, -100, 200, -200]);
+        assert_eq!(played_rate, 22_050);
+    }
+
+    #[tokio::test]
+    async fn barge_in_interrupt_ends_the_turn() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = tokio::io::split(client_io);
+        let mut conn =
+            WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default());
+
+        // Server accepts audio-start then goes quiet, so only the interrupt can end
+        // the turn. It must stay alive so the client's reads block (not EOF).
+        let server = tokio::spawn(async move {
+            let (sr, _sw) = tokio::io::split(server_io);
+            let mut reader = TokioBufReader::new(sr);
+            while read_event(&mut reader).await.transpose().is_some() {}
+        });
+
+        let (_pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(8);
+        let (int_tx, int_rx) = mpsc::channel::<()>(1);
+        // Fire the barge-in immediately.
+        int_tx.send(()).await.unwrap();
+
+        let mut updates = Vec::new();
+        run_turn(
+            &mut conn,
+            pcm_rx,
+            |u| updates.push(u),
+            |_, _| {},
+            int_rx,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        // The interrupt cut the turn short well before the 30 s watchdog.
+        assert_eq!(updates.last(), Some(&TurnUpdate::Finished));
+        drop(conn);
+        let _ = server.await;
     }
 
     #[tokio::test]
@@ -429,12 +575,15 @@ mod tests {
         });
 
         let (_pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(8);
+        let (_int_tx, int_rx) = mpsc::channel::<()>(1);
 
         let mut updates = Vec::new();
         run_turn(
             &mut conn,
             pcm_rx,
             |u| updates.push(u),
+            |_, _| {},
+            int_rx,
             Duration::from_millis(50),
         )
         .await

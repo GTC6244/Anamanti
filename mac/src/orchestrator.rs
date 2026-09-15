@@ -159,8 +159,9 @@ impl Pipeline {
             return Ok(TurnOutcome::Completed);
         }
 
-        // 3. Memory + LLM → reply text.
-        let reply = self.generate_reply(&transcript, on_event).await?;
+        // 3. Memory + LLM → reply text, relaying each reply token to the device
+        //    so it can render the reply token-by-token (Phase 5).
+        let reply = self.generate_reply(&transcript, device, on_event).await?;
         on_event(TurnEvent::Reply(reply.clone()));
 
         // 4. Synthesize and stream the reply audio back to the device.
@@ -220,16 +221,18 @@ impl Pipeline {
     }
 
     /// Apply memory policy and produce the reply text, emitting reply tokens as
-    /// they stream.
+    /// they stream and relaying each one to `device` for token-by-token rendering.
     async fn generate_reply(
         &self,
         transcript: &str,
+        device: &mut DynConnection,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<String> {
         // Explicit command → apply and confirm, skipping the LLM.
         if let Some(cmd) = parse_command(transcript) {
             let reply = self.apply_command(cmd, on_event)?;
             on_event(TurnEvent::ReplyToken(reply.clone()));
+            device.send(&WyomingEvent::reply_token(&reply)).await.ok();
             return Ok(reply);
         }
 
@@ -260,6 +263,7 @@ impl Pipeline {
         while let Some(tok) = stream.next().await {
             let tok = tok?;
             reply.push_str(&tok);
+            device.send(&WyomingEvent::reply_token(&tok)).await.ok();
             on_event(TurnEvent::ReplyToken(tok));
         }
         Ok(reply.trim().to_string())

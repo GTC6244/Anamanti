@@ -13,8 +13,11 @@
 //! - [`client`] — the `tokio` connection struct + async turn driver that binds
 //!   the codec and state machine to a real socket.
 //!
-//! Playback of the returned TTS frames and the full reconnect/back-off loop are
-//! Phase 5; the Mac-side STT/LLM/TTS services are Phase 4.
+//! Phase 5 extends the turn past the transcript into a SPEAKING phase: the driver
+//! also reads streamed `reply-token`s and the TTS `audio-start`/`audio-chunk`/
+//! `audio-stop` frames, handing decoded PCM to the speaker playback sink, and a
+//! wake word arriving mid-turn barges in. The Mac-side STT/LLM/TTS services are
+//! Phase 4.
 
 pub mod client;
 pub mod discovery;

@@ -99,9 +99,10 @@ async fn mock_tts(server: DuplexStream, captured: Arc<Mutex<Option<String>>>) {
     }
 }
 
-/// Drive the device side of a turn: stream audio, then read the relayed transcript
-/// and the returned TTS audio frames. Returns `(transcript_seen, tts_event_kinds)`.
-async fn drive_device(io: DuplexStream) -> (String, Vec<String>) {
+/// Drive the device side of a turn: stream audio, then read the relayed transcript,
+/// the streamed reply tokens, and the returned TTS audio frames. Returns
+/// `(transcript_seen, reply_text, tts_event_kinds)`.
+async fn drive_device(io: DuplexStream) -> (String, String, Vec<String>) {
     let (r, w) = split(io);
     let mut reader = BufReader::new(r);
     let mut writer = w;
@@ -131,16 +132,22 @@ async fn drive_device(io: DuplexStream) -> (String, Vec<String>) {
         .await
         .unwrap();
 
-    // Then the synthesized reply audio streams back.
+    // Then the streamed reply tokens (Phase 5) arrive, followed by the synthesized
+    // reply audio. Accumulate the reply text and collect the TTS frame kinds.
+    let mut reply = String::new();
     let mut kinds = Vec::new();
     while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if let Some(tok) = ev.reply_token_text() {
+            reply.push_str(tok);
+            continue;
+        }
         let t = ev.event_type.clone();
         kinds.push(t.clone());
         if t == types::AUDIO_STOP {
             break;
         }
     }
-    (transcript, kinds)
+    (transcript, reply, kinds)
 }
 
 fn build_pipeline(memory: Arc<MemoryStore>) -> Pipeline {
@@ -156,7 +163,7 @@ fn build_pipeline(memory: Arc<MemoryStore>) -> Pipeline {
 async fn run_one_turn(
     pipeline: &Pipeline,
     connector: &MockConnector,
-) -> ((String, Vec<String>), Vec<TurnEvent>) {
+) -> ((String, String, Vec<String>), Vec<TurnEvent>) {
     let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
     let (pr, pw) = split(dev_pipeline);
     let mut device = DynConnection::from_io(pr, pw);
@@ -182,9 +189,12 @@ async fn full_turn_streams_transcript_reply_and_tts_audio() {
     let pipeline = build_pipeline(memory.clone());
     let connector = MockConnector::new("turn on the lights");
 
-    let ((transcript, tts_kinds), events) = run_one_turn(&pipeline, &connector).await;
+    let ((transcript, reply, tts_kinds), events) = run_one_turn(&pipeline, &connector).await;
 
     assert_eq!(transcript, "turn on the lights");
+    // The reply was relayed to the device token-by-token (Phase 5) and reassembles
+    // to the full LLM reply.
+    assert_eq!(reply, "You said: turn on the lights");
     assert_eq!(
         tts_kinds,
         vec![

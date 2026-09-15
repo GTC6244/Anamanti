@@ -364,8 +364,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 9)
-      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -376,6 +376,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       score: dco_decode_f_32(arr[6]),
       model: dco_decode_String(arr[7]),
       transcript: dco_decode_String(arr[8]),
+      reply: dco_decode_String(arr[9]),
     );
   }
 
@@ -504,6 +505,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_score = sse_decode_f_32(deserializer);
     var var_model = sse_decode_String(deserializer);
     var var_transcript = sse_decode_String(deserializer);
+    var var_reply = sse_decode_String(deserializer);
     return WakeWordEvent(
       kind: var_kind,
       message: var_message,
@@ -514,6 +516,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       score: var_score,
       model: var_model,
       transcript: var_transcript,
+      reply: var_reply,
     );
   }
 
@@ -655,6 +658,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_32(self.score, serializer);
     sse_encode_String(self.model, serializer);
     sse_encode_String(self.transcript, serializer);
+    sse_encode_String(self.reply, serializer);
   }
 
   @protected

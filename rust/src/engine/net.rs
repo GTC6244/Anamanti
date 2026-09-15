@@ -1,32 +1,38 @@
-//! Bridge from the (`!Send`, real-time) capture thread to the async Wyoming turn
-//! (Plan.MD §3, Phase 3; architecture.md §4).
+//! Bridge from the (`!Send`, real-time) capture/playback thread to the async
+//! Wyoming turn (Plan.MD §3, Phases 3 & 5; architecture.md §4).
 //!
 //! The engine's capture/inference loop runs on a dedicated std thread because the
-//! `cpal` stream is `!Send`. The Wyoming client, by contrast, is async `tokio`
+//! `cpal` streams are `!Send`. The Wyoming client, by contrast, is async `tokio`
 //! networking. [`Network`] owns a small single-worker tokio runtime and marshals
 //! between the two worlds:
 //!
-//! - On a wake-word detection the capture thread calls [`Network::on_wake_word`],
-//!   which (if no turn is already active) spawns a turn task: resolve the host
-//!   over mDNS → dial → run the [`crate::wyoming`] state machine.
+//! - On a wake-word detection the capture thread calls [`Network::on_wake_word`].
+//!   If no turn is active it spawns one: resolve the host over mDNS → dial → run
+//!   the [`crate::wyoming`] state machine. If a turn *is* active, the call is a
+//!   **barge-in**: it flushes playback, interrupts the running turn, and requests
+//!   a fresh turn once the current one tears down (Plan.MD §3, Phase 5).
 //! - While a turn is active the capture thread calls [`Network::push_pcm`] with
-//!   each resampled 16 kHz block; the samples are forwarded over a bounded
-//!   channel to the turn task, which frames them as Wyoming `audio-chunk`s.
-//! - Turn progress (connecting / streaming / transcript / disconnected) is
-//!   emitted to Dart on the same [`StreamSink`] the wake-word events use.
+//!   each resampled 16 kHz block; the samples are forwarded over a bounded channel
+//!   to the turn task, which frames them as Wyoming `audio-chunk`s.
+//! - Returned TTS audio is handed to the shared [`PlaybackSink`] so the same
+//!   `cpal` layer that captured the mic plays the reply back.
+//! - Turn progress (connecting / streaming / transcript / reply-token / speaking /
+//!   disconnected) is emitted to Dart on the same [`StreamSink`] as wake-word
+//!   events.
 //!
-//! Full-duplex is preserved: wake-word scoring keeps running on the capture
-//! thread throughout a turn (the engine just raises the confidence threshold
-//! while `is_active()` — the AEC-interim mitigation).
+//! Full-duplex is preserved: wake-word scoring keeps running on the capture thread
+//! throughout a turn (the engine raises the confidence threshold while
+//! `is_active()` — the AEC-interim mitigation).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc;
 
 use crate::api::engine::{WakeWordConfig, WakeWordEvent};
+use crate::audio::playback::PlaybackSink;
 use crate::frb_generated::StreamSink;
 use crate::wyoming::{
     self, AudioFormat, EndpointCache, TurnUpdate, WyomingConnection, DEFAULT_DISCOVERY_TIMEOUT,
@@ -38,25 +44,43 @@ use crate::wyoming::{
 /// rather than back-pressuring the real-time capture thread.
 const PCM_CHANNEL_DEPTH: usize = 32;
 
-/// Owns the tokio runtime and the state shared between the capture thread and the
-/// in-flight Wyoming turn.
-pub struct Network {
-    runtime: Runtime,
+/// State shared between the capture thread and every (possibly restarted) turn
+/// task. Held in an `Arc` so a barge-in restart, spawned from the finishing
+/// turn's own cleanup, can re-enter [`Shared::spawn_turn`].
+struct Shared {
     sink: StreamSink<WakeWordEvent>,
     cache: Arc<EndpointCache>,
     /// True while a turn task is in flight (gates re-triggers + PCM forwarding).
-    active: Arc<AtomicBool>,
+    active: AtomicBool,
     /// Sender to the current turn's PCM channel, present only while active.
-    pcm_tx: Arc<Mutex<Option<mpsc::Sender<Vec<i16>>>>>,
+    pcm_tx: Mutex<Option<mpsc::Sender<Vec<i16>>>>,
+    /// Barge-in signal to the current turn, present only while active.
+    interrupt_tx: Mutex<Option<mpsc::Sender<()>>>,
+    /// Set when a wake word barges in mid-turn; the finishing turn starts a fresh
+    /// one when it sees this.
+    pending_restart: AtomicBool,
+    /// Speaker playback sink for returned TTS frames (absent if no output device).
+    playback: Option<Arc<PlaybackSink>>,
     discovery_timeout: Duration,
     turn_timeout: Duration,
 }
 
+/// Owns the tokio runtime and the shared turn state.
+pub struct Network {
+    runtime: Runtime,
+    shared: Arc<Shared>,
+}
+
 impl Network {
     /// Build the network bridge and its runtime. A single worker thread keeps the
-    /// footprint small on the Echo Show's ~1 GB budget while still driving
-    /// spawned turn tasks without an explicit `block_on`.
-    pub fn new(config: &WakeWordConfig, sink: StreamSink<WakeWordEvent>) -> anyhow::Result<Self> {
+    /// footprint small on the Echo Show's ~1 GB budget while still driving spawned
+    /// turn tasks without an explicit `block_on`. `playback`, when present, is the
+    /// shared sink used to play returned TTS audio.
+    pub fn new(
+        config: &WakeWordConfig,
+        sink: StreamSink<WakeWordEvent>,
+        playback: Option<Arc<PlaybackSink>>,
+    ) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("wyoming-net")
@@ -74,12 +98,17 @@ impl Network {
 
         Ok(Self {
             runtime,
-            sink,
-            cache: Arc::new(EndpointCache::new()),
-            active: Arc::new(AtomicBool::new(false)),
-            pcm_tx: Arc::new(Mutex::new(None)),
-            discovery_timeout,
-            turn_timeout,
+            shared: Arc::new(Shared {
+                sink,
+                cache: Arc::new(EndpointCache::new()),
+                active: AtomicBool::new(false),
+                pcm_tx: Mutex::new(None),
+                interrupt_tx: Mutex::new(None),
+                pending_restart: AtomicBool::new(false),
+                playback,
+                discovery_timeout,
+                turn_timeout,
+            }),
         })
     }
 
@@ -87,38 +116,30 @@ impl Network {
     /// the (higher) active wake-word threshold and to decide whether to forward
     /// PCM.
     pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::SeqCst)
+        self.shared.active.load(Ordering::SeqCst)
     }
 
-    /// Called by the capture thread when the wake word fires. Starts a turn unless
-    /// one is already running (duplicate triggers mid-turn are ignored in Phase
-    /// 3). Uses `compare_exchange` so only one task is ever spawned per turn.
+    /// Called by the capture thread when the wake word fires. Starts a turn if none
+    /// is running; otherwise treats it as **barge-in**: flush playback, interrupt
+    /// the in-flight turn, and request a restart so the finishing turn spawns a
+    /// fresh one.
     pub fn on_wake_word(&self) {
         if self
+            .shared
             .active
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
+            .is_ok()
         {
-            return; // a turn is already active
+            Shared::spawn_turn(self.shared.clone(), self.runtime.handle().clone());
+        } else {
+            self.shared.pending_restart.store(true, Ordering::SeqCst);
+            if let Some(pb) = &self.shared.playback {
+                pb.clear();
+            }
+            if let Some(tx) = self.shared.interrupt_tx.lock().unwrap().as_ref() {
+                let _ = tx.try_send(());
+            }
         }
-
-        let (tx, rx) = mpsc::channel::<Vec<i16>>(PCM_CHANNEL_DEPTH);
-        *self.pcm_tx.lock().unwrap() = Some(tx);
-
-        let sink = self.sink.clone();
-        let cache = self.cache.clone();
-        let active = self.active.clone();
-        let pcm_tx = self.pcm_tx.clone();
-        let discovery_timeout = self.discovery_timeout;
-        let turn_timeout = self.turn_timeout;
-
-        self.runtime.spawn(async move {
-            run_turn_task(sink, cache, rx, discovery_timeout, turn_timeout).await;
-            // Whatever happened, the turn is over: clear the sender and release
-            // the active flag so the next wake word can start a fresh turn.
-            *pcm_tx.lock().unwrap() = None;
-            active.store(false, Ordering::SeqCst);
-        });
     }
 
     /// Forward a resampled 16 kHz mono block to the active turn, if any. Never
@@ -127,7 +148,7 @@ impl Network {
         if !self.is_active() {
             return;
         }
-        if let Some(tx) = self.pcm_tx.lock().unwrap().as_ref() {
+        if let Some(tx) = self.shared.pcm_tx.lock().unwrap().as_ref() {
             let _ = tx.try_send(samples.to_vec());
         }
     }
@@ -135,25 +156,61 @@ impl Network {
 
 impl Drop for Network {
     fn drop(&mut self) {
-        // Signal any in-flight turn to stop forwarding, then let the runtime drop
-        // abort outstanding tasks. `shutdown_background` avoids blocking the
-        // engine thread on a task that is parked in a socket read.
-        self.active.store(false, Ordering::SeqCst);
-        *self.pcm_tx.lock().unwrap() = None;
+        // Signal any in-flight turn to stop forwarding + restart, then let the
+        // runtime drop abort outstanding tasks. `shutdown_background` (implicit on
+        // `Runtime` drop) avoids blocking the engine thread on a parked socket read.
+        self.shared.active.store(false, Ordering::SeqCst);
+        self.shared.pending_restart.store(false, Ordering::SeqCst);
+        *self.shared.pcm_tx.lock().unwrap() = None;
+        if let Some(tx) = self.shared.interrupt_tx.lock().unwrap().as_ref() {
+            let _ = tx.try_send(());
+        }
+    }
+}
+
+impl Shared {
+    /// Spawn one turn task on `handle`, wiring up its PCM + interrupt channels. On
+    /// completion it clears the per-turn state and, if a barge-in requested a
+    /// restart, immediately spawns the next turn.
+    fn spawn_turn(shared: Arc<Self>, handle: Handle) {
+        let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(PCM_CHANNEL_DEPTH);
+        let (int_tx, int_rx) = mpsc::channel::<()>(1);
+        *shared.pcm_tx.lock().unwrap() = Some(pcm_tx);
+        *shared.interrupt_tx.lock().unwrap() = Some(int_tx);
+
+        let shared_task = shared.clone();
+        handle.spawn(async move {
+            run_turn_task(&shared_task, pcm_rx, int_rx).await;
+            *shared_task.pcm_tx.lock().unwrap() = None;
+            *shared_task.interrupt_tx.lock().unwrap() = None;
+            shared_task.active.store(false, Ordering::SeqCst);
+
+            // Barge-in restart: a wake word fired mid-turn → begin a fresh turn,
+            // unless the engine is shutting down (Drop cleared `pending_restart`).
+            if shared_task.pending_restart.swap(false, Ordering::SeqCst)
+                && shared_task
+                    .active
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                Shared::spawn_turn(shared_task.clone(), Handle::current());
+            }
+        });
     }
 }
 
 /// The body of one Wyoming turn: discover → connect → drive the state machine,
-/// translating [`TurnUpdate`]s into Dart events. Errors are reported as a
-/// `Disconnected` event and swallowed so a failed turn never poisons the engine.
+/// translating [`TurnUpdate`]s into Dart events and returned TTS audio into
+/// playback. Errors are reported as a `Disconnected` event and swallowed so a
+/// failed turn never poisons the engine.
 async fn run_turn_task(
-    sink: StreamSink<WakeWordEvent>,
-    cache: Arc<EndpointCache>,
+    shared: &Arc<Shared>,
     pcm_rx: mpsc::Receiver<Vec<i16>>,
-    discovery_timeout: Duration,
-    turn_timeout: Duration,
+    interrupt: mpsc::Receiver<()>,
 ) {
-    let endpoint = match wyoming::resolve(&cache, discovery_timeout).await {
+    let sink = &shared.sink;
+
+    let endpoint = match wyoming::resolve(&shared.cache, shared.discovery_timeout).await {
         Ok(ep) => ep,
         Err(e) => {
             let _ = sink.add(WakeWordEvent::disconnected(format!("no Wyoming host: {e}")));
@@ -169,22 +226,39 @@ async fn run_turn_task(
         Err(e) => {
             // A stale cached endpoint may be why the dial failed; drop it so the
             // next turn re-browses instead of retrying a dead host.
-            cache.clear();
+            shared.cache.clear();
             let _ = sink.add(WakeWordEvent::disconnected(format!("connect failed: {e}")));
             return;
         }
     };
 
+    let playback = shared.playback.clone();
     let on_update = |update: TurnUpdate| {
         let event = match update {
             TurnUpdate::Streaming => WakeWordEvent::streaming(),
             TurnUpdate::Transcript(text) => WakeWordEvent::transcript(text),
+            TurnUpdate::ReplyToken(text) => WakeWordEvent::reply_token(text),
+            TurnUpdate::Speaking => WakeWordEvent::speaking(),
             TurnUpdate::Finished => WakeWordEvent::disconnected("turn complete".to_string()),
         };
         let _ = sink.add(event);
     };
+    let on_audio = |pcm: &[i16], rate: u32| {
+        if let Some(pb) = playback.as_ref() {
+            pb.submit_pcm(pcm, rate);
+        }
+    };
 
-    if let Err(e) = wyoming::run_turn(&mut conn, pcm_rx, on_update, turn_timeout).await {
+    if let Err(e) = wyoming::run_turn(
+        &mut conn,
+        pcm_rx,
+        on_update,
+        on_audio,
+        interrupt,
+        shared.turn_timeout,
+    )
+    .await
+    {
         let _ = sink.add(WakeWordEvent::disconnected(format!("turn error: {e}")));
     }
 }

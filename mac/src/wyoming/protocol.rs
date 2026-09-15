@@ -38,6 +38,11 @@ pub mod types {
     pub const TRANSCRIPT: &str = "transcript";
     /// client → TTS: request synthesis of `text` (data: `text`, optional `voice`).
     pub const SYNTHESIZE: &str = "synthesize";
+    /// orchestrator → device (Phase 5): one streamed LLM reply-token fragment
+    /// (data: `text`), so the device renders the reply token-by-token as it is
+    /// generated. A project-local extension on the device↔Mac hop (no off-the-shelf
+    /// Wyoming server is on that hop).
+    pub const REPLY_TOKEN: &str = "reply-token";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -138,6 +143,21 @@ impl WyomingEvent {
     /// A `transcript` event carrying recognized `text`.
     pub fn transcript(text: impl Into<String>) -> Self {
         Self::with_data(types::TRANSCRIPT, json!({ "text": text.into() }))
+    }
+
+    /// A `reply-token` event carrying one streamed LLM reply fragment, relayed to
+    /// the device so it can render the reply as it is generated (Phase 5).
+    pub fn reply_token(text: impl Into<String>) -> Self {
+        Self::with_data(types::REPLY_TOKEN, json!({ "text": text.into() }))
+    }
+
+    /// Extract the fragment text from a `reply-token` event's `data.text`.
+    pub fn reply_token_text(&self) -> Option<&str> {
+        if self.event_type == types::REPLY_TOKEN {
+            self.data.get("text").and_then(Value::as_str)
+        } else {
+            None
+        }
     }
 
     /// A `synthesize` request for the Piper TTS server. `voice` pins a named voice

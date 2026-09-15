@@ -2,10 +2,17 @@
 //! (Plan.MD §3, Phase 3; architecture.md §4).
 //!
 //! ```text
-//! IDLE ──wake word──► TRIGGERED ──connected──► STREAMING ──end-of-speech──► CLOSING ──closed──► IDLE
-//!   ▲                     │ connect failed         │ timeout                   │
-//!   └─────────────────────┴────────────────────────┴───────────────────────────┘
+//! IDLE ─wake word─► TRIGGERED ─connected─► STREAMING ─end-of-speech─► SPEAKING ─playback done─► IDLE
+//!   ▲                   │ connect failed       │ timeout                  │ closed / barge-in
+//!   └───────────────────┴──────────────────────┴──────────────────────────┘
 //! ```
+//!
+//! Phase 5 adds the **SPEAKING** state: once server-side VAD returns the
+//! transcript, the device stops streaming its mic (`audio-stop`) but keeps the
+//! socket open to receive the streamed reply tokens and the TTS audio frames it
+//! plays back. The turn ends when the TTS `audio-stop` arrives (playback done),
+//! the socket closes, a timeout elapses, or the user barges in with a new wake
+//! word. A `Timeout` while still STREAMING drains through the `CLOSING` state.
 //!
 //! Keeping the transitions pure (no sockets, no PCM, no runtime) means the whole
 //! turn lifecycle is exhaustively unit-testable in microseconds. The async
@@ -24,8 +31,12 @@ pub enum SessionState {
     Triggered,
     /// Connected; streaming PCM up while reading `transcript` events down.
     Streaming,
-    /// Server-side VAD (or a timeout) ended the turn; draining `audio-stop` and
-    /// tearing the socket down before returning to [`SessionState::Idle`].
+    /// Transcript received (server-side end-of-speech): the mic stream has been
+    /// stopped (`audio-stop` sent) and the device is now receiving streamed reply
+    /// tokens and TTS audio frames to play back (Plan.MD §3, Phase 5).
+    Speaking,
+    /// A timeout ended the turn mid-stream; draining `audio-stop` and tearing the
+    /// socket down before returning to [`SessionState::Idle`].
     Closing,
 }
 
@@ -50,6 +61,9 @@ pub enum ControlInput {
     ConnectFailed,
     /// Server-side end-of-speech: a `transcript` arrived or VAD signalled stop.
     EndOfSpeech,
+    /// The TTS stream finished (`audio-stop` received while SPEAKING): the reply
+    /// has been fully handed to playback, so the turn is done.
+    PlaybackFinished,
     /// No audio/events for too long; abandon the turn defensively.
     Timeout,
     /// The socket has been fully torn down.
@@ -122,18 +136,28 @@ impl Session {
             (Triggered, ConnectFailed) => (Idle, vec![]),
             (Triggered, Timeout | Stop) => (Idle, vec![Close]),
 
-            // STREAMING: server VAD or a timeout ends the turn; we drain.
-            (Streaming, EndOfSpeech | Timeout) => (Closing, vec![SendAudioStop]),
+            // STREAMING: server VAD returns the transcript → stop the mic stream
+            // and move to SPEAKING to receive the reply + TTS audio. A timeout
+            // instead abandons the turn through CLOSING.
+            (Streaming, EndOfSpeech) => (Speaking, vec![SendAudioStop]),
+            (Streaming, Timeout) => (Closing, vec![SendAudioStop]),
             // The peer closed on us mid-stream — no audio-stop to send.
             (Streaming, Closed) => (Idle, vec![Close]),
             (Streaming, Stop) => (Closing, vec![SendAudioStop]),
 
+            // SPEAKING: receiving reply tokens + TTS audio. The turn ends when the
+            // TTS stream stops, the socket closes, a watchdog timeout fires, or the
+            // user barges in (Stop). The mic `audio-stop` was already sent on the
+            // STREAMING→SPEAKING edge, so we only tear the socket down.
+            (Speaking, PlaybackFinished | Closed | Timeout | Stop) => (Idle, vec![Close]),
+
             // CLOSING: draining `audio-stop`; the socket teardown returns us home.
             (Closing, Closed | Timeout | Stop) => (Idle, vec![Close]),
 
-            // A wake word that fires while a turn is already active is ignored in
-            // Phase 3 (barge-in restart during SPEAKING is Phase 5). Any other
-            // unmatched pair is a benign no-op.
+            // Any other unmatched (state, input) pair is a benign no-op — the
+            // machine is total, so a stray event can never panic the engine. A
+            // second wake word arriving mid-turn is handled as barge-in by the
+            // network layer (it injects a `Stop`), not here.
             _ => (self.state, vec![]),
         };
 
@@ -150,7 +174,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn happy_path_idle_to_streaming_to_idle() {
+    fn happy_path_idle_to_streaming_to_speaking_to_idle() {
         let mut s = Session::new();
         assert_eq!(s.state(), Idle);
         assert!(!s.is_streaming());
@@ -163,14 +187,41 @@ mod tests {
         assert_eq!(s.state(), Streaming);
         assert!(s.is_streaming());
 
-        // Server-side VAD ends the turn → drain audio-stop, then close.
+        // Server-side VAD returns the transcript → stop the mic and start playback.
         assert_eq!(s.on_input(EndOfSpeech), vec![SendAudioStop]);
-        assert_eq!(s.state(), Closing);
+        assert_eq!(s.state(), Speaking);
         assert!(!s.is_streaming());
+        // Still "active" so the wake-word threshold stays raised during playback.
+        assert!(s.state().is_active());
 
-        assert_eq!(s.on_input(Closed), vec![Close]);
+        // TTS stream finishes → tear the socket down and return to idle.
+        assert_eq!(s.on_input(PlaybackFinished), vec![Close]);
         assert_eq!(s.state(), Idle);
         assert!(!s.state().is_active());
+    }
+
+    #[test]
+    fn speaking_ends_on_socket_close_too() {
+        let mut s = Session::new();
+        s.on_input(WakeWord);
+        s.on_input(Connected);
+        s.on_input(EndOfSpeech);
+        assert_eq!(s.state(), Speaking);
+        // Server closed the socket before a TTS audio-stop — still return home.
+        assert_eq!(s.on_input(Closed), vec![Close]);
+        assert_eq!(s.state(), Idle);
+    }
+
+    #[test]
+    fn barge_in_stop_during_speaking_returns_to_idle() {
+        let mut s = Session::new();
+        s.on_input(WakeWord);
+        s.on_input(Connected);
+        s.on_input(EndOfSpeech);
+        assert_eq!(s.state(), Speaking);
+        // The network layer injects `Stop` when a new wake word barges in.
+        assert_eq!(s.on_input(Stop), vec![Close]);
+        assert_eq!(s.state(), Idle);
     }
 
     #[test]
@@ -224,7 +275,15 @@ mod tests {
     #[test]
     fn stray_events_in_idle_are_noops() {
         let mut s = Session::new();
-        for input in [Connected, ConnectFailed, EndOfSpeech, Timeout, Closed, Stop] {
+        for input in [
+            Connected,
+            ConnectFailed,
+            EndOfSpeech,
+            PlaybackFinished,
+            Timeout,
+            Closed,
+            Stop,
+        ] {
             assert_eq!(s.on_input(input), vec![]);
             assert_eq!(s.state(), Idle);
         }
@@ -237,7 +296,8 @@ mod tests {
             assert_eq!(s.on_input(WakeWord), vec![OpenConnection]);
             assert_eq!(s.on_input(Connected), vec![SendAudioStart]);
             assert_eq!(s.on_input(EndOfSpeech), vec![SendAudioStop]);
-            assert_eq!(s.on_input(Closed), vec![Close]);
+            assert_eq!(s.state(), Speaking);
+            assert_eq!(s.on_input(PlaybackFinished), vec![Close]);
             assert_eq!(s.state(), Idle);
         }
     }
