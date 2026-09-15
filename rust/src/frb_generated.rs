@@ -318,6 +318,13 @@ impl SseDecode for u32 {
     }
 }
 
+impl SseDecode for u64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u64::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for u8 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -338,12 +345,18 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_wakewordModelPath = <String>::sse_decode(deserializer);
         let mut var_modelName = <String>::sse_decode(deserializer);
         let mut var_threshold = <f32>::sse_decode(deserializer);
+        let mut var_activeThreshold = <f32>::sse_decode(deserializer);
+        let mut var_discoveryTimeoutSecs = <u64>::sse_decode(deserializer);
+        let mut var_turnTimeoutSecs = <u64>::sse_decode(deserializer);
         return crate::api::engine::WakeWordConfig {
             melspec_model_path: var_melspecModelPath,
             embedding_model_path: var_embeddingModelPath,
             wakeword_model_path: var_wakewordModelPath,
             model_name: var_modelName,
             threshold: var_threshold,
+            active_threshold: var_activeThreshold,
+            discovery_timeout_secs: var_discoveryTimeoutSecs,
+            turn_timeout_secs: var_turnTimeoutSecs,
         };
     }
 }
@@ -359,6 +372,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_rms = <f32>::sse_decode(deserializer);
         let mut var_score = <f32>::sse_decode(deserializer);
         let mut var_model = <String>::sse_decode(deserializer);
+        let mut var_transcript = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
             message: var_message,
@@ -368,6 +382,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             rms: var_rms,
             score: var_score,
             model: var_model,
+            transcript: var_transcript,
         };
     }
 }
@@ -381,8 +396,12 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             1 => crate::api::engine::WakeWordEventKind::Status,
             2 => crate::api::engine::WakeWordEventKind::Level,
             3 => crate::api::engine::WakeWordEventKind::Detected,
-            4 => crate::api::engine::WakeWordEventKind::Stopped,
-            5 => crate::api::engine::WakeWordEventKind::Error,
+            4 => crate::api::engine::WakeWordEventKind::Connecting,
+            5 => crate::api::engine::WakeWordEventKind::Streaming,
+            6 => crate::api::engine::WakeWordEventKind::Transcript,
+            7 => crate::api::engine::WakeWordEventKind::Disconnected,
+            8 => crate::api::engine::WakeWordEventKind::Stopped,
+            9 => crate::api::engine::WakeWordEventKind::Error,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -436,6 +455,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.wakeword_model_path.into_into_dart().into_dart(),
             self.model_name.into_into_dart().into_dart(),
             self.threshold.into_into_dart().into_dart(),
+            self.active_threshold.into_into_dart().into_dart(),
+            self.discovery_timeout_secs.into_into_dart().into_dart(),
+            self.turn_timeout_secs.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -463,6 +485,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.rms.into_into_dart().into_dart(),
             self.score.into_into_dart().into_dart(),
             self.model.into_into_dart().into_dart(),
+            self.transcript.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -486,8 +509,12 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::Status => 1.into_dart(),
             Self::Level => 2.into_dart(),
             Self::Detected => 3.into_dart(),
-            Self::Stopped => 4.into_dart(),
-            Self::Error => 5.into_dart(),
+            Self::Connecting => 4.into_dart(),
+            Self::Streaming => 5.into_dart(),
+            Self::Transcript => 6.into_dart(),
+            Self::Disconnected => 7.into_dart(),
+            Self::Stopped => 8.into_dart(),
+            Self::Error => 9.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -572,6 +599,13 @@ impl SseEncode for u32 {
     }
 }
 
+impl SseEncode for u64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u64::<NativeEndian>(self).unwrap();
+    }
+}
+
 impl SseEncode for u8 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -592,6 +626,9 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <String>::sse_encode(self.wakeword_model_path, serializer);
         <String>::sse_encode(self.model_name, serializer);
         <f32>::sse_encode(self.threshold, serializer);
+        <f32>::sse_encode(self.active_threshold, serializer);
+        <u64>::sse_encode(self.discovery_timeout_secs, serializer);
+        <u64>::sse_encode(self.turn_timeout_secs, serializer);
     }
 }
 
@@ -606,6 +643,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <f32>::sse_encode(self.rms, serializer);
         <f32>::sse_encode(self.score, serializer);
         <String>::sse_encode(self.model, serializer);
+        <String>::sse_encode(self.transcript, serializer);
     }
 }
 
@@ -618,8 +656,12 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::Status => 1,
                 crate::api::engine::WakeWordEventKind::Level => 2,
                 crate::api::engine::WakeWordEventKind::Detected => 3,
-                crate::api::engine::WakeWordEventKind::Stopped => 4,
-                crate::api::engine::WakeWordEventKind::Error => 5,
+                crate::api::engine::WakeWordEventKind::Connecting => 4,
+                crate::api::engine::WakeWordEventKind::Streaming => 5,
+                crate::api::engine::WakeWordEventKind::Transcript => 6,
+                crate::api::engine::WakeWordEventKind::Disconnected => 7,
+                crate::api::engine::WakeWordEventKind::Stopped => 8,
+                crate::api::engine::WakeWordEventKind::Error => 9,
                 _ => {
                     unimplemented!("");
                 }

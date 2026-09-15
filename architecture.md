@@ -120,10 +120,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 - FRB v2 generates the JNI bindings and the Dart API from Rust signatures.
 - Data flows **Rust → Dart** primarily via generated `StreamSink`s:
-  - `wake_word_stream` — Phase 2 engine events (capture started, status, input
-    level, wake-word detected, stopped/error), surfaced by `start_wake_word_engine`
-    as a returned `Stream<WakeWordEvent>`. Modeled as a flat struct tagged by a
-    unit-only `WakeWordEventKind` enum so the boundary needs no `freezed` codegen.
+  - `wake_word_stream` — engine events surfaced by `start_wake_word_engine` as a
+    returned `Stream<WakeWordEvent>`: capture started, status, input level,
+    wake-word detected, stopped/error (Phase 2) plus the Phase-3 Wyoming turn
+    lifecycle (connecting, streaming, transcript, disconnected). Modeled as a flat
+    struct tagged by a unit-only `WakeWordEventKind` enum so the boundary needs no
+    `freezed` codegen. The dedicated `transcript_stream` / `reply_token_stream` /
+    `state_stream` below are the Phase-5 UI split built on top of this.
   - `transcript_stream` — live/partial + final transcripts.
   - `reply_token_stream` — LLM reply tokens for on-screen rendering.
   - `state_stream` — assistant state transitions (idle/listening/thinking/speaking).

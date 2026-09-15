@@ -1,12 +1,18 @@
-//! Engine orchestration for Phase 2: wires capture -> ring buffer -> resample ->
-//! wake-word inference on a single low-overhead background thread, and exposes a
-//! process-wide start/stop lifecycle (Plan.MD §3, Phase 2; architecture.md §2.1).
+//! Engine orchestration: wires capture -> ring buffer -> resample -> wake-word
+//! inference on a single low-overhead background thread, and (Phase 3) drives a
+//! Wyoming turn when the wake word fires (Plan.MD §3, Phases 2–3;
+//! architecture.md §2.1, §4).
 //!
 //! One dedicated thread owns the `cpal` stream (which is `!Send` on some
 //! backends) and runs the inference loop. The real-time audio callback only
-//! feeds the ring buffer; all model work happens here, off that hot path. Later
-//! phases (Wyoming client, playback) build the full state machine on top of the
-//! wake-word trigger this produces.
+//! feeds the ring buffer; all model work happens here, off that hot path.
+//!
+//! Phase 3 adds the network side without touching that thread's `!Send`
+//! constraint: [`net::Network`] owns a small tokio runtime, and the inference
+//! loop hands it wake-word triggers and (while a turn is active) resampled PCM
+//! over channels. Wake-word scoring keeps running during a turn (full-duplex);
+//! the engine just raises the confidence bar while a turn is active to suppress
+//! self-triggers (the AEC-interim mitigation, Plan.MD §4).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,6 +30,9 @@ use crate::audio::resample::Resampler;
 use crate::audio::ring_buffer::new_audio_ring;
 use crate::audio::TARGET_SAMPLE_RATE;
 use crate::wakeword::{WakeWordDetector, WakeWordModelPaths};
+
+mod net;
+use net::Network;
 
 /// Ring capacity in samples (~2 s at 48 kHz; ≈192 KB of `i16`). Absorbs
 /// inference-thread scheduling jitter while staying tiny in the RAM budget.
@@ -132,10 +141,30 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     };
 
+    // Phase 3: the Wyoming turn bridge. If the runtime can't be built the engine
+    // still runs wake-word detection (it just can't open a turn), so degrade to
+    // `None` rather than failing the whole engine.
+    let network = match Network::new(&config, sink.clone()) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            let _ = sink.add(WakeWordEvent::status(format!(
+                "Wyoming networking unavailable ({e}); wake-word only"
+            )));
+            None
+        }
+    };
+
+    // Idle detections use `threshold`; once a turn is active, require the higher
+    // `active_threshold` (never below `threshold`) to curb self-triggering while
+    // the device streams/speaks (AEC-interim mitigation, Plan.MD §4).
+    let idle_threshold = config.threshold;
+    let active_threshold = config.active_threshold.max(config.threshold);
+
     let mut resampler = Resampler::new(info.sample_rate, TARGET_SAMPLE_RATE);
     let mut scratch = vec![0i16; DRAIN_CHUNK];
     let mut in_f32: Vec<f32> = Vec::with_capacity(DRAIN_CHUNK);
     let mut resampled: Vec<f32> = Vec::with_capacity(DRAIN_CHUNK);
+    let mut pcm_i16: Vec<i16> = Vec::with_capacity(DRAIN_CHUNK);
     let mut block_counter: u32 = 0;
 
     while running.load(Ordering::SeqCst) {
@@ -154,14 +183,42 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
             continue;
         }
 
+        // While a turn is active, forward this 16 kHz block to the Wyoming client
+        // so it streams up as `audio-chunk`s. Convert once, clamped into range.
+        let turn_active = network.as_ref().is_some_and(Network::is_active);
+        if turn_active {
+            if let Some(net) = network.as_ref() {
+                pcm_i16.clear();
+                pcm_i16.extend(
+                    resampled
+                        .iter()
+                        .map(|&s| s.clamp(i16::MIN as f32, i16::MAX as f32) as i16),
+                );
+                net.push_pcm(&pcm_i16);
+            }
+        }
+
         match detector.as_mut() {
             Some(d) => match d.push_audio(&resampled) {
-                Ok(Some(score)) if score >= config.threshold => {
+                Ok(Some(score))
+                    if score
+                        >= if turn_active {
+                            active_threshold
+                        } else {
+                            idle_threshold
+                        } =>
+                {
                     if sink
                         .add(WakeWordEvent::detected(config.model_name.clone(), score))
                         .is_err()
                     {
                         break;
+                    }
+                    // Fire a Wyoming turn. When one is already active this is a
+                    // no-op (barge-in restart is Phase 5), so it is safe to call
+                    // on every over-threshold detection.
+                    if let Some(net) = network.as_ref() {
+                        net.on_wake_word();
                     }
                 }
                 Ok(_) => {}
@@ -184,6 +241,8 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     }
 
+    // Drop the network first so its runtime stops forwarding before capture ends.
+    drop(network);
     drop(capture);
     running.store(false, Ordering::SeqCst);
     let _ = sink.add(WakeWordEvent::stopped());

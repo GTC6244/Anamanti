@@ -6,7 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `detected`, `engine_target`, `error`, `level`, `started`, `status`, `stopped`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `started`, `status`, `stopped`, `streaming`, `transcript`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
 ///
@@ -32,10 +33,11 @@ Future<void> stopWakeWordEngine() =>
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
 
-/// Paths and tuning for the openWakeWord three-model chain. The Flutter layer
-/// resolves these from bundled/assets or the settings screen (Phase 6) and hands
-/// them to the engine; discovery of the Wyoming host is a separate concern
-/// (Phase 3), so nothing here touches the network.
+/// Paths and tuning for the openWakeWord three-model chain plus the Phase-3
+/// Wyoming turn. The Flutter layer resolves the model paths from bundled assets
+/// or the settings screen (Phase 6) and hands them to the engine. The Wyoming
+/// host itself is discovered over mDNS at turn time, so no address is configured
+/// here (architecture.md §5).
 class WakeWordConfig {
   /// Path to the melspectrogram ONNX model (`melspectrogram.onnx`).
   final String melspecModelPath;
@@ -49,8 +51,23 @@ class WakeWordConfig {
   /// Human-readable wake-word name, echoed back on detection events.
   final String modelName;
 
-  /// Confidence in [0, 1] above which a detection is reported.
+  /// Confidence in [0, 1] above which a detection is reported while idle.
   final double threshold;
+
+  /// Higher confidence required to fire *while a turn is already active*
+  /// (streaming/speaking). This is the AEC-interim mitigation from the locked
+  /// decisions: raise the bar during playback so the device's own speaker is
+  /// less likely to self-trigger (Plan.MD §4). Set equal to `threshold` to
+  /// disable. Clamped to at least `threshold` at runtime.
+  final double activeThreshold;
+
+  /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+  /// (0 = use the built-in default).
+  final BigInt discoveryTimeoutSecs;
+
+  /// Seconds of server silence before a turn is defensively abandoned
+  /// (0 = use the built-in default).
+  final BigInt turnTimeoutSecs;
 
   const WakeWordConfig({
     required this.melspecModelPath,
@@ -58,6 +75,9 @@ class WakeWordConfig {
     required this.wakewordModelPath,
     required this.modelName,
     required this.threshold,
+    required this.activeThreshold,
+    required this.discoveryTimeoutSecs,
+    required this.turnTimeoutSecs,
   });
 
   @override
@@ -66,7 +86,10 @@ class WakeWordConfig {
       embeddingModelPath.hashCode ^
       wakewordModelPath.hashCode ^
       modelName.hashCode ^
-      threshold.hashCode;
+      threshold.hashCode ^
+      activeThreshold.hashCode ^
+      discoveryTimeoutSecs.hashCode ^
+      turnTimeoutSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -77,13 +100,17 @@ class WakeWordConfig {
           embeddingModelPath == other.embeddingModelPath &&
           wakewordModelPath == other.wakewordModelPath &&
           modelName == other.modelName &&
-          threshold == other.threshold;
+          threshold == other.threshold &&
+          activeThreshold == other.activeThreshold &&
+          discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
+          turnTimeoutSecs == other.turnTimeoutSecs;
 }
 
-/// A single event streamed from the Rust engine to the Flutter UI during Phase
-/// 2. Modeled as a flat struct with a `kind` tag (rather than a data-carrying
-/// enum) so the FRB boundary stays dependency-free; fields not relevant to a
-/// given `kind` carry neutral defaults.
+/// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
+/// flat struct with a `kind` tag (rather than a data-carrying enum) so the FRB
+/// boundary stays dependency-free; fields not relevant to a given `kind` carry
+/// neutral defaults. `Clone` lets the engine fan the sink out to the Phase-3
+/// Wyoming turn task (which emits on the same stream).
 class WakeWordEvent {
   final WakeWordEventKind kind;
 
@@ -108,6 +135,9 @@ class WakeWordEvent {
   /// Wake-word name that fired (`Detected`).
   final String model;
 
+  /// Recognized speech (`Transcript`).
+  final String transcript;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -117,6 +147,7 @@ class WakeWordEvent {
     required this.rms,
     required this.score,
     required this.model,
+    required this.transcript,
   });
 
   @override
@@ -128,7 +159,8 @@ class WakeWordEvent {
       channels.hashCode ^
       rms.hashCode ^
       score.hashCode ^
-      model.hashCode;
+      model.hashCode ^
+      transcript.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -142,7 +174,8 @@ class WakeWordEvent {
           channels == other.channels &&
           rms == other.rms &&
           score == other.score &&
-          model == other.model;
+          model == other.model &&
+          transcript == other.transcript;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -160,6 +193,21 @@ enum WakeWordEventKind {
 
   /// The wake word fired; `model` and `score` are populated.
   detected,
+
+  /// Phase 3: a turn began — discovering/dialing the Wyoming host. `message`
+  /// describes the resolved endpoint when known.
+  connecting,
+
+  /// Phase 3: connected to the Wyoming host; PCM is now streaming up.
+  streaming,
+
+  /// Phase 3: a transcript arrived from the STT server; `transcript` carries
+  /// the recognized text.
+  transcript,
+
+  /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
+  /// The engine returns to idle wake-word listening.
+  disconnected,
 
   /// The engine loop has stopped and capture has been torn down.
   stopped,
