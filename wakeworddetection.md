@@ -280,3 +280,39 @@ hatch VACA validates.
    this decides whether the Plan's "AEC deferred" note holds or needs a JNI shim.
 3. **Later:** 4.4–4.6 as wake-word quality work; 4.6 microWakeWord is the biggest
    potential win for the constrained device.
+
+---
+
+## 6. Field fix: Echo Show capture sample-rate mismatch (resolved)
+
+First working on-hardware run. Wake-word detection scored ~0 on the device even
+though the mic was clearly capturing speech (`rms` tracked room audio). Isolation:
+
+- Host scoring of the **bundled models** against a real "hey jarvis" clip → **0.99**
+  (model + pipeline correct), including after a 48 kHz→16 kHz pass through the engine
+  `Resampler` and after attenuating the clip to the device's quiet far-field level.
+- Dumping the exact 16 kHz PCM the engine fed the model and scoring it on the host →
+  **~0.0001**, but re-scoring that same dump as if it were **8 kHz** (a 2x slow-down)
+  → **0.998**. The captured audio was **exactly 2x too fast / an octave high**.
+
+Root cause: on the Echo Show 8 (MediaTek AAudio HAL), `cpal`'s
+`default_input_config()` reports **48 kHz**, but the stream is actually delivered at
+**~24 kHz**. The engine trusted 48 kHz, so the linear resampler emitted every block at
+double speed — pitch/time-distorted enough that confidence collapsed to ~0. (The mono
+downmix was fine; only the rate label was wrong.)
+
+Fix (`engine/mod.rs`): **measure the true input rate at startup** — drain a short
+warm-up, count samples into the ring over a fixed wall-clock window, snap to the
+nearest standard rate — and build the `Resampler` from that instead of cpal's number.
+On device this calibrates `measured 24283 Hz -> 24000 Hz (cpal reported 48000)`; on
+the host coreaudio measures its real rate and nothing changes. After the fix, live
+scores hit 0.95–0.999 and human "hey jarvis" fires reliably.
+
+Also landed alongside: §4.1 moving-average smoothing (3-frame) + 1500 ms cooldown, and
+Info-level diagnostics (`wake-word diag: rms=… peak_score=…`, per-fire logs) that make
+this kind of on-hardware debugging tractable from `logcat`.
+
+Follow-ups surfaced: the faint far-field playback of a TTS "hey jarvis" from across the
+room still misses occasionally (near the noise floor); a software **mic gain / AGC**
+stage (§4.4) would firm that up. Real spoken wake words at conversational distance are
+unaffected.
