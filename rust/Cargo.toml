@@ -7,7 +7,12 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+anyhow = "1.0.104"
+cpal = "0.18.2"
 flutter_rust_bridge = "=2.11.1"
+log = "0.4.34"
+ringbuf = "0.5.2"
+tract-onnx = "0.23.7"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

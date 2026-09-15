@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Phase 2: the Rust engine captures mic audio for on-device wake-word
+         detection (Plan.MD §3). AAudio input requires the RECORD_AUDIO runtime
+         permission; without it `cpal` cannot open the input device. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-feature android:name="android.hardware.microphone" android:required="true"/>
     <application
         android:label="ambient_display"
         android:name="${applicationName}"

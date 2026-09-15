@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1571217109;
+  int get rustContentHash => 385738546;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -82,6 +82,14 @@ abstract class RustLibApi extends BaseApi {
   String crateApiEngineEngineVersion();
 
   Future<void> crateApiEngineInitApp();
+
+  bool crateApiEngineIsWakeWordEngineRunning();
+
+  Stream<WakeWordEvent> crateApiEngineStartWakeWordEngine({
+    required WakeWordConfig config,
+  });
+
+  Future<void> crateApiEngineStopWakeWordEngine();
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -164,6 +172,110 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiEngineInitAppConstMeta =>
       const TaskConstMeta(debugName: "init_app", argNames: []);
 
+  @override
+  bool crateApiEngineIsWakeWordEngineRunning() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineIsWakeWordEngineRunningConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineIsWakeWordEngineRunningConstMeta =>
+      const TaskConstMeta(
+        debugName: "is_wake_word_engine_running",
+        argNames: [],
+      );
+
+  @override
+  Stream<WakeWordEvent> crateApiEngineStartWakeWordEngine({
+    required WakeWordConfig config,
+  }) {
+    final sink = RustStreamSink<WakeWordEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_box_autoadd_wake_word_config(config, serializer);
+            sse_encode_StreamSink_wake_word_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 5,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_AnyhowException,
+          ),
+          constMeta: kCrateApiEngineStartWakeWordEngineConstMeta,
+          argValues: [config, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiEngineStartWakeWordEngineConstMeta =>
+      const TaskConstMeta(
+        debugName: "start_wake_word_engine",
+        argNames: ["config", "sink"],
+      );
+
+  @override
+  Future<void> crateApiEngineStopWakeWordEngine() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineStopWakeWordEngineConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineStopWakeWordEngineConstMeta =>
+      const TaskConstMeta(debugName: "stop_wake_word_engine", argNames: []);
+
+  @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AnyhowException(raw as String);
+  }
+
+  @protected
+  RustStreamSink<WakeWordEvent> dco_decode_StreamSink_wake_word_event_Sse(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
   @protected
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -171,9 +283,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  bool dco_decode_bool(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as bool;
+  }
+
+  @protected
+  WakeWordConfig dco_decode_box_autoadd_wake_word_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_wake_word_config(raw);
+  }
+
+  @protected
+  double dco_decode_f_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as double;
+  }
+
+  @protected
+  int dco_decode_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  int dco_decode_u_16(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
+  int dco_decode_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -189,6 +337,60 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  WakeWordConfig dco_decode_wake_word_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return WakeWordConfig(
+      melspecModelPath: dco_decode_String(arr[0]),
+      embeddingModelPath: dco_decode_String(arr[1]),
+      wakewordModelPath: dco_decode_String(arr[2]),
+      modelName: dco_decode_String(arr[3]),
+      threshold: dco_decode_f_32(arr[4]),
+    );
+  }
+
+  @protected
+  WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    return WakeWordEvent(
+      kind: dco_decode_wake_word_event_kind(arr[0]),
+      message: dco_decode_String(arr[1]),
+      device: dco_decode_String(arr[2]),
+      deviceSampleRate: dco_decode_u_32(arr[3]),
+      channels: dco_decode_u_16(arr[4]),
+      rms: dco_decode_f_32(arr[5]),
+      score: dco_decode_f_32(arr[6]),
+      model: dco_decode_String(arr[7]),
+    );
+  }
+
+  @protected
+  WakeWordEventKind dco_decode_wake_word_event_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return WakeWordEventKind.values[raw as int];
+  }
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_String(deserializer);
+    return AnyhowException(inner);
+  }
+
+  @protected
+  RustStreamSink<WakeWordEvent> sse_decode_StreamSink_wake_word_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
@@ -196,10 +398,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  bool sse_decode_bool(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  WakeWordConfig sse_decode_box_autoadd_wake_word_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_wake_word_config(deserializer));
+  }
+
+  @protected
+  double sse_decode_f_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getFloat32();
+  }
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getInt32();
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  int sse_decode_u_16(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint16();
+  }
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint32();
   }
 
   @protected
@@ -214,21 +454,111 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer) {
+  WakeWordConfig sse_decode_wake_word_config(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getInt32();
+    var var_melspecModelPath = sse_decode_String(deserializer);
+    var var_embeddingModelPath = sse_decode_String(deserializer);
+    var var_wakewordModelPath = sse_decode_String(deserializer);
+    var var_modelName = sse_decode_String(deserializer);
+    var var_threshold = sse_decode_f_32(deserializer);
+    return WakeWordConfig(
+      melspecModelPath: var_melspecModelPath,
+      embeddingModelPath: var_embeddingModelPath,
+      wakewordModelPath: var_wakewordModelPath,
+      modelName: var_modelName,
+      threshold: var_threshold,
+    );
   }
 
   @protected
-  bool sse_decode_bool(SseDeserializer deserializer) {
+  WakeWordEvent sse_decode_wake_word_event(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getUint8() != 0;
+    var var_kind = sse_decode_wake_word_event_kind(deserializer);
+    var var_message = sse_decode_String(deserializer);
+    var var_device = sse_decode_String(deserializer);
+    var var_deviceSampleRate = sse_decode_u_32(deserializer);
+    var var_channels = sse_decode_u_16(deserializer);
+    var var_rms = sse_decode_f_32(deserializer);
+    var var_score = sse_decode_f_32(deserializer);
+    var var_model = sse_decode_String(deserializer);
+    return WakeWordEvent(
+      kind: var_kind,
+      message: var_message,
+      device: var_device,
+      deviceSampleRate: var_deviceSampleRate,
+      channels: var_channels,
+      rms: var_rms,
+      score: var_score,
+      model: var_model,
+    );
+  }
+
+  @protected
+  WakeWordEventKind sse_decode_wake_word_event_kind(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return WakeWordEventKind.values[inner];
+  }
+
+  @protected
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_StreamSink_wake_word_event_Sse(
+    RustStreamSink<WakeWordEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_wake_word_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
   }
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
+  }
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_wake_word_config(
+    WakeWordConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_wake_word_config(self, serializer);
+  }
+
+  @protected
+  void sse_encode_f_32(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putFloat32(self);
+  }
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putInt32(self);
   }
 
   @protected
@@ -239,6 +569,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_u_16(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint16(self);
+  }
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint32(self);
   }
 
   @protected
@@ -253,14 +595,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_i_32(int self, SseSerializer serializer) {
+  void sse_encode_wake_word_config(
+    WakeWordConfig self,
+    SseSerializer serializer,
+  ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putInt32(self);
+    sse_encode_String(self.melspecModelPath, serializer);
+    sse_encode_String(self.embeddingModelPath, serializer);
+    sse_encode_String(self.wakewordModelPath, serializer);
+    sse_encode_String(self.modelName, serializer);
+    sse_encode_f_32(self.threshold, serializer);
   }
 
   @protected
-  void sse_encode_bool(bool self, SseSerializer serializer) {
+  void sse_encode_wake_word_event(
+    WakeWordEvent self,
+    SseSerializer serializer,
+  ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putUint8(self ? 1 : 0);
+    sse_encode_wake_word_event_kind(self.kind, serializer);
+    sse_encode_String(self.message, serializer);
+    sse_encode_String(self.device, serializer);
+    sse_encode_u_32(self.deviceSampleRate, serializer);
+    sse_encode_u_16(self.channels, serializer);
+    sse_encode_f_32(self.rms, serializer);
+    sse_encode_f_32(self.score, serializer);
+    sse_encode_String(self.model, serializer);
+  }
+
+  @protected
+  void sse_encode_wake_word_event_kind(
+    WakeWordEventKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 }
