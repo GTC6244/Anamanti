@@ -19,7 +19,12 @@ android {
         applicationId = "com.ambientdisplay.ambient_display"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Phase 2: the Rust engine's `cpal` capture links the NDK AAudio library
+        // (`-laaudio`), which the NDK only ships for API level >= 26. cargokit
+        // cross-compiles the Rust `.so` at this minSdk, so it must be >= 26 or the
+        // link fails with `unable to find library -laaudio`. The Echo Show 8
+        // (crown) runs Android 11 (SDK 30), so 26 is a safe floor.
+        minSdk = maxOf(26, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

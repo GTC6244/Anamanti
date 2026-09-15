@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `engine_target`
+// These functions are ignored because they are not marked as `pub`: `base`, `detected`, `engine_target`, `error`, `level`, `started`, `status`, `stopped`
 
 /// A friendly greeting from the native Rust engine.
 ///
@@ -18,3 +18,152 @@ String engineGreeting({required String name}) =>
 /// Reports the native engine's version and build target so the device can show
 /// exactly which cross-compiled binary it is running.
 String engineVersion() => RustLib.instance.api.crateApiEngineEngineVersion();
+
+/// Start microphone capture and continuous on-device wake-word scoring, pushing
+/// [`WakeWordEvent`]s to Dart. Replaces any engine already running.
+Stream<WakeWordEvent> startWakeWordEngine({required WakeWordConfig config}) =>
+    RustLib.instance.api.crateApiEngineStartWakeWordEngine(config: config);
+
+/// Stop the wake-word engine and release the microphone. Idempotent.
+Future<void> stopWakeWordEngine() =>
+    RustLib.instance.api.crateApiEngineStopWakeWordEngine();
+
+/// Whether the wake-word engine is currently running.
+bool isWakeWordEngineRunning() =>
+    RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
+
+/// Paths and tuning for the openWakeWord three-model chain. The Flutter layer
+/// resolves these from bundled/assets or the settings screen (Phase 6) and hands
+/// them to the engine; discovery of the Wyoming host is a separate concern
+/// (Phase 3), so nothing here touches the network.
+class WakeWordConfig {
+  /// Path to the melspectrogram ONNX model (`melspectrogram.onnx`).
+  final String melspecModelPath;
+
+  /// Path to the shared feature/embedding ONNX model (`embedding_model.onnx`).
+  final String embeddingModelPath;
+
+  /// Path to the wake-word classifier ONNX model (e.g. `alexa_v0.1.onnx`).
+  final String wakewordModelPath;
+
+  /// Human-readable wake-word name, echoed back on detection events.
+  final String modelName;
+
+  /// Confidence in [0, 1] above which a detection is reported.
+  final double threshold;
+
+  const WakeWordConfig({
+    required this.melspecModelPath,
+    required this.embeddingModelPath,
+    required this.wakewordModelPath,
+    required this.modelName,
+    required this.threshold,
+  });
+
+  @override
+  int get hashCode =>
+      melspecModelPath.hashCode ^
+      embeddingModelPath.hashCode ^
+      wakewordModelPath.hashCode ^
+      modelName.hashCode ^
+      threshold.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WakeWordConfig &&
+          runtimeType == other.runtimeType &&
+          melspecModelPath == other.melspecModelPath &&
+          embeddingModelPath == other.embeddingModelPath &&
+          wakewordModelPath == other.wakewordModelPath &&
+          modelName == other.modelName &&
+          threshold == other.threshold;
+}
+
+/// A single event streamed from the Rust engine to the Flutter UI during Phase
+/// 2. Modeled as a flat struct with a `kind` tag (rather than a data-carrying
+/// enum) so the FRB boundary stays dependency-free; fields not relevant to a
+/// given `kind` carry neutral defaults.
+class WakeWordEvent {
+  final WakeWordEventKind kind;
+
+  /// Status / error text (`Status`, `Error`).
+  final String message;
+
+  /// Capture device name (`Started`).
+  final String device;
+
+  /// Device-native capture rate in Hz (`Started`).
+  final int deviceSampleRate;
+
+  /// Device channel count before mono downmix (`Started`).
+  final int channels;
+
+  /// Input RMS level (`Level`).
+  final double rms;
+
+  /// Wake-word confidence in [0, 1] (`Detected`).
+  final double score;
+
+  /// Wake-word name that fired (`Detected`).
+  final String model;
+
+  const WakeWordEvent({
+    required this.kind,
+    required this.message,
+    required this.device,
+    required this.deviceSampleRate,
+    required this.channels,
+    required this.rms,
+    required this.score,
+    required this.model,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      message.hashCode ^
+      device.hashCode ^
+      deviceSampleRate.hashCode ^
+      channels.hashCode ^
+      rms.hashCode ^
+      score.hashCode ^
+      model.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WakeWordEvent &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          message == other.message &&
+          device == other.device &&
+          deviceSampleRate == other.deviceSampleRate &&
+          channels == other.channels &&
+          rms == other.rms &&
+          score == other.score &&
+          model == other.model;
+}
+
+/// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
+/// to a plain Dart `enum` (no `freezed` codegen dependency needed).
+enum WakeWordEventKind {
+  /// Capture started; `device`/`device_sample_rate`/`channels` are populated.
+  started,
+
+  /// Informational status in `message` (e.g. model loaded, capture-only).
+  status,
+
+  /// Periodic input level in `rms` (~0.0..1.0) — proves capture is live even
+  /// before a wake-word model is present.
+  level,
+
+  /// The wake word fired; `model` and `score` are populated.
+  detected,
+
+  /// The engine loop has stopped and capture has been torn down.
+  stopped,
+
+  /// A fatal error in `message`; the engine has stopped.
+  error,
+}

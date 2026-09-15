@@ -116,12 +116,53 @@ Echo Show speakers → return to idle.
 > **Gradle 8.11.1**. Revisit if/when cargokit ships AGP-9 support. NDK in use:
 > `28.2.13676358`; Rust `1.94.0`; FRB `2.11.1`.
 
-### Phase 2 — Native Audio & Local Inference (Rust)
+### Phase 2 — Native Audio & Local Inference (Rust) ✅ (implemented 2026-09-15)
 - Initialize `cpal` to pull raw 16 kHz / mono / 16-bit PCM from the mic array.
-- Feed the buffer stream through a pre-allocated ring buffer.
+  **Done** — `rust/src/audio/capture.rs` opens the default input device, downmixes
+  interleaved frames to mono `i16` in the (allocation-free) real-time callback,
+  and pushes into the ring buffer. Device-native rate is preserved on capture and
+  converted to 16 kHz downstream by a linear resampler (`audio/resample.rs`), since
+  mic arrays rarely deliver exactly 16 kHz. Requires `RECORD_AUDIO` (added to the
+  Android manifest) + the microphone feature.
+- Feed the buffer stream through a pre-allocated ring buffer. **Done** —
+  `rust/src/audio/ring_buffer.rs` wraps a single-producer/single-consumer
+  `ringbuf::HeapRb` (allocated once, ~2 s at 48 kHz) so the RT capture callback and
+  the inference loop exchange samples with only atomic index updates — no locks, no
+  per-frame heap churn.
 - Integrate `tract-onnx` + openWakeWord to score wake-word confidence continuously.
+  **Done** — `rust/src/wakeword/detector.rs` runs the full openWakeWord 3-model
+  chain on `tract-onnx`: melspectrogram (fixed 1280-sample chunks → 32-bin mel
+  frames, `mel/10 + 2`) → feature/embedding (sliding 76-frame window, 8-frame hop →
+  96-d embedding) → classifier (last 16 embeddings → confidence). Feeding fixed
+  chunks gives every model a concrete input shape so `tract` fully optimizes the
+  graph; rolling state is carried across calls for continuous streaming scoring.
 - Keep evaluation fully offline in a low-overhead thread loop to respect the 1 GB
-  RAM limit.
+  RAM limit. **Done** — `rust/src/engine/mod.rs` owns one background thread that
+  holds the `cpal` stream (which is `!Send`) and runs the drain→resample→score
+  loop off the RT path. A process-wide start/stop lifecycle is exposed over FRB
+  (`start_wake_word_engine` returns a `Stream<WakeWordEvent>`; `stop_wake_word_engine`,
+  `is_wake_word_engine_running`). If the model files are absent the engine degrades
+  to a capture-only mode that emits RMS levels, so the capture→ring→resample path
+  stays observable. Verified on the host via `cargo check`/`cargo clippy` (clean)
+  and a release `android-arm` APK cross-compile.
+
+> **Backend note (measured):** the locked decision was "`cpal` on the `oboe`
+> backend". The pinned `cpal` 0.18 no longer uses `oboe` — on Android it drives
+> the NDK's **AAudio** input directly (via the `ndk` crate). This still honors the
+> locked decision's intent (Rust `cpal` is the single audio layer that owns
+> capture + playback); only the underlying Android backend changed from oboe →
+> AAudio. No app-visible difference. **Consequence:** `cpal` links the NDK
+> `-laaudio` library, which exists only at **API level ≥ 26**, so the app's
+> `minSdk` was raised to **26** (`android/app/build.gradle.kts`); cargokit
+> cross-compiles the Rust `.so` at `minSdk`, and a lower value fails to link with
+> `unable to find library -laaudio`. The Echo Show 8 runs Android 11 (SDK 30), so
+> 26 is a safe floor.
+
+> **Dep note:** bumped `cc` (build-dependency, transitive via `tract-linalg`) from
+> the Phase-1-locked `1.0.83` to `1.4.6`; `tract-linalg` 0.23.7's build script
+> calls `cc`'s `cargo_warnings`, which the older `cc` predates. FRB event types use
+> a flat struct + unit-only-enum tag (not a data-carrying enum) to avoid pulling
+> the Dart `freezed` codegen dependency into the app.
 
 ### Phase 3 — Wyoming Client Core Logic (Rust)
 - mDNS discovery of `_wyoming._tcp`; cache the resolved host/port.

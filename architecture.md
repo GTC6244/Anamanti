@@ -62,13 +62,19 @@ service is located via mDNS, so neither node hardcodes an IP.
 The single owner of all real-time, resource-sensitive work. Chosen for
 predictable memory use and no GC pauses under the 1 GB limit.
 
-- **Audio Capture** — `cpal` on the `oboe-shared` backend pulls raw 16 kHz,
-  mono, 16-bit PCM blocks from the mic array.
-- **Ring Buffer** — a pre-allocated circular buffer decouples the capture
-  callback from consumers (wake word + network) with minimal locking.
+- **Audio Capture** — `cpal` pulls raw mono 16-bit PCM blocks from the mic array
+  at the device-native rate (downmixed to mono in the real-time callback), then a
+  linear resampler converts to 16 kHz off the RT path. On Android, `cpal` 0.18
+  drives the NDK's **AAudio** input backend (the earlier `oboe` assumption is
+  superseded — see `Plan.MD` Phase 2); on the macOS host it uses coreaudio.
+- **Ring Buffer** — a pre-allocated single-producer/single-consumer circular
+  buffer (`ringbuf::HeapRb`, allocated once) decouples the capture callback from
+  consumers (wake word + network) with lock-free atomic index updates and no
+  per-frame heap churn.
 - **Wake Word** — a low-overhead thread continuously scores buffer windows with
-  `tract-onnx` running an openWakeWord `.onnx` model. Fully offline; no audio
-  leaves the device before a trigger.
+  `tract-onnx` running the openWakeWord `.onnx` model chain (melspectrogram →
+  feature/embedding → classifier). Fully offline; no audio leaves the device
+  before a trigger.
 - **Wyoming Client** — a `tokio` TCP state machine (see §4) that frames outgoing
   audio and parses incoming events.
 - **mDNS Resolver** — browses `_wyoming._tcp`, resolves host/port, caches the
@@ -114,6 +120,10 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 - FRB v2 generates the JNI bindings and the Dart API from Rust signatures.
 - Data flows **Rust → Dart** primarily via generated `StreamSink`s:
+  - `wake_word_stream` — Phase 2 engine events (capture started, status, input
+    level, wake-word detected, stopped/error), surfaced by `start_wake_word_engine`
+    as a returned `Stream<WakeWordEvent>`. Modeled as a flat struct tagged by a
+    unit-only `WakeWordEventKind` enum so the boundary needs no `freezed` codegen.
   - `transcript_stream` — live/partial + final transcripts.
   - `reply_token_stream` — LLM reply tokens for on-screen rendering.
   - `state_stream` — assistant state transitions (idle/listening/thinking/speaking).

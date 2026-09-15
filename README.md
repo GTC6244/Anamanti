@@ -51,7 +51,7 @@ See [`architecture.md`](./architecture.md) for the full design and
 | UI | Flutter (always-on landscape) |
 | Systems | Rust, cross-compiled for `aarch64-linux-android` |
 | Interop | `flutter_rust_bridge` v2 (zero-copy Dart↔Rust) |
-| Audio | `cpal` on the Android `oboe` backend (capture + playback) |
+| Audio | `cpal` (capture + playback); Android backend is NDK AAudio |
 | Wake word | `tract-onnx` running an openWakeWord model |
 | Transport | Wyoming Protocol over `tokio` TCP |
 | Discovery | mDNS / Zeroconf (`_wyoming._tcp`) |
@@ -115,9 +115,16 @@ static IP configuration is required.
 (`/lib` Flutter + `/rust` engine), `flutter_rust_bridge` v2 is wired, and a
 hello-world Rust API cross-compiles into an `armeabi-v7a` APK that installs, runs,
 and renders engine text over the FRB bridge on the physical Echo Show 8
-(LineageOS, Android 11). Remaining phases (audio, wake word, Wyoming client, Mac
-pipeline, UI, settings) are planned — see the decision table and phases in
-`Plan.MD`.
+(LineageOS, Android 11).
+
+**Phase 2 complete — native audio + on-device wake word.** The Rust engine now
+captures mic audio via `cpal`, decouples the real-time callback from inference
+through a pre-allocated lock-free ring buffer, resamples to 16 kHz, and scores
+wake-word confidence continuously and offline with the openWakeWord model chain on
+`tract-onnx` — all on one low-overhead background thread. Flutter starts/stops the
+engine over FRB and consumes a `Stream<WakeWordEvent>` (capture status, input
+level, detections). Remaining phases (Wyoming client, Mac pipeline, UI, settings)
+are planned — see the decision table and phases in `Plan.MD`.
 
 ## License
 
