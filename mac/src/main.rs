@@ -22,6 +22,7 @@ use ambient_orchestrator::discovery::MdnsAdvertiser;
 use ambient_orchestrator::memory::{ChatLog, MemoryStore};
 use ambient_orchestrator::orchestrator::{self, Pipeline, TcpConnector};
 use ambient_orchestrator::server;
+use ambient_orchestrator::webconfig;
 
 /// Worker-thread stack size. The embedded HelixDB engine (feature `helix`) builds
 /// deep async state machines whose stack usage exceeds tokio's 2 MiB default,
@@ -100,6 +101,26 @@ async fn run() -> Result<()> {
         }
     } else {
         log::info!("memory backend: SQLite FTS");
+    }
+
+    // Optional local HTTP config page (no auth; loopback by default). Serves the
+    // same runtime-swappable settings the device controls over Wyoming, so you can
+    // change the LLM backend/model/voice live from a browser. Best-effort: a bind
+    // failure disables the page but never stops the orchestrator.
+    if let Some(config_addr) = config.config_addr {
+        let settings = pipeline.settings().clone();
+        match TcpListener::bind(config_addr).await {
+            Ok(listener) => {
+                let local = listener.local_addr().unwrap_or(config_addr);
+                log::info!("config page on http://{local}/ (no auth — keep it on a trusted network)");
+                tokio::spawn(async move {
+                    if let Err(e) = webconfig::serve(listener, settings).await {
+                        log::error!("config page stopped: {e:#}");
+                    }
+                });
+            }
+            Err(e) => log::warn!("config page disabled: could not bind {config_addr}: {e:#}"),
+        }
     }
 
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {

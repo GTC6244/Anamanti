@@ -168,6 +168,8 @@ mod tests {
     fn describe_reports_current_settings() {
         let s = SharedSettings::new(
             crate::settings::LlmFactory {
+                engine: crate::settings::LlmEngine::Native,
+                web_search: false,
                 ollama_url: "http://x".into(),
                 anthropic_base_url: "http://y".into(),
                 anthropic_api_key: None,

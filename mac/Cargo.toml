@@ -8,6 +8,12 @@ description = "Mac Mini assistant pipeline (STT -> pluggable LLM + persistent me
 name = "ambient-orchestrator"
 path = "src/main.rs"
 
+# Live streaming smoke test for the rig LLM path (real Ollama, optional web
+# search). Built only with the `rig` feature: `cargo run --example rig_smoke`.
+[[example]]
+name = "rig_smoke"
+required-features = ["rig"]
+
 [features]
 # `helix` compiles the embedded HelixDB GraphRAG memory backend directly into the
 # orchestrator (git dependency on HelixDB's engine crate — no server, no Docker;
@@ -16,6 +22,10 @@ path = "src/main.rs"
 # skips the heavy engine deps (slatedb/tantivy/foyer, ~90s cold compile).
 default = ["helix"]
 helix = ["dep:db", "dep:helix-ast"]
+# `rig` routes the LLM backends through the rig-core agent framework instead of the
+# hand-rolled HTTP clients. Opt-in during the migration; select at runtime with
+# AMBIENT_LLM_ENGINE=rig. Off by default until it reaches parity.
+rig = ["dep:rig-core"]
 
 [dependencies]
 # Embedded HelixDB engine (feature `helix`). Pinned to the spike-verified commit.
@@ -34,6 +44,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "rustls-tls",
 ] }
+rig-core = { version = "0.42", optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

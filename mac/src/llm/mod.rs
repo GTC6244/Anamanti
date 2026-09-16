@@ -9,6 +9,8 @@
 pub mod anthropic;
 pub mod mock;
 pub mod ollama;
+#[cfg(feature = "rig")]
+pub mod rig;
 
 use std::pin::Pin;
 

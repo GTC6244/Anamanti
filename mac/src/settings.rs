@@ -19,10 +19,28 @@ use anyhow::{Context, Result};
 
 use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
 
+/// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
+/// clients, or the rig-core agent framework (feature `rig`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LlmEngine {
+    /// Hand-rolled `ollama.rs` / `anthropic.rs` HTTP clients (always available).
+    #[default]
+    Native,
+    /// rig-core agents (`AMBIENT_LLM_ENGINE=rig`; needs the `rig` feature to take
+    /// effect — otherwise it transparently falls back to `Native`).
+    Rig,
+}
+
 /// Immutable inputs needed to (re)build any LLM backend on demand. Captured once
 /// from the environment/config so a runtime swap never re-reads `env`.
 #[derive(Clone)]
 pub struct LlmFactory {
+    /// Which engine backs the ollama/anthropic backends (native HTTP vs rig-core).
+    pub engine: LlmEngine,
+    /// Enable the rig web-search tool (`internet_search`). Only takes effect with
+    /// the `rig` engine; ignored by the native backends.
+    #[cfg_attr(not(feature = "rig"), allow(dead_code))]
+    pub web_search: bool,
     /// Local Ollama / llama.cpp base URL.
     pub ollama_url: String,
     /// Cloud Anthropic API base URL.
@@ -62,24 +80,36 @@ impl LlmFactory {
                     .or(Self::default_model("anthropic"))
                     .unwrap_or("claude-opus-5")
                     .to_string();
-                Ok((
-                    Arc::new(AnthropicBackend::new(
+                let backend: Arc<dyn LlmBackend> = match self.engine {
+                    #[cfg(feature = "rig")]
+                    LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::anthropic(
+                        &self.anthropic_base_url,
+                        &key,
+                        &model,
+                        self.anthropic_max_tokens,
+                        crate::llm::rig::tools_from_flag(self.web_search),
+                    )?),
+                    _ => Arc::new(AnthropicBackend::new(
                         &self.anthropic_base_url,
                         key,
                         &model,
                         self.anthropic_max_tokens,
                     )),
-                    "anthropic".to_string(),
-                    Some(model),
-                ))
+                };
+                Ok((backend, "anthropic".to_string(), Some(model)))
             }
             "ollama" => {
                 let model = model.unwrap_or("llama3.2").to_string();
-                Ok((
-                    Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
-                    "ollama".to_string(),
-                    Some(model),
-                ))
+                let backend: Arc<dyn LlmBackend> = match self.engine {
+                    #[cfg(feature = "rig")]
+                    LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::ollama(
+                        &self.ollama_url,
+                        &model,
+                        crate::llm::rig::tools_from_flag(self.web_search),
+                    )?),
+                    _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
+                };
+                Ok((backend, "ollama".to_string(), Some(model)))
             }
             other => {
                 anyhow::bail!("unknown LLM backend `{other}` (expected ollama/anthropic/mock)")
@@ -146,6 +176,8 @@ impl SharedSettings {
         tts_voice: Option<String>,
     ) -> Arc<Self> {
         let factory = LlmFactory {
+            engine: LlmEngine::Native,
+            web_search: false,
             ollama_url: "http://127.0.0.1:11434".to_string(),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             anthropic_api_key: None,
@@ -229,6 +261,8 @@ mod tests {
 
     fn factory_with_key(key: Option<&str>) -> LlmFactory {
         LlmFactory {
+            engine: LlmEngine::Native,
+            web_search: false,
             ollama_url: "http://127.0.0.1:11434".to_string(),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             anthropic_api_key: key.map(String::from),

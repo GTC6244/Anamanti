@@ -13,7 +13,34 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
-use crate::settings::{LlmFactory, RuntimeSettings, SharedSettings};
+use crate::settings::{LlmEngine, LlmFactory, RuntimeSettings, SharedSettings};
+
+/// Read the LLM engine selector from the environment. `AMBIENT_LLM_ENGINE=rig`
+/// routes ollama/anthropic through rig-core (needs the `rig` feature); anything
+/// else (or unset) keeps the native HTTP backends.
+fn llm_engine_from_env() -> LlmEngine {
+    match env::var("AMBIENT_LLM_ENGINE")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+        _ => LlmEngine::Native,
+    }
+}
+
+/// Whether to enable the rig web-search tool (`AMBIENT_WEB_SEARCH=1/true/on`).
+/// Only effective with the rig engine + `rig` feature.
+fn web_search_from_env() -> bool {
+    matches!(
+        env::var("AMBIENT_WEB_SEARCH")
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "on" | "yes"
+    )
+}
 
 /// Default persona/system prompt: concise, speakable replies for an ambient
 /// display. Kept short because the reply is spoken aloud via Piper.
@@ -37,6 +64,9 @@ pub enum LlmChoice {
 pub struct Config {
     /// Address the device-facing Wyoming server binds to (advertised via mDNS).
     pub bind_addr: SocketAddr,
+    /// Address the local HTTP **config page** binds to, or `None` to disable it.
+    /// Defaults to loopback (`127.0.0.1:8730`) since the page has no auth.
+    pub config_addr: Option<SocketAddr>,
     /// Human-readable mDNS instance name.
     pub service_name: String,
     /// Downstream Wyoming STT (Whisper) address.
@@ -111,6 +141,9 @@ impl Default for Config {
         Self {
             // Port 10700 is the conventional Wyoming satellite/host port.
             bind_addr: "0.0.0.0:10700".parse().unwrap(),
+            // Config page on loopback only by default (no auth); override or
+            // disable with AMBIENT_CONFIG_ADDR.
+            config_addr: Some("127.0.0.1:8730".parse().unwrap()),
             service_name: "Ambient Orchestrator".to_string(),
             stt_addr: "127.0.0.1:10300".parse().unwrap(), // wyoming-faster-whisper default
             tts_addr: "127.0.0.1:10200".parse().unwrap(), // wyoming-piper default
@@ -200,8 +233,20 @@ impl Config {
             graphrag.ingest_interval = Duration::from_secs(secs);
         }
 
+        // The config page: `off`/`none`/empty disables it, otherwise a host:port.
+        let config_addr = match env::var("AMBIENT_CONFIG_ADDR") {
+            Ok(v) if matches!(v.trim().to_lowercase().as_str(), "off" | "none" | "") => None,
+            Ok(v) => Some(
+                v.trim()
+                    .parse()
+                    .with_context(|| format!("parsing AMBIENT_CONFIG_ADDR=`{v}` as host:port"))?,
+            ),
+            Err(_) => d.config_addr,
+        };
+
         Ok(Self {
             bind_addr: env_addr("AMBIENT_BIND_ADDR", d.bind_addr)?,
+            config_addr,
             service_name: env::var("AMBIENT_SERVICE_NAME").unwrap_or(d.service_name),
             stt_addr: env_addr("AMBIENT_STT_ADDR", d.stt_addr)?,
             tts_addr: env_addr("AMBIENT_TTS_ADDR", d.tts_addr)?,
@@ -255,6 +300,8 @@ impl Config {
                 .unwrap_or(1024),
         };
         LlmFactory {
+            engine: llm_engine_from_env(),
+            web_search: web_search_from_env(),
             ollama_url: env::var("AMBIENT_OLLAMA_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string()),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
