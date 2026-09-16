@@ -182,24 +182,37 @@ score, model }` streamed to Dart. Lifecycle: `start_wake_word_engine`,
 
 ## 3. Side-by-side
 
-| Dimension | VACA (Android/Kotlin) | Our Phase 2 (Rust) |
-| --- | --- | --- |
-| openWakeWord chain + constants | ✅ mel→embed→classifier, 1280/76/8/32/16 | ✅ identical |
-| Inference runtime | TFLite (front-end) + ONNX/TFLite (classifier) | tract-onnx (all three) |
-| microWakeWord engine | ✅ separate TFLite streaming engine | ❌ none |
-| Multiple concurrent wake words | ✅ `modelProcessors` map | ❌ single model |
-| Detection smoothing | ✅ 3-frame moving average | ❌ single-frame threshold |
-| Repeat-fire cooldown | ✅ 1500 ms | ❌ none |
-| Hardware AEC/AGC/NS | ✅ platform effects + SW fallback | ❌ none |
-| Self-trigger handling | ✅ mic-blank window, barge-in preserved | ❌ (Plan defers to threshold bump) |
-| Mic source / gain tuning | ✅ VOICE_RECOGNITION source + gain slider | ❌ default device/config only |
-| Per-device quirk handling | ✅ issue-device list | ❌ none |
-| Concurrency model | coroutine Flow | dedicated thread + FRB stream |
-| Streams raw audio onward | ✅ when `isStreaming` | ⏳ Phase 3 (Wyoming) |
+Current state of **our engine** (as validated end-to-end on an Echo Show 8 —
+wake word → STT → LLM → TTS → spoken reply) versus **VACA**. Legend: ✅ working /
+present · ⚠️ partial or a different-but-working approach · ❌ not implemented.
 
-**Takeaway:** our core inference math is validated by an independent
-implementation on the same hardware class. The gaps are all in *robustness* —
-smoothing, self-trigger handling, and the mic front-end.
+| Dimension | VACA (Android/Kotlin) | Our engine (current) |
+| --- | --- | --- |
+| openWakeWord chain + constants | ✅ mel→embed→classifier, 1280/76/8/32/16 | ✅ identical (`wakeword/detector.rs`) |
+| Inference runtime | TFLite (front-end) + ONNX/TFLite (classifier) | ✅ tract-onnx (all three, pure-Rust, offline) |
+| End-to-end voice turn on device | ✅ (Home Assistant brain) | ✅ wake→STT→LLM→TTS→playback via Wyoming to the Mac orchestrator |
+| Detection smoothing | ✅ 3-frame moving average | ✅ 3-frame moving average (`engine/gate.rs`, unit-tested) |
+| Repeat-fire cooldown | ✅ 1500 ms | ✅ 1500 ms (same `DetectionGate`) |
+| Streams raw audio onward | ✅ when `isStreaming` | ✅ streams 16 kHz PCM to STT during a turn |
+| Speaker playback of the reply | ✅ | ✅ cpal AAudio output (needs `ndk_context`, now initialized via `JNI_OnLoad`) |
+| Self-trigger handling | ✅ mic-blank window, barge-in preserved | ⚠️ raises the wake-word threshold while a turn is active (`active_threshold`); mic-blank not ported |
+| Barge-in (wake word during playback) | ✅ | ✅ new detection interrupts + restarts the turn (`engine/net.rs`) |
+| Live mic level for tuning | ✅ | ✅ RMS `Level` event emitted always (not just capture-only) |
+| Capture sample-rate handling | ✅ (AudioRecord reports the real rate) | ✅ **runtime rate calibration** — cpal misreports 48 kHz on this HAL; we measure the true ~24 kHz and resample from that (§6) |
+| Hardware AEC/AGC/NS | ✅ platform effects + SW fallback | ❌ none (not reachable through cpal 0.18; see §4.2) |
+| Mic source / input gain | ✅ VOICE_RECOGNITION source + gain slider | ❌ default source; cpal exposes no input-preset hook. Digital gain intentionally skipped — the model is scale-invariant (§4.4) |
+| Multiple concurrent wake words | ✅ `modelProcessors` map | ❌ single classifier at a time (front-end is shared, so cheap to add — §4.5) |
+| microWakeWord engine | ✅ separate TFLite streaming engine | ❌ none (§4.6) |
+| Per-device quirk handling | ✅ issue-device list | ⚠️ none as a list, but the rate calibration self-corrects the one HAL quirk we hit |
+| Concurrency model | coroutine `Flow` | dedicated capture thread (`!Send` cpal) + tokio net runtime + FRB event stream |
+
+**Takeaway (updated):** the core inference math *and* the full turn loop now work
+on the target hardware — the robustness gaps VACA highlighted are largely closed
+(smoothing, cooldown, barge-in, playback, live levels). What remains genuinely
+missing is the **analog mic front-end**: hardware AEC/AGC/NS and the
+`VOICE_RECOGNITION` input source (the real lever for faint far-field pickup),
+both blocked on cpal not exposing those Android hooks. Multi-word / microWakeWord
+are the remaining engine features, deferred as "more models" work.
 
 ---
 
