@@ -15,7 +15,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::memory::MemoryStore;
-use crate::settings::{SettingsUpdate, SharedSettings};
+use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 use crate::wyoming::protocol::{types, WyomingEvent};
 use crate::wyoming::DynConnection;
 
@@ -90,10 +90,27 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         Some(Value::Null) => Some(None), // clear
         Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
     };
+    let engine = data
+        .get("engine")
+        .and_then(Value::as_str)
+        .map(|e| match e.to_lowercase().as_str() {
+            "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+            _ => LlmEngine::Native,
+        });
+    let web_search = data.get("web_search").and_then(Value::as_bool);
+    let search_api_key = match data.get("search_api_key") {
+        None => None,                    // unchanged
+        Some(Value::Null) => Some(None), // clear
+        Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
+    };
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
         tts_voice,
+        engine,
+        web_search,
+        search_provider: string_field("search_provider"),
+        search_api_key,
     }
 }
 
@@ -107,8 +124,20 @@ fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> Wyom
             "llm_backend": v.llm_backend,
             "llm_model": v.llm_model,
             "tts_voice": v.tts_voice,
+            "engine": engine_label(v.engine),
+            "web_search": v.web_search,
+            "search_provider": v.search_provider,
+            "search_key_set": v.search_key_set,
         }),
     )
+}
+
+/// Canonical string label for an engine (for JSON responses).
+fn engine_label(engine: LlmEngine) -> &'static str {
+    match engine {
+        LlmEngine::Native => "native",
+        LlmEngine::Rig => "rig",
+    }
 }
 
 fn memories_response(memory: &MemoryStore) -> WyomingEvent {
@@ -175,6 +204,10 @@ mod tests {
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
+                engine: crate::settings::LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
                 llm_backend: "ollama".into(),
                 llm_model: Some("llama3.2".into()),
                 tts_voice: Some("amy".into()),

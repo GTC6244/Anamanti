@@ -22,6 +22,7 @@ use ambient_orchestrator::discovery::MdnsAdvertiser;
 use ambient_orchestrator::memory::{ChatLog, MemoryStore};
 use ambient_orchestrator::orchestrator::{self, Pipeline, TcpConnector};
 use ambient_orchestrator::server;
+use ambient_orchestrator::webconfig;
 
 /// Worker-thread stack size. The embedded HelixDB engine (feature `helix`) builds
 /// deep async state machines whose stack usage exceeds tokio's 2 MiB default,
@@ -79,6 +80,34 @@ async fn run() -> Result<()> {
     );
     log::info!("chat log at {}", config.chatlog_path.display());
 
+    {
+        let v = settings.view();
+        log::info!(
+            "llm: engine={:?} backend={} web_search={} (change at runtime via the config page)",
+            v.engine,
+            v.llm_backend,
+            v.web_search,
+        );
+        // A very common footgun: selecting the rig engine in a binary that wasn't
+        // built with `--features rig`. It silently falls back to native (no tools),
+        // so web search never runs. Say so loudly.
+        #[cfg(not(feature = "rig"))]
+        if v.engine == ambient_orchestrator::settings::LlmEngine::Rig {
+            log::warn!(
+                "engine=rig requested but this binary was built WITHOUT the `rig` feature; \
+                 using native backends (NO tools / no web search). Rebuild with \
+                 `cargo run --features rig` to enable rig + the internet_search tool."
+            );
+        }
+        #[cfg(feature = "rig")]
+        if v.web_search && v.engine != ambient_orchestrator::settings::LlmEngine::Rig {
+            log::warn!(
+                "web_search is on but engine is not rig; the web-search tool only runs on \
+                 the rig engine. Set AMBIENT_LLM_ENGINE=rig (or switch it on the config page)."
+            );
+        }
+    }
+
     let mut pipeline = Pipeline::with_settings(
         settings,
         memory,
@@ -100,6 +129,26 @@ async fn run() -> Result<()> {
         }
     } else {
         log::info!("memory backend: SQLite FTS");
+    }
+
+    // Optional local HTTP config page (no auth; loopback by default). Serves the
+    // same runtime-swappable settings the device controls over Wyoming, so you can
+    // change the LLM backend/model/voice live from a browser. Best-effort: a bind
+    // failure disables the page but never stops the orchestrator.
+    if let Some(config_addr) = config.config_addr {
+        let settings = pipeline.settings().clone();
+        match TcpListener::bind(config_addr).await {
+            Ok(listener) => {
+                let local = listener.local_addr().unwrap_or(config_addr);
+                log::info!("config page on http://{local}/ (no auth — keep it on a trusted network)");
+                tokio::spawn(async move {
+                    if let Err(e) = webconfig::serve(listener, settings).await {
+                        log::error!("config page stopped: {e:#}");
+                    }
+                });
+            }
+            Err(e) => log::warn!("config page disabled: could not bind {config_addr}: {e:#}"),
+        }
     }
 
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
