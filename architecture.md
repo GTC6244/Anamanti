@@ -41,7 +41,7 @@ service is located via mDNS, so neither node hardcodes an IP.
                                │ TCP · Wyoming Protocol · newline JSON + PCM
                                ▼
 ┌─────────────────────────── M4 Mac Mini ───────────────────────────┐
-│  Wyoming STT (Whisper / CoreML) + server-side VAD                  │
+│  Wyoming STT (Whisper / CoreML)  · orchestrator energy VAD         │
 │        │ final transcript                                          │
 │        ▼                                                           │
 │  LLM Orchestrator  (trait-based, pluggable)  ◄─► Persistent Memory │
@@ -109,8 +109,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
   ("remember…") and auto-extracted from conversation turns. Managed via a
   settings list (view/delete) and voice ("forget that"); kept until cleared.
   Private to the LAN; survives device reflashes.
-- **Server-side VAD** — the STT server owns end-of-speech detection and signals
-  when the device should stop streaming; the device does no VAD of its own.
+- **End-of-speech / VAD** — runs in the **orchestrator**, not the STT server:
+  `wyoming-faster-whisper` has no streaming VAD and only transcribes once it
+  receives `audio-stop`, so the orchestrator scores per-chunk RMS energy over the
+  incoming PCM and, after speech followed by ~900 ms of trailing silence (or a 6 s
+  no-speech fallback), sends `audio-stop` to STT to finalize (`mac/src/orchestrator.rs`,
+  `stream_to_transcript`). The Echo Show device still runs **no VAD of its own** —
+  it streams continuously and waits for the transcript.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
   to the device.
 
@@ -129,17 +134,20 @@ predictable memory use and no GC pauses under the 1 GB limit.
 ## 3. Interop boundary (flutter_rust_bridge v2)
 
 - FRB v2 generates the JNI bindings and the Dart API from Rust signatures.
-- Data flows **Rust → Dart** primarily via generated `StreamSink`s:
-  - `wake_word_stream` — engine events surfaced by `start_wake_word_engine` as a
-    returned `Stream<WakeWordEvent>`: capture started, status, input level,
-    wake-word detected, stopped/error (Phase 2) plus the Phase-3 Wyoming turn
-    lifecycle (connecting, streaming, transcript, disconnected). Modeled as a flat
-    struct tagged by a unit-only `WakeWordEventKind` enum so the boundary needs no
-    `freezed` codegen. The dedicated `transcript_stream` / `reply_token_stream` /
-    `state_stream` below are the Phase-5 UI split built on top of this.
-  - `transcript_stream` — live/partial + final transcripts.
-  - `reply_token_stream` — LLM reply tokens for on-screen rendering.
-  - `state_stream` — assistant state transitions (idle/listening/thinking/speaking).
+- Data flows **Rust → Dart** over a **single** generated `StreamSink`:
+  - `start_wake_word_engine` returns one `Stream<WakeWordEvent>` covering the whole
+    turn lifecycle. The `WakeWordEventKind` tag spans: `started`, `status`, `level`,
+    `detected` (Phase 2); `connecting`, `streaming`, `transcript`, `disconnected`
+    (Phase 3 Wyoming turn); `replyToken`, `speaking` (Phase 5); and `stopped` /
+    `error`. Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
+    (payload fields carry neutral defaults when not relevant), so the boundary needs
+    no `freezed` codegen and there is exactly one stream to manage.
+  - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
+    boundary. `AssistantController` (`lib/src/engine/assistant_controller.dart`)
+    folds this single event stream into an observable `AssistantState` / `TurnPhase`
+    (`idle → listening → connecting → thinking → speaking`, plus `error`) that
+    widgets watch. There are no separate `transcript_stream` / `reply_token_stream`
+    / `state_stream` sinks on the FRB boundary.
 - Control flows **Dart → Rust** via generated function calls: `start_wake_word_engine`
   / `stop_wake_word_engine` (Phase 2–3) plus the Phase-6 settings functions
   (`fetch_orchestrator_settings`, `update_orchestrator_settings`, `list_memories`,
@@ -195,8 +203,9 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **IDLE** — wake word evaluation runs; TCP socket dormant/closed.
 - **TRIGGERED** — wake word fires; open TCP, send Wyoming `audio-start` header.
 - **STREAMING** — send raw PCM chunks in Wyoming frames; concurrently read
-  `transcript` events on the same socket. **End-of-speech is server-side**: the
-  STT server's VAD signals completion, then the device sends `audio-stop`.
+  `transcript` events on the same socket. The device streams continuously and runs
+  no VAD; **the orchestrator detects end-of-speech** (energy VAD over the PCM) and
+  sends `audio-stop` to the STT server, which then returns the final transcript.
 - **THINKING** — STT final transcript handed to the LLM orchestrator (which
   consults persistent memory); reply tokens stream back and render.
 - **SPEAKING** — Piper TTS audio frames arrive and are played via `cpal`/`oboe`.
@@ -251,7 +260,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 | Pluggable LLM behind a trait | Swap local/cloud without touching the pipeline |
 | Rust-side playback | One audio layer, symmetric with capture |
 | Full-duplex barge-in | Natural interruption; AEC deferred, threshold-tuned in v1 |
-| Server-side VAD | Less device work; STT server owns end-of-speech |
+| VAD in the orchestrator | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
 | Persistent memory in SQLite | Simple, debuggable; FTS covers explicit+inferred facts |
 | On-device OAuth for photos | Device displays directly; no Mac proxy needed |
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |
