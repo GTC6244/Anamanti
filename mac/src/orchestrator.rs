@@ -219,14 +219,38 @@ impl Pipeline {
         Ok(TurnOutcome::Completed)
     }
 
-    /// Pump loop: forward device `audio-chunk`s to STT while watching for STT's
-    /// `transcript`. Returns the transcript, or `None` if the device hung up or
-    /// the turn idled past `turn_timeout`.
+    /// Pump loop: forward device `audio-chunk`s to STT, detect end-of-speech, and
+    /// return STT's `transcript`. `None` if the device hung up or the turn idled
+    /// past `turn_timeout`.
+    ///
+    /// wyoming-faster-whisper does **not** do streaming VAD — it transcribes the
+    /// buffered utterance only once it receives `audio-stop`. The device, meanwhile,
+    /// streams continuously and waits for the transcript before it stops. So the
+    /// orchestrator is the only party that can close the loop: it runs a simple
+    /// energy VAD over the incoming PCM and, once speech has been followed by a
+    /// short trailing silence, sends `audio-stop` to STT to finalize the transcript.
     async fn stream_to_transcript(
         &self,
         device: &mut DynConnection,
         stt: &mut SttSession<crate::wyoming::DynRead, crate::wyoming::DynWrite>,
     ) -> Result<Option<String>> {
+        // RMS (i16 units) above which a chunk counts as speech rather than room
+        // noise. The Echo's far-field pickup is quiet (~50 idle, several hundred+
+        // while speaking), so this sits a few× above a typical noise floor.
+        const VOICE_RMS_THRESHOLD: f64 = 120.0;
+        // Trailing silence after speech that marks end-of-utterance. Longer than an
+        // inter-word gap so it doesn't cut a sentence short.
+        const END_SILENCE: std::time::Duration = std::time::Duration::from_millis(900);
+        // If no speech is ever detected, still finalize after this long so a silent
+        // or too-quiet utterance ends the turn instead of hanging to `turn_timeout`.
+        const NO_SPEECH_FINALIZE: std::time::Duration = std::time::Duration::from_secs(6);
+
+        let turn_start = Instant::now();
+        let mut last_voice = turn_start;
+        let mut speech_started = false;
+        // True once we've sent `audio-stop` to STT and are just awaiting the result.
+        let mut finalized = false;
+
         let mut deadline = Instant::now() + self.turn_timeout;
         loop {
             tokio::select! {
@@ -242,7 +266,33 @@ impl Pipeline {
                     match dev? {
                         Some(ev) if ev.event_type == types::AUDIO_CHUNK => {
                             if let Some(pcm) = ev.payload {
-                                stt.forward_pcm(pcm).await?;
+                                if !finalized {
+                                    let now = Instant::now();
+                                    if rms_i16_le(&pcm) > VOICE_RMS_THRESHOLD {
+                                        if !speech_started {
+                                            log::debug!("VAD: speech started");
+                                        }
+                                        speech_started = true;
+                                        last_voice = now;
+                                    }
+                                    stt.forward_pcm(pcm).await?;
+
+                                    let ended = if speech_started {
+                                        now.duration_since(last_voice) >= END_SILENCE
+                                    } else {
+                                        now.duration_since(turn_start) >= NO_SPEECH_FINALIZE
+                                    };
+                                    if ended {
+                                        log::info!(
+                                            "VAD: end-of-speech (speech_started={speech_started}); \
+                                             finalizing STT"
+                                        );
+                                        stt.finish().await?;
+                                        finalized = true;
+                                    }
+                                }
+                                // After finalizing, drop further mic chunks: STT has
+                                // its `audio-stop` and is transcribing.
                             }
                         }
                         // The device sends `audio-stop` only after it sees the
@@ -375,5 +425,47 @@ impl Pipeline {
             }
         }
         Ok(())
+    }
+}
+
+/// Root-mean-square amplitude (in `i16` units) of a little-endian PCM16 buffer,
+/// used by the turn's energy VAD to tell speech from room noise. A trailing odd
+/// byte (never expected from a well-formed frame) is ignored.
+fn rms_i16_le(pcm: &[u8]) -> f64 {
+    let mut sum_sq = 0f64;
+    let mut n = 0u64;
+    for c in pcm.chunks_exact(2) {
+        let s = i16::from_le_bytes([c[0], c[1]]) as f64;
+        sum_sq += s * s;
+        n += 1;
+    }
+    if n == 0 {
+        0.0
+    } else {
+        (sum_sq / n as f64).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod vad_tests {
+    use super::rms_i16_le;
+
+    fn pcm(samples: &[i16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn rms_of_silence_is_zero() {
+        assert_eq!(rms_i16_le(&pcm(&[0, 0, 0, 0])), 0.0);
+        assert_eq!(rms_i16_le(&[]), 0.0);
+    }
+
+    #[test]
+    fn rms_tracks_amplitude() {
+        // A constant ±1000 signal has RMS 1000; loud speech reads far above the
+        // 120-unit voice threshold while a quiet ±30 noise floor stays below it.
+        assert!((rms_i16_le(&pcm(&[1000, -1000, 1000, -1000])) - 1000.0).abs() < 1e-6);
+        assert!(rms_i16_le(&pcm(&[30, -30, 25, -20])) < 120.0);
+        assert!(rms_i16_le(&pcm(&[800, -600, 700, -900])) > 120.0);
     }
 }

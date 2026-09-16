@@ -207,18 +207,20 @@ smoothing, self-trigger handling, and the mic front-end.
 
 Ordered by value-to-effort.
 
-### 4.1 Add moving-average smoothing + cooldown (small, high value)
+### 4.1 Add moving-average smoothing + cooldown (small, high value) — ✅ DONE
 
-In `engine/mod.rs` (or `detector.rs`), replace the single-frame threshold with a
-VACA-style N-frame moving average and a debounce:
+Implemented in `engine/gate.rs` as a pure, unit-tested `DetectionGate`: it fires on
+the **moving average** of the last 3 block scores clearing `config.threshold`, with a
+1500 ms cooldown so one utterance fires once. The engine loop feeds it each block and
+the raised `active_threshold` while a turn is live. (The clock is injected into
+`observe(..)` so the smoothing + debounce is tested without a live pipeline.)
 
-- Keep a small `VecDeque<f32>` of the last 3 scores; fire when the **average**
-  exceeds `config.threshold`.
-- Add a `detection_cooldown` (~1500 ms) so one utterance fires once.
+### 4.2 Use Android hardware AEC/AGC/NS before writing our own (medium, high value) — ⏸ DEFERRED
 
-This is a few lines and directly reduces false triggers.
-
-### 4.2 Use Android hardware AEC/AGC/NS before writing our own (medium, high value)
+Not yet needed for wake-word capture (human "hey jarvis" is now reliable) and its
+self-triggering payoff is moot until TTS playback works — playback currently degrades
+to silent on the device (the `ndk_context` panic; see §6 follow-up). Revisit together
+with §4.4's mic-source once playback is restored and we can validate on hardware.
 
 Our Plan defers AEC. VACA shows the pragmatic first step is the platform effects,
 not custom DSP. Investigate whether we can attach `AcousticEchoCanceler`,
@@ -233,7 +235,12 @@ not custom DSP. Investigate whether we can attach `AcousticEchoCanceler`,
 - Track availability per source (hardware vs. software vs. unavailable) and
   surface it as a diagnostic event, like VACA's `agcSource/nsSource/aecSource`.
 
-### 4.3 Port the mic-blanking self-trigger trick (small, high value for full-duplex)
+### 4.3 Port the mic-blanking self-trigger trick (small, high value for full-duplex) — ⏸ DEFERRED
+
+Correct and cheap, but there is **no caller yet**: the device plays no local
+confirmation chime, and TTS playback is currently silent (§6 follow-up). Adding the
+hook now would be dead code. Land it alongside the first device-side sound (chime or
+restored TTS), where it can be exercised end-to-end.
 
 Implement `suppress_mic_for(duration)` in the capture/engine path: while active,
 the drain loop substitutes **silence of the same length** instead of real samples,
@@ -241,12 +248,24 @@ used only around the device's own confirmation chime/error sounds — never duri
 TTS playback (so barge-in survives). Cheaper and more surgical than the Plan's
 "raise threshold during SPEAKING," and keeps the AGC envelope clean.
 
-### 4.4 Expose gain + mic-source selection (medium)
+### 4.4 Expose gain + mic-source selection (medium) — ⚠️ PARTIAL
 
-Add `mic_gain` and an input-source preference to `WakeWordConfig`. On the device,
-prefer the `VOICE_RECOGNITION` audio source where it helps (build-dependent), and
-apply a software gain in the resampler stage. Expose a live audio-level diagnostic
-(we already emit RMS in capture-only mode — keep it on always for tuning).
+- **Always-on level: ✅ done.** The engine now emits the RMS `Level` event even while
+  a model is loaded (previously capture-only), so the UI meter and on-hardware tuning
+  stay live during detection, plus a `wake-word diag: rms=… peak_score=…` logcat line.
+- **Software gain: intentionally skipped.** openWakeWord's log-mel front-end is
+  effectively **amplitude/scale-invariant** — a clean "hey jarvis" attenuated to
+  `0.037×` (the Echo's far-field level) still scores **0.99** on the host. So a digital
+  `mic_gain` applied after capture does *nothing* for detection (it only rescales the
+  RMS meter and risks clipping). Not worth a config knob.
+- **Mic-source (`VOICE_RECOGNITION`): the real far-field lever, still blocked.** This
+  changes the *analog* capture path (platform AGC/NS + higher input gain), which is
+  what would actually help the faint far-field case (the residual weakness is SNR /
+  ADC quantization at ~6 effective bits, not digital amplitude). But `cpal` 0.18's
+  AAudio backend opens the stream with `inputPreset = 0` and exposes **no** hook to set
+  the preset (`configure_for_device` only sets device id / rate / buffer). Reaching it
+  needs a `cpal` fork or the Kotlin `AudioRecord` capture layer from §4.2 — and live
+  device validation. Deferred with §4.2.
 
 ### 4.5 Support multiple concurrent wake words (medium)
 
@@ -274,9 +293,53 @@ hatch VACA validates.
 
 ## 5. Recommended next actions
 
-1. **Now (Phase 2 hardening):** implement 4.1 (smoothing + cooldown) and 4.3
-   (mic-blanking hook) — both are small and land in `engine/mod.rs`/`capture.rs`.
-2. **Spike:** 4.2 (Android hardware AEC/AGC/NS reachability through cpal/AAudio) —
-   this decides whether the Plan's "AEC deferred" note holds or needs a JNI shim.
-3. **Later:** 4.4–4.6 as wake-word quality work; 4.6 microWakeWord is the biggest
-   potential win for the constrained device.
+**Landed** (this pass): the §6 sample-rate fix that made detection work at all, plus
+§4.1 (smoothing + cooldown, now a unit-tested `DetectionGate`) and the §4.4 always-on
+level meter. Human "hey jarvis" is reliable on hardware.
+
+**Next, in priority order:**
+
+1. **Restore TTS playback** (`ndk_context` init — §6 follow-up). It gates the whole
+   full-duplex story: without it §4.2 (self-trigger AEC) and §4.3 (mic-blanking) have
+   nothing to guard against, and a spoken reply is the missing half of a turn.
+2. **Mic-source / analog capture path** (§4.4 + §4.2). The one remaining wake-word
+   weakness is faint far-field pickup (SNR/quantization-limited, *not* digital gain).
+   The lever is the `VOICE_RECOGNITION` input source + platform AGC/NS, which needs a
+   `cpal` fork or a Kotlin `AudioRecord` layer — do this as a measured spike on device.
+3. **Then** §4.5–4.6 (more wake words / microWakeWord) as quality/perf work.
+
+---
+
+## 6. Field fix: Echo Show capture sample-rate mismatch (resolved)
+
+First working on-hardware run. Wake-word detection scored ~0 on the device even
+though the mic was clearly capturing speech (`rms` tracked room audio). Isolation:
+
+- Host scoring of the **bundled models** against a real "hey jarvis" clip → **0.99**
+  (model + pipeline correct), including after a 48 kHz→16 kHz pass through the engine
+  `Resampler` and after attenuating the clip to the device's quiet far-field level.
+- Dumping the exact 16 kHz PCM the engine fed the model and scoring it on the host →
+  **~0.0001**, but re-scoring that same dump as if it were **8 kHz** (a 2x slow-down)
+  → **0.998**. The captured audio was **exactly 2x too fast / an octave high**.
+
+Root cause: on the Echo Show 8 (MediaTek AAudio HAL), `cpal`'s
+`default_input_config()` reports **48 kHz**, but the stream is actually delivered at
+**~24 kHz**. The engine trusted 48 kHz, so the linear resampler emitted every block at
+double speed — pitch/time-distorted enough that confidence collapsed to ~0. (The mono
+downmix was fine; only the rate label was wrong.)
+
+Fix (`engine/mod.rs`): **measure the true input rate at startup** — drain a short
+warm-up, count samples into the ring over a fixed wall-clock window, snap to the
+nearest standard rate — and build the `Resampler` from that instead of cpal's number.
+On device this calibrates `measured 24283 Hz -> 24000 Hz (cpal reported 48000)`; on
+the host coreaudio measures its real rate and nothing changes. After the fix, live
+scores hit 0.95–0.999 and human "hey jarvis" fires reliably.
+
+Also landed alongside: §4.1 moving-average smoothing (3-frame) + 1500 ms cooldown, and
+Info-level diagnostics (`wake-word diag: rms=… peak_score=…`, per-fire logs) that make
+this kind of on-hardware debugging tractable from `logcat`.
+
+Follow-ups surfaced: the faint far-field playback of a TTS "hey jarvis" from across the
+room still misses occasionally (near the noise floor); a software **mic gain / AGC**
+stage (§4.4) would firm that up. Real spoken wake words at conversational distance are
+unaffected.

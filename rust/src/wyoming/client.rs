@@ -242,12 +242,22 @@ where
             }
 
             // Upstream: a captured PCM chunk to forward — only while STREAMING.
-            chunk = pcm_rx.recv() => {
+            //
+            // The `if session.is_streaming()` precondition is load-bearing, not just
+            // an optimization: `conn.read_event()` above is NOT cancellation-safe
+            // (it interleaves `read_line` + `read_exact`), so if this branch fired
+            // and won the `select!` while a read was suspended mid-frame, that
+            // partially-read event would be dropped and the next read would resume in
+            // the middle of a binary PCM payload ("stream did not contain valid
+            // UTF-8"). During SPEAKING the capture thread keeps pushing mic PCM here
+            // (dropped anyway), so leaving the branch enabled would corrupt every TTS
+            // audio-chunk read. Disabling it while not streaming keeps the socket
+            // reader the only consumer during playback.
+            chunk = pcm_rx.recv(), if session.is_streaming() => {
                 match chunk {
-                    Some(samples) if session.is_streaming() => {
+                    Some(samples) => {
                         conn.send_chunk(&samples).await?;
                     }
-                    Some(_) => { /* speaking/closing: drop late mic chunks */ }
                     None => {
                         // Capture side hung up: stop the turn gracefully.
                         let actions = session.on_input(ControlInput::Stop);

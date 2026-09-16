@@ -213,10 +213,12 @@ async fn run_turn_task(
     let endpoint = match wyoming::resolve(&shared.cache, shared.discovery_timeout).await {
         Ok(ep) => ep,
         Err(e) => {
+            log::warn!("turn: no Wyoming host: {e}");
             let _ = sink.add(WakeWordEvent::disconnected(format!("no Wyoming host: {e}")));
             return;
         }
     };
+    log::info!("turn: connecting to {endpoint}");
     let _ = sink.add(WakeWordEvent::connecting(format!(
         "connecting to {endpoint}"
     )));
@@ -227,6 +229,7 @@ async fn run_turn_task(
             // A stale cached endpoint may be why the dial failed; drop it so the
             // next turn re-browses instead of retrying a dead host.
             shared.cache.clear();
+            log::warn!("turn: connect failed: {e}");
             let _ = sink.add(WakeWordEvent::disconnected(format!("connect failed: {e}")));
             return;
         }
@@ -235,11 +238,23 @@ async fn run_turn_task(
     let playback = shared.playback.clone();
     let on_update = |update: TurnUpdate| {
         let event = match update {
-            TurnUpdate::Streaming => WakeWordEvent::streaming(),
-            TurnUpdate::Transcript(text) => WakeWordEvent::transcript(text),
+            TurnUpdate::Streaming => {
+                log::info!("turn: streaming mic to STT");
+                WakeWordEvent::streaming()
+            }
+            TurnUpdate::Transcript(text) => {
+                log::info!("turn: transcript {text:?}");
+                WakeWordEvent::transcript(text)
+            }
             TurnUpdate::ReplyToken(text) => WakeWordEvent::reply_token(text),
-            TurnUpdate::Speaking => WakeWordEvent::speaking(),
-            TurnUpdate::Finished => WakeWordEvent::disconnected("turn complete".to_string()),
+            TurnUpdate::Speaking => {
+                log::info!("turn: speaking (TTS playback started)");
+                WakeWordEvent::speaking()
+            }
+            TurnUpdate::Finished => {
+                log::info!("turn: finished cleanly");
+                WakeWordEvent::disconnected("turn complete".to_string())
+            }
         };
         let _ = sink.add(event);
     };
@@ -259,6 +274,7 @@ async fn run_turn_task(
     )
     .await
     {
+        log::error!("turn error (aborting turn): {e:#}");
         let _ = sink.add(WakeWordEvent::disconnected(format!("turn error: {e}")));
     }
 }

@@ -222,6 +222,53 @@ mod tests {
         }
     }
 
+    /// Isolation harness for on-hardware debugging: feed a real mono PCM16 clip of
+    /// the wake word through the detector and assert it scores a clear detection.
+    /// This is how the Echo Show capture bug was pinned down — a clip pulled off the
+    /// device scored ~0 until it was resampled to correct the HAL's 2x rate error,
+    /// isolating the fault to sample-rate handling rather than the model or mic.
+    ///
+    /// Runs only when `HEY_JARVIS_WAV` points at a file; ignored in normal CI.
+    /// Optional env knobs:
+    ///  - `HEADER`   bytes to skip (44 for a canonical WAV, 0 for a raw PCM dump).
+    ///  - `SRC_RATE` treat the input as this rate and run it through the engine
+    ///               `Resampler` down to 16 kHz first, reproducing the device path.
+    #[test]
+    fn scores_real_wake_word_clip() {
+        let Ok(wav) = std::env::var("HEY_JARVIS_WAV") else {
+            eprintln!("skipping: set HEY_JARVIS_WAV=/path/to/mono_pcm16.wav to run");
+            return;
+        };
+        let paths = bundled_models();
+        let mut detector = WakeWordDetector::load(&paths).expect("bundled models load");
+
+        let bytes = std::fs::read(&wav).expect("read wav");
+        let header: usize = std::env::var("HEADER").ok().and_then(|s| s.parse().ok()).unwrap_or(44);
+        let mut samples: Vec<f32> = bytes[header..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32)
+            .collect();
+
+        if let Some(src) = std::env::var("SRC_RATE").ok().and_then(|s| s.parse::<u32>().ok()) {
+            let mut r = crate::audio::resample::Resampler::new(src, 16_000);
+            let mut out = Vec::new();
+            r.process(&samples, &mut out);
+            eprintln!("resampled {src}Hz->16kHz: {} -> {} samples", samples.len(), out.len());
+            samples = out;
+        }
+        let maxabs = samples.iter().fold(0f32, |m, &s| m.max(s.abs()));
+        eprintln!("loaded {} samples (max |amp| = {maxabs:.0})", samples.len());
+
+        let mut peak = 0.0f32;
+        for chunk in samples.chunks(1280) {
+            if let Some(score) = detector.push_audio(chunk).expect("inference runs") {
+                peak = peak.max(score);
+            }
+        }
+        eprintln!("peak wake-word score for clip = {peak:.4}");
+        assert!(peak > 0.3, "expected a clear detection, got peak {peak:.4}");
+    }
+
     /// The real bundled model chain loads on `tract` and scores a live stream.
     /// This is the guardrail that the shipped `.onnx` files parse and their shapes
     /// line up with the pipeline (melspec → embedding → classifier). Skipped if the

@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ringbuf::traits::Consumer;
@@ -32,7 +32,9 @@ use crate::audio::ring_buffer::new_audio_ring;
 use crate::audio::TARGET_SAMPLE_RATE;
 use crate::wakeword::{WakeWordDetector, WakeWordModelPaths};
 
+mod gate;
 mod net;
+use gate::DetectionGate;
 use net::Network;
 
 /// Ring capacity in samples (~2 s at 48 kHz; ≈192 KB of `i16`). Absorbs
@@ -48,6 +50,20 @@ const IDLE_POLL: Duration = Duration::from_millis(10);
 /// Emit an audio-level event roughly this often (in drained blocks) when running
 /// in capture-only mode (no wake-word model loaded).
 const LEVEL_EVERY_N_BLOCKS: u32 = 10;
+
+/// Number of consecutive per-block scores averaged before a detection can fire
+/// (VACA-style smoothing, WakeWordDetection.md §4.1). Trades a little latency for
+/// far fewer single-frame false triggers.
+const SMOOTH_WINDOW: usize = 3;
+
+/// Minimum gap between two detections so one utterance fires exactly once
+/// (WakeWordDetection.md §4.1).
+const DETECTION_COOLDOWN: Duration = Duration::from_millis(1500);
+
+/// Scores at or above this are logged for live tuning even when they don't fire.
+/// Kept well below any usable threshold so the logcat trace shows the confidence
+/// climbing toward the wake word without flooding (one line per drained block).
+const SCORE_LOG_FLOOR: f32 = 0.05;
 
 struct EngineHandle {
     running: Arc<AtomicBool>,
@@ -113,6 +129,12 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     };
     let info = capture.info.clone();
+    log::info!(
+        "wake-word capture started on '{}' ({} Hz, {} ch)",
+        info.device_name,
+        info.sample_rate,
+        info.channels
+    );
     let _ = sink.add(WakeWordEvent::started(
         info.device_name.clone(),
         info.sample_rate,
@@ -128,6 +150,11 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     };
     let mut detector = match WakeWordDetector::load(&paths) {
         Ok(d) => {
+            log::info!(
+                "wake-word model '{}' loaded from {}",
+                config.model_name,
+                paths.wakeword.display()
+            );
             let _ = sink.add(WakeWordEvent::status(format!(
                 "wake-word model '{}' loaded",
                 config.model_name
@@ -135,6 +162,12 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
             Some(d)
         }
         Err(e) => {
+            log::warn!(
+                "no wake-word model ({e}); running capture-only. paths: mel={} emb={} ww={}",
+                paths.melspec.display(),
+                paths.embedding.display(),
+                paths.wakeword.display()
+            );
             let _ = sink.add(WakeWordEvent::status(format!(
                 "no wake-word model ({e}); running capture-only"
             )));
@@ -193,12 +226,37 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     let idle_threshold = config.threshold;
     let active_threshold = config.active_threshold.max(config.threshold);
 
-    let mut resampler = Resampler::new(info.sample_rate, TARGET_SAMPLE_RATE);
+    // Calibrate the *true* input sample rate before resampling. cpal's
+    // `default_input_config()` reports the rate it asked AAudio for (48 kHz on the
+    // Echo Show), but some Android HALs deliver the mono stream at a different
+    // effective rate — here it arrives at half, so trusting cpal's number makes the
+    // linear resampler emit audio at 2x speed / an octave high, which is
+    // pitch/time-distorted enough that wake-word confidence collapses to ~0 even
+    // though the mic is clearly capturing speech. Measuring the real throughput into
+    // the ring and resampling from that is self-correcting across HAL quirks.
+    let input_rate = calibrate_input_rate(&mut consumer, info.sample_rate, &running);
+    if input_rate != info.sample_rate {
+        let _ = sink.add(WakeWordEvent::status(format!(
+            "input rate calibrated to {input_rate} Hz (device reported {})",
+            info.sample_rate
+        )));
+    }
+    let mut resampler = Resampler::new(input_rate, TARGET_SAMPLE_RATE);
     let mut scratch = vec![0i16; DRAIN_CHUNK];
     let mut in_f32: Vec<f32> = Vec::with_capacity(DRAIN_CHUNK);
     let mut resampled: Vec<f32> = Vec::with_capacity(DRAIN_CHUNK);
     let mut pcm_i16: Vec<i16> = Vec::with_capacity(DRAIN_CHUNK);
     let mut block_counter: u32 = 0;
+
+    // VACA-style detection smoothing + debounce (WakeWordDetection.md §4.1): fire
+    // on the moving average of the last `SMOOTH_WINDOW` block scores rather than a
+    // single frame, and enforce a cooldown so one utterance fires exactly once. The
+    // gating logic is a pure, unit-tested state machine (see `gate`).
+    let mut gate = DetectionGate::new(SMOOTH_WINDOW, DETECTION_COOLDOWN);
+    // Rolling peak score between diagnostic log emissions, so the logcat trace shows
+    // both that audio is flowing (rms) and how high the model scored (peak) even
+    // when nothing crosses the detection threshold.
+    let mut diag_peak: f32 = 0.0;
 
     while running.load(Ordering::SeqCst) {
         let n = consumer.pop_slice(&mut scratch);
@@ -212,6 +270,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
 
         resampled.clear();
         resampler.process(&in_f32, &mut resampled);
+
         if resampled.is_empty() {
             continue;
         }
@@ -233,28 +292,63 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
 
         match detector.as_mut() {
             Some(d) => match d.push_audio(&resampled) {
-                Ok(Some(score))
-                    if score
-                        >= if turn_active {
-                            active_threshold
-                        } else {
-                            idle_threshold
-                        } =>
-                {
-                    if sink
-                        .add(WakeWordEvent::detected(config.model_name.clone(), score))
-                        .is_err()
-                    {
-                        break;
+                Ok(Some(score)) => {
+                    let threshold = if turn_active {
+                        active_threshold
+                    } else {
+                        idle_threshold
+                    };
+
+                    // Periodic diagnostic + live mic level. The RMS is emitted as a
+                    // `Level` event even while a model is loaded (not just in
+                    // capture-only mode) so the UI meter and on-hardware tuning stay
+                    // live during detection (WakeWordDetection.md §4.4), and logged
+                    // alongside the rolling peak score for logcat debugging.
+                    diag_peak = diag_peak.max(score);
+                    block_counter = block_counter.wrapping_add(1);
+                    if block_counter.is_multiple_of(LEVEL_EVERY_N_BLOCKS) {
+                        let rms = capture::rms_level(&resampled);
+                        log::info!("wake-word diag: rms={rms:.4} peak_score={diag_peak:.4}");
+                        diag_peak = 0.0;
+                        if sink.add(WakeWordEvent::level(rms)).is_err() {
+                            break;
+                        }
                     }
-                    // Fire a Wyoming turn. When one is already active this is a
-                    // barge-in: the network layer flushes playback, interrupts the
-                    // running turn, and restarts a fresh one (Plan.MD §3, Phase 5).
-                    if let Some(net) = network.as_ref() {
-                        net.on_wake_word();
+
+                    let fired = gate.observe(score, threshold, Instant::now());
+
+                    // Live tuning trace: show the confidence climbing toward the
+                    // wake word without flooding logcat (one line per drained block,
+                    // and only once a score is meaningfully above the noise floor).
+                    // `gate.avg()` now includes this block's score.
+                    if score >= SCORE_LOG_FLOOR {
+                        log::info!(
+                            "wake-word score={score:.3} avg={:.3} thr={threshold:.2}",
+                            gate.avg()
+                        );
+                    }
+
+                    if let Some(avg) = fired {
+                        log::info!(
+                            "WAKE WORD DETECTED '{}' (avg={avg:.3}, peak={score:.3})",
+                            config.model_name
+                        );
+                        if sink
+                            .add(WakeWordEvent::detected(config.model_name.clone(), avg))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        // Fire a Wyoming turn. When one is already active this is a
+                        // barge-in: the network layer flushes playback, interrupts
+                        // the running turn, and restarts a fresh one (Plan.MD §3,
+                        // Phase 5).
+                        if let Some(net) = network.as_ref() {
+                            net.on_wake_word();
+                        }
                     }
                 }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(e) => {
                     let _ = sink.add(WakeWordEvent::error(format!(
                         "wake-word inference error: {e}"
@@ -282,4 +376,65 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     drop(capture);
     running.store(false, Ordering::SeqCst);
     let _ = sink.add(WakeWordEvent::stopped());
+}
+
+/// Measure the real rate at which mono samples arrive in the ring and snap it to
+/// the nearest standard rate. Guards against Android HALs that deliver audio at a
+/// different effective rate than cpal's `default_input_config()` reports (observed
+/// on the Echo Show, where the reported 48 kHz is actually delivered at half),
+/// which would otherwise time/pitch-distort every block and break detection.
+///
+/// Drains a short warm-up (to shed the burst that queued during model load) then
+/// counts samples over a fixed wall-clock window. Falls back to `reported` if the
+/// measurement is too short to trust (e.g. the engine is stopping).
+fn calibrate_input_rate(
+    consumer: &mut crate::audio::ring_buffer::AudioConsumer,
+    reported: u32,
+    running: &Arc<AtomicBool>,
+) -> u32 {
+    const WARMUP: Duration = Duration::from_millis(300);
+    const WINDOW: Duration = Duration::from_millis(1500);
+    const STD_RATES: [u32; 11] = [
+        8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000,
+    ];
+
+    let mut scratch = vec![0i16; DRAIN_CHUNK];
+
+    // Warm-up: discard whatever is already buffered so the measurement reflects the
+    // steady-state callback cadence, not the model-load backlog.
+    let warm_end = Instant::now() + WARMUP;
+    while Instant::now() < warm_end && running.load(Ordering::SeqCst) {
+        if consumer.pop_slice(&mut scratch) == 0 {
+            thread::sleep(IDLE_POLL);
+        }
+    }
+
+    // Measure sustained throughput over the window.
+    let start = Instant::now();
+    let mut count: u64 = 0;
+    while start.elapsed() < WINDOW && running.load(Ordering::SeqCst) {
+        let n = consumer.pop_slice(&mut scratch);
+        if n == 0 {
+            thread::sleep(IDLE_POLL);
+        } else {
+            count += n as u64;
+        }
+    }
+
+    let secs = start.elapsed().as_secs_f64();
+    if secs < 0.5 || count < 4000 {
+        log::warn!("input-rate calibration inconclusive; using reported {reported} Hz");
+        return reported;
+    }
+
+    let measured = (count as f64 / secs).round() as u32;
+    let snapped = *STD_RATES
+        .iter()
+        .min_by_key(|&&r| (r as i64 - measured as i64).unsigned_abs())
+        .unwrap_or(&reported);
+    log::info!(
+        "input-rate calibration: measured {measured} Hz over {secs:.2}s -> {snapped} Hz \
+         (cpal reported {reported} Hz)"
+    );
+    snapped
 }

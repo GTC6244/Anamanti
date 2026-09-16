@@ -14,6 +14,18 @@ import io.flutter.embedding.android.FlutterActivity
 class MainActivity : FlutterActivity() {
     private var multicastLock: WifiManager.MulticastLock? = null
 
+    companion object {
+        init {
+            // Load the Rust engine through the *Java* path so the JVM runs its
+            // `JNI_OnLoad`, which initializes `ndk_context` (JavaVM + Application
+            // context). cpal's AAudio output backend needs that to query the Java
+            // AudioManager; without it `start_playback` panics and TTS is silent.
+            // flutter_rust_bridge later opens the same library via dlopen, which
+            // reuses this already-loaded, already-initialized instance.
+            System.loadLibrary("rust_lib_ambient_display")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
