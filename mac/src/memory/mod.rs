@@ -20,6 +20,22 @@ use rusqlite::{params, Connection};
 
 mod extract;
 
+pub mod backend;
+pub mod chatlog;
+pub mod embed;
+pub mod entity;
+
+// GraphRAG memory (embedded HelixDB) — feature-gated so a lean build can skip the
+// heavy engine deps. See memory_plan.md.
+#[cfg(feature = "helix")]
+pub mod helix;
+#[cfg(feature = "helix")]
+pub mod ingester;
+
+#[cfg(feature = "helix")]
+pub use backend::HelixRecall;
+pub use backend::{Recall, SqliteRecall};
+pub use chatlog::{ChatLog, ChatLogRecord};
 pub use extract::{infer_memories, parse_command, MemoryCommand};
 
 /// Whether an entry is a discrete fact or a standing preference.

@@ -18,7 +18,7 @@ Whisper and Piper are not implemented here — bring your own (rhasspy ecosystem
 | --- | --- |
 | `src/wyoming/` | Wyoming wire codec + STT/TTS client sessions |
 | `src/llm/` | Pluggable `LlmBackend` trait — `ollama`, `anthropic` (Claude), `mock` |
-| `src/memory/` | Persistent SQLite + FTS5 store; explicit + inferred extraction |
+| `src/memory/` | SQLite + FTS5 store (explicit + inferred); **optional embedded HelixDB GraphRAG** backend + chat log + OpenAI-embedding ingester |
 | `src/orchestrator.rs` | `Pipeline::run_turn` — the full STT → LLM+memory → TTS turn |
 | `src/server.rs` | Device-facing TCP accept loop |
 | `src/discovery.rs` | mDNS advertisement of `_wyoming._tcp` |
@@ -48,6 +48,28 @@ cargo clippy --all-targets -- -D warnings
 | `AMBIENT_BIND_ADDR` | `0.0.0.0:10700` | device-facing bind address |
 | `AMBIENT_DB_PATH` | `ambient_memory.sqlite` | memory database path |
 | `AMBIENT_SERVICE_NAME` | `Ambient Orchestrator` | mDNS instance name |
+| `AMBIENT_MEMORY_BACKEND` | `sqlite` | recall backend: `sqlite` (FTS) \| `helix` (GraphRAG) |
+| `AMBIENT_CHATLOG_PATH` | `ambient_chatlog.jsonl` | append-only turn log (always written) |
+| `AMBIENT_HELIX_PATH` | `ambient_helix` | embedded HelixDB on-disk store root |
+| `OPENAI_API_KEY` | — | required for `helix` (embeddings) |
+| `AMBIENT_EMBED_MODEL` | `text-embedding-3-small` | embedding model |
+| `AMBIENT_EMBED_DIMS` | `1536` | embedding dimensionality |
+| `AMBIENT_EXTRACT_MODEL` | `claude-haiku-4-5` | entity-extraction model (needs `ANTHROPIC_API_KEY`) |
+| `AMBIENT_INGEST_INTERVAL_SECS` | `30` | background ingester cadence |
+| `AMBIENT_OPENAI_BASE_URL` / `AMBIENT_ANTHROPIC_BASE_URL` | provider defaults | override API base (self-host/testing) |
+
+### GraphRAG memory (embedded HelixDB)
+
+The `helix` cargo feature (on by default) compiles HelixDB's engine crate
+**in-process** — no server, no Docker. With `AMBIENT_MEMORY_BACKEND=helix` the
+orchestrator writes each turn to the JSONL chat log, a background ingester
+embeds new turns (OpenAI `text-embedding-3-small`) and extracts entities (Claude
+Haiku) into a graph (`User/Turn/Memory/Entity` nodes; `SAID/MENTIONS/ABOUT/
+FOLLOWS/KNOWS` edges), and recall does vector KNN + graph expansion, injected
+into the LLM system prompt. Requires `OPENAI_API_KEY`; without it the
+orchestrator logs a warning and falls back to SQLite FTS. Build lean (SQLite
+only, skips the heavy engine deps) with `cargo build --no-default-features`.
+See [`../memory_plan.md`](../memory_plan.md) for the full design + status.
 
 The offline `mock` backend needs no model server, so
 `AMBIENT_LLM_BACKEND=mock cargo run` exercises the pipeline shape end to end (you

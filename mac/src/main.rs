@@ -1,3 +1,7 @@
+// The embedded HelixDB engine (feature `helix`) has deeply nested generic types;
+// computing the layout of the async runtime that awaits them needs a higher
+// recursion limit than the default 128 (the `db` crate sets the same).
+#![recursion_limit = "512"]
 //! Ambient Smart Display — Mac Mini assistant orchestrator (Plan.MD Phase 4).
 //!
 //! Runs the "brain": a Wyoming server the Echo Show discovers over mDNS, wiring
@@ -13,14 +17,33 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 
-use ambient_orchestrator::config::Config;
+use ambient_orchestrator::config::{Config, MemoryBackendChoice};
 use ambient_orchestrator::discovery::MdnsAdvertiser;
-use ambient_orchestrator::memory::MemoryStore;
+use ambient_orchestrator::memory::{ChatLog, MemoryStore};
 use ambient_orchestrator::orchestrator::{self, Pipeline, TcpConnector};
 use ambient_orchestrator::server;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Worker-thread stack size. The embedded HelixDB engine (feature `helix`) builds
+/// deep async state machines whose stack usage exceeds tokio's 2 MiB default,
+/// especially in debug builds; 16 MiB gives comfortable headroom.
+const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_SIZE)
+        .build()
+        .context("building tokio runtime")?;
+    // Run on a spawned task so all of `run` (including the embedded-HelixDB init)
+    // executes on a large-stack worker thread rather than the main thread.
+    runtime.block_on(async {
+        tokio::spawn(run())
+            .await
+            .context("orchestrator task panicked")?
+    })
+}
+
+async fn run() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let config = Config::from_env().context("loading configuration")?;
@@ -42,12 +65,36 @@ async fn main() -> Result<()> {
         .shared_settings()
         .context("initializing LLM backend")?;
 
-    let pipeline = Pipeline::with_settings(
+    // Chat log (always on): every completed turn is recorded here, both as the
+    // durable source of truth and as the ingestion queue for GraphRAG memory.
+    let chatlog = Arc::new(
+        ChatLog::open(&config.chatlog_path)
+            .with_context(|| format!("opening chat log at {}", config.chatlog_path.display()))?,
+    );
+    log::info!("chat log at {}", config.chatlog_path.display());
+
+    let mut pipeline = Pipeline::with_settings(
         settings,
         memory,
         config.system_prompt.clone(),
         config.turn_timeout,
-    );
+    )
+    .with_chatlog(chatlog.clone());
+
+    // Memory retrieval backend: SQLite FTS (default) or embedded HelixDB GraphRAG.
+    if config.memory_backend == MemoryBackendChoice::Helix {
+        match build_graphrag_recall(&config, &chatlog).await {
+            Ok(recall) => {
+                log::info!("memory backend: HelixDB GraphRAG (embedded, in-process)");
+                pipeline = pipeline.with_recall(recall);
+            }
+            Err(e) => {
+                log::error!("GraphRAG init failed ({e:#}); falling back to SQLite FTS recall");
+            }
+        }
+    } else {
+        log::info!("memory backend: SQLite FTS");
+    }
 
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
         stt_addr: config.stt_addr,
@@ -76,4 +123,80 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the HelixDB GraphRAG recall backend and spawn the background ingester.
+/// Requires `OPENAI_API_KEY` (embeddings); `ANTHROPIC_API_KEY` enables Claude
+/// Haiku entity extraction (absent → pure-vector recall). Only available when the
+/// binary is built with the `helix` feature.
+#[cfg(feature = "helix")]
+async fn build_graphrag_recall(
+    config: &Config,
+    chatlog: &Arc<ChatLog>,
+) -> Result<Arc<dyn ambient_orchestrator::memory::Recall>> {
+    use ambient_orchestrator::memory::embed::{Embedder, OpenAiEmbedder};
+    use ambient_orchestrator::memory::entity::{
+        AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor,
+    };
+    use ambient_orchestrator::memory::helix::HelixMemory;
+    use ambient_orchestrator::memory::ingester::MemoryIngester;
+    use ambient_orchestrator::memory::HelixRecall;
+
+    let g = &config.graphrag;
+    let openai_key = std::env::var("OPENAI_API_KEY")
+        .context("AMBIENT_MEMORY_BACKEND=helix requires OPENAI_API_KEY for embeddings")?;
+    let embedder: Arc<dyn Embedder> = Arc::new(OpenAiEmbedder::new(
+        g.openai_base_url.clone(),
+        openai_key,
+        g.embed_model.clone(),
+        g.embed_dims,
+    ));
+
+    let helix = Arc::new(
+        HelixMemory::open_disk(config.helix_path.clone(), "ambient", embedder.dimensions())
+            .await
+            .context("opening embedded HelixDB store")?,
+    );
+    log::info!(
+        "HelixDB store at {} ({} nodes)",
+        config.helix_path.display(),
+        helix.node_count().await.unwrap_or(0)
+    );
+
+    let extractor: Arc<dyn EntityExtractor> = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(key) if !key.is_empty() => Arc::new(AnthropicEntityExtractor::new(
+            g.anthropic_base_url.clone(),
+            key,
+            g.extract_model.clone(),
+        )),
+        _ => {
+            log::warn!(
+                "ANTHROPIC_API_KEY absent; entity extraction disabled (recall is pure vector KNN)"
+            );
+            Arc::new(NoopEntityExtractor)
+        }
+    };
+
+    let ingester = Arc::new(MemoryIngester::new(
+        chatlog.path().to_path_buf(),
+        helix.clone(),
+        embedder.clone(),
+        extractor,
+    ));
+    ingester.spawn(g.ingest_interval);
+    log::info!(
+        "background memory ingester running every {}s",
+        g.ingest_interval.as_secs()
+    );
+
+    Ok(Arc::new(HelixRecall::new(helix, embedder, g.recall_k)))
+}
+
+/// When built without the `helix` feature, the GraphRAG backend is unavailable.
+#[cfg(not(feature = "helix"))]
+async fn build_graphrag_recall(
+    _config: &Config,
+    _chatlog: &Arc<ChatLog>,
+) -> Result<Arc<dyn ambient_orchestrator::memory::Recall>> {
+    anyhow::bail!("binary built without the `helix` feature; rebuild with --features helix")
 }

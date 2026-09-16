@@ -49,9 +49,16 @@ impl MdnsAdvertiser {
                     "could not determine a routable LAN IPv4; \
                      falling back to auto address detection (all interfaces)"
                 );
-                ServiceInfo::new(WYOMING_SERVICE_TYPE, instance_name, &host_name, "", port, props)
-                    .context("building Wyoming ServiceInfo")?
-                    .enable_addr_auto()
+                ServiceInfo::new(
+                    WYOMING_SERVICE_TYPE,
+                    instance_name,
+                    &host_name,
+                    "",
+                    port,
+                    props,
+                )
+                .context("building Wyoming ServiceInfo")?
+                .enable_addr_auto()
             }
         };
 

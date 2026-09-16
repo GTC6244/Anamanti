@@ -1,3 +1,6 @@
+// Raised for the embedded HelixDB engine (feature `helix`): its deeply nested
+// generic types exceed the default type-layout recursion limit of 128.
+#![recursion_limit = "512"]
 //! Ambient Smart Display — Mac Mini assistant orchestrator (Plan.MD Phase 4).
 //!
 //! The "brain": a Wyoming server the Echo Show discovers over mDNS, wiring
