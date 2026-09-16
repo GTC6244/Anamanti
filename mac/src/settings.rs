@@ -13,9 +13,11 @@
 //! (re)build any backend from a `(backend, model)` pair, so a swap never has to
 //! re-read the environment.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
 
@@ -29,6 +31,84 @@ pub enum LlmEngine {
     /// rig-core agents (`AMBIENT_LLM_ENGINE=rig`; needs the `rig` feature to take
     /// effect — otherwise it transparently falls back to `Native`).
     Rig,
+}
+
+impl LlmEngine {
+    /// Canonical lowercase label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmEngine::Native => "native",
+            LlmEngine::Rig => "rig",
+        }
+    }
+
+    /// Parse a label; anything other than `rig` is `Native`.
+    pub fn from_label(label: &str) -> Self {
+        match label.to_lowercase().as_str() {
+            "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+            _ => LlmEngine::Native,
+        }
+    }
+}
+
+/// The mutable settings persisted to disk so page/device changes survive a
+/// restart. Contains the Tavily key in plaintext, so the file is written with
+/// `0600` permissions on unix and should stay on a trusted machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedSettings {
+    pub engine: String,
+    pub web_search: bool,
+    pub search_provider: String,
+    pub search_api_key: Option<String>,
+    pub llm_backend: String,
+    pub llm_model: Option<String>,
+    pub tts_voice: Option<String>,
+}
+
+/// Load persisted settings, or `None` if the file is absent/unreadable.
+pub fn load_persisted(path: &Path) -> Option<PersistedSettings> {
+    let data = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str(&data) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            log::warn!(
+                "ignoring unreadable settings file {}: {e}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Best-effort write of the persisted settings (0600 on unix). Failures are
+/// logged, never fatal — a settings change still takes effect in memory.
+fn persist(path: &Path, s: &PersistedSettings) {
+    let json = match serde_json::to_string_pretty(s) {
+        Ok(j) => j,
+        Err(e) => {
+            log::warn!("could not serialize settings: {e}");
+            return;
+        }
+    };
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(json.as_bytes())
+    })();
+    if let Err(e) = result {
+        log::warn!("could not persist settings to {}: {e}", path.display());
+    }
 }
 
 /// Immutable inputs needed to (re)build any LLM backend on demand. Captured once
@@ -177,16 +257,41 @@ pub struct SettingsUpdate {
 pub struct SharedSettings {
     inner: RwLock<RuntimeSettings>,
     factory: LlmFactory,
+    /// Where to persist changes, or `None` to keep settings in-memory only.
+    persist_path: Option<PathBuf>,
 }
 
 impl SharedSettings {
-    /// Create a shared holder around an initial [`RuntimeSettings`] and the factory
-    /// used to rebuild backends when the device changes them.
+    /// Create an in-memory-only shared holder (no persistence).
     pub fn new(factory: LlmFactory, initial: RuntimeSettings) -> Arc<Self> {
+        Self::new_persistent(factory, initial, None)
+    }
+
+    /// Create a shared holder that persists every applied change to `persist_path`
+    /// (when `Some`), reloaded at boot by the caller.
+    pub fn new_persistent(
+        factory: LlmFactory,
+        initial: RuntimeSettings,
+        persist_path: Option<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             inner: RwLock::new(initial),
             factory,
+            persist_path,
         })
+    }
+
+    /// Snapshot the mutable settings for persistence.
+    fn persisted_snapshot(s: &RuntimeSettings) -> PersistedSettings {
+        PersistedSettings {
+            engine: s.engine.as_str().to_string(),
+            web_search: s.web_search,
+            search_provider: s.search_provider.clone(),
+            search_api_key: s.search_api_key.clone(),
+            llm_backend: s.llm_backend.clone(),
+            llm_model: s.llm_model.clone(),
+            tts_voice: s.tts_voice.clone(),
+        }
     }
 
     /// A fixed holder around an already-built backend whose LLM cannot be swapped
@@ -305,7 +410,7 @@ impl SharedSettings {
         if let Some(voice) = &update.tts_voice {
             w.tts_voice = voice.clone().filter(|s| !s.is_empty());
         }
-        Ok(SettingsView {
+        let view = SettingsView {
             llm_backend: w.llm_backend.clone(),
             llm_model: w.llm_model.clone(),
             tts_voice: w.tts_voice.clone(),
@@ -313,7 +418,18 @@ impl SharedSettings {
             web_search: w.web_search,
             search_provider: w.search_provider.clone(),
             search_key_set: w.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
-        })
+        };
+        // Persist the new state (best-effort) after dropping the write lock so IO
+        // never blocks a concurrent turn's snapshot.
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        Ok(view)
     }
 }
 
@@ -354,6 +470,56 @@ mod tests {
                 tts_voice: None,
             },
         )
+    }
+
+    #[test]
+    fn apply_persists_settings_and_they_reload() {
+        let path = std::env::temp_dir().join(format!(
+            "ambient_settings_test_{}_{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let factory = factory_with_key(None);
+        let (llm, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+            )
+            .unwrap();
+        let s = SharedSettings::new_persistent(
+            factory,
+            RuntimeSettings {
+                llm,
+                engine: LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
+                llm_backend: label,
+                llm_model: model,
+                tts_voice: None,
+            },
+            Some(path.clone()),
+        );
+
+        s.apply(&SettingsUpdate {
+            web_search: Some(true),
+            search_provider: Some("tavily".into()),
+            search_api_key: Some(Some("tvly-secret".into())),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let p = load_persisted(&path).expect("settings file should exist");
+        assert!(p.web_search);
+        assert_eq!(p.search_provider, "tavily");
+        assert_eq!(p.search_api_key.as_deref(), Some("tvly-secret"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

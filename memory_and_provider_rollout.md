@@ -121,4 +121,4 @@ Open questions:
 - [ ] Frontier fallback model — which id to pin in config (needs current Anthropic/OpenAI ids)?
 - [ ] Guardrail phrase list — seed set for the regex fast path?
 - [x] Config page apply model — **resolved: live hot-swap** via `SharedSettings`, loopback + no auth.
-- [x] Config persistence — **resolved: none yet**; the page mutates in-memory runtime settings (env-seeded at boot). Add file persistence only if changes must survive restart.
+- [x] Config persistence — **done**: applied changes persist to `ambient_settings.json` (0600, gitignored — holds the search key) and reload at boot, overlaying env defaults. Disable with `AMBIENT_SETTINGS_PATH=off`.

@@ -13,7 +13,17 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
-use crate::settings::{LlmEngine, LlmFactory, RuntimeSettings, SharedSettings};
+use crate::settings::{load_persisted, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings};
+
+/// Where runtime settings are persisted, or `None` to disable persistence
+/// (`AMBIENT_SETTINGS_PATH=off`). Defaults to `ambient_settings.json`.
+fn settings_path_from_env() -> Option<std::path::PathBuf> {
+    match env::var("AMBIENT_SETTINGS_PATH") {
+        Ok(v) if matches!(v.trim().to_lowercase().as_str(), "off" | "none" | "") => None,
+        Ok(v) => Some(std::path::PathBuf::from(v)),
+        Err(_) => Some(std::path::PathBuf::from("ambient_settings.json")),
+    }
+}
 
 /// Read the LLM engine selector from the environment. `AMBIENT_LLM_ENGINE=rig`
 /// routes ollama/anthropic through rig-core (needs the `rig` feature); anything
@@ -335,26 +345,45 @@ impl Config {
     /// needs its key at startup, matching [`Self::build_llm`]).
     pub fn shared_settings(&self) -> Result<Arc<SharedSettings>> {
         let factory = self.llm_factory();
-        let engine = self.initial_engine();
-        let web_search = self.initial_web_search();
-        let search_provider = self.initial_search_provider();
-        let search_api_key = self.initial_search_api_key();
-        let (backend, model) = match &self.llm {
-            LlmChoice::Mock => ("mock", None),
-            LlmChoice::Ollama { model, .. } => ("ollama", Some(model.clone())),
-            LlmChoice::Anthropic { model, .. } => ("anthropic", Some(model.clone())),
+        let persist_path = settings_path_from_env();
+
+        // Environment/config defaults, then overlay a persisted file when present
+        // (page/device changes from a previous run win across restarts).
+        let (backend_default, model_default) = match &self.llm {
+            LlmChoice::Mock => ("mock".to_string(), None),
+            LlmChoice::Ollama { model, .. } => ("ollama".to_string(), Some(model.clone())),
+            LlmChoice::Anthropic { model, .. } => ("anthropic".to_string(), Some(model.clone())),
         };
+        let mut engine = self.initial_engine();
+        let mut web_search = self.initial_web_search();
+        let mut search_provider = self.initial_search_provider();
+        let mut search_api_key = self.initial_search_api_key();
+        let mut backend = backend_default;
+        let mut model = model_default;
+        let mut tts_voice = self.tts_voice.clone();
+
+        if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
+            log::info!("loaded persisted settings");
+            engine = LlmEngine::from_label(&p.engine);
+            web_search = p.web_search;
+            search_provider = p.search_provider;
+            search_api_key = p.search_api_key;
+            backend = p.llm_backend;
+            model = p.llm_model;
+            tts_voice = p.tts_voice;
+        }
+
         let (llm, llm_backend, llm_model) = factory
             .build(
                 engine,
                 web_search,
                 &search_provider,
                 search_api_key.as_deref(),
-                backend,
+                &backend,
                 model.as_deref(),
             )
             .context("building the initial LLM backend")?;
-        Ok(SharedSettings::new(
+        Ok(SharedSettings::new_persistent(
             factory,
             RuntimeSettings {
                 llm,
@@ -364,8 +393,9 @@ impl Config {
                 search_api_key,
                 llm_backend,
                 llm_model,
-                tts_voice: self.tts_voice.clone(),
+                tts_voice,
             },
+            persist_path,
         ))
     }
 
