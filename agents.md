@@ -25,8 +25,9 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **Playback:** Rust (`cpal`/`oboe`), symmetric with capture.
 - **Barge-in:** full-duplex — wake word stays active during playback. **AEC is
   deferred for v1** (self-triggering is a known, accepted risk).
-- **VAD:** server-side — the STT server decides end-of-speech; the device does
-  not run its own VAD.
+- **VAD:** off-device — the **orchestrator** decides end-of-speech (energy VAD;
+  faster-whisper has no streaming VAD, so the Mac sends `audio-stop`). The device
+  never runs its own VAD.
 - **Memory:** persistent **SQLite** on the Mac; **explicit + inferred** policy;
   managed via settings list + voice ("remember…"/"forget that").
 - **Idle screen:** photo slideshow from a Google Photos/Drive folder via
@@ -164,8 +165,8 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 
 - IDLE: wake-word scoring only; socket dormant; photo slideshow on screen.
 - TRIGGERED: open TCP, send `audio-start`.
-- STREAMING: send PCM frames; read `transcript` events; **server-side VAD** signals
-  end-of-speech → send `audio-stop`.
+- STREAMING: send PCM frames; read `transcript` events; the **orchestrator's energy
+  VAD** detects end-of-speech and sends `audio-stop` to STT (device runs no VAD).
 - THINKING: LLM (with persistent memory) streams reply tokens (render live).
 - SPEAKING: Piper audio frames play via `cpal`/`oboe`.
 - Full-duplex: wake-word scoring keeps running through THINKING/SPEAKING; a wake
