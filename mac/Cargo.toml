@@ -8,7 +8,19 @@ description = "Mac Mini assistant pipeline (STT -> pluggable LLM + persistent me
 name = "ambient-orchestrator"
 path = "src/main.rs"
 
+[features]
+# `helix` compiles the embedded HelixDB GraphRAG memory backend directly into the
+# orchestrator (git dependency on HelixDB's engine crate — no server, no Docker;
+# see memory_plan.md "SPIKE RESULT"). On by default; the SQLite backend is always
+# available regardless. Disable with `--no-default-features` for a lean build that
+# skips the heavy engine deps (slatedb/tantivy/foyer, ~90s cold compile).
+default = ["helix"]
+helix = ["dep:db", "dep:helix-ast"]
+
 [dependencies]
+# Embedded HelixDB engine (feature `helix`). Pinned to the spike-verified commit.
+db = { git = "https://github.com/HelixDB/helix-db.git", package = "db", rev = "6fde5bc8e3ceb7624124ad18d2ef6ef0bc5d60ff", optional = true }
+helix-ast = { git = "https://github.com/HelixDB/helix-db.git", package = "helix-ast", rev = "6fde5bc8e3ceb7624124ad18d2ef6ef0bc5d60ff", optional = true }
 anyhow = "1.0.104"
 async-stream = "0.3"
 async-trait = "0.1"

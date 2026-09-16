@@ -23,7 +23,11 @@ use futures_util::StreamExt;
 use tokio::time::{sleep_until, Instant};
 
 use crate::llm::{LlmBackend, LlmTurn};
-use crate::memory::{infer_memories, parse_command, MemoryCommand, MemorySource, MemoryStore};
+use crate::memory::chatlog::now_secs;
+use crate::memory::{
+    infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemorySource,
+    MemoryStore, Recall, SqliteRecall,
+};
 use crate::settings::SharedSettings;
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::stt::SttSession;
@@ -93,6 +97,12 @@ impl ServiceConnector for TcpConnector {
 pub struct Pipeline {
     settings: Arc<SharedSettings>,
     memory: Arc<MemoryStore>,
+    /// Retrieval backend for prompt context (SQLite FTS by default; HelixDB
+    /// GraphRAG when configured). Explicit/inferred writes still go to `memory`.
+    recall: Arc<dyn Recall>,
+    /// Optional append-only chat log; each completed turn is recorded for the
+    /// background GraphRAG ingester. `None` disables logging.
+    chatlog: Option<Arc<ChatLog>>,
     system_prompt: String,
     turn_timeout: Duration,
 }
@@ -107,12 +117,29 @@ impl Pipeline {
         system_prompt: impl Into<String>,
         turn_timeout: Duration,
     ) -> Self {
+        let recall: Arc<dyn Recall> = Arc::new(SqliteRecall::new(memory.clone()));
         Self {
             settings,
             memory,
+            recall,
+            chatlog: None,
             system_prompt: system_prompt.into(),
             turn_timeout,
         }
+    }
+
+    /// Swap the retrieval backend used to build prompt context (e.g. the HelixDB
+    /// GraphRAG backend). Defaults to SQLite FTS.
+    pub fn with_recall(mut self, recall: Arc<dyn Recall>) -> Self {
+        self.recall = recall;
+        self
+    }
+
+    /// Attach an append-only chat log; each completed turn is recorded for the
+    /// background GraphRAG ingester.
+    pub fn with_chatlog(mut self, chatlog: Arc<ChatLog>) -> Self {
+        self.chatlog = Some(chatlog);
+        self
     }
 
     /// Build a pipeline around a fixed LLM backend + voice (the Phase-4 behavior).
@@ -204,10 +231,14 @@ impl Pipeline {
 
         // 3. Memory + LLM → reply text, relaying each reply token to the device
         //    so it can render the reply token-by-token (Phase 5).
-        let reply = self
+        let (reply, memories_written) = self
             .generate_reply(&runtime, &transcript, device, on_event)
             .await?;
         on_event(TurnEvent::Reply(reply.clone()));
+
+        // Record the completed turn for the background GraphRAG ingester. Never
+        // let a logging failure break the turn.
+        self.log_turn(&runtime, &transcript, &reply, memories_written);
 
         // 4. Synthesize and stream the reply audio back to the device.
         if !reply.trim().is_empty() {
@@ -324,23 +355,35 @@ impl Pipeline {
         transcript: &str,
         device: &mut DynConnection,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<String>)> {
+        // Memory entries written this turn (for the chat log / ingester).
+        let mut memories_written = Vec::new();
+
         // Explicit command → apply and confirm, skipping the LLM.
         if let Some(cmd) = parse_command(transcript) {
+            if let MemoryCommand::Remember { content, .. } = &cmd {
+                memories_written.push(content.clone());
+            }
             let reply = self.apply_command(cmd, on_event)?;
             on_event(TurnEvent::ReplyToken(reply.clone()));
             device.send(&WyomingEvent::reply_token(&reply)).await.ok();
-            return Ok(reply);
+            return Ok((reply, memories_written));
         }
 
         // Inferred capture from an ordinary turn.
         for (kind, content) in infer_memories(transcript) {
             self.memory.add(kind, &content, MemorySource::Inferred)?;
+            memories_written.push(content.clone());
             on_event(TurnEvent::MemoryStored(content));
         }
 
-        // Build memory context and stream the LLM reply.
-        let context = self.build_context(transcript)?;
+        // Build memory context and stream the LLM reply. A recall failure (e.g. a
+        // transient GraphRAG backend error) must not sink the turn — proceed with
+        // no memory context rather than erroring.
+        let context = self.build_context(transcript).await.unwrap_or_else(|e| {
+            log::warn!("memory recall failed; answering without context: {e:#}");
+            String::new()
+        });
         let system_prompt = if context.is_empty() {
             self.system_prompt.clone()
         } else {
@@ -363,7 +406,35 @@ impl Pipeline {
             device.send(&WyomingEvent::reply_token(&tok)).await.ok();
             on_event(TurnEvent::ReplyToken(tok));
         }
-        Ok(reply.trim().to_string())
+        Ok((reply.trim().to_string(), memories_written))
+    }
+
+    /// Append the completed turn to the chat log, if one is attached. A failure is
+    /// logged and swallowed — logging must never break a turn.
+    fn log_turn(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        transcript: &str,
+        reply: &str,
+        memories_written: Vec<String>,
+    ) {
+        let Some(log) = &self.chatlog else {
+            return;
+        };
+        let id = log.next_id();
+        let record = ChatLogRecord {
+            session_id: format!("s-{id}"),
+            id,
+            ts: now_secs(),
+            transcript: transcript.to_string(),
+            reply: reply.to_string(),
+            memories_written,
+            llm_backend: runtime.llm_backend.clone(),
+            model: runtime.llm_model.clone(),
+        };
+        if let Err(e) = log.append(&record) {
+            log::warn!("failed to append chat log record: {e:#}");
+        }
     }
 
     /// Apply an explicit memory command; returns the spoken confirmation.
@@ -393,12 +464,13 @@ impl Pipeline {
         })
     }
 
-    /// Gather memory entries relevant to the transcript as prompt context.
-    fn build_context(&self, transcript: &str) -> Result<String> {
-        let hits = self.memory.search(transcript, 8)?;
+    /// Gather memory entries relevant to the transcript as prompt context, via the
+    /// configured recall backend (SQLite FTS by default; HelixDB GraphRAG when set).
+    async fn build_context(&self, transcript: &str) -> Result<String> {
+        let hits = self.recall.recall(transcript, 8).await?;
         Ok(hits
             .iter()
-            .map(|m| format!("- {}", m.content))
+            .map(|c| format!("- {c}"))
             .collect::<Vec<_>>()
             .join("\n"))
     }

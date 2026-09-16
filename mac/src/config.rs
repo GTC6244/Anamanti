@@ -53,6 +53,57 @@ pub struct Config {
     pub system_prompt: String,
     /// Idle timeout for a stalled turn.
     pub turn_timeout: Duration,
+    /// Memory retrieval backend: `sqlite` (FTS, default) or `helix` (GraphRAG).
+    pub memory_backend: MemoryBackendChoice,
+    /// Append-only JSONL chat log path (always written; the ingester's queue).
+    pub chatlog_path: PathBuf,
+    /// Embedded HelixDB on-disk store root (used when `memory_backend = helix`).
+    pub helix_path: PathBuf,
+    /// GraphRAG embedding + extraction settings (used when `memory_backend = helix`).
+    pub graphrag: GraphRagConfig,
+}
+
+/// Which memory retrieval backend the pipeline uses for prompt context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryBackendChoice {
+    /// SQLite FTS over the explicit/inferred memory store (default).
+    Sqlite,
+    /// Embedded HelixDB GraphRAG (vector KNN + graph expansion).
+    Helix,
+}
+
+/// Settings for the GraphRAG memory (embeddings + background entity extraction).
+/// API keys are read from the environment at wiring time, not stored here.
+#[derive(Debug, Clone)]
+pub struct GraphRagConfig {
+    /// OpenAI API base (overridable for testing).
+    pub openai_base_url: String,
+    /// Embedding model (default `text-embedding-3-small`).
+    pub embed_model: String,
+    /// Embedding dimensionality (native 1536; reducible via OpenAI's `dimensions`).
+    pub embed_dims: usize,
+    /// Anthropic API base for entity extraction.
+    pub anthropic_base_url: String,
+    /// Entity-extraction chat model (default Claude Haiku 4.5).
+    pub extract_model: String,
+    /// How often the background ingester drains the chat log.
+    pub ingest_interval: Duration,
+    /// KNN fan-out per vector search at recall time.
+    pub recall_k: usize,
+}
+
+impl Default for GraphRagConfig {
+    fn default() -> Self {
+        Self {
+            openai_base_url: "https://api.openai.com".to_string(),
+            embed_model: "text-embedding-3-small".to_string(),
+            embed_dims: 1536,
+            anthropic_base_url: "https://api.anthropic.com".to_string(),
+            extract_model: "claude-haiku-4-5".to_string(),
+            ingest_interval: Duration::from_secs(30),
+            recall_k: 6,
+        }
+    }
 }
 
 impl Default for Config {
@@ -71,6 +122,10 @@ impl Default for Config {
             db_path: PathBuf::from("ambient_memory.sqlite"),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             turn_timeout: Duration::from_secs(30),
+            memory_backend: MemoryBackendChoice::Sqlite,
+            chatlog_path: PathBuf::from("ambient_chatlog.jsonl"),
+            helix_path: PathBuf::from("ambient_helix"),
+            graphrag: GraphRagConfig::default(),
         }
     }
 }
@@ -110,6 +165,41 @@ impl Config {
             },
         };
 
+        let memory_backend = match env::var("AMBIENT_MEMORY_BACKEND")
+            .unwrap_or_else(|_| "sqlite".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "helix" | "graphrag" => MemoryBackendChoice::Helix,
+            _ => MemoryBackendChoice::Sqlite,
+        };
+
+        let mut graphrag = GraphRagConfig::default();
+        if let Ok(model) = env::var("AMBIENT_EMBED_MODEL") {
+            graphrag.embed_model = model;
+        }
+        if let Some(dims) = env::var("AMBIENT_EMBED_DIMS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            graphrag.embed_dims = dims;
+        }
+        if let Ok(model) = env::var("AMBIENT_EXTRACT_MODEL") {
+            graphrag.extract_model = model;
+        }
+        if let Ok(url) = env::var("AMBIENT_OPENAI_BASE_URL") {
+            graphrag.openai_base_url = url;
+        }
+        if let Ok(url) = env::var("AMBIENT_ANTHROPIC_BASE_URL") {
+            graphrag.anthropic_base_url = url;
+        }
+        if let Some(secs) = env::var("AMBIENT_INGEST_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            graphrag.ingest_interval = Duration::from_secs(secs);
+        }
+
         Ok(Self {
             bind_addr: env_addr("AMBIENT_BIND_ADDR", d.bind_addr)?,
             service_name: env::var("AMBIENT_SERVICE_NAME").unwrap_or(d.service_name),
@@ -122,6 +212,14 @@ impl Config {
                 .unwrap_or(d.db_path),
             system_prompt: env::var("AMBIENT_SYSTEM_PROMPT").unwrap_or(d.system_prompt),
             turn_timeout: d.turn_timeout,
+            memory_backend,
+            chatlog_path: env::var("AMBIENT_CHATLOG_PATH")
+                .map(PathBuf::from)
+                .unwrap_or(d.chatlog_path),
+            helix_path: env::var("AMBIENT_HELIX_PATH")
+                .map(PathBuf::from)
+                .unwrap_or(d.helix_path),
+            graphrag,
         })
     }
 
