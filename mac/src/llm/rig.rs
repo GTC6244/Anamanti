@@ -41,6 +41,15 @@ use super::{LlmBackend, LlmTurn, ReplyStream};
 /// calls can never spin forever. Each round is one streamed completion pass.
 pub const MAX_TOOL_ROUNDS: usize = 4;
 
+/// Appended to the system preamble when tools are available, so the model
+/// actually calls `internet_search` for real-time questions instead of refusing
+/// with "I don't have real-time access".
+const TOOL_GUIDANCE: &str = "You have an `internet_search` tool that fetches live \
+information from the web. Whenever the user asks about current events, news, weather, \
+sports, prices, or any real-time or factual detail you are not certain of, you MUST call \
+`internet_search` first and base your answer on its results. Never claim you lack \
+real-time or internet access — use the tool.";
+
 /// Default number of search results to fold into a tool result.
 pub const DEFAULT_SEARCH_RESULTS: u8 = 3;
 
@@ -451,10 +460,17 @@ where
     let (prompt, history) = messages
         .split_last()
         .expect("conversation always has at least the user message");
+    // When tools are available, tell the model to use them (some models otherwise
+    // refuse real-time questions instead of calling the tool).
+    let preamble = if tool_defs.is_empty() {
+        system_prompt.to_string()
+    } else {
+        format!("{system_prompt}\n\n{TOOL_GUIDANCE}")
+    };
     let mut builder = model
         .completion_request(prompt.clone())
         .messages(history.iter().cloned())
-        .preamble(system_prompt.to_string());
+        .preamble(preamble);
     if !tool_defs.is_empty() {
         builder = builder.tools(tool_defs.to_vec());
     }
