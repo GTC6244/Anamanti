@@ -28,6 +28,54 @@ impl OllamaBackend {
     }
 }
 
+/// Query the models installed in an Ollama server via `GET /api/tags`, returning
+/// their names (e.g. `["qwen2.5:7b", "llama3.2:latest"]`). Used by the startup
+/// model check so a missing model surfaces immediately instead of as a per-turn
+/// 404 at request time.
+pub async fn available_models(base_url: &str) -> Result<Vec<String>> {
+    let base_url = base_url.trim_end_matches('/');
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/api/tags"))
+        .send()
+        .await
+        .context("GET /api/tags from Ollama")?
+        .error_for_status()
+        .context("Ollama /api/tags returned an error status")?;
+    let body: serde_json::Value = resp.json().await.context("parsing /api/tags JSON")?;
+    Ok(body
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Outcome of checking a configured model against what Ollama has installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelCheck {
+    /// The configured model is installed and ready.
+    Available,
+    /// The configured model is missing; fall back to this installed model.
+    FallBack(String),
+    /// No models are installed at all — turns will fail until one is pulled.
+    NonePulled,
+}
+
+/// Decide what to do given the configured model and the installed set. Pure so it
+/// can be unit-tested; the loud logging + config rewrite live in `main`.
+pub fn resolve_model(configured: &str, available: &[String]) -> ModelCheck {
+    if available.iter().any(|m| m == configured) {
+        ModelCheck::Available
+    } else if let Some(first) = available.first() {
+        ModelCheck::FallBack(first.clone())
+    } else {
+        ModelCheck::NonePulled
+    }
+}
+
 #[async_trait]
 impl LlmBackend for OllamaBackend {
     fn name(&self) -> &str {
@@ -119,6 +167,46 @@ mod tests {
         let backend = OllamaBackend::new(format!("http://{addr}"), "test-model");
         let stream = backend.respond(LlmTurn::new("sys", "hello")).await.unwrap();
         assert_eq!(collect_reply(stream).await.unwrap(), "Hi there");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn resolve_model_picks_available_or_falls_back() {
+        let installed = vec!["qwen2.5:7b".to_string(), "llama3.2:latest".to_string()];
+        assert_eq!(
+            resolve_model("qwen2.5:7b", &installed),
+            ModelCheck::Available
+        );
+        assert_eq!(
+            resolve_model("llama3.2", &installed),
+            ModelCheck::FallBack("qwen2.5:7b".to_string())
+        );
+        assert_eq!(resolve_model("anything", &[]), ModelCheck::NonePulled);
+    }
+
+    #[tokio::test]
+    async fn available_models_parses_tags_response() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            let body = r#"{"models":[{"name":"qwen2.5:7b"},{"name":"nomic-embed-text:latest"}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+
+        let models = available_models(&format!("http://{addr}")).await.unwrap();
+        assert_eq!(models, vec!["qwen2.5:7b", "nomic-embed-text:latest"]);
         server.await.unwrap();
     }
 }

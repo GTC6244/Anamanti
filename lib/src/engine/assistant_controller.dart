@@ -28,6 +28,12 @@ import 'package:ambient_display/src/rust/api/engine.dart';
 /// `startWakeWordEngine`; tests pass a fake.
 typedef EngineStreamFactory = Stream<WakeWordEvent> Function(WakeWordConfig config);
 
+/// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
+/// connection/handshake succeeded. Production wires this to a control-protocol
+/// round-trip (mDNS discover + connect); tests inject a fake. When left null the
+/// offline poll is disabled.
+typedef OrchestratorProbe = Future<bool> Function();
+
 /// Where the current voice turn is, from the UI's point of view.
 enum TurnPhase {
   /// No active turn — the ambient/idle screen (slideshow) is showing.
@@ -118,28 +124,39 @@ class AssistantController extends ChangeNotifier {
   AssistantController({
     required WakeWordConfig config,
     EngineStreamFactory? startEngine,
+    OrchestratorProbe? probeOrchestrator,
     Duration minBackoff = const Duration(seconds: 1),
     Duration maxBackoff = const Duration(seconds: 30),
+    Duration offlinePollInterval = const Duration(seconds: 3),
   })  : _config = config,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
+        _probe = probeOrchestrator,
         _minBackoff = minBackoff,
-        _maxBackoff = maxBackoff;
+        _maxBackoff = maxBackoff,
+        _offlinePollInterval = offlinePollInterval;
 
   static Stream<WakeWordEvent> _defaultEngineStream(WakeWordConfig config) =>
       startWakeWordEngine(config: config);
 
   final WakeWordConfig _config;
   final EngineStreamFactory _startEngine;
+
+  /// Reachability probe used to auto-recover the online status while idle, instead
+  /// of waiting for the next wake word. Null disables the poll (e.g. in tests).
+  final OrchestratorProbe? _probe;
   final Duration _minBackoff;
   final Duration _maxBackoff;
+  final Duration _offlinePollInterval;
 
   AssistantState _state = const AssistantState();
   AssistantState get state => _state;
 
   StreamSubscription<WakeWordEvent>? _sub;
   Timer? _reconnectTimer;
+  Timer? _offlinePollTimer;
+  bool _probing = false;
   Duration _backoff = const Duration(seconds: 1);
   bool _disposed = false;
 
@@ -149,6 +166,8 @@ class AssistantController extends ChangeNotifier {
     _sub?.cancel();
     _backoff = _minBackoff;
     _listen();
+    // Start probing immediately if we're offline (don't wait for the first event).
+    _syncOfflinePoll();
   }
 
   void _listen() {
@@ -258,12 +277,50 @@ class AssistantController extends ChangeNotifier {
     if (_disposed) return;
     _state = next;
     notifyListeners();
+    // Keep the offline poll in sync with every state change: run it while we're
+    // offline and idle, stop it as soon as we're online or a turn is in flight.
+    _syncOfflinePoll();
+  }
+
+  /// Start/stop the reachability poll based on current state. While offline and
+  /// not mid-turn, probe the orchestrator every [_offlinePollInterval] so the UI
+  /// recovers to "online" on its own instead of waiting for the next wake word.
+  void _syncOfflinePoll() {
+    if (_probe == null) return; // feature disabled (no probe injected)
+    final shouldPoll = !_disposed && !_state.online && !_state.turnActive;
+    if (shouldPoll) {
+      _offlinePollTimer ??=
+          Timer.periodic(_offlinePollInterval, (_) => _probeOnce());
+    } else {
+      _offlinePollTimer?.cancel();
+      _offlinePollTimer = null;
+    }
+  }
+
+  Future<void> _probeOnce() async {
+    // Skip if state changed since the tick was scheduled, or a probe is in flight
+    // (a slow probe must not stack up behind the periodic timer).
+    if (_disposed || _probing || _state.online || _state.turnActive) return;
+    _probing = true;
+    var reachable = false;
+    try {
+      reachable = await _probe!();
+    } catch (_) {
+      reachable = false;
+    }
+    _probing = false;
+    if (_disposed || !reachable) return;
+    // Only flip to online if we're still idle+offline (a turn may have started).
+    if (!_state.online && !_state.turnActive) {
+      _emit(_state.copyWith(online: true, statusMessage: 'Ready'));
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
     _reconnectTimer?.cancel();
+    _offlinePollTimer?.cancel();
     _sub?.cancel();
     super.dispose();
   }

@@ -46,7 +46,7 @@ fn main() -> Result<()> {
 async fn run() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let config = Config::from_env().context("loading configuration")?;
+    let mut config = Config::from_env().context("loading configuration")?;
     log::info!(
         "starting orchestrator: bind={} stt={} tts={} llm={} db={}",
         config.bind_addr,
@@ -55,6 +55,12 @@ async fn run() -> Result<()> {
         config.llm_label(),
         config.db_path.display(),
     );
+
+    // Startup model check: when using Ollama, verify the configured model is
+    // actually installed. A missing model otherwise fails silently as a per-turn
+    // 404 (transcript shows, no reply). Surface it loudly at boot, and fall back
+    // to an installed model so the assistant still responds.
+    ensure_ollama_model(&mut config).await;
 
     let memory = Arc::new(MemoryStore::open(&config.db_path).context("opening memory store")?);
     log::info!("memory store holds {} entries", memory.count()?);
@@ -123,6 +129,43 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Startup model check for the Ollama backend: verify the configured model is
+/// installed; if not, fall back to an installed one (with a loud warning) so a
+/// misconfigured/absent model fails visibly at boot instead of as a silent
+/// per-turn 404. No-op for non-Ollama backends or if Ollama is unreachable.
+async fn ensure_ollama_model(config: &mut Config) {
+    use ambient_orchestrator::config::LlmChoice;
+    use ambient_orchestrator::llm::ollama::{self, ModelCheck};
+
+    let LlmChoice::Ollama { url, model } = &config.llm else {
+        return;
+    };
+    let (url, model) = (url.clone(), model.clone());
+    match ollama::available_models(&url).await {
+        Ok(models) => match ollama::resolve_model(&model, &models) {
+            ModelCheck::Available => log::info!("ollama model '{model}' is installed"),
+            ModelCheck::FallBack(fallback) => {
+                log::warn!(
+                    "ollama model '{model}' is not installed at {url}; falling back to '{fallback}'. \
+                     Installed: {models:?}. Set AMBIENT_OLLAMA_MODEL or run `ollama pull {model}`."
+                );
+                config.llm = LlmChoice::Ollama {
+                    url,
+                    model: fallback,
+                };
+            }
+            ModelCheck::NonePulled => log::error!(
+                "no models are installed in ollama at {url}; LLM turns will fail until you \
+                 `ollama pull {model}` (or start Ollama)."
+            ),
+        },
+        Err(e) => log::warn!(
+            "could not query ollama models at {url} ({e:#}); proceeding with '{model}' \
+             (turns will fail if it isn't installed)"
+        ),
+    }
 }
 
 /// Build the HelixDB GraphRAG recall backend and spawn the background ingester.
