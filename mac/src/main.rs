@@ -88,6 +88,24 @@ async fn run() -> Result<()> {
             v.llm_backend,
             v.web_search,
         );
+        // A very common footgun: selecting the rig engine in a binary that wasn't
+        // built with `--features rig`. It silently falls back to native (no tools),
+        // so web search never runs. Say so loudly.
+        #[cfg(not(feature = "rig"))]
+        if v.engine == ambient_orchestrator::settings::LlmEngine::Rig {
+            log::warn!(
+                "engine=rig requested but this binary was built WITHOUT the `rig` feature; \
+                 using native backends (NO tools / no web search). Rebuild with \
+                 `cargo run --features rig` to enable rig + the internet_search tool."
+            );
+        }
+        #[cfg(feature = "rig")]
+        if v.web_search && v.engine != ambient_orchestrator::settings::LlmEngine::Rig {
+            log::warn!(
+                "web_search is on but engine is not rig; the web-search tool only runs on \
+                 the rig engine. Set AMBIENT_LLM_ENGINE=rig (or switch it on the config page)."
+            );
+        }
     }
 
     let mut pipeline = Pipeline::with_settings(
