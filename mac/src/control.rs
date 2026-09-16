@@ -15,7 +15,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::memory::MemoryStore;
-use crate::settings::{SettingsUpdate, SharedSettings};
+use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 use crate::wyoming::protocol::{types, WyomingEvent};
 use crate::wyoming::DynConnection;
 
@@ -90,10 +90,20 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         Some(Value::Null) => Some(None), // clear
         Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
     };
+    let engine = data
+        .get("engine")
+        .and_then(Value::as_str)
+        .map(|e| match e.to_lowercase().as_str() {
+            "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+            _ => LlmEngine::Native,
+        });
+    let web_search = data.get("web_search").and_then(Value::as_bool);
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
         tts_voice,
+        engine,
+        web_search,
     }
 }
 
@@ -107,8 +117,18 @@ fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> Wyom
             "llm_backend": v.llm_backend,
             "llm_model": v.llm_model,
             "tts_voice": v.tts_voice,
+            "engine": engine_label(v.engine),
+            "web_search": v.web_search,
         }),
     )
+}
+
+/// Canonical string label for an engine (for JSON responses).
+fn engine_label(engine: LlmEngine) -> &'static str {
+    match engine {
+        LlmEngine::Native => "native",
+        LlmEngine::Rig => "rig",
+    }
 }
 
 fn memories_response(memory: &MemoryStore) -> WyomingEvent {
@@ -168,8 +188,6 @@ mod tests {
     fn describe_reports_current_settings() {
         let s = SharedSettings::new(
             crate::settings::LlmFactory {
-                engine: crate::settings::LlmEngine::Native,
-                web_search: false,
                 ollama_url: "http://x".into(),
                 anthropic_base_url: "http://y".into(),
                 anthropic_api_key: None,
@@ -177,6 +195,8 @@ mod tests {
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
+                engine: crate::settings::LlmEngine::Native,
+                web_search: false,
                 llm_backend: "ollama".into(),
                 llm_model: Some("llama3.2".into()),
                 tts_voice: Some("amy".into()),

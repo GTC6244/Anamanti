@@ -300,8 +300,6 @@ impl Config {
                 .unwrap_or(1024),
         };
         LlmFactory {
-            engine: llm_engine_from_env(),
-            web_search: web_search_from_env(),
             ollama_url: env::var("AMBIENT_OLLAMA_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string()),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
@@ -310,24 +308,38 @@ impl Config {
         }
     }
 
+    /// The initial engine + web-search selection from the environment. These seed
+    /// the live [`RuntimeSettings`] and can be changed at runtime (config page /
+    /// control frame).
+    pub fn initial_engine(&self) -> LlmEngine {
+        llm_engine_from_env()
+    }
+    pub fn initial_web_search(&self) -> bool {
+        web_search_from_env()
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
     /// needs its key at startup, matching [`Self::build_llm`]).
     pub fn shared_settings(&self) -> Result<Arc<SharedSettings>> {
         let factory = self.llm_factory();
+        let engine = self.initial_engine();
+        let web_search = self.initial_web_search();
         let (backend, model) = match &self.llm {
             LlmChoice::Mock => ("mock", None),
             LlmChoice::Ollama { model, .. } => ("ollama", Some(model.clone())),
             LlmChoice::Anthropic { model, .. } => ("anthropic", Some(model.clone())),
         };
         let (llm, llm_backend, llm_model) = factory
-            .build(backend, model.as_deref())
+            .build(engine, web_search, backend, model.as_deref())
             .context("building the initial LLM backend")?;
         Ok(SharedSettings::new(
             factory,
             RuntimeSettings {
                 llm,
+                engine,
+                web_search,
                 llm_backend,
                 llm_model,
                 tts_voice: self.tts_voice.clone(),

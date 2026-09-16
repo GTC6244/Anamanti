@@ -99,7 +99,7 @@ Status — **delivered** in `mac/src/webconfig.rs` (dependency-free HTTP over to
 
 - `GET /` — the static HTML config page.
 - `GET /config` — live settings as JSON.
-- `POST /config` — apply `{llm_backend?, llm_model?, tts_voice?}` (same JSON shape as the `ambient-set-settings` control frame; `tts_voice: null` clears).
+- `POST /config` — apply `{engine?, llm_backend?, llm_model?, tts_voice?, web_search?}` (same JSON shape as the `ambient-set-settings` control frame; `tts_voice: null` clears). **Engine (native/rig) and the web-search tool are now runtime-swappable from the page** — flip them live between voice tests, no restart. (Web search needs a rig-built binary and a search key; see below.)
 - Binds to `127.0.0.1:8730` by default (no auth → loopback only); override or disable with `AMBIENT_CONFIG_ADDR` (`off` to disable). Best-effort: a bind failure logs and disables the page, never stops the orchestrator.
 - Backed directly by the existing `SharedSettings` — so edits **apply live** (atomic hot-swap, no restart), resolving the open decision below. 8 unit/socket tests added; full suite green on both `--no-default-features` and the default `helix` build.
 

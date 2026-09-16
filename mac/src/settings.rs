@@ -35,12 +35,6 @@ pub enum LlmEngine {
 /// from the environment/config so a runtime swap never re-reads `env`.
 #[derive(Clone)]
 pub struct LlmFactory {
-    /// Which engine backs the ollama/anthropic backends (native HTTP vs rig-core).
-    pub engine: LlmEngine,
-    /// Enable the rig web-search tool (`internet_search`). Only takes effect with
-    /// the `rig` engine; ignored by the native backends.
-    #[cfg_attr(not(feature = "rig"), allow(dead_code))]
-    pub web_search: bool,
     /// Local Ollama / llama.cpp base URL.
     pub ollama_url: String,
     /// Cloud Anthropic API base URL.
@@ -67,9 +61,14 @@ impl LlmFactory {
     /// resolved model so callers can report exactly what took effect.
     pub fn build(
         &self,
+        engine: LlmEngine,
+        web_search: bool,
         backend: &str,
         model: Option<&str>,
     ) -> Result<(Arc<dyn LlmBackend>, String, Option<String>)> {
+        // `engine`/`web_search` only affect the ollama/anthropic arms under the
+        // `rig` feature; silence unused warnings on native-only builds.
+        let _ = (engine, web_search);
         match backend.to_lowercase().as_str() {
             "mock" => Ok((Arc::new(MockLlm::default()), "mock".to_string(), None)),
             "anthropic" | "claude" => {
@@ -80,14 +79,14 @@ impl LlmFactory {
                     .or(Self::default_model("anthropic"))
                     .unwrap_or("claude-opus-5")
                     .to_string();
-                let backend: Arc<dyn LlmBackend> = match self.engine {
+                let backend: Arc<dyn LlmBackend> = match engine {
                     #[cfg(feature = "rig")]
                     LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::anthropic(
                         &self.anthropic_base_url,
                         &key,
                         &model,
                         self.anthropic_max_tokens,
-                        crate::llm::rig::tools_from_flag(self.web_search),
+                        crate::llm::rig::tools_from_flag(web_search),
                     )?),
                     _ => Arc::new(AnthropicBackend::new(
                         &self.anthropic_base_url,
@@ -100,12 +99,12 @@ impl LlmFactory {
             }
             "ollama" => {
                 let model = model.unwrap_or("llama3.2").to_string();
-                let backend: Arc<dyn LlmBackend> = match self.engine {
+                let backend: Arc<dyn LlmBackend> = match engine {
                     #[cfg(feature = "rig")]
                     LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::ollama(
                         &self.ollama_url,
                         &model,
-                        crate::llm::rig::tools_from_flag(self.web_search),
+                        crate::llm::rig::tools_from_flag(web_search),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
                 };
@@ -123,6 +122,10 @@ impl LlmFactory {
 pub struct RuntimeSettings {
     /// The currently selected LLM backend.
     pub llm: Arc<dyn LlmBackend>,
+    /// Which engine backs ollama/anthropic (native HTTP vs rig-core).
+    pub engine: LlmEngine,
+    /// Whether the rig web-search tool is enabled (rig engine only).
+    pub web_search: bool,
     /// Canonical label of the selected backend (`ollama` / `anthropic` / `mock`).
     pub llm_backend: String,
     /// The resolved model name, if the backend uses one.
@@ -132,12 +135,14 @@ pub struct RuntimeSettings {
 }
 
 /// A description of the settings currently in effect, for reporting back to the
-/// device settings screen.
+/// device settings screen or the config page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsView {
     pub llm_backend: String,
     pub llm_model: Option<String>,
     pub tts_voice: Option<String>,
+    pub engine: LlmEngine,
+    pub web_search: bool,
 }
 
 /// A requested settings change. Absent fields are left unchanged; a `tts_voice` of
@@ -148,6 +153,10 @@ pub struct SettingsUpdate {
     pub llm_model: Option<String>,
     /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(v))` = set to `v`.
     pub tts_voice: Option<Option<String>>,
+    /// Switch the LLM engine (native vs rig).
+    pub engine: Option<LlmEngine>,
+    /// Toggle the rig web-search tool.
+    pub web_search: Option<bool>,
 }
 
 /// Thread-safe holder for the runtime settings plus the factory that rebuilds
@@ -176,8 +185,6 @@ impl SharedSettings {
         tts_voice: Option<String>,
     ) -> Arc<Self> {
         let factory = LlmFactory {
-            engine: LlmEngine::Native,
-            web_search: false,
             ollama_url: "http://127.0.0.1:11434".to_string(),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             anthropic_api_key: None,
@@ -187,6 +194,8 @@ impl SharedSettings {
             factory,
             RuntimeSettings {
                 llm,
+                engine: LlmEngine::Native,
+                web_search: false,
                 llm_backend: llm_backend.into(),
                 llm_model: None,
                 tts_voice,
@@ -207,6 +216,8 @@ impl SharedSettings {
             llm_backend: s.llm_backend.clone(),
             llm_model: s.llm_model.clone(),
             tts_voice: s.tts_voice.clone(),
+            engine: s.engine,
+            web_search: s.web_search,
         }
     }
 
@@ -215,9 +226,15 @@ impl SharedSettings {
     /// returned; on failure (e.g. anthropic requested with no key) the current
     /// settings are left untouched and the error is returned.
     pub fn apply(&self, update: &SettingsUpdate) -> Result<SettingsView> {
-        // Decide the target backend/model, building the new LLM *before* taking the
-        // write lock so a failed build never leaves the settings half-changed.
-        let rebuilt = if update.llm_backend.is_some() || update.llm_model.is_some() {
+        // Any of these change which backend object we need, so rebuild the LLM.
+        let needs_rebuild = update.llm_backend.is_some()
+            || update.llm_model.is_some()
+            || update.engine.is_some()
+            || update.web_search.is_some();
+
+        // Build the new LLM *before* taking the write lock so a failed build never
+        // leaves the settings half-changed.
+        let (rebuilt, target_engine, target_web_search) = if needs_rebuild {
             let current = self.inner.read().unwrap().clone();
             let target_backend = update
                 .llm_backend
@@ -230,12 +247,20 @@ impl SharedSettings {
                 (Some(_), None) => None,
                 (None, None) => current.llm_model.clone(),
             };
-            Some(
-                self.factory
-                    .build(&target_backend, target_model.as_deref())?,
+            let target_engine = update.engine.unwrap_or(current.engine);
+            let target_web_search = update.web_search.unwrap_or(current.web_search);
+            (
+                Some(self.factory.build(
+                    target_engine,
+                    target_web_search,
+                    &target_backend,
+                    target_model.as_deref(),
+                )?),
+                target_engine,
+                target_web_search,
             )
         } else {
-            None
+            (None, LlmEngine::default(), false)
         };
 
         let mut w = self.inner.write().unwrap();
@@ -243,6 +268,8 @@ impl SharedSettings {
             w.llm = llm;
             w.llm_backend = label;
             w.llm_model = model;
+            w.engine = target_engine;
+            w.web_search = target_web_search;
         }
         if let Some(voice) = &update.tts_voice {
             w.tts_voice = voice.clone().filter(|s| !s.is_empty());
@@ -251,6 +278,8 @@ impl SharedSettings {
             llm_backend: w.llm_backend.clone(),
             llm_model: w.llm_model.clone(),
             tts_voice: w.tts_voice.clone(),
+            engine: w.engine,
+            web_search: w.web_search,
         })
     }
 }
@@ -261,8 +290,6 @@ mod tests {
 
     fn factory_with_key(key: Option<&str>) -> LlmFactory {
         LlmFactory {
-            engine: LlmEngine::Native,
-            web_search: false,
             ollama_url: "http://127.0.0.1:11434".to_string(),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             anthropic_api_key: key.map(String::from),
@@ -271,11 +298,15 @@ mod tests {
     }
 
     fn shared(factory: LlmFactory) -> Arc<SharedSettings> {
-        let (llm, label, model) = factory.build("ollama", Some("llama3.2")).unwrap();
+        let (llm, label, model) = factory
+            .build(LlmEngine::Native, false, "ollama", Some("llama3.2"))
+            .unwrap();
         SharedSettings::new(
             factory,
             RuntimeSettings {
                 llm,
+                engine: LlmEngine::Native,
+                web_search: false,
                 llm_backend: label,
                 llm_model: model,
                 tts_voice: None,

@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::settings::{SettingsUpdate, SharedSettings};
+use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 
 /// The single static page. Inlined so the module is self-contained and needs no
 /// asset packaging. Plain HTML + a little `fetch` JS — no framework, no build step.
@@ -47,11 +47,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
   .ok { background: rgba(46,160,67,0.15); }
   .err { background: rgba(248,81,73,0.15); }
   .hint { opacity: 0.6; font-weight: 400; font-size: 0.85rem; }
+  label.check { display: flex; align-items: center; gap: 0.5rem; font-weight: 600; }
+  label.check input { width: auto; }
 </style>
 </head>
 <body>
   <h1>Ambient Orchestrator</h1>
   <p class="sub">Runtime settings — changes apply live, no restart.</p>
+
+  <label>Engine
+    <select id="engine">
+      <option value="native">native (HTTP clients)</option>
+      <option value="rig">rig (agent framework + tools)</option>
+    </select>
+  </label>
 
   <label>LLM backend
     <select id="llm_backend">
@@ -59,6 +68,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <option value="anthropic">anthropic (cloud)</option>
       <option value="mock">mock (offline)</option>
     </select>
+  </label>
+
+  <label class="check">
+    <input id="web_search" type="checkbox">
+    Web search tool <span class="hint">(rig engine only; needs a search key for real results)</span>
   </label>
 
   <label>Model <span class="hint">e.g. qwen2.5, llama3.2, claude-opus-5</span>
@@ -82,9 +96,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
   }
 
   function fill(v) {
+    $('engine').value = v.engine || 'native';
     $('llm_backend').value = v.llm_backend || 'ollama';
     $('llm_model').value = v.llm_model || '';
     $('tts_voice').value = v.tts_voice || '';
+    $('web_search').checked = !!v.web_search;
   }
 
   async function load() {
@@ -99,9 +115,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
   async function save() {
     const body = {
+      engine: $('engine').value,
       llm_backend: $('llm_backend').value,
       llm_model: $('llm_model').value.trim() || null,
       tts_voice: $('tts_voice').value.trim() || null,
+      web_search: $('web_search').checked,
     };
     try {
       const r = await fetch('/config', {
@@ -247,12 +265,18 @@ fn route(
 /// mirrors the Wyoming `ambient-settings` response.
 fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> String {
     let v = settings.view();
+    let engine = match v.engine {
+        LlmEngine::Native => "native",
+        LlmEngine::Rig => "rig",
+    };
     json!({
         "ok": ok,
         "message": message,
         "llm_backend": v.llm_backend,
         "llm_model": v.llm_model,
         "tts_voice": v.tts_voice,
+        "engine": engine,
+        "web_search": v.web_search,
     })
     .to_string()
 }
@@ -272,10 +296,20 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         Some(Value::Null) => Some(None), // clear
         Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
     };
+    let engine = data
+        .get("engine")
+        .and_then(Value::as_str)
+        .map(|e| match e.to_lowercase().as_str() {
+            "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+            _ => LlmEngine::Native,
+        });
+    let web_search = data.get("web_search").and_then(Value::as_bool);
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
         tts_voice,
+        engine,
+        web_search,
     }
 }
 
@@ -373,6 +407,23 @@ mod tests {
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(s.view(), before, "a rejected change leaves settings intact");
+    }
+
+    #[test]
+    fn post_config_toggles_engine_and_web_search() {
+        let s = settings();
+        let (status, _c, out) = route(
+            "POST",
+            "/config",
+            br#"{"engine":"rig","web_search":true}"#,
+            &s,
+        );
+        assert_eq!(status, "200 OK");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["engine"], "rig");
+        assert_eq!(v["web_search"], true);
+        assert_eq!(s.view().web_search, true);
     }
 
     #[test]

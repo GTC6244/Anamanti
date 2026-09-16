@@ -80,6 +80,16 @@ async fn run() -> Result<()> {
     );
     log::info!("chat log at {}", config.chatlog_path.display());
 
+    {
+        let v = settings.view();
+        log::info!(
+            "llm: engine={:?} backend={} web_search={} (change at runtime via the config page)",
+            v.engine,
+            v.llm_backend,
+            v.web_search,
+        );
+    }
+
     let mut pipeline = Pipeline::with_settings(
         settings,
         memory,
