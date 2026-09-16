@@ -317,6 +317,17 @@ impl Config {
     pub fn initial_web_search(&self) -> bool {
         web_search_from_env()
     }
+    /// Initial search provider (`AMBIENT_SEARCH_PROVIDER`, default `duckduckgo`).
+    pub fn initial_search_provider(&self) -> String {
+        env::var("AMBIENT_SEARCH_PROVIDER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "duckduckgo".to_string())
+    }
+    /// Initial search API key (`TAVILY_API_KEY`), if set.
+    pub fn initial_search_api_key(&self) -> Option<String> {
+        env::var("TAVILY_API_KEY").ok().filter(|s| !s.is_empty())
+    }
 
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
@@ -326,13 +337,22 @@ impl Config {
         let factory = self.llm_factory();
         let engine = self.initial_engine();
         let web_search = self.initial_web_search();
+        let search_provider = self.initial_search_provider();
+        let search_api_key = self.initial_search_api_key();
         let (backend, model) = match &self.llm {
             LlmChoice::Mock => ("mock", None),
             LlmChoice::Ollama { model, .. } => ("ollama", Some(model.clone())),
             LlmChoice::Anthropic { model, .. } => ("anthropic", Some(model.clone())),
         };
         let (llm, llm_backend, llm_model) = factory
-            .build(engine, web_search, backend, model.as_deref())
+            .build(
+                engine,
+                web_search,
+                &search_provider,
+                search_api_key.as_deref(),
+                backend,
+                model.as_deref(),
+            )
             .context("building the initial LLM backend")?;
         Ok(SharedSettings::new(
             factory,
@@ -340,6 +360,8 @@ impl Config {
                 llm,
                 engine,
                 web_search,
+                search_provider,
+                search_api_key,
                 llm_backend,
                 llm_model,
                 tts_voice: self.tts_voice.clone(),

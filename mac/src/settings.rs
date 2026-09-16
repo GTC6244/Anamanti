@@ -63,12 +63,14 @@ impl LlmFactory {
         &self,
         engine: LlmEngine,
         web_search: bool,
+        search_provider: &str,
+        search_api_key: Option<&str>,
         backend: &str,
         model: Option<&str>,
     ) -> Result<(Arc<dyn LlmBackend>, String, Option<String>)> {
-        // `engine`/`web_search` only affect the ollama/anthropic arms under the
-        // `rig` feature; silence unused warnings on native-only builds.
-        let _ = (engine, web_search);
+        // These only affect the ollama/anthropic arms under the `rig` feature;
+        // silence unused warnings on native-only builds.
+        let _ = (engine, web_search, search_provider, search_api_key);
         match backend.to_lowercase().as_str() {
             "mock" => Ok((Arc::new(MockLlm::default()), "mock".to_string(), None)),
             "anthropic" | "claude" => {
@@ -86,7 +88,7 @@ impl LlmFactory {
                         &key,
                         &model,
                         self.anthropic_max_tokens,
-                        crate::llm::rig::tools_from_flag(web_search),
+                        crate::llm::rig::tools_from_config(web_search, search_provider, search_api_key),
                     )?),
                     _ => Arc::new(AnthropicBackend::new(
                         &self.anthropic_base_url,
@@ -104,7 +106,7 @@ impl LlmFactory {
                     LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::ollama(
                         &self.ollama_url,
                         &model,
-                        crate::llm::rig::tools_from_flag(web_search),
+                        crate::llm::rig::tools_from_config(web_search, search_provider, search_api_key),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
                 };
@@ -126,6 +128,10 @@ pub struct RuntimeSettings {
     pub engine: LlmEngine,
     /// Whether the rig web-search tool is enabled (rig engine only).
     pub web_search: bool,
+    /// Web-search backend: `duckduckgo` (keyless) or `tavily` (needs a key).
+    pub search_provider: String,
+    /// API key for the search provider (Tavily). `None` = unset.
+    pub search_api_key: Option<String>,
     /// Canonical label of the selected backend (`ollama` / `anthropic` / `mock`).
     pub llm_backend: String,
     /// The resolved model name, if the backend uses one.
@@ -143,6 +149,9 @@ pub struct SettingsView {
     pub tts_voice: Option<String>,
     pub engine: LlmEngine,
     pub web_search: bool,
+    pub search_provider: String,
+    /// Whether a search API key is configured. The key itself is never exposed.
+    pub search_key_set: bool,
 }
 
 /// A requested settings change. Absent fields are left unchanged; a `tts_voice` of
@@ -157,6 +166,10 @@ pub struct SettingsUpdate {
     pub engine: Option<LlmEngine>,
     /// Toggle the rig web-search tool.
     pub web_search: Option<bool>,
+    /// Switch the search backend (`duckduckgo` / `tavily`).
+    pub search_provider: Option<String>,
+    /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(v))` = set.
+    pub search_api_key: Option<Option<String>>,
 }
 
 /// Thread-safe holder for the runtime settings plus the factory that rebuilds
@@ -196,6 +209,8 @@ impl SharedSettings {
                 llm,
                 engine: LlmEngine::Native,
                 web_search: false,
+                search_provider: "duckduckgo".to_string(),
+                search_api_key: None,
                 llm_backend: llm_backend.into(),
                 llm_model: None,
                 tts_voice,
@@ -218,6 +233,8 @@ impl SharedSettings {
             tts_voice: s.tts_voice.clone(),
             engine: s.engine,
             web_search: s.web_search,
+            search_provider: s.search_provider.clone(),
+            search_key_set: s.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
         }
     }
 
@@ -230,11 +247,13 @@ impl SharedSettings {
         let needs_rebuild = update.llm_backend.is_some()
             || update.llm_model.is_some()
             || update.engine.is_some()
-            || update.web_search.is_some();
+            || update.web_search.is_some()
+            || update.search_provider.is_some()
+            || update.search_api_key.is_some();
 
         // Build the new LLM *before* taking the write lock so a failed build never
         // leaves the settings half-changed.
-        let (rebuilt, target_engine, target_web_search) = if needs_rebuild {
+        let (rebuilt, targets) = if needs_rebuild {
             let current = self.inner.read().unwrap().clone();
             let target_backend = update
                 .llm_backend
@@ -249,27 +268,39 @@ impl SharedSettings {
             };
             let target_engine = update.engine.unwrap_or(current.engine);
             let target_web_search = update.web_search.unwrap_or(current.web_search);
+            let target_provider = update
+                .search_provider
+                .clone()
+                .unwrap_or(current.search_provider.clone());
+            let target_key = match &update.search_api_key {
+                None => current.search_api_key.clone(),
+                Some(k) => k.clone().filter(|s| !s.is_empty()),
+            };
             (
                 Some(self.factory.build(
                     target_engine,
                     target_web_search,
+                    &target_provider,
+                    target_key.as_deref(),
                     &target_backend,
                     target_model.as_deref(),
                 )?),
-                target_engine,
-                target_web_search,
+                Some((target_engine, target_web_search, target_provider, target_key)),
             )
         } else {
-            (None, LlmEngine::default(), false)
+            (None, None)
         };
 
         let mut w = self.inner.write().unwrap();
         if let Some((llm, label, model)) = rebuilt {
+            let (engine, web_search, provider, key) = targets.unwrap();
             w.llm = llm;
             w.llm_backend = label;
             w.llm_model = model;
-            w.engine = target_engine;
-            w.web_search = target_web_search;
+            w.engine = engine;
+            w.web_search = web_search;
+            w.search_provider = provider;
+            w.search_api_key = key;
         }
         if let Some(voice) = &update.tts_voice {
             w.tts_voice = voice.clone().filter(|s| !s.is_empty());
@@ -280,6 +311,8 @@ impl SharedSettings {
             tts_voice: w.tts_voice.clone(),
             engine: w.engine,
             web_search: w.web_search,
+            search_provider: w.search_provider.clone(),
+            search_key_set: w.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
         })
     }
 }
@@ -299,7 +332,14 @@ mod tests {
 
     fn shared(factory: LlmFactory) -> Arc<SharedSettings> {
         let (llm, label, model) = factory
-            .build(LlmEngine::Native, false, "ollama", Some("llama3.2"))
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+            )
             .unwrap();
         SharedSettings::new(
             factory,
@@ -307,6 +347,8 @@ mod tests {
                 llm,
                 engine: LlmEngine::Native,
                 web_search: false,
+                search_provider: "duckduckgo".to_string(),
+                search_api_key: None,
                 llm_backend: label,
                 llm_model: model,
                 tts_voice: None,

@@ -344,24 +344,20 @@ impl Tools {
     }
 }
 
-/// Choose the search backend from the environment. `AMBIENT_SEARCH_PROVIDER=tavily`
-/// (with `TAVILY_API_KEY`) gives real general web results; the default is the
-/// keyless DuckDuckGo Instant Answer API, which only answers encyclopedic/entity
-/// queries (news/weather/current events return nothing).
-fn default_search_provider() -> Arc<dyn SearchProvider> {
-    match std::env::var("AMBIENT_SEARCH_PROVIDER")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
-        "tavily" => match std::env::var("TAVILY_API_KEY") {
-            Ok(key) if !key.is_empty() => {
+/// Build a search provider from an explicit label + optional API key.
+/// `tavily` (with a key) gives real general web results; anything else (or Tavily
+/// with no key) falls back to the keyless DuckDuckGo Instant Answer API, which
+/// only answers encyclopedic/entity queries (news/weather return nothing).
+pub fn build_search_provider(provider: &str, api_key: Option<&str>) -> Arc<dyn SearchProvider> {
+    match provider.to_lowercase().as_str() {
+        "tavily" => match api_key {
+            Some(key) if !key.is_empty() => {
                 log::info!("web search provider: Tavily");
                 Arc::new(TavilySearch::new(key))
             }
             _ => {
                 log::warn!(
-                    "AMBIENT_SEARCH_PROVIDER=tavily but TAVILY_API_KEY is unset; \
+                    "search provider `tavily` selected but no API key is set; \
                      falling back to DuckDuckGo Instant Answer (entity queries only)"
                 );
                 Arc::new(DuckDuckGoSearch::default())
@@ -370,18 +366,28 @@ fn default_search_provider() -> Arc<dyn SearchProvider> {
         _ => {
             log::info!(
                 "web search provider: DuckDuckGo Instant Answer (keyless; entity queries \
-                 only — set AMBIENT_SEARCH_PROVIDER=tavily + TAVILY_API_KEY for general search)"
+                 only — choose Tavily + a key for general search)"
             );
             Arc::new(DuckDuckGoSearch::default())
         }
     }
 }
 
-/// Build the tool set from a feature flag: `Some(tools)` when web search is on.
-/// The search backend is chosen from the environment (see
-/// [`default_search_provider`]).
+/// Build the tool set from explicit config: `Some(tools)` when web search is on.
+pub fn tools_from_config(
+    web_search: bool,
+    provider: &str,
+    api_key: Option<&str>,
+) -> Option<Arc<Tools>> {
+    web_search.then(|| Arc::new(Tools::new(build_search_provider(provider, api_key))))
+}
+
+/// Build the tool set from the environment (used by the example / env-driven
+/// default): `AMBIENT_SEARCH_PROVIDER` + `TAVILY_API_KEY`.
 pub fn tools_from_flag(web_search: bool) -> Option<Arc<Tools>> {
-    web_search.then(|| Arc::new(Tools::new(default_search_provider())))
+    let provider = std::env::var("AMBIENT_SEARCH_PROVIDER").unwrap_or_default();
+    let key = std::env::var("TAVILY_API_KEY").ok();
+    tools_from_config(web_search, &provider, key.as_deref())
 }
 
 // ===========================================================================

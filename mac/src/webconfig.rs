@@ -72,7 +72,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
   <label class="check">
     <input id="web_search" type="checkbox">
-    Web search tool <span class="hint">(rig engine only; needs a search key for real results)</span>
+    Web search tool <span class="hint">(rig engine only)</span>
+  </label>
+
+  <label>Search provider
+    <select id="search_provider">
+      <option value="duckduckgo">DuckDuckGo (keyless; entity queries only)</option>
+      <option value="tavily">Tavily (real web results; needs a key)</option>
+    </select>
+  </label>
+
+  <label>Search API key <span class="hint" id="key_state"></span>
+    <input id="search_api_key" type="password" placeholder="(leave blank to keep current)">
   </label>
 
   <label>Model <span class="hint">e.g. qwen2.5, llama3.2, claude-opus-5</span>
@@ -101,6 +112,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     $('llm_model').value = v.llm_model || '';
     $('tts_voice').value = v.tts_voice || '';
     $('web_search').checked = !!v.web_search;
+    $('search_provider').value = v.search_provider || 'duckduckgo';
+    $('search_api_key').value = '';
+    $('key_state').textContent = v.search_key_set ? '(a key is set)' : '(no key set)';
   }
 
   async function load() {
@@ -120,6 +134,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       llm_model: $('llm_model').value.trim() || null,
       tts_voice: $('tts_voice').value.trim() || null,
       web_search: $('web_search').checked,
+      search_provider: $('search_provider').value,
+      // Only send the key when the user typed one; blank keeps the current key.
+      search_api_key: $('search_api_key').value.trim() || undefined,
     };
     try {
       const r = await fetch('/config', {
@@ -277,6 +294,8 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "tts_voice": v.tts_voice,
         "engine": engine,
         "web_search": v.web_search,
+        "search_provider": v.search_provider,
+        "search_key_set": v.search_key_set,
     })
     .to_string()
 }
@@ -304,12 +323,24 @@ fn parse_update(data: &Value) -> SettingsUpdate {
             _ => LlmEngine::Native,
         });
     let web_search = data.get("web_search").and_then(Value::as_bool);
+    // Key: absent/empty = leave unchanged (so a page reload never wipes it);
+    // explicit JSON null = clear.
+    let search_api_key = match data.get("search_api_key") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => match v.as_str() {
+            Some(s) if !s.is_empty() => Some(Some(s.to_string())),
+            _ => None,
+        },
+    };
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
         tts_voice,
         engine,
         web_search,
+        search_provider: string_field("search_provider"),
+        search_api_key,
     }
 }
 
@@ -424,6 +455,26 @@ mod tests {
         assert_eq!(v["engine"], "rig");
         assert_eq!(v["web_search"], true);
         assert_eq!(s.view().web_search, true);
+    }
+
+    #[test]
+    fn post_config_sets_search_provider_and_key_without_leaking_it() {
+        let s = settings();
+        let (status, _c, out) = route(
+            "POST",
+            "/config",
+            br#"{"search_provider":"tavily","search_api_key":"tvly-secret"}"#,
+            &s,
+        );
+        assert_eq!(status, "200 OK");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["search_provider"], "tavily");
+        assert_eq!(v["search_key_set"], true);
+        // The key value must never appear in a POST response or a later GET.
+        assert!(!String::from_utf8_lossy(&out).contains("tvly-secret"));
+        let (_s, _c, g) = route("GET", "/config", b"", &s);
+        assert!(!String::from_utf8_lossy(&g).contains("tvly-secret"));
+        assert!(s.view().search_key_set);
     }
 
     #[test]

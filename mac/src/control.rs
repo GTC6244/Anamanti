@@ -98,12 +98,19 @@ fn parse_update(data: &Value) -> SettingsUpdate {
             _ => LlmEngine::Native,
         });
     let web_search = data.get("web_search").and_then(Value::as_bool);
+    let search_api_key = match data.get("search_api_key") {
+        None => None,                    // unchanged
+        Some(Value::Null) => Some(None), // clear
+        Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
+    };
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
         tts_voice,
         engine,
         web_search,
+        search_provider: string_field("search_provider"),
+        search_api_key,
     }
 }
 
@@ -119,6 +126,8 @@ fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> Wyom
             "tts_voice": v.tts_voice,
             "engine": engine_label(v.engine),
             "web_search": v.web_search,
+            "search_provider": v.search_provider,
+            "search_key_set": v.search_key_set,
         }),
     )
 }
@@ -197,6 +206,8 @@ mod tests {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
                 engine: crate::settings::LlmEngine::Native,
                 web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
                 llm_backend: "ollama".into(),
                 llm_model: Some("llama3.2".into()),
                 tts_voice: Some("amy".into()),
