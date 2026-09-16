@@ -89,7 +89,21 @@ class _AmbientHomeState extends State<AmbientHome> {
     final config = await buildWakeWordConfigFrom(_settings);
     if (!mounted) return;
     _assistant?.dispose();
-    final assistant = AssistantController(config: config)..start();
+    final assistant = AssistantController(
+      config: config,
+      // While the status is offline, poll the orchestrator every few seconds so
+      // the UI recovers on its own (e.g. after the Mac restarts) instead of
+      // waiting for the next wake word. A control-protocol fetch is a full
+      // discover+connect handshake, so success means we're genuinely reachable.
+      probeOrchestrator: () async {
+        try {
+          await const FrbOrchestratorClient(discoveryTimeoutSecs: 2).fetchSettings();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      },
+    )..start();
     setState(() => _assistant = assistant);
   }
 
