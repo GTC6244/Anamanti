@@ -23,8 +23,11 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **LLM:** pluggable behind a trait (local Ollama/llama.cpp **or** cloud API).
 - **TTS:** Piper via Wyoming.
 - **Playback:** Rust (`cpal`/`oboe`), symmetric with capture.
-- **Barge-in:** full-duplex — wake word stays active during playback. **AEC is
-  deferred for v1** (self-triggering is a known, accepted risk).
+- **Barge-in:** wake word stays active during playback; saying it again flushes
+  playback immediately and starts a fresh turn, and sends an `ambient-interrupt`
+  frame so the orchestrator aborts the in-flight LLM + TTS. **AEC is not shipped**
+  (investigated on hardware — see below; self-triggering during loud playback is a
+  known, accepted limitation).
 - **VAD:** off-device — the **orchestrator** decides end-of-speech (energy VAD;
   faster-whisper has no streaming VAD, so the Mac sends `audio-stop`). The device
   never runs its own VAD.
@@ -34,8 +37,11 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   **on-device OAuth**; keeps running when disconnected.
 - **Resilience:** **auto-reconnect** with backoff via mDNS + a subtle
   disconnected indicator; wake words queue until reconnected.
-- **AEC interim:** raise the wake-word confidence **threshold during playback**
-  to suppress self-triggers; real AEC only if that's insufficient.
+- **AEC interim:** raise the wake-word confidence **threshold during playback** to
+  suppress self-triggers. Real AEC was attempted on hardware and deferred — the
+  `VOICE_COMMUNICATION` preset doesn't cancel on this device, and software AEC is
+  net-negative for flush-on-wake barge-in (no simultaneous echo to cancel). See the
+  risk section below.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
 
@@ -168,10 +174,13 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 - STREAMING: send PCM frames; read `transcript` events; the **orchestrator's energy
   VAD** detects end-of-speech and sends `audio-stop` to STT (device runs no VAD).
 - THINKING: LLM (with persistent memory) streams reply tokens (render live).
-- SPEAKING: Piper audio frames play via `cpal`/`oboe`.
-- Full-duplex: wake-word scoring keeps running through THINKING/SPEAKING; a wake
-  word interrupts and starts a new turn (AEC deferred — raise the wake-word
-  threshold during SPEAKING to suppress self-triggers).
+- THINKING→SPEAKING: the orchestrator segments the LLM stream into sentences and
+  synthesizes each with Piper as it forms (streaming TTS), coalesced into one
+  device-facing audio stream; the device plays it via `cpal`/`oboe`.
+- Barge-in: wake-word scoring keeps running through THINKING/SPEAKING; a wake word
+  flushes playback immediately + sends `ambient-interrupt` (orchestrator aborts
+  LLM+TTS) + starts a new turn. (AEC deferred — raise the wake-word threshold during
+  SPEAKING to suppress self-triggers.)
 
 Full diagram and wire format: [`architecture.md`](./architecture.md) §4.
 
@@ -189,10 +198,24 @@ Full diagram and wire format: [`architecture.md`](./architecture.md) §4.
 
 ## Remaining risk to watch (see Plan.MD §4)
 
-All design questions are decided (see locked decisions above). One empirical risk
-remains: whether **threshold-tuning alone** keeps self-triggering tolerable during
-playback — measure on real hardware; **Rust-side AEC** (WebRTC/speexdsp) is the
-fallback if not.
+**AEC (echo cancellation) — investigated on hardware, not shipped.** Findings:
+- Platform AEC via the AAudio `VOICE_COMMUNICATION` input preset is reachable and does
+  **not** break the wake word (on a release build), but it does **not actually cancel**
+  the device's own playback here (measured mic RMS ~0.1 during playback vs ~0.003 idle)
+  — the preset attaches the effect with no working render reference.
+- A dependency-free software NLMS canceller works in isolation (>20 dB on host tests)
+  but is **net-negative** once integrated: this design **flushes playback on barge-in**,
+  so there's no simultaneous echo to cancel, and the filter subtracts a phantom echo
+  from the user's clean speech, corrupting the transcript.
+- **Only pursue if we adopt true full-duplex barge-in** (keep playing while listening,
+  cancel echo, VAD-detect the user) with a production AEC (AEC3/speexdsp + double-talk
+  detector + residual suppressor), or coordinate the platform audio mode
+  (`MODE_IN_COMMUNICATION` + routed output) so the hardware AEC references the render
+  stream. For now the shipping mitigation is the raised wake-word threshold during
+  playback, and self-triggering over loud playback is an accepted limitation.
+- **On-device testing MUST use `--release` APKs** — debug Rust makes tract-onnx
+  inference ~3.6× slower on the 32-bit device, which starves the wake-word loop and
+  masquerades as unrelated audio bugs.
 
 Implementation note: the claude.ai Google Drive connector in this environment is
 unauthorized and cannot prototype photo access — wire real **on-device OAuth**

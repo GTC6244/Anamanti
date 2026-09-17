@@ -119,11 +119,25 @@ impl Network {
         self.shared.active.load(Ordering::SeqCst)
     }
 
-    /// Called by the capture thread when the wake word fires. Starts a turn if none
-    /// is running; otherwise treats it as **barge-in**: flush playback, interrupt
-    /// the in-flight turn, and request a restart so the finishing turn spawns a
-    /// fresh one.
+    /// Called by the capture thread when the wake word fires.
+    ///
+    /// **Always flush playback first.** The orchestrator relays a whole reply faster
+    /// than real-time, so a turn reaches `Idle` (its TTS `audio-stop` arrives) within
+    /// a second or two, while the audio itself keeps playing out of the multi-second
+    /// playback ring for much longer. So a wake word spoken *while the reply is still
+    /// audible* usually lands when no turn is technically active — yet the user
+    /// clearly means "stop talking and listen." Clearing the playback ring on every
+    /// wake word makes that barge-in feel instant whether or not a turn is in flight.
+    ///
+    /// If a turn *is* still active (STT/relay window), also interrupt it (sending the
+    /// `ambient-interrupt` frame so the orchestrator aborts generation/TTS) and
+    /// request a restart so the finishing turn spawns a fresh one.
     pub fn on_wake_word(&self) {
+        // Silence any in-flight or still-draining reply immediately.
+        if let Some(pb) = &self.shared.playback {
+            pb.clear();
+        }
+
         if self
             .shared
             .active
@@ -133,9 +147,6 @@ impl Network {
             Shared::spawn_turn(self.shared.clone(), self.runtime.handle().clone());
         } else {
             self.shared.pending_restart.store(true, Ordering::SeqCst);
-            if let Some(pb) = &self.shared.playback {
-                pb.clear();
-            }
             if let Some(tx) = self.shared.interrupt_tx.lock().unwrap().as_ref() {
                 let _ = tx.try_send(());
             }

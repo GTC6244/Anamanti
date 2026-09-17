@@ -18,10 +18,13 @@ speaks the reply back through the Echo Show's speakers.
   to a Whisper/CoreML server on the Mac; transcripts render as you speak.
 - 🧠 **Pluggable LLM brain** — swap between a local model (Ollama / llama.cpp) and
   a cloud API (Claude / OpenAI) behind one interface.
-- 🔊 **Spoken replies** — Piper (Wyoming TTS) synthesizes the answer; the Echo
-  Show plays it back through the same Rust audio engine that captured you.
-- 💬 **Full-duplex + memory** — interrupt mid-reply with the wake word, and the
-  assistant remembers facts/preferences across sessions (stored on the Mac).
+- 🔊 **Streaming spoken replies** — Piper (Wyoming TTS) synthesizes the answer
+  sentence-by-sentence *as the LLM generates it*, so the Echo Show starts speaking
+  after the first sentence (~2 s on-device) instead of waiting for the whole reply.
+- 💬 **Barge-in + memory** — say the wake word again mid-reply to interrupt: playback
+  stops instantly and a fresh turn begins (the orchestrator also aborts the in-flight
+  LLM + TTS via an `ambient-interrupt` frame). The assistant remembers
+  facts/preferences across sessions (stored on the Mac).
 - 📺 **Ambient display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder.
 

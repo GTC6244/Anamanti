@@ -24,15 +24,17 @@ use ambient_orchestrator::wyoming::DynConnection;
 /// A connector backed by in-process mock STT/TTS servers over duplex pipes.
 struct MockConnector {
     transcript: String,
-    /// Captures the text the TTS server was asked to synthesize.
-    synthesized: Arc<Mutex<Option<String>>>,
+    /// Captures, in order, each chunk of text the TTS server was asked to
+    /// synthesize. With streaming TTS a turn produces one entry per spoken
+    /// sentence; a single-chunk reply produces exactly one entry.
+    synthesized: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockConnector {
     fn new(transcript: &str) -> Self {
         Self {
             transcript: transcript.to_string(),
-            synthesized: Arc::new(Mutex::new(None)),
+            synthesized: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -49,6 +51,7 @@ impl ServiceConnector for MockConnector {
 
     async fn connect_tts(&self) -> Result<DynConnection> {
         let (client, server) = tokio::io::duplex(64 * 1024);
+        // One connect per spoken chunk (streaming TTS); each pushes its text.
         let captured = self.synthesized.clone();
         tokio::spawn(mock_tts(server, captured));
         let (r, w) = split(client);
@@ -74,7 +77,7 @@ async fn mock_stt(server: DuplexStream, transcript: String) {
 
 /// Mock Piper: reads the `synthesize` request, records the text, and emits a short
 /// audio stream (`audio-start` → one `audio-chunk` → `audio-stop`).
-async fn mock_tts(server: DuplexStream, captured: Arc<Mutex<Option<String>>>) {
+async fn mock_tts(server: DuplexStream, captured: Arc<Mutex<Vec<String>>>) {
     let (r, w) = split(server);
     let mut reader = BufReader::new(r);
     let mut writer = w;
@@ -86,7 +89,7 @@ async fn mock_tts(server: DuplexStream, captured: Arc<Mutex<Option<String>>>) {
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_string();
-            *captured.lock().unwrap() = Some(text);
+            captured.lock().unwrap().push(text);
             let fmt = AudioFormat::PCM_16K_MONO;
             for e in [
                 WyomingEvent::audio_start(fmt, 0),
@@ -148,6 +151,48 @@ async fn drive_device(io: DuplexStream) -> (String, String, Vec<String>) {
         }
     }
     (transcript, reply, kinds)
+}
+
+/// Like [`drive_device`] but drains every frame until the pipeline closes the
+/// socket. Returns `(transcript, reply_text, audio_start_count, audio_stop_count)`.
+/// The device-facing audio is coalesced into a single stream, so a well-formed
+/// turn yields exactly one `audio-start` and one `audio-stop` however many
+/// sentences were synthesized.
+async fn drive_device_until_close(io: DuplexStream) -> (String, String, usize, usize) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+
+    write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0))
+        .await
+        .unwrap();
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+    )
+    .await
+    .unwrap();
+
+    let ev = read_event(&mut reader).await.unwrap().unwrap();
+    let transcript = ev.transcript_text().unwrap_or_default().to_string();
+    write_event(&mut writer, &WyomingEvent::audio_stop(40))
+        .await
+        .unwrap();
+
+    let mut reply = String::new();
+    let mut audio_starts = 0;
+    let mut audio_stops = 0;
+    while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if let Some(tok) = ev.reply_token_text() {
+            reply.push_str(tok);
+        } else if ev.event_type == types::AUDIO_START {
+            audio_starts += 1;
+        } else if ev.event_type == types::AUDIO_STOP {
+            audio_stops += 1;
+        }
+    }
+    (transcript, reply, audio_starts, audio_stops)
 }
 
 fn build_pipeline(memory: Arc<MemoryStore>) -> Pipeline {
@@ -212,11 +257,152 @@ async fn full_turn_streams_transcript_reply_and_tts_audio() {
     assert!(events.contains(&TurnEvent::Speaking));
     assert_eq!(events.last(), Some(&TurnEvent::Finished));
 
-    // Piper was asked to synthesize exactly the LLM reply.
+    // Piper was asked to synthesize exactly the LLM reply. This reply has no
+    // sentence-terminal punctuation, so it flushes as a single chunk at end of
+    // stream.
     assert_eq!(
-        connector.synthesized.lock().unwrap().as_deref(),
-        Some("You said: turn on the lights")
+        *connector.synthesized.lock().unwrap(),
+        vec!["You said: turn on the lights".to_string()]
     );
+}
+
+/// An LLM that emits one complete sentence and then hangs forever, so a turn is
+/// still generating when a barge-in arrives — letting us prove the orchestrator
+/// aborts the in-flight reply instead of blocking on the stalled backend.
+struct FirstThenHangLlm;
+
+#[async_trait]
+impl ambient_orchestrator::llm::LlmBackend for FirstThenHangLlm {
+    fn name(&self) -> &str {
+        "first-then-hang"
+    }
+    async fn respond(
+        &self,
+        _turn: ambient_orchestrator::llm::LlmTurn,
+    ) -> Result<ambient_orchestrator::llm::ReplyStream> {
+        use futures_util::stream::{self, StreamExt};
+        let s = stream::iter(vec![Ok("First sentence. ".to_string())]).chain(stream::pending());
+        Ok(Box::pin(s))
+    }
+}
+
+/// Drive the device side of a barge-in: stream audio, read the transcript, then —
+/// after the first spoken sentence's audio arrives — send an `ambient-interrupt`
+/// and keep draining until the socket closes.
+async fn drive_device_and_barge_in(io: DuplexStream) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+
+    write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0))
+        .await
+        .unwrap();
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+    )
+    .await
+    .unwrap();
+
+    // Transcript, then end our mic input (STREAMING → SPEAKING).
+    let _ = read_event(&mut reader).await.unwrap().unwrap();
+    write_event(&mut writer, &WyomingEvent::audio_stop(40))
+        .await
+        .unwrap();
+
+    // Once the first sentence's audio starts arriving, barge in. (Per-sentence
+    // audio-stops are coalesced away now, so trigger on the first audio-chunk.)
+    while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if ev.event_type == types::AUDIO_CHUNK {
+            write_event(&mut writer, &WyomingEvent::interrupt())
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    // Drain anything still in flight until the server closes.
+    while (read_event(&mut reader).await).unwrap_or(None).is_some() {}
+}
+
+#[tokio::test]
+async fn barge_in_aborts_an_in_flight_reply() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(FirstThenHangLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(30),
+    );
+    let connector = MockConnector::new("say something");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_and_barge_in(dev_test));
+
+    // The turn must return promptly on barge-in even though the LLM never finishes.
+    let mut on_event = |_e: TurnEvent| {};
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        pipeline.run_turn(&mut device, &connector, &mut on_event),
+    )
+    .await
+    .expect("barge-in aborts the turn instead of hanging on the stalled LLM");
+    outcome.expect("turn runs");
+    drop(device);
+    device_task.await.unwrap();
+
+    // Only the first sentence was ever synthesized; the hung remainder was aborted.
+    assert_eq!(
+        *connector.synthesized.lock().unwrap(),
+        vec!["First sentence.".to_string()],
+    );
+}
+
+#[tokio::test]
+async fn multi_sentence_reply_is_synthesized_sentence_by_sentence() {
+    // A reply with two sentences should be flushed to Piper as two separate
+    // `synthesize` chunks (streaming TTS), producing two audio bursts — not one
+    // whole-reply synthesis. This is what lets playback of sentence 1 begin before
+    // sentence 2 has finished generating.
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(MockLlm::new("First part. Second part.")),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    );
+    let connector = MockConnector::new("say something");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_until_close(dev_test));
+
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    drop(device); // close the socket so the device driver sees EOF
+
+    let (transcript, reply, audio_starts, audio_stops) = device_task.await.unwrap();
+    assert_eq!(transcript, "say something");
+    assert_eq!(reply, "First part. Second part.");
+    assert_eq!(
+        *connector.synthesized.lock().unwrap(),
+        vec!["First part.".to_string(), "Second part.".to_string()],
+        "each sentence is synthesized as its own Piper chunk (streaming TTS)"
+    );
+    // ...but the device sees one coalesced audio stream, so its turn state machine
+    // (which ends on the first audio-stop) plays the whole reply, not just sentence 1.
+    assert_eq!(audio_starts, 1, "one coalesced audio-start for the turn");
+    assert_eq!(audio_stops, 1, "one coalesced audio-stop for the turn");
 }
 
 #[tokio::test]
@@ -246,10 +432,10 @@ async fn explicit_remember_command_short_circuits_the_llm() {
 
     // The reply is the confirmation, not the mock LLM's "You said: …" echo.
     assert!(events.contains(&TurnEvent::Reply("Okay, I'll remember that.".to_string())));
-    // The confirmation is what gets synthesized.
+    // The confirmation is what gets synthesized (one chunk).
     assert_eq!(
-        connector.synthesized.lock().unwrap().as_deref(),
-        Some("Okay, I'll remember that.")
+        *connector.synthesized.lock().unwrap(),
+        vec!["Okay, I'll remember that.".to_string()]
     );
 
     let stored = memory.list().unwrap();

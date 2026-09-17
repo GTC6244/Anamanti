@@ -17,19 +17,34 @@ full loop has not been exercised against real services on the device.
 - [ ] Install the release APK on the Echo Show and run one full turn:
       wake word → STT → LLM → TTS playback, with the transcript/reply rendered live.
 - [ ] Confirm **mDNS discovery** works across the real network (no hardcoded IP).
-- [ ] Exercise **barge-in** (wake word during playback) and **memory** on-device
-      (voice "remember…"/"forget that" + the settings memory list).
+- [x] Exercise **barge-in** (wake word during playback) on-device — works: a wake word
+      mid-reply flushes playback and starts a fresh turn (flush-on-wake + the
+      `ambient-interrupt` frame aborts the orchestrator's in-flight LLM+TTS). Detection
+      over loud playback takes a try or two without AEC.
+- [ ] Exercise **memory** on-device (voice "remember…"/"forget that" + the settings
+      memory list).
 - [ ] Verify the Phase-6 **settings control protocol** on-device: change LLM
       backend / model / TTS voice from the settings screen and see it take effect on
       the next turn; view/delete memory entries.
 
-## 2. AEC / self-triggering (the one open empirical risk — Plan §4)
+## 2. AEC / self-triggering (investigated on hardware — Plan §4)
 
-- [ ] Measure on real hardware whether raising the wake-word confidence threshold
-      during playback (`active_threshold`) is enough to stop the device
-      self-triggering on its own TTS.
-- [ ] If not, implement real AEC (Rust-side WebRTC/speexdsp with the playback signal
-      as reference, or Android hardware `AcousticEchoCanceler`).
+- [x] Measured on real hardware: the raised `active_threshold` during playback is the
+      shipping mitigation; self-triggering / wake-detection over loud playback is an
+      accepted limitation (barge-in still works, takes a try or two).
+- [x] Tried Android platform AEC (`VOICE_COMMUNICATION` input preset): reachable, does
+      **not** break the wake word on release, but does **not cancel** on this device
+      (mic RMS unchanged during playback). Dead end without audio-mode coordination.
+- [x] Tried software NLMS AEC (playback as reference): works in isolation (>20 dB host
+      tests) but **net-negative** for this flush-on-wake design — barge-in flushes
+      playback so there's no echo to cancel, and it corrupts the near-end transcript.
+      Reverted.
+- [ ] Real AEC remains open, and only pays off with a **true full-duplex barge-in
+      redesign** (keep playing while listening; production AEC with double-talk
+      detector + residual suppressor), or platform `MODE_IN_COMMUNICATION` + routed
+      output so the hardware AEC references the render stream.
+- Note: **on-device perf/audio testing must use `--release` APKs** (debug Rust makes
+      inference ~3.6× slower on the 32-bit device and masks the real behavior).
 
 ## 3. Real Google OAuth for the photo slideshow (feature stub)
 

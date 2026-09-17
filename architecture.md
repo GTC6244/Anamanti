@@ -208,20 +208,39 @@ predictable memory use and no GC pauses under the 1 GB limit.
   sends `audio-stop` to the STT server, which then returns the final transcript.
 - **THINKING** — STT final transcript handed to the LLM orchestrator (which
   consults persistent memory); reply tokens stream back and render.
-- **SPEAKING** — Piper TTS audio frames arrive and are played via `cpal`/`oboe`.
-- **Full-duplex barge-in:** wake-word scoring keeps running during THINKING and
-  SPEAKING; a wake word interrupts playback and starts a new turn. AEC is
-  deferred for v1; the interim mitigation is to **raise the wake-word confidence
-  threshold while in SPEAKING** so the device's own speaker is less likely to
-  self-trigger (see `Plan.MD` §4).
+- **THINKING → SPEAKING (streaming TTS):** the orchestrator does **not** buffer the
+  whole reply before speaking. It segments the LLM token stream into sentences and
+  synthesizes each with Piper as soon as it forms, so the first audio reaches the
+  device ~first-sentence latency (~2 s) instead of full-reply latency (~8 s). The
+  per-sentence Piper bursts are **coalesced into one device-facing audio stream** (one
+  `audio-start`, all chunks, one final `audio-stop`) because the device ends its turn
+  on the first `audio-stop`.
+- **SPEAKING** — the coalesced Piper audio stream is played via `cpal`/`oboe`.
+- **Barge-in:** wake-word scoring keeps running during THINKING and SPEAKING. A wake
+  word mid-reply **always flushes the playback ring immediately** (silencing the reply
+  even after the turn has technically ended — the orchestrator relays audio faster than
+  real-time, so the turn reaches IDLE while audio is still draining from the buffer),
+  sends an `ambient-interrupt` frame so the orchestrator **aborts the in-flight LLM +
+  TTS**, and starts a fresh turn.
+- **AEC:** not shipped. Investigated on real hardware (Echo Show 8): the platform
+  `VOICE_COMMUNICATION` AEC preset is reachable but doesn't actually cancel on this
+  device, and a software NLMS canceller is net-negative for this flush-on-wake barge-in
+  (there's no simultaneous echo to cancel once playback is flushed). The interim
+  mitigation remains **raising the wake-word confidence threshold while active**. Real
+  AEC would require a true keep-playing-while-listening full-duplex redesign — see
+  `Plan.MD` §4 / `TODO.md`.
 - Return to **IDLE** on playback completion, timeout, or reset.
 
 ### Wire format
 
 - Newline-delimited (`\n`) JSON control frames for metadata and events.
 - Raw audio chunks streamed immediately after the setup/metadata frame.
-- The same socket carries outbound audio and inbound `transcript` + synthesized
-  audio frames.
+- The same socket carries outbound audio and inbound `transcript`, streamed
+  `reply-token` (per-LLM-token text for on-screen rendering), and synthesized audio
+  frames.
+- **`ambient-interrupt`** (device → orchestrator): a project-local barge-in frame that
+  tells the orchestrator to abort the in-flight LLM generation + TTS at once, rather
+  than only learning of the interruption when the socket drops.
 
 ---
 
@@ -242,8 +261,9 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **RAM (~1 GB on the Echo Show):** pre-allocated ring buffer; wake-word model
   kept small; avoid per-frame heap churn; single audio engine for capture +
   playback.
-- **Latency:** wake word runs on-device; audio streams (not batched) so STT can
-  emit partials early; reply tokens render as they arrive; TTS streams back.
+- **Latency:** wake word runs on-device; audio streams (not batched); reply tokens
+  render as they arrive; **TTS is synthesized and streamed sentence-by-sentence** so
+  playback starts after the first sentence, not the whole reply.
 - **Privacy:** no audio leaves the device until the wake word fires.
 
 ---
@@ -259,7 +279,8 @@ predictable memory use and no GC pauses under the 1 GB limit.
 | openWakeWord via tract-onnx | Pre-trained models, minimal deps, offline |
 | Pluggable LLM behind a trait | Swap local/cloud without touching the pipeline |
 | Rust-side playback | One audio layer, symmetric with capture |
-| Full-duplex barge-in | Natural interruption; AEC deferred, threshold-tuned in v1 |
+| Wake-word barge-in (flush-on-wake + `ambient-interrupt`) | Natural interruption without full-duplex complexity; AEC investigated on hardware and deferred (see §4) |
+| Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
 | VAD in the orchestrator | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
 | Persistent memory in SQLite | Simple, debuggable; FTS covers explicit+inferred facts |
 | On-device OAuth for photos | Device displays directly; no Mac proxy needed |

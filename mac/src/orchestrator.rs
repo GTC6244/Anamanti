@@ -32,7 +32,7 @@ use crate::settings::SharedSettings;
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::stt::SttSession;
 use crate::wyoming::tts::TtsSession;
-use crate::wyoming::DynConnection;
+use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
 /// Progress events surfaced as a turn runs (logging, tests, and — via the device
 /// relay — the Phase-5 UI).
@@ -234,22 +234,18 @@ impl Pipeline {
             return Ok(TurnOutcome::Completed);
         }
 
-        // 3. Memory + LLM → reply text, relaying each reply token to the device
-        //    so it can render the reply token-by-token (Phase 5).
+        // 3 + 4. Memory + LLM → reply, relaying each token to the device for
+        //    token-by-token rendering (Phase 5) AND synthesizing complete sentences
+        //    with Piper as soon as they form, so playback begins before the full
+        //    reply is generated (streaming TTS; architecture.md §4 SPEAKING).
         let (reply, memories_written) = self
-            .generate_reply(&runtime, &transcript, device, on_event)
+            .respond_and_speak(&runtime, &transcript, device, connector, on_event)
             .await?;
         on_event(TurnEvent::Reply(reply.clone()));
 
         // Record the completed turn for the background GraphRAG ingester. Never
         // let a logging failure break the turn.
         self.log_turn(&runtime, &transcript, &reply, memories_written);
-
-        // 4. Synthesize and stream the reply audio back to the device.
-        if !reply.trim().is_empty() {
-            self.speak(&runtime, device, connector, &reply, on_event)
-                .await?;
-        }
 
         on_event(TurnEvent::Finished);
         Ok(TurnOutcome::Completed)
@@ -353,26 +349,47 @@ impl Pipeline {
         }
     }
 
-    /// Apply memory policy and produce the reply text, emitting reply tokens as
-    /// they stream and relaying each one to `device` for token-by-token rendering.
-    async fn generate_reply(
+    /// Apply memory policy, stream the LLM reply, and synthesize it with Piper as
+    /// complete sentences arrive so playback begins before generation finishes.
+    ///
+    /// Each token is relayed to the device as a `reply-token` (for token-by-token
+    /// on-screen rendering) and appended to a pending buffer; whenever that buffer
+    /// holds a complete sentence it is flushed to TTS immediately. This removes the
+    /// old "buffer the whole reply, then speak" barrier: time-to-first-audio drops
+    /// from full-reply latency to first-sentence latency. Returns the full reply
+    /// text and the memory entries written this turn.
+    async fn respond_and_speak(
         &self,
         runtime: &crate::settings::RuntimeSettings,
         transcript: &str,
         device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<(String, Vec<String>)> {
         // Memory entries written this turn (for the chat log / ingester).
         let mut memories_written = Vec::new();
 
-        // Explicit command → apply and confirm, skipping the LLM.
+        // Explicit command → apply, confirm, and speak the confirmation in one
+        // chunk, skipping the LLM. (Instant, so it is not barge-in-interruptible.)
         if let Some(cmd) = parse_command(transcript) {
             if let MemoryCommand::Remember { content, .. } = &cmd {
                 memories_written.push(content.clone());
             }
             let reply = self.apply_command(cmd, on_event)?;
             on_event(TurnEvent::ReplyToken(reply.clone()));
-            device.send(&WyomingEvent::reply_token(&reply)).await.ok();
+            let (_reader, writer) = device.split_mut();
+            protocol::write_event(writer, &WyomingEvent::reply_token(&reply))
+                .await
+                .ok();
+            on_event(TurnEvent::Speaking);
+            let mut audio_started = false;
+            self.speak_chunk(writer, runtime, connector, &reply, &mut audio_started)
+                .await?;
+            if audio_started {
+                protocol::write_event(writer, &WyomingEvent::audio_stop(0))
+                    .await
+                    .ok();
+            }
             return Ok((reply, memories_written));
         }
 
@@ -407,12 +424,95 @@ impl Pipeline {
             .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?;
 
         let mut reply = String::new();
-        while let Some(tok) = stream.next().await {
-            let tok = tok?;
-            reply.push_str(&tok);
-            device.send(&WyomingEvent::reply_token(&tok)).await.ok();
-            on_event(TurnEvent::ReplyToken(tok));
+        let mut pending = String::new();
+        let mut speaking = false;
+        // Whether the single, coalesced device-facing `audio-start` has been sent.
+        // Piper emits an `audio-start`/`audio-stop` per sentence, but the device
+        // ends its turn on the *first* `audio-stop` — so we forward exactly one
+        // `audio-start` up front, relay only the chunks, and send one `audio-stop`
+        // at the very end. The reply still streams sentence-by-sentence (low
+        // time-to-first-audio) but reaches the device as one continuous stream.
+        let mut audio_started = false;
+
+        // Race the reply against a barge-in in an inner scope so both futures (and
+        // their borrows of `reply`/`pending`/the split socket halves) are dropped
+        // before we read `reply` back out below.
+        let interrupted = {
+            // Split the device socket so we can *concurrently* stream reply tokens +
+            // TTS audio out on the writer while watching the reader for a barge-in.
+            // The user talking over the assistant (a new wake word or on-device VAD)
+            // sends an `ambient-interrupt` frame (and/or drops the socket); either
+            // wins the `select!` below, cancels the driver, and aborts the LLM + TTS
+            // at once instead of finishing a reply nobody is listening to.
+            let (reader, writer) = device.split_mut();
+
+            // The generation + speaking driver. Dropping this future (when a barge-in
+            // wins the race) drops the LLM `stream` and any in-flight `TtsSession`,
+            // cancelling the upstream Ollama/Anthropic request and Piper synthesis.
+            let drive = async {
+                while let Some(tok) = stream.next().await {
+                    let tok = tok?;
+                    reply.push_str(&tok);
+                    pending.push_str(&tok);
+                    protocol::write_event(writer, &WyomingEvent::reply_token(&tok))
+                        .await
+                        .ok();
+                    on_event(TurnEvent::ReplyToken(tok));
+
+                    // Flush every complete sentence that has formed so far.
+                    while let Some(sentence) = take_speakable(&mut pending, false) {
+                        if !speaking {
+                            on_event(TurnEvent::Speaking);
+                            speaking = true;
+                        }
+                        if !self
+                            .speak_chunk(writer, runtime, connector, &sentence, &mut audio_started)
+                            .await?
+                        {
+                            // Device closed mid-relay; stop generating.
+                            return Ok::<(), anyhow::Error>(());
+                        }
+                    }
+                }
+                // Speak any trailing clause left without terminal punctuation.
+                if let Some(rest) = take_speakable(&mut pending, true) {
+                    if !speaking {
+                        on_event(TurnEvent::Speaking);
+                    }
+                    self.speak_chunk(writer, runtime, connector, &rest, &mut audio_started)
+                        .await?;
+                }
+                // Close the single coalesced device-facing audio stream.
+                if audio_started {
+                    protocol::write_event(writer, &WyomingEvent::audio_stop(0))
+                        .await
+                        .ok();
+                }
+                Ok(())
+            };
+            tokio::pin!(drive);
+
+            let watch = watch_for_barge_in(reader);
+            tokio::pin!(watch);
+
+            let interrupted;
+            tokio::select! {
+                biased;
+                // Barge-in (or device close) → cancel the reply immediately.
+                _ = &mut watch => {
+                    interrupted = true;
+                }
+                res = &mut drive => {
+                    res?;
+                    interrupted = false;
+                }
+            }
+            interrupted
+        };
+        if interrupted {
+            log::info!("barge-in: aborting in-flight LLM generation + TTS for this turn");
         }
+
         Ok((reply.trim().to_string(), memories_written))
     }
 
@@ -482,40 +582,159 @@ impl Pipeline {
             .join("\n"))
     }
 
-    /// Synthesize `reply` with Piper and relay each audio frame to the device. A
-    /// device that closed early (e.g. the Phase-3 client, which ends on transcript)
-    /// is treated as a graceful stop, not a turn failure.
-    async fn speak(
+    /// Synthesize one chunk of reply text with Piper and relay its audio frames to
+    /// the device over the same socket. A fresh downstream Piper connection is used
+    /// per chunk so this works with any Wyoming TTS server (whether or not it keeps
+    /// a connection open across `synthesize` requests).
+    ///
+    /// Returns `Ok(false)` if the device closed mid-relay — treated as a graceful
+    /// stop (e.g. the Phase-3 client that ends on transcript, or a barge-in that
+    /// dropped the socket), not a turn failure — and `Ok(true)` otherwise. An
+    /// empty/whitespace chunk is a no-op that returns `Ok(true)`.
+    async fn speak_chunk(
         &self,
+        writer: &mut DynWrite,
         runtime: &crate::settings::RuntimeSettings,
-        device: &mut DynConnection,
         connector: &dyn ServiceConnector,
-        reply: &str,
-        on_event: &mut (dyn FnMut(TurnEvent) + Send),
-    ) -> Result<()> {
+        text: &str,
+        audio_started: &mut bool,
+    ) -> Result<bool> {
+        let text = sanitize_for_tts(text);
+        if text.trim().is_empty() {
+            return Ok(true);
+        }
         let tts_conn = connector.connect_tts().await?;
-        let mut tts = TtsSession::begin(tts_conn, reply, runtime.tts_voice.as_deref()).await?;
-        on_event(TurnEvent::Speaking);
+        let mut tts = TtsSession::begin(tts_conn, &text, runtime.tts_voice.as_deref()).await?;
 
         while let Some(ev) = tts.next_audio().await? {
-            if device.send(&ev).await.is_err() {
+            // Coalesce this sentence's Piper stream into the turn's single
+            // device-facing stream: forward exactly one `audio-start`, relay every
+            // `audio-chunk`, and swallow the per-sentence `audio-stop` (the turn
+            // sends one final `audio-stop`). The device ends its turn on the first
+            // `audio-stop` it sees, so a per-sentence stop would truncate the reply.
+            let forward = match ev.event_type.as_str() {
+                types::AUDIO_START => {
+                    if *audio_started {
+                        false
+                    } else {
+                        *audio_started = true;
+                        true
+                    }
+                }
+                types::AUDIO_STOP => false,
+                _ => true,
+            };
+            if forward && protocol::write_event(writer, &ev).await.is_err() {
                 log::info!("device closed before TTS playback finished; stopping relay");
-                break;
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
     }
+}
+
+/// Watch the device→orchestrator half of the socket for a **barge-in** while the
+/// assistant is replying. Resolves (ending the race in [`Pipeline::respond_and_speak`])
+/// when the device sends an `ambient-interrupt` frame or closes the socket; any
+/// other stray frame during playback (e.g. the device's own `audio-stop` from the
+/// STREAMING→SPEAKING edge) is consumed and ignored so it can't be mistaken for a
+/// barge-in.
+///
+/// This is a single long-lived future (never re-created inside a `select!` arm), so
+/// it is cancellation-safe: whenever it is dropped it is parked on a fresh
+/// `read_event` with no partially-consumed frame.
+async fn watch_for_barge_in(reader: &mut DynRead) {
+    loop {
+        match protocol::read_event(reader).await {
+            Ok(Some(ev)) if ev.is_interrupt() => return,
+            Ok(Some(_)) => continue, // stray frame during playback — ignore
+            Ok(None) => return,      // device closed the socket
+            Err(e) => {
+                log::debug!("barge-in watcher read error (treating as disconnect): {e:#}");
+                return;
+            }
+        }
+    }
+}
+
+/// The longest run of text (in characters) we let accumulate without terminal
+/// punctuation before flushing it to TTS anyway. Bounds time-to-first-audio on a
+/// long unpunctuated clause.
+const TTS_MAX_CHUNK_CHARS: usize = 240;
+
+/// Pull the next speakable chunk out of `pending`, draining it from the buffer.
+///
+/// A chunk is a complete sentence — text up to and including a `.`/`!`/`?` or a
+/// newline — or, to bound latency on a long clause that never terminates, the
+/// leading [`TTS_MAX_CHUNK_CHARS`] broken at the last whitespace. When `flush` is
+/// set (end of the token stream) the entire remaining buffer is returned. Returns
+/// `None` when there is nothing complete to speak yet.
+fn take_speakable(pending: &mut String, flush: bool) -> Option<String> {
+    if flush {
+        let rest = pending.trim().to_string();
+        pending.clear();
+        return if rest.is_empty() { None } else { Some(rest) };
+    }
+
+    // End of the first sentence, if one has arrived.
+    let boundary = pending
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | '\n'))
+        .map(|(i, ch)| i + ch.len_utf8());
+
+    let cut = match boundary {
+        Some(b) => b,
+        None => {
+            if pending.chars().count() < TTS_MAX_CHUNK_CHARS {
+                return None;
+            }
+            // Overlong unterminated clause: break at the last space/newline within
+            // the cap (both are single-byte, so `+ 1` stays on a char boundary).
+            let cap = pending
+                .char_indices()
+                .nth(TTS_MAX_CHUNK_CHARS)
+                .map(|(i, _)| i)
+                .unwrap_or(pending.len());
+            pending[..cap]
+                .rfind([' ', '\n'])
+                .map(|w| w + 1)
+                .unwrap_or(cap)
+        }
+    };
+
+    let chunk: String = pending.drain(..cut).collect();
+    let chunk = chunk.trim().to_string();
+    if chunk.is_empty() {
+        // The drained span was only whitespace/punctuation — try the next boundary.
+        return take_speakable(pending, false);
+    }
+    Some(chunk)
+}
+
+/// Strip Markdown decoration characters an LLM may emit (`* _ ` # ~`) so Piper does
+/// not read them aloud (e.g. "asterisk asterisk"). Kept deliberately light: it only
+/// removes standalone decoration glyphs, leaving words and punctuation intact.
+fn sanitize_for_tts(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '*' | '`' | '#' | '_' | '~'))
+        .collect()
 }
 
 /// A one-line statement of the current local date + time + timezone, injected into
 /// the LLM system prompt each turn so the model answers time/date questions from
 /// fact instead of hallucinating (it has no clock of its own). Example:
 /// `Current date and time: Monday, 16 September 2026, 6:36 PM EDT (UTC-04:00).`
+///
+/// Phrased *non-leadingly*: the model must only use it when the user actually asks
+/// about the time/date, and must not volunteer it otherwise. Without that guard the
+/// prominently-stated clock became the most salient fact in context, so on a vague or
+/// mis-transcribed request the model would default to reciting the time.
 fn current_datetime_line() -> String {
     let now = chrono::Local::now();
     format!(
-        "Current date and time: {} ({}). Use this as the source of truth for any \
-         time-, date-, day-of-week-, or \"today/tomorrow/now\"-related question.",
+        "For reference, the current date and time is {} ({}). Use this only to answer \
+         questions that are explicitly about the time, date, or day of week; do not \
+         mention the time or date otherwise, and never bring it up on your own.",
         now.format("%A, %-d %B %Y, %-I:%M %p %Z"),
         now.format("UTC%:z"),
     )
@@ -560,5 +779,71 @@ mod vad_tests {
         assert!((rms_i16_le(&pcm(&[1000, -1000, 1000, -1000])) - 1000.0).abs() < 1e-6);
         assert!(rms_i16_le(&pcm(&[30, -30, 25, -20])) < 120.0);
         assert!(rms_i16_le(&pcm(&[800, -600, 700, -900])) > 120.0);
+    }
+}
+
+#[cfg(test)]
+mod segmenter_tests {
+    use super::{sanitize_for_tts, take_speakable, TTS_MAX_CHUNK_CHARS};
+
+    #[test]
+    fn waits_for_a_complete_sentence() {
+        let mut p = String::from("Hello there");
+        assert_eq!(take_speakable(&mut p, false), None, "no terminator yet");
+        assert_eq!(p, "Hello there", "buffer untouched");
+    }
+
+    #[test]
+    fn flushes_each_complete_sentence_in_order() {
+        let mut p = String::from("First one. Second one! Third?");
+        assert_eq!(take_speakable(&mut p, false).as_deref(), Some("First one."));
+        assert_eq!(
+            take_speakable(&mut p, false).as_deref(),
+            Some("Second one!")
+        );
+        assert_eq!(take_speakable(&mut p, false).as_deref(), Some("Third?"));
+        assert_eq!(take_speakable(&mut p, false), None);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn splits_on_newlines_too() {
+        let mut p = String::from("Line one\nleftover");
+        assert_eq!(take_speakable(&mut p, false).as_deref(), Some("Line one"));
+        assert_eq!(take_speakable(&mut p, false), None);
+        assert_eq!(p, "leftover");
+    }
+
+    #[test]
+    fn flush_returns_trailing_clause() {
+        let mut p = String::from("no terminator here");
+        assert_eq!(take_speakable(&mut p, false), None);
+        assert_eq!(
+            take_speakable(&mut p, true).as_deref(),
+            Some("no terminator here")
+        );
+        assert_eq!(take_speakable(&mut p, true), None, "empty flush is None");
+    }
+
+    #[test]
+    fn overlong_unterminated_clause_is_broken_at_whitespace() {
+        // A long run with no sentence terminator flushes near the cap at a space
+        // boundary, never mid-word, so time-to-first-audio stays bounded.
+        let word = "word ";
+        let mut p = word.repeat(TTS_MAX_CHUNK_CHARS); // far longer than the cap
+        let chunk = take_speakable(&mut p, false).expect("caps long clause");
+        assert!(chunk.chars().count() <= TTS_MAX_CHUNK_CHARS);
+        assert!(chunk.starts_with("word"));
+        assert!(!chunk.ends_with("wor"), "must not split mid-word");
+    }
+
+    #[test]
+    fn sanitize_strips_markdown_decoration() {
+        assert_eq!(
+            sanitize_for_tts("**bold** and _em_ and `code`"),
+            "bold and em and code"
+        );
+        assert_eq!(sanitize_for_tts("# Heading"), " Heading");
+        assert_eq!(sanitize_for_tts("plain text, ok."), "plain text, ok.");
     }
 }

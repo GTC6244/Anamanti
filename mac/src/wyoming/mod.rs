@@ -82,4 +82,12 @@ where
             .await
             .context("reading Wyoming event")
     }
+
+    /// Borrow the reader and writer halves independently so a caller can read and
+    /// write concurrently on one connection (e.g. watching for a barge-in frame
+    /// while streaming reply audio out). The two halves are distinct fields, so
+    /// this hands out two disjoint mutable borrows.
+    pub fn split_mut(&mut self) -> (&mut R, &mut W) {
+        (&mut self.reader, &mut self.writer)
+    }
 }
