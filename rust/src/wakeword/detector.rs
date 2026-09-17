@@ -230,9 +230,9 @@ mod tests {
     ///
     /// Runs only when `HEY_JARVIS_WAV` points at a file; ignored in normal CI.
     /// Optional env knobs:
-    ///  - `HEADER`   bytes to skip (44 for a canonical WAV, 0 for a raw PCM dump).
-    ///  - `SRC_RATE` treat the input as this rate and run it through the engine
-    ///               `Resampler` down to 16 kHz first, reproducing the device path.
+    /// - `HEADER`   bytes to skip (44 for a canonical WAV, 0 for a raw PCM dump).
+    /// - `SRC_RATE` treat the input as this rate and run it through the engine
+    ///   `Resampler` down to 16 kHz first, reproducing the device path.
     #[test]
     fn scores_real_wake_word_clip() {
         let Ok(wav) = std::env::var("HEY_JARVIS_WAV") else {
@@ -243,17 +243,27 @@ mod tests {
         let mut detector = WakeWordDetector::load(&paths).expect("bundled models load");
 
         let bytes = std::fs::read(&wav).expect("read wav");
-        let header: usize = std::env::var("HEADER").ok().and_then(|s| s.parse().ok()).unwrap_or(44);
+        let header: usize = std::env::var("HEADER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(44);
         let mut samples: Vec<f32> = bytes[header..]
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32)
             .collect();
 
-        if let Some(src) = std::env::var("SRC_RATE").ok().and_then(|s| s.parse::<u32>().ok()) {
+        if let Some(src) = std::env::var("SRC_RATE")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        {
             let mut r = crate::audio::resample::Resampler::new(src, 16_000);
             let mut out = Vec::new();
             r.process(&samples, &mut out);
-            eprintln!("resampled {src}Hz->16kHz: {} -> {} samples", samples.len(), out.len());
+            eprintln!(
+                "resampled {src}Hz->16kHz: {} -> {} samples",
+                samples.len(),
+                out.len()
+            );
             samples = out;
         }
         let maxabs = samples.iter().fold(0f32, |m, &s| m.max(s.abs()));

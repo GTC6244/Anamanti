@@ -51,6 +51,27 @@ impl LlmEngine {
     }
 }
 
+/// Default trailing-silence (ms) the energy VAD waits for after speech before
+/// finalizing the STT transcript. A mild reduction from the historical 900 ms to
+/// cut end-of-turn latency; A/B-tunable from the device settings screen.
+pub const DEFAULT_END_SILENCE_MS: u64 = 700;
+
+/// Default RMS (i16 units) above which an incoming chunk counts as speech rather
+/// than room noise. Set above the Echo Show's measured far-field idle noise floor
+/// (~100–200 i16), which the original 120 sat *inside* — so every frame read as
+/// speech and end-of-speech never fired, stalling the turn. Speech runs ~1000+, so
+/// 450 cleanly separates the two. Lower it for a very quiet mic, raise it for a
+/// noisy room (A/B-tunable from the device settings screen / config page).
+pub const DEFAULT_VOICE_RMS_THRESHOLD: f64 = 450.0;
+
+fn default_end_silence_ms() -> u64 {
+    DEFAULT_END_SILENCE_MS
+}
+
+fn default_voice_rms_threshold() -> f64 {
+    DEFAULT_VOICE_RMS_THRESHOLD
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -63,6 +84,12 @@ pub struct PersistedSettings {
     pub llm_backend: String,
     pub llm_model: Option<String>,
     pub tts_voice: Option<String>,
+    /// End-of-speech trailing silence in ms (VAD). Defaulted for older files.
+    #[serde(default = "default_end_silence_ms")]
+    pub end_silence_ms: u64,
+    /// Speech-vs-noise RMS threshold (VAD). Defaulted for older files.
+    #[serde(default = "default_voice_rms_threshold")]
+    pub voice_rms_threshold: f64,
 }
 
 /// Load persisted settings, or `None` if the file is absent/unreadable.
@@ -218,11 +245,16 @@ pub struct RuntimeSettings {
     pub llm_model: Option<String>,
     /// The Piper voice to synthesize with, or `None` for the server default.
     pub tts_voice: Option<String>,
+    /// End-of-speech trailing silence (ms) the energy VAD waits for before
+    /// finalizing the STT transcript. A/B-tunable from the device.
+    pub end_silence_ms: u64,
+    /// RMS (i16 units) above which a chunk counts as speech for the VAD.
+    pub voice_rms_threshold: f64,
 }
 
 /// A description of the settings currently in effect, for reporting back to the
 /// device settings screen or the config page.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SettingsView {
     pub llm_backend: String,
     pub llm_model: Option<String>,
@@ -232,11 +264,15 @@ pub struct SettingsView {
     pub search_provider: String,
     /// Whether a search API key is configured. The key itself is never exposed.
     pub search_key_set: bool,
+    /// End-of-speech trailing silence (ms) the VAD waits for.
+    pub end_silence_ms: u64,
+    /// Speech-vs-noise RMS threshold for the VAD.
+    pub voice_rms_threshold: f64,
 }
 
 /// A requested settings change. Absent fields are left unchanged; a `tts_voice` of
 /// `Some(None)` clears the voice.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SettingsUpdate {
     pub llm_backend: Option<String>,
     pub llm_model: Option<String>,
@@ -250,6 +286,10 @@ pub struct SettingsUpdate {
     pub search_provider: Option<String>,
     /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(v))` = set.
     pub search_api_key: Option<Option<String>>,
+    /// New end-of-speech trailing silence (ms) for the VAD, or `None` to leave it.
+    pub end_silence_ms: Option<u64>,
+    /// New speech-vs-noise RMS threshold for the VAD, or `None` to leave it.
+    pub voice_rms_threshold: Option<f64>,
 }
 
 /// Thread-safe holder for the runtime settings plus the factory that rebuilds
@@ -291,6 +331,8 @@ impl SharedSettings {
             llm_backend: s.llm_backend.clone(),
             llm_model: s.llm_model.clone(),
             tts_voice: s.tts_voice.clone(),
+            end_silence_ms: s.end_silence_ms,
+            voice_rms_threshold: s.voice_rms_threshold,
         }
     }
 
@@ -319,6 +361,8 @@ impl SharedSettings {
                 llm_backend: llm_backend.into(),
                 llm_model: None,
                 tts_voice,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
             },
         )
     }
@@ -340,6 +384,8 @@ impl SharedSettings {
             web_search: s.web_search,
             search_provider: s.search_provider.clone(),
             search_key_set: s.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            end_silence_ms: s.end_silence_ms,
+            voice_rms_threshold: s.voice_rms_threshold,
         }
     }
 
@@ -410,6 +456,15 @@ impl SharedSettings {
         if let Some(voice) = &update.tts_voice {
             w.tts_voice = voice.clone().filter(|s| !s.is_empty());
         }
+        // VAD tuning needs no backend rebuild — it's read from the per-turn snapshot
+        // by `stream_to_transcript`. Clamp to sane ranges so a bad request can't wedge
+        // end-of-speech detection.
+        if let Some(ms) = update.end_silence_ms {
+            w.end_silence_ms = ms.clamp(150, 5000);
+        }
+        if let Some(thr) = update.voice_rms_threshold {
+            w.voice_rms_threshold = thr.clamp(0.0, 5000.0);
+        }
         let view = SettingsView {
             llm_backend: w.llm_backend.clone(),
             llm_model: w.llm_model.clone(),
@@ -418,6 +473,8 @@ impl SharedSettings {
             web_search: w.web_search,
             search_provider: w.search_provider.clone(),
             search_key_set: w.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            end_silence_ms: w.end_silence_ms,
+            voice_rms_threshold: w.voice_rms_threshold,
         };
         // Persist the new state (best-effort) after dropping the write lock so IO
         // never blocks a concurrent turn's snapshot.
@@ -468,6 +525,8 @@ mod tests {
                 llm_backend: label,
                 llm_model: model,
                 tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
             },
         )
     }
@@ -503,6 +562,8 @@ mod tests {
                 llm_backend: label,
                 llm_model: model,
                 tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
             },
             Some(path.clone()),
         );

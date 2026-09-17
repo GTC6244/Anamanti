@@ -296,6 +296,8 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "web_search": v.web_search,
         "search_provider": v.search_provider,
         "search_key_set": v.search_key_set,
+        "end_silence_ms": v.end_silence_ms,
+        "voice_rms_threshold": v.voice_rms_threshold,
     })
     .to_string()
 }
@@ -341,6 +343,8 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         web_search,
         search_provider: string_field("search_provider"),
         search_api_key,
+        end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
+        voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
     }
 }
 
@@ -454,7 +458,7 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["engine"], "rig");
         assert_eq!(v["web_search"], true);
-        assert_eq!(s.view().web_search, true);
+        assert!(s.view().web_search);
     }
 
     #[test]

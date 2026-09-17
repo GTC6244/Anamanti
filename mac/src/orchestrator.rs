@@ -210,7 +210,12 @@ impl Pipeline {
         let mut stt = SttSession::begin(stt_conn, format).await?;
         on_event(TurnEvent::Streaming);
 
-        let Some(transcript) = self.stream_to_transcript(device, &mut stt).await? else {
+        let end_silence = Duration::from_millis(runtime.end_silence_ms);
+        let voice_rms_threshold = runtime.voice_rms_threshold;
+        let Some(transcript) = self
+            .stream_to_transcript(device, &mut stt, end_silence, voice_rms_threshold)
+            .await?
+        else {
             // Device closed or timed out before a transcript — abandon the turn.
             let _ = stt.finish().await;
             return Ok(TurnOutcome::Completed);
@@ -264,14 +269,15 @@ impl Pipeline {
         &self,
         device: &mut DynConnection,
         stt: &mut SttSession<crate::wyoming::DynRead, crate::wyoming::DynWrite>,
+        end_silence: std::time::Duration,
+        voice_rms_threshold: f64,
     ) -> Result<Option<String>> {
-        // RMS (i16 units) above which a chunk counts as speech rather than room
-        // noise. The Echo's far-field pickup is quiet (~50 idle, several hundred+
-        // while speaking), so this sits a few× above a typical noise floor.
-        const VOICE_RMS_THRESHOLD: f64 = 120.0;
-        // Trailing silence after speech that marks end-of-utterance. Longer than an
-        // inter-word gap so it doesn't cut a sentence short.
-        const END_SILENCE: std::time::Duration = std::time::Duration::from_millis(900);
+        // `voice_rms_threshold`: RMS (i16 units) above which a chunk counts as speech
+        // rather than room noise. The Echo's far-field pickup is quiet (~50 idle,
+        // several hundred+ while speaking). `end_silence`: trailing silence after
+        // speech that marks end-of-utterance. Both come from the per-turn settings
+        // snapshot so they are A/B-tunable from the device without a restart.
+        //
         // If no speech is ever detected, still finalize after this long so a silent
         // or too-quiet utterance ends the turn instead of hanging to `turn_timeout`.
         const NO_SPEECH_FINALIZE: std::time::Duration = std::time::Duration::from_secs(6);
@@ -299,7 +305,7 @@ impl Pipeline {
                             if let Some(pcm) = ev.payload {
                                 if !finalized {
                                     let now = Instant::now();
-                                    if rms_i16_le(&pcm) > VOICE_RMS_THRESHOLD {
+                                    if rms_i16_le(&pcm) > voice_rms_threshold {
                                         if !speech_started {
                                             log::debug!("VAD: speech started");
                                         }
@@ -309,7 +315,7 @@ impl Pipeline {
                                     stt.forward_pcm(pcm).await?;
 
                                     let ended = if speech_started {
-                                        now.duration_since(last_voice) >= END_SILENCE
+                                        now.duration_since(last_voice) >= end_silence
                                     } else {
                                         now.duration_since(turn_start) >= NO_SPEECH_FINALIZE
                                     };
@@ -384,14 +390,15 @@ impl Pipeline {
             log::warn!("memory recall failed; answering without context: {e:#}");
             String::new()
         });
-        let system_prompt = if context.is_empty() {
-            self.system_prompt.clone()
-        } else {
-            format!(
-                "{}\n\nWhat you remember about this user:\n{}",
-                self.system_prompt, context
-            )
-        };
+        // Ground the model in the real wall-clock: without this it hallucinates the
+        // time/date (it has no clock). Injected every turn so "what time is it" /
+        // date-relative questions are answered from fact.
+        let mut system_prompt = format!("{}\n\n{}", self.system_prompt, current_datetime_line());
+        if !context.is_empty() {
+            system_prompt.push_str(&format!(
+                "\n\nWhat you remember about this user:\n{context}"
+            ));
+        }
 
         let mut stream = runtime
             .llm
@@ -498,6 +505,20 @@ impl Pipeline {
         }
         Ok(())
     }
+}
+
+/// A one-line statement of the current local date + time + timezone, injected into
+/// the LLM system prompt each turn so the model answers time/date questions from
+/// fact instead of hallucinating (it has no clock of its own). Example:
+/// `Current date and time: Monday, 16 September 2026, 6:36 PM EDT (UTC-04:00).`
+fn current_datetime_line() -> String {
+    let now = chrono::Local::now();
+    format!(
+        "Current date and time: {} ({}). Use this as the source of truth for any \
+         time-, date-, day-of-week-, or \"today/tomorrow/now\"-related question.",
+        now.format("%A, %-d %B %Y, %-I:%M %p %Z"),
+        now.format("UTC%:z"),
+    )
 }
 
 /// Root-mean-square amplitude (in `i16` units) of a little-endian PCM16 buffer,

@@ -91,6 +91,11 @@ class _AmbientHomeState extends State<AmbientHome> {
     _assistant?.dispose();
     final assistant = AssistantController(
       config: config,
+      // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
+      // flip to a "processing" indicator the instant the user stops talking.
+      endpointCueEnabled: _settings.endpointCueEnabled,
+      endpointSilence: Duration(milliseconds: _settings.endpointSilenceMs),
+      endpointRmsThreshold: _settings.endpointRmsThreshold,
       // While the status is offline, poll the orchestrator every few seconds so
       // the UI recovers on its own (e.g. after the Mac restarts) instead of
       // waiting for the next wake word. A control-protocol fetch is a full
@@ -114,7 +119,13 @@ class _AmbientHomeState extends State<AmbientHome> {
   Future<void> _onSettingsApplied(AppSettings next) async {
     final engineChanged = next.wakeWord != _settings.wakeWord ||
         next.threshold != _settings.threshold ||
-        next.activeThreshold != _settings.activeThreshold;
+        next.activeThreshold != _settings.activeThreshold ||
+        next.smoothingWindow != _settings.smoothingWindow ||
+        next.fireOnPeak != _settings.fireOnPeak ||
+        next.playbackBufferSecs != _settings.playbackBufferSecs ||
+        next.endpointCueEnabled != _settings.endpointCueEnabled ||
+        next.endpointSilenceMs != _settings.endpointSilenceMs ||
+        next.endpointRmsThreshold != _settings.endpointRmsThreshold;
     final photoChanged = next.photoSource != _settings.photoSource ||
         next.googleFolderName != _settings.googleFolderName ||
         next.googleLinked != _settings.googleLinked;

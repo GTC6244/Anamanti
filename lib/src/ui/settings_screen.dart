@@ -71,6 +71,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _remoteError;
   bool _saving = false;
 
+  // Orchestrator-side VAD tuning (loaded from the Mac, applied on Save).
+  int _endSilenceMs = 700;
+  double _voiceRmsThreshold = 120;
+
   @override
   void initState() {
     super.initState();
@@ -98,6 +102,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _backend = _kBackends.containsKey(remote.llmBackend) ? remote.llmBackend : 'ollama';
         _modelController.text = remote.llmModel ?? '';
         _voiceController.text = remote.ttsVoice ?? '';
+        // Adopt the orchestrator's live VAD values (0 = unknown → keep the default).
+        if (remote.endSilenceMs > 0) _endSilenceMs = remote.endSilenceMs;
+        if (remote.voiceRmsThreshold > 0) _voiceRmsThreshold = remote.voiceRmsThreshold;
         _remoteLoading = false;
       });
     } catch (e) {
@@ -145,6 +152,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           llmModel: _modelController.text.trim().isEmpty ? null : _modelController.text.trim(),
           setTtsVoice: true,
           ttsVoice: _voiceController.text.trim().isEmpty ? null : _voiceController.text.trim(),
+          endSilenceMs: _endSilenceMs,
+          voiceRmsThreshold: _voiceRmsThreshold,
         );
         if (!result.ok) remoteNote = 'Assistant: ${result.message}';
       } catch (e) {
@@ -199,6 +208,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const Divider(),
           _section('Idle photos'),
           ..._photoTiles(),
+          const Divider(),
+          _section('Speech & detection'),
+          ..._detectionTuningTiles(),
+          ..._speechTiles(),
           const Divider(),
           _section('Memory'),
           ListTile(
@@ -295,6 +308,119 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  /// A general-purpose labelled slider with a configurable range + value format,
+  /// for the detection/playback tuning knobs (which aren't all 0..1).
+  Widget _rangeSlider({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required String Function(double) format,
+    required ValueChanged<double> onChanged,
+    Key? sliderKey,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        children: [
+          SizedBox(width: 190, child: Text(label)),
+          Expanded(
+            child: Slider(
+              key: sliderKey,
+              min: min,
+              max: max,
+              divisions: divisions,
+              value: value.clamp(min, max),
+              label: format(value),
+              onChanged: onChanged,
+            ),
+          ),
+          SizedBox(width: 56, child: Text(format(value))),
+        ],
+      ),
+    );
+  }
+
+  /// Wake-word detection tuning: smoothing window + fire-on-peak (WakeWordDetection
+  /// responsiveness levers, adjustable on-device).
+  List<Widget> _detectionTuningTiles() {
+    return [
+      _rangeSlider(
+        label: 'Smoothing window',
+        value: _settings.smoothingWindow.toDouble(),
+        min: 1,
+        max: 6,
+        divisions: 5,
+        format: (v) => v.round().toString(),
+        sliderKey: const Key('settings-smoothing'),
+        onChanged: (v) =>
+            setState(() => _settings = _settings.copyWith(smoothingWindow: v.round())),
+      ),
+      SwitchListTile(
+        key: const Key('settings-fire-on-peak'),
+        secondary: const Icon(Icons.bolt),
+        title: const Text('Fire on peak'),
+        subtitle: const Text(
+            'Trigger on the strongest frame, not the average — snappier for quiet wake words'),
+        value: _settings.fireOnPeak,
+        onChanged: (v) => setState(() => _settings = _settings.copyWith(fireOnPeak: v)),
+      ),
+    ];
+  }
+
+  /// Speech + playback tuning: playback buffer depth and the local end-of-speech
+  /// cue (silence window + level threshold).
+  List<Widget> _speechTiles() {
+    return [
+      _rangeSlider(
+        label: 'Playback buffer (s)',
+        value: _settings.playbackBufferSecs.toDouble(),
+        min: 2,
+        max: 60,
+        divisions: 58,
+        format: (v) => '${v.round()}s',
+        sliderKey: const Key('settings-playback-buffer'),
+        onChanged: (v) =>
+            setState(() => _settings = _settings.copyWith(playbackBufferSecs: v.round())),
+      ),
+      SwitchListTile(
+        key: const Key('settings-endpoint-cue'),
+        secondary: const Icon(Icons.hourglass_top),
+        title: const Text('Instant "processing" cue'),
+        subtitle: const Text(
+            'Show a processing indicator the moment you stop speaking, before the reply'),
+        value: _settings.endpointCueEnabled,
+        onChanged: (v) =>
+            setState(() => _settings = _settings.copyWith(endpointCueEnabled: v)),
+      ),
+      if (_settings.endpointCueEnabled) ...[
+        _rangeSlider(
+          label: 'End-of-speech silence (ms)',
+          value: _settings.endpointSilenceMs.toDouble(),
+          min: 200,
+          max: 1500,
+          divisions: 26,
+          format: (v) => '${v.round()}',
+          sliderKey: const Key('settings-endpoint-silence'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(endpointSilenceMs: v.round())),
+        ),
+        _rangeSlider(
+          label: 'Silence level',
+          value: _settings.endpointRmsThreshold,
+          min: 0.002,
+          max: 0.05,
+          divisions: 48,
+          format: (v) => v.toStringAsFixed(3),
+          sliderKey: const Key('settings-endpoint-level'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(endpointRmsThreshold: v)),
+        ),
+      ],
+    ];
+  }
+
   List<Widget> _assistantTiles() {
     if (_remoteLoading) {
       return const [
@@ -355,6 +481,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             hintText: 'Piper voice, e.g. en_US-amy-medium (blank = default)',
           ),
         ),
+      ),
+      // Orchestrator-side end-of-speech VAD tuning (applied on the Mac). Shortening
+      // the silence window cuts the wait before the reply; lowering the level helps
+      // a quiet far-field mic register as speech instead of hitting the slow timeout.
+      _rangeSlider(
+        label: 'End-of-speech wait (ms)',
+        value: _endSilenceMs.toDouble(),
+        min: 300,
+        max: 1500,
+        divisions: 24,
+        format: (v) => '${v.round()}',
+        sliderKey: const Key('settings-vad-silence'),
+        onChanged: (v) => setState(() => _endSilenceMs = v.round()),
+      ),
+      _rangeSlider(
+        label: 'Voice level threshold',
+        value: _voiceRmsThreshold,
+        min: 20,
+        max: 400,
+        divisions: 38,
+        format: (v) => '${v.round()}',
+        sliderKey: const Key('settings-vad-level'),
+        onChanged: (v) => setState(() => _voiceRmsThreshold = v),
       ),
     ];
   }

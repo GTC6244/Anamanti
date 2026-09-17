@@ -100,6 +100,22 @@ pub struct WakeWordConfig {
     /// Seconds of server silence before a turn is defensively abandoned
     /// (0 = use the built-in default).
     pub turn_timeout_secs: u64,
+    /// Number of consecutive per-block scores smoothed before a detection can fire
+    /// (0 = engine default). Lower = snappier / more sensitive to brief or faint
+    /// wake words; higher = fewer single-frame false triggers. A/B-tunable from the
+    /// settings screen to dial in far-field responsiveness on hardware.
+    pub smoothing_window: u32,
+    /// Detection-gate criterion. `false` (default) fires on the *average* of the
+    /// smoothing window clearing `threshold`; `true` fires as soon as the *peak*
+    /// score in the window clears it — far more responsive to short/quiet "hey
+    /// jarvis" utterances (whose confidence peaks for a single block and is
+    /// otherwise diluted by the surrounding low blocks) at the cost of a slightly
+    /// higher false-trigger rate.
+    pub fire_on_peak: bool,
+    /// Speaker playback buffer depth in seconds (0 = engine default). Sized to hold
+    /// a whole spoken reply so long TTS answers are not truncated when the network
+    /// delivers audio faster than real-time playback drains it. A/B-tunable.
+    pub playback_buffer_secs: u32,
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it

@@ -20,6 +20,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -29,10 +30,23 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::resample::Resampler;
 
-/// Output ring capacity in `f32` samples: ~4 s at 48 kHz stereo. TTS replies are
-/// short, but a generous buffer means the async turn task can hand off a whole
-/// utterance without ever blocking the real-time output callback.
-const PLAYBACK_RING_SAMPLES: usize = 48_000 * 2 * 4;
+/// Default playback buffer depth in seconds when the caller passes `0`. Sized to
+/// comfortably hold a whole spoken reply: the orchestrator relays Piper audio as
+/// fast as TCP delivers it (much faster than real-time playback drains), so a
+/// too-small ring silently truncated the tail of any reply longer than the buffer
+/// — the "long audio gets cut off" bug. A/B-tunable via `WakeWordConfig`.
+const DEFAULT_PLAYBACK_BUFFER_SECS: u32 = 30;
+
+/// How long [`PlaybackSink::submit_pcm`] will wait for ring space before giving up
+/// and dropping the overflow. This is the backpressure that paces the producer to
+/// real-time playback: the real-time output callback drains the ring on its own
+/// (separate) audio thread, so parking the producer here simply throttles it to the
+/// speaker's rate instead of dropping samples. With the generous default ring this
+/// path is essentially never hit; it only engages for pathologically long replies.
+const SUBMIT_BACKPRESSURE: Duration = Duration::from_secs(5);
+
+/// Polling granularity while waiting for ring space in `submit_pcm`.
+const SUBMIT_PARK: Duration = Duration::from_millis(2);
 
 /// Describes the output stream that was actually opened.
 #[derive(Debug, Clone)]
@@ -60,6 +74,8 @@ pub struct PlaybackSink {
     flush: std::sync::Arc<AtomicBool>,
     out_rate: u32,
     out_channels: u16,
+    /// How long `submit_pcm` waits for ring space before dropping overflow.
+    max_backpressure: Duration,
 }
 
 struct SinkState {
@@ -74,7 +90,16 @@ struct SinkState {
 impl PlaybackSink {
     /// Convert and enqueue a mono `i16` PCM block sampled at `src_rate`. Resamples
     /// to the output device rate and fans the mono sample out across every output
-    /// channel. Never blocks: if the ring is full the excess is dropped.
+    /// channel.
+    ///
+    /// Applies **backpressure** rather than dropping: if the ring is full it parks
+    /// briefly (up to `max_backpressure`) waiting for the real-time output callback
+    /// to drain space, which paces this producer to the speaker's real-time rate.
+    /// This is what keeps a long reply intact — the network hands us the whole
+    /// utterance far faster than it plays, and the old "drop the rest on full"
+    /// behavior truncated everything past the ring. Only if the wait is exhausted
+    /// (playback wedged, or a reply longer than `max_backpressure` of buffer) is the
+    /// remainder dropped, with a warning.
     pub fn submit_pcm(&self, samples: &[i16], src_rate: u32) {
         if samples.is_empty() {
             return;
@@ -97,12 +122,32 @@ impl PlaybackSink {
         let (_, r) = resampler.as_mut().expect("resampler set above");
         r.process(in_f32, out_f32);
 
-        for &s in out_f32.iter() {
-            for _ in 0..self.out_channels.max(1) {
-                if prod.try_push(s).is_err() {
-                    return; // ring full — drop the rest of this block
+        let channels = self.out_channels.max(1);
+        let mut dropped = 0usize;
+        'block: for &s in out_f32.iter() {
+            for _ in 0..channels {
+                let mut deadline: Option<Instant> = None;
+                while prod.try_push(s).is_err() {
+                    // Ring full: wait for the output callback to drain some space.
+                    // `deadline` is set lazily so the common (non-full) path stays a
+                    // single `try_push` with no clock read.
+                    let end =
+                        *deadline.get_or_insert_with(|| Instant::now() + self.max_backpressure);
+                    if Instant::now() >= end {
+                        // Count the whole remaining block as dropped and bail.
+                        dropped = out_f32.len();
+                        break 'block;
+                    }
+                    std::thread::sleep(SUBMIT_PARK);
                 }
             }
+        }
+        if dropped > 0 {
+            log::warn!(
+                "playback ring stayed full for {:?}; dropped ~{dropped} samples of a reply \
+                 (increase the playback buffer)",
+                self.max_backpressure
+            );
         }
     }
 
@@ -117,6 +162,24 @@ impl PlaybackSink {
     /// a real audio device.
     #[cfg(test)]
     pub fn for_test(out_rate: u32, out_channels: u16, capacity: usize) -> (Self, HeapCons<f32>) {
+        // Tests exercise a standalone ring with no live output callback draining it,
+        // so use a tiny backpressure window: the drop-on-exhaustion path is reached
+        // quickly instead of parking for the production 5 s.
+        Self::for_test_with_backpressure(
+            out_rate,
+            out_channels,
+            capacity,
+            Duration::from_millis(20),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn for_test_with_backpressure(
+        out_rate: u32,
+        out_channels: u16,
+        capacity: usize,
+        max_backpressure: Duration,
+    ) -> (Self, HeapCons<f32>) {
         let (prod, cons) = HeapRb::<f32>::new(capacity).split();
         let sink = Self {
             inner: Mutex::new(SinkState {
@@ -128,6 +191,7 @@ impl PlaybackSink {
             flush: std::sync::Arc::new(AtomicBool::new(false)),
             out_rate,
             out_channels,
+            max_backpressure,
         };
         (sink, cons)
     }
@@ -136,7 +200,11 @@ impl PlaybackSink {
 /// Open the default output device and start a silent stream that plays whatever
 /// [`PlaybackSink::submit_pcm`] enqueues. Returns the (`!Send`) stream to keep
 /// alive on the engine thread plus the shareable sink for the turn task.
-pub fn start_playback() -> Result<(PlaybackStream, PlaybackSink)> {
+///
+/// `buffer_secs` sizes the output ring (seconds of audio it can hold); `0` selects
+/// [`DEFAULT_PLAYBACK_BUFFER_SECS`]. It must be large enough to hold a whole reply,
+/// since the network delivers TTS faster than real-time — see [`PlaybackSink::submit_pcm`].
+pub fn start_playback(buffer_secs: u32) -> Result<(PlaybackStream, PlaybackSink)> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -151,7 +219,16 @@ pub fn start_playback() -> Result<(PlaybackStream, PlaybackSink)> {
     let channels = config.channels;
     let sample_rate = config.sample_rate;
 
-    let (prod, cons) = HeapRb::<f32>::new(PLAYBACK_RING_SAMPLES).split();
+    let secs = if buffer_secs == 0 {
+        DEFAULT_PLAYBACK_BUFFER_SECS
+    } else {
+        buffer_secs
+    };
+    let ring_samples = (sample_rate as usize)
+        .saturating_mul(channels.max(1) as usize)
+        .saturating_mul(secs as usize)
+        .max(1);
+    let (prod, cons) = HeapRb::<f32>::new(ring_samples).split();
     let flush = std::sync::Arc::new(AtomicBool::new(false));
 
     let stream = match sample_format {
@@ -179,6 +256,7 @@ pub fn start_playback() -> Result<(PlaybackStream, PlaybackSink)> {
         flush,
         out_rate: sample_rate,
         out_channels: channels,
+        max_backpressure: SUBMIT_BACKPRESSURE,
     };
     Ok((
         PlaybackStream {
@@ -271,13 +349,63 @@ mod tests {
     }
 
     #[test]
-    fn full_ring_drops_excess_without_panicking() {
+    fn full_ring_eventually_drops_excess_without_hanging() {
+        // No consumer drains the ring, so once it fills, `submit_pcm` parks for the
+        // (tiny, test-only) backpressure window and then drops the remainder rather
+        // than blocking forever.
         let (sink, mut cons) = PlaybackSink::for_test(16_000, 1, 8);
+        let start = std::time::Instant::now();
         sink.submit_pcm(&[7i16; 100], 16_000); // far more than 8 slots
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "submit must give up, not hang"
+        );
         let mut n = 0;
         while cons.try_pop().is_some() {
             n += 1;
         }
         assert_eq!(n, 8, "ring holds at most its capacity");
+    }
+
+    #[test]
+    fn backpressure_lets_a_long_reply_through_when_drained_concurrently() {
+        // A reply far larger than the ring: a background "speaker" drains the ring at
+        // its own pace while the producer submits. With backpressure (park-and-retry)
+        // every sample makes it through instead of the tail being dropped — the fix
+        // for long-audio truncation.
+        const CAP: usize = 64;
+        const TOTAL: usize = 4000; // ~62× the ring
+        let (sink, mut cons) =
+            PlaybackSink::for_test_with_backpressure(16_000, 1, CAP, Duration::from_secs(5));
+
+        let played = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let played_t = played.clone();
+        let done_t = done.clone();
+        // Consumer thread: drain whatever is available until the producer signals done
+        // and the ring is empty.
+        let drainer = std::thread::spawn(move || loop {
+            match cons.try_pop() {
+                Some(_) => {
+                    played_t.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {
+                    if done_t.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+
+        sink.submit_pcm(&vec![5i16; TOTAL], 16_000);
+        done.store(true, Ordering::SeqCst);
+        drainer.join().unwrap();
+
+        assert_eq!(
+            played.load(Ordering::SeqCst),
+            TOTAL,
+            "backpressure must deliver the whole reply, not truncate it"
+        );
     }
 }

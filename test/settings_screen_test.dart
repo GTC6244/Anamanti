@@ -121,12 +121,16 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // The memory tile sits at the bottom of the settings list; scroll it into view.
+    // The memory tile sits at the bottom of the settings list; scroll it fully into
+    // view before tapping (the list is long enough that a partial reveal can leave
+    // the tile's center off-screen).
     await tester.scrollUntilVisible(
       find.byKey(const Key('settings-memory')),
       200,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.ensureVisible(find.byKey(const Key('settings-memory')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('settings-memory')));
     await tester.pumpAndSettle();
 

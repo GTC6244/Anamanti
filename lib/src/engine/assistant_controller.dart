@@ -42,6 +42,11 @@ enum TurnPhase {
   /// Wake word fired / mic streaming up: we are listening to the user.
   listening,
 
+  /// The user has stopped speaking (detected locally on-device from the mic level)
+  /// and the assistant is finalizing/transcribing — shown immediately as a cue so
+  /// the screen isn't stuck on "Listening…" during the Mac's VAD + STT round trip.
+  processing,
+
   /// Contacting the Mac orchestrator over the discovered Wyoming socket.
   connecting,
 
@@ -128,6 +133,10 @@ class AssistantController extends ChangeNotifier {
     Duration minBackoff = const Duration(seconds: 1),
     Duration maxBackoff = const Duration(seconds: 30),
     Duration offlinePollInterval = const Duration(seconds: 3),
+    bool endpointCueEnabled = true,
+    Duration endpointSilence = const Duration(milliseconds: 600),
+    double endpointRmsThreshold = 0.012,
+    DateTime Function()? clock,
   })  : _config = config,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
@@ -135,7 +144,11 @@ class AssistantController extends ChangeNotifier {
         _probe = probeOrchestrator,
         _minBackoff = minBackoff,
         _maxBackoff = maxBackoff,
-        _offlinePollInterval = offlinePollInterval;
+        _offlinePollInterval = offlinePollInterval,
+        _endpointCueEnabled = endpointCueEnabled,
+        _endpointSilence = endpointSilence,
+        _endpointRmsThreshold = endpointRmsThreshold,
+        _clock = clock ?? DateTime.now;
 
   static Stream<WakeWordEvent> _defaultEngineStream(WakeWordConfig config) =>
       startWakeWordEngine(config: config);
@@ -149,6 +162,21 @@ class AssistantController extends ChangeNotifier {
   final Duration _minBackoff;
   final Duration _maxBackoff;
   final Duration _offlinePollInterval;
+
+  /// Local end-of-speech cue: flip to [TurnPhase.processing] once the mic level has
+  /// stayed below [_endpointRmsThreshold] for [_endpointSilence] after speech, so
+  /// the UI reacts the instant the user stops rather than waiting on the Mac.
+  final bool _endpointCueEnabled;
+  final Duration _endpointSilence;
+  final double _endpointRmsThreshold;
+  final DateTime Function() _clock;
+
+  /// True once we've seen speech-level audio in the current turn (so trailing
+  /// silence means "done speaking" rather than "hasn't started yet").
+  bool _speechSeen = false;
+
+  /// When the mic last carried speech-level audio in the current turn.
+  DateTime? _lastVoiceAt;
 
   AssistantState _state = const AssistantState();
   AssistantState get state => _state;
@@ -221,9 +249,12 @@ class AssistantController extends ChangeNotifier {
       case WakeWordEventKind.status:
         _emit(_state.copyWith(statusMessage: e.message));
       case WakeWordEventKind.level:
-        _emit(_state.copyWith(micLevel: e.rms));
+        _onLevel(e.rms);
       case WakeWordEventKind.detected:
-        // A wake word starts a fresh turn: clear the previous exchange.
+        // A wake word starts a fresh turn: clear the previous exchange and reset the
+        // local end-of-speech tracker.
+        _speechSeen = false;
+        _lastVoiceAt = _clock();
         _emit(_state.copyWith(
           phase: TurnPhase.listening,
           wakeWord: e.model,
@@ -259,6 +290,25 @@ class AssistantController extends ChangeNotifier {
       case WakeWordEventKind.error:
         _scheduleReconnect(e.message);
     }
+  }
+
+  /// Fold a mic-level event into the state, and — while we're actively listening —
+  /// run the local end-of-speech detector so the UI flips to [TurnPhase.processing]
+  /// the moment the user stops talking, ahead of the Mac's VAD + transcript.
+  void _onLevel(double rms) {
+    final now = _clock();
+    var next = _state.copyWith(micLevel: rms);
+    if (_endpointCueEnabled && _state.phase == TurnPhase.listening) {
+      if (rms >= _endpointRmsThreshold) {
+        _speechSeen = true;
+        _lastVoiceAt = now;
+      } else if (_speechSeen &&
+          _lastVoiceAt != null &&
+          now.difference(_lastVoiceAt!) >= _endpointSilence) {
+        next = next.copyWith(phase: TurnPhase.processing);
+      }
+    }
+    _emit(next);
   }
 
   void _onDisconnected(String message) {

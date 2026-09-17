@@ -507,6 +507,71 @@ async fn open_stream(
     }
 }
 
+/// Non-streaming completion used for tool-negotiation rounds. Returns the assistant
+/// text (if any) plus every tool call the model requested. Unlike the streaming
+/// path, this reliably surfaces tool calls across providers (see `respond`).
+async fn open_completion(
+    model: &Model,
+    system_prompt: &str,
+    messages: &[Message],
+    tool_defs: &[ToolDefinition],
+    max_tokens: u64,
+) -> Result<(String, Vec<ToolCall>)> {
+    match model {
+        Model::Ollama(m) => {
+            build_and_complete(m.clone(), system_prompt, messages, tool_defs, max_tokens).await
+        }
+        Model::Anthropic(m) => {
+            build_and_complete(m.clone(), system_prompt, messages, tool_defs, max_tokens).await
+        }
+    }
+}
+
+async fn build_and_complete<M>(
+    model: M,
+    system_prompt: &str,
+    messages: &[Message],
+    tool_defs: &[ToolDefinition],
+    max_tokens: u64,
+) -> Result<(String, Vec<ToolCall>)>
+where
+    M: CompletionModel + Clone,
+{
+    let (prompt, history) = messages
+        .split_last()
+        .expect("conversation always has at least the user message");
+    let preamble = if tool_defs.is_empty() {
+        system_prompt.to_string()
+    } else {
+        format!("{system_prompt}\n\n{TOOL_GUIDANCE}")
+    };
+    let mut builder = model
+        .completion_request(prompt.clone())
+        .messages(history.iter().cloned())
+        .preamble(preamble);
+    if !tool_defs.is_empty() {
+        builder = builder.tools(tool_defs.to_vec());
+    }
+    if max_tokens > 0 {
+        builder = builder.max_tokens(max_tokens);
+    }
+    let response = model
+        .completion(builder.build())
+        .await
+        .context("rig completion request")?;
+
+    let mut text = String::new();
+    let mut calls: Vec<ToolCall> = Vec::new();
+    for content in response.choice.into_iter() {
+        match content {
+            AssistantContent::Text(t) => text.push_str(&t.text),
+            AssistantContent::ToolCall(tc) => calls.push(tc),
+            _ => {}
+        }
+    }
+    Ok((text.trim().to_string(), calls))
+}
+
 #[async_trait]
 impl LlmBackend for RigBackend {
     fn name(&self) -> &str {
@@ -523,32 +588,44 @@ impl LlmBackend for RigBackend {
             .map(|t| t.definitions.clone())
             .unwrap_or_default();
 
+        // No tools → pure streaming (token-by-token) in a single pass.
+        if tool_defs.is_empty() {
+            let stream = async_stream::try_stream! {
+                let messages = vec![Message::user(turn.user_message)];
+                let response =
+                    open_stream(&model, &system_prompt, &messages, &tool_defs, max_tokens).await?;
+                futures_util::pin_mut!(response);
+                while let Some(part) = response.next().await {
+                    if let StreamedAssistantContent::Text(text) = part? {
+                        if !text.text.is_empty() {
+                            yield text.text;
+                        }
+                    }
+                }
+            };
+            return Ok(Box::pin(stream));
+        }
+
+        // Tools present → drive the tool-negotiation rounds with a **non-streaming**
+        // completion. rig-core 0.42's ollama *streaming* parser drops tool calls that
+        // arrive in a non-final (`done:false`) chunk — which is exactly how live
+        // ollama emits them — so the tool was never executed and the reply came back
+        // empty. Non-streaming `completion()` returns the tool calls reliably. We
+        // give up token-by-token streaming for tool turns, which is fine: the reply
+        // is spoken via TTS (and rendered) from the full text regardless.
         let stream = async_stream::try_stream! {
             let mut messages: Vec<Message> = vec![Message::user(turn.user_message)];
 
             for _round in 0..MAX_TOOL_ROUNDS {
-                let response =
-                    open_stream(&model, &system_prompt, &messages, &tool_defs, max_tokens).await?;
-                futures_util::pin_mut!(response);
+                let (text, calls) =
+                    open_completion(&model, &system_prompt, &messages, &tool_defs, max_tokens)
+                        .await?;
 
-                // Forward assistant text as reply tokens; collect any tool calls to
-                // execute once this pass completes.
-                let mut calls: Vec<ToolCall> = Vec::new();
-                while let Some(part) = response.next().await {
-                    match part? {
-                        StreamedAssistantContent::Text(text) => {
-                            if !text.text.is_empty() {
-                                yield text.text;
-                            }
-                        }
-                        StreamedAssistantContent::ToolCall { tool_call, .. } => {
-                            calls.push(tool_call);
-                        }
-                        _ => {}
-                    }
+                if !text.is_empty() {
+                    yield text;
                 }
 
-                // No tool calls → the model has finished; stop.
+                // No tool calls → the model has produced its answer; stop.
                 if calls.is_empty() {
                     break;
                 }
@@ -701,8 +778,9 @@ mod tests {
     #[tokio::test]
     async fn rig_ollama_runs_tool_then_streams_answer() {
         let tool_call = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"internet_search\",\"arguments\":{\"query\":\"weather in paris\"}}}]},\"done\":true,\"done_reason\":\"stop\"}\n";
-        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"It is sunny\"},\"done\":false}\n\
-                      {\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\" in Paris.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        // Tool turns use a non-streaming completion (see `respond`), so the follow-up
+        // answer is a single JSON object rather than streamed deltas.
+        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"It is sunny in Paris.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
         let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
 
         let tools = Some(Arc::new(Tools::new(Arc::new(StaticSearch("Sunny, 21C.")))));
