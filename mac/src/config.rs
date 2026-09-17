@@ -362,6 +362,9 @@ impl Config {
         let mut model = model_default;
         let mut tts_voice = self.tts_voice.clone();
 
+        let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
+        let mut voice_rms_threshold = crate::settings::DEFAULT_VOICE_RMS_THRESHOLD;
+
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
             engine = LlmEngine::from_label(&p.engine);
@@ -371,6 +374,8 @@ impl Config {
             backend = p.llm_backend;
             model = p.llm_model;
             tts_voice = p.tts_voice;
+            end_silence_ms = p.end_silence_ms;
+            voice_rms_threshold = p.voice_rms_threshold;
         }
 
         let (llm, llm_backend, llm_model) = factory
@@ -394,6 +399,8 @@ impl Config {
                 llm_backend,
                 llm_model,
                 tts_voice,
+                end_silence_ms,
+                voice_rms_threshold,
             },
             persist_path,
         ))

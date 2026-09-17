@@ -64,6 +64,7 @@ class _PhaseHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final label = switch (phase) {
       TurnPhase.listening => 'Listening…',
+      TurnPhase.processing => 'Processing…',
       TurnPhase.connecting => 'Connecting…',
       TurnPhase.thinking => 'Thinking…',
       TurnPhase.speaking => 'Speaking…',

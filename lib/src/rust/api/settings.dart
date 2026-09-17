@@ -107,12 +107,20 @@ class OrchestratorSettings {
   /// The active Piper voice, or `None` for the server default.
   final String? ttsVoice;
 
+  /// Orchestrator VAD: end-of-speech trailing silence in ms (0 if unknown).
+  final int endSilenceMs;
+
+  /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
+  final double voiceRmsThreshold;
+
   const OrchestratorSettings({
     required this.ok,
     required this.message,
     required this.llmBackend,
     this.llmModel,
     this.ttsVoice,
+    required this.endSilenceMs,
+    required this.voiceRmsThreshold,
   });
 
   @override
@@ -121,7 +129,9 @@ class OrchestratorSettings {
       message.hashCode ^
       llmBackend.hashCode ^
       llmModel.hashCode ^
-      ttsVoice.hashCode;
+      ttsVoice.hashCode ^
+      endSilenceMs.hashCode ^
+      voiceRmsThreshold.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -132,7 +142,9 @@ class OrchestratorSettings {
           message == other.message &&
           llmBackend == other.llmBackend &&
           llmModel == other.llmModel &&
-          ttsVoice == other.ttsVoice;
+          ttsVoice == other.ttsVoice &&
+          endSilenceMs == other.endSilenceMs &&
+          voiceRmsThreshold == other.voiceRmsThreshold;
 }
 
 /// A requested settings change from the screen. Absent fields are left unchanged.
@@ -150,11 +162,19 @@ class SettingsUpdate {
   /// The voice to set when `set_tts_voice` is `true`.
   final String? ttsVoice;
 
+  /// New orchestrator VAD end-of-speech silence (ms), or `None` to leave it.
+  final int? endSilenceMs;
+
+  /// New orchestrator VAD speech RMS threshold, or `None` to leave it.
+  final double? voiceRmsThreshold;
+
   const SettingsUpdate({
     this.llmBackend,
     this.llmModel,
     required this.setTtsVoice,
     this.ttsVoice,
+    this.endSilenceMs,
+    this.voiceRmsThreshold,
   });
 
   @override
@@ -162,7 +182,9 @@ class SettingsUpdate {
       llmBackend.hashCode ^
       llmModel.hashCode ^
       setTtsVoice.hashCode ^
-      ttsVoice.hashCode;
+      ttsVoice.hashCode ^
+      endSilenceMs.hashCode ^
+      voiceRmsThreshold.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -172,5 +194,7 @@ class SettingsUpdate {
           llmBackend == other.llmBackend &&
           llmModel == other.llmModel &&
           setTtsVoice == other.setTtsVoice &&
-          ttsVoice == other.ttsVoice;
+          ttsVoice == other.ttsVoice &&
+          endSilenceMs == other.endSilenceMs &&
+          voiceRmsThreshold == other.voiceRmsThreshold;
 }

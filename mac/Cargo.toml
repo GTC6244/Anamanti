@@ -35,6 +35,10 @@ anyhow = "1.0.104"
 async-stream = "0.3"
 async-trait = "0.1"
 bytes = "1"
+# Local (timezone-aware) wall-clock time, injected into the LLM prompt each turn so
+# the model answers date/time questions from fact. `clock` enables `Local::now()` +
+# the system timezone; default features are off to keep the build lean.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 env_logger = "0.11"
 futures-util = "0.3"
 log = "0.4.34"

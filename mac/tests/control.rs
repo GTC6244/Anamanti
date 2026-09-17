@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use ambient_orchestrator::memory::{MemoryKind, MemorySource, MemoryStore};
 use ambient_orchestrator::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
-use ambient_orchestrator::settings::{LlmFactory, RuntimeSettings, SharedSettings};
+use ambient_orchestrator::settings::{
+    LlmEngine, LlmFactory, RuntimeSettings, SharedSettings, DEFAULT_END_SILENCE_MS,
+    DEFAULT_VOICE_RMS_THRESHOLD,
+};
 use ambient_orchestrator::wyoming::protocol::{read_event, types, write_event, WyomingEvent};
 use serde_json::json;
 use tokio::io::BufReader;
@@ -27,14 +30,29 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         anthropic_api_key: None,
         anthropic_max_tokens: 128,
     };
-    let (llm, backend, model) = factory.build("ollama", Some("llama3.2")).unwrap();
+    let (llm, backend, model) = factory
+        .build(
+            LlmEngine::Native,
+            false,
+            "duckduckgo",
+            None,
+            "ollama",
+            Some("llama3.2"),
+        )
+        .unwrap();
     let settings = SharedSettings::new(
         factory,
         RuntimeSettings {
             llm,
+            engine: LlmEngine::Native,
+            web_search: false,
+            search_provider: "duckduckgo".to_string(),
+            search_api_key: None,
             llm_backend: backend,
             llm_model: model,
             tts_voice: None,
+            end_silence_ms: DEFAULT_END_SILENCE_MS,
+            voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
         },
     );
     let pipeline = Pipeline::with_settings(

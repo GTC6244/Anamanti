@@ -111,6 +111,8 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         web_search,
         search_provider: string_field("search_provider"),
         search_api_key,
+        end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
+        voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
     }
 }
 
@@ -128,6 +130,8 @@ fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> Wyom
             "web_search": v.web_search,
             "search_provider": v.search_provider,
             "search_key_set": v.search_key_set,
+            "end_silence_ms": v.end_silence_ms,
+            "voice_rms_threshold": v.voice_rms_threshold,
         }),
     )
 }
@@ -211,6 +215,8 @@ mod tests {
                 llm_backend: "ollama".into(),
                 llm_model: Some("llama3.2".into()),
                 tts_voice: Some("amy".into()),
+                end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();

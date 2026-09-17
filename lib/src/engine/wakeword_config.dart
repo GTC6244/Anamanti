@@ -20,6 +20,9 @@ class WakeWordDefaults {
   static const String modelName = 'hey_jarvis';
   static const double threshold = 0.5;
   static const double activeThreshold = 0.7;
+  static const int smoothingWindow = 2;
+  static const bool fireOnPeak = false;
+  static const int playbackBufferSecs = 30;
   static const int discoveryTimeoutSecs = 3;
   static const int turnTimeoutSecs = 15;
 
@@ -46,6 +49,9 @@ Future<WakeWordConfig> buildWakeWordConfig({
   String modelName = WakeWordDefaults.modelName,
   double threshold = WakeWordDefaults.threshold,
   double activeThreshold = WakeWordDefaults.activeThreshold,
+  int smoothingWindow = WakeWordDefaults.smoothingWindow,
+  bool fireOnPeak = WakeWordDefaults.fireOnPeak,
+  int playbackBufferSecs = WakeWordDefaults.playbackBufferSecs,
 }) async {
   final dir = await wakeWordModelDir();
   return WakeWordConfig(
@@ -57,16 +63,23 @@ Future<WakeWordConfig> buildWakeWordConfig({
     activeThreshold: activeThreshold,
     discoveryTimeoutSecs: BigInt.from(WakeWordDefaults.discoveryTimeoutSecs),
     turnTimeoutSecs: BigInt.from(WakeWordDefaults.turnTimeoutSecs),
+    smoothingWindow: smoothingWindow,
+    fireOnPeak: fireOnPeak,
+    playbackBufferSecs: playbackBufferSecs,
   );
 }
 
 /// Build a [WakeWordConfig] from the user's persisted [AppSettings] (Phase 6):
-/// the settings screen chooses the wake word and thresholds, and this maps them to
-/// the native engine config (resolving the model paths under the app model dir).
+/// the settings screen chooses the wake word and detection/playback tuning, and
+/// this maps them to the native engine config (resolving the model paths under the
+/// app model dir).
 Future<WakeWordConfig> buildWakeWordConfigFrom(AppSettings settings) {
   return buildWakeWordConfig(
     modelName: settings.wakeWord,
     threshold: settings.threshold,
     activeThreshold: settings.activeThreshold,
+    smoothingWindow: settings.smoothingWindow,
+    fireOnPeak: settings.fireOnPeak,
+    playbackBufferSecs: settings.playbackBufferSecs,
   );
 }
