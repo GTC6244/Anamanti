@@ -134,6 +134,15 @@ where
             .context("sending audio-stop")
     }
 
+    /// Send an `ambient-interrupt` (barge-in) frame so the orchestrator aborts the
+    /// in-flight reply's LLM generation + TTS at once, rather than only noticing
+    /// when the socket is torn down.
+    pub async fn send_interrupt(&mut self) -> Result<()> {
+        protocol::write_event(&mut self.writer, &WyomingEvent::interrupt())
+            .await
+            .context("sending interrupt")
+    }
+
     /// Read the next event from the server, or `None` on a clean close.
     pub async fn read_event(&mut self) -> Result<Option<WyomingEvent>> {
         protocol::read_event(&mut self.reader)
@@ -209,9 +218,14 @@ where
         tokio::select! {
             biased;
 
-            // Barge-in: a new wake word fired mid-turn → stop and let a fresh turn
-            // start. Draining the receiver value is enough; we only need the signal.
+            // Barge-in: a new wake word (or on-device VAD) fired mid-turn → tell the
+            // orchestrator to abort the in-flight reply, then stop this turn so a
+            // fresh one can start. The engine has already flushed local playback.
+            // Sending here is cancellation-safe: this arm is mutually exclusive with
+            // the `read_event` arm, so no partially-read frame is dropped. A failed
+            // send (socket already gone) is fine — we tear the turn down regardless.
             _ = interrupt.recv() => {
+                let _ = conn.send_interrupt().await;
                 let actions = session.on_input(ControlInput::Stop);
                 run_actions(conn, actions, &mut on_update).await?;
             }
@@ -505,11 +519,17 @@ mod tests {
             WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default());
 
         // Server accepts audio-start then goes quiet, so only the interrupt can end
-        // the turn. It must stay alive so the client's reads block (not EOF).
+        // the turn. It must stay alive so the client's reads block (not EOF). It
+        // records every frame type it sees so we can assert the barge-in frame was
+        // relayed to the orchestrator.
         let server = tokio::spawn(async move {
             let (sr, _sw) = tokio::io::split(server_io);
             let mut reader = TokioBufReader::new(sr);
-            while read_event(&mut reader).await.transpose().is_some() {}
+            let mut seen = Vec::new();
+            while let Ok(Some(ev)) = read_event(&mut reader).await {
+                seen.push(ev.event_type);
+            }
+            seen
         });
 
         let (_pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(8);
@@ -532,7 +552,13 @@ mod tests {
         // The interrupt cut the turn short well before the 30 s watchdog.
         assert_eq!(updates.last(), Some(&TurnUpdate::Finished));
         drop(conn);
-        let _ = server.await;
+        // The device relayed an `ambient-interrupt` frame so the orchestrator can
+        // abort the reply gracefully (not just learn of it via the socket drop).
+        let seen = server.await.unwrap();
+        assert!(
+            seen.iter().any(|t| t == types::INTERRUPT),
+            "barge-in should send an interrupt frame; saw {seen:?}"
+        );
     }
 
     #[tokio::test]
