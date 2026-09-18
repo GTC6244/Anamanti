@@ -28,6 +28,12 @@ import 'package:ambient_display/src/rust/api/engine.dart';
 /// `startWakeWordEngine`; tests pass a fake.
 typedef EngineStreamFactory = Stream<WakeWordEvent> Function(WakeWordConfig config);
 
+/// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
+/// connection/handshake succeeded. Production wires this to a control-protocol
+/// round-trip (mDNS discover + connect); tests inject a fake. When left null the
+/// offline poll is disabled.
+typedef OrchestratorProbe = Future<bool> Function();
+
 /// Where the current voice turn is, from the UI's point of view.
 enum TurnPhase {
   /// No active turn — the ambient/idle screen (slideshow) is showing.
@@ -35,6 +41,11 @@ enum TurnPhase {
 
   /// Wake word fired / mic streaming up: we are listening to the user.
   listening,
+
+  /// The user has stopped speaking (detected locally on-device from the mic level)
+  /// and the assistant is finalizing/transcribing — shown immediately as a cue so
+  /// the screen isn't stuck on "Listening…" during the Mac's VAD + STT round trip.
+  processing,
 
   /// Contacting the Mac orchestrator over the discovered Wyoming socket.
   connecting,
@@ -118,28 +129,62 @@ class AssistantController extends ChangeNotifier {
   AssistantController({
     required WakeWordConfig config,
     EngineStreamFactory? startEngine,
+    OrchestratorProbe? probeOrchestrator,
     Duration minBackoff = const Duration(seconds: 1),
     Duration maxBackoff = const Duration(seconds: 30),
+    Duration offlinePollInterval = const Duration(seconds: 3),
+    bool endpointCueEnabled = true,
+    Duration endpointSilence = const Duration(milliseconds: 600),
+    double endpointRmsThreshold = 0.012,
+    DateTime Function()? clock,
   })  : _config = config,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
+        _probe = probeOrchestrator,
         _minBackoff = minBackoff,
-        _maxBackoff = maxBackoff;
+        _maxBackoff = maxBackoff,
+        _offlinePollInterval = offlinePollInterval,
+        _endpointCueEnabled = endpointCueEnabled,
+        _endpointSilence = endpointSilence,
+        _endpointRmsThreshold = endpointRmsThreshold,
+        _clock = clock ?? DateTime.now;
 
   static Stream<WakeWordEvent> _defaultEngineStream(WakeWordConfig config) =>
       startWakeWordEngine(config: config);
 
   final WakeWordConfig _config;
   final EngineStreamFactory _startEngine;
+
+  /// Reachability probe used to auto-recover the online status while idle, instead
+  /// of waiting for the next wake word. Null disables the poll (e.g. in tests).
+  final OrchestratorProbe? _probe;
   final Duration _minBackoff;
   final Duration _maxBackoff;
+  final Duration _offlinePollInterval;
+
+  /// Local end-of-speech cue: flip to [TurnPhase.processing] once the mic level has
+  /// stayed below [_endpointRmsThreshold] for [_endpointSilence] after speech, so
+  /// the UI reacts the instant the user stops rather than waiting on the Mac.
+  final bool _endpointCueEnabled;
+  final Duration _endpointSilence;
+  final double _endpointRmsThreshold;
+  final DateTime Function() _clock;
+
+  /// True once we've seen speech-level audio in the current turn (so trailing
+  /// silence means "done speaking" rather than "hasn't started yet").
+  bool _speechSeen = false;
+
+  /// When the mic last carried speech-level audio in the current turn.
+  DateTime? _lastVoiceAt;
 
   AssistantState _state = const AssistantState();
   AssistantState get state => _state;
 
   StreamSubscription<WakeWordEvent>? _sub;
   Timer? _reconnectTimer;
+  Timer? _offlinePollTimer;
+  bool _probing = false;
   Duration _backoff = const Duration(seconds: 1);
   bool _disposed = false;
 
@@ -149,6 +194,8 @@ class AssistantController extends ChangeNotifier {
     _sub?.cancel();
     _backoff = _minBackoff;
     _listen();
+    // Start probing immediately if we're offline (don't wait for the first event).
+    _syncOfflinePoll();
   }
 
   void _listen() {
@@ -202,9 +249,12 @@ class AssistantController extends ChangeNotifier {
       case WakeWordEventKind.status:
         _emit(_state.copyWith(statusMessage: e.message));
       case WakeWordEventKind.level:
-        _emit(_state.copyWith(micLevel: e.rms));
+        _onLevel(e.rms);
       case WakeWordEventKind.detected:
-        // A wake word starts a fresh turn: clear the previous exchange.
+        // A wake word starts a fresh turn: clear the previous exchange and reset the
+        // local end-of-speech tracker.
+        _speechSeen = false;
+        _lastVoiceAt = _clock();
         _emit(_state.copyWith(
           phase: TurnPhase.listening,
           wakeWord: e.model,
@@ -242,6 +292,25 @@ class AssistantController extends ChangeNotifier {
     }
   }
 
+  /// Fold a mic-level event into the state, and — while we're actively listening —
+  /// run the local end-of-speech detector so the UI flips to [TurnPhase.processing]
+  /// the moment the user stops talking, ahead of the Mac's VAD + transcript.
+  void _onLevel(double rms) {
+    final now = _clock();
+    var next = _state.copyWith(micLevel: rms);
+    if (_endpointCueEnabled && _state.phase == TurnPhase.listening) {
+      if (rms >= _endpointRmsThreshold) {
+        _speechSeen = true;
+        _lastVoiceAt = now;
+      } else if (_speechSeen &&
+          _lastVoiceAt != null &&
+          now.difference(_lastVoiceAt!) >= _endpointSilence) {
+        next = next.copyWith(phase: TurnPhase.processing);
+      }
+    }
+    _emit(next);
+  }
+
   void _onDisconnected(String message) {
     // "turn complete" is the normal end of a successful turn — stay online and
     // return to idle. Anything else (no host / connect failed / turn error) means
@@ -258,12 +327,50 @@ class AssistantController extends ChangeNotifier {
     if (_disposed) return;
     _state = next;
     notifyListeners();
+    // Keep the offline poll in sync with every state change: run it while we're
+    // offline and idle, stop it as soon as we're online or a turn is in flight.
+    _syncOfflinePoll();
+  }
+
+  /// Start/stop the reachability poll based on current state. While offline and
+  /// not mid-turn, probe the orchestrator every [_offlinePollInterval] so the UI
+  /// recovers to "online" on its own instead of waiting for the next wake word.
+  void _syncOfflinePoll() {
+    if (_probe == null) return; // feature disabled (no probe injected)
+    final shouldPoll = !_disposed && !_state.online && !_state.turnActive;
+    if (shouldPoll) {
+      _offlinePollTimer ??=
+          Timer.periodic(_offlinePollInterval, (_) => _probeOnce());
+    } else {
+      _offlinePollTimer?.cancel();
+      _offlinePollTimer = null;
+    }
+  }
+
+  Future<void> _probeOnce() async {
+    // Skip if state changed since the tick was scheduled, or a probe is in flight
+    // (a slow probe must not stack up behind the periodic timer).
+    if (_disposed || _probing || _state.online || _state.turnActive) return;
+    _probing = true;
+    var reachable = false;
+    try {
+      reachable = await _probe!();
+    } catch (_) {
+      reachable = false;
+    }
+    _probing = false;
+    if (_disposed || !reachable) return;
+    // Only flip to online if we're still idle+offline (a turn may have started).
+    if (!_state.online && !_state.turnActive) {
+      _emit(_state.copyWith(online: true, statusMessage: 'Ready'));
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
     _reconnectTimer?.cancel();
+    _offlinePollTimer?.cancel();
     _sub?.cancel();
     super.dispose();
   }

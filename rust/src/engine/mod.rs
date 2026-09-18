@@ -47,14 +47,22 @@ const DRAIN_CHUNK: usize = 4096;
 /// Idle poll interval when the ring is momentarily empty.
 const IDLE_POLL: Duration = Duration::from_millis(10);
 
-/// Emit an audio-level event roughly this often (in drained blocks) when running
-/// in capture-only mode (no wake-word model loaded).
-const LEVEL_EVERY_N_BLOCKS: u32 = 10;
+/// Emit an audio-level event this often (in drained blocks). Kept small so the
+/// device's mic-level stream is fine-grained enough to drive the UI meter *and* the
+/// Dart-side local end-of-speech cue (which flips to "processing" the instant the
+/// user stops talking, without waiting on the Mac's VAD + transcript round trip).
+const LEVEL_EVERY_N_BLOCKS: u32 = 2;
 
-/// Number of consecutive per-block scores averaged before a detection can fire
-/// (VACA-style smoothing, WakeWordDetection.md §4.1). Trades a little latency for
-/// far fewer single-frame false triggers.
-const SMOOTH_WINDOW: usize = 3;
+/// Emit the `wake-word diag: rms=… peak_score=…` logcat line this often. Coarser
+/// than the level-event cadence so the finer level stream doesn't flood logs.
+const DIAG_LOG_EVERY_N_BLOCKS: u32 = 10;
+
+/// Default number of consecutive per-block scores smoothed before a detection can
+/// fire when the config leaves `smoothing_window` at 0 (VACA-style smoothing,
+/// WakeWordDetection.md §4.1). Trades a little latency for fewer single-frame false
+/// triggers; the settings screen can lower it (to 1) or raise it for on-device A/B
+/// tuning.
+const DEFAULT_SMOOTH_WINDOW: usize = 2;
 
 /// Minimum gap between two detections so one utterance fires exactly once
 /// (WakeWordDetection.md §4.1).
@@ -118,17 +126,72 @@ pub fn start(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>) -> Result<
 fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Arc<AtomicBool>) {
     let (producer, mut consumer) = new_audio_ring(RING_CAPACITY_SAMPLES);
 
-    let capture = match start_capture(producer) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = sink.add(WakeWordEvent::error(format!(
-                "failed to start audio capture: {e}"
-            )));
-            running.store(false, Ordering::SeqCst);
-            return;
+    // Capture source. The Kotlin `AudioRecord` bridge (Android, opt-in) reaches the
+    // HAL's VOICE_RECOGNITION source + platform effects and reports its true rate;
+    // `cpal` is the default and the only path off-Android. `capture_stream` holds the
+    // `!Send` cpal stream alive on this thread (None in AudioRecord mode).
+    #[cfg(target_os = "android")]
+    let use_audiorecord = config.use_audiorecord;
+    #[cfg(not(target_os = "android"))]
+    let use_audiorecord = false;
+
+    #[allow(unused_mut)]
+    let mut capture_stream: Option<capture::CaptureStream> = None;
+    // Set in AudioRecord mode (device reports the true rate → skip cpal calibration).
+    let mut precalibrated_rate: Option<u32> = None;
+    let info: capture::CaptureInfo;
+
+    if use_audiorecord {
+        #[cfg(target_os = "android")]
+        {
+            crate::audio::mic_bridge::install_producer(producer);
+            match crate::audio::mic_bridge::start(
+                TARGET_SAMPLE_RATE as i32,
+                config.mic_source as i32,
+                config.platform_aec,
+                config.platform_agc,
+                config.platform_ns,
+            ) {
+                Ok(rate) => {
+                    precalibrated_rate = Some(rate);
+                    info = capture::CaptureInfo {
+                        device_name: format!("AudioRecord(source={})", config.mic_source),
+                        sample_rate: rate,
+                        channels: 1,
+                    };
+                }
+                Err(e) => {
+                    crate::audio::mic_bridge::clear_producer();
+                    log::error!("AudioRecord capture failed to start: {e:#}");
+                    let _ = sink.add(WakeWordEvent::error(format!(
+                        "failed to start AudioRecord capture: {e}"
+                    )));
+                    running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
         }
-    };
-    let info = capture.info.clone();
+        #[cfg(not(target_os = "android"))]
+        {
+            // Unreachable: `use_audiorecord` is a compile-time `false` off-Android.
+            let _ = producer;
+            unreachable!("AudioRecord capture is Android-only");
+        }
+    } else {
+        match start_capture(producer) {
+            Ok(c) => {
+                info = c.info.clone();
+                capture_stream = Some(c);
+            }
+            Err(e) => {
+                let _ = sink.add(WakeWordEvent::error(format!(
+                    "failed to start audio capture: {e}"
+                )));
+                running.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
     log::info!(
         "wake-word capture started on '{}' ({} Hz, {} ch)",
         info.device_name,
@@ -184,7 +247,10 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // library is `dlopen`'d by Dart. Catch the unwind so a playback failure never
     // takes down the whole engine — wake-word detection and the Wyoming turn still
     // run; only the spoken reply is lost.
-    let playback_init = std::panic::catch_unwind(std::panic::AssertUnwindSafe(start_playback));
+    let playback_buffer_secs = config.playback_buffer_secs;
+    let playback_init = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        start_playback(playback_buffer_secs)
+    }));
     let (playback_stream, playback_sink) = match playback_init {
         Ok(Ok((stream, sink_handle))) => {
             let _ = sink.add(WakeWordEvent::status(format!(
@@ -234,7 +300,11 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // pitch/time-distorted enough that wake-word confidence collapses to ~0 even
     // though the mic is clearly capturing speech. Measuring the real throughput into
     // the ring and resampling from that is self-correcting across HAL quirks.
-    let input_rate = calibrate_input_rate(&mut consumer, info.sample_rate, &running);
+    // AudioRecord reports its true rate, so skip the cpal rate-calibration workaround.
+    let input_rate = match precalibrated_rate {
+        Some(rate) => rate,
+        None => calibrate_input_rate(&mut consumer, info.sample_rate, &running),
+    };
     if input_rate != info.sample_rate {
         let _ = sink.add(WakeWordEvent::status(format!(
             "input rate calibrated to {input_rate} Hz (device reported {})",
@@ -248,11 +318,27 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     let mut pcm_i16: Vec<i16> = Vec::with_capacity(DRAIN_CHUNK);
     let mut block_counter: u32 = 0;
 
-    // VACA-style detection smoothing + debounce (WakeWordDetection.md §4.1): fire
-    // on the moving average of the last `SMOOTH_WINDOW` block scores rather than a
-    // single frame, and enforce a cooldown so one utterance fires exactly once. The
-    // gating logic is a pure, unit-tested state machine (see `gate`).
-    let mut gate = DetectionGate::new(SMOOTH_WINDOW, DETECTION_COOLDOWN);
+    // VACA-style detection smoothing + debounce (WakeWordDetection.md §4.1): smooth
+    // the last `smoothing_window` block scores rather than trusting a single frame,
+    // and enforce a cooldown so one utterance fires exactly once. Both the window
+    // size and the fire criterion (average vs peak) come from the config so they can
+    // be A/B-tuned on-device for far-field responsiveness. The gating logic is a
+    // pure, unit-tested state machine (see `gate`).
+    let smoothing_window = if config.smoothing_window == 0 {
+        DEFAULT_SMOOTH_WINDOW
+    } else {
+        config.smoothing_window as usize
+    };
+    log::info!(
+        "wake-word gate: window={smoothing_window} criterion={} idle_thr={idle_threshold:.2} \
+         active_thr={active_threshold:.2}",
+        if config.fire_on_peak {
+            "peak"
+        } else {
+            "average"
+        }
+    );
+    let mut gate = DetectionGate::new(smoothing_window, DETECTION_COOLDOWN, config.fire_on_peak);
     // Rolling peak score between diagnostic log emissions, so the logcat trace shows
     // both that audio is flowing (rms) and how high the model scored (peak) even
     // when nothing crosses the detection threshold.
@@ -308,10 +394,14 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                     block_counter = block_counter.wrapping_add(1);
                     if block_counter.is_multiple_of(LEVEL_EVERY_N_BLOCKS) {
                         let rms = capture::rms_level(&resampled);
-                        log::info!("wake-word diag: rms={rms:.4} peak_score={diag_peak:.4}");
-                        diag_peak = 0.0;
                         if sink.add(WakeWordEvent::level(rms)).is_err() {
                             break;
+                        }
+                        // Log the rolling peak on a coarser cadence than the level
+                        // stream so the finer mic-level events don't flood logcat.
+                        if block_counter.is_multiple_of(DIAG_LOG_EVERY_N_BLOCKS) {
+                            log::info!("wake-word diag: rms={rms:.4} peak_score={diag_peak:.4}");
+                            diag_peak = 0.0;
                         }
                     }
 
@@ -373,7 +463,12 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // playback and capture streams.
     drop(network);
     drop(playback_stream);
-    drop(capture);
+    #[cfg(target_os = "android")]
+    if use_audiorecord {
+        crate::audio::mic_bridge::stop();
+        crate::audio::mic_bridge::clear_producer();
+    }
+    drop(capture_stream);
     running.store(false, Ordering::SeqCst);
     let _ = sink.add(WakeWordEvent::stopped());
 }

@@ -43,6 +43,12 @@ pub mod types {
     /// generated. A project-local extension on the device↔Mac hop (no off-the-shelf
     /// Wyoming server is on that hop).
     pub const REPLY_TOKEN: &str = "reply-token";
+    /// device → orchestrator: **barge-in**. The user started speaking (a new wake
+    /// word, or on-device VAD) while the assistant was still replying, so the
+    /// orchestrator must abort the in-flight LLM generation + TTS synthesis for
+    /// this turn at once (no data). A project-local extension on the device↔Mac
+    /// hop; kept byte-identical to the device crate's `types::INTERRUPT`.
+    pub const INTERRUPT: &str = "ambient-interrupt";
 
     // ---- Phase 6: project-local settings + memory control frames ----
     //
@@ -205,6 +211,17 @@ impl WyomingEvent {
         } else {
             None
         }
+    }
+
+    /// An `ambient-interrupt` (barge-in) event: data-less, sent device →
+    /// orchestrator to abort the in-flight reply.
+    pub fn interrupt() -> Self {
+        Self::new(types::INTERRUPT)
+    }
+
+    /// True if this is an `ambient-interrupt` (barge-in) event.
+    pub fn is_interrupt(&self) -> bool {
+        self.event_type == types::INTERRUPT
     }
 
     /// A `synthesize` request for the Piper TTS server. `voice` pins a named voice
@@ -374,6 +391,17 @@ mod tests {
         let back = roundtrip(&ev).await;
         assert_eq!(back, ev);
         assert_eq!(back.payload.as_deref(), Some(pcm.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn interrupt_event_roundtrips() {
+        let ev = WyomingEvent::interrupt();
+        let back = roundtrip(&ev).await;
+        assert_eq!(back, ev);
+        assert_eq!(back.event_type, types::INTERRUPT);
+        assert!(back.is_interrupt());
+        assert_eq!(back.data, Value::Null);
+        assert!(back.payload.is_none());
     }
 
     #[tokio::test]

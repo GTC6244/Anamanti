@@ -25,6 +25,14 @@ WakeWordConfig _testConfig() => WakeWordConfig(
       activeThreshold: 0.7,
       discoveryTimeoutSecs: BigInt.zero,
       turnTimeoutSecs: BigInt.zero,
+      smoothingWindow: 2,
+      fireOnPeak: false,
+      playbackBufferSecs: 30,
+      useAudiorecord: false,
+      micSource: 6,
+      platformAec: false,
+      platformAgc: true,
+      platformNs: true,
     );
 
 WakeWordEvent _event(

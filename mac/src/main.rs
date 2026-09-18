@@ -22,6 +22,7 @@ use ambient_orchestrator::discovery::MdnsAdvertiser;
 use ambient_orchestrator::memory::{ChatLog, MemoryStore};
 use ambient_orchestrator::orchestrator::{self, Pipeline, TcpConnector};
 use ambient_orchestrator::server;
+use ambient_orchestrator::webconfig;
 
 /// Worker-thread stack size. The embedded HelixDB engine (feature `helix`) builds
 /// deep async state machines whose stack usage exceeds tokio's 2 MiB default,
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
 async fn run() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let config = Config::from_env().context("loading configuration")?;
+    let mut config = Config::from_env().context("loading configuration")?;
     log::info!(
         "starting orchestrator: bind={} stt={} tts={} llm={} db={}",
         config.bind_addr,
@@ -55,6 +56,12 @@ async fn run() -> Result<()> {
         config.llm_label(),
         config.db_path.display(),
     );
+
+    // Startup model check: when using Ollama, verify the configured model is
+    // actually installed. A missing model otherwise fails silently as a per-turn
+    // 404 (transcript shows, no reply). Surface it loudly at boot, and fall back
+    // to an installed model so the assistant still responds.
+    ensure_ollama_model(&mut config).await;
 
     let memory = Arc::new(MemoryStore::open(&config.db_path).context("opening memory store")?);
     log::info!("memory store holds {} entries", memory.count()?);
@@ -72,6 +79,34 @@ async fn run() -> Result<()> {
             .with_context(|| format!("opening chat log at {}", config.chatlog_path.display()))?,
     );
     log::info!("chat log at {}", config.chatlog_path.display());
+
+    {
+        let v = settings.view();
+        log::info!(
+            "llm: engine={:?} backend={} web_search={} (change at runtime via the config page)",
+            v.engine,
+            v.llm_backend,
+            v.web_search,
+        );
+        // A very common footgun: selecting the rig engine in a binary that wasn't
+        // built with `--features rig`. It silently falls back to native (no tools),
+        // so web search never runs. Say so loudly.
+        #[cfg(not(feature = "rig"))]
+        if v.engine == ambient_orchestrator::settings::LlmEngine::Rig {
+            log::warn!(
+                "engine=rig requested but this binary was built WITHOUT the `rig` feature; \
+                 using native backends (NO tools / no web search). Rebuild with \
+                 `cargo run --features rig` to enable rig + the internet_search tool."
+            );
+        }
+        #[cfg(feature = "rig")]
+        if v.web_search && v.engine != ambient_orchestrator::settings::LlmEngine::Rig {
+            log::warn!(
+                "web_search is on but engine is not rig; the web-search tool only runs on \
+                 the rig engine. Set AMBIENT_LLM_ENGINE=rig (or switch it on the config page)."
+            );
+        }
+    }
 
     let mut pipeline = Pipeline::with_settings(
         settings,
@@ -109,6 +144,26 @@ async fn run() -> Result<()> {
         }
     }
 
+    // Optional local HTTP config page (no auth; loopback by default). Serves the
+    // same runtime-swappable settings the device controls over Wyoming, so you can
+    // change the LLM backend/model/voice live from a browser. Best-effort: a bind
+    // failure disables the page but never stops the orchestrator.
+    if let Some(config_addr) = config.config_addr {
+        let settings = pipeline.settings().clone();
+        match TcpListener::bind(config_addr).await {
+            Ok(listener) => {
+                let local = listener.local_addr().unwrap_or(config_addr);
+                log::info!("config page on http://{local}/ (no auth — keep it on a trusted network)");
+                tokio::spawn(async move {
+                    if let Err(e) = webconfig::serve(listener, settings).await {
+                        log::error!("config page stopped: {e:#}");
+                    }
+                });
+            }
+            Err(e) => log::warn!("config page disabled: could not bind {config_addr}: {e:#}"),
+        }
+    }
+
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
         stt_addr: config.stt_addr,
         tts_addr: config.tts_addr,
@@ -136,6 +191,43 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Startup model check for the Ollama backend: verify the configured model is
+/// installed; if not, fall back to an installed one (with a loud warning) so a
+/// misconfigured/absent model fails visibly at boot instead of as a silent
+/// per-turn 404. No-op for non-Ollama backends or if Ollama is unreachable.
+async fn ensure_ollama_model(config: &mut Config) {
+    use ambient_orchestrator::config::LlmChoice;
+    use ambient_orchestrator::llm::ollama::{self, ModelCheck};
+
+    let LlmChoice::Ollama { url, model } = &config.llm else {
+        return;
+    };
+    let (url, model) = (url.clone(), model.clone());
+    match ollama::available_models(&url).await {
+        Ok(models) => match ollama::resolve_model(&model, &models) {
+            ModelCheck::Available => log::info!("ollama model '{model}' is installed"),
+            ModelCheck::FallBack(fallback) => {
+                log::warn!(
+                    "ollama model '{model}' is not installed at {url}; falling back to '{fallback}'. \
+                     Installed: {models:?}. Set AMBIENT_OLLAMA_MODEL or run `ollama pull {model}`."
+                );
+                config.llm = LlmChoice::Ollama {
+                    url,
+                    model: fallback,
+                };
+            }
+            ModelCheck::NonePulled => log::error!(
+                "no models are installed in ollama at {url}; LLM turns will fail until you \
+                 `ollama pull {model}` (or start Ollama)."
+            ),
+        },
+        Err(e) => log::warn!(
+            "could not query ollama models at {url} ({e:#}); proceeding with '{model}' \
+             (turns will fail if it isn't installed)"
+        ),
+    }
 }
 
 /// Build the HelixDB GraphRAG recall backend and spawn the background ingester.

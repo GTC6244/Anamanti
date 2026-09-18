@@ -10,6 +10,10 @@
 //! ([`playback`]); it reuses the same `cpal` layer and the [`resample`] path.
 
 pub mod capture;
+/// Kotlin `AudioRecord` capture bridge — Android only (VOICE_RECOGNITION source +
+/// platform effects, reached through JNI since `cpal` can't request an input preset).
+#[cfg(target_os = "android")]
+pub mod mic_bridge;
 pub mod playback;
 pub mod resample;
 pub mod ring_buffer;

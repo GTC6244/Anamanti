@@ -16,6 +16,8 @@ class OrchestratorSettingsView {
     required this.llmBackend,
     this.llmModel,
     this.ttsVoice,
+    this.endSilenceMs = 0,
+    this.voiceRmsThreshold = 0,
   });
 
   final bool ok;
@@ -23,6 +25,12 @@ class OrchestratorSettingsView {
   final String llmBackend;
   final String? llmModel;
   final String? ttsVoice;
+
+  /// Orchestrator VAD: end-of-speech trailing silence in ms (0 if unknown).
+  final int endSilenceMs;
+
+  /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
+  final double voiceRmsThreshold;
 }
 
 /// One persistent memory entry.
@@ -85,6 +93,8 @@ abstract class OrchestratorClient {
     String? llmModel,
     bool setTtsVoice = false,
     String? ttsVoice,
+    int? endSilenceMs,
+    double? voiceRmsThreshold,
   });
 
   Future<List<MemoryView>> listMemories();
@@ -126,6 +136,8 @@ class FrbOrchestratorClient implements OrchestratorClient {
     String? llmModel,
     bool setTtsVoice = false,
     String? ttsVoice,
+    int? endSilenceMs,
+    double? voiceRmsThreshold,
   }) async {
     final result = await frb.updateOrchestratorSettings(
       update: frb.SettingsUpdate(
@@ -133,6 +145,8 @@ class FrbOrchestratorClient implements OrchestratorClient {
         llmModel: llmModel,
         setTtsVoice: setTtsVoice,
         ttsVoice: ttsVoice,
+        endSilenceMs: endSilenceMs,
+        voiceRmsThreshold: voiceRmsThreshold,
       ),
       discoveryTimeoutSecs: _timeout,
     );
@@ -192,5 +206,7 @@ class FrbOrchestratorClient implements OrchestratorClient {
         llmBackend: s.llmBackend,
         llmModel: s.llmModel,
         ttsVoice: s.ttsVoice,
+        endSilenceMs: s.endSilenceMs,
+        voiceRmsThreshold: s.voiceRmsThreshold,
       );
 }

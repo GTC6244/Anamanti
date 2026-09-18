@@ -36,6 +36,10 @@ pub struct OrchestratorSettings {
     pub llm_model: Option<String>,
     /// The active Piper voice, or `None` for the server default.
     pub tts_voice: Option<String>,
+    /// Orchestrator VAD: end-of-speech trailing silence in ms (0 if unknown).
+    pub end_silence_ms: u32,
+    /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
+    pub voice_rms_threshold: f64,
 }
 
 /// One persistent memory entry, for the settings memory list.
@@ -79,6 +83,10 @@ pub struct SettingsUpdate {
     pub set_tts_voice: bool,
     /// The voice to set when `set_tts_voice` is `true`.
     pub tts_voice: Option<String>,
+    /// New orchestrator VAD end-of-speech silence (ms), or `None` to leave it.
+    pub end_silence_ms: Option<u32>,
+    /// New orchestrator VAD speech RMS threshold, or `None` to leave it.
+    pub voice_rms_threshold: Option<f64>,
 }
 
 fn timeout(secs: u64) -> Duration {

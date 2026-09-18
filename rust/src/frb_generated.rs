@@ -629,6 +629,13 @@ impl SseDecode for f32 {
     }
 }
 
+impl SseDecode for f64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_f64::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -712,6 +719,28 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<f64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<f64>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<u32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for crate::api::settings::OrchestratorSettings {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -720,12 +749,16 @@ impl SseDecode for crate::api::settings::OrchestratorSettings {
         let mut var_llmBackend = <String>::sse_decode(deserializer);
         let mut var_llmModel = <Option<String>>::sse_decode(deserializer);
         let mut var_ttsVoice = <Option<String>>::sse_decode(deserializer);
+        let mut var_endSilenceMs = <u32>::sse_decode(deserializer);
+        let mut var_voiceRmsThreshold = <f64>::sse_decode(deserializer);
         return crate::api::settings::OrchestratorSettings {
             ok: var_ok,
             message: var_message,
             llm_backend: var_llmBackend,
             llm_model: var_llmModel,
             tts_voice: var_ttsVoice,
+            end_silence_ms: var_endSilenceMs,
+            voice_rms_threshold: var_voiceRmsThreshold,
         };
     }
 }
@@ -737,11 +770,15 @@ impl SseDecode for crate::api::settings::SettingsUpdate {
         let mut var_llmModel = <Option<String>>::sse_decode(deserializer);
         let mut var_setTtsVoice = <bool>::sse_decode(deserializer);
         let mut var_ttsVoice = <Option<String>>::sse_decode(deserializer);
+        let mut var_endSilenceMs = <Option<u32>>::sse_decode(deserializer);
+        let mut var_voiceRmsThreshold = <Option<f64>>::sse_decode(deserializer);
         return crate::api::settings::SettingsUpdate {
             llm_backend: var_llmBackend,
             llm_model: var_llmModel,
             set_tts_voice: var_setTtsVoice,
             tts_voice: var_ttsVoice,
+            end_silence_ms: var_endSilenceMs,
+            voice_rms_threshold: var_voiceRmsThreshold,
         };
     }
 }
@@ -808,6 +845,14 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_activeThreshold = <f32>::sse_decode(deserializer);
         let mut var_discoveryTimeoutSecs = <u64>::sse_decode(deserializer);
         let mut var_turnTimeoutSecs = <u64>::sse_decode(deserializer);
+        let mut var_smoothingWindow = <u32>::sse_decode(deserializer);
+        let mut var_fireOnPeak = <bool>::sse_decode(deserializer);
+        let mut var_playbackBufferSecs = <u32>::sse_decode(deserializer);
+        let mut var_useAudiorecord = <bool>::sse_decode(deserializer);
+        let mut var_micSource = <u32>::sse_decode(deserializer);
+        let mut var_platformAec = <bool>::sse_decode(deserializer);
+        let mut var_platformAgc = <bool>::sse_decode(deserializer);
+        let mut var_platformNs = <bool>::sse_decode(deserializer);
         return crate::api::engine::WakeWordConfig {
             melspec_model_path: var_melspecModelPath,
             embedding_model_path: var_embeddingModelPath,
@@ -817,6 +862,14 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
             active_threshold: var_activeThreshold,
             discovery_timeout_secs: var_discoveryTimeoutSecs,
             turn_timeout_secs: var_turnTimeoutSecs,
+            smoothing_window: var_smoothingWindow,
+            fire_on_peak: var_fireOnPeak,
+            playback_buffer_secs: var_playbackBufferSecs,
+            use_audiorecord: var_useAudiorecord,
+            mic_source: var_micSource,
+            platform_aec: var_platformAec,
+            platform_agc: var_platformAgc,
+            platform_ns: var_platformNs,
         };
     }
 }
@@ -962,6 +1015,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::settings::OrchestratorSetting
             self.llm_backend.into_into_dart().into_dart(),
             self.llm_model.into_into_dart().into_dart(),
             self.tts_voice.into_into_dart().into_dart(),
+            self.end_silence_ms.into_into_dart().into_dart(),
+            self.voice_rms_threshold.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -985,6 +1040,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::settings::SettingsUpdate {
             self.llm_model.into_into_dart().into_dart(),
             self.set_tts_voice.into_into_dart().into_dart(),
             self.tts_voice.into_into_dart().into_dart(),
+            self.end_silence_ms.into_into_dart().into_dart(),
+            self.voice_rms_threshold.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1036,6 +1093,14 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.active_threshold.into_into_dart().into_dart(),
             self.discovery_timeout_secs.into_into_dart().into_dart(),
             self.turn_timeout_secs.into_into_dart().into_dart(),
+            self.smoothing_window.into_into_dart().into_dart(),
+            self.fire_on_peak.into_into_dart().into_dart(),
+            self.playback_buffer_secs.into_into_dart().into_dart(),
+            self.use_audiorecord.into_into_dart().into_dart(),
+            self.mic_source.into_into_dart().into_dart(),
+            self.platform_aec.into_into_dart().into_dart(),
+            self.platform_agc.into_into_dart().into_dart(),
+            self.platform_ns.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1149,6 +1214,13 @@ impl SseEncode for f32 {
     }
 }
 
+impl SseEncode for f64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_f64::<NativeEndian>(self).unwrap();
+    }
+}
+
 impl SseEncode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1214,6 +1286,26 @@ impl SseEncode for Option<String> {
     }
 }
 
+impl SseEncode for Option<f64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <f64>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <u32>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for crate::api::settings::OrchestratorSettings {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1222,6 +1314,8 @@ impl SseEncode for crate::api::settings::OrchestratorSettings {
         <String>::sse_encode(self.llm_backend, serializer);
         <Option<String>>::sse_encode(self.llm_model, serializer);
         <Option<String>>::sse_encode(self.tts_voice, serializer);
+        <u32>::sse_encode(self.end_silence_ms, serializer);
+        <f64>::sse_encode(self.voice_rms_threshold, serializer);
     }
 }
 
@@ -1232,6 +1326,8 @@ impl SseEncode for crate::api::settings::SettingsUpdate {
         <Option<String>>::sse_encode(self.llm_model, serializer);
         <bool>::sse_encode(self.set_tts_voice, serializer);
         <Option<String>>::sse_encode(self.tts_voice, serializer);
+        <Option<u32>>::sse_encode(self.end_silence_ms, serializer);
+        <Option<f64>>::sse_encode(self.voice_rms_threshold, serializer);
     }
 }
 
@@ -1290,6 +1386,14 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <f32>::sse_encode(self.active_threshold, serializer);
         <u64>::sse_encode(self.discovery_timeout_secs, serializer);
         <u64>::sse_encode(self.turn_timeout_secs, serializer);
+        <u32>::sse_encode(self.smoothing_window, serializer);
+        <bool>::sse_encode(self.fire_on_peak, serializer);
+        <u32>::sse_encode(self.playback_buffer_secs, serializer);
+        <bool>::sse_encode(self.use_audiorecord, serializer);
+        <u32>::sse_encode(self.mic_source, serializer);
+        <bool>::sse_encode(self.platform_aec, serializer);
+        <bool>::sse_encode(self.platform_agc, serializer);
+        <bool>::sse_encode(self.platform_ns, serializer);
     }
 }
 

@@ -48,3 +48,6 @@ app.*.map.json
 # Orchestrator runtime memory DB (created at run time)
 ambient_memory.sqlite
 ambient_memory.sqlite-*
+
+# Orchestrator persisted runtime settings (contains the search API key in plaintext)
+ambient_settings.json

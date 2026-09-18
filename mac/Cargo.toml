@@ -8,6 +8,20 @@ description = "Mac Mini assistant pipeline (STT -> pluggable LLM + persistent me
 name = "ambient-orchestrator"
 path = "src/main.rs"
 
+# Live streaming smoke test for the rig LLM path (real Ollama, optional web
+# search). Built only with the `rig` feature: `cargo run --example rig_smoke`.
+[[example]]
+name = "rig_smoke"
+required-features = ["rig"]
+
+# Host-side AEC spike (WebRTC APM). Reads raw 16 kHz mono i16 PCM dumps of the
+# device mic (near-end) and render reference (far-end), runs them through the
+# APM, and writes the cleaned mic out. Built only with the `aec` feature:
+# `cargo run --features aec --example aec_spike -- mic.pcm ref.pcm clean.pcm`.
+[[example]]
+name = "aec_spike"
+required-features = ["aec"]
+
 [features]
 # `helix` compiles the embedded HelixDB GraphRAG memory backend directly into the
 # orchestrator (git dependency on HelixDB's engine crate — no server, no Docker;
@@ -21,6 +35,16 @@ helix = ["dep:db", "dep:helix-ast"]
 # the deterministic mock embedder + the whole per-person pipeline work without it.
 # Enable with `--features speaker` and set AMBIENT_SPEAKER_MODEL_PATH to the model.
 speaker = ["dep:tract-onnx"]
+# `rig` routes the LLM backends through the rig-core agent framework instead of the
+# hand-rolled HTTP clients. Opt-in during the migration; select at runtime with
+# AMBIENT_LLM_ENGINE=rig. Off by default until it reaches parity.
+rig = ["dep:rig-core"]
+# `aec` compiles the host-side WebRTC Audio Processing stage (AEC3 + noise
+# suppression + AGC). Off by default because it triggers a heavy native C++ build
+# (vendored libwebrtc via meson/ninja + abseil) — build prerequisites: `meson`,
+# `ninja`, `pkg-config`, and the `llvm-tools` rustup component (for `rust-objcopy`).
+# See the Phase 0 spike + `src/aec/mod.rs`.
+aec = ["dep:webrtc-audio-processing"]
 
 [dependencies]
 # Embedded HelixDB engine (feature `helix`). Pinned to the spike-verified commit.
@@ -30,6 +54,10 @@ anyhow = "1.0.104"
 async-stream = "0.3"
 async-trait = "0.1"
 bytes = "1"
+# Local (timezone-aware) wall-clock time, injected into the LLM prompt each turn so
+# the model answers date/time questions from fact. `clock` enables `Local::now()` +
+# the system timezone; default features are off to keep the build lean.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 env_logger = "0.11"
 futures-util = "0.3"
 log = "0.4.34"
@@ -39,6 +67,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "rustls-tls",
 ] }
+rig-core = { version = "0.42", optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
 # Pure-Rust ONNX inference for the speaker embedder (feature `speaker`). No
 # external onnxruntime binary — compiles offline.
@@ -54,6 +83,12 @@ tokio = { version = "1.34", features = [
     "macros",
     "signal",
 ] }
+# Host-side WebRTC Audio Processing (feature `aec`). `bundled` statically builds
+# the vendored libwebrtc APM (meson/ninja + abseil) so no system lib is required;
+# see the `aec` feature note above for the host build prerequisites.
+webrtc-audio-processing = { version = "2.1", features = [
+    "bundled",
+], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.34", features = ["test-util"] }

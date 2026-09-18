@@ -60,6 +60,16 @@ fn parse_settings(ev: &WyomingEvent) -> OrchestratorSettings {
         llm_backend: opt_str(&ev.data, "llm_backend").unwrap_or_default(),
         llm_model: opt_str(&ev.data, "llm_model"),
         tts_voice: opt_str(&ev.data, "tts_voice"),
+        end_silence_ms: ev
+            .data
+            .get("end_silence_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+        voice_rms_threshold: ev
+            .data
+            .get("voice_rms_threshold")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
     }
 }
 
@@ -111,6 +121,12 @@ pub async fn update_settings(
             Some(voice) => data.insert("tts_voice".into(), json!(voice)),
             None => data.insert("tts_voice".into(), Value::Null),
         };
+    }
+    if let Some(ms) = update.end_silence_ms {
+        data.insert("end_silence_ms".into(), json!(ms));
+    }
+    if let Some(thr) = update.voice_rms_threshold {
+        data.insert("voice_rms_threshold".into(), json!(thr));
     }
 
     let request = WyomingEvent::with_data(types::SET_SETTINGS, Value::Object(data));
@@ -332,6 +348,8 @@ mod tests {
             llm_model: None,
             set_tts_voice: true,
             tts_voice: Some("en_US-amy-medium".to_string()),
+            end_silence_ms: None,
+            voice_rms_threshold: None,
         };
         let out = update_settings(&cache, Duration::from_millis(0), &update)
             .await
@@ -344,6 +362,39 @@ mod tests {
         assert!(request.data.get("llm_backend").is_none());
         assert!(request.data.get("llm_model").is_none());
         assert_eq!(request.data["tts_voice"], json!("en_US-amy-medium"));
+    }
+
+    #[tokio::test]
+    async fn describe_parses_and_update_sends_vad_fields() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::SETTINGS,
+            json!({ "ok": true, "llm_backend": "ollama",
+                    "end_silence_ms": 550, "voice_rms_threshold": 80.0 }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let update = SettingsUpdate {
+            llm_backend: None,
+            llm_model: None,
+            set_tts_voice: false,
+            tts_voice: None,
+            end_silence_ms: Some(550),
+            voice_rms_threshold: Some(80.0),
+        };
+        let out = update_settings(&cache, Duration::from_millis(0), &update)
+            .await
+            .unwrap();
+        // Response parsing surfaces the VAD values to the settings screen.
+        assert_eq!(out.end_silence_ms, 550);
+        assert_eq!(out.voice_rms_threshold, 80.0);
+
+        // The request carried the VAD keys the orchestrator's parse_update reads.
+        let request = server.await.unwrap();
+        assert_eq!(request.data["end_silence_ms"], json!(550));
+        assert_eq!(request.data["voice_rms_threshold"], json!(80.0));
     }
 
     #[tokio::test]
@@ -362,6 +413,8 @@ mod tests {
             llm_model: None,
             set_tts_voice: true,
             tts_voice: None,
+            end_silence_ms: None,
+            voice_rms_threshold: None,
         };
         update_settings(&cache, Duration::from_millis(0), &update)
             .await

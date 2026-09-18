@@ -12,6 +12,9 @@
 //! The library exposes every layer so both the `ambient-orchestrator` binary and
 //! the integration tests drive the same code.
 
+#[cfg(feature = "aec")]
+pub mod aec;
+pub mod audio_dump;
 pub mod config;
 pub mod control;
 pub mod discovery;
@@ -21,4 +24,5 @@ pub mod orchestrator;
 pub mod server;
 pub mod settings;
 pub mod speaker;
+pub mod webconfig;
 pub mod wyoming;

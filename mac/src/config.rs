@@ -13,7 +13,44 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
-use crate::settings::{LlmFactory, RuntimeSettings, SharedSettings};
+use crate::settings::{load_persisted, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings};
+
+/// Where runtime settings are persisted, or `None` to disable persistence
+/// (`AMBIENT_SETTINGS_PATH=off`). Defaults to `ambient_settings.json`.
+fn settings_path_from_env() -> Option<std::path::PathBuf> {
+    match env::var("AMBIENT_SETTINGS_PATH") {
+        Ok(v) if matches!(v.trim().to_lowercase().as_str(), "off" | "none" | "") => None,
+        Ok(v) => Some(std::path::PathBuf::from(v)),
+        Err(_) => Some(std::path::PathBuf::from("ambient_settings.json")),
+    }
+}
+
+/// Read the LLM engine selector from the environment. `AMBIENT_LLM_ENGINE=rig`
+/// routes ollama/anthropic through rig-core (needs the `rig` feature); anything
+/// else (or unset) keeps the native HTTP backends.
+fn llm_engine_from_env() -> LlmEngine {
+    match env::var("AMBIENT_LLM_ENGINE")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+        _ => LlmEngine::Native,
+    }
+}
+
+/// Whether to enable the rig web-search tool (`AMBIENT_WEB_SEARCH=1/true/on`).
+/// Only effective with the rig engine + `rig` feature.
+fn web_search_from_env() -> bool {
+    matches!(
+        env::var("AMBIENT_WEB_SEARCH")
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "on" | "yes"
+    )
+}
 
 /// Default persona/system prompt: concise, speakable replies for an ambient
 /// display. Kept short because the reply is spoken aloud via Piper.
@@ -37,6 +74,9 @@ pub enum LlmChoice {
 pub struct Config {
     /// Address the device-facing Wyoming server binds to (advertised via mDNS).
     pub bind_addr: SocketAddr,
+    /// Address the local HTTP **config page** binds to, or `None` to disable it.
+    /// Defaults to loopback (`127.0.0.1:8730`) since the page has no auth.
+    pub config_addr: Option<SocketAddr>,
     /// Human-readable mDNS instance name.
     pub service_name: String,
     /// Downstream Wyoming STT (Whisper) address.
@@ -144,6 +184,9 @@ impl Default for Config {
         Self {
             // Port 10700 is the conventional Wyoming satellite/host port.
             bind_addr: "0.0.0.0:10700".parse().unwrap(),
+            // Config page on loopback only by default (no auth); override or
+            // disable with AMBIENT_CONFIG_ADDR.
+            config_addr: Some("127.0.0.1:8730".parse().unwrap()),
             service_name: "Ambient Orchestrator".to_string(),
             stt_addr: "127.0.0.1:10300".parse().unwrap(), // wyoming-faster-whisper default
             tts_addr: "127.0.0.1:10200".parse().unwrap(), // wyoming-piper default
@@ -265,8 +308,20 @@ impl Config {
                 .unwrap_or(sd.embed_dims),
         };
 
+        // The config page: `off`/`none`/empty disables it, otherwise a host:port.
+        let config_addr = match env::var("AMBIENT_CONFIG_ADDR") {
+            Ok(v) if matches!(v.trim().to_lowercase().as_str(), "off" | "none" | "") => None,
+            Ok(v) => Some(
+                v.trim()
+                    .parse()
+                    .with_context(|| format!("parsing AMBIENT_CONFIG_ADDR=`{v}` as host:port"))?,
+            ),
+            Err(_) => d.config_addr,
+        };
+
         Ok(Self {
             bind_addr: env_addr("AMBIENT_BIND_ADDR", d.bind_addr)?,
+            config_addr,
             service_name: env::var("AMBIENT_SERVICE_NAME").unwrap_or(d.service_name),
             stt_addr: env_addr("AMBIENT_STT_ADDR", d.stt_addr)?,
             tts_addr: env_addr("AMBIENT_TTS_ADDR", d.tts_addr)?,
@@ -329,28 +384,91 @@ impl Config {
         }
     }
 
+    /// The initial engine + web-search selection from the environment. These seed
+    /// the live [`RuntimeSettings`] and can be changed at runtime (config page /
+    /// control frame).
+    pub fn initial_engine(&self) -> LlmEngine {
+        llm_engine_from_env()
+    }
+    pub fn initial_web_search(&self) -> bool {
+        web_search_from_env()
+    }
+    /// Initial search provider (`AMBIENT_SEARCH_PROVIDER`, default `duckduckgo`).
+    pub fn initial_search_provider(&self) -> String {
+        env::var("AMBIENT_SEARCH_PROVIDER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "duckduckgo".to_string())
+    }
+    /// Initial search API key (`TAVILY_API_KEY`), if set.
+    pub fn initial_search_api_key(&self) -> Option<String> {
+        env::var("TAVILY_API_KEY").ok().filter(|s| !s.is_empty())
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
     /// needs its key at startup, matching [`Self::build_llm`]).
     pub fn shared_settings(&self) -> Result<Arc<SharedSettings>> {
         let factory = self.llm_factory();
-        let (backend, model) = match &self.llm {
-            LlmChoice::Mock => ("mock", None),
-            LlmChoice::Ollama { model, .. } => ("ollama", Some(model.clone())),
-            LlmChoice::Anthropic { model, .. } => ("anthropic", Some(model.clone())),
+        let persist_path = settings_path_from_env();
+
+        // Environment/config defaults, then overlay a persisted file when present
+        // (page/device changes from a previous run win across restarts).
+        let (backend_default, model_default) = match &self.llm {
+            LlmChoice::Mock => ("mock".to_string(), None),
+            LlmChoice::Ollama { model, .. } => ("ollama".to_string(), Some(model.clone())),
+            LlmChoice::Anthropic { model, .. } => ("anthropic".to_string(), Some(model.clone())),
         };
+        let mut engine = self.initial_engine();
+        let mut web_search = self.initial_web_search();
+        let mut search_provider = self.initial_search_provider();
+        let mut search_api_key = self.initial_search_api_key();
+        let mut backend = backend_default;
+        let mut model = model_default;
+        let mut tts_voice = self.tts_voice.clone();
+
+        let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
+        let mut voice_rms_threshold = crate::settings::DEFAULT_VOICE_RMS_THRESHOLD;
+
+        if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
+            log::info!("loaded persisted settings");
+            engine = LlmEngine::from_label(&p.engine);
+            web_search = p.web_search;
+            search_provider = p.search_provider;
+            search_api_key = p.search_api_key;
+            backend = p.llm_backend;
+            model = p.llm_model;
+            tts_voice = p.tts_voice;
+            end_silence_ms = p.end_silence_ms;
+            voice_rms_threshold = p.voice_rms_threshold;
+        }
+
         let (llm, llm_backend, llm_model) = factory
-            .build(backend, model.as_deref())
+            .build(
+                engine,
+                web_search,
+                &search_provider,
+                search_api_key.as_deref(),
+                &backend,
+                model.as_deref(),
+            )
             .context("building the initial LLM backend")?;
-        Ok(SharedSettings::new(
+        Ok(SharedSettings::new_persistent(
             factory,
             RuntimeSettings {
                 llm,
+                engine,
+                web_search,
+                search_provider,
+                search_api_key,
                 llm_backend,
                 llm_model,
-                tts_voice: self.tts_voice.clone(),
+                tts_voice,
+                end_silence_ms,
+                voice_rms_threshold,
             },
+            persist_path,
         ))
     }
 

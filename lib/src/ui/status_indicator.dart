@@ -51,6 +51,8 @@ class StatusIndicator extends StatelessWidget {
     switch (s.phase) {
       case TurnPhase.listening:
         return (const Color(0xFF9BE7FF), 'Listening', Icons.mic);
+      case TurnPhase.processing:
+        return (const Color(0xFFB8C7FF), 'Processing', Icons.hourglass_top);
       case TurnPhase.connecting:
         return (const Color(0xFF9BE7FF), 'Connecting', Icons.wifi_tethering);
       case TurnPhase.thinking:
