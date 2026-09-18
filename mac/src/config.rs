@@ -12,7 +12,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
+use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
+use crate::llm::catalog::ModelCatalog;
+use crate::llm::{
+    anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
+    LlmBackend,
+};
 use crate::settings::{load_persisted, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings};
 
 /// Where runtime settings are persisted, or `None` to disable persistence
@@ -37,6 +42,12 @@ fn llm_engine_from_env() -> LlmEngine {
         "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
         _ => LlmEngine::Native,
     }
+}
+
+/// Initial Anthropic auth mode from the environment
+/// (`AMBIENT_ANTHROPIC_AUTH=apikey|subscription`, default `apikey`). Runtime-swappable.
+fn anthropic_auth_from_env() -> AnthropicAuth {
+    AnthropicAuth::from_label(&env::var("AMBIENT_ANTHROPIC_AUTH").unwrap_or_default())
 }
 
 /// Whether to enable the rig web-search tool (`AMBIENT_WEB_SEARCH=1/true/on`).
@@ -67,6 +78,8 @@ pub enum LlmChoice {
     Ollama { url: String, model: String },
     /// Cloud Claude Messages API.
     Anthropic { model: String, max_tokens: u32 },
+    /// Cloud OpenAI Chat Completions API.
+    OpenAI { model: String, max_tokens: u32 },
 }
 
 /// Fully-resolved orchestrator configuration.
@@ -235,6 +248,14 @@ impl Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1024),
             },
+            "openai" | "gpt" => LlmChoice::OpenAI {
+                model: env::var("AMBIENT_OPENAI_MODEL")
+                    .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+                max_tokens: env::var("AMBIENT_OPENAI_MAX_TOKENS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1024),
+            },
             _ => LlmChoice::Ollama {
                 url: env::var("AMBIENT_OLLAMA_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string()),
@@ -360,6 +381,16 @@ impl Config {
                     *max_tokens,
                 ))
             }
+            LlmChoice::OpenAI { model, max_tokens } => {
+                let key = env::var("OPENAI_API_KEY")
+                    .context("AMBIENT_LLM_BACKEND=openai requires OPENAI_API_KEY")?;
+                Arc::new(OpenAiBackend::new(
+                    self.graphrag.openai_base_url.clone(),
+                    key,
+                    model,
+                    *max_tokens,
+                ))
+            }
         })
     }
 
@@ -375,13 +406,40 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1024),
         };
+        let openai_max_tokens = match &self.llm {
+            LlmChoice::OpenAI { max_tokens, .. } => *max_tokens,
+            _ => env::var("AMBIENT_OPENAI_MAX_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024),
+        };
         LlmFactory {
             ollama_url: env::var("AMBIENT_OLLAMA_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string()),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty()),
             anthropic_max_tokens,
+            openai_base_url: self.graphrag.openai_base_url.clone(),
+            openai_api_key: env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
+            openai_max_tokens,
+            anthropic_token: Some(Arc::new(AnthropicTokenProvider::new())),
         }
+    }
+
+    /// The selectable-model catalog for the settings dropdown, wired with the same
+    /// provider endpoints/keys the factory uses (keys read from the environment) and
+    /// the same Anthropic auth mode so subscription hosts list live models.
+    pub fn model_catalog(&self) -> ModelCatalog {
+        ModelCatalog::new(
+            "https://api.anthropic.com",
+            env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty()),
+            self.graphrag.openai_base_url.clone(),
+            env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
+        )
+        .with_anthropic_auth(
+            anthropic_auth_from_env(),
+            Some(Arc::new(AnthropicTokenProvider::new())),
+        )
     }
 
     /// The initial engine + web-search selection from the environment. These seed
@@ -419,6 +477,7 @@ impl Config {
             LlmChoice::Mock => ("mock".to_string(), None),
             LlmChoice::Ollama { model, .. } => ("ollama".to_string(), Some(model.clone())),
             LlmChoice::Anthropic { model, .. } => ("anthropic".to_string(), Some(model.clone())),
+            LlmChoice::OpenAI { model, .. } => ("openai".to_string(), Some(model.clone())),
         };
         let mut engine = self.initial_engine();
         let mut web_search = self.initial_web_search();
@@ -426,6 +485,7 @@ impl Config {
         let mut search_api_key = self.initial_search_api_key();
         let mut backend = backend_default;
         let mut model = model_default;
+        let mut anthropic_auth = anthropic_auth_from_env();
         let mut tts_voice = self.tts_voice.clone();
 
         let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
@@ -439,6 +499,7 @@ impl Config {
             search_api_key = p.search_api_key;
             backend = p.llm_backend;
             model = p.llm_model;
+            anthropic_auth = AnthropicAuth::from_label(&p.anthropic_auth);
             tts_voice = p.tts_voice;
             end_silence_ms = p.end_silence_ms;
             voice_rms_threshold = p.voice_rms_threshold;
@@ -452,6 +513,7 @@ impl Config {
                 search_api_key.as_deref(),
                 &backend,
                 model.as_deref(),
+                anthropic_auth,
             )
             .context("building the initial LLM backend")?;
         Ok(SharedSettings::new_persistent(
@@ -464,6 +526,7 @@ impl Config {
                 search_api_key,
                 llm_backend,
                 llm_model,
+                anthropic_auth,
                 tts_voice,
                 end_silence_ms,
                 voice_rms_threshold,
@@ -541,6 +604,7 @@ impl Config {
             LlmChoice::Mock => "mock",
             LlmChoice::Ollama { .. } => "ollama",
             LlmChoice::Anthropic { .. } => "anthropic",
+            LlmChoice::OpenAI { .. } => "openai",
         }
     }
 }

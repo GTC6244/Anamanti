@@ -30,16 +30,30 @@ pub struct OrchestratorSettings {
     pub ok: bool,
     /// Human-readable status/error (e.g. why a backend change was rejected).
     pub message: String,
-    /// The active LLM backend label (`ollama` / `anthropic` / `mock`).
+    /// The active LLM backend label (`ollama` / `anthropic` / `openai` / `mock`).
     pub llm_backend: String,
     /// The active model name, if the backend uses one.
     pub llm_model: Option<String>,
+    /// Anthropic auth mode: `apikey` or `subscription` (Claude OAuth).
+    pub anthropic_auth: String,
     /// The active Piper voice, or `None` for the server default.
     pub tts_voice: Option<String>,
     /// Orchestrator VAD: end-of-speech trailing silence in ms (0 if unknown).
     pub end_silence_ms: u32,
     /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
     pub voice_rms_threshold: f64,
+}
+
+/// One selectable LLM model for the settings model dropdown, as reported by the
+/// orchestrator's catalog (scoped to the last 12 months per provider).
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    /// `anthropic` or `openai`.
+    pub provider: String,
+    /// The model id to send as the backend's model (e.g. `claude-opus-5`).
+    pub id: String,
+    /// A human-friendly label for the dropdown (falls back to `id`).
+    pub label: String,
 }
 
 /// One persistent memory entry, for the settings memory list.
@@ -78,6 +92,8 @@ pub struct SettingsUpdate {
     pub llm_backend: Option<String>,
     /// New model name, or `None` to leave it unchanged.
     pub llm_model: Option<String>,
+    /// New Anthropic auth mode (`apikey`/`subscription`), or `None` to leave it.
+    pub anthropic_auth: Option<String>,
     /// When `true`, apply `tts_voice` (a `None`/empty value clears the voice); when
     /// `false`, leave the voice unchanged.
     pub set_tts_voice: bool,
@@ -123,6 +139,15 @@ pub fn update_orchestrator_settings(
     block_on(async move {
         let cache = EndpointCache::new();
         control::update_settings(&cache, timeout(discovery_timeout_secs), &update).await
+    })
+}
+
+/// List the orchestrator's selectable LLM models (Anthropic + OpenAI, scoped to the
+/// last 12 months) for the settings model dropdown.
+pub fn list_models(discovery_timeout_secs: u64) -> Result<Vec<ModelInfo>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_models(&cache, timeout(discovery_timeout_secs)).await
     })
 }
 

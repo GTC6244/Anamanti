@@ -98,6 +98,13 @@ pub mod types {
     pub const DELETE_SPEAKER: &str = "ambient-delete-speaker";
     /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
     pub const SPEAKER_RESULT: &str = "ambient-speaker-result";
+
+    /// device → orchestrator: list the selectable LLM models for the settings model
+    /// dropdown (no data).
+    pub const LIST_MODELS: &str = "ambient-list-models";
+    /// orchestrator → device: the selectable models (data: `ok`, `models` array of
+    /// `{provider, id, label}`), scoped to the last 12 months per provider.
+    pub const MODELS: &str = "ambient-models";
 }
 
 /// A decoded Wyoming event: a `type` tag, an optional structured `data` object,

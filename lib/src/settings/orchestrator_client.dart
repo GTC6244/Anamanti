@@ -15,6 +15,7 @@ class OrchestratorSettingsView {
     required this.message,
     required this.llmBackend,
     this.llmModel,
+    this.anthropicAuth = 'apikey',
     this.ttsVoice,
     this.endSilenceMs = 0,
     this.voiceRmsThreshold = 0,
@@ -24,6 +25,9 @@ class OrchestratorSettingsView {
   final String message;
   final String llmBackend;
   final String? llmModel;
+
+  /// Anthropic auth mode: `apikey` or `subscription` (Claude OAuth).
+  final String anthropicAuth;
   final String? ttsVoice;
 
   /// Orchestrator VAD: end-of-speech trailing silence in ms (0 if unknown).
@@ -31,6 +35,24 @@ class OrchestratorSettingsView {
 
   /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
   final double voiceRmsThreshold;
+}
+
+/// One selectable LLM model for the settings model dropdown (last 12 months).
+class ModelOption {
+  const ModelOption({
+    required this.provider,
+    required this.id,
+    required this.label,
+  });
+
+  /// `anthropic` or `openai`.
+  final String provider;
+
+  /// The model id sent as `llmModel` (e.g. `claude-opus-5`, `gpt-4o-mini`).
+  final String id;
+
+  /// A human-friendly label for the dropdown (falls back to `id`).
+  final String label;
 }
 
 /// One persistent memory entry.
@@ -91,11 +113,16 @@ abstract class OrchestratorClient {
   Future<OrchestratorSettingsView> applySettings({
     String? llmBackend,
     String? llmModel,
+    String? anthropicAuth,
     bool setTtsVoice = false,
     String? ttsVoice,
     int? endSilenceMs,
     double? voiceRmsThreshold,
   });
+
+  /// The selectable LLM models for the model dropdown (Anthropic + OpenAI, each
+  /// scoped to the last 12 months). May be empty if the Mac is unreachable.
+  Future<List<ModelOption>> listModels();
 
   Future<List<MemoryView>> listMemories();
 
@@ -134,6 +161,7 @@ class FrbOrchestratorClient implements OrchestratorClient {
   Future<OrchestratorSettingsView> applySettings({
     String? llmBackend,
     String? llmModel,
+    String? anthropicAuth,
     bool setTtsVoice = false,
     String? ttsVoice,
     int? endSilenceMs,
@@ -143,6 +171,7 @@ class FrbOrchestratorClient implements OrchestratorClient {
       update: frb.SettingsUpdate(
         llmBackend: llmBackend,
         llmModel: llmModel,
+        anthropicAuth: anthropicAuth,
         setTtsVoice: setTtsVoice,
         ttsVoice: ttsVoice,
         endSilenceMs: endSilenceMs,
@@ -151,6 +180,14 @@ class FrbOrchestratorClient implements OrchestratorClient {
       discoveryTimeoutSecs: _timeout,
     );
     return _view(result);
+  }
+
+  @override
+  Future<List<ModelOption>> listModels() async {
+    final models = await frb.listModels(discoveryTimeoutSecs: _timeout);
+    return models
+        .map((m) => ModelOption(provider: m.provider, id: m.id, label: m.label))
+        .toList();
   }
 
   @override
@@ -205,6 +242,7 @@ class FrbOrchestratorClient implements OrchestratorClient {
         message: s.message,
         llmBackend: s.llmBackend,
         llmModel: s.llmModel,
+        anthropicAuth: s.anthropicAuth,
         ttsVoice: s.ttsVoice,
         endSilenceMs: s.endSilenceMs,
         voiceRmsThreshold: s.voiceRmsThreshold,

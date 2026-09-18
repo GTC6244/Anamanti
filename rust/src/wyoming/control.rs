@@ -18,7 +18,9 @@ use serde_json::{json, Map, Value};
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
-use crate::api::settings::{MemoryEntry, OrchestratorSettings, SettingsUpdate, SpeakerInfo};
+use crate::api::settings::{
+    MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo,
+};
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
 use super::protocol::{self, types, WyomingEvent};
@@ -59,6 +61,7 @@ fn parse_settings(ev: &WyomingEvent) -> OrchestratorSettings {
             .to_string(),
         llm_backend: opt_str(&ev.data, "llm_backend").unwrap_or_default(),
         llm_model: opt_str(&ev.data, "llm_model"),
+        anthropic_auth: opt_str(&ev.data, "anthropic_auth").unwrap_or_else(|| "apikey".to_string()),
         tts_voice: opt_str(&ev.data, "tts_voice"),
         end_silence_ms: ev
             .data
@@ -70,6 +73,29 @@ fn parse_settings(ev: &WyomingEvent) -> OrchestratorSettings {
             .get("voice_rms_threshold")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
+    }
+}
+
+fn parse_model(v: &Value) -> ModelInfo {
+    let id = v
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let label = v
+        .get("label")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&id)
+        .to_string();
+    ModelInfo {
+        provider: v
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        id,
+        label,
     }
 }
 
@@ -114,6 +140,9 @@ pub async fn update_settings(
     if let Some(model) = update.llm_model.as_deref().filter(|s| !s.is_empty()) {
         data.insert("llm_model".into(), json!(model));
     }
+    if let Some(auth) = update.anthropic_auth.as_deref().filter(|s| !s.is_empty()) {
+        data.insert("anthropic_auth".into(), json!(auth));
+    }
     if update.set_tts_voice {
         // A present `tts_voice` key drives the change: a non-empty string sets the
         // voice, `null` clears it (matching the orchestrator's parse_update).
@@ -132,6 +161,28 @@ pub async fn update_settings(
     let request = WyomingEvent::with_data(types::SET_SETTINGS, Value::Object(data));
     let resp = round_trip(&endpoint, request).await?;
     Ok(parse_settings(&resp))
+}
+
+/// List the orchestrator's selectable LLM models for the settings model dropdown.
+pub async fn list_models(cache: &EndpointCache, timeout: Duration) -> Result<Vec<ModelInfo>> {
+    let endpoint = resolve(cache, timeout).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_MODELS)).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing models failed")
+        ));
+    }
+    let models = resp
+        .data
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_model).collect())
+        .unwrap_or_default();
+    Ok(models)
 }
 
 /// List every persistent memory entry.
@@ -346,6 +397,7 @@ mod tests {
         let update = SettingsUpdate {
             llm_backend: None,
             llm_model: None,
+            anthropic_auth: None,
             set_tts_voice: true,
             tts_voice: Some("en_US-amy-medium".to_string()),
             end_silence_ms: None,
@@ -365,6 +417,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_sends_anthropic_auth_mode() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::SETTINGS,
+            json!({ "ok": true, "llm_backend": "anthropic", "anthropic_auth": "subscription" }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let update = SettingsUpdate {
+            llm_backend: Some("anthropic".to_string()),
+            llm_model: None,
+            anthropic_auth: Some("subscription".to_string()),
+            set_tts_voice: false,
+            tts_voice: None,
+            end_silence_ms: None,
+            voice_rms_threshold: None,
+        };
+        let out = update_settings(&cache, Duration::from_millis(0), &update)
+            .await
+            .unwrap();
+        assert_eq!(out.anthropic_auth, "subscription");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.data["anthropic_auth"], json!("subscription"));
+    }
+
+    #[tokio::test]
     async fn describe_parses_and_update_sends_vad_fields() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -379,6 +460,7 @@ mod tests {
         let update = SettingsUpdate {
             llm_backend: None,
             llm_model: None,
+            anthropic_auth: None,
             set_tts_voice: false,
             tts_voice: None,
             end_silence_ms: Some(550),
@@ -411,6 +493,7 @@ mod tests {
         let update = SettingsUpdate {
             llm_backend: None,
             llm_model: None,
+            anthropic_auth: None,
             set_tts_voice: true,
             tts_voice: None,
             end_silence_ms: None,
@@ -447,6 +530,31 @@ mod tests {
         assert_eq!(entries[1].content, "name is Sam");
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_catalog() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::MODELS,
+            json!({ "ok": true, "models": [
+                { "provider": "anthropic", "id": "claude-opus-5", "label": "Claude Opus 5" },
+                { "provider": "openai", "id": "gpt-4o-mini", "label": "gpt-4o-mini" },
+            ]}),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let models = list_models(&cache, Duration::from_millis(0)).await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].provider, "anthropic");
+        assert_eq!(models[0].id, "claude-opus-5");
+        assert_eq!(models[0].label, "Claude Opus 5");
+        assert_eq!(models[1].provider, "openai");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::LIST_MODELS);
     }
 
     #[tokio::test]

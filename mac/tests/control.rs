@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ambient_orchestrator::llm::anthropic_auth::AnthropicAuth;
 use ambient_orchestrator::memory::{MemoryKind, MemorySource, MemoryStore};
 use ambient_orchestrator::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
 use ambient_orchestrator::settings::{
@@ -29,6 +30,10 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         anthropic_base_url: "https://api.anthropic.com".into(),
         anthropic_api_key: None,
         anthropic_max_tokens: 128,
+        openai_base_url: "https://api.openai.com".into(),
+        openai_api_key: None,
+        openai_max_tokens: 128,
+        anthropic_token: None,
     };
     let (llm, backend, model) = factory
         .build(
@@ -38,6 +43,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             None,
             "ollama",
             Some("llama3.2"),
+            AnthropicAuth::ApiKey,
         )
         .unwrap();
     let settings = SharedSettings::new(
@@ -50,6 +56,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             search_api_key: None,
             llm_backend: backend,
             llm_model: model,
+            anthropic_auth: AnthropicAuth::ApiKey,
             tts_voice: None,
             end_silence_ms: DEFAULT_END_SILENCE_MS,
             voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
@@ -67,10 +74,17 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         tts_addr: "127.0.0.1:1".parse().unwrap(),
     });
 
+    // No provider keys → the catalog serves its static fallback (no network).
+    let catalog = Arc::new(ambient_orchestrator::llm::catalog::ModelCatalog::new(
+        "http://unused",
+        None,
+        "http://unused",
+        None,
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(ambient_orchestrator::server::serve(
-        listener, pipeline, connector,
+        listener, pipeline, connector, catalog,
     ));
     (addr, memory, settings)
 }
@@ -113,6 +127,19 @@ async fn describe_then_set_settings_over_the_socket() {
         settings.view().tts_voice.as_deref(),
         Some("en_US-amy-medium")
     );
+}
+
+#[tokio::test]
+async fn list_models_over_the_socket() {
+    let (addr, _mem, _settings) = start_server().await;
+
+    let resp = round_trip(addr, WyomingEvent::new(types::LIST_MODELS)).await;
+    assert_eq!(resp.event_type, types::MODELS);
+    assert_eq!(resp.data["ok"], json!(true));
+    let models = resp.data["models"].as_array().unwrap();
+    // The static fallback (no keys in the test) includes both providers.
+    assert!(models.iter().any(|m| m["id"] == json!("claude-opus-5")));
+    assert!(models.iter().any(|m| m["id"] == json!("gpt-4o-mini")));
 }
 
 #[tokio::test]

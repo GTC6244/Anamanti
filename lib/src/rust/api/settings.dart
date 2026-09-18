@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `block_on`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Read the orchestrator's current runtime settings.
 Future<OrchestratorSettings> fetchOrchestratorSettings({
@@ -24,6 +24,13 @@ Future<OrchestratorSettings> updateOrchestratorSettings({
   update: update,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
+
+/// List the orchestrator's selectable LLM models (Anthropic + OpenAI, scoped to the
+/// last 12 months) for the settings model dropdown.
+Future<List<ModelInfo>> listModels({required BigInt discoveryTimeoutSecs}) =>
+    RustLib.instance.api.crateApiSettingsListModels(
+      discoveryTimeoutSecs: discoveryTimeoutSecs,
+    );
 
 /// List all persistent memory entries (settings memory management view).
 Future<List<MemoryEntry>> listMemories({
@@ -128,6 +135,37 @@ class MemoryEntry {
           createdAt == other.createdAt;
 }
 
+/// One selectable LLM model for the settings model dropdown, as reported by the
+/// orchestrator's catalog (scoped to the last 12 months per provider).
+class ModelInfo {
+  /// `anthropic` or `openai`.
+  final String provider;
+
+  /// The model id to send as the backend's model (e.g. `claude-opus-5`).
+  final String id;
+
+  /// A human-friendly label for the dropdown (falls back to `id`).
+  final String label;
+
+  const ModelInfo({
+    required this.provider,
+    required this.id,
+    required this.label,
+  });
+
+  @override
+  int get hashCode => provider.hashCode ^ id.hashCode ^ label.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ModelInfo &&
+          runtimeType == other.runtimeType &&
+          provider == other.provider &&
+          id == other.id &&
+          label == other.label;
+}
+
 /// The orchestrator's runtime settings, as reported by a describe/set response.
 class OrchestratorSettings {
   /// Whether the request succeeded (a rejected change reports `false` with a
@@ -137,11 +175,14 @@ class OrchestratorSettings {
   /// Human-readable status/error (e.g. why a backend change was rejected).
   final String message;
 
-  /// The active LLM backend label (`ollama` / `anthropic` / `mock`).
+  /// The active LLM backend label (`ollama` / `anthropic` / `openai` / `mock`).
   final String llmBackend;
 
   /// The active model name, if the backend uses one.
   final String? llmModel;
+
+  /// Anthropic auth mode: `apikey` or `subscription` (Claude OAuth).
+  final String anthropicAuth;
 
   /// The active Piper voice, or `None` for the server default.
   final String? ttsVoice;
@@ -157,6 +198,7 @@ class OrchestratorSettings {
     required this.message,
     required this.llmBackend,
     this.llmModel,
+    required this.anthropicAuth,
     this.ttsVoice,
     required this.endSilenceMs,
     required this.voiceRmsThreshold,
@@ -168,6 +210,7 @@ class OrchestratorSettings {
       message.hashCode ^
       llmBackend.hashCode ^
       llmModel.hashCode ^
+      anthropicAuth.hashCode ^
       ttsVoice.hashCode ^
       endSilenceMs.hashCode ^
       voiceRmsThreshold.hashCode;
@@ -181,6 +224,7 @@ class OrchestratorSettings {
           message == other.message &&
           llmBackend == other.llmBackend &&
           llmModel == other.llmModel &&
+          anthropicAuth == other.anthropicAuth &&
           ttsVoice == other.ttsVoice &&
           endSilenceMs == other.endSilenceMs &&
           voiceRmsThreshold == other.voiceRmsThreshold;
@@ -193,6 +237,9 @@ class SettingsUpdate {
 
   /// New model name, or `None` to leave it unchanged.
   final String? llmModel;
+
+  /// New Anthropic auth mode (`apikey`/`subscription`), or `None` to leave it.
+  final String? anthropicAuth;
 
   /// When `true`, apply `tts_voice` (a `None`/empty value clears the voice); when
   /// `false`, leave the voice unchanged.
@@ -210,6 +257,7 @@ class SettingsUpdate {
   const SettingsUpdate({
     this.llmBackend,
     this.llmModel,
+    this.anthropicAuth,
     required this.setTtsVoice,
     this.ttsVoice,
     this.endSilenceMs,
@@ -220,6 +268,7 @@ class SettingsUpdate {
   int get hashCode =>
       llmBackend.hashCode ^
       llmModel.hashCode ^
+      anthropicAuth.hashCode ^
       setTtsVoice.hashCode ^
       ttsVoice.hashCode ^
       endSilenceMs.hashCode ^
@@ -232,6 +281,7 @@ class SettingsUpdate {
           runtimeType == other.runtimeType &&
           llmBackend == other.llmBackend &&
           llmModel == other.llmModel &&
+          anthropicAuth == other.anthropicAuth &&
           setTtsVoice == other.setTtsVoice &&
           ttsVoice == other.ttsVoice &&
           endSilenceMs == other.endSilenceMs &&

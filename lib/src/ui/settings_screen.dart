@@ -27,8 +27,13 @@ import 'package:ambient_display/src/ui/people_screen.dart';
 const Map<String, String> _kBackends = {
   'ollama': 'Local (Ollama)',
   'anthropic': 'Cloud (Claude)',
+  'openai': 'Cloud (OpenAI)',
   'mock': 'Offline echo (mock)',
 };
+
+/// Backends whose model is chosen from the orchestrator's last-12-months catalog
+/// (a dropdown); other backends keep a free-text model field (e.g. an Ollama tag).
+const Set<String> _kCloudBackends = {'anthropic', 'openai'};
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -68,9 +73,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _folderController = TextEditingController();
 
   String _backend = 'ollama';
+  // Anthropic auth mode: 'apikey' or 'subscription' (Claude OAuth).
+  String _anthropicAuth = 'apikey';
   bool _remoteLoading = true;
   String? _remoteError;
   bool _saving = false;
+
+  /// Selectable models (last 12 months) from the orchestrator, for the dropdown.
+  List<ModelOption> _models = const <ModelOption>[];
 
   // Orchestrator-side VAD tuning (loaded from the Mac, applied on Save).
   int _endSilenceMs = 700;
@@ -98,9 +108,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     try {
       final remote = await widget.client.fetchSettings();
+      // The model catalog is best-effort: if it fails, the model field falls back
+      // to free text so the user is never blocked.
+      List<ModelOption> models;
+      try {
+        models = await widget.client.listModels();
+      } catch (_) {
+        models = const <ModelOption>[];
+      }
       if (!mounted) return;
       setState(() {
+        _models = models;
         _backend = _kBackends.containsKey(remote.llmBackend) ? remote.llmBackend : 'ollama';
+        _anthropicAuth = remote.anthropicAuth == 'subscription' ? 'subscription' : 'apikey';
         _modelController.text = remote.llmModel ?? '';
         _voiceController.text = remote.ttsVoice ?? '';
         // Adopt the orchestrator's live VAD values (0 = unknown → keep the default).
@@ -151,6 +171,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final result = await widget.client.applySettings(
           llmBackend: _backend,
           llmModel: _modelController.text.trim().isEmpty ? null : _modelController.text.trim(),
+          anthropicAuth: _backend == 'anthropic' ? _anthropicAuth : null,
           setTtsVoice: true,
           ttsVoice: _voiceController.text.trim().isEmpty ? null : _voiceController.text.trim(),
           endSilenceMs: _endSilenceMs,
@@ -480,21 +501,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               DropdownMenuItem(value: entry.key, child: Text(entry.value)),
           ],
           onChanged: (v) {
-            if (v != null) setState(() => _backend = v);
+            if (v == null || v == _backend) return;
+            setState(() {
+              _backend = v;
+              // Switching backend resets the model to that backend's default so a
+              // stale model id from another provider is never sent.
+              _modelController.text = '';
+            });
           },
         ),
       ),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-        child: TextField(
-          key: const Key('settings-model'),
-          controller: _modelController,
-          decoration: const InputDecoration(
-            labelText: 'Model',
-            hintText: 'e.g. llama3.2 or claude-opus-5',
-          ),
-        ),
-      ),
+      _authField(),
+      _modelField(),
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
         child: TextField(
@@ -530,6 +548,90 @@ class _SettingsScreenState extends State<SettingsScreen> {
         onChanged: (v) => setState(() => _voiceRmsThreshold = v),
       ),
     ];
+  }
+
+  /// The Anthropic auth selector (API key vs Claude subscription/OAuth), shown only
+  /// for the Anthropic backend. OpenAI is API-key-only (no subscription→API path).
+  Widget _authField() {
+    if (_backend == 'anthropic') {
+      return ListTile(
+        leading: const Icon(Icons.key_outlined),
+        title: const Text('Anthropic auth'),
+        subtitle: Text(_anthropicAuth == 'subscription'
+            ? 'Claude subscription (OAuth via claude setup-token)'
+            : 'API key (ANTHROPIC_API_KEY)'),
+        trailing: DropdownButton<String>(
+          key: const Key('settings-anthropic-auth'),
+          value: _anthropicAuth == 'subscription' ? 'subscription' : 'apikey',
+          items: const [
+            DropdownMenuItem(value: 'apikey', child: Text('API key')),
+            DropdownMenuItem(value: 'subscription', child: Text('Subscription')),
+          ],
+          onChanged: (v) {
+            if (v != null) setState(() => _anthropicAuth = v);
+          },
+        ),
+      );
+    }
+    if (_backend == 'openai') {
+      return const Padding(
+        padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
+        child: Text(
+          'OpenAI uses an API key (OPENAI_API_KEY). Subscription auth is not available for OpenAI.',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  /// The model control: a dropdown of the orchestrator's last-12-months models for
+  /// cloud backends (Anthropic/OpenAI), or a free-text field for local/mock (e.g. an
+  /// Ollama tag). A model pinned outside the fetched list stays selectable.
+  Widget _modelField() {
+    if (!_kCloudBackends.contains(_backend)) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: TextField(
+          key: const Key('settings-model'),
+          controller: _modelController,
+          decoration: const InputDecoration(
+            labelText: 'Model',
+            hintText: 'e.g. llama3.2 or qwen2.5',
+          ),
+        ),
+      );
+    }
+
+    final current = _modelController.text.trim();
+    final providerModels = _models.where((m) => m.provider == _backend).toList();
+    final ids = providerModels.map((m) => m.id).toSet();
+    final items = <DropdownMenuItem<String>>[
+      const DropdownMenuItem(value: '', child: Text('Backend default')),
+      for (final m in providerModels)
+        DropdownMenuItem(value: m.id, child: Text(m.label)),
+      // Keep a pinned model that isn't in the fetched list selectable + visible.
+      if (current.isNotEmpty && !ids.contains(current))
+        DropdownMenuItem(value: current, child: Text('$current (pinned)')),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          labelText: 'Model',
+          helperText: 'Released in the last 12 months',
+        ),
+        child: DropdownButton<String>(
+          key: const Key('settings-model'),
+          isExpanded: true,
+          underline: const SizedBox.shrink(),
+          value: current.isEmpty ? '' : current,
+          items: items,
+          onChanged: (v) => setState(() => _modelController.text = v ?? ''),
+        ),
+      ),
+    );
   }
 
   List<Widget> _photoTiles() {

@@ -51,3 +51,8 @@ ambient_memory.sqlite-*
 
 # Orchestrator persisted runtime settings (contains the search API key in plaintext)
 ambient_settings.json
+
+# Orchestrator runtime chat log (append-only turn record; GraphRAG ingest queue)
+ambient_chatlog.jsonl
+ambient_chatlog.jsonl-*
+ambient_helix/
