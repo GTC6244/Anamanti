@@ -128,7 +128,54 @@ declared (`photoslibrary.readonly`, `drive.readonly`).
 - [ ] Confirm auto-reconnect/backoff behavior end-to-end when the Mac goes away and
       returns (slideshow keeps running; subtle offline chip; wake words queue).
 
-## 5. Nice-to-haves / follow-ups
+## 5. Per-person speaker identification (this branch — finish to production)
+
+Phases A–D **and** the device "People" UI are implemented, tested, and merged
+(see [`speaker_id_plan.md`](./speaker_id_plan.md)): passive voiceprint +
+auto-clustering, per-person SQLite + GraphRAG memory, the prompt identity line,
+voice naming ("my name is …"), and the `ambient-*speaker*` control frames. It is
+**not running yet** — `AMBIENT_SPEAKER_ID` is unset (household), the release binary
+is built without `--features speaker`, and there is no real embedding model on the
+Mac. To take it from dormant code to a real feature:
+
+### 6a. Real embedding model (Phase E — the blocker for accuracy)
+
+- [ ] Obtain/export an **ECAPA-TDNN** (or WeSpeaker) speaker-embedding model to
+      **ONNX** and place it on the Mac.
+- [ ] Confirm the model's **input contract** (raw waveform vs. precomputed log-mel;
+      tensor layout `[1, frames, mels]` vs `[1, mels, frames]`) and align
+      `OnnxSpeakerEmbedder` + `FbankConfig` (`mac/src/speaker/{embed,features}.rs`)
+      to it; set `AMBIENT_SPEAKER_EMBED_DIMS` (192 for ECAPA).
+- [ ] Build/ship the orchestrator with **`--features speaker`** and set
+      `AMBIENT_SPEAKER_MODEL_PATH` (else it falls back to the dev-only mock embedder).
+
+### 6b. Enable + calibrate on hardware
+
+- [ ] Launch with **`AMBIENT_SPEAKER_ID=on`** and fold it (plus `--features speaker`
+      + the model path) into the launchd/run script from §4.
+- [ ] **Calibrate** `AMBIENT_SPEAKER_MATCH_THRESHOLD` / `_NEW_THRESHOLD` /
+      `_MIN_SPEECH_MS` against real Echo Show far-field captures; measure EER and
+      record the chosen operating point.
+- [ ] Verify per-person **memory scoping** + the prompt identity line with 2+ real
+      speakers (Sam vs. Dana get separate facts; the reply greets by name).
+- [ ] Verify the **People** settings screen end-to-end on the device (list, name,
+      merge, forget) and that anonymous clusters show as "Speaker N".
+- [ ] Verify **GraphRAG per-`User`** attribution with `AMBIENT_MEMORY_BACKEND=helix`
+      (+ `OPENAI_API_KEY`): turns/memories attach to the right user node.
+
+### 6c. Robustness & deferred cuts
+
+- [ ] **Diarization**: multiple speakers within one utterance/turn (v1 attributes the
+      whole turn to a single utterance-level embedding).
+- [ ] **Cross-session merge suggestions**: propose merging clusters whose centroids
+      are close ("Speaker 3 sounds like Dana — merge?").
+- [ ] **Voiceprint drift / re-enrollment** as voices age or the mic/AEC path changes.
+- [ ] **Retention/pruning** of stale, never-named anonymous clusters.
+- [ ] Explicit **"who am I?"** handling (today it relies on the prompt identity line).
+- [ ] Privacy: confirm the People "forget" path fully removes the voiceprint centroid;
+      document that voiceprints never leave the LAN.
+
+## 6. Nice-to-haves / follow-ups
 
 - [ ] Bundle additional wake-word classifiers (only `hey_jarvis` ships today; others
       in the settings list need their `<name>.onnx` dropped into the model dir).

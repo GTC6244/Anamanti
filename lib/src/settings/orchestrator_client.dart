@@ -78,6 +78,32 @@ class MemoryView {
   final int createdAt;
 }
 
+/// One identified speaker, for the settings "People" list.
+class SpeakerView {
+  const SpeakerView({
+    required this.id,
+    required this.labeled,
+    required this.samples,
+    required this.createdAt,
+    this.name,
+  });
+
+  /// Stable id (`spk-…`).
+  final String id;
+
+  /// User-given name, or `null` while the cluster is still anonymous.
+  final String? name;
+
+  /// Whether a person has named this cluster (vs. auto-created).
+  final bool labeled;
+
+  /// How many utterances back this voiceprint.
+  final int samples;
+
+  /// Unix seconds when the cluster was first heard.
+  final int createdAt;
+}
+
 /// Reads and changes orchestrator-side settings and persistent memory. All calls
 /// hit the network (mDNS discovery + a short Wyoming control connection) and may
 /// throw if the Mac is unreachable; callers surface that as an offline state.
@@ -103,6 +129,18 @@ abstract class OrchestratorClient {
   Future<bool> deleteMemory(int id);
 
   Future<int> clearMemories();
+
+  /// List the identified speakers (the "People" view).
+  Future<List<SpeakerView>> listSpeakers();
+
+  /// Name (or rename) a speaker; returns whether it was applied.
+  Future<bool> nameSpeaker(String id, String name);
+
+  /// Merge the `drop` speaker into `keep` (same person, two clusters).
+  Future<bool> mergeSpeakers({required String keep, required String drop});
+
+  /// Delete a speaker profile; returns whether one was removed.
+  Future<bool> deleteSpeaker(String id);
 }
 
 /// Production client backed by the generated FRB control functions.
@@ -172,6 +210,32 @@ class FrbOrchestratorClient implements OrchestratorClient {
 
   @override
   Future<int> clearMemories() => frb.clearMemories(discoveryTimeoutSecs: _timeout);
+
+  @override
+  Future<List<SpeakerView>> listSpeakers() async {
+    final people = await frb.listSpeakers(discoveryTimeoutSecs: _timeout);
+    return people
+        .map((s) => SpeakerView(
+              id: s.id,
+              name: s.name,
+              labeled: s.labeled,
+              samples: s.samples.toInt(),
+              createdAt: s.createdAt.toInt(),
+            ))
+        .toList();
+  }
+
+  @override
+  Future<bool> nameSpeaker(String id, String name) =>
+      frb.nameSpeaker(id: id, name: name, discoveryTimeoutSecs: _timeout);
+
+  @override
+  Future<bool> mergeSpeakers({required String keep, required String drop}) =>
+      frb.mergeSpeakers(keep: keep, drop: drop, discoveryTimeoutSecs: _timeout);
+
+  @override
+  Future<bool> deleteSpeaker(String id) =>
+      frb.deleteSpeaker(id: id, discoveryTimeoutSecs: _timeout);
 
   OrchestratorSettingsView _view(frb.OrchestratorSettings s) => OrchestratorSettingsView(
         ok: s.ok,

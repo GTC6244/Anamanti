@@ -63,6 +63,8 @@ fn record(id: &str, transcript: &str, reply: &str, memories: &[&str]) -> ChatLog
         memories_written: memories.iter().map(|s| s.to_string()).collect(),
         llm_backend: "mock".to_string(),
         model: None,
+        speaker_id: "household".to_string(),
+        speaker_name: None,
     }
 }
 
@@ -123,7 +125,10 @@ async fn full_pipeline_body() {
     // 5. Recall: a music query should surface the jazz turn (vector KNN) and the
     //    jazz memory (graph expansion turn→MENTIONS→Entity→ABOUT→Memory).
     let recall = HelixRecall::new(helix.clone(), embedder.clone(), 6);
-    let hits = recall.recall("what music do I like", 8).await.unwrap();
+    let hits = recall
+        .recall("what music do I like", None, 8)
+        .await
+        .unwrap();
     assert!(
         hits.iter().any(|h| h.to_lowercase().contains("jazz")),
         "recall should surface jazz context, got: {hits:?}"
@@ -147,7 +152,7 @@ async fn disk_store_body() {
         let helix = HelixMemory::open_disk(&dir, "persist", dims).await.unwrap();
         let vec = embedder.embed_one("remember the alamo").await.unwrap();
         helix
-            .ingest_turn("d1", "s", 1, "remember the alamo", vec, &[])
+            .ingest_turn("d1", "s", 1, "remember the alamo", vec, &[], "household", None)
             .await
             .unwrap();
         let before = helix.node_count().await.unwrap();

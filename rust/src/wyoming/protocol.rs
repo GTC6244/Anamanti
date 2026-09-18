@@ -80,6 +80,25 @@ pub mod types {
     pub const CLEAR_MEMORIES: &str = "ambient-clear-memories";
     /// orchestrator → device: result of a delete/clear (data: `ok`, `count`).
     pub const MEMORY_RESULT: &str = "ambient-memory-result";
+
+    // Speaker identification control frames (speaker_id_plan.md Phase C). Kept
+    // byte-identical to the orchestrator crate's `types` (guarded by round-trip
+    // tests in both crates).
+
+    /// device → orchestrator: list identified speakers (no data).
+    pub const LIST_SPEAKERS: &str = "ambient-list-speakers";
+    /// orchestrator → device: the speakers (data: `ok`, `speakers` array of
+    /// `{id, name, labeled, samples, created_at}`).
+    pub const SPEAKERS: &str = "ambient-speakers";
+    /// device → orchestrator: name a speaker (data: `id`, `name`).
+    pub const NAME_SPEAKER: &str = "ambient-name-speaker";
+    /// device → orchestrator: merge `drop` into `keep` (data: `keep`, `drop`).
+    pub const MERGE_SPEAKERS: &str = "ambient-merge-speakers";
+    /// device → orchestrator: delete a speaker profile (data: `id`).
+    pub const DELETE_SPEAKER: &str = "ambient-delete-speaker";
+    /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
+    pub const SPEAKER_RESULT: &str = "ambient-speaker-result";
+
     /// device → orchestrator: list the selectable LLM models for the settings model
     /// dropdown (no data).
     pub const LIST_MODELS: &str = "ambient-list-models";

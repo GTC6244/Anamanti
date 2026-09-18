@@ -67,6 +67,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<SpeakerInfo> dco_decode_list_speaker_info(dynamic raw);
+
+  @protected
   MemoryEntry dco_decode_memory_entry(dynamic raw);
 
   @protected
@@ -86,6 +89,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SettingsUpdate dco_decode_settings_update(dynamic raw);
+
+  @protected
+  SpeakerInfo dco_decode_speaker_info(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -163,6 +169,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<SpeakerInfo> sse_decode_list_speaker_info(SseDeserializer deserializer);
+
+  @protected
   MemoryEntry sse_decode_memory_entry(SseDeserializer deserializer);
 
   @protected
@@ -184,6 +193,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SettingsUpdate sse_decode_settings_update(SseDeserializer deserializer);
+
+  @protected
+  SpeakerInfo sse_decode_speaker_info(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -278,6 +290,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_speaker_info(
+    List<SpeakerInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_memory_entry(MemoryEntry self, SseSerializer serializer);
 
   @protected
@@ -303,6 +321,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     SettingsUpdate self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_speaker_info(SpeakerInfo self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_16(int self, SseSerializer serializer);

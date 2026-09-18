@@ -45,14 +45,15 @@ const E_MENTIONS: &str = "MENTIONS";
 const E_ABOUT: &str = "ABOUT";
 const E_FOLLOWS: &str = "FOLLOWS";
 const E_KNOWS: &str = "KNOWS";
-// The single shared household user for v1 (speaker ID is future work).
+// The shared/unattributed user, used for turns without a specific speaker (and as
+// the sentinel `speaker_id` on such nodes). Per-person `User` nodes are keyed by
+// their `spk-…` id (speaker_id_plan.md Phase D).
 const HOUSEHOLD: &str = "household";
 
 /// Embedded GraphRAG memory backend.
 pub struct HelixMemory {
     db: HelixDB,
     dims: usize,
-    household_id: u64,
     /// Most recent `Turn` node id per session, for the temporal `FOLLOWS` chain.
     last_turn: Mutex<HashMap<String, u64>>,
 }
@@ -106,16 +107,16 @@ impl HelixMemory {
             .with_context(|| format!("creating vector index on {label}.embedding"))?;
         }
 
-        let mut me = Self {
+        let me = Self {
             db,
             dims,
-            household_id: 0,
             last_turn: Mutex::new(HashMap::new()),
         };
         // Vector indexes are built asynchronously by the secondary-index worker;
         // block until they're queryable so the first recall can't race the build.
         me.ensure_indexes_ready().await?;
-        me.household_id = me.ensure_node(L_USER, "name", HOUSEHOLD, &[]).await?;
+        // Ensure the shared household user exists (keyed by speaker_id).
+        me.ensure_user(HOUSEHOLD, None).await?;
         Ok(me)
     }
 
@@ -175,9 +176,12 @@ impl HelixMemory {
     // ---- writes -----------------------------------------------------------
 
     /// Ingest one completed turn: a `Turn` node (with embedding), a `SAID` edge
-    /// from the household user, `MENTIONS`/`KNOWS` edges to each entity, and a
+    /// from the speaking user, `MENTIONS`/`KNOWS` edges to each entity, and a
     /// `FOLLOWS` edge from the previous turn in the same session. Idempotent by
     /// `ext_id` (a re-ingested record returns the existing node id).
+    // A turn genuinely carries this many independent fields; grouping them into a
+    // struct would only move the list around, so the arg-count lint isn't worth it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn ingest_turn(
         &self,
         ext_id: &str,
@@ -186,13 +190,17 @@ impl HelixMemory {
         text: &str,
         embedding: Vec<f32>,
         entities: &[Entity],
+        speaker_id: &str,
+        speaker_name: Option<&str>,
     ) -> Result<u64> {
         if let Some(existing) = self.find_by_ext_id(L_TURN, ext_id).await? {
             return Ok(existing);
         }
         self.check_dims(&embedding)?;
 
-        // Pre-resolve entity ids (get-or-create) so the turn batch can link by id.
+        // Resolve the speaking user (get-or-create) so SAID/KNOWS originate from
+        // the right person, and pre-resolve entity ids so the batch links by id.
+        let user_id = self.ensure_user(speaker_id, speaker_name).await?;
         let mut entity_ids = Vec::with_capacity(entities.len());
         for e in entities {
             entity_ids.push(self.ensure_entity(e).await?);
@@ -209,13 +217,14 @@ impl HelixMemory {
                     ("session", PropertyInput::from(session)),
                     ("ts", PropertyInput::from(ts)),
                     ("text", PropertyInput::from(text)),
+                    ("speaker_id", PropertyInput::from(speaker_id)),
                     ("embedding", PropertyInput::from(embedding)),
                 ],
             ),
         );
         b = b.var_as(
             "_said",
-            g().n(NodeRef::id(self.household_id))
+            g().n(NodeRef::id(user_id))
                 .add_e(E_SAID, NodeRef::var("t"), no_props()),
         );
         for (i, eid) in entity_ids.iter().enumerate() {
@@ -226,7 +235,7 @@ impl HelixMemory {
             );
             b = b.var_as(
                 &format!("_k{i}"),
-                g().n(NodeRef::id(self.household_id))
+                g().n(NodeRef::id(user_id))
                     .add_e(E_KNOWS, NodeRef::id(*eid), no_props()),
             );
         }
@@ -255,6 +264,7 @@ impl HelixMemory {
         content: &str,
         embedding: Vec<f32>,
         entities: &[Entity],
+        speaker_id: &str,
     ) -> Result<u64> {
         if let Some(existing) = self.find_by_ext_id(L_MEMORY, ext_id).await? {
             return Ok(existing);
@@ -273,6 +283,7 @@ impl HelixMemory {
                     ("ext_id", PropertyInput::from(ext_id)),
                     ("kind", PropertyInput::from(kind)),
                     ("content", PropertyInput::from(content)),
+                    ("speaker_id", PropertyInput::from(speaker_id)),
                     ("embedding", PropertyInput::from(embedding)),
                 ],
             ),
@@ -297,37 +308,43 @@ impl HelixMemory {
     ///    `ABOUT` those entities.
     ///
     /// Deduplicated, capped to `max_items`, most-relevant-first-ish.
-    pub async fn recall(&self, query: Vec<f32>, k: usize, max_items: usize) -> Result<Vec<String>> {
+    pub async fn recall(
+        &self,
+        query: Vec<f32>,
+        speaker_id: Option<&str>,
+        k: usize,
+        max_items: usize,
+    ) -> Result<Vec<String>> {
         self.check_dims(&query)?;
         let mut out: Vec<String> = Vec::new();
 
-        // 1. nearest turns
+        // 1. nearest turns (scoped to this speaker + shared)
         let turns = self
             .read(
                 batch::read_batch()
                     .var_as(
                         "t",
                         g().vector_search_nodes(L_TURN, "embedding", query.clone(), k, None)
-                            .value_map(Some(vec!["text"])),
+                            .value_map(Some(vec!["text", "speaker_id"])),
                     )
                     .returning(["t"]),
             )
             .await?;
-        push_prop(&mut out, &turns, "t", "text");
+        push_scoped(&mut out, &turns, "t", "text", speaker_id);
 
-        // 2. nearest memories (direct vector)
+        // 2. nearest memories (direct vector, scoped)
         let mems = self
             .read(
                 batch::read_batch()
                     .var_as(
                         "m",
                         g().vector_search_nodes(L_MEMORY, "embedding", query.clone(), k, None)
-                            .value_map(Some(vec!["content"])),
+                            .value_map(Some(vec!["content", "speaker_id"])),
                     )
                     .returning(["m"]),
             )
             .await?;
-        push_prop(&mut out, &mems, "m", "content");
+        push_scoped(&mut out, &mems, "m", "content", speaker_id);
 
         // 3. graph hop: nearest turns → MENTIONS → Entity → (ABOUT, incoming) → Memory
         let expanded = self
@@ -338,12 +355,12 @@ impl HelixMemory {
                         g().vector_search_nodes(L_TURN, "embedding", query, k, None)
                             .out(Some(E_MENTIONS))
                             .in_(Some(E_ABOUT))
-                            .value_map(Some(vec!["content"])),
+                            .value_map(Some(vec!["content", "speaker_id"])),
                     )
                     .returning(["e"]),
             )
             .await?;
-        push_prop(&mut out, &expanded, "e", "content");
+        push_scoped(&mut out, &expanded, "e", "content", speaker_id);
 
         // dedupe (stable, keep first occurrence) and cap
         let mut seen = std::collections::HashSet::new();
@@ -408,6 +425,19 @@ impl HelixMemory {
             .await
     }
 
+    /// Get-or-create a `User` node keyed by `speaker_id` (`spk-…`, or `household`
+    /// for the shared user), tagging its display `name` when provided. The name is
+    /// set on creation; a later rename updates the SQLite registry (the source of
+    /// truth for the spoken reply), so the graph property is best-effort.
+    async fn ensure_user(&self, speaker_id: &str, name: Option<&str>) -> Result<u64> {
+        let extra: Vec<(&str, &str)> = match name {
+            Some(n) if !n.is_empty() => vec![("name", n)],
+            _ => Vec::new(),
+        };
+        self.ensure_node(L_USER, "speaker_id", speaker_id, &extra)
+            .await
+    }
+
     /// Get-or-create a node identified by `(key_prop == key_val)` under `label`,
     /// setting `extra` properties only when creating. Returns the node id.
     async fn ensure_node(
@@ -467,12 +497,25 @@ fn first_id(value: &Value, var: &str) -> Option<u64> {
     value.get(var)?.as_array()?.first()?.get("$id")?.as_u64()
 }
 
-/// Append `prop` from every element of `value[var]` to `out`.
-fn push_prop(out: &mut Vec<String>, value: &Value, var: &str, prop: &str) {
+/// Append `prop` from every element of `value[var]` to `out`, keeping only nodes
+/// in scope for `want`: a specific speaker sees their own nodes plus shared
+/// (`household`) ones; `None` (household scope) sees only shared. A node missing a
+/// `speaker_id` property is treated as shared (covers pre-Phase-D nodes).
+fn push_scoped(out: &mut Vec<String>, value: &Value, var: &str, prop: &str, want: Option<&str>) {
     if let Some(arr) = value.get(var).and_then(|v| v.as_array()) {
         for item in arr {
-            if let Some(s) = item.get(prop).and_then(|v| v.as_str()) {
-                out.push(s.to_string());
+            let sid = item
+                .get("speaker_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(HOUSEHOLD);
+            let in_scope = match want {
+                Some(w) => sid == w || sid == HOUSEHOLD,
+                None => sid == HOUSEHOLD,
+            };
+            if in_scope {
+                if let Some(s) = item.get(prop).and_then(|v| v.as_str()) {
+                    out.push(s.to_string());
+                }
             }
         }
     }

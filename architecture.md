@@ -108,7 +108,10 @@ predictable memory use and no GC pauses under the 1 GB limit.
   v1). Policy is **explicit + inferred**: entries are added on request
   ("remember…") and auto-extracted from conversation turns. Managed via a
   settings list (view/delete) and voice ("forget that"); kept until cleared.
-  Private to the LAN; survives device reflashes.
+  Private to the LAN; survives device reflashes. **Per-person:** an opt-in local
+  voiceprint embedder (`mac/src/speaker/`) identifies who is speaking from the
+  utterance PCM and scopes memory writes/recall and the prompt to that person (a
+  shared "household" scope is the floor); see `speaker_id_plan.md`.
 - **End-of-speech / VAD** — runs in the **orchestrator**, not the STT server:
   `wyoming-faster-whisper` has no streaming VAD and only transcribes once it
   receives `audio-stop`, so the orchestrator scores per-chunk RMS energy over the
@@ -303,6 +306,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 | Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
 | VAD in the orchestrator | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
 | Persistent memory in SQLite | Simple, debuggable; FTS covers explicit+inferred facts |
+| Per-person speaker ID (local, opt-in) | Local ECAPA voiceprint (passive + auto-cluster) keeps voice on the LAN and scopes memory + prompt per person for better context; no raw audio leaves the device |
 | On-device OAuth for photos | Device displays directly; no Mac proxy needed |
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |
 | Idle photo slideshow (Google) | Ambient value when idle; user picks the folder |

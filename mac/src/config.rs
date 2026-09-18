@@ -114,6 +114,39 @@ pub struct Config {
     pub helix_path: PathBuf,
     /// GraphRAG embedding + extraction settings (used when `memory_backend = helix`).
     pub graphrag: GraphRagConfig,
+    /// Per-person speaker identification settings (speaker_id_plan.md).
+    pub speaker: SpeakerConfig,
+}
+
+/// Speaker-identification configuration. Off by default (opt-in like `helix`); a
+/// missing model path degrades gracefully to the shared household.
+#[derive(Debug, Clone)]
+pub struct SpeakerConfig {
+    /// Whether to identify speakers per turn (`AMBIENT_SPEAKER_ID=on`).
+    pub enabled: bool,
+    /// Path to the speaker-embedding ONNX model (Phase E). Absent ⇒ household.
+    pub model_path: Option<PathBuf>,
+    /// Cosine ≥ this ⇒ confident match (centroid updated).
+    pub match_threshold: f32,
+    /// Cosine below this ⇒ mint a new anonymous cluster.
+    pub new_threshold: f32,
+    /// Minimum voiced audio (ms) before attempting identification.
+    pub min_speech_ms: u32,
+    /// Embedding dimensionality the ONNX model produces (ECAPA-TDNN → 192).
+    pub embed_dims: usize,
+}
+
+impl Default for SpeakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model_path: None,
+            match_threshold: 0.55,
+            new_threshold: 0.40,
+            min_speech_ms: 1200,
+            embed_dims: 192,
+        }
+    }
 }
 
 /// Which memory retrieval backend the pipeline uses for prompt context.
@@ -182,6 +215,7 @@ impl Default for Config {
             chatlog_path: PathBuf::from("ambient_chatlog.jsonl"),
             helix_path: PathBuf::from("ambient_helix"),
             graphrag: GraphRagConfig::default(),
+            speaker: SpeakerConfig::default(),
         }
     }
 }
@@ -264,6 +298,37 @@ impl Config {
             graphrag.ingest_interval = Duration::from_secs(secs);
         }
 
+        let sd = SpeakerConfig::default();
+        let speaker = SpeakerConfig {
+            enabled: matches!(
+                env::var("AMBIENT_SPEAKER_ID")
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .as_str(),
+                "on" | "1" | "true" | "yes"
+            ),
+            model_path: env::var("AMBIENT_SPEAKER_MODEL_PATH")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+            match_threshold: env::var("AMBIENT_SPEAKER_MATCH_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(sd.match_threshold),
+            new_threshold: env::var("AMBIENT_SPEAKER_NEW_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(sd.new_threshold),
+            min_speech_ms: env::var("AMBIENT_SPEAKER_MIN_SPEECH_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(sd.min_speech_ms),
+            embed_dims: env::var("AMBIENT_SPEAKER_EMBED_DIMS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(sd.embed_dims),
+        };
+
         // The config page: `off`/`none`/empty disables it, otherwise a host:port.
         let config_addr = match env::var("AMBIENT_CONFIG_ADDR") {
             Ok(v) if matches!(v.trim().to_lowercase().as_str(), "off" | "none" | "") => None,
@@ -296,6 +361,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or(d.helix_path),
             graphrag,
+            speaker,
         })
     }
 
@@ -467,6 +533,69 @@ impl Config {
             },
             persist_path,
         ))
+    }
+
+    /// Build the per-person [`SpeakerService`], or `None` when speaker ID is
+    /// disabled. The registry lives in the same SQLite file as memory. Until the
+    /// ONNX embedder lands (Phase E) this uses the deterministic mock embedder so
+    /// the end-to-end per-person plumbing is exercisable — with a loud warning, as
+    /// the mock is not accurate for real voices.
+    pub fn build_speaker_service(&self) -> Result<Option<Arc<crate::speaker::SpeakerService>>> {
+        use crate::speaker::{
+            MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry, SpeakerService, SpeakerThresholds,
+        };
+        if !self.speaker.enabled {
+            return Ok(None);
+        }
+        let registry =
+            SpeakerRegistry::open(&self.db_path).context("opening speaker registry database")?;
+        let thresholds = SpeakerThresholds::from_ms(
+            self.speaker.match_threshold,
+            self.speaker.new_threshold,
+            self.speaker.min_speech_ms,
+        );
+        let embedder: Arc<dyn SpeakerEmbedder> = match &self.speaker.model_path {
+            #[cfg(feature = "speaker")]
+            Some(path) => {
+                use crate::speaker::embed::OnnxSpeakerEmbedder;
+                use crate::speaker::features::FbankConfig;
+                match OnnxSpeakerEmbedder::open(path, self.speaker.embed_dims, FbankConfig::default())
+                {
+                    Ok(e) => {
+                        log::info!("speaker embedder: ONNX model {}", path.display());
+                        Arc::new(e)
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "failed to load speaker model {} ({err:#}); using the mock embedder",
+                            path.display()
+                        );
+                        Arc::new(MockSpeakerEmbedder::default())
+                    }
+                }
+            }
+            #[cfg(not(feature = "speaker"))]
+            Some(path) => {
+                log::warn!(
+                    "AMBIENT_SPEAKER_MODEL_PATH is set ({}) but the binary was built without the \
+                     `speaker` feature; using the deterministic mock embedder (dev only). Rebuild \
+                     with --features speaker to use the ONNX model.",
+                    path.display()
+                );
+                Arc::new(MockSpeakerEmbedder::default())
+            }
+            None => {
+                log::warn!(
+                    "speaker ID enabled with no model path; using the deterministic mock embedder \
+                     (dev/testing only — not accurate for real voices). Set AMBIENT_SPEAKER_MODEL_PATH \
+                     and build with --features speaker to use the ONNX model."
+                );
+                Arc::new(MockSpeakerEmbedder::default())
+            }
+        };
+        Ok(Some(Arc::new(SpeakerService::new(
+            embedder, registry, thresholds,
+        ))))
     }
 
     /// A short label for the selected backend (logging/settings).

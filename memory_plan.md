@@ -376,8 +376,13 @@ HelixQL deploy). Everything else (trait, ingester, retrieval flow) stands.
 
 1. **SQLite → Helix backfill** (`migrate.rs`, plan Q11): import existing
    fact/preference rows as `Memory` nodes. Not built; start-fresh for now.
-2. **Speaker identification**: real per-user attribution + populating `KNOWS`
-   per speaker. Schema already supports multiple `User` nodes.
+2. ~~**Speaker identification**: real per-user attribution + populating `KNOWS`
+   per speaker.~~ **DONE (2026-09-17)** — see `speaker_id_plan.md`. Per-person
+   voiceprint ID (passive + auto-cluster) now attributes each turn to a `User`
+   node, scopes SQLite + GraphRAG memory per speaker, injects a "who am I
+   speaking with" line into the prompt, and ships a device "People" settings
+   screen to name/merge/forget voices. Only the on-hardware ONNX model swap +
+   threshold calibration (Phase E) remains.
 3. **Retention/pruning** of old `Turn` nodes+vectors (JSONL kept forever).
 4. **Per-connection sessions** so `FOLLOWS` chains a whole conversation (v1 mints
    a session id per turn).

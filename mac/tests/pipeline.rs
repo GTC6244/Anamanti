@@ -16,6 +16,9 @@ use tokio::io::{split, BufReader, DuplexStream};
 use ambient_orchestrator::llm::mock::MockLlm;
 use ambient_orchestrator::memory::{MemoryKind, MemoryStore};
 use ambient_orchestrator::orchestrator::{Pipeline, ServiceConnector, TurnEvent};
+use ambient_orchestrator::speaker::{
+    MockSpeakerEmbedder, SpeakerContext, SpeakerRegistry, SpeakerService, SpeakerThresholds,
+};
 use ambient_orchestrator::wyoming::protocol::{
     read_event, types, write_event, AudioFormat, WyomingEvent,
 };
@@ -420,6 +423,161 @@ async fn inferred_facts_are_persisted_across_a_turn() {
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].content, "The user's name is Sam");
     assert_eq!(stored[0].kind, MemoryKind::Fact);
+}
+
+// ---- Phase B: per-person identification end to end -------------------------
+
+/// Synthesize `ms` of a pure tone at `hz` as little-endian PCM16 bytes — a mock
+/// "voice" loud enough to pass the orchestrator's energy gate and long enough to
+/// clear the speaker-ID minimum-speech floor.
+fn voiced_chunk_bytes(hz: f32, ms: usize) -> Vec<u8> {
+    let n = 16_000usize * ms / 1000;
+    let mut out = Vec::with_capacity(n * 2);
+    for t in 0..n {
+        let x = (std::f32::consts::TAU * hz * t as f32 / 16_000.0).sin();
+        out.extend_from_slice(&((x * 8000.0) as i16).to_le_bytes());
+    }
+    out
+}
+
+/// Like [`drive_device`] but streams a single ~1.5 s voiced chunk at pitch `hz`
+/// (so speaker ID runs), returning `(transcript_seen, reply_text)`.
+async fn drive_device_voiced(io: DuplexStream, hz: f32) -> (String, String) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+
+    write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0))
+        .await
+        .unwrap();
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(hz, 1500)),
+    )
+    .await
+    .unwrap();
+
+    let ev = read_event(&mut reader).await.unwrap().unwrap();
+    let transcript = ev.transcript_text().unwrap_or_default().to_string();
+    write_event(&mut writer, &WyomingEvent::audio_stop(1520))
+        .await
+        .unwrap();
+
+    let mut reply = String::new();
+    while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if let Some(tok) = ev.reply_token_text() {
+            reply.push_str(tok);
+            continue;
+        }
+        if ev.event_type == types::AUDIO_STOP {
+            break;
+        }
+    }
+    (transcript, reply)
+}
+
+/// Drive one voiced turn at pitch `hz` through a speaker-enabled pipeline.
+async fn run_voiced_turn(
+    pipeline: &Pipeline,
+    transcript: &str,
+    hz: f32,
+) -> (String, Vec<TurnEvent>) {
+    let connector = MockConnector::new(transcript);
+    let (dev_pipeline, dev_test) = tokio::io::duplex(256 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_voiced(dev_test, hz));
+
+    let mut events = Vec::new();
+    {
+        let mut on_event = |e: TurnEvent| events.push(e);
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    let (_, reply) = device_task.await.unwrap();
+    (reply, events)
+}
+
+/// Pull the identified [`SpeakerContext`] out of a turn's events.
+fn speaker_of(events: &[TurnEvent]) -> SpeakerContext {
+    events
+        .iter()
+        .find_map(|e| match e {
+            TurnEvent::Speaker(s) => Some(s.clone()),
+            _ => None,
+        })
+        .expect("a Speaker event was emitted")
+}
+
+#[tokio::test]
+async fn per_person_identification_scopes_memory_and_context() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let speaker = Arc::new(SpeakerService::new(
+        Arc::new(MockSpeakerEmbedder::default()),
+        SpeakerRegistry::open_in_memory().unwrap(),
+        SpeakerThresholds::default(),
+    ));
+    // The reply echoes the system prompt so we can assert the identity line.
+    let pipeline = Pipeline::new(
+        Arc::new(MockLlm::new("[{sys}]")),
+        memory.clone(),
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_speaker(speaker.clone());
+
+    // Turn 1 — Sam introduces himself (low pitch). A new cluster is minted and the
+    // inferred name fact is attributed to it.
+    let (_, ev1) = run_voiced_turn(&pipeline, "my name is Sam", 180.0).await;
+    let sam = speaker_of(&ev1);
+    assert!(sam.is_new, "first voice creates a cluster");
+    assert!(!sam.is_household());
+
+    // Name the cluster (Phase C ships the voice/settings UX; here we set it directly).
+    speaker.registry().rename(&sam.speaker_id, "Sam").unwrap();
+
+    // Turn 2 — same voice, a preference. Matches Sam (not a new cluster) and the
+    // reply's system prompt now greets him by name.
+    let (reply2, ev2) = run_voiced_turn(&pipeline, "I like jazz", 180.0).await;
+    let sam2 = speaker_of(&ev2);
+    assert_eq!(sam2.speaker_id, sam.speaker_id, "same voice re-identifies");
+    assert!(!sam2.is_new);
+    assert!(
+        reply2.contains("You are speaking with Sam."),
+        "identity line reached the LLM: {reply2:?}"
+    );
+
+    // Turn 3 — a different voice (high pitch): a distinct cluster.
+    let (_, ev3) = run_voiced_turn(&pipeline, "I like tea", 600.0).await;
+    let dana = speaker_of(&ev3);
+    assert_ne!(dana.speaker_id, sam.speaker_id, "different voice, new cluster");
+    assert!(dana.is_new);
+
+    // Memory is per-person: Sam's scope has his name + jazz, never Dana's tea.
+    let sam_hits: Vec<String> = memory
+        .search_scoped("jazz tea Sam", Some(&sam.speaker_id), 10)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    assert!(sam_hits.iter().any(|c| c.contains("jazz")));
+    assert!(sam_hits.iter().any(|c| c.contains("name is Sam")));
+    assert!(!sam_hits.iter().any(|c| c.contains("tea")));
+
+    let dana_hits: Vec<String> = memory
+        .search_scoped("jazz tea", Some(&dana.speaker_id), 10)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    assert!(dana_hits.iter().any(|c| c.contains("tea")));
+    assert!(!dana_hits.iter().any(|c| c.contains("jazz")));
+
+    assert_eq!(speaker.registry().count().unwrap(), 2, "exactly two people");
 }
 
 #[tokio::test]

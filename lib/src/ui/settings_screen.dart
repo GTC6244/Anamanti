@@ -20,6 +20,7 @@ import 'package:ambient_display/src/settings/orchestrator_client.dart';
 import 'package:ambient_display/src/settings/settings_store.dart';
 import 'package:ambient_display/src/slideshow/photo_source.dart';
 import 'package:ambient_display/src/ui/memory_screen.dart';
+import 'package:ambient_display/src/ui/people_screen.dart';
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
 /// is the orchestrator's backend label.
@@ -244,6 +245,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
                 builder: (_) => MemoryScreen(client: widget.client),
+              ),
+            ),
+          ),
+          const Divider(),
+          _section('People'),
+          ListTile(
+            key: const Key('settings-people'),
+            leading: const Icon(Icons.groups_outlined),
+            title: const Text('Manage people'),
+            subtitle: const Text('Name the voices the assistant recognizes'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => PeopleScreen(client: widget.client),
               ),
             ),
           ),

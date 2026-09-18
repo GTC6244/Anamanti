@@ -21,6 +21,9 @@ pub enum MemoryCommand {
     ForgetMatching(String),
     /// "forget that" (bare) — delete the most recently stored entry.
     ForgetLast,
+    /// "my name is …" / "call me …" — name the current speaker (speaker_id_plan.md
+    /// Phase C). Carries the given name.
+    NameSpeaker(String),
 }
 
 /// Trim surrounding whitespace and trailing sentence punctuation.
@@ -53,6 +56,18 @@ pub fn parse_command(text: &str) -> Option<MemoryCommand> {
             let rest = clean(rest);
             if !rest.is_empty() {
                 return Some(MemoryCommand::ForgetMatching(rest.to_string()));
+            }
+        }
+    }
+
+    // "my name is …" / "call me …" → name the current speaker. Take the first
+    // token as the name (conservative: avoids "my name is Sam and I like jazz"
+    // capturing a whole clause). Only the unambiguous naming phrases are matched —
+    // "i'm …" / "i am …" are intentionally excluded ("I'm hungry" is not a name).
+    for p in ["my name is ", "call me "] {
+        if let Some(tail) = tail_after_prefix(text, &lead, p) {
+            if let Some(name) = first_name_token(tail) {
+                return Some(MemoryCommand::NameSpeaker(name));
             }
         }
     }
@@ -98,6 +113,21 @@ fn tail_after_prefix<'a>(text: &'a str, lead: &str, phrase: &str) -> Option<&'a 
         None
     } else {
         Some(tail)
+    }
+}
+
+/// The first whitespace-delimited token of `tail`, stripped of surrounding
+/// punctuation — used as a spoken name ("my name is Sam." → "Sam"). `None` when
+/// there is no alphanumeric token.
+fn first_name_token(tail: &str) -> Option<String> {
+    let tok = tail
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| !c.is_alphanumeric());
+    if tok.is_empty() {
+        None
+    } else {
+        Some(tok.to_string())
     }
 }
 
@@ -185,6 +215,25 @@ mod tests {
     fn non_commands_return_none() {
         assert_eq!(parse_command("what time is it?"), None);
         assert_eq!(parse_command("remember"), None); // no content
+    }
+
+    #[test]
+    fn parses_name_speaker_commands() {
+        assert_eq!(
+            parse_command("My name is Sam"),
+            Some(MemoryCommand::NameSpeaker("Sam".to_string()))
+        );
+        assert_eq!(
+            parse_command("call me Dana."),
+            Some(MemoryCommand::NameSpeaker("Dana".to_string()))
+        );
+        // Conservative: only the first token becomes the name.
+        assert_eq!(
+            parse_command("my name is Sam and I like jazz"),
+            Some(MemoryCommand::NameSpeaker("Sam".to_string()))
+        );
+        // Ambiguous "I'm …" is deliberately NOT treated as a name.
+        assert_eq!(parse_command("I'm hungry"), None);
     }
 
     #[test]

@@ -18,7 +18,9 @@ use serde_json::{json, Map, Value};
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
-use crate::api::settings::{MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate};
+use crate::api::settings::{
+    MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo,
+};
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
 use super::protocol::{self, types, WyomingEvent};
@@ -229,6 +231,90 @@ pub async fn clear_memories(cache: &EndpointCache, timeout: Duration) -> Result<
         .and_then(Value::as_i64)
         .unwrap_or(0)
         .max(0) as u32)
+}
+
+fn parse_speaker(v: &Value) -> SpeakerInfo {
+    SpeakerInfo {
+        id: v
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        name: opt_str(v, "name"),
+        labeled: v.get("labeled").and_then(Value::as_bool).unwrap_or(false),
+        samples: v.get("samples").and_then(Value::as_i64).unwrap_or(0),
+        created_at: v.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+    }
+}
+
+/// The `ok` flag from a `SPEAKER_RESULT`, surfacing the in-band `message` as an
+/// error when the orchestrator rejected the request.
+fn speaker_ok(resp: &WyomingEvent) -> Result<bool> {
+    let ok = resp.data.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if !ok {
+        if let Some(msg) = resp.data.get("message").and_then(Value::as_str) {
+            if !msg.is_empty() {
+                return Err(anyhow!("{msg}"));
+            }
+        }
+    }
+    Ok(ok)
+}
+
+/// List the identified speakers (settings "People" view).
+pub async fn list_speakers(cache: &EndpointCache, timeout: Duration) -> Result<Vec<SpeakerInfo>> {
+    let endpoint = resolve(cache, timeout).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_SPEAKERS)).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing speakers failed")
+        ));
+    }
+    Ok(resp
+        .data
+        .get("speakers")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_speaker).collect())
+        .unwrap_or_default())
+}
+
+/// Name (or rename) a speaker; returns whether it was applied.
+pub async fn name_speaker(
+    cache: &EndpointCache,
+    timeout: Duration,
+    id: &str,
+    name: &str,
+) -> Result<bool> {
+    let endpoint = resolve(cache, timeout).await?;
+    let request = WyomingEvent::with_data(types::NAME_SPEAKER, json!({ "id": id, "name": name }));
+    let resp = round_trip(&endpoint, request).await?;
+    speaker_ok(&resp)
+}
+
+/// Merge the `drop` speaker into `keep`; returns whether it was applied.
+pub async fn merge_speakers(
+    cache: &EndpointCache,
+    timeout: Duration,
+    keep: &str,
+    drop: &str,
+) -> Result<bool> {
+    let endpoint = resolve(cache, timeout).await?;
+    let request =
+        WyomingEvent::with_data(types::MERGE_SPEAKERS, json!({ "keep": keep, "drop": drop }));
+    let resp = round_trip(&endpoint, request).await?;
+    speaker_ok(&resp)
+}
+
+/// Delete a speaker profile; returns whether one was removed.
+pub async fn delete_speaker(cache: &EndpointCache, timeout: Duration, id: &str) -> Result<bool> {
+    let endpoint = resolve(cache, timeout).await?;
+    let request = WyomingEvent::with_data(types::DELETE_SPEAKER, json!({ "id": id }));
+    let resp = round_trip(&endpoint, request).await?;
+    speaker_ok(&resp)
 }
 
 #[cfg(test)]
@@ -488,6 +574,68 @@ mod tests {
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::DELETE_MEMORY);
         assert_eq!(request.data["id"], json!(7));
+    }
+
+    #[tokio::test]
+    async fn list_speakers_parses_people() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::SPEAKERS,
+            json!({ "ok": true, "speakers": [
+                { "id": "spk-1", "name": "Sam", "labeled": true, "samples": 4, "created_at": 100 },
+                { "id": "spk-2", "name": null, "labeled": false, "samples": 1, "created_at": 200 },
+            ]}),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let people = list_speakers(&cache, Duration::from_millis(0)).await.unwrap();
+        assert_eq!(people.len(), 2);
+        assert_eq!(people[0].id, "spk-1");
+        assert_eq!(people[0].name.as_deref(), Some("Sam"));
+        assert!(people[0].labeled);
+        assert_eq!(people[1].name, None);
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::LIST_SPEAKERS);
+    }
+
+    #[tokio::test]
+    async fn name_speaker_sends_id_and_name() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response =
+            WyomingEvent::with_data(types::SPEAKER_RESULT, json!({ "ok": true, "message": "named" }));
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let ok = name_speaker(&cache, Duration::from_millis(0), "spk-2", "Dana")
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::NAME_SPEAKER);
+        assert_eq!(request.data["id"], json!("spk-2"));
+        assert_eq!(request.data["name"], json!("Dana"));
+    }
+
+    #[tokio::test]
+    async fn speaker_action_surfaces_in_band_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::SPEAKER_RESULT,
+            json!({ "ok": false, "message": "no such speaker" }),
+        );
+        serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = delete_speaker(&cache, Duration::from_millis(0), "nope")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no such speaker"));
     }
 
     #[tokio::test]
