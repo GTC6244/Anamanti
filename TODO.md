@@ -78,10 +78,12 @@ far end — transparent to `AudioRecord`/AudioFlinger.
 4. [ ] **Optional Speex tuning:** raise `persist.vendor.amznaec.spx_filter_ms` for a
        longer adaptive filter; try mild `spx_echo_suppress` for more cancellation at a
        small talker cost. A/B against the current ~16 dB.
-5. [ ] **Get the shim source into version control** (its own repo or a `device/` tree),
-       replacing the `/tmp` build — currently `amznaec_speex_shim.cpp` lives only in
-       `/tmp` and on the device. Not part of *this* Flutter/Rust repo, but should not
-       stay ephemeral.
+5. [x] **Shim source is in version control** — extracted to its own repo
+       **[EchoShow8gen1-aec-shim](https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim)**
+       (private): `src/amznaec_speex_shim.cpp`, a standalone NDK build script (no ROM
+       tree), reversible adb install/uninstall, the `cap6`/`play6` probes, a
+       built-from-source prebuilt `.so`, and vendored SpeexDSP. The WebRTC-engine build
+       (#3 above) belongs there too when it happens.
 6. [ ] **Turn off Rooted debugging + wifi-adb persistence** on the device when the AEC
        work is finished.
 
