@@ -9,6 +9,7 @@ use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::control;
+use crate::llm::catalog::ModelCatalog;
 use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome};
 use crate::wyoming::protocol::{self, types, AudioFormat};
 use crate::wyoming::DynConnection;
@@ -19,14 +20,16 @@ pub async fn serve(
     listener: TcpListener,
     pipeline: Pipeline,
     connector: Arc<dyn ServiceConnector>,
+    catalog: Arc<ModelCatalog>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         log::info!("device connected: {peer}");
         let pipeline = pipeline.clone();
         let connector = connector.clone();
+        let catalog = catalog.clone();
         tokio::spawn(async move {
-            match handle_connection(stream, pipeline, connector).await {
+            match handle_connection(stream, pipeline, connector, catalog).await {
                 Ok(()) => log::info!("device disconnected: {peer}"),
                 Err(e) => log::warn!("connection {peer} ended with error: {e:#}"),
             }
@@ -43,6 +46,7 @@ async fn handle_connection(
     stream: TcpStream,
     pipeline: Pipeline,
     connector: Arc<dyn ServiceConnector>,
+    catalog: Arc<ModelCatalog>,
 ) -> Result<()> {
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
@@ -56,8 +60,14 @@ async fn handle_connection(
                     peer_str(peer.as_ref()),
                     ev.event_type
                 );
-                control::handle_control(&mut device, &ev, pipeline.memory(), pipeline.settings())
-                    .await?;
+                control::handle_control(
+                    &mut device,
+                    &ev,
+                    pipeline.memory(),
+                    pipeline.settings(),
+                    &catalog,
+                )
+                .await?;
             }
             Some(ev) if ev.event_type == types::AUDIO_START => {
                 let format = protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO);

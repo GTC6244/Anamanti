@@ -8,8 +8,14 @@ class FakeOrchestratorClient implements OrchestratorClient {
   FakeOrchestratorClient({
     OrchestratorSettingsView? settings,
     List<MemoryView>? memories,
+    List<ModelOption>? models,
     this.throwOnFetch = false,
-  })  : _settings = settings ??
+  })  : _models = models ??
+            const <ModelOption>[
+              ModelOption(provider: 'anthropic', id: 'claude-opus-5', label: 'Claude Opus 5'),
+              ModelOption(provider: 'openai', id: 'gpt-4o-mini', label: 'gpt-4o-mini'),
+            ],
+        _settings = settings ??
             const OrchestratorSettingsView(
               ok: true,
               message: 'ok',
@@ -21,6 +27,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
 
   OrchestratorSettingsView _settings;
   final List<MemoryView> _memories;
+  final List<ModelOption> _models;
   final bool throwOnFetch;
 
   // Call records for assertions.
@@ -40,6 +47,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   Future<OrchestratorSettingsView> applySettings({
     String? llmBackend,
     String? llmModel,
+    String? anthropicAuth,
     bool setTtsVoice = false,
     String? ttsVoice,
     int? endSilenceMs,
@@ -48,6 +56,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
     applyCalls.add({
       'llmBackend': llmBackend,
       'llmModel': llmModel,
+      'anthropicAuth': anthropicAuth,
       'setTtsVoice': setTtsVoice,
       'ttsVoice': ttsVoice,
       'endSilenceMs': endSilenceMs,
@@ -58,11 +67,18 @@ class FakeOrchestratorClient implements OrchestratorClient {
       message: 'applied',
       llmBackend: llmBackend ?? _settings.llmBackend,
       llmModel: llmModel ?? _settings.llmModel,
+      anthropicAuth: anthropicAuth ?? _settings.anthropicAuth,
       ttsVoice: setTtsVoice ? ttsVoice : _settings.ttsVoice,
       endSilenceMs: endSilenceMs ?? _settings.endSilenceMs,
       voiceRmsThreshold: voiceRmsThreshold ?? _settings.voiceRmsThreshold,
     );
     return _settings;
+  }
+
+  @override
+  Future<List<ModelOption>> listModels() async {
+    if (throwOnFetch) throw Exception('offline');
+    return List.of(_models);
   }
 
   @override

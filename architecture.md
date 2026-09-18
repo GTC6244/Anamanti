@@ -167,13 +167,33 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - The **LLM backend + model and TTS voice** live on the Mac and are read/changed
   over a **project-local control protocol** on the device↔orchestrator hop —
   `ambient-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
-  memories) that ride the existing framing (byte-identical `types` in both crates,
-  no off-the-shelf server sees them). The orchestrator's `Pipeline` reads a per-turn
-  snapshot of runtime-swappable `SharedSettings`, so a backend/voice change takes
-  effect on the next turn with no restart; the accept loop routes control frames to
-  `control::respond` and audio-start frames to a turn. Selecting the cloud backend
-  still needs `ANTHROPIC_API_KEY` on the Mac; if absent the change is rejected
-  in-band (never dropping the connection).
+  memories; `list-models`) that ride the existing framing (byte-identical `types`
+  in both crates, no off-the-shelf server sees them). The orchestrator's `Pipeline`
+  reads a per-turn snapshot of runtime-swappable `SharedSettings`, so a
+  backend/voice change takes effect on the next turn with no restart; the accept
+  loop routes control frames to `control::handle_control` and audio-start frames to
+  a turn. Backends are `ollama` (local), `anthropic` and `openai` (cloud), and
+  `mock`; selecting a cloud backend needs its API key (`ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY`) on the Mac, else the change is rejected in-band (never dropping
+  the connection).
+- **Model selection** is a drop-down of **specific Anthropic / OpenAI models from
+  the last 12 months**, produced by `llm::catalog::ModelCatalog`: it live-queries
+  each provider's `GET /v1/models` (Anthropic `created_at`, OpenAI `created`),
+  filters to the trailing 12 months (and OpenAI to chat models), caches the result,
+  and falls back to a curated built-in list when a key is missing/offline. The list
+  is exposed to the device via `ambient-list-models` → `ambient-models` and to the
+  browser via `GET /models` on the config page. The chosen `llm_model` flows through
+  the same `SharedSettings::apply` → `LlmFactory::build` path into the concrete
+  backend's request, and persists to `ambient_settings.json`.
+- **Anthropic auth mode** (`llm::anthropic_auth`): a per-provider toggle selects
+  **API key** (`x-api-key` from `ANTHROPIC_API_KEY`) or **subscription OAuth**
+  (`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`). Subscription tokens
+  come from `AnthropicTokenProvider` — `ANTHROPIC_OAUTH_TOKEN` (from
+  `claude setup-token`) or a token-printing command (`AMBIENT_ANTHROPIC_TOKEN_CMD`,
+  default the `ant` CLI), cached with a short TTL and refreshed on a 401. Both the
+  chat backend and the catalog share the provider so listing + turns authenticate
+  identically. The mode rides the settings protocol (`anthropic_auth` field) and the
+  config page toggle; OpenAI is API-key-only.
 - **Memory management** is dual: the settings list (this control protocol) plus
   voice ("remember…", "forget that") applied on the Mac during a turn (Phase 4).
 - **On-device Google OAuth** for the photo folder is wired as a seam

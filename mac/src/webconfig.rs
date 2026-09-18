@@ -25,6 +25,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::llm::anthropic_auth::AnthropicAuth;
+use crate::llm::catalog::ModelCatalog;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 
 /// The single static page. Inlined so the module is self-contained and needs no
@@ -66,7 +68,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <select id="llm_backend">
       <option value="ollama">ollama (local)</option>
       <option value="anthropic">anthropic (cloud)</option>
+      <option value="openai">openai (cloud)</option>
       <option value="mock">mock (offline)</option>
+    </select>
+  </label>
+
+  <label id="anthropic_auth_row">Anthropic auth
+    <select id="anthropic_auth">
+      <option value="apikey">API key (ANTHROPIC_API_KEY)</option>
+      <option value="subscription">Subscription — Claude OAuth (claude setup-token)</option>
     </select>
   </label>
 
@@ -86,8 +96,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <input id="search_api_key" type="password" placeholder="(leave blank to keep current)">
   </label>
 
-  <label>Model <span class="hint">e.g. qwen2.5, llama3.2, claude-opus-5</span>
-    <input id="llm_model" type="text" placeholder="(backend default)">
+  <label>Model <span class="hint" id="model_hint">last 12 months, per provider</span>
+    <!-- Cloud backends (anthropic/openai): a dropdown of last-12-months models. -->
+    <select id="llm_model_select"></select>
+    <!-- Local/mock: a free-text model tag (e.g. an Ollama tag like qwen2.5). -->
+    <input id="llm_model_text" type="text" placeholder="(backend default)" style="display:none">
   </label>
 
   <label>Piper TTS voice <span class="hint">blank = server default</span>
@@ -100,16 +113,62 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <script>
   const $ = (id) => document.getElementById(id);
   const status = $('status');
+  let MODELS = [];               // [{provider, id, label}] from /models
+  const CLOUD = ['anthropic', 'openai'];
 
   function show(ok, msg) {
     status.textContent = msg;
     status.className = 'status ' + (ok ? 'ok' : 'err');
   }
 
+  // Show the right model control for the backend, and populate the dropdown with
+  // that provider's last-12-months models (keeping `selected` even if off-list).
+  function renderModel(backend, selected) {
+    const sel = $('llm_model_select');
+    const txt = $('llm_model_text');
+    if (CLOUD.includes(backend)) {
+      sel.style.display = '';
+      txt.style.display = 'none';
+      $('model_hint').textContent = 'last 12 months, per provider';
+      const list = MODELS.filter((m) => m.provider === backend);
+      sel.innerHTML = '<option value="">(backend default)</option>';
+      let matched = !selected;
+      for (const m of list) {
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.label || m.id;
+        if (m.id === selected) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      }
+      if (!matched) {   // a pinned model not in the fetched list — keep it visible
+        const o = document.createElement('option');
+        o.value = selected; o.textContent = selected + ' (pinned)'; o.selected = true;
+        sel.appendChild(o);
+      }
+    } else {
+      sel.style.display = 'none';
+      txt.style.display = '';
+      txt.value = selected || '';
+      $('model_hint').textContent = 'e.g. qwen2.5, llama3.2';
+    }
+  }
+
+  function currentModel() {
+    const backend = $('llm_backend').value;
+    const raw = CLOUD.includes(backend) ? $('llm_model_select').value : $('llm_model_text').value;
+    return raw.trim() || null;
+  }
+
+  // The Anthropic auth toggle only applies to the anthropic backend.
+  function renderAuthRow(backend) {
+    $('anthropic_auth_row').style.display = backend === 'anthropic' ? '' : 'none';
+  }
+
   function fill(v) {
     $('engine').value = v.engine || 'native';
     $('llm_backend').value = v.llm_backend || 'ollama';
-    $('llm_model').value = v.llm_model || '';
+    $('anthropic_auth').value = v.anthropic_auth || 'apikey';
+    renderAuthRow($('llm_backend').value);
+    renderModel($('llm_backend').value, v.llm_model || '');
     $('tts_voice').value = v.tts_voice || '';
     $('web_search').checked = !!v.web_search;
     $('search_provider').value = v.search_provider || 'duckduckgo';
@@ -117,7 +176,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     $('key_state').textContent = v.search_key_set ? '(a key is set)' : '(no key set)';
   }
 
+  async function loadModels() {
+    try {
+      const r = await fetch('/models');
+      MODELS = (await r.json()).models || [];
+    } catch (e) { MODELS = []; }
+  }
+
   async function load() {
+    await loadModels();
     try {
       const r = await fetch('/config');
       fill(await r.json());
@@ -131,7 +198,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const body = {
       engine: $('engine').value,
       llm_backend: $('llm_backend').value,
-      llm_model: $('llm_model').value.trim() || null,
+      anthropic_auth: $('anthropic_auth').value,
+      llm_model: currentModel(),
       tts_voice: $('tts_voice').value.trim() || null,
       web_search: $('web_search').checked,
       search_provider: $('search_provider').value,
@@ -152,6 +220,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
   }
 
+  // Switching backend resets the model to that backend's default + toggles auth row.
+  $('llm_backend').addEventListener('change', () => {
+    renderAuthRow($('llm_backend').value);
+    renderModel($('llm_backend').value, '');
+  });
   $('save').addEventListener('click', save);
   load();
 </script>
@@ -165,12 +238,17 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 /// Accept config-page connections forever, one task per connection. Returns only if
 /// the listener itself fails.
-pub async fn serve(listener: TcpListener, settings: Arc<SharedSettings>) -> Result<()> {
+pub async fn serve(
+    listener: TcpListener,
+    settings: Arc<SharedSettings>,
+    catalog: Arc<ModelCatalog>,
+) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let settings = settings.clone();
+        let catalog = catalog.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, settings).await {
+            if let Err(e) = handle(stream, settings, catalog).await {
                 log::debug!("config page connection {peer} ended: {e:#}");
             }
         });
@@ -179,7 +257,11 @@ pub async fn serve(listener: TcpListener, settings: Arc<SharedSettings>) -> Resu
 
 /// Read one HTTP request, route it, write one response, close. One request per
 /// connection (`Connection: close`) — ample for a settings page.
-async fn handle(mut stream: TcpStream, settings: Arc<SharedSettings>) -> Result<()> {
+async fn handle(
+    mut stream: TcpStream,
+    settings: Arc<SharedSettings>,
+    catalog: Arc<ModelCatalog>,
+) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
 
@@ -189,8 +271,13 @@ async fn handle(mut stream: TcpStream, settings: Arc<SharedSettings>) -> Result<
             break pos;
         }
         if buf.len() > MAX_REQUEST_BYTES {
-            return write_response(&mut stream, "413 Payload Too Large", "text/plain", b"too large")
-                .await;
+            return write_response(
+                &mut stream,
+                "413 Payload Too Large",
+                "text/plain",
+                b"too large",
+            )
+            .await;
         }
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
@@ -229,8 +316,27 @@ async fn handle(mut stream: TcpStream, settings: Arc<SharedSettings>) -> Result<
     }
     body.truncate(content_length);
 
+    // The model list needs an async catalog fetch, so it's handled here rather than
+    // in the pure `route` function.
+    let path = target.split(['?', '#']).next().unwrap_or(&target);
+    if method == "GET" && path == "/models" {
+        let payload = models_json(&catalog).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+
     let (status, content_type, payload) = route(&method, &target, &body, &settings);
     write_response(&mut stream, status, content_type, &payload).await
+}
+
+/// The selectable models as a JSON string (`{ "ok": true, "models": [...] }`).
+async fn models_json(catalog: &ModelCatalog) -> String {
+    let models: Vec<Value> = catalog
+        .models()
+        .await
+        .into_iter()
+        .map(|m| json!({ "provider": m.provider, "id": m.id, "label": m.label }))
+        .collect();
+    json!({ "ok": true, "models": models }).to_string()
 }
 
 /// Pure request router: maps `(method, target, body)` to a response. Kept free of
@@ -291,6 +397,7 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "message": message,
         "llm_backend": v.llm_backend,
         "llm_model": v.llm_model,
+        "anthropic_auth": v.anthropic_auth.as_str(),
         "tts_voice": v.tts_voice,
         "engine": engine,
         "web_search": v.web_search,
@@ -317,13 +424,13 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         Some(Value::Null) => Some(None), // clear
         Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
     };
-    let engine = data
-        .get("engine")
-        .and_then(Value::as_str)
-        .map(|e| match e.to_lowercase().as_str() {
-            "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
-            _ => LlmEngine::Native,
-        });
+    let engine =
+        data.get("engine")
+            .and_then(Value::as_str)
+            .map(|e| match e.to_lowercase().as_str() {
+                "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+                _ => LlmEngine::Native,
+            });
     let web_search = data.get("web_search").and_then(Value::as_bool);
     // Key: absent/empty = leave unchanged (so a page reload never wipes it);
     // explicit JSON null = clear.
@@ -335,9 +442,14 @@ fn parse_update(data: &Value) -> SettingsUpdate {
             _ => None,
         },
     };
+    let anthropic_auth = data
+        .get("anthropic_auth")
+        .and_then(Value::as_str)
+        .map(AnthropicAuth::from_label);
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
+        anthropic_auth,
         tts_voice,
         engine,
         web_search,
@@ -393,6 +505,16 @@ mod tests {
 
     fn settings() -> Arc<SharedSettings> {
         SharedSettings::fixed(Arc::new(MockLlm::default()), "mock", None)
+    }
+
+    fn catalog() -> Arc<ModelCatalog> {
+        // No keys → the static fallback list, so the test needs no network.
+        Arc::new(ModelCatalog::new(
+            "http://unused",
+            None,
+            "http://unused",
+            None,
+        ))
     }
 
     #[test]
@@ -504,7 +626,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s).await.unwrap();
+            handle(stream, s, catalog()).await.unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -520,5 +642,31 @@ mod tests {
         client.read_to_string(&mut resp).await.unwrap();
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
         assert!(resp.contains("en_US-amy-medium"), "resp: {resp}");
+    }
+
+    /// `GET /models` returns the catalog JSON (static fallback here, no network).
+    #[tokio::test]
+    async fn serves_the_model_catalog() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let s = settings();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle(stream, s, catalog()).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /models HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
+        assert!(resp.contains("claude-opus-5"), "resp: {resp}");
+        assert!(resp.contains("gpt-4o-mini"), "resp: {resp}");
     }
 }

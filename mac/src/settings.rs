@@ -19,7 +19,11 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, LlmBackend};
+use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
+use crate::llm::{
+    anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
+    LlmBackend,
+};
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
 /// clients, or the rig-core agent framework (feature `rig`).
@@ -72,6 +76,10 @@ fn default_voice_rms_threshold() -> f64 {
     DEFAULT_VOICE_RMS_THRESHOLD
 }
 
+fn default_anthropic_auth() -> String {
+    AnthropicAuth::ApiKey.as_str().to_string()
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -83,6 +91,9 @@ pub struct PersistedSettings {
     pub search_api_key: Option<String>,
     pub llm_backend: String,
     pub llm_model: Option<String>,
+    /// Anthropic auth mode (`apikey`/`subscription`). Defaulted for older files.
+    #[serde(default = "default_anthropic_auth")]
+    pub anthropic_auth: String,
     pub tts_voice: Option<String>,
     /// End-of-speech trailing silence in ms (VAD). Defaulted for older files.
     #[serde(default = "default_end_silence_ms")]
@@ -98,10 +109,7 @@ pub fn load_persisted(path: &Path) -> Option<PersistedSettings> {
     match serde_json::from_str(&data) {
         Ok(p) => Some(p),
         Err(e) => {
-            log::warn!(
-                "ignoring unreadable settings file {}: {e}",
-                path.display()
-            );
+            log::warn!("ignoring unreadable settings file {}: {e}", path.display());
             None
         }
     }
@@ -151,6 +159,16 @@ pub struct LlmFactory {
     pub anthropic_api_key: Option<String>,
     /// `max_tokens` for Anthropic replies (kept small for spoken output).
     pub anthropic_max_tokens: u32,
+    /// Cloud OpenAI API base URL.
+    pub openai_base_url: String,
+    /// OpenAI API key, if available. Absent means the OpenAI backend cannot be
+    /// selected and a request for it is rejected in-band.
+    pub openai_api_key: Option<String>,
+    /// `max_completion_tokens` for OpenAI replies (kept small for spoken output).
+    pub openai_max_tokens: u32,
+    /// Subscription (OAuth) token source for Anthropic, used when the auth mode is
+    /// `Subscription`. Shared with the model catalog so both authenticate the same.
+    pub anthropic_token: Option<Arc<AnthropicTokenProvider>>,
 }
 
 impl LlmFactory {
@@ -159,13 +177,15 @@ impl LlmFactory {
         match backend {
             "ollama" => Some("llama3.2"),
             "anthropic" | "claude" => Some("claude-opus-5"),
+            "openai" | "gpt" => Some("gpt-4o-mini"),
             _ => None,
         }
     }
 
-    /// Build a backend from a label (`ollama` / `anthropic` / `mock`) and an
-    /// optional model. Returns the trait object plus the canonical label and the
+    /// Build a backend from a label (`ollama` / `anthropic` / `openai` / `mock`) and
+    /// an optional model. Returns the trait object plus the canonical label and the
     /// resolved model so callers can report exactly what took effect.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         &self,
         engine: LlmEngine,
@@ -174,6 +194,7 @@ impl LlmFactory {
         search_api_key: Option<&str>,
         backend: &str,
         model: Option<&str>,
+        anthropic_auth: AnthropicAuth,
     ) -> Result<(Arc<dyn LlmBackend>, String, Option<String>)> {
         // These only affect the ollama/anthropic arms under the `rig` feature;
         // silence unused warnings on native-only builds.
@@ -181,30 +202,72 @@ impl LlmFactory {
         match backend.to_lowercase().as_str() {
             "mock" => Ok((Arc::new(MockLlm::default()), "mock".to_string(), None)),
             "anthropic" | "claude" => {
-                let key = self.anthropic_api_key.clone().context(
-                    "the anthropic backend requires ANTHROPIC_API_KEY on the orchestrator",
-                )?;
                 let model = model
                     .or(Self::default_model("anthropic"))
                     .unwrap_or("claude-opus-5")
                     .to_string();
-                let backend: Arc<dyn LlmBackend> = match engine {
-                    #[cfg(feature = "rig")]
-                    LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::anthropic(
-                        &self.anthropic_base_url,
-                        &key,
-                        &model,
-                        self.anthropic_max_tokens,
-                        crate::llm::rig::tools_from_config(web_search, search_provider, search_api_key),
-                    )?),
-                    _ => Arc::new(AnthropicBackend::new(
-                        &self.anthropic_base_url,
-                        key,
-                        &model,
-                        self.anthropic_max_tokens,
-                    )),
+                let backend: Arc<dyn LlmBackend> = match anthropic_auth {
+                    // Subscription (OAuth) uses the token provider; the rig engine has
+                    // no subscription path, so subscription always uses native HTTP.
+                    AnthropicAuth::Subscription => {
+                        let token = self.anthropic_token.clone().context(
+                            "the anthropic subscription backend needs a token — set \
+                             ANTHROPIC_OAUTH_TOKEN (run `claude setup-token`) on the orchestrator",
+                        )?;
+                        Arc::new(AnthropicBackend::with_subscription(
+                            &self.anthropic_base_url,
+                            token,
+                            &model,
+                            self.anthropic_max_tokens,
+                        ))
+                    }
+                    AnthropicAuth::ApiKey => {
+                        let key = self.anthropic_api_key.clone().context(
+                            "the anthropic backend requires ANTHROPIC_API_KEY on the orchestrator \
+                             (or switch to subscription auth)",
+                        )?;
+                        match engine {
+                            #[cfg(feature = "rig")]
+                            LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::anthropic(
+                                &self.anthropic_base_url,
+                                &key,
+                                &model,
+                                self.anthropic_max_tokens,
+                                crate::llm::rig::tools_from_config(
+                                    web_search,
+                                    search_provider,
+                                    search_api_key,
+                                ),
+                            )?),
+                            _ => Arc::new(AnthropicBackend::new(
+                                &self.anthropic_base_url,
+                                key,
+                                &model,
+                                self.anthropic_max_tokens,
+                            )),
+                        }
+                    }
                 };
                 Ok((backend, "anthropic".to_string(), Some(model)))
+            }
+            "openai" | "gpt" => {
+                let key = self
+                    .openai_api_key
+                    .clone()
+                    .context("the openai backend requires OPENAI_API_KEY on the orchestrator")?;
+                let model = model
+                    .or(Self::default_model("openai"))
+                    .unwrap_or("gpt-4o-mini")
+                    .to_string();
+                // rig-openai is out of scope for v1: the OpenAI backend always uses
+                // the native HTTP client, even under the rig engine.
+                let backend: Arc<dyn LlmBackend> = Arc::new(OpenAiBackend::new(
+                    &self.openai_base_url,
+                    key,
+                    &model,
+                    self.openai_max_tokens,
+                ));
+                Ok((backend, "openai".to_string(), Some(model)))
             }
             "ollama" => {
                 let model = model.unwrap_or("llama3.2").to_string();
@@ -213,14 +276,20 @@ impl LlmFactory {
                     LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::ollama(
                         &self.ollama_url,
                         &model,
-                        crate::llm::rig::tools_from_config(web_search, search_provider, search_api_key),
+                        crate::llm::rig::tools_from_config(
+                            web_search,
+                            search_provider,
+                            search_api_key,
+                        ),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
                 };
                 Ok((backend, "ollama".to_string(), Some(model)))
             }
             other => {
-                anyhow::bail!("unknown LLM backend `{other}` (expected ollama/anthropic/mock)")
+                anyhow::bail!(
+                    "unknown LLM backend `{other}` (expected ollama/anthropic/openai/mock)"
+                )
             }
         }
     }
@@ -243,6 +312,8 @@ pub struct RuntimeSettings {
     pub llm_backend: String,
     /// The resolved model name, if the backend uses one.
     pub llm_model: Option<String>,
+    /// How the Anthropic backend authenticates (API key vs subscription OAuth).
+    pub anthropic_auth: AnthropicAuth,
     /// The Piper voice to synthesize with, or `None` for the server default.
     pub tts_voice: Option<String>,
     /// End-of-speech trailing silence (ms) the energy VAD waits for before
@@ -258,6 +329,8 @@ pub struct RuntimeSettings {
 pub struct SettingsView {
     pub llm_backend: String,
     pub llm_model: Option<String>,
+    /// Anthropic auth mode (API key vs subscription OAuth).
+    pub anthropic_auth: AnthropicAuth,
     pub tts_voice: Option<String>,
     pub engine: LlmEngine,
     pub web_search: bool,
@@ -276,6 +349,8 @@ pub struct SettingsView {
 pub struct SettingsUpdate {
     pub llm_backend: Option<String>,
     pub llm_model: Option<String>,
+    /// New Anthropic auth mode, or `None` to leave it unchanged.
+    pub anthropic_auth: Option<AnthropicAuth>,
     /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(v))` = set to `v`.
     pub tts_voice: Option<Option<String>>,
     /// Switch the LLM engine (native vs rig).
@@ -330,6 +405,7 @@ impl SharedSettings {
             search_api_key: s.search_api_key.clone(),
             llm_backend: s.llm_backend.clone(),
             llm_model: s.llm_model.clone(),
+            anthropic_auth: s.anthropic_auth.as_str().to_string(),
             tts_voice: s.tts_voice.clone(),
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
@@ -349,6 +425,10 @@ impl SharedSettings {
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             anthropic_api_key: None,
             anthropic_max_tokens: 1024,
+            openai_base_url: "https://api.openai.com".to_string(),
+            openai_api_key: None,
+            openai_max_tokens: 1024,
+            anthropic_token: None,
         };
         Self::new(
             factory,
@@ -360,6 +440,7 @@ impl SharedSettings {
                 search_api_key: None,
                 llm_backend: llm_backend.into(),
                 llm_model: None,
+                anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
@@ -379,6 +460,7 @@ impl SharedSettings {
         SettingsView {
             llm_backend: s.llm_backend.clone(),
             llm_model: s.llm_model.clone(),
+            anthropic_auth: s.anthropic_auth,
             tts_voice: s.tts_voice.clone(),
             engine: s.engine,
             web_search: s.web_search,
@@ -397,6 +479,7 @@ impl SharedSettings {
         // Any of these change which backend object we need, so rebuild the LLM.
         let needs_rebuild = update.llm_backend.is_some()
             || update.llm_model.is_some()
+            || update.anthropic_auth.is_some()
             || update.engine.is_some()
             || update.web_search.is_some()
             || update.search_provider.is_some()
@@ -418,6 +501,7 @@ impl SharedSettings {
                 (None, None) => current.llm_model.clone(),
             };
             let target_engine = update.engine.unwrap_or(current.engine);
+            let target_auth = update.anthropic_auth.unwrap_or(current.anthropic_auth);
             let target_web_search = update.web_search.unwrap_or(current.web_search);
             let target_provider = update
                 .search_provider
@@ -435,8 +519,15 @@ impl SharedSettings {
                     target_key.as_deref(),
                     &target_backend,
                     target_model.as_deref(),
+                    target_auth,
                 )?),
-                Some((target_engine, target_web_search, target_provider, target_key)),
+                Some((
+                    target_engine,
+                    target_auth,
+                    target_web_search,
+                    target_provider,
+                    target_key,
+                )),
             )
         } else {
             (None, None)
@@ -444,10 +535,11 @@ impl SharedSettings {
 
         let mut w = self.inner.write().unwrap();
         if let Some((llm, label, model)) = rebuilt {
-            let (engine, web_search, provider, key) = targets.unwrap();
+            let (engine, auth, web_search, provider, key) = targets.unwrap();
             w.llm = llm;
             w.llm_backend = label;
             w.llm_model = model;
+            w.anthropic_auth = auth;
             w.engine = engine;
             w.web_search = web_search;
             w.search_provider = provider;
@@ -468,6 +560,7 @@ impl SharedSettings {
         let view = SettingsView {
             llm_backend: w.llm_backend.clone(),
             llm_model: w.llm_model.clone(),
+            anthropic_auth: w.anthropic_auth,
             tts_voice: w.tts_voice.clone(),
             engine: w.engine,
             web_search: w.web_search,
@@ -500,6 +593,10 @@ mod tests {
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             anthropic_api_key: key.map(String::from),
             anthropic_max_tokens: 256,
+            openai_base_url: "https://api.openai.com".to_string(),
+            openai_api_key: None,
+            openai_max_tokens: 256,
+            anthropic_token: None,
         }
     }
 
@@ -512,6 +609,7 @@ mod tests {
                 None,
                 "ollama",
                 Some("llama3.2"),
+                AnthropicAuth::ApiKey,
             )
             .unwrap();
         SharedSettings::new(
@@ -524,11 +622,54 @@ mod tests {
                 search_api_key: None,
                 llm_backend: label,
                 llm_model: model,
+                anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
             },
         )
+    }
+
+    #[test]
+    fn subscription_backend_builds_with_a_token_provider() {
+        use crate::llm::anthropic_auth::AnthropicTokenProvider;
+        let mut factory = factory_with_key(None); // no API key…
+        factory.anthropic_token = Some(Arc::new(AnthropicTokenProvider::with_fetcher(Arc::new(
+            || Ok("tok".into()),
+        ))));
+        // …but subscription auth builds anyway, because a token provider is wired.
+        let (_, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "anthropic",
+                None,
+                AnthropicAuth::Subscription,
+            )
+            .unwrap();
+        assert_eq!(label, "anthropic");
+        assert_eq!(model.as_deref(), Some("claude-opus-5"));
+    }
+
+    #[test]
+    fn subscription_without_token_provider_is_rejected() {
+        let factory = factory_with_key(None); // anthropic_token: None
+                                              // `Arc<dyn LlmBackend>` isn't Debug, so take the error via `.err()`.
+        let err = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "anthropic",
+                None,
+                AnthropicAuth::Subscription,
+            )
+            .err()
+            .expect("subscription without a token provider must be rejected");
+        assert!(format!("{err:#}").contains("ANTHROPIC_OAUTH_TOKEN"));
     }
 
     #[test]
@@ -549,6 +690,7 @@ mod tests {
                 None,
                 "ollama",
                 Some("llama3.2"),
+                AnthropicAuth::ApiKey,
             )
             .unwrap();
         let s = SharedSettings::new_persistent(
@@ -561,6 +703,7 @@ mod tests {
                 search_api_key: None,
                 llm_backend: label,
                 llm_model: model,
+                anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,

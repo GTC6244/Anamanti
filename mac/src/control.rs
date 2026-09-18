@@ -14,6 +14,8 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
+use crate::llm::anthropic_auth::AnthropicAuth;
+use crate::llm::catalog::ModelCatalog;
 use crate::memory::MemoryStore;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 use crate::wyoming::protocol::{types, WyomingEvent};
@@ -29,18 +31,37 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MEMORIES
             | types::DELETE_MEMORY
             | types::CLEAR_MEMORIES
+            | types::LIST_MODELS
     )
 }
 
-/// Handle one control request over `device`: build the response and send it.
+/// Handle one control request over `device`: build the response and send it. Most
+/// requests are answered synchronously by [`respond`]; `ambient-list-models` needs
+/// an async catalog fetch, so it is handled here.
 pub async fn handle_control(
     device: &mut DynConnection,
     request: &WyomingEvent,
     memory: &MemoryStore,
     settings: &SharedSettings,
+    catalog: &ModelCatalog,
 ) -> Result<()> {
-    let response = respond(request, memory, settings);
+    let response = if request.event_type == types::LIST_MODELS {
+        models_response(catalog).await
+    } else {
+        respond(request, memory, settings)
+    };
     device.send(&response).await
+}
+
+/// Build the `ambient-models` response from the selectable-model catalog.
+pub async fn models_response(catalog: &ModelCatalog) -> WyomingEvent {
+    let models: Vec<Value> = catalog
+        .models()
+        .await
+        .into_iter()
+        .map(|m| json!({ "provider": m.provider, "id": m.id, "label": m.label }))
+        .collect();
+    WyomingEvent::with_data(types::MODELS, json!({ "ok": true, "models": models }))
 }
 
 /// Build the response event for a control `request`. Never fails: a bad request or
@@ -90,22 +111,27 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         Some(Value::Null) => Some(None), // clear
         Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
     };
-    let engine = data
-        .get("engine")
-        .and_then(Value::as_str)
-        .map(|e| match e.to_lowercase().as_str() {
-            "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
-            _ => LlmEngine::Native,
-        });
+    let engine =
+        data.get("engine")
+            .and_then(Value::as_str)
+            .map(|e| match e.to_lowercase().as_str() {
+                "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
+                _ => LlmEngine::Native,
+            });
     let web_search = data.get("web_search").and_then(Value::as_bool);
     let search_api_key = match data.get("search_api_key") {
         None => None,                    // unchanged
         Some(Value::Null) => Some(None), // clear
         Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
     };
+    let anthropic_auth = data
+        .get("anthropic_auth")
+        .and_then(Value::as_str)
+        .map(AnthropicAuth::from_label);
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
+        anthropic_auth,
         tts_voice,
         engine,
         web_search,
@@ -125,6 +151,7 @@ fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> Wyom
             "message": message,
             "llm_backend": v.llm_backend,
             "llm_model": v.llm_model,
+            "anthropic_auth": v.anthropic_auth.as_str(),
             "tts_voice": v.tts_voice,
             "engine": engine_label(v.engine),
             "web_search": v.web_search,
@@ -205,6 +232,10 @@ mod tests {
                 anthropic_base_url: "http://y".into(),
                 anthropic_api_key: None,
                 anthropic_max_tokens: 10,
+                openai_base_url: "http://z".into(),
+                openai_api_key: None,
+                openai_max_tokens: 10,
+                anthropic_token: None,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -214,6 +245,7 @@ mod tests {
                 search_api_key: None,
                 llm_backend: "ollama".into(),
                 llm_model: Some("llama3.2".into()),
+                anthropic_auth: crate::llm::anthropic_auth::AnthropicAuth::ApiKey,
                 tts_voice: Some("amy".into()),
                 end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
@@ -315,7 +347,24 @@ mod tests {
         assert!(is_control_request(types::DESCRIBE_SETTINGS));
         assert!(is_control_request(types::SET_SETTINGS));
         assert!(is_control_request(types::LIST_MEMORIES));
+        assert!(is_control_request(types::LIST_MODELS));
         assert!(!is_control_request(types::AUDIO_START));
         assert!(!is_control_request(types::TRANSCRIPT));
+    }
+
+    #[tokio::test]
+    async fn list_models_returns_the_static_fallback_without_keys() {
+        // No provider keys → the catalog serves its curated fallback list.
+        let catalog = ModelCatalog::new("http://unused", None, "http://unused", None);
+        let resp = models_response(&catalog).await;
+        assert_eq!(resp.event_type, types::MODELS);
+        assert_eq!(resp.data["ok"], json!(true));
+        let models = resp.data["models"].as_array().unwrap();
+        assert!(models
+            .iter()
+            .any(|m| m["provider"] == json!("anthropic") && m["id"] == json!("claude-opus-5")));
+        assert!(models
+            .iter()
+            .any(|m| m["provider"] == json!("openai") && m["id"] == json!("gpt-4o-mini")));
     }
 }

@@ -5,28 +5,37 @@
 //! reference). The response is Server-Sent Events; the reply tokens ride on
 //! `content_block_delta` events as `delta.text`, which map onto [`ReplyStream`].
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use serde_json::json;
+use serde_json::{json, Value};
 
+use super::anthropic_auth::{apply_auth, AnthropicAuth, AnthropicTokenProvider};
 use super::{line_stream, LlmBackend, LlmTurn, ReplyStream};
 
 /// Anthropic API version pinned per the claude-api skill.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Config + HTTP client for the Claude Messages API.
+/// Config + HTTP client for the Claude Messages API. Authenticates with either an
+/// API key (`x-api-key`) or a Claude subscription OAuth token (`Authorization:
+/// Bearer` + `anthropic-beta`), selected by [`AnthropicAuth`].
 pub struct AnthropicBackend {
     client: reqwest::Client,
     base_url: String,
+    auth: AnthropicAuth,
+    /// API key (used in `ApiKey` mode; empty in subscription mode).
     api_key: String,
+    /// Subscription token source (used in `Subscription` mode).
+    token: Option<Arc<AnthropicTokenProvider>>,
     model: String,
     max_tokens: u32,
 }
 
 impl AnthropicBackend {
-    /// `model` defaults to `claude-opus-5` at the config layer. `max_tokens` is
-    /// kept modest for spoken replies. `base_url` is the API root
+    /// API-key backend. `model` defaults to `claude-opus-5` at the config layer;
+    /// `max_tokens` is kept modest for spoken replies; `base_url` is the API root
     /// (`https://api.anthropic.com`), overridable for testing.
     pub fn new(
         base_url: impl Into<String>,
@@ -37,10 +46,44 @@ impl AnthropicBackend {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            auth: AnthropicAuth::ApiKey,
             api_key: api_key.into(),
+            token: None,
             model: model.into(),
             max_tokens,
         }
+    }
+
+    /// Subscription (OAuth) backend: tokens come from `token` (the `ant` CLI).
+    pub fn with_subscription(
+        base_url: impl Into<String>,
+        token: Arc<AnthropicTokenProvider>,
+        model: impl Into<String>,
+        max_tokens: u32,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            auth: AnthropicAuth::Subscription,
+            api_key: String::new(),
+            token: Some(token),
+            model: model.into(),
+            max_tokens,
+        }
+    }
+
+    /// Send one Messages request with the current auth applied. `bearer` is the
+    /// subscription token when in OAuth mode.
+    async fn post(&self, body: &Value, bearer: Option<&str>) -> reqwest::Result<reqwest::Response> {
+        let req = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json");
+        apply_auth(req, self.auth, &self.api_key, bearer)
+            .json(body)
+            .send()
+            .await
     }
 }
 
@@ -59,16 +102,36 @@ impl LlmBackend for AnthropicBackend {
             "messages": [{"role": "user", "content": turn.user_message}],
         });
 
-        let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
+        // In subscription mode, mint/refresh a Bearer token; on a 401 (expired
+        // token) invalidate the cache and retry once with a fresh token.
+        let mut bearer = match self.auth {
+            AnthropicAuth::Subscription => Some(
+                self.token
+                    .as_ref()
+                    .context("subscription auth selected but no token provider is wired")?
+                    .bearer()
+                    .await?,
+            ),
+            AnthropicAuth::ApiKey => None,
+        };
+
+        let mut resp = self
+            .post(&body, bearer.as_deref())
             .await
-            .context("POST /v1/messages to Anthropic")?
+            .context("POST /v1/messages to Anthropic")?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.auth == AnthropicAuth::Subscription
+        {
+            if let Some(tp) = &self.token {
+                tp.invalidate();
+                bearer = Some(tp.bearer().await?);
+                resp = self
+                    .post(&body, bearer.as_deref())
+                    .await
+                    .context("POST /v1/messages to Anthropic (after token refresh)")?;
+            }
+        }
+        let resp = resp
             .error_for_status()
             .context("Anthropic returned an error status")?;
 

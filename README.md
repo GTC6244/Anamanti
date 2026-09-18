@@ -125,7 +125,23 @@ cargo run --manifest-path mac/Cargo.toml --release
 ```
 
 - `AMBIENT_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
-  `ANTHROPIC_API_KEY`), or `mock` (offline echo, no servers needed).
+  `ANTHROPIC_API_KEY`), `openai` (GPT / o-series; needs `OPENAI_API_KEY`), or
+  `mock` (offline echo, no servers needed).
+- **Model selection:** the settings screen and the config page
+  (`http://127.0.0.1:8730/`) show a **drop-down of specific Anthropic / OpenAI
+  models from the last 12 months** (fetched live from each provider's `/v1/models`,
+  with a curated built-in fallback). Picking one is saved on the orchestrator
+  (`ambient_settings.json`) and used for every subsequent chat turn. Pin an initial
+  model with `AMBIENT_ANTHROPIC_MODEL` / `AMBIENT_OPENAI_MODEL`.
+- **Anthropic auth — API key or subscription:** a per-provider toggle chooses how
+  Claude authenticates. `AMBIENT_ANTHROPIC_AUTH=apikey` (default) uses
+  `ANTHROPIC_API_KEY` (`x-api-key`). `AMBIENT_ANTHROPIC_AUTH=subscription` uses a
+  Claude **subscription OAuth** token (`Authorization: Bearer` + the
+  `anthropic-beta: oauth-2025-04-20` header) — provide it via `ANTHROPIC_OAUTH_TOKEN`
+  (run **`claude setup-token`** once), or via `AMBIENT_ANTHROPIC_TOKEN_CMD` (a command
+  that prints a fresh token, default `ant auth print-credentials --access-token`).
+  OpenAI is API-key-only (`OPENAI_API_KEY`) — its ChatGPT subscription does not grant
+  API access.
 - Whisper and Piper are off-the-shelf Wyoming servers; the orchestrator is a
   client to them. See `mac/src/config.rs` for all environment variables.
 
