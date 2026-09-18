@@ -72,6 +72,11 @@ async fn run() -> Result<()> {
         .shared_settings()
         .context("initializing LLM backend")?;
 
+    // Selectable-model catalog for the settings dropdown (device + config page).
+    // Live-fetched from the provider APIs (filtered to the last 12 months) with a
+    // curated static fallback; shared by both front doors.
+    let catalog = Arc::new(config.model_catalog());
+
     // Chat log (always on): every completed turn is recorded here, both as the
     // durable source of truth and as the ingestion queue for GraphRAG memory.
     let chatlog = Arc::new(
@@ -137,12 +142,15 @@ async fn run() -> Result<()> {
     // failure disables the page but never stops the orchestrator.
     if let Some(config_addr) = config.config_addr {
         let settings = pipeline.settings().clone();
+        let catalog = catalog.clone();
         match TcpListener::bind(config_addr).await {
             Ok(listener) => {
                 let local = listener.local_addr().unwrap_or(config_addr);
-                log::info!("config page on http://{local}/ (no auth — keep it on a trusted network)");
+                log::info!(
+                    "config page on http://{local}/ (no auth — keep it on a trusted network)"
+                );
                 tokio::spawn(async move {
-                    if let Err(e) = webconfig::serve(listener, settings).await {
+                    if let Err(e) = webconfig::serve(listener, settings, catalog).await {
                         log::error!("config page stopped: {e:#}");
                     }
                 });
@@ -169,7 +177,7 @@ async fn run() -> Result<()> {
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     tokio::select! {
-        res = server::serve(listener, pipeline, connector) => {
+        res = server::serve(listener, pipeline, connector, catalog) => {
             res.context("device-facing server stopped")?;
         }
         _ = tokio::signal::ctrl_c() => {

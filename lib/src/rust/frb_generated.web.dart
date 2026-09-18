@@ -63,10 +63,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MemoryEntry> dco_decode_list_memory_entry(dynamic raw);
 
   @protected
+  List<ModelInfo> dco_decode_list_model_info(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
   MemoryEntry dco_decode_memory_entry(dynamic raw);
+
+  @protected
+  ModelInfo dco_decode_model_info(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -153,10 +159,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MemoryEntry> sse_decode_list_memory_entry(SseDeserializer deserializer);
 
   @protected
+  List<ModelInfo> sse_decode_list_model_info(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
   MemoryEntry sse_decode_memory_entry(SseDeserializer deserializer);
+
+  @protected
+  ModelInfo sse_decode_model_info(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -256,6 +268,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_model_info(
+    List<ModelInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -263,6 +281,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_memory_entry(MemoryEntry self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_model_info(ModelInfo self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);

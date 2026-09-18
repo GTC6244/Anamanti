@@ -256,9 +256,11 @@ services, inserting the pluggable LLM + persistent memory between them.
   and a `--release` build of the `ambient-orchestrator` binary.
 
 > **Config note (Phase 4):** the orchestrator is environment-driven
-> (`mac/src/config.rs`). `AMBIENT_LLM_BACKEND=ollama|anthropic|mock` selects the
-> backend (default `ollama`, model `llama3.2`; `anthropic` needs `ANTHROPIC_API_KEY`,
-> default model `claude-opus-5`, small `max_tokens` for spoken replies).
+> (`mac/src/config.rs`). `AMBIENT_LLM_BACKEND=ollama|anthropic|openai|mock` selects
+> the backend (default `ollama`, model `llama3.2`; `anthropic` needs
+> `ANTHROPIC_API_KEY`, default model `claude-opus-5`; `openai` needs `OPENAI_API_KEY`,
+> default model `gpt-4o-mini`, via `AMBIENT_OPENAI_MODEL`/`AMBIENT_OPENAI_MAX_TOKENS`;
+> small `max_tokens` for spoken replies).
 > `AMBIENT_STT_ADDR` / `AMBIENT_TTS_ADDR` point at the Whisper (10300) and Piper
 > (10200) Wyoming servers, and the host advertises `_wyoming._tcp` on
 > `AMBIENT_BIND_ADDR` (default `0.0.0.0:10700`). Whisper and Piper themselves are
@@ -389,6 +391,37 @@ services, inserting the pluggable LLM + persistent memory between them.
 > `<name>.onnx` is dropped in. A device-crate test loads the real bundled chain on
 > `tract` and scores a stream, guarding that the shipped models parse and their
 > shapes line up. Server-side VAD is used, so `silero_vad.onnx` is not needed.
+
+> **Model selector (Phase 6 follow-up):** the assistant's model is chosen from a
+> **drop-down of specific Anthropic / OpenAI models released in the last 12 months**
+> (superseding the earlier free-text field). A new **OpenAI chat backend**
+> (`mac/src/llm/openai.rs`, streaming `/v1/chat/completions`, `OPENAI_API_KEY`) sits
+> behind the same `LlmBackend` trait next to `ollama`/`anthropic`/`mock`, so a picked
+> GPT/o-series model drives the real turn. `mac/src/llm/catalog.rs`
+> (`ModelCatalog`) builds the list: it live-queries each provider's `GET /v1/models`,
+> filters to the trailing 12 months (Anthropic `created_at`, OpenAI `created` + a
+> chat-model filter), caches ~1h, and falls back to a curated built-in list when a
+> key is missing/offline. It is exposed to the device via `ambient-list-models` →
+> `ambient-models` (new FRB `list_models` → `listModels`) and to the browser via
+> `GET /models` on the config page. The chosen model flows through the existing
+> `SharedSettings::apply` → `LlmFactory::build` path and persists to
+> `ambient_settings.json`; the settings screen shows a dropdown for cloud backends
+> and keeps free text for local Ollama tags. Verified: mac `cargo test` (native +
+> helix) + clippy/fmt + `--features rig` check, device `cargo test`
+> (`list_models` round trip), FRB regen, `flutter analyze` + `flutter test`.
+
+> **Anthropic auth mode (Phase 6 follow-up):** cloud Claude can authenticate with an
+> **API key** *or* a **Claude subscription (OAuth)**. `mac/src/llm/anthropic_auth.rs`
+> adds `AnthropicAuth` + an `AnthropicTokenProvider` that resolves a subscription
+> Bearer token from `ANTHROPIC_OAUTH_TOKEN` (from `claude setup-token`) or a
+> configurable token-printing command (`AMBIENT_ANTHROPIC_TOKEN_CMD`, default the
+> `ant` CLI), cached with a short TTL and refreshed on a 401; the subscription path
+> sends `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20` (no `x-api-key`).
+> The mode is a per-turn `RuntimeSettings` field, rides the `ambient-set-settings`
+> frame + config page as `anthropic_auth`, persists to `ambient_settings.json`, and
+> is surfaced in the device settings screen (a selector shown for the Anthropic
+> backend) and the config page. OpenAI stays API-key-only (no subscription→API path).
+> `AMBIENT_ANTHROPIC_AUTH=apikey|subscription` seeds the initial mode.
 
 > **Wire note (Phase 6):** the `ambient-*` control frames are project-local to the
 > device↔orchestrator hop (no off-the-shelf Wyoming server sees them), kept

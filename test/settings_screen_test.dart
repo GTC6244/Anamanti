@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ambient_display/src/settings/app_settings.dart';
+import 'package:ambient_display/src/settings/orchestrator_client.dart';
 import 'package:ambient_display/src/ui/settings_screen.dart';
 
 import 'support/fake_orchestrator_client.dart';
@@ -79,6 +80,80 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(client.applyCalls.single['llmBackend'], 'anthropic');
+  });
+
+  testWidgets('cloud backend shows a model dropdown and sends the picked model',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(models: const [
+      ModelOption(provider: 'anthropic', id: 'claude-opus-5', label: 'Claude Opus 5'),
+      ModelOption(provider: 'anthropic', id: 'claude-sonnet-5', label: 'Claude Sonnet 5'),
+      ModelOption(provider: 'openai', id: 'gpt-4o-mini', label: 'gpt-4o-mini'),
+    ]);
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // Switch to the Claude backend → the model becomes a dropdown of Anthropic
+    // models (the OpenAI entry is filtered out).
+    await tester.tap(find.byKey(const Key('settings-backend')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloud (Claude)').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-model')));
+    await tester.pumpAndSettle();
+    expect(find.text('Claude Sonnet 5').last, findsOneWidget);
+    expect(find.text('gpt-4o-mini'), findsNothing);
+    await tester.tap(find.text('Claude Sonnet 5').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(client.applyCalls.single['llmBackend'], 'anthropic');
+    expect(client.applyCalls.single['llmModel'], 'claude-sonnet-5');
+  });
+
+  testWidgets('anthropic backend exposes the auth selector and sends subscription',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-backend')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cloud (Claude)').last);
+    await tester.pumpAndSettle();
+
+    // The auth selector appears for Anthropic; pick Subscription.
+    expect(find.byKey(const Key('settings-anthropic-auth')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('settings-anthropic-auth')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Subscription').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(client.applyCalls.single['llmBackend'], 'anthropic');
+    expect(client.applyCalls.single['anthropicAuth'], 'subscription');
   });
 
   testWidgets('offline assistant still saves device-local settings',

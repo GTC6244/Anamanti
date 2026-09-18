@@ -104,7 +104,13 @@ cargo clippy --manifest-path mac/Cargo.toml --all-targets -- -D warnings
 cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp, serves turns
 
 # Backend selection + endpoints are env-driven (see mac/src/config.rs), e.g.:
-#   AMBIENT_LLM_BACKEND=ollama|anthropic|mock   (default ollama; anthropic needs ANTHROPIC_API_KEY)
+#   AMBIENT_LLM_BACKEND=ollama|anthropic|openai|mock (default ollama; anthropic needs
+#     ANTHROPIC_API_KEY, openai needs OPENAI_API_KEY)
+#   AMBIENT_ANTHROPIC_AUTH=apikey|subscription (default apikey; subscription uses a
+#     Claude OAuth token from ANTHROPIC_OAUTH_TOKEN (`claude setup-token`) or
+#     AMBIENT_ANTHROPIC_TOKEN_CMD)
+#   AMBIENT_ANTHROPIC_MODEL / AMBIENT_OPENAI_MODEL   (initial pinned model; the
+#     settings screen / config page pick a specific model from a last-12-months list)
 #   AMBIENT_STT_ADDR=127.0.0.1:10300  AMBIENT_TTS_ADDR=127.0.0.1:10200
 #   AMBIENT_BIND_ADDR=0.0.0.0:10700   AMBIENT_TTS_VOICE=en_US-amy-medium
 ```

@@ -77,6 +77,12 @@ pub mod types {
     pub const CLEAR_MEMORIES: &str = "ambient-clear-memories";
     /// orchestrator → device: result of a delete/clear (data: `ok`, `count`).
     pub const MEMORY_RESULT: &str = "ambient-memory-result";
+    /// device → orchestrator: list the selectable LLM models for the settings model
+    /// dropdown (no data).
+    pub const LIST_MODELS: &str = "ambient-list-models";
+    /// orchestrator → device: the selectable models (data: `ok`, `models` array of
+    /// `{provider, id, label}`), scoped to the last 12 months per provider.
+    pub const MODELS: &str = "ambient-models";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams

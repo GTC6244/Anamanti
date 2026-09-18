@@ -7,8 +7,11 @@
 //! the turn logic. This is the locked "pluggable behind a trait" decision.
 
 pub mod anthropic;
+pub mod anthropic_auth;
+pub mod catalog;
 pub mod mock;
 pub mod ollama;
+pub mod openai;
 #[cfg(feature = "rig")]
 pub mod rig;
 
