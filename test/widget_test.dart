@@ -28,6 +28,11 @@ WakeWordConfig _testConfig() => WakeWordConfig(
       smoothingWindow: 2,
       fireOnPeak: false,
       playbackBufferSecs: 30,
+      useAudiorecord: false,
+      micSource: 6,
+      platformAec: false,
+      platformAgc: true,
+      platformNs: true,
     );
 
 WakeWordEvent _event(

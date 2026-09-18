@@ -39,10 +39,58 @@ full loop has not been exercised against real services on the device.
       tests) but **net-negative** for this flush-on-wake design — barge-in flushes
       playback so there's no echo to cancel, and it corrupts the near-end transcript.
       Reverted.
-- [ ] Real AEC remains open, and only pays off with a **true full-duplex barge-in
-      redesign** (keep playing while listening; production AEC with double-talk
-      detector + residual suppressor), or platform `MODE_IN_COMMUNICATION` + routed
-      output so the hardware AEC references the render stream.
+### ✅ SOLVED on-device (2026-09-18): hardware-referenced AEC shim
+
+The Echo Show 8 has a **hardware sample-aligned echo reference** — the FPGA capture
+stream `pcmC0D22c` (6-ch `S24_3LE` 16 kHz) carries the 4 mics on ch0-3 and a **DAC
+loopback on ch4-5** (confirmed on our unit; source: jxlarrea/lineageos-echo-show-camera
+`docs/echo-cancellation.md`). A HAL shim `LD_PRELOAD`ed into the audio service
+interposes tinyalsa `pcm_read` and runs AEC on the mic using `avg(ch4,ch5)` as the
+far end — transparent to `AudioRecord`/AudioFlinger.
+
+- [x] Built a **self-contained Speex-only AEC shim** (armv7, static libc++, deps
+      liblog/libm/libdl/libc) and installed it reversibly via `LD_PRELOAD` in the audio
+      HAL init rc (`.orig` backups kept), PGA lowered 80→40.
+- [x] **Verified working, supervised:** during story playback the shim logs `ref ~-45
+      dBFS` (loopback is real) and `mic out` 8→16 dB below `mic in` as the adaptive
+      filter converges (**~16 dB cancellation, talker-preserving**). Barge-in "Hey
+      Jarvis, actually tell me about dogs" *over* a playing story produced a clean
+      transcript where the pre-shim attempt gave an empty one. Stable, persists across
+      reboot.
+- Full install/revert state and knowledge are recorded in the plan file
+      (`~/.claude/plans/snazzy-hopping-gadget.md`, "ON-DEVICE AEC SHIM" section).
+
+**Remaining AEC follow-ups (device-side; not in this repo's build):**
+
+1. [ ] **Quiet the shim's debug logging** in daily use: `setprop
+       persist.vendor.amznaec.log 0` (drops the 5s `ref/mic in/out` lines).
+2. [ ] **Confirm doze behavior in normal daily use** — the app's mic is blocked while
+       the device "top-sleeps" (`getInputForAttr permission denied`); the ambient UI
+       normally keeps the display awake, but verify over a real idle→wake cycle without
+       the `svc power stayon true` test crutch.
+3. [ ] 🚀 **Build the WebRTC AEC engine variant (38-50 dB)** via the LineageOS 18.1
+       `crown` ROM tree (`m libamznaec_shim` against the ROM's `external/webrtc` +
+       `libwebrtc_audio_preprocessing.so`). Needs a Linux host + ~150 GB tree. Much
+       stronger cancellation than Speex, but its nonlinear suppressor eats the talker
+       ~9.5 dB during double-talk — so keep the talker-preserving Speex engine as the
+       wake-word/barge-in default and make the engine selectable
+       (`persist.vendor.amznaec.engine`). **The exciting one.**
+4. [ ] **Optional Speex tuning:** raise `persist.vendor.amznaec.spx_filter_ms` for a
+       longer adaptive filter; try mild `spx_echo_suppress` for more cancellation at a
+       small talker cost. A/B against the current ~16 dB.
+5. [ ] **Get the shim source into version control** (its own repo or a `device/` tree),
+       replacing the `/tmp` build — currently `amznaec_speex_shim.cpp` lives only in
+       `/tmp` and on the device. Not part of *this* Flutter/Rust repo, but should not
+       stay ephemeral.
+6. [ ] **Turn off Rooted debugging + wifi-adb persistence** on the device when the AEC
+       work is finished.
+
+**Superseded by the on-device shim (kept in this repo, gated/dark):** the host-side
+WebRTC APM (`mac/src/aec/`, `aec` feature) and the AudioRecord capture shim landed for
+this effort still build and are useful (clean STT path / true-16 kHz capture), but the
+on-device shim is now the primary AEC. Decide later whether to invest in the host APM
+live-path wiring (Plan Phases 1-2) or retire it.
+
 - Note: **on-device perf/audio testing must use `--release` APKs** (debug Rust makes
       inference ~3.6× slower on the 32-bit device and masks the real behavior).
 

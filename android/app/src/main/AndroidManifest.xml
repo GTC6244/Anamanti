@@ -3,6 +3,9 @@
          detection (Plan.MD §3). AAudio input requires the RECORD_AUDIO runtime
          permission; without it `cpal` cannot open the input device. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Kotlin AudioRecord capture shim: attaching the platform AcousticEchoCanceler
+         / AutomaticGainControl / NoiseSuppressor audio effects requires this. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-feature android:name="android.hardware.microphone" android:required="true"/>
     <!-- Phase 3: the Rust engine opens a TCP (Wyoming) connection to the Mac Mini
          orchestrator. A release build needs INTERNET explicitly — Flutter only

@@ -640,8 +640,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordConfig dco_decode_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 11)
-      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    if (arr.length != 16)
+      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
     return WakeWordConfig(
       melspecModelPath: dco_decode_String(arr[0]),
       embeddingModelPath: dco_decode_String(arr[1]),
@@ -654,6 +654,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       smoothingWindow: dco_decode_u_32(arr[8]),
       fireOnPeak: dco_decode_bool(arr[9]),
       playbackBufferSecs: dco_decode_u_32(arr[10]),
+      useAudiorecord: dco_decode_bool(arr[11]),
+      micSource: dco_decode_u_32(arr[12]),
+      platformAec: dco_decode_bool(arr[13]),
+      platformAgc: dco_decode_bool(arr[14]),
+      platformNs: dco_decode_bool(arr[15]),
     );
   }
 
@@ -917,6 +922,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_smoothingWindow = sse_decode_u_32(deserializer);
     var var_fireOnPeak = sse_decode_bool(deserializer);
     var var_playbackBufferSecs = sse_decode_u_32(deserializer);
+    var var_useAudiorecord = sse_decode_bool(deserializer);
+    var var_micSource = sse_decode_u_32(deserializer);
+    var var_platformAec = sse_decode_bool(deserializer);
+    var var_platformAgc = sse_decode_bool(deserializer);
+    var var_platformNs = sse_decode_bool(deserializer);
     return WakeWordConfig(
       melspecModelPath: var_melspecModelPath,
       embeddingModelPath: var_embeddingModelPath,
@@ -929,6 +939,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       smoothingWindow: var_smoothingWindow,
       fireOnPeak: var_fireOnPeak,
       playbackBufferSecs: var_playbackBufferSecs,
+      useAudiorecord: var_useAudiorecord,
+      micSource: var_micSource,
+      platformAec: var_platformAec,
+      platformAgc: var_platformAgc,
+      platformNs: var_platformNs,
     );
   }
 
@@ -1197,6 +1212,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.smoothingWindow, serializer);
     sse_encode_bool(self.fireOnPeak, serializer);
     sse_encode_u_32(self.playbackBufferSecs, serializer);
+    sse_encode_bool(self.useAudiorecord, serializer);
+    sse_encode_u_32(self.micSource, serializer);
+    sse_encode_bool(self.platformAec, serializer);
+    sse_encode_bool(self.platformAgc, serializer);
+    sse_encode_bool(self.platformNs, serializer);
   }
 
   @protected

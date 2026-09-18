@@ -366,6 +366,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         value: _settings.fireOnPeak,
         onChanged: (v) => setState(() => _settings = _settings.copyWith(fireOnPeak: v)),
       ),
+      SwitchListTile(
+        key: const Key('settings-use-audiorecord'),
+        secondary: const Icon(Icons.settings_voice),
+        title: const Text('AudioRecord capture (far-field)'),
+        subtitle: const Text(
+            'Android: capture via VOICE_RECOGNITION + platform noise-suppression/AGC instead of cpal'),
+        value: _settings.useAudioRecord,
+        onChanged: (v) => setState(() => _settings = _settings.copyWith(useAudioRecord: v)),
+      ),
     ];
   }
 

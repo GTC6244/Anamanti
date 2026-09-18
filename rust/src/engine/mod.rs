@@ -126,17 +126,72 @@ pub fn start(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>) -> Result<
 fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Arc<AtomicBool>) {
     let (producer, mut consumer) = new_audio_ring(RING_CAPACITY_SAMPLES);
 
-    let capture = match start_capture(producer) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = sink.add(WakeWordEvent::error(format!(
-                "failed to start audio capture: {e}"
-            )));
-            running.store(false, Ordering::SeqCst);
-            return;
+    // Capture source. The Kotlin `AudioRecord` bridge (Android, opt-in) reaches the
+    // HAL's VOICE_RECOGNITION source + platform effects and reports its true rate;
+    // `cpal` is the default and the only path off-Android. `capture_stream` holds the
+    // `!Send` cpal stream alive on this thread (None in AudioRecord mode).
+    #[cfg(target_os = "android")]
+    let use_audiorecord = config.use_audiorecord;
+    #[cfg(not(target_os = "android"))]
+    let use_audiorecord = false;
+
+    #[allow(unused_mut)]
+    let mut capture_stream: Option<capture::CaptureStream> = None;
+    // Set in AudioRecord mode (device reports the true rate → skip cpal calibration).
+    let mut precalibrated_rate: Option<u32> = None;
+    let info: capture::CaptureInfo;
+
+    if use_audiorecord {
+        #[cfg(target_os = "android")]
+        {
+            crate::audio::mic_bridge::install_producer(producer);
+            match crate::audio::mic_bridge::start(
+                TARGET_SAMPLE_RATE as i32,
+                config.mic_source as i32,
+                config.platform_aec,
+                config.platform_agc,
+                config.platform_ns,
+            ) {
+                Ok(rate) => {
+                    precalibrated_rate = Some(rate);
+                    info = capture::CaptureInfo {
+                        device_name: format!("AudioRecord(source={})", config.mic_source),
+                        sample_rate: rate,
+                        channels: 1,
+                    };
+                }
+                Err(e) => {
+                    crate::audio::mic_bridge::clear_producer();
+                    log::error!("AudioRecord capture failed to start: {e:#}");
+                    let _ = sink.add(WakeWordEvent::error(format!(
+                        "failed to start AudioRecord capture: {e}"
+                    )));
+                    running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
         }
-    };
-    let info = capture.info.clone();
+        #[cfg(not(target_os = "android"))]
+        {
+            // Unreachable: `use_audiorecord` is a compile-time `false` off-Android.
+            let _ = producer;
+            unreachable!("AudioRecord capture is Android-only");
+        }
+    } else {
+        match start_capture(producer) {
+            Ok(c) => {
+                info = c.info.clone();
+                capture_stream = Some(c);
+            }
+            Err(e) => {
+                let _ = sink.add(WakeWordEvent::error(format!(
+                    "failed to start audio capture: {e}"
+                )));
+                running.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
     log::info!(
         "wake-word capture started on '{}' ({} Hz, {} ch)",
         info.device_name,
@@ -245,7 +300,11 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // pitch/time-distorted enough that wake-word confidence collapses to ~0 even
     // though the mic is clearly capturing speech. Measuring the real throughput into
     // the ring and resampling from that is self-correcting across HAL quirks.
-    let input_rate = calibrate_input_rate(&mut consumer, info.sample_rate, &running);
+    // AudioRecord reports its true rate, so skip the cpal rate-calibration workaround.
+    let input_rate = match precalibrated_rate {
+        Some(rate) => rate,
+        None => calibrate_input_rate(&mut consumer, info.sample_rate, &running),
+    };
     if input_rate != info.sample_rate {
         let _ = sink.add(WakeWordEvent::status(format!(
             "input rate calibrated to {input_rate} Hz (device reported {})",
@@ -404,7 +463,12 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // playback and capture streams.
     drop(network);
     drop(playback_stream);
-    drop(capture);
+    #[cfg(target_os = "android")]
+    if use_audiorecord {
+        crate::audio::mic_bridge::stop();
+        crate::audio::mic_bridge::clear_producer();
+    }
+    drop(capture_stream);
     running.store(false, Ordering::SeqCst);
     let _ = sink.add(WakeWordEvent::stopped());
 }

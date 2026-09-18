@@ -34,6 +34,7 @@ class AppSettings {
     this.smoothingWindow = 2,
     this.fireOnPeak = false,
     this.playbackBufferSecs = 30,
+    this.useAudioRecord = true,
     this.endpointCueEnabled = true,
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
@@ -65,6 +66,11 @@ class AppSettings {
   /// spoken reply so long TTS answers are not truncated. A/B-tunable.
   final int playbackBufferSecs;
 
+  /// **Android only.** Capture through the Kotlin `AudioRecord` layer
+  /// (`VOICE_RECOGNITION` source + platform noise-suppression/AGC) instead of the
+  /// default `cpal` path. A/B-tunable on-device to compare far-field pickup.
+  final bool useAudioRecord;
+
   /// Whether the device shows a local "processing" cue the instant the user stops
   /// speaking, instead of waiting for the Mac's VAD + transcript round trip.
   final bool endpointCueEnabled;
@@ -92,6 +98,7 @@ class AppSettings {
     int? smoothingWindow,
     bool? fireOnPeak,
     int? playbackBufferSecs,
+    bool? useAudioRecord,
     bool? endpointCueEnabled,
     int? endpointSilenceMs,
     double? endpointRmsThreshold,
@@ -106,6 +113,7 @@ class AppSettings {
       smoothingWindow: smoothingWindow ?? this.smoothingWindow,
       fireOnPeak: fireOnPeak ?? this.fireOnPeak,
       playbackBufferSecs: playbackBufferSecs ?? this.playbackBufferSecs,
+      useAudioRecord: useAudioRecord ?? this.useAudioRecord,
       endpointCueEnabled: endpointCueEnabled ?? this.endpointCueEnabled,
       endpointSilenceMs: endpointSilenceMs ?? this.endpointSilenceMs,
       endpointRmsThreshold: endpointRmsThreshold ?? this.endpointRmsThreshold,
@@ -122,6 +130,7 @@ class AppSettings {
         'smoothingWindow': smoothingWindow,
         'fireOnPeak': fireOnPeak,
         'playbackBufferSecs': playbackBufferSecs,
+        'useAudioRecord': useAudioRecord,
         'endpointCueEnabled': endpointCueEnabled,
         'endpointSilenceMs': endpointSilenceMs,
         'endpointRmsThreshold': endpointRmsThreshold,
@@ -149,6 +158,9 @@ class AppSettings {
       fireOnPeak: json['fireOnPeak'] == true,
       playbackBufferSecs:
           asInt(json['playbackBufferSecs'], defaults.playbackBufferSecs, min: 2, max: 120),
+      useAudioRecord: json['useAudioRecord'] is bool
+          ? json['useAudioRecord'] as bool
+          : defaults.useAudioRecord,
       endpointCueEnabled: json['endpointCueEnabled'] is bool
           ? json['endpointCueEnabled'] as bool
           : defaults.endpointCueEnabled,
@@ -176,6 +188,7 @@ class AppSettings {
       smoothingWindow == other.smoothingWindow &&
       fireOnPeak == other.fireOnPeak &&
       playbackBufferSecs == other.playbackBufferSecs &&
+      useAudioRecord == other.useAudioRecord &&
       endpointCueEnabled == other.endpointCueEnabled &&
       endpointSilenceMs == other.endpointSilenceMs &&
       endpointRmsThreshold == other.endpointRmsThreshold &&
@@ -191,6 +204,7 @@ class AppSettings {
         smoothingWindow,
         fireOnPeak,
         playbackBufferSecs,
+        useAudioRecord,
         endpointCueEnabled,
         endpointSilenceMs,
         endpointRmsThreshold,

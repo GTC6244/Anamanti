@@ -26,6 +26,17 @@ class WakeWordDefaults {
   static const int discoveryTimeoutSecs = 3;
   static const int turnTimeoutSecs = 15;
 
+  /// Capture backend + effects (Android only). Default is the `cpal` path; the
+  /// AudioRecord path opens the HAL's far-field `VOICE_RECOGNITION` source
+  /// (`AudioSource.VOICE_RECOGNITION` == 6) and attaches platform NS/AGC. Platform
+  /// AEC is left off — the host-side WebRTC APM does echo cancellation, and this
+  /// device's platform AEC was found not to actually cancel.
+  static const bool useAudioRecord = true;
+  static const int micSource = 6;
+  static const bool platformAec = false;
+  static const bool platformAgc = true;
+  static const bool platformNs = true;
+
   static const String melspecFile = 'melspectrogram.onnx';
   static const String embeddingFile = 'embedding_model.onnx';
   static String wakewordFile(String name) => '$name.onnx';
@@ -52,6 +63,11 @@ Future<WakeWordConfig> buildWakeWordConfig({
   int smoothingWindow = WakeWordDefaults.smoothingWindow,
   bool fireOnPeak = WakeWordDefaults.fireOnPeak,
   int playbackBufferSecs = WakeWordDefaults.playbackBufferSecs,
+  bool useAudioRecord = WakeWordDefaults.useAudioRecord,
+  int micSource = WakeWordDefaults.micSource,
+  bool platformAec = WakeWordDefaults.platformAec,
+  bool platformAgc = WakeWordDefaults.platformAgc,
+  bool platformNs = WakeWordDefaults.platformNs,
 }) async {
   final dir = await wakeWordModelDir();
   return WakeWordConfig(
@@ -66,6 +82,11 @@ Future<WakeWordConfig> buildWakeWordConfig({
     smoothingWindow: smoothingWindow,
     fireOnPeak: fireOnPeak,
     playbackBufferSecs: playbackBufferSecs,
+    useAudiorecord: useAudioRecord,
+    micSource: micSource,
+    platformAec: platformAec,
+    platformAgc: platformAgc,
+    platformNs: platformNs,
   );
 }
 
@@ -81,5 +102,6 @@ Future<WakeWordConfig> buildWakeWordConfigFrom(AppSettings settings) {
     smoothingWindow: settings.smoothingWindow,
     fireOnPeak: settings.fireOnPeak,
     playbackBufferSecs: settings.playbackBufferSecs,
+    useAudioRecord: settings.useAudioRecord,
   );
 }

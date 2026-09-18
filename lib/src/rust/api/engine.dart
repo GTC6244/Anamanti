@@ -88,6 +88,29 @@ class WakeWordConfig {
   /// delivers audio faster than real-time playback drains it. A/B-tunable.
   final int playbackBufferSecs;
 
+  /// **Android only.** Use the Kotlin `AudioRecord` capture layer instead of
+  /// `cpal`, to reach the HAL's far-field `VOICE_RECOGNITION` source (array
+  /// beamforming) + platform audio effects. `false` (default) keeps the `cpal`
+  /// path; ignored entirely off-Android. A/B-tunable from the settings screen.
+  final bool useAudiorecord;
+
+  /// `android.media.MediaRecorder.AudioSource` for the AudioRecord path
+  /// (6 = `VOICE_RECOGNITION`, 7 = `VOICE_COMMUNICATION`, 1 = `MIC`). Only used
+  /// when `use_audiorecord` is set.
+  final int micSource;
+
+  /// Attach the platform `AcousticEchoCanceler` to the AudioRecord session (if the
+  /// device offers it). Default off — the host-side WebRTC APM does AEC, and prior
+  /// on-hardware testing found this device's platform AEC did not actually cancel.
+  final bool platformAec;
+
+  /// Attach the platform `AutomaticGainControl` to the AudioRecord session (if
+  /// available). Helps the Echo Show's quiet far-field pickup.
+  final bool platformAgc;
+
+  /// Attach the platform `NoiseSuppressor` to the AudioRecord session (if available).
+  final bool platformNs;
+
   const WakeWordConfig({
     required this.melspecModelPath,
     required this.embeddingModelPath,
@@ -100,6 +123,11 @@ class WakeWordConfig {
     required this.smoothingWindow,
     required this.fireOnPeak,
     required this.playbackBufferSecs,
+    required this.useAudiorecord,
+    required this.micSource,
+    required this.platformAec,
+    required this.platformAgc,
+    required this.platformNs,
   });
 
   @override
@@ -114,7 +142,12 @@ class WakeWordConfig {
       turnTimeoutSecs.hashCode ^
       smoothingWindow.hashCode ^
       fireOnPeak.hashCode ^
-      playbackBufferSecs.hashCode;
+      playbackBufferSecs.hashCode ^
+      useAudiorecord.hashCode ^
+      micSource.hashCode ^
+      platformAec.hashCode ^
+      platformAgc.hashCode ^
+      platformNs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -131,7 +164,12 @@ class WakeWordConfig {
           turnTimeoutSecs == other.turnTimeoutSecs &&
           smoothingWindow == other.smoothingWindow &&
           fireOnPeak == other.fireOnPeak &&
-          playbackBufferSecs == other.playbackBufferSecs;
+          playbackBufferSecs == other.playbackBufferSecs &&
+          useAudiorecord == other.useAudiorecord &&
+          micSource == other.micSource &&
+          platformAec == other.platformAec &&
+          platformAgc == other.platformAgc &&
+          platformNs == other.platformNs;
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
