@@ -15,7 +15,9 @@ pub struct MockLlm {
 }
 
 impl MockLlm {
-    /// `template` may contain `{msg}`, replaced by the user's transcript.
+    /// `template` may contain `{msg}` (replaced by the user's transcript) and
+    /// `{sys}` (replaced by the system prompt — handy for asserting prompt
+    /// construction, e.g. the speaker identity line).
     pub fn new(template: impl Into<String>) -> Self {
         Self {
             template: template.into(),
@@ -36,7 +38,10 @@ impl LlmBackend for MockLlm {
     }
 
     async fn respond(&self, turn: LlmTurn) -> Result<ReplyStream> {
-        let reply = self.template.replace("{msg}", turn.user_message.trim());
+        let reply = self
+            .template
+            .replace("{msg}", turn.user_message.trim())
+            .replace("{sys}", turn.system_prompt.trim());
         // Split into words but keep the spaces so the concatenation is faithful.
         let mut tokens: Vec<Result<String>> = Vec::new();
         for (i, word) in reply.split(' ').enumerate() {

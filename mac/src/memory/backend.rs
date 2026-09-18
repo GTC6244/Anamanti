@@ -25,9 +25,15 @@ use super::MemoryStore;
 /// an `Arc` across concurrent turns.
 #[async_trait]
 pub trait Recall: Send + Sync {
-    /// Return up to `limit` context snippets relevant to `transcript`, most
-    /// relevant first, already de-duplicated.
-    async fn recall(&self, transcript: &str, limit: usize) -> Result<Vec<String>>;
+    /// Return up to `limit` context snippets relevant to `transcript` for the given
+    /// speaker (`None` = shared/household scope), most relevant first, already
+    /// de-duplicated. A speaker's own memories plus shared ones are in scope.
+    async fn recall(
+        &self,
+        transcript: &str,
+        speaker_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>>;
 }
 
 /// SQLite FTS recall — the default backend (unchanged Phase-4 behavior).
@@ -43,8 +49,13 @@ impl SqliteRecall {
 
 #[async_trait]
 impl Recall for SqliteRecall {
-    async fn recall(&self, transcript: &str, limit: usize) -> Result<Vec<String>> {
-        let hits = self.memory.search(transcript, limit)?;
+    async fn recall(
+        &self,
+        transcript: &str,
+        speaker_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let hits = self.memory.search_scoped(transcript, speaker_id, limit)?;
         Ok(hits.into_iter().map(|m| m.content).collect())
     }
 }
@@ -75,12 +86,17 @@ mod helix_recall {
 
     #[async_trait]
     impl Recall for HelixRecall {
-        async fn recall(&self, transcript: &str, limit: usize) -> Result<Vec<String>> {
+        async fn recall(
+            &self,
+            transcript: &str,
+            speaker_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<String>> {
             if transcript.trim().is_empty() {
                 return Ok(Vec::new());
             }
             let qvec = self.embedder.embed_one(transcript).await?;
-            self.helix.recall(qvec, self.k, limit).await
+            self.helix.recall(qvec, speaker_id, self.k, limit).await
         }
     }
 }
@@ -108,7 +124,10 @@ mod tests {
             )
             .unwrap();
         let recall = SqliteRecall::new(store);
-        let hits = recall.recall("what music do I like", 5).await.unwrap();
+        let hits = recall
+            .recall("what music do I like", None, 5)
+            .await
+            .unwrap();
         assert!(hits.iter().any(|h| h.contains("jazz")));
     }
 }

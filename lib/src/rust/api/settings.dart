@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `block_on`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Read the orchestrator's current runtime settings.
 Future<OrchestratorSettings> fetchOrchestratorSettings({
@@ -46,6 +46,45 @@ Future<int> clearMemories({required BigInt discoveryTimeoutSecs}) => RustLib
     .instance
     .api
     .crateApiSettingsClearMemories(discoveryTimeoutSecs: discoveryTimeoutSecs);
+
+/// List the identified speakers (settings "People" view).
+Future<List<SpeakerInfo>> listSpeakers({
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListSpeakers(
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Name (or rename) a speaker. Returns whether the change was applied.
+Future<bool> nameSpeaker({
+  required String id,
+  required String name,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsNameSpeaker(
+  id: id,
+  name: name,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Merge the `drop` speaker into `keep` (same person, two clusters). Returns
+/// whether the merge was applied.
+Future<bool> mergeSpeakers({
+  required String keep,
+  required String drop,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsMergeSpeakers(
+  keep: keep,
+  drop: drop,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Delete a speaker profile. Returns whether a profile was removed.
+Future<bool> deleteSpeaker({
+  required String id,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsDeleteSpeaker(
+  id: id,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
 
 /// One persistent memory entry, for the settings memory list.
 class MemoryEntry {
@@ -173,4 +212,50 @@ class SettingsUpdate {
           llmModel == other.llmModel &&
           setTtsVoice == other.setTtsVoice &&
           ttsVoice == other.ttsVoice;
+}
+
+/// One identified speaker, for the settings "People" list (speaker_id_plan.md
+/// Phase C).
+class SpeakerInfo {
+  /// Stable id (`spk-…`) referenced by memory + the graph.
+  final String id;
+
+  /// User-given name, or `None` while the cluster is still anonymous.
+  final String? name;
+
+  /// Whether a person has named this cluster (vs. auto-created).
+  final bool labeled;
+
+  /// How many utterances back this voiceprint.
+  final PlatformInt64 samples;
+
+  /// Unix seconds when the cluster was first heard.
+  final PlatformInt64 createdAt;
+
+  const SpeakerInfo({
+    required this.id,
+    this.name,
+    required this.labeled,
+    required this.samples,
+    required this.createdAt,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      labeled.hashCode ^
+      samples.hashCode ^
+      createdAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SpeakerInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          labeled == other.labeled &&
+          samples == other.samples &&
+          createdAt == other.createdAt;
 }

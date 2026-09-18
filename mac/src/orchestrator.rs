@@ -25,10 +25,11 @@ use tokio::time::{sleep_until, Instant};
 use crate::llm::{LlmBackend, LlmTurn};
 use crate::memory::chatlog::now_secs;
 use crate::memory::{
-    infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemorySource,
+    infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemoryKind, MemorySource,
     MemoryStore, Recall, SqliteRecall,
 };
 use crate::settings::SharedSettings;
+use crate::speaker::{SpeakerContext, SpeakerService};
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::stt::SttSession;
 use crate::wyoming::tts::TtsSession;
@@ -42,6 +43,8 @@ pub enum TurnEvent {
     Streaming,
     /// The final transcript arrived from STT.
     Transcript(String),
+    /// The turn's speaker was identified (or attributed to the shared household).
+    Speaker(SpeakerContext),
     /// One reply-token fragment from the LLM (or a command confirmation).
     ReplyToken(String),
     /// The complete reply text.
@@ -103,6 +106,10 @@ pub struct Pipeline {
     /// Optional append-only chat log; each completed turn is recorded for the
     /// background GraphRAG ingester. `None` disables logging.
     chatlog: Option<Arc<ChatLog>>,
+    /// Optional per-person speaker identification (speaker_id_plan.md). `None`
+    /// preserves the shared-household behavior — every turn attributes to
+    /// [`crate::speaker::HOUSEHOLD_SPEAKER`].
+    speaker: Option<Arc<SpeakerService>>,
     system_prompt: String,
     turn_timeout: Duration,
 }
@@ -123,6 +130,7 @@ impl Pipeline {
             memory,
             recall,
             chatlog: None,
+            speaker: None,
             system_prompt: system_prompt.into(),
             turn_timeout,
         }
@@ -140,6 +148,19 @@ impl Pipeline {
     pub fn with_chatlog(mut self, chatlog: Arc<ChatLog>) -> Self {
         self.chatlog = Some(chatlog);
         self
+    }
+
+    /// Enable per-person speaker identification. Without this the pipeline keeps the
+    /// shared-household behavior (all turns → `household`).
+    pub fn with_speaker(mut self, speaker: Arc<SpeakerService>) -> Self {
+        self.speaker = Some(speaker);
+        self
+    }
+
+    /// The speaker service, if enabled (the Phase-C control handler lists/renames
+    /// its registry).
+    pub fn speaker(&self) -> Option<&Arc<SpeakerService>> {
+        self.speaker.as_ref()
     }
 
     /// Build a pipeline around a fixed LLM backend + voice (the Phase-4 behavior).
@@ -210,7 +231,8 @@ impl Pipeline {
         let mut stt = SttSession::begin(stt_conn, format).await?;
         on_event(TurnEvent::Streaming);
 
-        let Some(transcript) = self.stream_to_transcript(device, &mut stt).await? else {
+        let Some((transcript, voiced_pcm)) = self.stream_to_transcript(device, &mut stt).await?
+        else {
             // Device closed or timed out before a transcript — abandon the turn.
             let _ = stt.finish().await;
             return Ok(TurnOutcome::Completed);
@@ -229,16 +251,21 @@ impl Pipeline {
             return Ok(TurnOutcome::Completed);
         }
 
+        // 2b. Identify who is speaking (or attribute to the shared household), so
+        //     memory writes/recall and the reply are per-person.
+        let speaker = self.identify_speaker(&voiced_pcm);
+        on_event(TurnEvent::Speaker(speaker.clone()));
+
         // 3. Memory + LLM → reply text, relaying each reply token to the device
         //    so it can render the reply token-by-token (Phase 5).
         let (reply, memories_written) = self
-            .generate_reply(&runtime, &transcript, device, on_event)
+            .generate_reply(&runtime, &transcript, &speaker, device, on_event)
             .await?;
         on_event(TurnEvent::Reply(reply.clone()));
 
         // Record the completed turn for the background GraphRAG ingester. Never
         // let a logging failure break the turn.
-        self.log_turn(&runtime, &transcript, &reply, memories_written);
+        self.log_turn(&runtime, &speaker, &transcript, &reply, memories_written);
 
         // 4. Synthesize and stream the reply audio back to the device.
         if !reply.trim().is_empty() {
@@ -260,11 +287,14 @@ impl Pipeline {
     /// orchestrator is the only party that can close the loop: it runs a simple
     /// energy VAD over the incoming PCM and, once speech has been followed by a
     /// short trailing silence, sends `audio-stop` to STT to finalize the transcript.
+    /// Returns the transcript together with the utterance's **voiced** PCM (the
+    /// chunks that passed the energy gate), so the caller can compute a speaker
+    /// embedding without re-reading the socket. `None` on disconnect/timeout.
     async fn stream_to_transcript(
         &self,
         device: &mut DynConnection,
         stt: &mut SttSession<crate::wyoming::DynRead, crate::wyoming::DynWrite>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<(String, Vec<i16>)>> {
         // RMS (i16 units) above which a chunk counts as speech rather than room
         // noise. The Echo's far-field pickup is quiet (~50 idle, several hundred+
         // while speaking), so this sits a few× above a typical noise floor.
@@ -281,6 +311,9 @@ impl Pipeline {
         let mut speech_started = false;
         // True once we've sent `audio-stop` to STT and are just awaiting the result.
         let mut finalized = false;
+        // Accumulated voiced PCM (samples from chunks above the energy gate), used
+        // for the speaker embedding once the transcript arrives.
+        let mut voiced_pcm: Vec<i16> = Vec::new();
 
         let mut deadline = Instant::now() + self.turn_timeout;
         loop {
@@ -305,6 +338,8 @@ impl Pipeline {
                                         }
                                         speech_started = true;
                                         last_voice = now;
+                                        // Keep the voiced samples for speaker ID.
+                                        append_pcm_i16_le(&mut voiced_pcm, &pcm);
                                     }
                                     stt.forward_pcm(pcm).await?;
 
@@ -337,7 +372,8 @@ impl Pipeline {
                     deadline = Instant::now() + self.turn_timeout;
                     match sev? {
                         Some(ev) if ev.is_transcript() => {
-                            return Ok(Some(ev.transcript_text().unwrap_or_default().to_string()));
+                            let text = ev.transcript_text().unwrap_or_default().to_string();
+                            return Ok(Some((text, std::mem::take(&mut voiced_pcm))));
                         }
                         Some(_) => {} // voice-started / voice-stopped etc.
                         None => anyhow::bail!("STT service closed before returning a transcript"),
@@ -353,45 +389,53 @@ impl Pipeline {
         &self,
         runtime: &crate::settings::RuntimeSettings,
         transcript: &str,
+        speaker: &SpeakerContext,
         device: &mut DynConnection,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<(String, Vec<String>)> {
         // Memory entries written this turn (for the chat log / ingester).
         let mut memories_written = Vec::new();
+        // The scope memory writes/recall use: this person, or shared (household).
+        let scope = speaker_scope(speaker);
 
         // Explicit command → apply and confirm, skipping the LLM.
         if let Some(cmd) = parse_command(transcript) {
-            if let MemoryCommand::Remember { content, .. } = &cmd {
-                memories_written.push(content.clone());
+            match &cmd {
+                MemoryCommand::Remember { content, .. } => memories_written.push(content.clone()),
+                MemoryCommand::NameSpeaker(name) => {
+                    memories_written.push(format!("The user's name is {name}"))
+                }
+                _ => {}
             }
-            let reply = self.apply_command(cmd, on_event)?;
+            let reply = self.apply_command(cmd, scope, on_event)?;
             on_event(TurnEvent::ReplyToken(reply.clone()));
             device.send(&WyomingEvent::reply_token(&reply)).await.ok();
             return Ok((reply, memories_written));
         }
 
-        // Inferred capture from an ordinary turn.
+        // Inferred capture from an ordinary turn — attributed to this speaker.
         for (kind, content) in infer_memories(transcript) {
-            self.memory.add(kind, &content, MemorySource::Inferred)?;
+            self.memory
+                .add_scoped(kind, &content, MemorySource::Inferred, scope)?;
             memories_written.push(content.clone());
             on_event(TurnEvent::MemoryStored(content));
         }
 
-        // Build memory context and stream the LLM reply. A recall failure (e.g. a
-        // transient GraphRAG backend error) must not sink the turn — proceed with
-        // no memory context rather than erroring.
-        let context = self.build_context(transcript).await.unwrap_or_else(|e| {
+        // Build per-person memory context and stream the LLM reply. A recall
+        // failure (e.g. a transient GraphRAG backend error) must not sink the turn —
+        // proceed with no memory context rather than erroring.
+        let context = self.build_context(transcript, scope).await.unwrap_or_else(|e| {
             log::warn!("memory recall failed; answering without context: {e:#}");
             String::new()
         });
-        let system_prompt = if context.is_empty() {
-            self.system_prompt.clone()
-        } else {
-            format!(
-                "{}\n\nWhat you remember about this user:\n{}",
-                self.system_prompt, context
-            )
-        };
+        // Tell the model who it is speaking with so it can address them by name and
+        // apply the right person's memory.
+        let identity = speaker_identity_line(speaker);
+        let mut system_prompt = format!("{}\n\n{}", self.system_prompt, identity);
+        if !context.is_empty() {
+            system_prompt.push_str("\n\nWhat you remember about this person:\n");
+            system_prompt.push_str(&context);
+        }
 
         let mut stream = runtime
             .llm
@@ -414,6 +458,7 @@ impl Pipeline {
     fn log_turn(
         &self,
         runtime: &crate::settings::RuntimeSettings,
+        speaker: &SpeakerContext,
         transcript: &str,
         reply: &str,
         memories_written: Vec<String>,
@@ -431,6 +476,8 @@ impl Pipeline {
             memories_written,
             llm_backend: runtime.llm_backend.clone(),
             model: runtime.llm_model.clone(),
+            speaker_id: speaker.speaker_id.clone(),
+            speaker_name: speaker.name.clone(),
         };
         if let Err(e) = log.append(&record) {
             log::warn!("failed to append chat log record: {e:#}");
@@ -441,11 +488,13 @@ impl Pipeline {
     fn apply_command(
         &self,
         cmd: MemoryCommand,
+        speaker_id: Option<&str>,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<String> {
         Ok(match cmd {
             MemoryCommand::Remember { kind, content } => {
-                self.memory.add(kind, &content, MemorySource::Explicit)?;
+                self.memory
+                    .add_scoped(kind, &content, MemorySource::Explicit, speaker_id)?;
                 on_event(TurnEvent::MemoryStored(content));
                 "Okay, I'll remember that.".to_string()
             }
@@ -461,18 +510,48 @@ impl Pipeline {
                 Some(_) => "Okay, I've forgotten that.".to_string(),
                 None => "There was nothing to forget.".to_string(),
             },
+            MemoryCommand::NameSpeaker(name) => {
+                // Record the name as a per-person fact (parity with inferred capture)…
+                let fact = format!("The user's name is {name}");
+                self.memory
+                    .add_scoped(MemoryKind::Fact, &fact, MemorySource::Explicit, speaker_id)?;
+                on_event(TurnEvent::MemoryStored(fact));
+                // …and attach it to the voiceprint profile, when a person was identified.
+                if let (Some(svc), Some(id)) = (&self.speaker, speaker_id) {
+                    if let Err(e) = svc.registry().rename(id, &name) {
+                        log::warn!("failed to name speaker {id}: {e:#}");
+                    }
+                }
+                format!("Nice to meet you, {name}!")
+            }
         })
     }
 
-    /// Gather memory entries relevant to the transcript as prompt context, via the
-    /// configured recall backend (SQLite FTS by default; HelixDB GraphRAG when set).
-    async fn build_context(&self, transcript: &str) -> Result<String> {
-        let hits = self.recall.recall(transcript, 8).await?;
+    /// Gather memory entries relevant to the transcript as prompt context for this
+    /// speaker (their own entries plus shared), via the configured recall backend
+    /// (SQLite FTS by default; HelixDB GraphRAG when set).
+    async fn build_context(&self, transcript: &str, speaker_id: Option<&str>) -> Result<String> {
+        let hits = self.recall.recall(transcript, speaker_id, 8).await?;
         Ok(hits
             .iter()
             .map(|c| format!("- {c}"))
             .collect::<Vec<_>>()
             .join("\n"))
+    }
+
+    /// Identify the turn's speaker via the [`SpeakerService`], degrading gracefully
+    /// to the shared household on any failure (or when identification is disabled).
+    fn identify_speaker(&self, voiced_pcm: &[i16]) -> SpeakerContext {
+        let Some(svc) = &self.speaker else {
+            return SpeakerContext::household();
+        };
+        match svc.identify_and_attribute(voiced_pcm) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                log::warn!("speaker identification failed; attributing to household: {e:#}");
+                SpeakerContext::household()
+            }
+        }
     }
 
     /// Synthesize `reply` with Piper and relay each audio frame to the device. A
@@ -497,6 +576,36 @@ impl Pipeline {
             }
         }
         Ok(())
+    }
+}
+
+/// The memory scope for a speaker: `None` (shared/household) for the sentinel
+/// household context, else the concrete `speaker_id`.
+fn speaker_scope(speaker: &SpeakerContext) -> Option<&str> {
+    if speaker.is_household() {
+        None
+    } else {
+        Some(speaker.speaker_id.as_str())
+    }
+}
+
+/// The system-prompt line telling the model who it is speaking with.
+fn speaker_identity_line(speaker: &SpeakerContext) -> String {
+    match &speaker.name {
+        Some(name) => format!("You are speaking with {name}."),
+        None if speaker.is_household() => "You are speaking with a member of the household.".to_string(),
+        None => "You are speaking with a household member you haven't been introduced to yet. \
+                 If they tell you their name, greet them by it."
+            .to_string(),
+    }
+}
+
+/// Append little-endian PCM16 bytes to an `i16` sample buffer (a trailing odd byte,
+/// never expected from a well-formed frame, is ignored).
+fn append_pcm_i16_le(out: &mut Vec<i16>, pcm: &[u8]) {
+    out.reserve(pcm.len() / 2);
+    for c in pcm.chunks_exact(2) {
+        out.push(i16::from_le_bytes([c[0], c[1]]));
     }
 }
 

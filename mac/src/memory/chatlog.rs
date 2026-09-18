@@ -43,6 +43,14 @@ pub struct ChatLogRecord {
     /// The model name, if the backend has one.
     #[serde(default)]
     pub model: Option<String>,
+    /// The identified speaker id for this turn (`spk-…`), or `"household"` when
+    /// unattributed. Defaulted so pre-speaker-ID logs still parse (speaker_id_plan.md
+    /// §3.4).
+    #[serde(default)]
+    pub speaker_id: String,
+    /// The speaker's name, if their cluster has been named.
+    #[serde(default)]
+    pub speaker_name: Option<String>,
 }
 
 /// Append-only JSONL writer, safe to share across concurrent turns behind an `Arc`.
@@ -150,6 +158,8 @@ mod tests {
             memories_written: vec![],
             llm_backend: "mock".to_string(),
             model: None,
+            speaker_id: "household".to_string(),
+            speaker_name: None,
         }
     }
 

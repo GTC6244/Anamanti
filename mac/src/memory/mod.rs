@@ -92,6 +92,9 @@ pub struct Memory {
     pub content: String,
     pub source: MemorySource,
     pub created_at: i64,
+    /// The person this memory belongs to (`spk-…`), or `None` for a
+    /// shared/household entry visible to everyone (speaker_id_plan.md §3.2).
+    pub speaker_id: Option<String>,
 }
 
 /// The persistent memory store.
@@ -112,6 +115,9 @@ impl MemoryStore {
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
+        // A second connection (the speaker registry) may touch the same file;
+        // wait on a transient write lock rather than failing.
+        conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS memories (
@@ -119,7 +125,8 @@ impl MemoryStore {
                 kind       TEXT NOT NULL,
                 content    TEXT NOT NULL,
                 source     TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                speaker_id TEXT
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
                 USING fts5(content, content='memories', content_rowid='id');
@@ -138,50 +145,68 @@ impl MemoryStore {
             "#,
         )
         .context("initializing memory schema")?;
+        migrate_speaker_column(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Add an entry, returning its row id. Duplicate content of the same kind is
-    /// coalesced (returns the existing id) so repeated turns don't pile up copies.
+    /// Add a shared/household entry (no speaker attribution). Convenience wrapper
+    /// over [`add_scoped`](Self::add_scoped) preserving the pre-speaker-ID signature.
     pub fn add(&self, kind: MemoryKind, content: &str, source: MemorySource) -> Result<i64> {
+        self.add_scoped(kind, content, source, None)
+    }
+
+    /// Add an entry owned by `speaker_id` (`None` = shared/household), returning its
+    /// row id. Duplicate content of the same kind **and speaker** is coalesced
+    /// (returns the existing id) so repeated turns don't pile up copies; the same
+    /// content said by two people is kept separately.
+    pub fn add_scoped(
+        &self,
+        kind: MemoryKind,
+        content: &str,
+        source: MemorySource,
+        speaker_id: Option<&str>,
+    ) -> Result<i64> {
         let content = content.trim();
         let conn = self.conn.lock().unwrap();
+        // `IS` (not `=`) so a NULL speaker matches NULL — SQLite's null-safe compare.
         if let Ok(existing) = conn.query_row(
-            "SELECT id FROM memories WHERE kind = ?1 AND content = ?2",
-            params![kind.as_str(), content],
+            "SELECT id FROM memories WHERE kind = ?1 AND content = ?2 AND speaker_id IS ?3",
+            params![kind.as_str(), content, speaker_id],
             |row| row.get::<_, i64>(0),
         ) {
             return Ok(existing);
         }
         conn.execute(
-            "INSERT INTO memories (kind, content, source, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![kind.as_str(), content, source.as_str(), now()],
+            "INSERT INTO memories (kind, content, source, created_at, speaker_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![kind.as_str(), content, source.as_str(), now(), speaker_id],
         )
         .context("inserting memory")?;
         Ok(conn.last_insert_rowid())
     }
 
-    /// All entries, most recent first (the settings list view).
+    /// All entries, most recent first (the settings list view). Every speaker's
+    /// entries plus shared ones — the settings screen shows the whole store.
     pub fn list(&self) -> Result<Vec<Memory>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, kind, content, source, created_at FROM memories ORDER BY created_at DESC, id DESC",
+            "SELECT id, kind, content, source, created_at, speaker_id FROM memories \
+             ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], row_to_memory)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Full-text search for entries relevant to `query`, most relevant first. An
-    /// empty/degenerate query returns the most recent entries so the LLM always
-    /// gets some standing context.
+    /// Full-text search across **all** speakers (unscoped) — used by the settings
+    /// list and by "forget …". For per-turn recall use [`search_scoped`](Self::search_scoped).
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
         let match_expr = fts_match_expr(query);
         let conn = self.conn.lock().unwrap();
         if let Some(expr) = match_expr {
             let mut stmt = conn.prepare(
-                "SELECT m.id, m.kind, m.content, m.source, m.created_at \
+                "SELECT m.id, m.kind, m.content, m.source, m.created_at, m.speaker_id \
                  FROM memories_fts f JOIN memories m ON m.id = f.rowid \
                  WHERE memories_fts MATCH ?1 ORDER BY rank LIMIT ?2",
             )?;
@@ -189,12 +214,67 @@ impl MemoryStore {
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, kind, content, source, created_at FROM memories \
+                "SELECT id, kind, content, source, created_at, speaker_id FROM memories \
                  ORDER BY created_at DESC, id DESC LIMIT ?1",
             )?;
             let rows = stmt.query_map(params![limit as i64], row_to_memory)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         }
+    }
+
+    /// Full-text search scoped to a speaker for per-turn recall (speaker_id_plan.md
+    /// §4.2): returns `speaker_id`'s own entries **plus** shared (`NULL`) entries,
+    /// most relevant first. `speaker_id = None` (household/unattributed) returns
+    /// only shared entries. A degenerate query falls back to recent entries in the
+    /// same scope so the LLM always gets some standing context.
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        speaker_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Memory>> {
+        let match_expr = fts_match_expr(query);
+        let conn = self.conn.lock().unwrap();
+        let rows = match (match_expr, speaker_id) {
+            (Some(expr), Some(id)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT m.id, m.kind, m.content, m.source, m.created_at, m.speaker_id \
+                     FROM memories_fts f JOIN memories m ON m.id = f.rowid \
+                     WHERE memories_fts MATCH ?1 AND (m.speaker_id IS NULL OR m.speaker_id = ?2) \
+                     ORDER BY rank LIMIT ?3",
+                )?;
+                let mapped = stmt.query_map(params![expr, id, limit as i64], row_to_memory)?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            (Some(expr), None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT m.id, m.kind, m.content, m.source, m.created_at, m.speaker_id \
+                     FROM memories_fts f JOIN memories m ON m.id = f.rowid \
+                     WHERE memories_fts MATCH ?1 AND m.speaker_id IS NULL \
+                     ORDER BY rank LIMIT ?2",
+                )?;
+                let mapped = stmt.query_map(params![expr, limit as i64], row_to_memory)?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            (None, Some(id)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, kind, content, source, created_at, speaker_id FROM memories \
+                     WHERE speaker_id IS NULL OR speaker_id = ?1 \
+                     ORDER BY created_at DESC, id DESC LIMIT ?2",
+                )?;
+                let mapped = stmt.query_map(params![id, limit as i64], row_to_memory)?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            (None, None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, kind, content, source, created_at, speaker_id FROM memories \
+                     WHERE speaker_id IS NULL ORDER BY created_at DESC, id DESC LIMIT ?1",
+                )?;
+                let mapped = stmt.query_map(params![limit as i64], row_to_memory)?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
     }
 
     /// Delete one entry by id; returns whether a row was removed.
@@ -234,6 +314,16 @@ impl MemoryStore {
         }
     }
 
+    /// Reassign every memory owned by `from` to `to` (used when two speaker
+    /// clusters are merged, speaker_id_plan.md §4.5). Returns the number moved.
+    pub fn reassign_speaker(&self, from: &str, to: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE memories SET speaker_id = ?1 WHERE speaker_id = ?2",
+            params![to, from],
+        )?)
+    }
+
     /// Remove all entries.
     pub fn clear(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
@@ -254,7 +344,24 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         content: row.get(2)?,
         source: MemorySource::from_str(&row.get::<_, String>(3)?),
         created_at: row.get(4)?,
+        speaker_id: row.get(5)?,
     })
+}
+
+/// Add the `speaker_id` column to a pre-speaker-ID `memories` table. Fresh DBs get
+/// it from `CREATE TABLE`; this backfills older ones (existing rows read as `NULL`
+/// = shared/household, so nothing is lost). Idempotent: a no-op when present.
+fn migrate_speaker_column(conn: &Connection) -> Result<()> {
+    let has_column: bool = conn
+        .prepare("PRAGMA table_info(memories)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == "speaker_id");
+    if !has_column {
+        conn.execute("ALTER TABLE memories ADD COLUMN speaker_id TEXT", [])
+            .context("adding memories.speaker_id column")?;
+    }
+    Ok(())
 }
 
 fn now() -> i64 {
@@ -362,6 +469,66 @@ mod tests {
 
         assert_eq!(store.forget_matching("Milo").unwrap(), 1);
         assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn scoped_search_isolates_speakers_but_shares_household() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .add_scoped(
+                MemoryKind::Preference,
+                "The user likes jazz",
+                MemorySource::Inferred,
+                Some("spk-sam"),
+            )
+            .unwrap();
+        store
+            .add_scoped(
+                MemoryKind::Preference,
+                "The user hates jazz",
+                MemorySource::Inferred,
+                Some("spk-dana"),
+            )
+            .unwrap();
+        store
+            .add_scoped(
+                MemoryKind::Fact,
+                "The house wifi is FastNet",
+                MemorySource::Explicit,
+                None, // shared/household
+            )
+            .unwrap();
+
+        // Sam sees his own jazz pref + the shared wifi fact, not Dana's.
+        let sam = store.search_scoped("jazz wifi", Some("spk-sam"), 10).unwrap();
+        assert!(sam.iter().any(|m| m.content.contains("likes jazz")));
+        assert!(sam.iter().any(|m| m.content.contains("FastNet")));
+        assert!(!sam.iter().any(|m| m.content.contains("hates jazz")));
+
+        // Household scope sees only shared entries.
+        let shared = store.search_scoped("jazz wifi", None, 10).unwrap();
+        assert!(shared.iter().all(|m| m.speaker_id.is_none()));
+        assert!(shared.iter().any(|m| m.content.contains("FastNet")));
+
+        // The same words from two people are stored as distinct rows.
+        assert_eq!(store.count().unwrap(), 3);
+    }
+
+    #[test]
+    fn same_content_different_speakers_not_coalesced() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let a = store
+            .add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Explicit, Some("spk-a"))
+            .unwrap();
+        let b = store
+            .add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Explicit, Some("spk-b"))
+            .unwrap();
+        let a2 = store
+            .add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Inferred, Some("spk-a"))
+            .unwrap();
+        assert_ne!(a, b, "different speakers kept separate");
+        assert_eq!(a, a2, "same speaker + content coalesces");
+        assert_eq!(store.count().unwrap(), 2);
     }
 
     #[test]

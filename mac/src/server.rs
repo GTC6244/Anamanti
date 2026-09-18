@@ -56,8 +56,14 @@ async fn handle_connection(
                     peer_str(peer.as_ref()),
                     ev.event_type
                 );
-                control::handle_control(&mut device, &ev, pipeline.memory(), pipeline.settings())
-                    .await?;
+                control::handle_control(
+                    &mut device,
+                    &ev,
+                    pipeline.memory(),
+                    pipeline.settings(),
+                    pipeline.speaker().map(|s| s.registry()),
+                )
+                .await?;
             }
             Some(ev) if ev.event_type == types::AUDIO_START => {
                 let format = protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO);
@@ -84,6 +90,14 @@ fn log_event(peer: Option<&std::net::SocketAddr>, ev: &TurnEvent) {
     match ev {
         TurnEvent::Streaming => log::debug!("[{who}] streaming audio to STT"),
         TurnEvent::Transcript(t) => log::info!("[{who}] transcript: {t:?}"),
+        TurnEvent::Speaker(s) => {
+            let label = s.name.as_deref().unwrap_or(&s.speaker_id);
+            log::info!(
+                "[{who}] speaker: {label}{} (confidence {:.2})",
+                if s.is_new { " [new]" } else { "" },
+                s.confidence
+            );
+        }
         TurnEvent::MemoryStored(c) => log::info!("[{who}] remembered: {c:?}"),
         TurnEvent::Reply(r) => log::info!("[{who}] reply: {r:?}"),
         TurnEvent::Speaking => log::debug!("[{who}] streaming TTS audio to device"),

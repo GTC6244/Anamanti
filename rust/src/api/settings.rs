@@ -51,6 +51,22 @@ pub struct MemoryEntry {
     pub created_at: i64,
 }
 
+/// One identified speaker, for the settings "People" list (speaker_id_plan.md
+/// Phase C).
+#[derive(Debug, Clone)]
+pub struct SpeakerInfo {
+    /// Stable id (`spk-…`) referenced by memory + the graph.
+    pub id: String,
+    /// User-given name, or `None` while the cluster is still anonymous.
+    pub name: Option<String>,
+    /// Whether a person has named this cluster (vs. auto-created).
+    pub labeled: bool,
+    /// How many utterances back this voiceprint.
+    pub samples: i64,
+    /// Unix seconds when the cluster was first heard.
+    pub created_at: i64,
+}
+
 /// A requested settings change from the screen. Absent fields are left unchanged.
 #[derive(Debug, Clone)]
 pub struct SettingsUpdate {
@@ -123,5 +139,38 @@ pub fn clear_memories(discovery_timeout_secs: u64) -> Result<u32> {
     block_on(async move {
         let cache = EndpointCache::new();
         control::clear_memories(&cache, timeout(discovery_timeout_secs)).await
+    })
+}
+
+/// List the identified speakers (settings "People" view).
+pub fn list_speakers(discovery_timeout_secs: u64) -> Result<Vec<SpeakerInfo>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_speakers(&cache, timeout(discovery_timeout_secs)).await
+    })
+}
+
+/// Name (or rename) a speaker. Returns whether the change was applied.
+pub fn name_speaker(id: String, name: String, discovery_timeout_secs: u64) -> Result<bool> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::name_speaker(&cache, timeout(discovery_timeout_secs), &id, &name).await
+    })
+}
+
+/// Merge the `drop` speaker into `keep` (same person, two clusters). Returns
+/// whether the merge was applied.
+pub fn merge_speakers(keep: String, drop: String, discovery_timeout_secs: u64) -> Result<bool> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::merge_speakers(&cache, timeout(discovery_timeout_secs), &keep, &drop).await
+    })
+}
+
+/// Delete a speaker profile. Returns whether a profile was removed.
+pub fn delete_speaker(id: String, discovery_timeout_secs: u64) -> Result<bool> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::delete_speaker(&cache, timeout(discovery_timeout_secs), &id).await
     })
 }

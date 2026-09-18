@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use crate::memory::MemoryStore;
 use crate::settings::{SettingsUpdate, SharedSettings};
+use crate::speaker::SpeakerRegistry;
 use crate::wyoming::protocol::{types, WyomingEvent};
 use crate::wyoming::DynConnection;
 
@@ -29,6 +30,10 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MEMORIES
             | types::DELETE_MEMORY
             | types::CLEAR_MEMORIES
+            | types::LIST_SPEAKERS
+            | types::NAME_SPEAKER
+            | types::MERGE_SPEAKERS
+            | types::DELETE_SPEAKER
     )
 }
 
@@ -38,8 +43,9 @@ pub async fn handle_control(
     request: &WyomingEvent,
     memory: &MemoryStore,
     settings: &SharedSettings,
+    speaker: Option<&SpeakerRegistry>,
 ) -> Result<()> {
-    let response = respond(request, memory, settings);
+    let response = respond(request, memory, settings, speaker);
     device.send(&response).await
 }
 
@@ -50,8 +56,13 @@ pub fn respond(
     request: &WyomingEvent,
     memory: &MemoryStore,
     settings: &SharedSettings,
+    speaker: Option<&SpeakerRegistry>,
 ) -> WyomingEvent {
     match request.event_type.as_str() {
+        types::LIST_SPEAKERS => speakers_response(speaker),
+        types::NAME_SPEAKER => name_speaker(request, speaker),
+        types::MERGE_SPEAKERS => merge_speakers(request, memory, speaker),
+        types::DELETE_SPEAKER => delete_speaker(request, speaker),
         types::DESCRIBE_SETTINGS => settings_response(settings, true, "current settings"),
         types::SET_SETTINGS => match settings.apply(&parse_update(&request.data)) {
             Ok(_) => settings_response(settings, true, "settings applied"),
@@ -149,6 +160,99 @@ fn memory_error(message: &str) -> WyomingEvent {
     )
 }
 
+// ---- speaker identification control (speaker_id_plan.md Phase C) ----
+
+/// The `ambient-speakers` response listing identified speakers.
+fn speakers_response(speaker: Option<&SpeakerRegistry>) -> WyomingEvent {
+    let Some(reg) = speaker else {
+        return WyomingEvent::with_data(
+            types::SPEAKERS,
+            json!({ "ok": false, "message": SPEAKER_DISABLED, "speakers": [] }),
+        );
+    };
+    match reg.list() {
+        Ok(list) => {
+            let speakers: Vec<Value> = list
+                .into_iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id,
+                        "name": p.name,
+                        "labeled": p.labeled,
+                        "samples": p.samples as i64,
+                        "created_at": p.created_at,
+                    })
+                })
+                .collect();
+            WyomingEvent::with_data(types::SPEAKERS, json!({ "ok": true, "speakers": speakers }))
+        }
+        Err(e) => WyomingEvent::with_data(
+            types::SPEAKERS,
+            json!({ "ok": false, "message": format!("{e:#}"), "speakers": [] }),
+        ),
+    }
+}
+
+fn name_speaker(request: &WyomingEvent, speaker: Option<&SpeakerRegistry>) -> WyomingEvent {
+    let Some(reg) = speaker else {
+        return speaker_result(false, SPEAKER_DISABLED);
+    };
+    let id = request.data.get("id").and_then(Value::as_str);
+    let name = request.data.get("name").and_then(Value::as_str);
+    match (id, name) {
+        (Some(id), Some(name)) if !name.trim().is_empty() => match reg.rename(id, name) {
+            Ok(true) => speaker_result(true, &format!("named {id} \"{}\"", name.trim())),
+            Ok(false) => speaker_result(false, "no such speaker"),
+            Err(e) => speaker_result(false, &format!("{e:#}")),
+        },
+        _ => speaker_result(false, "name-speaker requires `id` and a non-empty `name`"),
+    }
+}
+
+fn merge_speakers(
+    request: &WyomingEvent,
+    memory: &MemoryStore,
+    speaker: Option<&SpeakerRegistry>,
+) -> WyomingEvent {
+    let Some(reg) = speaker else {
+        return speaker_result(false, SPEAKER_DISABLED);
+    };
+    let keep = request.data.get("keep").and_then(Value::as_str);
+    let drop = request.data.get("drop").and_then(Value::as_str);
+    match (keep, drop) {
+        (Some(keep), Some(drop)) => match reg.merge(keep, drop) {
+            Ok(true) => {
+                // Move the dropped speaker's memories onto the kept profile.
+                let moved = memory.reassign_speaker(drop, keep).unwrap_or(0);
+                speaker_result(true, &format!("merged {drop} into {keep} ({moved} memories moved)"))
+            }
+            Ok(false) => speaker_result(false, "merge failed (unknown id, or same id)"),
+            Err(e) => speaker_result(false, &format!("{e:#}")),
+        },
+        _ => speaker_result(false, "merge-speakers requires `keep` and `drop`"),
+    }
+}
+
+fn delete_speaker(request: &WyomingEvent, speaker: Option<&SpeakerRegistry>) -> WyomingEvent {
+    let Some(reg) = speaker else {
+        return speaker_result(false, SPEAKER_DISABLED);
+    };
+    match request.data.get("id").and_then(Value::as_str) {
+        Some(id) => match reg.delete(id) {
+            Ok(true) => speaker_result(true, "deleted"),
+            Ok(false) => speaker_result(false, "no such speaker"),
+            Err(e) => speaker_result(false, &format!("{e:#}")),
+        },
+        None => speaker_result(false, "delete-speaker requires `id`"),
+    }
+}
+
+fn speaker_result(ok: bool, message: &str) -> WyomingEvent {
+    WyomingEvent::with_data(types::SPEAKER_RESULT, json!({ "ok": ok, "message": message }))
+}
+
+const SPEAKER_DISABLED: &str = "speaker identification is disabled on the orchestrator";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,7 +285,7 @@ mod tests {
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();
-        let resp = respond(&WyomingEvent::new(types::DESCRIBE_SETTINGS), &mem, &s);
+        let resp = respond(&WyomingEvent::new(types::DESCRIBE_SETTINGS), &mem, &s, None);
         assert_eq!(resp.event_type, types::SETTINGS);
         assert_eq!(resp.data["ok"], json!(true));
         assert_eq!(resp.data["llm_backend"], json!("ollama"));
@@ -200,6 +304,7 @@ mod tests {
             ),
             &mem,
             &s,
+            None,
         );
         assert_eq!(resp.data["ok"], json!(true));
         assert_eq!(resp.data["tts_voice"], json!("en_US-amy-medium"));
@@ -215,6 +320,7 @@ mod tests {
             &req(types::SET_SETTINGS, json!({ "llm_backend": "anthropic" })),
             &mem,
             &s,
+            None,
         );
         assert_eq!(resp.event_type, types::SETTINGS);
         assert_eq!(resp.data["ok"], json!(false));
@@ -243,7 +349,7 @@ mod tests {
         mem.add(MemoryKind::Preference, "likes jazz", MemorySource::Inferred)
             .unwrap();
 
-        let listed = respond(&WyomingEvent::new(types::LIST_MEMORIES), &mem, &s);
+        let listed = respond(&WyomingEvent::new(types::LIST_MEMORIES), &mem, &s, None);
         assert_eq!(listed.event_type, types::MEMORIES);
         assert_eq!(listed.data["entries"].as_array().unwrap().len(), 2);
         assert_eq!(
@@ -251,12 +357,12 @@ mod tests {
             json!("the user likes tea")
         );
 
-        let deleted = respond(&req(types::DELETE_MEMORY, json!({ "id": id })), &mem, &s);
+        let deleted = respond(&req(types::DELETE_MEMORY, json!({ "id": id })), &mem, &s, None);
         assert_eq!(deleted.event_type, types::MEMORY_RESULT);
         assert_eq!(deleted.data["ok"], json!(true));
         assert_eq!(deleted.data["count"], json!(1));
 
-        let cleared = respond(&WyomingEvent::new(types::CLEAR_MEMORIES), &mem, &s);
+        let cleared = respond(&WyomingEvent::new(types::CLEAR_MEMORIES), &mem, &s, None);
         assert_eq!(cleared.data["ok"], json!(true));
         assert_eq!(cleared.data["count"], json!(1));
         assert_eq!(mem.count().unwrap(), 0);
@@ -266,7 +372,7 @@ mod tests {
     fn delete_without_id_is_an_in_band_error() {
         let s = settings();
         let mem = MemoryStore::open_in_memory().unwrap();
-        let resp = respond(&WyomingEvent::new(types::DELETE_MEMORY), &mem, &s);
+        let resp = respond(&WyomingEvent::new(types::DELETE_MEMORY), &mem, &s, None);
         assert_eq!(resp.event_type, types::MEMORY_RESULT);
         assert_eq!(resp.data["ok"], json!(false));
     }
@@ -276,7 +382,107 @@ mod tests {
         assert!(is_control_request(types::DESCRIBE_SETTINGS));
         assert!(is_control_request(types::SET_SETTINGS));
         assert!(is_control_request(types::LIST_MEMORIES));
+        assert!(is_control_request(types::LIST_SPEAKERS));
+        assert!(is_control_request(types::NAME_SPEAKER));
+        assert!(is_control_request(types::MERGE_SPEAKERS));
+        assert!(is_control_request(types::DELETE_SPEAKER));
         assert!(!is_control_request(types::AUDIO_START));
         assert!(!is_control_request(types::TRANSCRIPT));
+    }
+
+    #[test]
+    fn speaker_requests_report_disabled_without_a_registry() {
+        let s = settings();
+        let mem = MemoryStore::open_in_memory().unwrap();
+        let resp = respond(&WyomingEvent::new(types::LIST_SPEAKERS), &mem, &s, None);
+        assert_eq!(resp.event_type, types::SPEAKERS);
+        assert_eq!(resp.data["ok"], json!(false));
+        assert_eq!(resp.data["speakers"].as_array().unwrap().len(), 0);
+
+        let resp = respond(
+            &req(types::NAME_SPEAKER, json!({ "id": "spk-1", "name": "Sam" })),
+            &mem,
+            &s,
+            None,
+        );
+        assert_eq!(resp.event_type, types::SPEAKER_RESULT);
+        assert_eq!(resp.data["ok"], json!(false));
+    }
+
+    #[test]
+    fn list_name_and_delete_speakers() {
+        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry};
+        let s = settings();
+        let mem = MemoryStore::open_in_memory().unwrap();
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let e = MockSpeakerEmbedder::default();
+        let id = reg
+            .create_cluster(&e.embed(&vec![1000i16; 20_000]).unwrap())
+            .unwrap();
+
+        // List shows the anonymous cluster.
+        let listed = respond(&WyomingEvent::new(types::LIST_SPEAKERS), &mem, &s, Some(&reg));
+        assert_eq!(listed.event_type, types::SPEAKERS);
+        assert_eq!(listed.data["ok"], json!(true));
+        let arr = listed.data["speakers"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], json!(id));
+        assert_eq!(arr[0]["labeled"], json!(false));
+
+        // Name it.
+        let named = respond(
+            &req(types::NAME_SPEAKER, json!({ "id": id, "name": "Sam" })),
+            &mem,
+            &s,
+            Some(&reg),
+        );
+        assert_eq!(named.event_type, types::SPEAKER_RESULT);
+        assert_eq!(named.data["ok"], json!(true));
+        assert_eq!(reg.get(&id).unwrap().unwrap().name.as_deref(), Some("Sam"));
+
+        // Naming an unknown speaker fails in-band.
+        let bad = respond(
+            &req(types::NAME_SPEAKER, json!({ "id": "nope", "name": "X" })),
+            &mem,
+            &s,
+            Some(&reg),
+        );
+        assert_eq!(bad.data["ok"], json!(false));
+
+        // Delete it.
+        let del = respond(
+            &req(types::DELETE_SPEAKER, json!({ "id": id })),
+            &mem,
+            &s,
+            Some(&reg),
+        );
+        assert_eq!(del.data["ok"], json!(true));
+        assert_eq!(reg.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn merge_speakers_moves_memories() {
+        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry};
+        use crate::memory::{MemoryKind, MemorySource};
+        let s = settings();
+        let mem = MemoryStore::open_in_memory().unwrap();
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let e = MockSpeakerEmbedder::default();
+        let keep = reg.create_cluster(&e.embed(&vec![1000i16; 20_000]).unwrap()).unwrap();
+        let drop = reg.create_cluster(&e.embed(&vec![500i16; 20_000]).unwrap()).unwrap();
+        mem.add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Explicit, Some(&drop))
+            .unwrap();
+
+        let resp = respond(
+            &req(types::MERGE_SPEAKERS, json!({ "keep": keep, "drop": drop })),
+            &mem,
+            &s,
+            Some(&reg),
+        );
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(reg.count().unwrap(), 1, "dropped profile removed");
+        // The dropped speaker's memory now belongs to the kept speaker.
+        let hits = mem.search_scoped("tea", Some(&keep), 10).unwrap();
+        assert!(hits.iter().any(|m| m.content == "likes tea"));
     }
 }

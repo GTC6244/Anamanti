@@ -8,6 +8,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   FakeOrchestratorClient({
     OrchestratorSettingsView? settings,
     List<MemoryView>? memories,
+    List<SpeakerView>? speakers,
     this.throwOnFetch = false,
   })  : _settings = settings ??
             const OrchestratorSettingsView(
@@ -17,10 +18,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
               llmModel: 'llama3.2',
               ttsVoice: null,
             ),
-        _memories = memories ?? <MemoryView>[];
+        _memories = memories ?? <MemoryView>[],
+        _speakers = speakers ?? <SpeakerView>[];
 
   OrchestratorSettingsView _settings;
   final List<MemoryView> _memories;
+  final List<SpeakerView> _speakers;
   final bool throwOnFetch;
 
   // Call records for assertions.
@@ -28,6 +31,9 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<Map<String, dynamic>> applyCalls = <Map<String, dynamic>>[];
   final List<int> deleted = <int>[];
   int clearCount = 0;
+  final List<Map<String, String>> namedCalls = <Map<String, String>>[];
+  final List<Map<String, String>> mergeCalls = <Map<String, String>>[];
+  final List<String> deletedSpeakers = <String>[];
 
   @override
   Future<OrchestratorSettingsView> fetchSettings() async {
@@ -75,5 +81,38 @@ class FakeOrchestratorClient implements OrchestratorClient {
     final n = _memories.length;
     _memories.clear();
     return n;
+  }
+
+  @override
+  Future<List<SpeakerView>> listSpeakers() async => List.of(_speakers);
+
+  @override
+  Future<bool> nameSpeaker(String id, String name) async {
+    namedCalls.add({'id': id, 'name': name});
+    final i = _speakers.indexWhere((s) => s.id == id);
+    if (i < 0) return false;
+    final s = _speakers[i];
+    _speakers[i] = SpeakerView(
+      id: s.id,
+      name: name,
+      labeled: true,
+      samples: s.samples,
+      createdAt: s.createdAt,
+    );
+    return true;
+  }
+
+  @override
+  Future<bool> mergeSpeakers({required String keep, required String drop}) async {
+    mergeCalls.add({'keep': keep, 'drop': drop});
+    _speakers.removeWhere((s) => s.id == drop);
+    return true;
+  }
+
+  @override
+  Future<bool> deleteSpeaker(String id) async {
+    deletedSpeakers.add(id);
+    _speakers.removeWhere((s) => s.id == id);
+    return true;
   }
 }

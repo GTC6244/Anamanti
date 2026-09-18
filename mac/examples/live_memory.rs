@@ -139,6 +139,8 @@ async fn run() -> anyhow::Result<()> {
         memories_written: mem.iter().map(|s| s.to_string()).collect(),
         llm_backend: "mock".to_string(),
         model: None,
+        speaker_id: "household".to_string(),
+        speaker_name: None,
     };
     log.append(&mk(
         "l1",
@@ -170,7 +172,7 @@ async fn run() -> anyhow::Result<()> {
 
     let recall = HelixRecall::new(helix.clone(), embedder.clone(), 6);
     let query = "what kind of music am I into";
-    let hits = recall.recall(query, 8).await?;
+    let hits = recall.recall(query, None, 8).await?;
     println!("   query: {query:?}");
     for h in &hits {
         println!("   → {h}");

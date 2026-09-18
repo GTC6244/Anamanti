@@ -96,6 +96,19 @@ async fn run() -> Result<()> {
         log::info!("memory backend: SQLite FTS");
     }
 
+    // Per-person speaker identification (opt-in; speaker_id_plan.md). Failure or
+    // absence degrades to the shared-household behavior.
+    match config.build_speaker_service() {
+        Ok(Some(speaker)) => {
+            log::info!("speaker identification: enabled (per-person memory + context)");
+            pipeline = pipeline.with_speaker(speaker);
+        }
+        Ok(None) => log::info!("speaker identification: disabled (shared household)"),
+        Err(e) => {
+            log::error!("speaker ID init failed ({e:#}); continuing with shared household");
+        }
+    }
+
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
         stt_addr: config.stt_addr,
         tts_addr: config.tts_addr,

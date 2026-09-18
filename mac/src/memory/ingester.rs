@@ -104,7 +104,16 @@ impl MemoryIngester {
                                 Vec::new()
                             });
                     self.helix
-                        .ingest_turn(&r.id, &r.session_id, r.ts, &turn_text(r), vector, &entities)
+                        .ingest_turn(
+                            &r.id,
+                            &r.session_id,
+                            r.ts,
+                            &turn_text(r),
+                            vector,
+                            &entities,
+                            speaker_of(r),
+                            r.speaker_name.as_deref(),
+                        )
                         .await
                         .with_context(|| format!("ingesting turn {}", r.id))?;
                     ingested += 1;
@@ -115,7 +124,7 @@ impl MemoryIngester {
                     let entities = self.extractor.extract(content).await.unwrap_or_default();
                     let ext_id = format!("{}-mem-{}", r.id, mi);
                     self.helix
-                        .ingest_memory(&ext_id, "memory", content, vector, &entities)
+                        .ingest_memory(&ext_id, "memory", content, vector, &entities, speaker_of(r))
                         .await
                         .with_context(|| format!("ingesting memory {ext_id}"))?;
                 }
@@ -156,6 +165,16 @@ impl MemoryIngester {
     fn write_offset(&self, offset: u64) -> Result<()> {
         std::fs::write(&self.offset_path, offset.to_string())
             .with_context(|| format!("writing offset {}", self.offset_path.display()))
+    }
+}
+
+/// The speaker id to attribute a record to, normalizing a missing id (pre-speaker-ID
+/// logs) to the shared household user.
+fn speaker_of(r: &ChatLogRecord) -> &str {
+    if r.speaker_id.is_empty() {
+        "household"
+    } else {
+        &r.speaker_id
     }
 }
 
