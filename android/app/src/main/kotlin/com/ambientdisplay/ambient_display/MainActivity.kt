@@ -28,6 +28,10 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Cache the MicBridge class for the Rust engine's native thread (see
+        // MicBridge.nativeCacheClass). Runs here, on an app thread, so the class is
+        // resolved through the app class loader before the engine ever starts.
+        MicBridge.nativeCacheClass()
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         multicastLock = wifi.createMulticastLock("ambient-mdns").apply {
             setReferenceCounted(false)

@@ -21,6 +21,11 @@ WakeWordConfig _cfg() => WakeWordConfig(
       smoothingWindow: 2,
       fireOnPeak: false,
       playbackBufferSecs: 30,
+      useAudiorecord: false,
+      micSource: 6,
+      platformAec: false,
+      platformAgc: true,
+      platformNs: true,
     );
 
 WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =>

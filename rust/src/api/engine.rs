@@ -116,6 +116,24 @@ pub struct WakeWordConfig {
     /// a whole spoken reply so long TTS answers are not truncated when the network
     /// delivers audio faster than real-time playback drains it. A/B-tunable.
     pub playback_buffer_secs: u32,
+    /// **Android only.** Use the Kotlin `AudioRecord` capture layer instead of
+    /// `cpal`, to reach the HAL's far-field `VOICE_RECOGNITION` source (array
+    /// beamforming) + platform audio effects. `false` (default) keeps the `cpal`
+    /// path; ignored entirely off-Android. A/B-tunable from the settings screen.
+    pub use_audiorecord: bool,
+    /// `android.media.MediaRecorder.AudioSource` for the AudioRecord path
+    /// (6 = `VOICE_RECOGNITION`, 7 = `VOICE_COMMUNICATION`, 1 = `MIC`). Only used
+    /// when `use_audiorecord` is set.
+    pub mic_source: u32,
+    /// Attach the platform `AcousticEchoCanceler` to the AudioRecord session (if the
+    /// device offers it). Default off — the host-side WebRTC APM does AEC, and prior
+    /// on-hardware testing found this device's platform AEC did not actually cancel.
+    pub platform_aec: bool,
+    /// Attach the platform `AutomaticGainControl` to the AudioRecord session (if
+    /// available). Helps the Echo Show's quiet far-field pickup.
+    pub platform_agc: bool,
+    /// Attach the platform `NoiseSuppressor` to the AudioRecord session (if available).
+    pub platform_ns: bool,
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it

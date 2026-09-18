@@ -20,6 +20,11 @@ WakeWordConfig _cfg() => WakeWordConfig(
       smoothingWindow: 2,
       fireOnPeak: false,
       playbackBufferSecs: 30,
+      useAudiorecord: false,
+      micSource: 6,
+      platformAec: false,
+      platformAgc: true,
+      platformNs: true,
     );
 
 void main() {

@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use tokio::time::{sleep_until, Instant};
 
+use crate::audio_dump::TurnAudioDump;
 use crate::llm::{LlmBackend, LlmTurn};
 use crate::memory::chatlog::now_secs;
 use crate::memory::{
@@ -205,6 +206,10 @@ impl Pipeline {
         // swap never changes the backend/voice mid-reply.
         let runtime = self.settings.snapshot();
 
+        // Debug-only AEC corpus capture (no-op unless AMBIENT_AUDIO_DUMP_DIR is set):
+        // records this turn's device mic (near-end) and Piper TTS (far-end reference).
+        let dump = TurnAudioDump::for_turn();
+
         // 2. Open the STT stream and pump device PCM into it until the transcript.
         let stt_conn = connector.connect_stt().await?;
         let mut stt = SttSession::begin(stt_conn, format).await?;
@@ -213,7 +218,14 @@ impl Pipeline {
         let end_silence = Duration::from_millis(runtime.end_silence_ms);
         let voice_rms_threshold = runtime.voice_rms_threshold;
         let Some(transcript) = self
-            .stream_to_transcript(device, &mut stt, end_silence, voice_rms_threshold)
+            .stream_to_transcript(
+                device,
+                &mut stt,
+                end_silence,
+                voice_rms_threshold,
+                format.rate,
+                dump.as_ref(),
+            )
             .await?
         else {
             // Device closed or timed out before a transcript — abandon the turn.
@@ -221,6 +233,9 @@ impl Pipeline {
             return Ok(TurnOutcome::Completed);
         };
         let _ = stt.finish().await; // close the STT audio stream (post server-VAD)
+        if let Some(d) = dump.as_ref() {
+            d.set_transcript(&transcript);
+        }
         on_event(TurnEvent::Transcript(transcript.clone()));
 
         // Relay the transcript to the device (renders on screen; ends its input).
@@ -239,8 +254,18 @@ impl Pipeline {
         //    with Piper as soon as they form, so playback begins before the full
         //    reply is generated (streaming TTS; architecture.md §4 SPEAKING).
         let (reply, memories_written) = self
-            .respond_and_speak(&runtime, &transcript, device, connector, on_event)
+            .respond_and_speak(
+                &runtime,
+                &transcript,
+                device,
+                connector,
+                on_event,
+                dump.as_ref(),
+            )
             .await?;
+        if let Some(d) = dump.as_ref() {
+            d.set_reply(&reply);
+        }
         on_event(TurnEvent::Reply(reply.clone()));
 
         // Record the completed turn for the background GraphRAG ingester. Never
@@ -267,6 +292,8 @@ impl Pipeline {
         stt: &mut SttSession<crate::wyoming::DynRead, crate::wyoming::DynWrite>,
         end_silence: std::time::Duration,
         voice_rms_threshold: f64,
+        mic_rate: u32,
+        dump: Option<&TurnAudioDump>,
     ) -> Result<Option<String>> {
         // `voice_rms_threshold`: RMS (i16 units) above which a chunk counts as speech
         // rather than room noise. The Echo's far-field pickup is quiet (~50 idle,
@@ -299,6 +326,11 @@ impl Pipeline {
                     match dev? {
                         Some(ev) if ev.event_type == types::AUDIO_CHUNK => {
                             if let Some(pcm) = ev.payload {
+                                // Capture the near-end mic for the AEC corpus (the
+                                // whole listening window, incl. pre/post-speech).
+                                if let Some(d) = dump {
+                                    d.push_mic(&pcm, mic_rate);
+                                }
                                 if !finalized {
                                     let now = Instant::now();
                                     if rms_i16_le(&pcm) > voice_rms_threshold {
@@ -365,6 +397,7 @@ impl Pipeline {
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
     ) -> Result<(String, Vec<String>)> {
         // Memory entries written this turn (for the chat log / ingester).
         let mut memories_written = Vec::new();
@@ -383,7 +416,7 @@ impl Pipeline {
                 .ok();
             on_event(TurnEvent::Speaking);
             let mut audio_started = false;
-            self.speak_chunk(writer, runtime, connector, &reply, &mut audio_started)
+            self.speak_chunk(writer, runtime, connector, &reply, &mut audio_started, dump)
                 .await?;
             if audio_started {
                 protocol::write_event(writer, &WyomingEvent::audio_stop(0))
@@ -466,7 +499,14 @@ impl Pipeline {
                             speaking = true;
                         }
                         if !self
-                            .speak_chunk(writer, runtime, connector, &sentence, &mut audio_started)
+                            .speak_chunk(
+                                writer,
+                                runtime,
+                                connector,
+                                &sentence,
+                                &mut audio_started,
+                                dump,
+                            )
                             .await?
                         {
                             // Device closed mid-relay; stop generating.
@@ -479,7 +519,7 @@ impl Pipeline {
                     if !speaking {
                         on_event(TurnEvent::Speaking);
                     }
-                    self.speak_chunk(writer, runtime, connector, &rest, &mut audio_started)
+                    self.speak_chunk(writer, runtime, connector, &rest, &mut audio_started, dump)
                         .await?;
                 }
                 // Close the single coalesced device-facing audio stream.
@@ -598,6 +638,7 @@ impl Pipeline {
         connector: &dyn ServiceConnector,
         text: &str,
         audio_started: &mut bool,
+        dump: Option<&TurnAudioDump>,
     ) -> Result<bool> {
         let text = sanitize_for_tts(text);
         if text.trim().is_empty() {
@@ -606,7 +647,20 @@ impl Pipeline {
         let tts_conn = connector.connect_tts().await?;
         let mut tts = TtsSession::begin(tts_conn, &text, runtime.tts_voice.as_deref()).await?;
 
+        // Piper announces its rate in each `audio-start`; track it so dumped TTS
+        // (the far-end reference) is tagged with the right sample rate.
+        let mut tts_rate = AudioFormat::default().rate;
         while let Some(ev) = tts.next_audio().await? {
+            if ev.event_type == types::AUDIO_START {
+                if let Some(fmt) = protocol::audio_format(&ev.data) {
+                    tts_rate = fmt.rate;
+                }
+            }
+            if ev.event_type == types::AUDIO_CHUNK {
+                if let (Some(d), Some(pcm)) = (dump, ev.payload.as_deref()) {
+                    d.push_tts(pcm, tts_rate);
+                }
+            }
             // Coalesce this sentence's Piper stream into the turn's single
             // device-facing stream: forward exactly one `audio-start`, relay every
             // `audio-chunk`, and swallow the per-sentence `audio-stop` (the turn
