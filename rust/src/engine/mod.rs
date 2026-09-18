@@ -135,9 +135,14 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     #[cfg(not(target_os = "android"))]
     let use_audiorecord = false;
 
-    #[allow(unused_mut)]
+    // Both `mut` and the initial assignment are only exercised on one platform each
+    // (capture_stream is reassigned on the cpal/host path; precalibrated_rate only in
+    // the Android AudioRecord `cfg` block), so the other build sees an unused `mut` /
+    // dead initial write. The bindings are correct on both — silence the host-only lints.
+    #[allow(unused_mut, unused_assignments)]
     let mut capture_stream: Option<capture::CaptureStream> = None;
     // Set in AudioRecord mode (device reports the true rate → skip cpal calibration).
+    #[allow(unused_mut)]
     let mut precalibrated_rate: Option<u32> = None;
     let info: capture::CaptureInfo;
 
