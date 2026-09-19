@@ -264,6 +264,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **`ambient-interrupt`** (device → orchestrator): a project-local barge-in frame that
   tells the orchestrator to abort the in-flight LLM generation + TTS at once, rather
   than only learning of the interruption when the socket drops.
+- **`ambient-timer`** (orchestrator → device): a project-local **device-action** frame
+  (`data.action` = `start`/`cancel`; `duration_secs` + optional `label`). Emitted when
+  an LLM **tool** the model called on the Mac (`set_timer` / `cancel_timer`) asks to
+  act on the device. The device owns the resulting state — unlimited concurrent
+  countdowns, the on-screen UI, and the alarm — so a timer keeps running after the
+  turn's socket closes and even if the Mac disconnects. See §8.
 
 ---
 
@@ -313,7 +319,95 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 ---
 
-## 8. Cross-references
+## 8. Extending the assistant with tools & device actions
+
+The assistant does more than chat: the LLM can call **tools** to fetch information
+and to take **actions** on the device. This section is the canonical process for
+adding a new capability.
+
+### 8.1 How tool calling works
+
+Tool calling lives in the **rig engine** (`mac/src/llm/rig.rs`), the default LLM
+engine (`AMBIENT_LLM_ENGINE=rig`; `native` opts out to the tool-less HTTP backends).
+Each turn the orchestrator advertises a set of **tool definitions** (name +
+description + JSON-schema for the arguments) to the model. If the model asks to call
+one, `RigBackend::respond` runs a short **tool-negotiation loop** (up to
+`MAX_TOOL_ROUNDS`): it executes the tool, appends the result to the conversation, and
+completes again — until the model answers with no further tool calls. Because a live
+`ollama` streaming parser drops non-final tool calls, tool turns use a **non-streaming
+completion**; the reply is still spoken whole (and rendered) via the sentence-chunked
+TTS path, so there is no user-visible regression.
+
+There are **two flavors** of tool:
+
+- **Info tool** — runs entirely on the Mac and returns text the model speaks
+  (e.g. `internet_search`). Adding one is self-contained in `rig.rs`.
+- **Action tool** — additionally causes an effect on the Echo Show (e.g.
+  `set_timer`). The tool cannot reach the device directly (it runs inside the LLM
+  loop, which has no socket), so it emits a **`DeviceAction`** onto a per-turn
+  channel; the orchestrator's reply loop drains that channel and writes a
+  project-local **`ambient-*`** frame to the device on the same turn socket. The
+  device owns whatever state results.
+
+### 8.2 Adding an **info** tool (Mac-only)
+
+1. In `mac/src/llm/rig.rs`, add a tool `NAME`, a `Deserialize` args struct, a
+   `…_definition() -> ToolDefinition` (JSON-schema for the args), and an
+   `…_invoke(args) -> Result<String>` that does the work and returns a short,
+   speakable result.
+2. Register it: add its definition in `Tools::new` and a match arm in
+   `Tools::dispatch`.
+3. Nudge the model: extend `tool_guidance` so the preamble tells the model when to
+   call it (only when the tool is actually advertised).
+4. Test it in `rig.rs` (a unit test for `…_invoke`, and an end-to-end
+   `serve_sequence` test that has a fake model call the tool then answer).
+
+No protocol, device, or Flutter changes are needed — build + test with
+`cargo test --manifest-path mac/Cargo.toml`.
+
+### 8.3 Adding a **device action** (spans all layers)
+
+Worked example: **timers** (`set_timer` / `cancel_timer`). The flow is
+model → Mac tool → `DeviceAction` → `ambient-timer` frame → device timer manager →
+FRB event → Flutter UI. To add a new action, mirror these steps:
+
+1. **Mac tool** (`mac/src/llm/rig.rs`): as in §8.2, but `…_invoke` takes the per-turn
+   `Option<&ActionSink>` and `send`s a new `DeviceAction` variant
+   (`mac/src/llm/mod.rs`) instead of doing the work locally. Action tools are
+   registered unconditionally (they need no config).
+2. **Relay** (`mac/src/orchestrator.rs`): the reply loop already drains the per-turn
+   action channel (`drain_device_actions`) and writes the frame; add a match arm
+   mapping the new `DeviceAction` to its `WyomingEvent` constructor.
+3. **Wire frame** (`mac/src/wyoming/protocol.rs` **and** `rust/src/wyoming/protocol.rs`,
+   kept **byte-identical** with round-trip tests in both crates): add an `ambient-*`
+   `type` const, constructor(s), and — on the device side — a decoder
+   (e.g. `timer_command()`).
+4. **Device intake** (`rust/src/wyoming/client.rs`): add a `TurnUpdate` variant and a
+   branch in `handle_server_event` that decodes the frame into it. The frame only
+   arrives **mid-turn** (the device is always the Wyoming *client*; the socket exists
+   only during a turn), which is fine — device actions are triggered by the very turn
+   that carries them.
+5. **Device state** (`rust/src/engine/`): own the resulting state in a manager held by
+   the long-lived `Network`/`Shared` (so it outlives the turn socket), applied from
+   the `on_update` closure in `net.rs`. Reuse the shared `PlaybackSink` for any sound
+   (no second audio path). See `rust/src/engine/timer.rs`.
+6. **FRB event** (`rust/src/api/engine.rs`): add `WakeWordEventKind` variant(s) +
+   neutral-default payload fields to the flat `WakeWordEvent`, plus `pub(crate)`
+   builders; the manager emits them via the `StreamSink`. Then **regenerate**:
+   `flutter_rust_bridge_codegen generate` (never hand-edit `frb_generated.rs` or
+   `lib/src/rust/`).
+7. **Flutter** (`lib/`): fold the new event kind into `AssistantState` in
+   `AssistantController._onEvent` (the exhaustive `switch` forces you to handle it),
+   and render it. See `lib/src/ui/timers_overlay.dart`, mounted in the always-visible
+   `Stack` in `ambient_screen.dart` so it shows during both idle slideshow and a live
+   turn.
+
+Build/verify each layer independently: `cargo test` for `mac/` and `rust/`,
+`flutter test` + `flutter analyze` for the UI.
+
+---
+
+## 9. Cross-references
 
 - Delivery phases & open questions → [`Plan.MD`](./Plan.MD)
 - Contributor / AI-agent build guidance → [`agents.md`](./agents.md)

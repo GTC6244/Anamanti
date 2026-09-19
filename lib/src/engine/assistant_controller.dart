@@ -60,6 +60,40 @@ enum TurnPhase {
   error,
 }
 
+/// One on-device countdown timer, as the UI sees it (Phase 2 device actions). The
+/// device owns the authoritative countdown + alarm; the UI just renders a live
+/// countdown to [deadline] and highlights [finished] ones (their alarm is sounding).
+@immutable
+class TimerModel {
+  const TimerModel({
+    required this.id,
+    required this.label,
+    required this.deadline,
+    this.finished = false,
+  });
+
+  /// Stable device-assigned id (used to update/remove the right chip).
+  final int id;
+
+  /// Spoken label ("pasta"), or empty for an unlabeled timer.
+  final String label;
+
+  /// Wall-clock instant the timer fires, derived on start from the reported
+  /// remaining seconds so the UI can count down smoothly without per-second events.
+  final DateTime deadline;
+
+  /// True once the timer reached zero (the device alarm is sounding); the chip stays
+  /// until acknowledged.
+  final bool finished;
+
+  TimerModel copyWith({bool? finished}) => TimerModel(
+        id: id,
+        label: label,
+        deadline: deadline,
+        finished: finished ?? this.finished,
+      );
+}
+
 /// An immutable snapshot of everything the UI needs to render one frame.
 @immutable
 class AssistantState {
@@ -72,6 +106,7 @@ class AssistantState {
     this.wakeWord = '',
     this.micLevel = 0.0,
     this.captureReady = false,
+    this.timers = const [],
   });
 
   final TurnPhase phase;
@@ -98,6 +133,10 @@ class AssistantState {
   /// True once the mic capture stream has started at least once.
   final bool captureReady;
 
+  /// Active on-device timers (Phase 2), in start order. Independent of [phase] —
+  /// they run and display during idle and during a turn alike.
+  final List<TimerModel> timers;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -110,6 +149,7 @@ class AssistantState {
     String? wakeWord,
     double? micLevel,
     bool? captureReady,
+    List<TimerModel>? timers,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -120,6 +160,7 @@ class AssistantState {
       wakeWord: wakeWord ?? this.wakeWord,
       micLevel: micLevel ?? this.micLevel,
       captureReady: captureReady ?? this.captureReady,
+      timers: timers ?? this.timers,
     );
   }
 }
@@ -289,6 +330,34 @@ class AssistantController extends ChangeNotifier {
         _scheduleReconnect('capture stopped');
       case WakeWordEventKind.error:
         _scheduleReconnect(e.message);
+      case WakeWordEventKind.timerStarted:
+        // Anchor a wall-clock deadline so the overlay can count down smoothly with
+        // no per-second events from Rust. Replace any existing timer with this id.
+        final deadline = _clock().add(Duration(seconds: e.timerRemainingSecs));
+        _emit(_state.copyWith(timers: [
+          ..._state.timers.where((t) => t.id != e.timerId),
+          TimerModel(id: e.timerId, label: e.timerLabel, deadline: deadline),
+        ]));
+      case WakeWordEventKind.timerFinished:
+        // Mark it finished (its alarm is sounding); the chip stays until dismissed.
+        _emit(_state.copyWith(
+          timers: _state.timers
+              .map((t) => t.id == e.timerId ? t.copyWith(finished: true) : t)
+              .toList(),
+        ));
+      case WakeWordEventKind.timerCancelled:
+        _emit(_state.copyWith(
+          timers: _state.timers.where((t) => t.id != e.timerId).toList(),
+        ));
+    }
+  }
+
+  /// Dismiss a timer from the UI (e.g. the user taps a finished/ringing chip).
+  /// Device-side the timer has already fired or been cancelled; this only clears the
+  /// chip.
+  void dismissTimer(int id) {
+    if (_state.timers.any((t) => t.id == id)) {
+      _emit(_state.copyWith(timers: _state.timers.where((t) => t.id != id).toList()));
     }
   }
 

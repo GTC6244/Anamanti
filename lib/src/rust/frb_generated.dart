@@ -907,8 +907,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 13)
+      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -920,6 +920,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       model: dco_decode_String(arr[7]),
       transcript: dco_decode_String(arr[8]),
       reply: dco_decode_String(arr[9]),
+      timerId: dco_decode_u_32(arr[10]),
+      timerLabel: dco_decode_String(arr[11]),
+      timerRemainingSecs: dco_decode_u_32(arr[12]),
     );
   }
 
@@ -1255,6 +1258,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_model = sse_decode_String(deserializer);
     var var_transcript = sse_decode_String(deserializer);
     var var_reply = sse_decode_String(deserializer);
+    var var_timerId = sse_decode_u_32(deserializer);
+    var var_timerLabel = sse_decode_String(deserializer);
+    var var_timerRemainingSecs = sse_decode_u_32(deserializer);
     return WakeWordEvent(
       kind: var_kind,
       message: var_message,
@@ -1266,6 +1272,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       model: var_model,
       transcript: var_transcript,
       reply: var_reply,
+      timerId: var_timerId,
+      timerLabel: var_timerLabel,
+      timerRemainingSecs: var_timerRemainingSecs,
     );
   }
 
@@ -1574,6 +1583,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.model, serializer);
     sse_encode_String(self.transcript, serializer);
     sse_encode_String(self.reply, serializer);
+    sse_encode_u_32(self.timerId, serializer);
+    sse_encode_String(self.timerLabel, serializer);
+    sse_encode_u_32(self.timerRemainingSecs, serializer);
   }
 
   @protected

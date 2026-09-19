@@ -40,6 +40,9 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       model: model,
       transcript: '',
       reply: '',
+      timerId: 0,
+      timerLabel: '',
+      timerRemainingSecs: 0,
     );
 
 void main() {

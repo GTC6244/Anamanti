@@ -105,6 +105,31 @@ pub mod types {
     /// orchestrator → device: the selectable models (data: `ok`, `models` array of
     /// `{provider, id, label}`), scoped to the last 12 months per provider.
     pub const MODELS: &str = "ambient-models";
+
+    // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
+    //
+    // orchestrator → device: a tool the LLM called on the Mac emits a device action
+    // relayed as this frame during the turn. The device owns the resulting state
+    // (unlimited concurrent timers, the countdown UI, and the alarm sound), so it
+    // keeps ticking after the turn's socket closes and even if the Mac disconnects.
+    // Byte-identical to the orchestrator crate's `types::TIMER`.
+
+    /// orchestrator → device: start or cancel a timer (data: `action` =
+    /// `"start"`/`"cancel"`; for `start`: `duration_secs` + optional `label`; for
+    /// `cancel`: optional `label`, where an absent/null label cancels all timers).
+    pub const TIMER: &str = "ambient-timer";
+}
+
+/// A device-action timer command decoded from an `ambient-timer` frame (Phase 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimerCommand {
+    /// Start a countdown timer for `duration_secs` with an optional spoken `label`.
+    Start {
+        label: Option<String>,
+        duration_secs: u64,
+    },
+    /// Cancel timers matching `label`, or *all* timers when `label` is `None`.
+    Cancel { label: Option<String> },
 }
 
 /// A decoded Wyoming event: a `type` tag, an optional structured `data` object,
@@ -227,6 +252,49 @@ impl WyomingEvent {
     /// True if this is an `ambient-interrupt` (barge-in) event.
     pub fn is_interrupt(&self) -> bool {
         self.event_type == types::INTERRUPT
+    }
+
+    /// An `ambient-timer` **start** action (used by tests + the mock server; the
+    /// orchestrator emits the wire form directly).
+    pub fn timer_start(duration_secs: u64, label: Option<&str>) -> Self {
+        Self::with_data(
+            types::TIMER,
+            json!({ "action": "start", "duration_secs": duration_secs, "label": label }),
+        )
+    }
+
+    /// An `ambient-timer` **cancel** action (`label` `None` cancels all timers).
+    pub fn timer_cancel(label: Option<&str>) -> Self {
+        Self::with_data(
+            types::TIMER,
+            json!({ "action": "cancel", "label": label }),
+        )
+    }
+
+    /// Decode an `ambient-timer` frame into a [`TimerCommand`], or `None` if this is
+    /// not a timer frame or its `action` is unrecognized. A `start` with no/invalid
+    /// `duration_secs` is rejected (returns `None`).
+    pub fn timer_command(&self) -> Option<TimerCommand> {
+        if self.event_type != types::TIMER {
+            return None;
+        }
+        let label = self
+            .data
+            .get("label")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
+        match self.data.get("action").and_then(Value::as_str)? {
+            "start" => {
+                let duration_secs = self.data.get("duration_secs").and_then(Value::as_u64)?;
+                Some(TimerCommand::Start {
+                    label,
+                    duration_secs,
+                })
+            }
+            "cancel" => Some(TimerCommand::Cancel { label }),
+            _ => None,
+        }
     }
 
     /// Serialize this event to its on-the-wire bytes: header line, then the
@@ -381,6 +449,32 @@ mod tests {
         assert!(back.is_interrupt());
         assert_eq!(back.data, Value::Null);
         assert!(back.payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn timer_frame_roundtrips_and_decodes_command() {
+        let start = WyomingEvent::timer_start(300, Some("pasta"));
+        let back = roundtrip(&start).await;
+        assert_eq!(back, start);
+        assert_eq!(
+            back.timer_command(),
+            Some(TimerCommand::Start {
+                label: Some("pasta".to_string()),
+                duration_secs: 300
+            })
+        );
+
+        // Cancel-all: null label decodes to `None`.
+        let cancel = roundtrip(&WyomingEvent::timer_cancel(None)).await;
+        assert_eq!(
+            cancel.timer_command(),
+            Some(TimerCommand::Cancel { label: None })
+        );
+
+        // A non-timer frame yields no command; a start missing a duration is rejected.
+        assert_eq!(WyomingEvent::interrupt().timer_command(), None);
+        let bad = WyomingEvent::with_data(types::TIMER, json!({ "action": "start" }));
+        assert_eq!(bad.timer_command(), None);
     }
 
     #[tokio::test]

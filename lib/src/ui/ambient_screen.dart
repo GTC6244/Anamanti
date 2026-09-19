@@ -16,6 +16,7 @@ import 'package:ambient_display/src/slideshow/photo_source.dart';
 import 'package:ambient_display/src/ui/conversation_view.dart';
 import 'package:ambient_display/src/ui/slideshow_view.dart';
 import 'package:ambient_display/src/ui/status_indicator.dart';
+import 'package:ambient_display/src/ui/timers_overlay.dart';
 
 class AmbientScreen extends StatelessWidget {
   const AmbientScreen({
@@ -82,6 +83,22 @@ class AmbientScreen extends StatelessWidget {
                 right: 20,
                 top: 18,
                 child: StatusIndicator(state: state),
+              ),
+
+              // On-device timers, top-center — visible during both idle slideshow
+              // and a live turn (not gated by `active`). Padded clear of the
+              // settings button (top-left) and status chip (top-right).
+              Positioned(
+                top: 16,
+                left: 64,
+                right: 120,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: TimersOverlay(
+                    timers: state.timers,
+                    onDismiss: assistant.dismissTimer,
+                  ),
+                ),
               ),
 
               // Discreet settings control, top-left. Fades out during a turn so it

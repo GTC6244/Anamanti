@@ -41,6 +41,9 @@ WakeWordEvent _event(
   String transcript = '',
   String reply = '',
   String model = '',
+  int timerId = 0,
+  String timerLabel = '',
+  int timerRemainingSecs = 0,
 }) {
   return WakeWordEvent(
     kind: kind,
@@ -53,6 +56,9 @@ WakeWordEvent _event(
     model: model,
     transcript: transcript,
     reply: reply,
+    timerId: timerId,
+    timerLabel: timerLabel,
+    timerRemainingSecs: timerRemainingSecs,
   );
 }
 

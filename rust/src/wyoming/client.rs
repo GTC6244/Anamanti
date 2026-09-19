@@ -165,6 +165,10 @@ pub enum TurnUpdate {
     /// The reply's TTS audio has started arriving and is now being played back
     /// through the speakers (Phase 5 SPEAKING).
     Speaking,
+    /// A device-action **timer** command relayed from the orchestrator (Phase 2):
+    /// start or cancel a countdown. Handled by the engine's on-device timer manager,
+    /// which owns the countdown + alarm and outlives the turn's socket.
+    Timer(protocol::TimerCommand),
     /// The turn ended cleanly and the client is back to idle.
     Finished,
 }
@@ -344,6 +348,14 @@ where
         types::AUDIO_STOP => {
             let actions = session.on_input(ControlInput::PlaybackFinished);
             run_actions(conn, actions, on_update).await?;
+        }
+        // A device action (timer start/cancel) relayed from the orchestrator. It does
+        // not change the turn's state machine — the engine's timer manager owns the
+        // countdown/alarm — so just surface it and keep going.
+        types::TIMER => {
+            if let Some(cmd) = event.timer_command() {
+                on_update(TurnUpdate::Timer(cmd));
+            }
         }
         // voice-started / info / etc. don't change the turn.
         _ => {}

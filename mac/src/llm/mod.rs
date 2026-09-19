@@ -26,6 +26,30 @@ use futures_util::{Stream, StreamExt};
 /// and the concatenation is sent to Piper for synthesis (Phase 4).
 pub type ReplyStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
+/// A **device action** a tool asks the pipeline to relay to the Echo Show (Phase 2).
+/// Info tools (web search) just return text to the model; *action* tools (timers)
+/// additionally emit one of these onto the per-turn [`ActionSink`], which the
+/// orchestrator drains and writes to the device as an `ambient-timer` frame. The
+/// device owns the resulting state (unlimited concurrent timers + the countdown UI
+/// and alarm), so actions are fire-and-forget from the Mac's side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceAction {
+    /// Start a timer for `duration_secs` with an optional spoken `label`.
+    StartTimer {
+        label: Option<String>,
+        duration_secs: u64,
+    },
+    /// Cancel timers matching `label`, or *all* timers when `label` is `None`.
+    CancelTimer { label: Option<String> },
+}
+
+/// The per-turn channel a tool pushes [`DeviceAction`]s onto. Unbounded so a tool's
+/// synchronous `invoke` never blocks on the pipeline draining it; the pipeline
+/// drains it while streaming the reply. `None` on an [`LlmTurn`] means the caller
+/// cannot relay device actions (e.g. tests, or a turn with no device attached), so
+/// action tools degrade to a spoken "I can't do that here".
+pub type ActionSink = tokio::sync::mpsc::UnboundedSender<DeviceAction>;
+
 /// One request to a backend: a system prompt (which carries the persistent-memory
 /// context) plus the user's transcript for this turn. Kept single-turn for v1;
 /// cross-session continuity comes from the memory store, not a message history.
@@ -33,6 +57,10 @@ pub type ReplyStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 pub struct LlmTurn {
     pub system_prompt: String,
     pub user_message: String,
+    /// Where action tools emit [`DeviceAction`]s for the pipeline to relay to the
+    /// device. `None` disables device actions for this turn. Only the rig engine
+    /// reads it; the plain-text backends ignore it.
+    pub actions: Option<ActionSink>,
 }
 
 impl LlmTurn {
@@ -40,7 +68,15 @@ impl LlmTurn {
         Self {
             system_prompt: system_prompt.into(),
             user_message: user_message.into(),
+            actions: None,
         }
+    }
+
+    /// Attach the per-turn device-action sink so action tools (timers) can relay to
+    /// the device.
+    pub fn with_actions(mut self, actions: ActionSink) -> Self {
+        self.actions = Some(actions);
+        self
     }
 }
 

@@ -119,7 +119,8 @@ async fn run() -> Result<()> {
         config.system_prompt.clone(),
         config.turn_timeout,
     )
-    .with_chatlog(chatlog.clone());
+    .with_chatlog(chatlog.clone())
+    .with_location(config.home_location.clone(), config.weather_units.clone());
 
     // Memory retrieval backend: SQLite FTS (default) or embedded HelixDB GraphRAG.
     if config.memory_backend == MemoryBackendChoice::Helix {

@@ -23,7 +23,7 @@ use futures_util::StreamExt;
 use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
-use crate::llm::{LlmBackend, LlmTurn};
+use crate::llm::{DeviceAction, LlmBackend, LlmTurn};
 use crate::memory::chatlog::now_secs;
 use crate::memory::{
     infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemoryKind, MemorySource,
@@ -112,6 +112,13 @@ pub struct Pipeline {
     /// [`crate::speaker::HOUSEHOLD_SPEAKER`].
     speaker: Option<Arc<SpeakerService>>,
     system_prompt: String,
+    /// The device's physical home location (e.g. "Austin, Texas"), injected into the
+    /// prompt so location-relative questions (weather, sunset, nearby places)
+    /// resolve an unqualified "here" to it. `None` omits the location line.
+    home_location: Option<String>,
+    /// Preferred measurement units for answers (e.g. "imperial" / "metric"), paired
+    /// with `home_location` in the prompt. `None` leaves it to the model.
+    weather_units: Option<String>,
     turn_timeout: Duration,
 }
 
@@ -133,6 +140,8 @@ impl Pipeline {
             chatlog: None,
             speaker: None,
             system_prompt: system_prompt.into(),
+            home_location: None,
+            weather_units: None,
             turn_timeout,
         }
     }
@@ -162,6 +171,20 @@ impl Pipeline {
     /// its registry).
     pub fn speaker(&self) -> Option<&Arc<SpeakerService>> {
         self.speaker.as_ref()
+    }
+
+    /// Ground the assistant in the device's physical location (and preferred units)
+    /// so location-relative questions — weather, sunset, "what's nearby" — resolve an
+    /// unqualified "here" to the configured home instead of the model guessing. Both
+    /// are optional; a `None`/blank location omits the line entirely.
+    pub fn with_location(
+        mut self,
+        home_location: Option<String>,
+        weather_units: Option<String>,
+    ) -> Self {
+        self.home_location = home_location.filter(|s| !s.trim().is_empty());
+        self.weather_units = weather_units.filter(|s| !s.trim().is_empty());
+        self
     }
 
     /// Build a pipeline around a fixed LLM backend + voice (the Phase-4 behavior).
@@ -498,14 +521,25 @@ impl Pipeline {
             current_datetime_line(),
             identity
         );
+        if let Some(line) =
+            location_line(self.home_location.as_deref(), self.weather_units.as_deref())
+        {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&line);
+        }
         if !context.is_empty() {
             system_prompt.push_str("\n\nWhat you remember about this person:\n");
             system_prompt.push_str(&context);
         }
 
+        // Per-turn device-action channel: action tools (timers) push `DeviceAction`s
+        // here and the drive loop below relays them to the device as `ambient-timer`
+        // frames on the same socket. Unbounded so a tool's `invoke` never blocks.
+        let (action_tx, mut action_rx) =
+            tokio::sync::mpsc::unbounded_channel::<DeviceAction>();
         let mut stream = runtime
             .llm
-            .respond(LlmTurn::new(system_prompt, transcript))
+            .respond(LlmTurn::new(system_prompt, transcript).with_actions(action_tx))
             .await
             .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?;
 
@@ -537,6 +571,9 @@ impl Pipeline {
             // cancelling the upstream Ollama/Anthropic request and Piper synthesis.
             let drive = async {
                 while let Some(tok) = stream.next().await {
+                    // Relay any device actions a tool emitted (e.g. a timer) to the
+                    // device as they arrive, before rendering more of the reply.
+                    drain_device_actions(&mut action_rx, writer).await;
                     let tok = tok?;
                     reply.push_str(&tok);
                     pending.push_str(&tok);
@@ -567,6 +604,9 @@ impl Pipeline {
                         }
                     }
                 }
+                // Relay any device actions emitted late in the reply (e.g. a tool
+                // call on the final round) before closing the turn.
+                drain_device_actions(&mut action_rx, writer).await;
                 // Speak any trailing clause left without terminal punctuation.
                 if let Some(rest) = take_speakable(&mut pending, true) {
                     if !speaking {
@@ -912,6 +952,51 @@ fn current_datetime_line() -> String {
     )
 }
 
+/// A system-prompt line grounding the assistant in the device's physical location
+/// (and preferred units), so location-relative questions — weather, sunset, nearby
+/// places — resolve an unqualified "here" to the configured home rather than the
+/// model guessing. Returns `None` when no home location is configured, so the prompt
+/// omits the line entirely. Phrased non-leadingly (like the clock line) so it only
+/// matters when the user actually asks something location-relative.
+fn location_line(location: Option<&str>, units: Option<&str>) -> Option<String> {
+    let location = location.map(str::trim).filter(|s| !s.is_empty())?;
+    let mut line = format!(
+        "This device is located in {location}. When the user asks about local conditions \
+         (weather, sunset, nearby places) without naming a place, assume {location}. Do \
+         not mention the location otherwise."
+    );
+    if let Some(units) = units.map(str::trim).filter(|s| !s.is_empty()) {
+        line.push_str(&format!(
+            " Prefer {units} units for temperatures and measurements."
+        ));
+    }
+    Some(line)
+}
+
+/// Drain every currently-pending [`DeviceAction`] from the per-turn channel and
+/// relay it to the device as an `ambient-timer` frame on `writer`. Non-blocking: it
+/// only takes actions already queued (a tool's `invoke` runs synchronously during
+/// the LLM turn, so its action is enqueued before we get here). Write failures are
+/// swallowed — the device dropping mid-turn is handled by the surrounding turn logic.
+async fn drain_device_actions<W>(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DeviceAction>, writer: &mut W)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    while let Ok(action) = rx.try_recv() {
+        let event = match action {
+            DeviceAction::StartTimer {
+                label,
+                duration_secs,
+            } => WyomingEvent::timer_start(duration_secs, label.as_deref()),
+            DeviceAction::CancelTimer { label } => WyomingEvent::timer_cancel(label.as_deref()),
+        };
+        if let Err(e) = protocol::write_event(writer, &event).await {
+            log::warn!("failed to relay device action to the device: {e:#}");
+            break;
+        }
+    }
+}
+
 /// Root-mean-square amplitude (in `i16` units) of a little-endian PCM16 buffer,
 /// used by the turn's energy VAD to tell speech from room noise. A trailing odd
 /// byte (never expected from a well-formed frame) is ignored.
@@ -927,6 +1012,31 @@ fn rms_i16_le(pcm: &[u8]) -> f64 {
         0.0
     } else {
         (sum_sq / n as f64).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::location_line;
+
+    #[test]
+    fn grounds_configured_home_and_units() {
+        let line = location_line(Some("Austin, Texas"), Some("imperial")).unwrap();
+        assert!(line.contains("Austin, Texas"));
+        assert!(line.contains("imperial"));
+    }
+
+    #[test]
+    fn omits_units_when_unset_but_keeps_location() {
+        let line = location_line(Some("Paris"), None).unwrap();
+        assert!(line.contains("Paris"));
+        assert!(!line.to_lowercase().contains("units"));
+    }
+
+    #[test]
+    fn no_location_yields_no_line() {
+        assert!(location_line(None, Some("metric")).is_none());
+        assert!(location_line(Some("   "), None).is_none());
     }
 }
 

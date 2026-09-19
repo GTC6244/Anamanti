@@ -953,6 +953,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_model = <String>::sse_decode(deserializer);
         let mut var_transcript = <String>::sse_decode(deserializer);
         let mut var_reply = <String>::sse_decode(deserializer);
+        let mut var_timerId = <u32>::sse_decode(deserializer);
+        let mut var_timerLabel = <String>::sse_decode(deserializer);
+        let mut var_timerRemainingSecs = <u32>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
             message: var_message,
@@ -964,6 +967,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             model: var_model,
             transcript: var_transcript,
             reply: var_reply,
+            timer_id: var_timerId,
+            timer_label: var_timerLabel,
+            timer_remaining_secs: var_timerRemainingSecs,
         };
     }
 }
@@ -985,6 +991,9 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             9 => crate::api::engine::WakeWordEventKind::Disconnected,
             10 => crate::api::engine::WakeWordEventKind::Stopped,
             11 => crate::api::engine::WakeWordEventKind::Error,
+            12 => crate::api::engine::WakeWordEventKind::TimerStarted,
+            13 => crate::api::engine::WakeWordEventKind::TimerFinished,
+            14 => crate::api::engine::WakeWordEventKind::TimerCancelled,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -1221,6 +1230,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.model.into_into_dart().into_dart(),
             self.transcript.into_into_dart().into_dart(),
             self.reply.into_into_dart().into_dart(),
+            self.timer_id.into_into_dart().into_dart(),
+            self.timer_label.into_into_dart().into_dart(),
+            self.timer_remaining_secs.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1252,6 +1264,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::Disconnected => 9.into_dart(),
             Self::Stopped => 10.into_dart(),
             Self::Error => 11.into_dart(),
+            Self::TimerStarted => 12.into_dart(),
+            Self::TimerFinished => 13.into_dart(),
+            Self::TimerCancelled => 14.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -1522,6 +1537,9 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <String>::sse_encode(self.model, serializer);
         <String>::sse_encode(self.transcript, serializer);
         <String>::sse_encode(self.reply, serializer);
+        <u32>::sse_encode(self.timer_id, serializer);
+        <String>::sse_encode(self.timer_label, serializer);
+        <u32>::sse_encode(self.timer_remaining_secs, serializer);
     }
 }
 
@@ -1542,6 +1560,9 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::Disconnected => 9,
                 crate::api::engine::WakeWordEventKind::Stopped => 10,
                 crate::api::engine::WakeWordEventKind::Error => 11,
+                crate::api::engine::WakeWordEventKind::TimerStarted => 12,
+                crate::api::engine::WakeWordEventKind::TimerFinished => 13,
+                crate::api::engine::WakeWordEventKind::TimerCancelled => 14,
                 _ => {
                     unimplemented!("");
                 }

@@ -113,6 +113,12 @@ cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp,
 #     settings screen / config page pick a specific model from a last-12-months list)
 #   AMBIENT_STT_ADDR=127.0.0.1:10300  AMBIENT_TTS_ADDR=127.0.0.1:10200
 #   AMBIENT_BIND_ADDR=0.0.0.0:10700   AMBIENT_TTS_VOICE=en_US-amy-medium
+#   AMBIENT_LLM_ENGINE=rig|native  (default rig — enables tool calling incl. the
+#     internet_search tool; set `native` for the hand-rolled HTTP backends / no tools)
+#   AMBIENT_WEB_SEARCH=on|off  (default on with the rig engine) plus
+#     AMBIENT_SEARCH_PROVIDER=duckduckgo|tavily and TAVILY_API_KEY for real web search
+#   AMBIENT_HOME_LOCATION="Austin, Texas"  AMBIENT_WEATHER_UNITS=imperial|metric
+#     (grounds "here" for weather/location questions in the system prompt)
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
   cargokit plugin (`rust_builder/cargokit`) uses the legacy AGP variant API and

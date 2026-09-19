@@ -35,20 +35,50 @@ use rig_core::providers::{anthropic, ollama};
 use rig_core::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
 use rig_core::tool::PortableTool;
 
-use super::{LlmBackend, LlmTurn, ReplyStream};
+use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, ReplyStream};
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
 /// calls can never spin forever. Each round is one streamed completion pass.
 pub const MAX_TOOL_ROUNDS: usize = 4;
 
-/// Appended to the system preamble when tools are available, so the model
-/// actually calls `internet_search` for real-time questions instead of refusing
-/// with "I don't have real-time access".
-const TOOL_GUIDANCE: &str = "You have an `internet_search` tool that fetches live \
-information from the web. Whenever the user asks about current events, news, weather, \
-sports, prices, or any real-time or factual detail you are not certain of, you MUST call \
-`internet_search` first and base your answer on its results. Never claim you lack \
-real-time or internet access — use the tool.";
+/// Build the system-preamble guidance for exactly the tools present this turn, so
+/// the model actually calls them (some models otherwise refuse real-time questions
+/// or claim they "can't set timers" instead of using the tool). Naming only the
+/// tools that are actually advertised avoids prompting the model to call a tool that
+/// isn't there. Returns an empty string when no known tool is present.
+fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let has = |name: &str| tool_defs.iter().any(|d| d.name == name);
+    if has(InternetSearch::NAME) {
+        parts.push(
+            "You have an `internet_search` tool that fetches live information from the web. \
+             Whenever the user asks about current events, news, weather, sports, prices, or any \
+             real-time or factual detail you are not certain of, you MUST call `internet_search` \
+             first and base your answer on its results. Never claim you lack real-time or internet \
+             access — use the tool.",
+        );
+    }
+    if has(SET_TIMER) || has(CANCEL_TIMER) {
+        parts.push(
+            "You can start and cancel countdown timers on the device with the `set_timer` \
+             (convert the requested time to whole seconds) and `cancel_timer` tools. When the user \
+             asks to set, start, or cancel a timer, call the tool — never say you are unable to set \
+             timers. There can be any number of timers running at once.",
+        );
+    }
+    parts.join(" ")
+}
+
+/// The system preamble for a turn: the base prompt, plus per-tool usage guidance
+/// when any known tool is advertised.
+fn build_preamble(system_prompt: &str, tool_defs: &[ToolDefinition]) -> String {
+    let guidance = tool_guidance(tool_defs);
+    if guidance.is_empty() {
+        system_prompt.to_string()
+    } else {
+        format!("{system_prompt}\n\n{guidance}")
+    }
+}
 
 /// Default number of search results to fold into a tool result.
 pub const DEFAULT_SEARCH_RESULTS: u8 = 3;
@@ -318,27 +348,182 @@ impl PortableTool for InternetSearch {
     }
 }
 
+// ===========================================================================
+// Timer tools (device actions)
+// ===========================================================================
+
+/// Tool name: start a countdown timer on the device.
+pub const SET_TIMER: &str = "set_timer";
+/// Tool name: cancel one or all countdown timers on the device.
+pub const CANCEL_TIMER: &str = "cancel_timer";
+
+/// Hard cap on a timer duration (24h) so a mis-parsed request can't spin an
+/// effectively-infinite timer on the device.
+const MAX_TIMER_SECS: u64 = 24 * 60 * 60;
+
+/// Typed args for [`SET_TIMER`].
+#[derive(Debug, Deserialize)]
+struct SetTimerArgs {
+    /// Timer length in whole seconds (the model converts "5 minutes" → 300).
+    duration_seconds: u64,
+    /// Optional spoken label ("pasta", "laundry").
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// Typed args for [`CANCEL_TIMER`].
+#[derive(Debug, Deserialize, Default)]
+struct CancelTimerArgs {
+    /// Which timer to cancel by label; absent/empty cancels *all* timers.
+    #[serde(default)]
+    label: Option<String>,
+}
+
+fn set_timer_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: SET_TIMER.to_string(),
+        description: "Start a countdown timer on the device. Use for any \"set a timer for …\" / \
+                      \"remind me in …\" request. Convert the requested time to whole seconds."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "duration_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Timer length in whole seconds (e.g. 5 minutes → 300)."
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Optional short name for the timer, e.g. \"pasta\"."
+                }
+            },
+            "required": ["duration_seconds"]
+        }),
+    }
+}
+
+fn cancel_timer_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CANCEL_TIMER.to_string(),
+        description: "Cancel a running countdown timer. Pass the timer's label to cancel just \
+                      that one, or omit it to cancel all timers."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "Label of the timer to cancel; omit to cancel every timer."
+                }
+            }
+        }),
+    }
+}
+
+/// Render a whole-second duration as a short, speakable phrase ("5 minutes",
+/// "1 hour 30 minutes", "45 seconds").
+fn humanize_secs(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    let mut parts = Vec::new();
+    let unit = |n: u64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    if h > 0 {
+        parts.push(unit(h, "hour"));
+    }
+    if m > 0 {
+        parts.push(unit(m, "minute"));
+    }
+    if s > 0 || parts.is_empty() {
+        parts.push(unit(s, "second"));
+    }
+    parts.join(" ")
+}
+
+/// Execute `set_timer`: emit a [`DeviceAction::StartTimer`] on the per-turn sink and
+/// return a speakable confirmation for the model to relay. Errors (no device
+/// attached / closed channel) surface as the tool result so the model apologizes.
+fn set_timer_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+    let args: SetTimerArgs =
+        serde_json::from_value(arguments.clone()).context("parsing set_timer arguments")?;
+    let sink = actions.context("no device is connected to run a timer on right now")?;
+    let secs = args.duration_seconds.clamp(1, MAX_TIMER_SECS);
+    let label = args.label.filter(|s| !s.trim().is_empty());
+    sink.send(DeviceAction::StartTimer {
+        label: label.clone(),
+        duration_secs: secs,
+    })
+    .map_err(|_| anyhow::anyhow!("the device disconnected before the timer could start"))?;
+    Ok(match &label {
+        Some(l) => format!("Started a {} timer for {l}.", humanize_secs(secs)),
+        None => format!("Started a {} timer.", humanize_secs(secs)),
+    })
+}
+
+/// Execute `cancel_timer`: emit a [`DeviceAction::CancelTimer`] on the per-turn sink.
+fn cancel_timer_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+    let args: CancelTimerArgs = if arguments.is_null() {
+        CancelTimerArgs::default()
+    } else {
+        serde_json::from_value(arguments.clone()).context("parsing cancel_timer arguments")?
+    };
+    let sink = actions.context("no device is connected to manage timers on right now")?;
+    let label = args.label.filter(|s| !s.trim().is_empty());
+    sink.send(DeviceAction::CancelTimer {
+        label: label.clone(),
+    })
+    .map_err(|_| anyhow::anyhow!("the device disconnected before the timer could be cancelled"))?;
+    Ok(match &label {
+        Some(l) => format!("Cancelled the {l} timer."),
+        None => "Cancelled all timers.".to_string(),
+    })
+}
+
+// ===========================================================================
+// Tool set
+// ===========================================================================
+
 /// The set of tools available to a turn: their advertised definitions plus a
 /// dispatcher that executes a call by name. Cheaply shared behind an `Arc`.
+///
+/// The **timer** tools (`set_timer` / `cancel_timer`) are always present — they are
+/// stateless device actions needing no config. The **web-search** tool is included
+/// only when a provider is configured (`web_search` on).
 pub struct Tools {
     definitions: Vec<ToolDefinition>,
-    search: Arc<InternetSearch>,
+    search: Option<Arc<InternetSearch>>,
 }
 
 impl Tools {
-    /// Build the tool set from a search provider (currently the only tool).
-    pub fn new(provider: Arc<dyn SearchProvider>) -> Self {
-        let search = Arc::new(InternetSearch::new(provider));
+    /// Build the tool set. Timer tools are always advertised; the web-search tool is
+    /// added when `search` is `Some`.
+    pub fn new(search: Option<Arc<dyn SearchProvider>>) -> Self {
+        let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
+        let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
+        if let Some(s) = &search {
+            definitions.push(s.definition());
+        }
         Self {
-            definitions: vec![search.definition()],
+            definitions,
             search,
         }
     }
 
     /// Execute a model-requested tool call by name, returning its text result.
-    async fn dispatch(&self, name: &str, arguments: &Value) -> Result<String> {
+    /// `actions` is the per-turn device-action sink (for the timer tools); `None`
+    /// makes the timer tools report that no device is available.
+    async fn dispatch(
+        &self,
+        name: &str,
+        arguments: &Value,
+        actions: Option<&ActionSink>,
+    ) -> Result<String> {
         match name {
-            InternetSearch::NAME => self.search.invoke(arguments).await,
+            SET_TIMER => set_timer_invoke(arguments, actions),
+            CANCEL_TIMER => cancel_timer_invoke(arguments, actions),
+            InternetSearch::NAME => match &self.search {
+                Some(search) => search.invoke(arguments).await,
+                None => anyhow::bail!("web search is not enabled"),
+            },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
     }
@@ -373,13 +558,16 @@ pub fn build_search_provider(provider: &str, api_key: Option<&str>) -> Arc<dyn S
     }
 }
 
-/// Build the tool set from explicit config: `Some(tools)` when web search is on.
+/// Build the tool set from explicit config. Always returns a tool set (the timer
+/// tools are unconditional device actions); the web-search tool is included only
+/// when `web_search` is on.
 pub fn tools_from_config(
     web_search: bool,
     provider: &str,
     api_key: Option<&str>,
 ) -> Option<Arc<Tools>> {
-    web_search.then(|| Arc::new(Tools::new(build_search_provider(provider, api_key))))
+    let search = web_search.then(|| build_search_provider(provider, api_key));
+    Some(Arc::new(Tools::new(search)))
 }
 
 /// Build the tool set from the environment (used by the example / env-driven
@@ -468,11 +656,7 @@ where
         .expect("conversation always has at least the user message");
     // When tools are available, tell the model to use them (some models otherwise
     // refuse real-time questions instead of calling the tool).
-    let preamble = if tool_defs.is_empty() {
-        system_prompt.to_string()
-    } else {
-        format!("{system_prompt}\n\n{TOOL_GUIDANCE}")
-    };
+    let preamble = build_preamble(system_prompt, tool_defs);
     let mut builder = model
         .completion_request(prompt.clone())
         .messages(history.iter().cloned())
@@ -540,11 +724,7 @@ where
     let (prompt, history) = messages
         .split_last()
         .expect("conversation always has at least the user message");
-    let preamble = if tool_defs.is_empty() {
-        system_prompt.to_string()
-    } else {
-        format!("{system_prompt}\n\n{TOOL_GUIDANCE}")
-    };
+    let preamble = build_preamble(system_prompt, tool_defs);
     let mut builder = model
         .completion_request(prompt.clone())
         .messages(history.iter().cloned())
@@ -583,6 +763,9 @@ impl LlmBackend for RigBackend {
         let max_tokens = self.max_tokens;
         let tools = self.tools.clone();
         let system_prompt = turn.system_prompt;
+        // The per-turn device-action sink (timers). Cloned into the tool loop so
+        // action tools can relay to the device while the reply is generated.
+        let actions = turn.actions.clone();
         let tool_defs: Vec<ToolDefinition> = tools
             .as_ref()
             .map(|t| t.definitions.clone())
@@ -646,7 +829,7 @@ impl LlmBackend for RigBackend {
                         call.function.arguments
                     );
                     let result = tools
-                        .dispatch(&call.function.name, &call.function.arguments)
+                        .dispatch(&call.function.name, &call.function.arguments, actions.as_ref())
                         .await
                         .unwrap_or_else(|e| format!("tool error: {e:#}"));
                     log::info!(
@@ -783,13 +966,110 @@ mod tests {
         let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"It is sunny in Paris.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
         let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
 
-        let tools = Some(Arc::new(Tools::new(Arc::new(StaticSearch("Sunny, 21C.")))));
+        let tools = Some(Arc::new(Tools::new(Some(Arc::new(StaticSearch("Sunny, 21C."))))));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "what is the weather in paris"))
             .await
             .unwrap();
         assert_eq!(collect_reply(stream).await.unwrap(), "It is sunny in Paris.");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn humanize_secs_reads_naturally() {
+        assert_eq!(humanize_secs(45), "45 seconds");
+        assert_eq!(humanize_secs(60), "1 minute");
+        assert_eq!(humanize_secs(300), "5 minutes");
+        assert_eq!(humanize_secs(3661), "1 hour 1 minute 1 second");
+        assert_eq!(humanize_secs(0), "0 seconds");
+    }
+
+    #[test]
+    fn set_timer_emits_start_action_and_confirms() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = set_timer_invoke(
+            &json!({ "duration_seconds": 300, "label": "pasta" }),
+            Some(&tx),
+        )
+        .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::StartTimer {
+                label: Some("pasta".to_string()),
+                duration_secs: 300
+            }
+        );
+        assert!(out.contains("5 minutes"));
+        assert!(out.contains("pasta"));
+    }
+
+    #[test]
+    fn set_timer_clamps_and_without_device_errors() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        set_timer_invoke(&json!({ "duration_seconds": 999999999u64 }), Some(&tx)).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::StartTimer {
+                label: None,
+                duration_secs: MAX_TIMER_SECS
+            }
+        );
+        // No device attached → the tool reports an error the model can relay.
+        assert!(set_timer_invoke(&json!({ "duration_seconds": 60 }), None).is_err());
+    }
+
+    #[test]
+    fn cancel_timer_null_args_cancels_all() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        cancel_timer_invoke(&Value::Null, Some(&tx)).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::CancelTimer { label: None }
+        );
+        cancel_timer_invoke(&json!({ "label": "pasta" }), Some(&tx)).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::CancelTimer {
+                label: Some("pasta".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn timer_tools_are_always_advertised_even_without_web_search() {
+        let tools = Tools::new(None);
+        let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&SET_TIMER));
+        assert!(names.contains(&CANCEL_TIMER));
+        assert!(!names.contains(&InternetSearch::NAME));
+    }
+
+    /// End-to-end tool loop: the fake ollama asks for `set_timer`; the pipeline's
+    /// action sink receives the `StartTimer`, and the follow-up answer streams back.
+    #[tokio::test]
+    async fn rig_ollama_runs_set_timer_and_relays_the_action() {
+        let tool_call = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"set_timer\",\"arguments\":{\"duration_seconds\":300,\"label\":\"pasta\"}}}]},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"Your pasta timer is set for five minutes.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // No web search — timers are always available regardless.
+        let tools = Some(Arc::new(Tools::new(None)));
+        let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
+        let stream = backend
+            .respond(LlmTurn::new("sys", "set a 5 minute pasta timer").with_actions(tx))
+            .await
+            .unwrap();
+        let reply = collect_reply(stream).await.unwrap();
+        assert_eq!(reply, "Your pasta timer is set for five minutes.");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::StartTimer {
+                label: Some("pasta".to_string()),
+                duration_secs: 300
+            }
+        );
         server.await.unwrap();
     }
 

@@ -30,6 +30,7 @@ These answers override any earlier ambiguity in this document:
 | **Photo auth** | **On-device OAuth** — the Echo Show runs the flow and calls Google directly |
 | **AEC** | **Ship full-duplex**; raise wake-word confidence **threshold during playback** to suppress self-triggers; real AEC only if still bad |
 | **Settings screen** | User-configurable: **LLM backend**, **TTS voice**, **wake word**, **photo source** |
+| **Tool calling / actions** | **rig-core is the default engine** (tool-calling loop); info tools run on the Mac, device actions (timers/alarms) emit `ambient-*` frames and execute **on-device**. Weather is grounded by a configured **home location** (`AMBIENT_HOME_LOCATION`). Calendar/reminders designed but deferred. |
 | **Doc intent** | Onboarding + AI codegen — docs guide AI agents and humans to build from scratch |
 
 ---
@@ -431,6 +432,36 @@ services, inserting the pluggable LLM + persistent memory between them.
 > the change is rejected **in-band** (the response's `ok:false` + message) and the
 > previous backend stays in force, so a control error never drops the device
 > connection or the turn.
+
+### Tool calling & actions (post-Phase-6)
+
+The assistant can call **tools** to fetch info and take actions. Mechanism: the
+LLM is handed tool definitions (name + description + JSON-schema args); if it asks
+for one, the orchestrator executes it, threads the result back, and the model
+answers (`mac/src/llm/rig.rs`, up to `MAX_TOOL_ROUNDS`). Adding a capability = one
+more tool in `Tools`.
+
+- **Engine:** rig-core is now the **default** engine (`AMBIENT_LLM_ENGINE=rig`,
+  `rig` in the crate's default features); `native` opts back out to the tool-less
+  HTTP backends. Tool turns answer **non-streaming** (rig 0.42's ollama streaming
+  parser drops non-final tool calls) — fine, since the reply is spoken whole.
+- **Info tools (Mac-side):** `internet_search` (DuckDuckGo keyless / Tavily with
+  `TAVILY_API_KEY`), on by default (`AMBIENT_WEB_SEARCH`). **Weather works** via
+  this tool; it is grounded by a configured home location + units
+  (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`), injected into the system
+  prompt next to the wall-clock and speaker-identity lines (`location_line`).
+- **Device actions (implemented, on-device):** the `set_timer` / `cancel_timer`
+  tools emit a `DeviceAction` onto a per-turn `ActionSink` (`LlmTurn.actions`); the
+  orchestrator's reply loop drains it (`drain_device_actions`) and relays an
+  `ambient-timer` frame on the turn socket. The device decodes it
+  (`TurnUpdate::Timer`) and its long-lived `TimerManager`
+  (`rust/src/engine/timer.rs`) owns each countdown (unlimited, outliving the turn
+  socket + surviving a Mac disconnect), sounds a synthesized chime via the shared
+  `PlaybackSink`, and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`.
+  Flutter renders a countdown-chip overlay visible during idle + turns. The full
+  add-a-capability process is documented in `architecture.md` §8.
+- **Calendar / reminders:** designed, **deferred** — backend (macOS EventKit vs
+  Google vs CalDAV) undecided.
 
 ---
 

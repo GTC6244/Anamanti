@@ -103,6 +103,19 @@ pub mod types {
     /// orchestrator → device: the selectable models (data: `ok`, `models` array of
     /// `{provider, id, label}`), scoped to the last 12 months per provider.
     pub const MODELS: &str = "ambient-models";
+
+    // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
+    //
+    // A tool the LLM calls on the Mac emits a **device action** that the pipeline
+    // relays to the Echo Show as this project-local frame. The device owns the
+    // action's state (unlimited concurrent timers, the countdown UI, and the alarm
+    // sound), so it keeps working if the Mac disconnects. Same device↔orchestrator-
+    // only framing; byte-identical to the device crate's `types::TIMER`.
+
+    /// orchestrator → device: start or cancel a timer (data: `action` =
+    /// `"start"`/`"cancel"`; for `start`: `duration_secs` + optional `label`; for
+    /// `cancel`: optional `label`, where an absent/null label cancels all timers).
+    pub const TIMER: &str = "ambient-timer";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -229,6 +242,37 @@ impl WyomingEvent {
     /// True if this is an `ambient-interrupt` (barge-in) event.
     pub fn is_interrupt(&self) -> bool {
         self.event_type == types::INTERRUPT
+    }
+
+    /// An `ambient-timer` **start** action (orchestrator → device): begin a timer
+    /// for `duration_secs` with an optional spoken `label` ("pasta"). The device
+    /// assigns the timer's id and owns its countdown/alarm.
+    pub fn timer_start(duration_secs: u64, label: Option<&str>) -> Self {
+        Self::with_data(
+            types::TIMER,
+            json!({
+                "action": "start",
+                "duration_secs": duration_secs,
+                "label": label,
+            }),
+        )
+    }
+
+    /// An `ambient-timer` **cancel** action (orchestrator → device): cancel timers
+    /// matching `label`, or *all* timers when `label` is `None`.
+    pub fn timer_cancel(label: Option<&str>) -> Self {
+        Self::with_data(
+            types::TIMER,
+            json!({
+                "action": "cancel",
+                "label": label,
+            }),
+        )
+    }
+
+    /// True if this is an `ambient-timer` device-action frame.
+    pub fn is_timer(&self) -> bool {
+        self.event_type == types::TIMER
     }
 
     /// A `synthesize` request for the Piper TTS server. `voice` pins a named voice
@@ -409,6 +453,23 @@ mod tests {
         assert!(back.is_interrupt());
         assert_eq!(back.data, Value::Null);
         assert!(back.payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn timer_start_and_cancel_roundtrip() {
+        let start = WyomingEvent::timer_start(300, Some("pasta"));
+        let back = roundtrip(&start).await;
+        assert_eq!(back, start);
+        assert!(back.is_timer());
+        assert_eq!(back.data["action"], json!("start"));
+        assert_eq!(back.data["duration_secs"], json!(300));
+        assert_eq!(back.data["label"], json!("pasta"));
+
+        // Cancel-all carries a null label.
+        let cancel_all = WyomingEvent::timer_cancel(None);
+        let back = roundtrip(&cancel_all).await;
+        assert_eq!(back.data["action"], json!("cancel"));
+        assert_eq!(back.data["label"], Value::Null);
     }
 
     #[tokio::test]

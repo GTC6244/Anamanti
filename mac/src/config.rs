@@ -30,17 +30,19 @@ fn settings_path_from_env() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Read the LLM engine selector from the environment. `AMBIENT_LLM_ENGINE=rig`
-/// routes ollama/anthropic through rig-core (needs the `rig` feature); anything
-/// else (or unset) keeps the native HTTP backends.
+/// Read the LLM engine selector from the environment. The rig-core engine (with the
+/// `internet_search` tool) is now the **default**; set `AMBIENT_LLM_ENGINE=native`
+/// to fall back to the hand-rolled HTTP backends (no tools). rig needs the `rig`
+/// feature compiled in (on by default) — without it, `Rig` transparently degrades to
+/// native and `main` logs a loud warning.
 fn llm_engine_from_env() -> LlmEngine {
     match env::var("AMBIENT_LLM_ENGINE")
         .unwrap_or_default()
         .to_lowercase()
         .as_str()
     {
-        "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
-        _ => LlmEngine::Native,
+        "native" | "http" | "legacy" => LlmEngine::Native,
+        _ => LlmEngine::Rig,
     }
 }
 
@@ -50,16 +52,18 @@ fn anthropic_auth_from_env() -> AnthropicAuth {
     AnthropicAuth::from_label(&env::var("AMBIENT_ANTHROPIC_AUTH").unwrap_or_default())
 }
 
-/// Whether to enable the rig web-search tool (`AMBIENT_WEB_SEARCH=1/true/on`).
-/// Only effective with the rig engine + `rig` feature.
+/// Whether to enable the rig web-search tool. **On by default** now that rig is the
+/// default engine (so weather/news/real-time questions work out of the box); set
+/// `AMBIENT_WEB_SEARCH=off` (or `0`/`false`/`no`) to disable it. Only effective with
+/// the rig engine + `rig` feature.
 fn web_search_from_env() -> bool {
-    matches!(
+    !matches!(
         env::var("AMBIENT_WEB_SEARCH")
             .unwrap_or_default()
             .trim()
             .to_lowercase()
             .as_str(),
-        "1" | "true" | "on" | "yes"
+        "0" | "false" | "off" | "no"
     )
 }
 
@@ -104,6 +108,14 @@ pub struct Config {
     pub db_path: PathBuf,
     /// Base system prompt/persona.
     pub system_prompt: String,
+    /// The device's physical home location (e.g. "Austin, Texas"), injected into the
+    /// prompt so location-relative questions (weather, sunset, nearby places) resolve
+    /// an unqualified "here". `None` omits the location grounding. Set via
+    /// `AMBIENT_HOME_LOCATION`.
+    pub home_location: Option<String>,
+    /// Preferred measurement units for answers (e.g. "imperial" / "metric"), paired
+    /// with `home_location`. Set via `AMBIENT_WEATHER_UNITS`.
+    pub weather_units: Option<String>,
     /// Idle timeout for a stalled turn.
     pub turn_timeout: Duration,
     /// Memory retrieval backend: `sqlite` (FTS, default) or `helix` (GraphRAG).
@@ -210,6 +222,8 @@ impl Default for Config {
             },
             db_path: PathBuf::from("ambient_memory.sqlite"),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            home_location: None,
+            weather_units: None,
             turn_timeout: Duration::from_secs(30),
             memory_backend: MemoryBackendChoice::Sqlite,
             chatlog_path: PathBuf::from("ambient_chatlog.jsonl"),
@@ -352,6 +366,14 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or(d.db_path),
             system_prompt: env::var("AMBIENT_SYSTEM_PROMPT").unwrap_or(d.system_prompt),
+            home_location: env::var("AMBIENT_HOME_LOCATION")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            weather_units: env::var("AMBIENT_WEATHER_UNITS")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             turn_timeout: d.turn_timeout,
             memory_backend,
             chatlog_path: env::var("AMBIENT_CHATLOG_PATH")

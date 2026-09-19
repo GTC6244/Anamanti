@@ -183,3 +183,35 @@ Mac. To take it from dormant code to a real feature:
       absent) instead of silently degrading to capture-only.
 - [ ] Persist a last-known copy of orchestrator settings on the device for display
       while the Mac is offline.
+
+## 7. Tools & actions (agent capabilities)
+
+Tool calling runs on the **rig** engine, now the default (`mac/src/llm/rig.rs`).
+Adding a capability = registering one tool in `Tools`. See Plan §3 "Tool calling &
+actions".
+
+- [x] **Weather context**: inject a configured home location + units
+      (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`) into the system prompt so
+      "what's the weather" resolves "here" (`orchestrator::location_line`).
+- [x] Make **rig the default engine** + web search on by default (was opt-in).
+- [ ] Verify on hardware: ask "what's the weather" with `AMBIENT_HOME_LOCATION` set
+      and a Tavily key — confirm the model calls `internet_search` and speaks a
+      location-correct answer.
+- [x] **Device-action framework**: the `ambient-timer` frame + `set_timer`/`cancel_timer`
+      tools emit a `DeviceAction` onto a per-turn channel that the orchestrator drains
+      and relays on the turn socket (`orchestrator::drain_device_actions`). The seam is
+      `LlmTurn.actions` (an `ActionSink`).
+- [x] **Timers/alarms on-device** (unlimited concurrent): Rust `TimerManager`
+      (`rust/src/engine/timer.rs`) owns each countdown on the long-lived Network runtime
+      (outlives the turn socket), fires a synthesized chime via the shared `PlaybackSink`,
+      and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`. Flutter renders a
+      countdown-chip overlay (`lib/src/ui/timers_overlay.dart`) visible in idle + turns.
+- [ ] **Verify timers on hardware**: "set a 5-minute pasta timer" → chip counts down →
+      chime + "time's up" at zero; "cancel the pasta timer" / "cancel all timers"; two
+      concurrent timers; a timer keeps running after the Mac disconnects mid-countdown.
+- [ ] Consider a dedicated **weather tool** if web-search summaries prove too coarse
+      (structured forecast vs. a search snippet).
+- [ ] **Query/list timers** by voice ("how long left?") — needs a device→Mac timer-state
+      report so the model can answer; today the countdown UI answers visually.
+- [ ] **Calendar / reminders** (deferred): pick a backend — macOS EventKit (local,
+      no OAuth), Google Calendar (OAuth, needs a client ID), or generic CalDAV.

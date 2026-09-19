@@ -34,6 +34,7 @@ use crate::wakeword::{WakeWordDetector, WakeWordModelPaths};
 
 mod gate;
 mod net;
+mod timer;
 use gate::DetectionGate;
 use net::Network;
 

@@ -28,7 +28,7 @@ required-features = ["aec"]
 # see memory_plan.md "SPIKE RESULT"). On by default; the SQLite backend is always
 # available regardless. Disable with `--no-default-features` for a lean build that
 # skips the heavy engine deps (slatedb/tantivy/foyer, ~90s cold compile).
-default = ["helix"]
+default = ["helix", "rig"]
 helix = ["dep:db", "dep:helix-ast"]
 # `speaker` compiles the real ECAPA-TDNN ONNX voiceprint embedder (pure-Rust
 # `tract-onnx`, no external runtime; speaker_id_plan.md Phase E). Off by default;
@@ -36,8 +36,10 @@ helix = ["dep:db", "dep:helix-ast"]
 # Enable with `--features speaker` and set AMBIENT_SPEAKER_MODEL_PATH to the model.
 speaker = ["dep:tract-onnx"]
 # `rig` routes the LLM backends through the rig-core agent framework instead of the
-# hand-rolled HTTP clients. Opt-in during the migration; select at runtime with
-# AMBIENT_LLM_ENGINE=rig. Off by default until it reaches parity.
+# hand-rolled HTTP clients, and enables tool calling (the `internet_search` tool).
+# **On by default** (it is now the default engine); build with `--no-default-features`
+# for a lean native-only binary, and set AMBIENT_LLM_ENGINE=native to opt back out at
+# runtime.
 rig = ["dep:rig-core"]
 # `aec` compiles the host-side WebRTC Audio Processing stage (AEC3 + noise
 # suppression + AGC). Off by default because it triggers a heavy native C++ build

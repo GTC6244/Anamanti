@@ -170,6 +170,15 @@ pub enum WakeWordEventKind {
     Stopped,
     /// A fatal error in `message`; the engine has stopped.
     Error,
+    /// Phase 2: a countdown timer started on the device. `timer_id`,
+    /// `timer_label`, and `timer_remaining_secs` (the full duration) are populated;
+    /// the UI shows a countdown from that deadline.
+    TimerStarted,
+    /// Phase 2: a countdown timer reached zero (the alarm is sounding). `timer_id`
+    /// and `timer_label` identify it.
+    TimerFinished,
+    /// Phase 2: a running timer was cancelled. `timer_id` identifies it.
+    TimerCancelled,
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
@@ -198,6 +207,14 @@ pub struct WakeWordEvent {
     pub transcript: String,
     /// One streamed reply-token fragment (`ReplyToken`).
     pub reply: String,
+    /// Timer id (`TimerStarted` / `TimerFinished` / `TimerCancelled`). Stable for
+    /// the life of one timer so the UI can add/remove the right chip.
+    pub timer_id: u32,
+    /// Timer's spoken label, empty when unlabeled (`TimerStarted`/`TimerFinished`).
+    pub timer_label: String,
+    /// Full timer duration in seconds at start (`TimerStarted`); the UI counts down
+    /// from `now + timer_remaining_secs`. Zero for finished/cancelled.
+    pub timer_remaining_secs: u32,
 }
 
 impl WakeWordEvent {
@@ -213,6 +230,9 @@ impl WakeWordEvent {
             model: String::new(),
             transcript: String::new(),
             reply: String::new(),
+            timer_id: 0,
+            timer_label: String::new(),
+            timer_remaining_secs: 0,
         }
     }
 
@@ -291,6 +311,30 @@ impl WakeWordEvent {
         Self {
             message,
             ..Self::base(WakeWordEventKind::Error)
+        }
+    }
+
+    pub(crate) fn timer_started(id: u32, label: &str, remaining_secs: u32) -> Self {
+        Self {
+            timer_id: id,
+            timer_label: label.to_string(),
+            timer_remaining_secs: remaining_secs,
+            ..Self::base(WakeWordEventKind::TimerStarted)
+        }
+    }
+
+    pub(crate) fn timer_finished(id: u32, label: &str) -> Self {
+        Self {
+            timer_id: id,
+            timer_label: label.to_string(),
+            ..Self::base(WakeWordEventKind::TimerFinished)
+        }
+    }
+
+    pub(crate) fn timer_cancelled(id: u32) -> Self {
+        Self {
+            timer_id: id,
+            ..Self::base(WakeWordEventKind::TimerCancelled)
         }
     }
 }

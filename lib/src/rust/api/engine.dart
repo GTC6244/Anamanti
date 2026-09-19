@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `reply_token`, `speaking`, `started`, `status`, `stopped`, `streaming`, `transcript`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `reply_token`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
@@ -207,6 +207,17 @@ class WakeWordEvent {
   /// One streamed reply-token fragment (`ReplyToken`).
   final String reply;
 
+  /// Timer id (`TimerStarted` / `TimerFinished` / `TimerCancelled`). Stable for
+  /// the life of one timer so the UI can add/remove the right chip.
+  final int timerId;
+
+  /// Timer's spoken label, empty when unlabeled (`TimerStarted`/`TimerFinished`).
+  final String timerLabel;
+
+  /// Full timer duration in seconds at start (`TimerStarted`); the UI counts down
+  /// from `now + timer_remaining_secs`. Zero for finished/cancelled.
+  final int timerRemainingSecs;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -218,6 +229,9 @@ class WakeWordEvent {
     required this.model,
     required this.transcript,
     required this.reply,
+    required this.timerId,
+    required this.timerLabel,
+    required this.timerRemainingSecs,
   });
 
   @override
@@ -231,7 +245,10 @@ class WakeWordEvent {
       score.hashCode ^
       model.hashCode ^
       transcript.hashCode ^
-      reply.hashCode;
+      reply.hashCode ^
+      timerId.hashCode ^
+      timerLabel.hashCode ^
+      timerRemainingSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -247,7 +264,10 @@ class WakeWordEvent {
           score == other.score &&
           model == other.model &&
           transcript == other.transcript &&
-          reply == other.reply;
+          reply == other.reply &&
+          timerId == other.timerId &&
+          timerLabel == other.timerLabel &&
+          timerRemainingSecs == other.timerRemainingSecs;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -294,4 +314,16 @@ enum WakeWordEventKind {
 
   /// A fatal error in `message`; the engine has stopped.
   error,
+
+  /// Phase 2: a countdown timer started on the device. `timer_id`,
+  /// `timer_label`, and `timer_remaining_secs` (the full duration) are populated;
+  /// the UI shows a countdown from that deadline.
+  timerStarted,
+
+  /// Phase 2: a countdown timer reached zero (the alarm is sounding). `timer_id`
+  /// and `timer_label` identify it.
+  timerFinished,
+
+  /// Phase 2: a running timer was cancelled. `timer_id` identifies it.
+  timerCancelled,
 }

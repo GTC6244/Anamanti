@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 
 use crate::api::engine::{WakeWordConfig, WakeWordEvent};
 use crate::audio::playback::PlaybackSink;
+use crate::engine::timer::TimerManager;
 use crate::frb_generated::StreamSink;
 use crate::wyoming::{
     self, AudioFormat, EndpointCache, TurnUpdate, WyomingConnection, DEFAULT_DISCOVERY_TIMEOUT,
@@ -61,6 +62,8 @@ struct Shared {
     pending_restart: AtomicBool,
     /// Speaker playback sink for returned TTS frames (absent if no output device).
     playback: Option<Arc<PlaybackSink>>,
+    /// On-device timers (Phase 2). Long-lived so countdowns outlive the turn socket.
+    timers: TimerManager,
     discovery_timeout: Duration,
     turn_timeout: Duration,
 }
@@ -96,6 +99,10 @@ impl Network {
             n => Duration::from_secs(n),
         };
 
+        // The timer manager shares the event sink + playback and spawns countdown
+        // tasks on this runtime (so they outlive any single turn's socket).
+        let timers = TimerManager::new(sink.clone(), playback.clone(), runtime.handle().clone());
+
         Ok(Self {
             runtime,
             shared: Arc::new(Shared {
@@ -106,6 +113,7 @@ impl Network {
                 interrupt_tx: Mutex::new(None),
                 pending_restart: AtomicBool::new(false),
                 playback,
+                timers,
                 discovery_timeout,
                 turn_timeout,
             }),
@@ -247,6 +255,7 @@ async fn run_turn_task(
     };
 
     let playback = shared.playback.clone();
+    let timers = shared.timers.clone();
     let on_update = |update: TurnUpdate| {
         let event = match update {
             TurnUpdate::Streaming => {
@@ -261,6 +270,13 @@ async fn run_turn_task(
             TurnUpdate::Speaking => {
                 log::info!("turn: speaking (TTS playback started)");
                 WakeWordEvent::speaking()
+            }
+            // A device action: hand it to the long-lived timer manager, which emits
+            // its own timer events + alarm. Nothing to add on the sink here.
+            TurnUpdate::Timer(cmd) => {
+                log::info!("turn: timer command {cmd:?}");
+                timers.apply(cmd);
+                return;
             }
             TurnUpdate::Finished => {
                 log::info!("turn: finished cleanly");
