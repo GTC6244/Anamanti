@@ -432,10 +432,27 @@ services, inserting the pluggable LLM + persistent memory between them.
 > device↔orchestrator hop (no off-the-shelf Wyoming server sees them), kept
 > byte-identical in `rust/` and `mac/` `wyoming::protocol::types` and guarded by
 > round-trip tests on both sides. Selecting the cloud (anthropic) backend at
-> runtime still requires `ANTHROPIC_API_KEY` on the orchestrator; if it's absent
-> the change is rejected **in-band** (the response's `ok:false` + message) and the
+> runtime still requires an API key on the orchestrator, but that key no longer has
+> to be present at boot (see the runtime-key note below); if none is available the
+> change is rejected **in-band** (the response's `ok:false` + message) and the
 > previous backend stays in force, so a control error never drops the device
 > connection or the turn.
+
+> **Runtime provider keys (Phase 6 follow-up):** a cloud API key no longer has to be
+> in the environment at launch. `SettingsUpdate` gains optional `anthropic_api_key` /
+> `openai_api_key` fields (tri-state like the Tavily search key: absent = keep,
+> `null` = clear, value = set); `SharedSettings::apply` builds the backend with a
+> factory clone whose keys reflect the target, so a key entered at runtime enables the
+> cloud backend **without a restart**. Keys live in `RuntimeSettings` (the env var is
+> only the boot seed) and persist to `ambient_settings.json` (0600); on load a
+> persisted key overlays the env key only when present, so a pre-feature settings file
+> can't wipe a working env key. Key **entry** is exposed only on the loopback config
+> page (`webconfig.rs` — password fields shown per backend); the device/Wyoming
+> control path never accepts a provider key, and both surfaces report only
+> `anthropic_key_set` / `openai_key_set` (a boolean), never the key value. Endpoints
+> (base URLs) stay boot-time env only — deferred. Verified: mac `cargo test`
+> (107 unit + integration, incl. runtime-key enable + persist tests) + clippy `-D
+> warnings` + fmt.
 
 ---
 

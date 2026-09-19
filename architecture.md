@@ -180,8 +180,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
   loop routes control frames to `control::handle_control` and audio-start frames to
   a turn. Backends are `ollama` (local), `anthropic` and `openai` (cloud), and
   `mock`; selecting a cloud backend needs its API key (`ANTHROPIC_API_KEY` /
-  `OPENAI_API_KEY`) on the Mac, else the change is rejected in-band (never dropping
-  the connection).
+  `OPENAI_API_KEY`), else the change is rejected in-band (never dropping the
+  connection). The key can come from the environment at boot **or** be entered at
+  runtime on the loopback config page: `SettingsUpdate` carries optional
+  `anthropic_api_key` / `openai_api_key` fields (same tri-state as the search key —
+  absent = keep, `null` = clear, value = set), so a cloud backend can be enabled
+  without a restart. Runtime keys live in `SharedSettings` (env is only the boot
+  seed) and persist to `ambient_settings.json` (0600). Key **entry** is deliberately
+  config-page-only — the Wyoming/device control path never accepts a provider key, so
+  cloud secrets never live on the shared Echo Show screen; the device is told only
+  whether a key is set (`anthropic_key_set` / `openai_key_set`), never its value.
 - **Model selection** is a drop-down of **specific Anthropic / OpenAI models from
   the last 12 months**, produced by `llm::catalog::ModelCatalog`: it live-queries
   each provider's `GET /v1/models` (Anthropic `created_at`, OpenAI `created`),
