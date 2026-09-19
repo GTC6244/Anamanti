@@ -127,6 +127,12 @@ cargo run --manifest-path mac/Cargo.toml --release
 - `AMBIENT_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
   `ANTHROPIC_API_KEY`), `openai` (GPT / o-series; needs `OPENAI_API_KEY`), or
   `mock` (offline echo, no servers needed).
+- **Provider API keys at runtime:** you don't have to set the cloud key before
+  launch. The config page (`http://127.0.0.1:8730/`) has Anthropic / OpenAI API-key
+  fields — paste a key, pick the backend, and it applies **without a restart** (the
+  key is saved 0600 in `ambient_settings.json`, so it survives reboots too). The env
+  vars are just the boot seed. For safety the key fields live only on the loopback
+  config page, not on the device settings screen.
 - **Model selection:** the settings screen and the config page
   (`http://127.0.0.1:8730/`) show a **drop-down of specific Anthropic / OpenAI
   models from the last 12 months** (fetched live from each provider's `/v1/models`,
