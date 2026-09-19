@@ -14,10 +14,13 @@
 //! Routes:
 //! - `GET /`         → the HTML config page.
 //! - `GET /config`   → the live [`SettingsView`](crate::settings::SettingsView) as JSON.
+//! - `GET /models`   → the selectable LLM models for the model dropdown.
+//! - `GET /voices`   → the installed Piper voices for the TTS voice dropdown.
 //! - `POST /config`  → apply a `{llm_backend?, llm_model?, tts_voice?}` change
 //!   (same JSON shape as the `ambient-set-settings` control frame; a `tts_voice`
 //!   of `null` clears the voice) and return the resulting settings.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -27,6 +30,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
+use crate::orchestrator::ServiceConnector;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 
 /// The single static page. Inlined so the module is self-contained and needs no
@@ -103,8 +107,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <input id="llm_model_text" type="text" placeholder="(backend default)" style="display:none">
   </label>
 
-  <label>Piper TTS voice <span class="hint">blank = server default</span>
-    <input id="tts_voice" type="text" placeholder="(default)">
+  <label>Piper TTS voice <span class="hint" id="voice_hint">blank = server default</span>
+    <!-- When the orchestrator can list voices: a dropdown of installed Piper voices. -->
+    <select id="tts_voice_select" style="display:none"></select>
+    <!-- Fallback (voices unavailable): a free-text Piper voice name. -->
+    <input id="tts_voice_text" type="text" placeholder="(default)">
   </label>
 
   <button id="save">Apply</button>
@@ -114,6 +121,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   const $ = (id) => document.getElementById(id);
   const status = $('status');
   let MODELS = [];               // [{provider, id, label}] from /models
+  let VOICES = [];               // [{name, language, label}] from /voices
   const CLOUD = ['anthropic', 'openai'];
 
   function show(ok, msg) {
@@ -158,6 +166,42 @@ const INDEX_HTML: &str = r#"<!doctype html>
     return raw.trim() || null;
   }
 
+  // Show a dropdown of installed voices when we have them, else a free-text field.
+  // Keeps `selected` visible even if it isn't an installed voice.
+  function renderVoice(selected) {
+    const sel = $('tts_voice_select');
+    const txt = $('tts_voice_text');
+    if (VOICES.length) {
+      sel.style.display = '';
+      txt.style.display = 'none';
+      $('voice_hint').textContent = 'installed voices';
+      sel.innerHTML = '<option value="">(server default)</option>';
+      let matched = !selected;
+      for (const v of VOICES) {
+        const o = document.createElement('option');
+        o.value = v.name;
+        o.textContent = v.language ? (v.label || v.name) + ' · ' + v.language : (v.label || v.name);
+        if (v.name === selected) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      }
+      if (!matched) {   // a voice not in the installed list — keep it visible
+        const o = document.createElement('option');
+        o.value = selected; o.textContent = selected + ' (not installed)'; o.selected = true;
+        sel.appendChild(o);
+      }
+    } else {
+      sel.style.display = 'none';
+      txt.style.display = '';
+      txt.value = selected || '';
+      $('voice_hint').textContent = 'blank = server default';
+    }
+  }
+
+  function currentVoice() {
+    const raw = VOICES.length ? $('tts_voice_select').value : $('tts_voice_text').value;
+    return raw.trim() || null;
+  }
+
   // The Anthropic auth toggle only applies to the anthropic backend.
   function renderAuthRow(backend) {
     $('anthropic_auth_row').style.display = backend === 'anthropic' ? '' : 'none';
@@ -169,7 +213,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     $('anthropic_auth').value = v.anthropic_auth || 'apikey';
     renderAuthRow($('llm_backend').value);
     renderModel($('llm_backend').value, v.llm_model || '');
-    $('tts_voice').value = v.tts_voice || '';
+    renderVoice(v.tts_voice || '');
     $('web_search').checked = !!v.web_search;
     $('search_provider').value = v.search_provider || 'duckduckgo';
     $('search_api_key').value = '';
@@ -183,8 +227,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     } catch (e) { MODELS = []; }
   }
 
+  async function loadVoices() {
+    try {
+      const r = await fetch('/voices');
+      VOICES = (await r.json()).voices || [];
+    } catch (e) { VOICES = []; }
+  }
+
   async function load() {
-    await loadModels();
+    await Promise.all([loadModels(), loadVoices()]);
     try {
       const r = await fetch('/config');
       fill(await r.json());
@@ -200,7 +251,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       llm_backend: $('llm_backend').value,
       anthropic_auth: $('anthropic_auth').value,
       llm_model: currentModel(),
-      tts_voice: $('tts_voice').value.trim() || null,
+      tts_voice: currentVoice(),
       web_search: $('web_search').checked,
       search_provider: $('search_provider').value,
       // Only send the key when the user typed one; blank keeps the current key.
@@ -242,13 +293,17 @@ pub async fn serve(
     listener: TcpListener,
     settings: Arc<SharedSettings>,
     catalog: Arc<ModelCatalog>,
+    connector: Arc<dyn ServiceConnector>,
+    voices_dir: Option<PathBuf>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let settings = settings.clone();
         let catalog = catalog.clone();
+        let connector = connector.clone();
+        let voices_dir = voices_dir.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, settings, catalog).await {
+            if let Err(e) = handle(stream, settings, catalog, connector, voices_dir).await {
                 log::debug!("config page connection {peer} ended: {e:#}");
             }
         });
@@ -261,6 +316,8 @@ async fn handle(
     mut stream: TcpStream,
     settings: Arc<SharedSettings>,
     catalog: Arc<ModelCatalog>,
+    connector: Arc<dyn ServiceConnector>,
+    voices_dir: Option<PathBuf>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
@@ -316,11 +373,18 @@ async fn handle(
     }
     body.truncate(content_length);
 
-    // The model list needs an async catalog fetch, so it's handled here rather than
-    // in the pure `route` function.
+    // The model list needs an async catalog fetch and the voice list an async Piper
+    // `describe`, so both are handled here rather than in the pure `route` function.
     let path = target.split(['?', '#']).next().unwrap_or(&target);
     if method == "GET" && path == "/models" {
         let payload = models_json(&catalog).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "GET" && path == "/voices" {
+        // Reuse the exact device-facing logic: Piper's catalog intersected with the
+        // installed voices when a voices dir is configured.
+        let ev = crate::control::voices_response(connector.as_ref(), voices_dir.as_deref()).await;
+        let payload = ev.data.to_string().into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
 
@@ -517,6 +581,42 @@ mod tests {
         ))
     }
 
+    /// A connector whose `connect_tts` answers a Wyoming `describe` with a fixed
+    /// voice catalog, so the `/voices` route can be exercised without a real Piper.
+    struct VoiceConnector;
+
+    #[async_trait::async_trait]
+    impl ServiceConnector for VoiceConnector {
+        async fn connect_stt(&self) -> Result<crate::wyoming::DynConnection> {
+            anyhow::bail!("stt not used in config-page tests")
+        }
+
+        async fn connect_tts(&self) -> Result<crate::wyoming::DynConnection> {
+            use crate::wyoming::protocol::{types, write_event, WyomingEvent};
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(server);
+                let mut reader = tokio::io::BufReader::new(r);
+                let mut writer = w;
+                let _ = crate::wyoming::protocol::read_event(&mut reader).await;
+                let info = WyomingEvent::with_data(
+                    types::INFO,
+                    json!({ "tts": [{ "voices": [
+                        { "name": "en_US-amy-medium", "languages": ["en_US"], "description": "amy (medium)" },
+                        { "name": "en_US-lessac-medium", "languages": ["en_US"], "description": "lessac (medium)" },
+                    ]}]}),
+                );
+                let _ = write_event(&mut writer, &info).await;
+            });
+            let (r, w) = tokio::io::split(client);
+            Ok(crate::wyoming::DynConnection::from_io(r, w))
+        }
+    }
+
+    fn connector() -> Arc<dyn ServiceConnector> {
+        Arc::new(VoiceConnector)
+    }
+
     #[test]
     fn get_root_serves_html() {
         let (status, ctype, body) = route("GET", "/", b"", &settings());
@@ -626,7 +726,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog()).await.unwrap();
+            handle(stream, s, catalog(), connector(), None).await.unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -654,7 +754,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog()).await.unwrap();
+            handle(stream, s, catalog(), connector(), None).await.unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -668,5 +768,46 @@ mod tests {
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
         assert!(resp.contains("claude-opus-5"), "resp: {resp}");
         assert!(resp.contains("gpt-4o-mini"), "resp: {resp}");
+    }
+
+    /// `GET /voices` returns the installed-voice list, filtered to a voices dir.
+    #[tokio::test]
+    async fn serves_the_voice_catalog_filtered_to_installed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A voices dir with only amy installed → lessac is filtered out even though
+        // the mock Piper advertises both.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ambient-webcfg-voices-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("en_US-amy-medium.onnx"), b"").unwrap();
+
+        let s = settings();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dir_for_task = dir.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle(stream, s, catalog(), connector(), Some(dir_for_task))
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /voices HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
+        assert!(resp.contains("en_US-amy-medium"), "resp: {resp}");
+        assert!(!resp.contains("en_US-lessac-medium"), "resp: {resp}");
     }
 }

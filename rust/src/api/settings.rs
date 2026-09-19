@@ -56,6 +56,19 @@ pub struct ModelInfo {
     pub label: String,
 }
 
+/// One selectable Piper voice for the settings TTS voice dropdown, as reported by
+/// the orchestrator (its intersection of Piper's advertised catalog with the voices
+/// installed on disk).
+#[derive(Debug, Clone)]
+pub struct VoiceInfo {
+    /// Piper voice id sent as `tts_voice` (e.g. `en_US-amy-medium`).
+    pub name: String,
+    /// Primary locale (e.g. `en_US`), or `None` if the server didn't report one.
+    pub language: Option<String>,
+    /// A human-friendly label for the dropdown (falls back to `name`).
+    pub label: String,
+}
+
 /// One persistent memory entry, for the settings memory list.
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
@@ -148,6 +161,14 @@ pub fn list_models(discovery_timeout_secs: u64) -> Result<Vec<ModelInfo>> {
     block_on(async move {
         let cache = EndpointCache::new();
         control::list_models(&cache, timeout(discovery_timeout_secs)).await
+    })
+}
+
+/// List the installed Piper voices for the settings TTS voice dropdown.
+pub fn list_voices(discovery_timeout_secs: u64) -> Result<Vec<VoiceInfo>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_voices(&cache, timeout(discovery_timeout_secs)).await
     })
 }
 

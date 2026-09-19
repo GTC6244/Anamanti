@@ -410,6 +410,21 @@ services, inserting the pluggable LLM + persistent memory between them.
 > helix) + clippy/fmt + `--features rig` check, device `cargo test`
 > (`list_models` round trip), FRB regen, `flutter analyze` + `flutter test`.
 
+> **TTS voice dropdown (Phase 6 follow-up):** the settings TTS voice field is a
+> dropdown of **installed** Piper voices, mirroring the model dropdown. On
+> `ambient-list-voices`, the orchestrator queries Piper's advertised catalog (a
+> downstream Wyoming `describe` → `info`, parsed in `mac/src/wyoming/tts.rs`
+> `describe_voices`/`parse_voice_catalog`) and, when `AMBIENT_TTS_VOICES_DIR` is set
+> (Piper co-located on the Mac), keeps only voices whose `<name>.onnx` is present on
+> disk; unset → the full advertised list. Exposed via `ambient-list-voices` →
+> `ambient-voices` (new FRB `list_voices` → `listVoices`, `VoiceInfo`/`VoiceOption`)
+> and to the browser via `GET /voices` on the config page. Both the device screen
+> and the config page show a "Server default" entry, preserve a hand-set voice not
+> in the list, and fall back to a free-text field when the list is unavailable.
+> Verified: mac
+> `cargo test` + clippy, device `cargo test` (`list_voices` round trip) + clippy,
+> FRB regen, `flutter analyze` + `flutter test` (voice dropdown + free-text fallback).
+
 > **Anthropic auth mode (Phase 6 follow-up):** cloud Claude can authenticate with an
 > **API key** *or* a **Claude subscription (OAuth)**. `mac/src/llm/anthropic_auth.rs`
 > adds `AnthropicAuth` + an `AnthropicTokenProvider` that resolves a subscription

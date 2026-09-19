@@ -170,7 +170,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - The **LLM backend + model and TTS voice** live on the Mac and are read/changed
   over a **project-local control protocol** on the device↔orchestrator hop —
   `ambient-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
-  memories; `list-models`) that ride the existing framing (byte-identical `types`
+  memories; `list-models`; `list-voices`) that ride the existing framing (byte-identical `types`
   in both crates, no off-the-shelf server sees them). The orchestrator's `Pipeline`
   reads a per-turn snapshot of runtime-swappable `SharedSettings`, so a
   backend/voice change takes effect on the next turn with no restart; the accept
@@ -188,6 +188,17 @@ predictable memory use and no GC pauses under the 1 GB limit.
   browser via `GET /models` on the config page. The chosen `llm_model` flows through
   the same `SharedSettings::apply` → `LlmFactory::build` path into the concrete
   backend's request, and persists to `ambient_settings.json`.
+- **TTS voice selection** is likewise a drop-down. On `ambient-list-voices`, the
+  orchestrator asks Piper for its advertised catalog (a downstream Wyoming
+  `describe` → `info`) and, when `AMBIENT_TTS_VOICES_DIR` points at Piper's model
+  dir (Piper co-located on the Mac), intersects it with the `<name>.onnx` files
+  actually on disk so only installed voices are offered; with no dir set it returns
+  the full advertised list. Exposed to the device via `ambient-list-voices` →
+  `ambient-voices` (FRB `list_voices` → `listVoices`) and to the browser via
+  `GET /voices` on the config page. Both the settings screen and the config page
+  render a dropdown (with a "Server default" entry) and fall back to a free-text
+  field when the list is unavailable; a hand-set voice not in the list stays
+  selectable.
 - **Anthropic auth mode** (`llm::anthropic_auth`): a per-provider toggle selects
   **API key** (`x-api-key` from `ANTHROPIC_API_KEY`) or **subscription OAuth**
   (`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`). Subscription tokens

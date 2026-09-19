@@ -11,15 +11,20 @@
 //! [`respond`] is a pure function of `(request, memory, settings)` so the whole
 //! control surface is unit-testable without a socket.
 
-use anyhow::Result;
+use std::collections::HashSet;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::MemoryStore;
+use crate::orchestrator::ServiceConnector;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 use crate::speaker::SpeakerRegistry;
 use crate::wyoming::protocol::{types, WyomingEvent};
+use crate::wyoming::tts::{describe_voices, VoiceEntry};
 use crate::wyoming::DynConnection;
 
 /// Whether an incoming event is a Phase-6 control request the orchestrator should
@@ -37,12 +42,15 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::MERGE_SPEAKERS
             | types::DELETE_SPEAKER
             | types::LIST_MODELS
+            | types::LIST_VOICES
     )
 }
 
 /// Handle one control request over `device`: build the response and send it. Most
 /// requests are answered synchronously by [`respond`]; `ambient-list-models` needs
-/// an async catalog fetch, so it is handled here.
+/// an async catalog fetch and `ambient-list-voices` an async Piper `describe`, so
+/// those are handled here.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_control(
     device: &mut DynConnection,
     request: &WyomingEvent,
@@ -50,13 +58,75 @@ pub async fn handle_control(
     settings: &SharedSettings,
     speaker: Option<&SpeakerRegistry>,
     catalog: &ModelCatalog,
+    connector: &dyn ServiceConnector,
+    voices_dir: Option<&Path>,
 ) -> Result<()> {
     let response = if request.event_type == types::LIST_MODELS {
         models_response(catalog).await
+    } else if request.event_type == types::LIST_VOICES {
+        voices_response(connector, voices_dir).await
     } else {
         respond(request, memory, settings, speaker)
     };
     device.send(&response).await
+}
+
+/// Build the `ambient-voices` response: Piper's advertised voice catalog, filtered
+/// to the voices actually present on disk when a voices dir is configured. A
+/// failure to reach Piper is reported in-band (`ok: false`) so it never drops the
+/// device connection.
+pub async fn voices_response(
+    connector: &dyn ServiceConnector,
+    voices_dir: Option<&Path>,
+) -> WyomingEvent {
+    match list_installed_voices(connector, voices_dir).await {
+        Ok(voices) => {
+            let voices: Vec<Value> = voices
+                .into_iter()
+                .map(|v| json!({ "name": v.name, "language": v.language, "label": v.label }))
+                .collect();
+            WyomingEvent::with_data(types::VOICES, json!({ "ok": true, "voices": voices }))
+        }
+        Err(e) => WyomingEvent::with_data(
+            types::VOICES,
+            json!({ "ok": false, "message": format!("{e:#}"), "voices": [] }),
+        ),
+    }
+}
+
+/// Fetch Piper's advertised voices and, when `voices_dir` is set, keep only those
+/// whose `<name>.onnx` model is present there. Sorted by name, deduplicated.
+async fn list_installed_voices(
+    connector: &dyn ServiceConnector,
+    voices_dir: Option<&Path>,
+) -> Result<Vec<VoiceEntry>> {
+    let conn = connector.connect_tts().await?;
+    let mut catalog = describe_voices(conn).await?;
+    if let Some(dir) = voices_dir {
+        let installed = installed_voice_names(dir)?;
+        catalog.retain(|v| installed.contains(&v.name));
+    }
+    catalog.sort_by(|a, b| a.name.cmp(&b.name));
+    catalog.dedup_by(|a, b| a.name == b.name);
+    Ok(catalog)
+}
+
+/// The set of voice names present in `dir`: the file stem of every `<name>.onnx`
+/// (so `en_US-amy-medium.onnx` → `en_US-amy-medium`; the sibling `.onnx.json` is
+/// ignored).
+fn installed_voice_names(dir: &Path) -> Result<HashSet<String>> {
+    let mut names = HashSet::new();
+    let entries = std::fs::read_dir(dir)
+        .with_context(|| format!("scanning Piper voices dir {}", dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("onnx") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.insert(stem.to_string());
+            }
+        }
+    }
+    Ok(names)
 }
 
 /// Build the `ambient-models` response from the selectable-model catalog.
@@ -458,6 +528,7 @@ mod tests {
         assert!(is_control_request(types::MERGE_SPEAKERS));
         assert!(is_control_request(types::DELETE_SPEAKER));
         assert!(is_control_request(types::LIST_MODELS));
+        assert!(is_control_request(types::LIST_VOICES));
         assert!(!is_control_request(types::AUDIO_START));
         assert!(!is_control_request(types::TRANSCRIPT));
     }
@@ -572,5 +643,93 @@ mod tests {
         assert!(models
             .iter()
             .any(|m| m["provider"] == json!("openai") && m["id"] == json!("gpt-4o-mini")));
+    }
+
+    // ---- ambient-list-voices ----
+
+    /// A connector whose `connect_tts` answers a `describe` with a fixed voice
+    /// catalog (amy, lessac, and a not-installed German voice). `connect_stt` is
+    /// never used by the voice path.
+    struct VoiceConnector;
+
+    #[async_trait::async_trait]
+    impl crate::orchestrator::ServiceConnector for VoiceConnector {
+        async fn connect_stt(&self) -> Result<crate::wyoming::DynConnection> {
+            anyhow::bail!("stt not used in voice tests")
+        }
+
+        async fn connect_tts(&self) -> Result<crate::wyoming::DynConnection> {
+            use crate::wyoming::protocol::write_event;
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(server);
+                let mut reader = tokio::io::BufReader::new(r);
+                let mut writer = w;
+                // Wait for the describe, then answer with an info catalog.
+                let _ = crate::wyoming::protocol::read_event(&mut reader).await;
+                let info = WyomingEvent::with_data(
+                    types::INFO,
+                    json!({ "tts": [{ "voices": [
+                        { "name": "en_US-amy-medium", "languages": ["en_US"], "description": "amy (medium)" },
+                        { "name": "en_US-lessac-medium", "languages": ["en_US"], "description": "lessac (medium)" },
+                        { "name": "de_DE-thorsten-low", "languages": ["de_DE"], "description": "thorsten (low)" },
+                    ]}]}),
+                );
+                let _ = write_event(&mut writer, &info).await;
+            });
+            let (r, w) = tokio::io::split(client);
+            Ok(crate::wyoming::DynConnection::from_io(r, w))
+        }
+    }
+
+    /// Create a unique temp dir seeded with `<name>.onnx` (+ a sibling `.onnx.json`
+    /// that must be ignored) for each installed voice. Returned dir is caller-owned.
+    fn temp_voices_dir(installed: &[&str]) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ambient-voices-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in installed {
+            std::fs::write(dir.join(format!("{name}.onnx")), b"").unwrap();
+            std::fs::write(dir.join(format!("{name}.onnx.json")), b"{}").unwrap();
+        }
+        dir
+    }
+
+    #[tokio::test]
+    async fn voices_response_filters_to_installed_when_dir_is_set() {
+        let dir = temp_voices_dir(&["en_US-amy-medium", "en_US-lessac-medium"]);
+        let resp = voices_response(&VoiceConnector, Some(&dir)).await;
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(resp.event_type, types::VOICES);
+        assert_eq!(resp.data["ok"], json!(true));
+        let voices = resp.data["voices"].as_array().unwrap();
+        let names: Vec<&str> = voices.iter().map(|v| v["name"].as_str().unwrap()).collect();
+        // Only the two installed voices survive; the German voice is filtered out.
+        assert_eq!(names, vec!["en_US-amy-medium", "en_US-lessac-medium"]);
+        assert_eq!(voices[0]["language"], json!("en_US"));
+        assert_eq!(voices[0]["label"], json!("amy (medium)"));
+    }
+
+    #[tokio::test]
+    async fn voices_response_returns_full_catalog_without_a_dir() {
+        // No voices dir configured (remote Piper): the full advertised list is returned.
+        let resp = voices_response(&VoiceConnector, None).await;
+        assert_eq!(resp.data["ok"], json!(true));
+        let voices = resp.data["voices"].as_array().unwrap();
+        assert_eq!(voices.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn voices_response_reports_scan_error_in_band() {
+        // A missing voices dir surfaces as ok:false, never a dropped connection.
+        let missing = std::env::temp_dir().join("ambient-voices-does-not-exist-xyz");
+        let resp = voices_response(&VoiceConnector, Some(&missing)).await;
+        assert_eq!(resp.event_type, types::VOICES);
+        assert_eq!(resp.data["ok"], json!(false));
+        assert_eq!(resp.data["voices"].as_array().unwrap().len(), 0);
     }
 }

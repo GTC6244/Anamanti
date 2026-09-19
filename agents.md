@@ -113,6 +113,9 @@ cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp,
 #     settings screen / config page pick a specific model from a last-12-months list)
 #   AMBIENT_STT_ADDR=127.0.0.1:10300  AMBIENT_TTS_ADDR=127.0.0.1:10200
 #   AMBIENT_BIND_ADDR=0.0.0.0:10700   AMBIENT_TTS_VOICE=en_US-amy-medium
+#   AMBIENT_TTS_VOICES_DIR=<piper model dir>  (when Piper is co-located: the
+#     settings voice dropdown then lists only the `<name>.onnx` voices installed
+#     there; unset → the dropdown shows Piper's full advertised catalog)
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
   cargokit plugin (`rust_builder/cargokit`) uses the legacy AGP variant API and
