@@ -170,6 +170,83 @@ async fn disk_store_body() {
 }
 
 #[test]
+fn rename_entity_fixes_a_misspelled_name() {
+    on_big_stack(rename_entity_body());
+}
+
+/// Editing an entity's name (a misspelled fact) rewrites the `Entity` node in
+/// place — same node, same edges — *and* the free text of the turns/memories that
+/// mention it, while refusing to collide with another entity.
+async fn rename_entity_body() {
+    use ambient_orchestrator::memory::entity::Entity;
+    use ambient_orchestrator::memory::GraphView;
+
+    let embedder = MockEmbedder::new(16);
+    let dims = embedder.dimensions();
+    let helix = HelixMemory::open_in_memory("rename-test", dims)
+        .await
+        .unwrap();
+
+    // Ingest a turn + a memory that both mention a misspelled place, "Portlnad".
+    let ents = vec![Entity {
+        name: "Portlnad".to_string(),
+        kind: "place".to_string(),
+    }];
+    let vec = embedder.embed_one("I live in Portlnad").await.unwrap();
+    helix
+        .ingest_turn("t1", "s", 1, "I live in Portlnad", vec, &ents, "household", None)
+        .await
+        .unwrap();
+    let mvec = embedder.embed_one("The user lives in Portlnad").await.unwrap();
+    helix
+        .ingest_memory("m1", "fact", "The user lives in Portlnad", mvec, &ents, "household")
+        .await
+        .unwrap();
+
+    // Renaming a name that appears nowhere touches nothing.
+    let none = helix.rename_entity("Nowhere", "Somewhere").await.unwrap();
+    assert_eq!(none.total(), 0);
+
+    // Fix the spelling: the Entity node, the turn text, and the memory content are
+    // all corrected in place.
+    let fixed = helix.rename_entity("Portlnad", "Portland").await.unwrap();
+    assert_eq!(fixed.entities, 1, "the entity node is renamed");
+    assert_eq!(fixed.turns, 1, "the turn's free text is corrected");
+    assert_eq!(fixed.memories, 1, "the memory's free text is corrected");
+
+    // The graph now shows the corrected name and no trace of the misspelling.
+    let sample = helix.sample(10).await.unwrap();
+    let entities = sample["Entity"].as_array().unwrap();
+    assert_eq!(entities.len(), 1, "rename edits in place, not a new node");
+    assert_eq!(entities[0]["name"], "Portland");
+    assert_eq!(sample["Turn"][0]["text"], "I live in Portland");
+    assert_eq!(sample["Memory"][0]["content"], "The user lives in Portland");
+
+    // Renaming onto an existing *distinct* entity is rejected (would split edges),
+    // and leaves everything untouched.
+    let vec2 = embedder.embed_one("coffee").await.unwrap();
+    let coffee = vec![Entity {
+        name: "coffee".to_string(),
+        kind: "thing".to_string(),
+    }];
+    helix
+        .ingest_turn("t2", "s", 2, "coffee", vec2, &coffee, "household", None)
+        .await
+        .unwrap();
+    assert!(
+        helix.rename_entity("coffee", "Portland").await.is_err(),
+        "colliding with an existing entity name must be rejected"
+    );
+
+    // A no-op rename (same name) changes nothing and reports the entity match count.
+    let noop = helix.rename_entity("Portland", "Portland").await.unwrap();
+    assert_eq!(noop.entities, 1);
+    assert_eq!(noop.turns, 0);
+    // An empty target name is rejected.
+    assert!(helix.rename_entity("Portland", "   ").await.is_err());
+}
+
+#[test]
 fn graph_view_reports_stats_and_samples_nodes() {
     on_big_stack(graph_view_body());
 }
