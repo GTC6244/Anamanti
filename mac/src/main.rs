@@ -1,6 +1,6 @@
-// The embedded HelixDB engine (feature `helix`) has deeply nested generic types;
-// computing the layout of the async runtime that awaits them needs a higher
-// recursion limit than the default 128 (the `db` crate sets the same).
+// The embedded HelixDB engine has deeply nested generic types; computing the
+// layout of the async runtime that awaits them needs a higher recursion limit than
+// the default 128 (the `db` crate sets the same).
 #![recursion_limit = "512"]
 //! Ambient Smart Display — Mac Mini assistant orchestrator (Plan.MD Phase 4).
 //!
@@ -19,14 +19,14 @@ use tokio::net::TcpListener;
 
 use ambient_orchestrator::config::{Config, MemoryBackendChoice};
 use ambient_orchestrator::discovery::MdnsAdvertiser;
-use ambient_orchestrator::memory::{ChatLog, MemoryStore};
+use ambient_orchestrator::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
 use ambient_orchestrator::orchestrator::{self, Pipeline, TcpConnector};
 use ambient_orchestrator::server;
-use ambient_orchestrator::webconfig;
+use ambient_orchestrator::webconfig::{self, DebugSources};
 
-/// Worker-thread stack size. The embedded HelixDB engine (feature `helix`) builds
-/// deep async state machines whose stack usage exceeds tokio's 2 MiB default,
-/// especially in debug builds; 16 MiB gives comfortable headroom.
+/// Worker-thread stack size. The embedded HelixDB engine builds deep async state
+/// machines whose stack usage exceeds tokio's 2 MiB default, especially in debug
+/// builds; 16 MiB gives comfortable headroom.
 const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> Result<()> {
@@ -85,6 +85,16 @@ async fn run() -> Result<()> {
     );
     log::info!("chat log at {}", config.chatlog_path.display());
 
+    // Prompt log (always on): the exact assembled LLM prompt per turn, for the
+    // orchestrator's debug GUI (`/prompts`). Separate from the chat log, which the
+    // GraphRAG ingester consumes.
+    let promptlog = Arc::new(
+        PromptLog::open(&config.promptlog_path).with_context(|| {
+            format!("opening prompt log at {}", config.promptlog_path.display())
+        })?,
+    );
+    log::info!("prompt log at {}", config.promptlog_path.display());
+
     {
         let v = settings.view();
         log::info!(
@@ -93,18 +103,8 @@ async fn run() -> Result<()> {
             v.llm_backend,
             v.web_search,
         );
-        // A very common footgun: selecting the rig engine in a binary that wasn't
-        // built with `--features rig`. It silently falls back to native (no tools),
-        // so web search never runs. Say so loudly.
-        #[cfg(not(feature = "rig"))]
-        if v.engine == ambient_orchestrator::settings::LlmEngine::Rig {
-            log::warn!(
-                "engine=rig requested but this binary was built WITHOUT the `rig` feature; \
-                 using native backends (NO tools / no web search). Rebuild with \
-                 `cargo run --features rig` to enable rig + the internet_search tool."
-            );
-        }
-        #[cfg(feature = "rig")]
+        // Web search only runs on the rig engine; warn if it's on but the engine
+        // isn't rig, so the tool would silently never fire.
         if v.web_search && v.engine != ambient_orchestrator::settings::LlmEngine::Rig {
             log::warn!(
                 "web_search is on but engine is not rig; the web-search tool only runs on \
@@ -119,14 +119,20 @@ async fn run() -> Result<()> {
         config.system_prompt.clone(),
         config.turn_timeout,
     )
-    .with_chatlog(chatlog.clone());
+    .with_chatlog(chatlog.clone())
+    .with_promptlog(promptlog.clone());
+
+    // Read-only handle onto the GraphRAG store for the debug GUI (`/helix`); stays
+    // `None` on the SQLite backend or when the graph backend fails to initialize.
+    let mut graph_view: Option<Arc<dyn GraphView>> = None;
 
     // Memory retrieval backend: SQLite FTS (default) or embedded HelixDB GraphRAG.
     if config.memory_backend == MemoryBackendChoice::Helix {
         match build_graphrag_recall(&config, &chatlog).await {
-            Ok(recall) => {
+            Ok((recall, graph)) => {
                 log::info!("memory backend: HelixDB GraphRAG (embedded, in-process)");
                 pipeline = pipeline.with_recall(recall);
+                graph_view = Some(graph);
             }
             Err(e) => {
                 log::error!("GraphRAG init failed ({e:#}); falling back to SQLite FTS recall");
@@ -156,14 +162,28 @@ async fn run() -> Result<()> {
     if let Some(config_addr) = config.config_addr {
         let settings = pipeline.settings().clone();
         let catalog = catalog.clone();
+        let debug = DebugSources {
+            memory: pipeline.memory().clone(),
+            chatlog_path: config.chatlog_path.clone(),
+            promptlog_path: config.promptlog_path.clone(),
+            db_path: config.db_path.clone(),
+            helix_path: config.helix_path.clone(),
+            memory_backend: match config.memory_backend {
+                MemoryBackendChoice::Helix => "helix",
+                MemoryBackendChoice::Sqlite => "sqlite",
+            }
+            .to_string(),
+            graph: graph_view.clone(),
+        };
         match TcpListener::bind(config_addr).await {
             Ok(listener) => {
                 let local = listener.local_addr().unwrap_or(config_addr);
                 log::info!(
-                    "config page on http://{local}/ (no auth — keep it on a trusted network)"
+                    "config + debug pages on http://{local}/ \
+                     (chat log, prompts, SQLite, HelixDB — no auth, keep it on a trusted network)"
                 );
                 tokio::spawn(async move {
-                    if let Err(e) = webconfig::serve(listener, settings, catalog).await {
+                    if let Err(e) = webconfig::serve(listener, settings, catalog, debug).await {
                         log::error!("config page stopped: {e:#}");
                     }
                 });
@@ -240,13 +260,11 @@ async fn ensure_ollama_model(config: &mut Config) {
 
 /// Build the HelixDB GraphRAG recall backend and spawn the background ingester.
 /// Requires `OPENAI_API_KEY` (embeddings); `ANTHROPIC_API_KEY` enables Claude
-/// Haiku entity extraction (absent → pure-vector recall). Only available when the
-/// binary is built with the `helix` feature.
-#[cfg(feature = "helix")]
+/// Haiku entity extraction (absent → pure-vector recall).
 async fn build_graphrag_recall(
     config: &Config,
     chatlog: &Arc<ChatLog>,
-) -> Result<Arc<dyn ambient_orchestrator::memory::Recall>> {
+) -> Result<(Arc<dyn ambient_orchestrator::memory::Recall>, Arc<dyn GraphView>)> {
     use ambient_orchestrator::memory::embed::{Embedder, OpenAiEmbedder};
     use ambient_orchestrator::memory::entity::{
         AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor,
@@ -302,14 +320,8 @@ async fn build_graphrag_recall(
         g.ingest_interval.as_secs()
     );
 
-    Ok(Arc::new(HelixRecall::new(helix, embedder, g.recall_k)))
-}
-
-/// When built without the `helix` feature, the GraphRAG backend is unavailable.
-#[cfg(not(feature = "helix"))]
-async fn build_graphrag_recall(
-    _config: &Config,
-    _chatlog: &Arc<ChatLog>,
-) -> Result<Arc<dyn ambient_orchestrator::memory::Recall>> {
-    anyhow::bail!("binary built without the `helix` feature; rebuild with --features helix")
+    let recall: Arc<dyn ambient_orchestrator::memory::Recall> =
+        Arc::new(HelixRecall::new(helix.clone(), embedder, g.recall_k));
+    let graph: Arc<dyn GraphView> = helix;
+    Ok((recall, graph))
 }

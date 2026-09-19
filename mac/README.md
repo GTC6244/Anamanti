@@ -67,9 +67,10 @@ embeds new turns (OpenAI `text-embedding-3-small`) and extracts entities (Claude
 Haiku) into a graph (`User/Turn/Memory/Entity` nodes; `SAID/MENTIONS/ABOUT/
 FOLLOWS/KNOWS` edges), and recall does vector KNN + graph expansion, injected
 into the LLM system prompt. Requires `OPENAI_API_KEY`; without it the
-orchestrator logs a warning and falls back to SQLite FTS. Build lean (SQLite
-only, skips the heavy engine deps) with `cargo build --no-default-features`.
-See [`../memory_plan.md`](../memory_plan.md) for the full design + status.
+orchestrator logs a warning and falls back to SQLite FTS. Set
+`AMBIENT_MEMORY_BACKEND=sqlite` to force pure FTS recall (the HelixDB engine is
+always compiled in). See [`../memory_plan.md`](../memory_plan.md) for the full
+design + status.
 
 The offline `mock` backend needs no model server, so
 `AMBIENT_LLM_BACKEND=mock cargo run` exercises the pipeline shape end to end (you

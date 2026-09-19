@@ -103,15 +103,23 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `respond(transcript) -> token stream`. Two interchangeable implementations:
   local (Ollama/llama.cpp) and cloud (Claude/OpenAI). Selection is config-driven.
   Reads/writes the persistent memory store to build context and record new facts.
-- **Persistent Memory** — a **SQLite** DB on the Mac holding long-term facts and
-  user preferences across sessions, with full-text search (no embedding model in
-  v1). Policy is **explicit + inferred**: entries are added on request
-  ("remember…") and auto-extracted from conversation turns. Managed via a
-  settings list (view/delete) and voice ("forget that"); kept until cleared.
-  Private to the LAN; survives device reflashes. **Per-person:** an opt-in local
-  voiceprint embedder (`mac/src/speaker/`) identifies who is speaking from the
-  utterance PCM and scopes memory writes/recall and the prompt to that person (a
-  shared "household" scope is the floor); see `speaker_id_plan.md`.
+- **Persistent Memory** — a **SQLite** DB on the Mac is the store of record for
+  long-term facts and user preferences across sessions. Policy is **explicit +
+  inferred**: entries are added on request ("remember…") and auto-extracted from
+  conversation turns. Managed via a settings list (view/delete) and voice
+  ("forget that"); kept until cleared. Private to the LAN; survives device
+  reflashes. **Retrieval/recall runs behind a `memory::Recall` seam and defaults
+  to the embedded HelixDB GraphRAG backend** (`mac/src/memory/helix.rs`;
+  in-process, no server/Docker): each completed turn is appended to
+  `ambient_chatlog.jsonl` and a background ingester (`memory/ingester.rs`) embeds
+  it (OpenAI `text-embedding-3-small`, `OPENAI_API_KEY`) into a graph of
+  `User/Turn/Memory/Entity` nodes, so recall does vector KNN + a graph hop rather
+  than keyword FTS. If `OPENAI_API_KEY` is absent or the graph fails to open,
+  recall **falls back to SQLite FTS** (writes are unaffected); `AMBIENT_MEMORY_BACKEND=sqlite`
+  forces FTS. **Per-person:** an opt-in local voiceprint embedder
+  (`mac/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
+  memory writes/recall and the prompt to that person (a shared "household" scope is
+  the floor); see `speaker_id_plan.md`.
 - **End-of-speech / VAD** — runs in the **orchestrator**, not the STT server:
   `wyoming-faster-whisper` has no streaming VAD and only transcribes once it
   receives `audio-stop`, so the orchestrator scores per-chunk RMS energy over the
@@ -197,6 +205,14 @@ predictable memory use and no GC pauses under the 1 GB limit.
   chat backend and the catalog share the provider so listing + turns authenticate
   identically. The mode rides the settings protocol (`anthropic_auth` field) and the
   config page toggle; OpenAI is API-key-only.
+- **Debug/inspection pages** (`webconfig.rs`, same loopback HTTP server as the
+  config page, strictly read-only): `GET /chatlog`, `/prompts`, `/sqlite`, `/helix`
+  render the recent chat log, the exact assembled LLM prompt per turn (captured to
+  a separate `ambient_promptlog.jsonl` via `PromptLog`), the SQLite memory rows, and
+  the HelixDB GraphRAG node stats + a sample of nodes (behind the read-only
+  `memory::GraphView` seam; reports "disabled" on the SQLite backend). Each has a
+  `*.json` data endpoint the page fetches. No auth — keep the config address on a
+  trusted network.
 - **Memory management** is dual: the settings list (this control protocol) plus
   voice ("remember…", "forget that") applied on the Mac during a turn (Phase 4).
 - **On-device Google OAuth** for the photo folder is wired as a seam
@@ -305,7 +321,8 @@ predictable memory use and no GC pauses under the 1 GB limit.
 | Wake-word barge-in (flush-on-wake + `ambient-interrupt`) | Natural interruption without full-duplex complexity; AEC investigated on hardware and deferred (see §4) |
 | Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
 | VAD in the orchestrator | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
-| Persistent memory in SQLite | Simple, debuggable; FTS covers explicit+inferred facts |
+| SQLite is the memory store of record | Simple, debuggable; holds explicit+inferred facts and the settings-list/voice management |
+| Recall defaults to embedded HelixDB GraphRAG | Vector KNN + graph hop beats keyword FTS for context; in-process (no server/Docker); needs `OPENAI_API_KEY`, falls back to SQLite FTS if absent |
 | Per-person speaker ID (local, opt-in) | Local ECAPA voiceprint (passive + auto-cluster) keeps voice on the LAN and scopes memory + prompt per person for better context; no raw audio leaves the device |
 | On-device OAuth for photos | Device displays directly; no Mac proxy needed |
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |

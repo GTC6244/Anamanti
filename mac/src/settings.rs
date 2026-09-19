@@ -26,7 +26,8 @@ use crate::llm::{
 };
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
-/// clients, or the rig-core agent framework (feature `rig`).
+/// clients, or the rig-core agent framework (selected at runtime with
+/// `AMBIENT_LLM_ENGINE=rig`; required for the web-search tool).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LlmEngine {
     /// Hand-rolled `ollama.rs` / `anthropic.rs` HTTP clients (always available).
@@ -227,7 +228,6 @@ impl LlmFactory {
                              (or switch to subscription auth)",
                         )?;
                         match engine {
-                            #[cfg(feature = "rig")]
                             LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::anthropic(
                                 &self.anthropic_base_url,
                                 &key,
@@ -272,7 +272,6 @@ impl LlmFactory {
             "ollama" => {
                 let model = model.unwrap_or("llama3.2").to_string();
                 let backend: Arc<dyn LlmBackend> = match engine {
-                    #[cfg(feature = "rig")]
                     LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::ollama(
                         &self.ollama_url,
                         &model,

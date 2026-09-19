@@ -144,6 +144,16 @@ pub fn read_from(path: impl AsRef<Path>, from_line: u64) -> Result<(u64, Vec<Cha
     Ok((idx, out))
 }
 
+/// Read up to `limit` most-recent records from `path`, newest first. Malformed
+/// lines are skipped. A missing file yields an empty vec. Used by the debug GUI;
+/// the ingester uses [`read_from`] with a high-water mark instead.
+pub fn read_tail(path: impl AsRef<Path>, limit: usize) -> Result<Vec<ChatLogRecord>> {
+    let (_next, mut records) = read_from(path, 0)?;
+    records.reverse(); // newest first
+    records.truncate(limit);
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
