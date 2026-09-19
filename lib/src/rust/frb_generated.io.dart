@@ -70,6 +70,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SpeakerInfo> dco_decode_list_speaker_info(dynamic raw);
 
   @protected
+  List<VoiceInfo> dco_decode_list_voice_info(dynamic raw);
+
+  @protected
   MemoryEntry dco_decode_memory_entry(dynamic raw);
 
   @protected
@@ -107,6 +110,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  VoiceInfo dco_decode_voice_info(dynamic raw);
 
   @protected
   WakeWordConfig dco_decode_wake_word_config(dynamic raw);
@@ -172,6 +178,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SpeakerInfo> sse_decode_list_speaker_info(SseDeserializer deserializer);
 
   @protected
+  List<VoiceInfo> sse_decode_list_voice_info(SseDeserializer deserializer);
+
+  @protected
   MemoryEntry sse_decode_memory_entry(SseDeserializer deserializer);
 
   @protected
@@ -211,6 +220,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  VoiceInfo sse_decode_voice_info(SseDeserializer deserializer);
 
   @protected
   WakeWordConfig sse_decode_wake_word_config(SseDeserializer deserializer);
@@ -296,6 +308,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_voice_info(
+    List<VoiceInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_memory_entry(MemoryEntry self, SseSerializer serializer);
 
   @protected
@@ -339,6 +357,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_voice_info(VoiceInfo self, SseSerializer serializer);
 
   @protected
   void sse_encode_wake_word_config(

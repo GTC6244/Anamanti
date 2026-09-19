@@ -149,6 +149,11 @@ async fn run() -> Result<()> {
         }
     }
 
+    let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
+        stt_addr: config.stt_addr,
+        tts_addr: config.tts_addr,
+    });
+
     // Optional local HTTP config page (no auth; loopback by default). Serves the
     // same runtime-swappable settings the device controls over Wyoming, so you can
     // change the LLM backend/model/voice live from a browser. Best-effort: a bind
@@ -156,6 +161,8 @@ async fn run() -> Result<()> {
     if let Some(config_addr) = config.config_addr {
         let settings = pipeline.settings().clone();
         let catalog = catalog.clone();
+        let connector = connector.clone();
+        let voices_dir = config.tts_voices_dir.clone();
         match TcpListener::bind(config_addr).await {
             Ok(listener) => {
                 let local = listener.local_addr().unwrap_or(config_addr);
@@ -163,7 +170,9 @@ async fn run() -> Result<()> {
                     "config page on http://{local}/ (no auth — keep it on a trusted network)"
                 );
                 tokio::spawn(async move {
-                    if let Err(e) = webconfig::serve(listener, settings, catalog).await {
+                    if let Err(e) =
+                        webconfig::serve(listener, settings, catalog, connector, voices_dir).await
+                    {
                         log::error!("config page stopped: {e:#}");
                     }
                 });
@@ -171,11 +180,6 @@ async fn run() -> Result<()> {
             Err(e) => log::warn!("config page disabled: could not bind {config_addr}: {e:#}"),
         }
     }
-
-    let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
-        stt_addr: config.stt_addr,
-        tts_addr: config.tts_addr,
-    });
 
     let listener = TcpListener::bind(config.bind_addr)
         .await
@@ -190,7 +194,7 @@ async fn run() -> Result<()> {
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog) => {
+        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone()) => {
             res.context("device-facing server stopped")?;
         }
         _ = tokio::signal::ctrl_c() => {

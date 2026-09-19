@@ -98,6 +98,11 @@ pub struct Config {
     pub tts_addr: SocketAddr,
     /// Optional Piper voice name.
     pub tts_voice: Option<String>,
+    /// Directory holding Piper voice models (`<name>.onnx`). When set (Piper is
+    /// co-located with the orchestrator), the settings voice dropdown lists only the
+    /// voices actually present here; when `None`, it lists Piper's full advertised
+    /// catalog. Set via `AMBIENT_TTS_VOICES_DIR`.
+    pub tts_voices_dir: Option<PathBuf>,
     /// Selected LLM backend.
     pub llm: LlmChoice,
     /// SQLite memory database path.
@@ -204,6 +209,7 @@ impl Default for Config {
             stt_addr: "127.0.0.1:10300".parse().unwrap(), // wyoming-faster-whisper default
             tts_addr: "127.0.0.1:10200".parse().unwrap(), // wyoming-piper default
             tts_voice: None,
+            tts_voices_dir: None,
             llm: LlmChoice::Ollama {
                 url: "http://127.0.0.1:11434".to_string(),
                 model: "llama3.2".to_string(),
@@ -347,6 +353,11 @@ impl Config {
             stt_addr: env_addr("AMBIENT_STT_ADDR", d.stt_addr)?,
             tts_addr: env_addr("AMBIENT_TTS_ADDR", d.tts_addr)?,
             tts_voice: env::var("AMBIENT_TTS_VOICE").ok().filter(|s| !s.is_empty()),
+            tts_voices_dir: env::var("AMBIENT_TTS_VOICES_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .or(d.tts_voices_dir),
             llm,
             db_path: env::var("AMBIENT_DB_PATH")
                 .map(PathBuf::from)

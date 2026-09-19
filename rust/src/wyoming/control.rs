@@ -19,7 +19,7 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 use crate::api::settings::{
-    MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo,
+    MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo, VoiceInfo,
 };
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
@@ -95,6 +95,29 @@ fn parse_model(v: &Value) -> ModelInfo {
             .unwrap_or_default()
             .to_string(),
         id,
+        label,
+    }
+}
+
+fn parse_voice(v: &Value) -> VoiceInfo {
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let label = v
+        .get("label")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&name)
+        .to_string();
+    VoiceInfo {
+        language: v
+            .get("language")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        name,
         label,
     }
 }
@@ -183,6 +206,28 @@ pub async fn list_models(cache: &EndpointCache, timeout: Duration) -> Result<Vec
         .map(|a| a.iter().map(parse_model).collect())
         .unwrap_or_default();
     Ok(models)
+}
+
+/// List the installed Piper voices for the settings TTS voice dropdown.
+pub async fn list_voices(cache: &EndpointCache, timeout: Duration) -> Result<Vec<VoiceInfo>> {
+    let endpoint = resolve(cache, timeout).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_VOICES)).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing voices failed")
+        ));
+    }
+    let voices = resp
+        .data
+        .get("voices")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_voice).collect())
+        .unwrap_or_default();
+    Ok(voices)
 }
 
 /// List every persistent memory entry.
@@ -555,6 +600,49 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::LIST_MODELS);
+    }
+
+    #[tokio::test]
+    async fn list_voices_parses_catalog() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::VOICES,
+            json!({ "ok": true, "voices": [
+                { "name": "en_US-amy-medium", "language": "en_US", "label": "amy (medium)" },
+                { "name": "en_US-lessac-medium", "language": "en_US", "label": "lessac (medium)" },
+                { "name": "bare" }, // no language/label → language None, label falls back to name
+            ]}),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let voices = list_voices(&cache, Duration::from_millis(0)).await.unwrap();
+        assert_eq!(voices.len(), 3);
+        assert_eq!(voices[0].name, "en_US-amy-medium");
+        assert_eq!(voices[0].language.as_deref(), Some("en_US"));
+        assert_eq!(voices[0].label, "amy (medium)");
+        assert_eq!(voices[2].name, "bare");
+        assert_eq!(voices[2].language, None);
+        assert_eq!(voices[2].label, "bare");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::LIST_VOICES);
+    }
+
+    #[tokio::test]
+    async fn list_voices_surfaces_in_band_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::VOICES,
+            json!({ "ok": false, "message": "piper unreachable", "voices": [] }),
+        );
+        serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = list_voices(&cache, Duration::from_millis(0)).await.unwrap_err();
+        assert!(err.to_string().contains("piper unreachable"));
     }
 
     #[tokio::test]

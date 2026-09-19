@@ -122,6 +122,63 @@ void main() {
     expect(client.applyCalls.single['llmModel'], 'claude-sonnet-5');
   });
 
+  testWidgets('voice dropdown lists installed voices and sends the picked voice',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(voices: const [
+      VoiceOption(name: 'en_US-amy-medium', label: 'amy (medium)', language: 'en_US'),
+      VoiceOption(name: 'en_US-lessac-medium', label: 'lessac (medium)', language: 'en_US'),
+    ]);
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // The voice control is a dropdown of installed voices (labels carry locale).
+    await tester.tap(find.byKey(const Key('settings-voice')));
+    await tester.pumpAndSettle();
+    expect(find.text('Server default').last, findsOneWidget);
+    expect(find.text('amy (medium) · en_US').last, findsOneWidget);
+    await tester.tap(find.text('amy (medium) · en_US').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(client.applyCalls.single['setTtsVoice'], true);
+    expect(client.applyCalls.single['ttsVoice'], 'en_US-amy-medium');
+  });
+
+  testWidgets('voice field falls back to free text when no voices are available',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(voices: const <VoiceOption>[]);
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // With no installed voices, the control is a text field the user can type into.
+    await tester.enterText(
+        find.byKey(const Key('settings-voice')), 'en_GB-alan-medium');
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(client.applyCalls.single['ttsVoice'], 'en_GB-alan-medium');
+  });
+
   testWidgets('anthropic backend exposes the auth selector and sends subscription',
       (tester) async {
     final store = InMemorySettingsStore();
