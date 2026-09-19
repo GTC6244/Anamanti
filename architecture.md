@@ -141,8 +141,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
   - `start_wake_word_engine` returns one `Stream<WakeWordEvent>` covering the whole
     turn lifecycle. The `WakeWordEventKind` tag spans: `started`, `status`, `level`,
     `detected` (Phase 2); `connecting`, `streaming`, `transcript`, `disconnected`
-    (Phase 3 Wyoming turn); `replyToken`, `speaking` (Phase 5); and `stopped` /
-    `error`. Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
+    (Phase 3 Wyoming turn); `replyToken`, `speaking`, `speakingDone` (Phase 5); and
+    `stopped` / `error`. `speakingDone` is UI-only: it fires when the reply audio has
+    finished playing out of the ring (drained or barge-in-flushed), so the UI can keep
+    the reply text on screen for exactly as long as it is being read, then remove it.
+    Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
     (payload fields carry neutral defaults when not relevant), so the boundary needs
     no `freezed` codegen and there is exactly one stream to manage.
   - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
@@ -238,7 +241,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   per-sentence Piper bursts are **coalesced into one device-facing audio stream** (one
   `audio-start`, all chunks, one final `audio-stop`) because the device ends its turn
   on the first `audio-stop`.
-- **SPEAKING** — the coalesced Piper audio stream is played via `cpal`/`oboe`.
+- **SPEAKING** — the coalesced Piper audio stream is played via `cpal`/`oboe`. The
+  turn returns to IDLE on the first `audio-stop` (above), but the audio keeps
+  draining from the ring for seconds after; the device tracks ring occupancy
+  (`PlaybackSink::pending()`) and emits a UI-only `speakingDone` once it empties, so
+  the on-screen reply text stays up for the whole utterance and is removed only when
+  the audio actually stops (a barge-in flush zeroes the ring and triggers it too).
 - **Barge-in:** wake-word scoring keeps running during THINKING and SPEAKING. A wake
   word mid-reply **always flushes the playback ring immediately** (silencing the reply
   even after the turn has technically ended — the orchestrator relays audio faster than

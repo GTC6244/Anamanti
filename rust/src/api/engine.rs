@@ -163,6 +163,12 @@ pub enum WakeWordEventKind {
     /// Phase 5: the reply's TTS audio has started and is now playing back through
     /// the speakers.
     Speaking,
+    /// Phase 5: the reply's TTS audio has finished playing out of the speaker — the
+    /// playback ring drained naturally, or was flushed by a barge-in. UI-only: it
+    /// signals that the on-screen reply text may be removed now that the audio has
+    /// stopped. Fires *after* the turn has already returned to idle, because the
+    /// device relays audio faster than real-time (see `engine/net.rs`).
+    SpeakingDone,
     /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
     /// The engine returns to idle wake-word listening.
     Disconnected,
@@ -274,6 +280,10 @@ impl WakeWordEvent {
 
     pub(crate) fn speaking() -> Self {
         Self::base(WakeWordEventKind::Speaking)
+    }
+
+    pub(crate) fn speaking_done() -> Self {
+        Self::base(WakeWordEventKind::SpeakingDone)
     }
 
     pub(crate) fn disconnected(message: String) -> Self {

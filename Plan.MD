@@ -287,7 +287,12 @@ services, inserting the pluggable LLM + persistent memory between them.
   clock + status), `conversation_view.dart` (transcript/reply bubbles with a
   streaming caret, reading-column capped for the 8-inch display),
   `status_indicator.dart`. Reply tokens accumulate into the reply bubble as they
-  arrive (`WakeWordEventKind::ReplyToken`).
+  arrive (`WakeWordEventKind::ReplyToken`). The reply text stays on screen for as
+  long as the audio is being read aloud: the device relays audio faster than
+  real-time, so the turn returns to idle while the playback ring is still draining;
+  Rust tracks ring occupancy (`PlaybackSink::pending()`) and emits a UI-only
+  `SpeakingDone` when it empties (or a barge-in flushes it), which is when the UI
+  removes the text (`AssistantState.audioPlaying` / `displayActive`).
 - **Idle ambient screen:** photo slideshow from a chosen Google Photos/Drive folder
   (**on-device OAuth**). Slideshow keeps running when disconnected. **Done** —
   `lib/src/slideshow/photo_source.dart`: a pluggable `PhotoSource`
