@@ -40,7 +40,10 @@ class AmbientScreen extends StatelessWidget {
         animation: assistant,
         builder: (context, _) {
           final state = assistant.state;
-          final active = state.turnActive;
+          // Keep the panel (and dimmed scrim) up not just while the turn is active
+          // but for as long as the reply audio is still playing, so the text stays
+          // on screen until it stops being read aloud.
+          final active = state.displayActive;
           return Stack(
             fit: StackFit.expand,
             children: [

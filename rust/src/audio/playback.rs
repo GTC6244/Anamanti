@@ -18,7 +18,8 @@
 //!   22.05 kHz mono) to the output device's rate/channel count and pushes it into
 //!   the ring. `clear` flushes queued audio for barge-in.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -76,6 +77,15 @@ pub struct PlaybackSink {
     out_channels: u16,
     /// How long `submit_pcm` waits for ring space before dropping overflow.
     max_backpressure: Duration,
+    /// Cumulative count of samples actually pushed into the ring (successful
+    /// `try_push`es only — backpressure-dropped samples are not counted). Paired
+    /// with [`played`](Self::played) so `pending()` reports how much audio is still
+    /// queued but not yet played out of the speaker.
+    submitted: Arc<AtomicU64>,
+    /// Cumulative count of samples actually popped from the ring by the real-time
+    /// output callback — counting both normal playback and barge-in flush drains,
+    /// but never the silence written on underrun. Shared with the callback.
+    played: Arc<AtomicU64>,
 }
 
 struct SinkState {
@@ -124,6 +134,7 @@ impl PlaybackSink {
 
         let channels = self.out_channels.max(1);
         let mut dropped = 0usize;
+        let mut pushed = 0u64;
         'block: for &s in out_f32.iter() {
             for _ in 0..channels {
                 let mut deadline: Option<Instant> = None;
@@ -140,7 +151,13 @@ impl PlaybackSink {
                     }
                     std::thread::sleep(SUBMIT_PARK);
                 }
+                pushed += 1;
             }
+        }
+        // One atomic add for the whole block (only samples that actually entered the
+        // ring), so `pending()` tracks queued-but-unplayed audio for the drain watcher.
+        if pushed > 0 {
+            self.submitted.fetch_add(pushed, Ordering::Relaxed);
         }
         if dropped > 0 {
             log::warn!(
@@ -153,8 +170,25 @@ impl PlaybackSink {
 
     /// Flush any queued audio so the next callback outputs silence. Used for
     /// barge-in: when the user speaks over the reply, the current utterance is cut.
+    ///
+    /// The flushed samples are counted toward [`played`](Self::played) by the output
+    /// callback's drain loop, so `pending()` collapses to 0 within one callback —
+    /// letting the drain watcher treat a barge-in flush as "audio stopped" too.
     pub fn clear(&self) {
         self.flush.store(true, Ordering::SeqCst);
+    }
+
+    /// Samples still queued in the ring (submitted but not yet played out, whether
+    /// by real-time playback or a barge-in flush). `0` means the speaker has fully
+    /// drained the current reply — i.e. audio has stopped. Used by the engine's
+    /// drain watcher to know when the on-screen reply text may be removed.
+    ///
+    /// Saturating so a transient reordering of the two `Relaxed` counters (producer
+    /// vs. audio thread) can never underflow into a huge bogus "pending".
+    pub fn pending(&self) -> u64 {
+        self.submitted
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.played.load(Ordering::Relaxed))
     }
 
     /// Test-only constructor: builds a sink backed by a standalone ring and hands
@@ -192,8 +226,19 @@ impl PlaybackSink {
             out_rate,
             out_channels,
             max_backpressure,
+            submitted: Arc::new(AtomicU64::new(0)),
+            played: Arc::new(AtomicU64::new(0)),
         };
         (sink, cons)
+    }
+
+    /// Test-only handle to the `played` counter. Tests have no real output callback
+    /// draining the ring, so they pop from the returned consumer and bump this by
+    /// hand to simulate the speaker playing samples out — mirroring what the live
+    /// `build_output` callback does.
+    #[cfg(test)]
+    pub fn played_handle(&self) -> Arc<AtomicU64> {
+        self.played.clone()
     }
 }
 
@@ -230,13 +275,24 @@ pub fn start_playback(buffer_secs: u32) -> Result<(PlaybackStream, PlaybackSink)
         .max(1);
     let (prod, cons) = HeapRb::<f32>::new(ring_samples).split();
     let flush = std::sync::Arc::new(AtomicBool::new(false));
+    let played = Arc::new(AtomicU64::new(0));
 
     let stream = match sample_format {
-        SampleFormat::F32 => build_output::<f32>(&device, &config, cons, flush.clone())?,
-        SampleFormat::I16 => build_output::<i16>(&device, &config, cons, flush.clone())?,
-        SampleFormat::U16 => build_output::<u16>(&device, &config, cons, flush.clone())?,
-        SampleFormat::I32 => build_output::<i32>(&device, &config, cons, flush.clone())?,
-        SampleFormat::F64 => build_output::<f64>(&device, &config, cons, flush.clone())?,
+        SampleFormat::F32 => {
+            build_output::<f32>(&device, &config, cons, flush.clone(), played.clone())?
+        }
+        SampleFormat::I16 => {
+            build_output::<i16>(&device, &config, cons, flush.clone(), played.clone())?
+        }
+        SampleFormat::U16 => {
+            build_output::<u16>(&device, &config, cons, flush.clone(), played.clone())?
+        }
+        SampleFormat::I32 => {
+            build_output::<i32>(&device, &config, cons, flush.clone(), played.clone())?
+        }
+        SampleFormat::F64 => {
+            build_output::<f64>(&device, &config, cons, flush.clone(), played.clone())?
+        }
         other => return Err(anyhow!("unsupported output sample format: {other:?}")),
     };
     stream.play().context("starting playback stream")?;
@@ -257,6 +313,8 @@ pub fn start_playback(buffer_secs: u32) -> Result<(PlaybackStream, PlaybackSink)
         out_rate: sample_rate,
         out_channels: channels,
         max_backpressure: SUBMIT_BACKPRESSURE,
+        submitted: Arc::new(AtomicU64::new(0)),
+        played,
     };
     Ok((
         PlaybackStream {
@@ -275,18 +333,37 @@ fn build_output<T>(
     config: &StreamConfig,
     mut cons: HeapCons<f32>,
     flush: std::sync::Arc<AtomicBool>,
+    played: Arc<AtomicU64>,
 ) -> Result<Stream>
 where
     T: SizedSample + FromSample<f32>,
 {
     let data_callback = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+        // Count every sample actually taken from the ring (real playback or flush
+        // drain) so `PlaybackSink::pending()` can tell when the reply has finished
+        // playing. Accumulated locally and committed with a single `fetch_add` to
+        // keep this real-time callback lock-free and allocation-free.
+        let mut popped = 0u64;
         // Barge-in: drop everything still queued before writing this buffer.
         if flush.swap(false, Ordering::SeqCst) {
-            while cons.try_pop().is_some() {}
+            while cons.try_pop().is_some() {
+                popped += 1;
+            }
         }
         for slot in data.iter_mut() {
-            let sample = cons.try_pop().unwrap_or(0.0);
+            // Silence written on underrun is deliberately not counted (nothing was
+            // dequeued), so `pending()` reflects only real queued audio.
+            let sample = match cons.try_pop() {
+                Some(s) => {
+                    popped += 1;
+                    s
+                }
+                None => 0.0,
+            };
             *slot = T::from_sample(sample);
+        }
+        if popped > 0 {
+            played.fetch_add(popped, Ordering::Relaxed);
         }
     };
     let error_callback = |err| log::error!("audio playback stream error: {err}");
@@ -346,6 +423,30 @@ mod tests {
             n += 1;
         }
         assert!(n > 400, "expected ~3x upsample, got {n}");
+    }
+
+    #[test]
+    fn pending_tracks_queued_audio_and_returns_to_zero_when_drained() {
+        // `pending()` should equal the samples still in the ring: it rises as audio
+        // is submitted and falls back to 0 once every submitted sample has been
+        // played out (here simulated by popping the consumer and bumping the shared
+        // `played` counter, exactly as the real output callback does).
+        let (sink, mut cons) = PlaybackSink::for_test(16_000, 1, 1024);
+        assert_eq!(sink.pending(), 0, "nothing submitted yet");
+
+        sink.submit_pcm(&[0, 16_384, -16_384, 32_767], 16_000);
+        assert_eq!(sink.pending(), 4, "4 mono samples queued, none played");
+
+        // Simulate the speaker draining the ring.
+        let played = sink.played_handle();
+        while cons.try_pop().is_some() {
+            played.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(
+            sink.pending(),
+            0,
+            "audio fully played out → nothing pending"
+        );
     }
 
     #[test]

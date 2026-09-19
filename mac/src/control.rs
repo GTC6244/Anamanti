@@ -212,6 +212,11 @@ fn parse_update(data: &Value) -> SettingsUpdate {
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
+        // Provider API keys are intentionally NOT accepted from the device control
+        // path — they are entered only on the orchestrator's loopback config page, so
+        // cloud secrets never travel from or live on the shared Echo Show screen.
+        anthropic_api_key: None,
+        openai_api_key: None,
         anthropic_auth,
         tts_voice,
         engine,
@@ -232,6 +237,11 @@ fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> Wyom
             "message": message,
             "llm_backend": v.llm_backend,
             "llm_model": v.llm_model,
+            // Read-only on the device: whether a provider key is configured, never
+            // the key itself. Provider keys are entered only on the loopback config
+            // page (see `webconfig`), not from the shared device screen.
+            "anthropic_key_set": v.anthropic_key_set,
+            "openai_key_set": v.openai_key_set,
             "anthropic_auth": v.anthropic_auth.as_str(),
             "tts_voice": v.tts_voice,
             "engine": engine_label(v.engine),
@@ -354,7 +364,10 @@ fn merge_speakers(
             Ok(true) => {
                 // Move the dropped speaker's memories onto the kept profile.
                 let moved = memory.reassign_speaker(drop, keep).unwrap_or(0);
-                speaker_result(true, &format!("merged {drop} into {keep} ({moved} memories moved)"))
+                speaker_result(
+                    true,
+                    &format!("merged {drop} into {keep} ({moved} memories moved)"),
+                )
             }
             Ok(false) => speaker_result(false, "merge failed (unknown id, or same id)"),
             Err(e) => speaker_result(false, &format!("{e:#}")),
@@ -378,7 +391,10 @@ fn delete_speaker(request: &WyomingEvent, speaker: Option<&SpeakerRegistry>) -> 
 }
 
 fn speaker_result(ok: bool, message: &str) -> WyomingEvent {
-    WyomingEvent::with_data(types::SPEAKER_RESULT, json!({ "ok": ok, "message": message }))
+    WyomingEvent::with_data(
+        types::SPEAKER_RESULT,
+        json!({ "ok": ok, "message": message }),
+    )
 }
 
 const SPEAKER_DISABLED: &str = "speaker identification is disabled on the orchestrator";
@@ -419,6 +435,8 @@ mod tests {
                 search_api_key: None,
                 llm_backend: "ollama".into(),
                 llm_model: Some("llama3.2".into()),
+                anthropic_api_key: None,
+                openai_api_key: None,
                 anthropic_auth: crate::llm::anthropic_auth::AnthropicAuth::ApiKey,
                 tts_voice: Some("amy".into()),
                 end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
@@ -498,7 +516,12 @@ mod tests {
             json!("the user likes tea")
         );
 
-        let deleted = respond(&req(types::DELETE_MEMORY, json!({ "id": id })), &mem, &s, None);
+        let deleted = respond(
+            &req(types::DELETE_MEMORY, json!({ "id": id })),
+            &mem,
+            &s,
+            None,
+        );
         assert_eq!(deleted.event_type, types::MEMORY_RESULT);
         assert_eq!(deleted.data["ok"], json!(true));
         assert_eq!(deleted.data["count"], json!(1));
@@ -564,7 +587,12 @@ mod tests {
             .unwrap();
 
         // List shows the anonymous cluster.
-        let listed = respond(&WyomingEvent::new(types::LIST_SPEAKERS), &mem, &s, Some(&reg));
+        let listed = respond(
+            &WyomingEvent::new(types::LIST_SPEAKERS),
+            &mem,
+            &s,
+            Some(&reg),
+        );
         assert_eq!(listed.event_type, types::SPEAKERS);
         assert_eq!(listed.data["ok"], json!(true));
         let arr = listed.data["speakers"].as_array().unwrap();
@@ -605,16 +633,25 @@ mod tests {
 
     #[test]
     fn merge_speakers_moves_memories() {
-        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry};
         use crate::memory::{MemoryKind, MemorySource};
+        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry};
         let s = settings();
         let mem = MemoryStore::open_in_memory().unwrap();
         let reg = SpeakerRegistry::open_in_memory().unwrap();
         let e = MockSpeakerEmbedder::default();
-        let keep = reg.create_cluster(&e.embed(&vec![1000i16; 20_000]).unwrap()).unwrap();
-        let drop = reg.create_cluster(&e.embed(&vec![500i16; 20_000]).unwrap()).unwrap();
-        mem.add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Explicit, Some(&drop))
+        let keep = reg
+            .create_cluster(&e.embed(&vec![1000i16; 20_000]).unwrap())
             .unwrap();
+        let drop = reg
+            .create_cluster(&e.embed(&vec![500i16; 20_000]).unwrap())
+            .unwrap();
+        mem.add_scoped(
+            MemoryKind::Fact,
+            "likes tea",
+            MemorySource::Explicit,
+            Some(&drop),
+        )
+        .unwrap();
 
         let resp = respond(
             &req(types::MERGE_SPEAKERS, json!({ "keep": keep, "drop": drop })),

@@ -84,6 +84,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </select>
   </label>
 
+  <label id="anthropic_key_row">Anthropic API key <span class="hint" id="anthropic_key_state"></span>
+    <input id="anthropic_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+
+  <label id="openai_key_row">OpenAI API key <span class="hint" id="openai_key_state"></span>
+    <input id="openai_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+
   <label class="check">
     <input id="web_search" type="checkbox">
     Web search tool <span class="hint">(rig engine only)</span>
@@ -205,12 +213,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
   // The Anthropic auth toggle only applies to the anthropic backend.
   function renderAuthRow(backend) {
     $('anthropic_auth_row').style.display = backend === 'anthropic' ? '' : 'none';
+    renderKeyRows(backend);
+  }
+
+  // Show a provider's API-key field only when that backend is selected (and, for
+  // Anthropic, only under API-key auth — subscription auth uses an OAuth token).
+  function renderKeyRows(backend) {
+    const auth = $('anthropic_auth').value;
+    $('anthropic_key_row').style.display =
+      (backend === 'anthropic' && auth === 'apikey') ? '' : 'none';
+    $('openai_key_row').style.display = backend === 'openai' ? '' : 'none';
   }
 
   function fill(v) {
     $('engine').value = v.engine || 'native';
     $('llm_backend').value = v.llm_backend || 'ollama';
     $('anthropic_auth').value = v.anthropic_auth || 'apikey';
+    $('anthropic_api_key').value = '';
+    $('openai_api_key').value = '';
+    $('anthropic_key_state').textContent = v.anthropic_key_set ? '(a key is set)' : '(no key set)';
+    $('openai_key_state').textContent = v.openai_key_set ? '(a key is set)' : '(no key set)';
     renderAuthRow($('llm_backend').value);
     renderModel($('llm_backend').value, v.llm_model || '');
     renderVoice(v.tts_voice || '');
@@ -254,8 +276,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       tts_voice: currentVoice(),
       web_search: $('web_search').checked,
       search_provider: $('search_provider').value,
-      // Only send the key when the user typed one; blank keeps the current key.
+      // Only send a key when the user typed one; blank keeps the current key.
       search_api_key: $('search_api_key').value.trim() || undefined,
+      anthropic_api_key: $('anthropic_api_key').value.trim() || undefined,
+      openai_api_key: $('openai_api_key').value.trim() || undefined,
     };
     try {
       const r = await fetch('/config', {
@@ -276,6 +300,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     renderAuthRow($('llm_backend').value);
     renderModel($('llm_backend').value, '');
   });
+  // Switching Anthropic auth toggles whether the API-key field is relevant.
+  $('anthropic_auth').addEventListener('change', () => renderKeyRows($('llm_backend').value));
   $('save').addEventListener('click', save);
   load();
 </script>
@@ -461,6 +487,8 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "message": message,
         "llm_backend": v.llm_backend,
         "llm_model": v.llm_model,
+        "anthropic_key_set": v.anthropic_key_set,
+        "openai_key_set": v.openai_key_set,
         "anthropic_auth": v.anthropic_auth.as_str(),
         "tts_voice": v.tts_voice,
         "engine": engine,
@@ -510,9 +538,21 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         .get("anthropic_auth")
         .and_then(Value::as_str)
         .map(AnthropicAuth::from_label);
+    // Provider API keys, same tri-state as the search key: absent/empty = leave
+    // unchanged (a page reload never wipes a stored key); explicit JSON null = clear.
+    let key_field = |key: &str| match data.get(key) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => match v.as_str() {
+            Some(s) if !s.is_empty() => Some(Some(s.to_string())),
+            _ => None,
+        },
+    };
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
+        anthropic_api_key: key_field("anthropic_api_key"),
+        openai_api_key: key_field("openai_api_key"),
         anthropic_auth,
         tts_voice,
         engine,
@@ -701,6 +741,30 @@ mod tests {
         let (_s, _c, g) = route("GET", "/config", b"", &s);
         assert!(!String::from_utf8_lossy(&g).contains("tvly-secret"));
         assert!(s.view().search_key_set);
+    }
+
+    #[test]
+    fn post_config_sets_anthropic_key_and_selects_the_backend_without_leaking_it() {
+        let s = settings(); // mock backend, no env anthropic key
+        assert!(!s.view().anthropic_key_set);
+        // A runtime key + backend switch in one POST enables the cloud backend with
+        // no restart (mirrors entering the key on the page and choosing anthropic).
+        let (status, _c, out) = route(
+            "POST",
+            "/config",
+            br#"{"llm_backend":"anthropic","anthropic_api_key":"sk-secret"}"#,
+            &s,
+        );
+        assert_eq!(status, "200 OK");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["llm_backend"], "anthropic");
+        assert_eq!(v["anthropic_key_set"], true);
+        // The key must never appear in a POST response or a later GET.
+        assert!(!String::from_utf8_lossy(&out).contains("sk-secret"));
+        let (_s, _c, g) = route("GET", "/config", b"", &s);
+        assert!(!String::from_utf8_lossy(&g).contains("sk-secret"));
+        assert!(s.view().anthropic_key_set);
     }
 
     #[test]
