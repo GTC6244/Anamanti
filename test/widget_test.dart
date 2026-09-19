@@ -140,6 +140,67 @@ void main() {
     await h.dispose(tester);
   });
 
+  testWidgets(
+      'reply text stays on screen while audio plays, then clears on speakingDone',
+      (tester) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    h.add(_event(WakeWordEventKind.detected, model: 'alexa'));
+    h.add(_event(WakeWordEventKind.transcript, transcript: 'what time is it'));
+    h.add(_event(WakeWordEventKind.replyToken, reply: 'It is noon'));
+    h.add(_event(WakeWordEventKind.speaking));
+    await h.settle(tester);
+    expect(h.assistant.state.audioPlaying, isTrue);
+
+    // The turn returns to idle while the reply audio is still draining from the
+    // playback ring — the text must remain on screen and the panel stay open.
+    h.add(_event(WakeWordEventKind.disconnected, message: 'turn complete'));
+    await h.settle(tester);
+    expect(h.assistant.state.phase, TurnPhase.idle);
+    expect(h.assistant.state.displayActive, isTrue);
+    expect(h.assistant.state.reply, 'It is noon');
+    expect(find.text('It is noon'), findsOneWidget);
+    expect(find.text('Speaking…'), findsOneWidget);
+
+    // Audio finishes playing: only now is the text removed and the panel closed.
+    h.add(_event(WakeWordEventKind.speakingDone));
+    await h.settle(tester);
+    expect(h.assistant.state.audioPlaying, isFalse);
+    expect(h.assistant.state.displayActive, isFalse);
+    expect(h.assistant.state.reply, isEmpty);
+    expect(find.text('It is noon'), findsNothing);
+
+    await h.dispose(tester);
+  });
+
+  testWidgets("a stale speakingDone does not wipe the next turn's text",
+      (tester) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    // A first reply starts speaking and the turn returns to idle (audio still
+    // draining), then the user barges in with a fresh wake word.
+    h.add(_event(WakeWordEventKind.speaking));
+    h.add(_event(WakeWordEventKind.disconnected, message: 'turn complete'));
+    await h.settle(tester);
+
+    h.add(_event(WakeWordEventKind.detected, model: 'alexa'));
+    h.add(_event(WakeWordEventKind.transcript, transcript: 'new question'));
+    h.add(_event(WakeWordEventKind.replyToken, reply: 'fresh answer'));
+    await h.settle(tester);
+    expect(h.assistant.state.reply, 'fresh answer');
+
+    // The previous reply's drain watcher fires late — it must not clear the new
+    // turn's text.
+    h.add(_event(WakeWordEventKind.speakingDone));
+    await h.settle(tester);
+    expect(h.assistant.state.reply, 'fresh answer');
+    expect(h.assistant.state.audioPlaying, isFalse);
+
+    await h.dispose(tester);
+  });
+
   testWidgets('an unreachable host flags the offline indicator', (tester) async {
     final h = _Harness();
     await h.pump(tester);

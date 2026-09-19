@@ -982,9 +982,10 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             6 => crate::api::engine::WakeWordEventKind::Transcript,
             7 => crate::api::engine::WakeWordEventKind::ReplyToken,
             8 => crate::api::engine::WakeWordEventKind::Speaking,
-            9 => crate::api::engine::WakeWordEventKind::Disconnected,
-            10 => crate::api::engine::WakeWordEventKind::Stopped,
-            11 => crate::api::engine::WakeWordEventKind::Error,
+            9 => crate::api::engine::WakeWordEventKind::SpeakingDone,
+            10 => crate::api::engine::WakeWordEventKind::Disconnected,
+            11 => crate::api::engine::WakeWordEventKind::Stopped,
+            12 => crate::api::engine::WakeWordEventKind::Error,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -1249,9 +1250,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::Transcript => 6.into_dart(),
             Self::ReplyToken => 7.into_dart(),
             Self::Speaking => 8.into_dart(),
-            Self::Disconnected => 9.into_dart(),
-            Self::Stopped => 10.into_dart(),
-            Self::Error => 11.into_dart(),
+            Self::SpeakingDone => 9.into_dart(),
+            Self::Disconnected => 10.into_dart(),
+            Self::Stopped => 11.into_dart(),
+            Self::Error => 12.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -1539,9 +1541,10 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::Transcript => 6,
                 crate::api::engine::WakeWordEventKind::ReplyToken => 7,
                 crate::api::engine::WakeWordEventKind::Speaking => 8,
-                crate::api::engine::WakeWordEventKind::Disconnected => 9,
-                crate::api::engine::WakeWordEventKind::Stopped => 10,
-                crate::api::engine::WakeWordEventKind::Error => 11,
+                crate::api::engine::WakeWordEventKind::SpeakingDone => 9,
+                crate::api::engine::WakeWordEventKind::Disconnected => 10,
+                crate::api::engine::WakeWordEventKind::Stopped => 11,
+                crate::api::engine::WakeWordEventKind::Error => 12,
                 _ => {
                     unimplemented!("");
                 }

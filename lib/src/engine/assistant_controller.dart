@@ -72,6 +72,7 @@ class AssistantState {
     this.wakeWord = '',
     this.micLevel = 0.0,
     this.captureReady = false,
+    this.audioPlaying = false,
   });
 
   final TurnPhase phase;
@@ -98,8 +99,21 @@ class AssistantState {
   /// True once the mic capture stream has started at least once.
   final bool captureReady;
 
+  /// Whether the reply's TTS audio is still playing out of the speaker. Set when
+  /// SPEAKING begins and stays true past the turn's return to idle — because the
+  /// device relays audio faster than real-time, so the ring keeps playing after the
+  /// turn ends — until the engine reports the playback drained (`speakingDone`).
+  /// Keeps the on-screen reply text up for exactly as long as it is being read.
+  final bool audioPlaying;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
+
+  /// Whether the conversation panel (transcript + reply text) should stay on
+  /// screen: while a turn is active, and afterwards for as long as the reply audio
+  /// is still playing. The audio outlives the turn, so this is the visibility gate
+  /// the UI keys off — not [turnActive] alone.
+  bool get displayActive => turnActive || audioPlaying;
 
   AssistantState copyWith({
     TurnPhase? phase,
@@ -110,6 +124,7 @@ class AssistantState {
     String? wakeWord,
     double? micLevel,
     bool? captureReady,
+    bool? audioPlaying,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -120,6 +135,7 @@ class AssistantState {
       wakeWord: wakeWord ?? this.wakeWord,
       micLevel: micLevel ?? this.micLevel,
       captureReady: captureReady ?? this.captureReady,
+      audioPlaying: audioPlaying ?? this.audioPlaying,
     );
   }
 }
@@ -223,6 +239,7 @@ class AssistantController extends ChangeNotifier {
       phase: TurnPhase.error,
       online: false,
       statusMessage: '$reason — reconnecting…',
+      audioPlaying: false,
     ));
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(_backoff, () {
@@ -252,7 +269,9 @@ class AssistantController extends ChangeNotifier {
         _onLevel(e.rms);
       case WakeWordEventKind.detected:
         // A wake word starts a fresh turn: clear the previous exchange and reset the
-        // local end-of-speech tracker.
+        // local end-of-speech tracker. Also clear any lingering audio-playing flag
+        // from a previous reply (a barge-in cuts its playback) so a late drain event
+        // can't wipe this new turn's text.
         _speechSeen = false;
         _lastVoiceAt = _clock();
         _emit(_state.copyWith(
@@ -260,6 +279,7 @@ class AssistantController extends ChangeNotifier {
           wakeWord: e.model,
           transcript: '',
           reply: '',
+          audioPlaying: false,
         ));
       case WakeWordEventKind.connecting:
         _emit(_state.copyWith(
@@ -282,7 +302,15 @@ class AssistantController extends ChangeNotifier {
           reply: _state.reply + e.reply,
         ));
       case WakeWordEventKind.speaking:
-        _emit(_state.copyWith(phase: TurnPhase.speaking, online: true));
+        // TTS playback started: mark audio as playing so the reply text stays on
+        // screen through the whole utterance, even after the turn returns to idle.
+        _emit(_state.copyWith(
+          phase: TurnPhase.speaking,
+          online: true,
+          audioPlaying: true,
+        ));
+      case WakeWordEventKind.speakingDone:
+        _onSpeakingDone();
       case WakeWordEventKind.disconnected:
         _onDisconnected(e.message);
       case WakeWordEventKind.stopped:
@@ -316,11 +344,33 @@ class AssistantController extends ChangeNotifier {
     // return to idle. Anything else (no host / connect failed / turn error) means
     // the Mac was unreachable, so flag the disconnected indicator.
     final normalEnd = message.contains('turn complete');
+    // On a clean end the reply audio is usually still playing out of the ring, so
+    // leave `audioPlaying` untouched — it keeps the reply text on screen until the
+    // engine's `speakingDone` fires. On a failed turn nothing is playing, so drop it.
     _emit(_state.copyWith(
       phase: TurnPhase.idle,
       online: normalEnd,
       statusMessage: normalEnd ? 'Ready' : message,
+      audioPlaying: normalEnd ? null : false,
     ));
+  }
+
+  /// The reply's TTS audio has finished playing (drained naturally, or was flushed
+  /// by a barge-in). Now — and only now — remove the on-screen text.
+  ///
+  /// Guard against a stale drain event from a previous reply landing inside a newer
+  /// turn: only clear the text if we're still in the speaking/just-finished window
+  /// (SPEAKING, or idle with audio that was playing). If a fresh turn has already
+  /// moved us on (listening/connecting/thinking), just drop the flag and keep the
+  /// new turn's text.
+  void _onSpeakingDone() {
+    final endingReply = _state.phase == TurnPhase.speaking ||
+        (_state.phase == TurnPhase.idle && _state.audioPlaying);
+    if (endingReply) {
+      _emit(_state.copyWith(audioPlaying: false, transcript: '', reply: ''));
+    } else if (_state.audioPlaying) {
+      _emit(_state.copyWith(audioPlaying: false));
+    }
   }
 
   void _emit(AssistantState next) {

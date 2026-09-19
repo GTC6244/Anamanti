@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `reply_token`, `speaking`, `started`, `status`, `stopped`, `streaming`, `transcript`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `transcript`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
@@ -284,6 +284,13 @@ enum WakeWordEventKind {
   /// Phase 5: the reply's TTS audio has started and is now playing back through
   /// the speakers.
   speaking,
+
+  /// Phase 5: the reply's TTS audio has finished playing out of the speaker — the
+  /// playback ring drained naturally, or was flushed by a barge-in. UI-only: it
+  /// signals that the on-screen reply text may be removed now that the audio has
+  /// stopped. Fires *after* the turn has already returned to idle, because the
+  /// device relays audio faster than real-time (see `engine/net.rs`).
+  speakingDone,
 
   /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
   /// The engine returns to idle wake-word listening.
