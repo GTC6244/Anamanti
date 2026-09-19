@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `block_on`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Read the orchestrator's current runtime settings.
 Future<OrchestratorSettings> fetchOrchestratorSettings({
@@ -29,6 +29,12 @@ Future<OrchestratorSettings> updateOrchestratorSettings({
 /// last 12 months) for the settings model dropdown.
 Future<List<ModelInfo>> listModels({required BigInt discoveryTimeoutSecs}) =>
     RustLib.instance.api.crateApiSettingsListModels(
+      discoveryTimeoutSecs: discoveryTimeoutSecs,
+    );
+
+/// List the installed Piper voices for the settings TTS voice dropdown.
+Future<List<VoiceInfo>> listVoices({required BigInt discoveryTimeoutSecs}) =>
+    RustLib.instance.api.crateApiSettingsListVoices(
       discoveryTimeoutSecs: discoveryTimeoutSecs,
     );
 
@@ -332,4 +338,32 @@ class SpeakerInfo {
           labeled == other.labeled &&
           samples == other.samples &&
           createdAt == other.createdAt;
+}
+
+/// One selectable Piper voice for the settings TTS voice dropdown, as reported by
+/// the orchestrator (its intersection of Piper's advertised catalog with the voices
+/// installed on disk).
+class VoiceInfo {
+  /// Piper voice id sent as `tts_voice` (e.g. `en_US-amy-medium`).
+  final String name;
+
+  /// Primary locale (e.g. `en_US`), or `None` if the server didn't report one.
+  final String? language;
+
+  /// A human-friendly label for the dropdown (falls back to `name`).
+  final String label;
+
+  const VoiceInfo({required this.name, this.language, required this.label});
+
+  @override
+  int get hashCode => name.hashCode ^ language.hashCode ^ label.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is VoiceInfo &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          language == other.language &&
+          label == other.label;
 }

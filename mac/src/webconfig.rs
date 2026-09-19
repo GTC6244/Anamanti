@@ -17,9 +17,11 @@
 //! store, and the HelixDB GraphRAG store. These are strictly read-only.
 //!
 //! Routes:
-//! - `GET /`            → the HTML config page.
-//! - `GET /config`      → the live [`SettingsView`](crate::settings::SettingsView) as JSON.
-//! - `POST /config`     → apply a `{llm_backend?, llm_model?, tts_voice?}` change
+//! - `GET /`         → the HTML config page.
+//! - `GET /config`   → the live [`SettingsView`](crate::settings::SettingsView) as JSON.
+//! - `GET /models`   → the selectable LLM models for the model dropdown.
+//! - `GET /voices`   → the installed Piper voices for the TTS voice dropdown.
+//! - `POST /config`  → apply a `{llm_backend?, llm_model?, tts_voice?}` change
 //!   (same JSON shape as the `ambient-set-settings` control frame; a `tts_voice`
 //!   of `null` clears the voice) and return the resulting settings.
 //! - `GET /chatlog`     → debug page; `GET /chatlog.json?limit=N` → recent turns.
@@ -38,6 +40,7 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
+use crate::orchestrator::ServiceConnector;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -130,6 +133,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </select>
   </label>
 
+  <label id="anthropic_key_row">Anthropic API key <span class="hint" id="anthropic_key_state"></span>
+    <input id="anthropic_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+
+  <label id="openai_key_row">OpenAI API key <span class="hint" id="openai_key_state"></span>
+    <input id="openai_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+
   <label class="check">
     <input id="web_search" type="checkbox">
     Web search tool <span class="hint">(rig engine only)</span>
@@ -153,8 +164,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <input id="llm_model_text" type="text" placeholder="(backend default)" style="display:none">
   </label>
 
-  <label>Piper TTS voice <span class="hint">blank = server default</span>
-    <input id="tts_voice" type="text" placeholder="(default)">
+  <label>Piper TTS voice <span class="hint" id="voice_hint">blank = server default</span>
+    <!-- When the orchestrator can list voices: a dropdown of installed Piper voices. -->
+    <select id="tts_voice_select" style="display:none"></select>
+    <!-- Fallback (voices unavailable): a free-text Piper voice name. -->
+    <input id="tts_voice_text" type="text" placeholder="(default)">
   </label>
 
   <button id="save">Apply</button>
@@ -164,6 +178,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   const $ = (id) => document.getElementById(id);
   const status = $('status');
   let MODELS = [];               // [{provider, id, label}] from /models
+  let VOICES = [];               // [{name, language, label}] from /voices
   const CLOUD = ['anthropic', 'openai'];
 
   function show(ok, msg) {
@@ -208,18 +223,68 @@ const INDEX_HTML: &str = r#"<!doctype html>
     return raw.trim() || null;
   }
 
+  // Show a dropdown of installed voices when we have them, else a free-text field.
+  // Keeps `selected` visible even if it isn't an installed voice.
+  function renderVoice(selected) {
+    const sel = $('tts_voice_select');
+    const txt = $('tts_voice_text');
+    if (VOICES.length) {
+      sel.style.display = '';
+      txt.style.display = 'none';
+      $('voice_hint').textContent = 'installed voices';
+      sel.innerHTML = '<option value="">(server default)</option>';
+      let matched = !selected;
+      for (const v of VOICES) {
+        const o = document.createElement('option');
+        o.value = v.name;
+        o.textContent = v.language ? (v.label || v.name) + ' · ' + v.language : (v.label || v.name);
+        if (v.name === selected) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      }
+      if (!matched) {   // a voice not in the installed list — keep it visible
+        const o = document.createElement('option');
+        o.value = selected; o.textContent = selected + ' (not installed)'; o.selected = true;
+        sel.appendChild(o);
+      }
+    } else {
+      sel.style.display = 'none';
+      txt.style.display = '';
+      txt.value = selected || '';
+      $('voice_hint').textContent = 'blank = server default';
+    }
+  }
+
+  function currentVoice() {
+    const raw = VOICES.length ? $('tts_voice_select').value : $('tts_voice_text').value;
+    return raw.trim() || null;
+  }
+
   // The Anthropic auth toggle only applies to the anthropic backend.
   function renderAuthRow(backend) {
     $('anthropic_auth_row').style.display = backend === 'anthropic' ? '' : 'none';
+    renderKeyRows(backend);
+  }
+
+  // Show a provider's API-key field only when that backend is selected (and, for
+  // Anthropic, only under API-key auth — subscription auth uses an OAuth token).
+  function renderKeyRows(backend) {
+    const auth = $('anthropic_auth').value;
+    $('anthropic_key_row').style.display =
+      (backend === 'anthropic' && auth === 'apikey') ? '' : 'none';
+    $('openai_key_row').style.display = backend === 'openai' ? '' : 'none';
   }
 
   function fill(v) {
     $('engine').value = v.engine || 'native';
     $('llm_backend').value = v.llm_backend || 'ollama';
     $('anthropic_auth').value = v.anthropic_auth || 'apikey';
+    $('anthropic_api_key').value = '';
+    $('openai_api_key').value = '';
+    $('anthropic_key_state').textContent = v.anthropic_key_set ? '(a key is set)' : '(no key set)';
+    $('openai_key_state').textContent = v.openai_key_set ? '(a key is set)' : '(no key set)';
     renderAuthRow($('llm_backend').value);
     renderModel($('llm_backend').value, v.llm_model || '');
-    $('tts_voice').value = v.tts_voice || '';
+    renderVoice(v.tts_voice || '');
     $('web_search').checked = !!v.web_search;
     $('search_provider').value = v.search_provider || 'duckduckgo';
     $('search_api_key').value = '';
@@ -233,8 +298,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     } catch (e) { MODELS = []; }
   }
 
+  async function loadVoices() {
+    try {
+      const r = await fetch('/voices');
+      VOICES = (await r.json()).voices || [];
+    } catch (e) { VOICES = []; }
+  }
+
   async function load() {
-    await loadModels();
+    await Promise.all([loadModels(), loadVoices()]);
     try {
       const r = await fetch('/config');
       fill(await r.json());
@@ -250,11 +322,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       llm_backend: $('llm_backend').value,
       anthropic_auth: $('anthropic_auth').value,
       llm_model: currentModel(),
-      tts_voice: $('tts_voice').value.trim() || null,
+      tts_voice: currentVoice(),
       web_search: $('web_search').checked,
       search_provider: $('search_provider').value,
-      // Only send the key when the user typed one; blank keeps the current key.
+      // Only send a key when the user typed one; blank keeps the current key.
       search_api_key: $('search_api_key').value.trim() || undefined,
+      anthropic_api_key: $('anthropic_api_key').value.trim() || undefined,
+      openai_api_key: $('openai_api_key').value.trim() || undefined,
     };
     try {
       const r = await fetch('/config', {
@@ -275,6 +349,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     renderAuthRow($('llm_backend').value);
     renderModel($('llm_backend').value, '');
   });
+  // Switching Anthropic auth toggles whether the API-key field is relevant.
+  $('anthropic_auth').addEventListener('change', () => renderKeyRows($('llm_backend').value));
   $('save').addEventListener('click', save);
   load();
 </script>
@@ -490,15 +566,19 @@ pub async fn serve(
     listener: TcpListener,
     settings: Arc<SharedSettings>,
     catalog: Arc<ModelCatalog>,
+    connector: Arc<dyn ServiceConnector>,
+    voices_dir: Option<PathBuf>,
     debug: DebugSources,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let settings = settings.clone();
         let catalog = catalog.clone();
+        let connector = connector.clone();
+        let voices_dir = voices_dir.clone();
         let debug = debug.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, settings, catalog, debug).await {
+            if let Err(e) = handle(stream, settings, catalog, connector, voices_dir, debug).await {
                 log::debug!("config page connection {peer} ended: {e:#}");
             }
         });
@@ -511,6 +591,8 @@ async fn handle(
     mut stream: TcpStream,
     settings: Arc<SharedSettings>,
     catalog: Arc<ModelCatalog>,
+    connector: Arc<dyn ServiceConnector>,
+    voices_dir: Option<PathBuf>,
     debug: DebugSources,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
@@ -567,11 +649,18 @@ async fn handle(
     }
     body.truncate(content_length);
 
-    // The model list needs an async catalog fetch, so it's handled here rather than
-    // in the pure `route` function.
+    // The model list needs an async catalog fetch and the voice list an async Piper
+    // `describe`, so both are handled here rather than in the pure `route` function.
     let path = target.split(['?', '#']).next().unwrap_or(&target);
     if method == "GET" && path == "/models" {
         let payload = models_json(&catalog).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "GET" && path == "/voices" {
+        // Reuse the exact device-facing logic: Piper's catalog intersected with the
+        // installed voices when a voices dir is configured.
+        let ev = crate::control::voices_response(connector.as_ref(), voices_dir.as_deref()).await;
+        let payload = ev.data.to_string().into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
 
@@ -773,6 +862,8 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "message": message,
         "llm_backend": v.llm_backend,
         "llm_model": v.llm_model,
+        "anthropic_key_set": v.anthropic_key_set,
+        "openai_key_set": v.openai_key_set,
         "anthropic_auth": v.anthropic_auth.as_str(),
         "tts_voice": v.tts_voice,
         "engine": engine,
@@ -822,9 +913,21 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         .get("anthropic_auth")
         .and_then(Value::as_str)
         .map(AnthropicAuth::from_label);
+    // Provider API keys, same tri-state as the search key: absent/empty = leave
+    // unchanged (a page reload never wipes a stored key); explicit JSON null = clear.
+    let key_field = |key: &str| match data.get(key) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => match v.as_str() {
+            Some(s) if !s.is_empty() => Some(Some(s.to_string())),
+            _ => None,
+        },
+    };
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
+        anthropic_api_key: key_field("anthropic_api_key"),
+        openai_api_key: key_field("openai_api_key"),
         anthropic_auth,
         tts_voice,
         engine,
@@ -903,6 +1006,42 @@ mod tests {
             memory_backend: "sqlite".to_string(),
             graph: None,
         }
+    }
+
+    /// A connector whose `connect_tts` answers a Wyoming `describe` with a fixed
+    /// voice catalog, so the `/voices` route can be exercised without a real Piper.
+    struct VoiceConnector;
+
+    #[async_trait::async_trait]
+    impl ServiceConnector for VoiceConnector {
+        async fn connect_stt(&self) -> Result<crate::wyoming::DynConnection> {
+            anyhow::bail!("stt not used in config-page tests")
+        }
+
+        async fn connect_tts(&self) -> Result<crate::wyoming::DynConnection> {
+            use crate::wyoming::protocol::{types, write_event, WyomingEvent};
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let (r, w) = tokio::io::split(server);
+                let mut reader = tokio::io::BufReader::new(r);
+                let mut writer = w;
+                let _ = crate::wyoming::protocol::read_event(&mut reader).await;
+                let info = WyomingEvent::with_data(
+                    types::INFO,
+                    json!({ "tts": [{ "voices": [
+                        { "name": "en_US-amy-medium", "languages": ["en_US"], "description": "amy (medium)" },
+                        { "name": "en_US-lessac-medium", "languages": ["en_US"], "description": "lessac (medium)" },
+                    ]}]}),
+                );
+                let _ = write_event(&mut writer, &info).await;
+            });
+            let (r, w) = tokio::io::split(client);
+            Ok(crate::wyoming::DynConnection::from_io(r, w))
+        }
+    }
+
+    fn connector() -> Arc<dyn ServiceConnector> {
+        Arc::new(VoiceConnector)
     }
 
     #[test]
@@ -992,6 +1131,30 @@ mod tests {
     }
 
     #[test]
+    fn post_config_sets_anthropic_key_and_selects_the_backend_without_leaking_it() {
+        let s = settings(); // mock backend, no env anthropic key
+        assert!(!s.view().anthropic_key_set);
+        // A runtime key + backend switch in one POST enables the cloud backend with
+        // no restart (mirrors entering the key on the page and choosing anthropic).
+        let (status, _c, out) = route(
+            "POST",
+            "/config",
+            br#"{"llm_backend":"anthropic","anthropic_api_key":"sk-secret"}"#,
+            &s,
+        );
+        assert_eq!(status, "200 OK");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["llm_backend"], "anthropic");
+        assert_eq!(v["anthropic_key_set"], true);
+        // The key must never appear in a POST response or a later GET.
+        assert!(!String::from_utf8_lossy(&out).contains("sk-secret"));
+        let (_s, _c, g) = route("GET", "/config", b"", &s);
+        assert!(!String::from_utf8_lossy(&g).contains("sk-secret"));
+        assert!(s.view().anthropic_key_set);
+    }
+
+    #[test]
     fn invalid_json_is_a_400() {
         let (status, _c, _b) = route("POST", "/config", b"not json", &settings());
         assert_eq!(status, "400 Bad Request");
@@ -1064,7 +1227,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), debug()).await.unwrap();
+            handle(stream, s, catalog(), connector(), None, debug())
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -1092,7 +1257,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), debug()).await.unwrap();
+            handle(stream, s, catalog(), connector(), None, debug())
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -1106,5 +1273,46 @@ mod tests {
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
         assert!(resp.contains("claude-opus-5"), "resp: {resp}");
         assert!(resp.contains("gpt-4o-mini"), "resp: {resp}");
+    }
+
+    /// `GET /voices` returns the installed-voice list, filtered to a voices dir.
+    #[tokio::test]
+    async fn serves_the_voice_catalog_filtered_to_installed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A voices dir with only amy installed → lessac is filtered out even though
+        // the mock Piper advertises both.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ambient-webcfg-voices-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("en_US-amy-medium.onnx"), b"").unwrap();
+
+        let s = settings();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dir_for_task = dir.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle(stream, s, catalog(), connector(), Some(dir_for_task), debug())
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /voices HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
+        assert!(resp.contains("en_US-amy-medium"), "resp: {resp}");
+        assert!(!resp.contains("en_US-lessac-medium"), "resp: {resp}");
     }
 }

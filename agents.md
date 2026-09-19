@@ -124,6 +124,9 @@ cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp,
 #     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
 #   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /chatlog,
 #     /prompts, /sqlite, /helix — no auth; `off` disables)
+#   AMBIENT_TTS_VOICES_DIR=<piper model dir>  (when Piper is co-located: the
+#     settings voice dropdown then lists only the `<name>.onnx` voices installed
+#     there; unset → the dropdown shows Piper's full advertised catalog)
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
   cargokit plugin (`rust_builder/cargokit`) uses the legacy AGP variant API and

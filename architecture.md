@@ -149,8 +149,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
   - `start_wake_word_engine` returns one `Stream<WakeWordEvent>` covering the whole
     turn lifecycle. The `WakeWordEventKind` tag spans: `started`, `status`, `level`,
     `detected` (Phase 2); `connecting`, `streaming`, `transcript`, `disconnected`
-    (Phase 3 Wyoming turn); `replyToken`, `speaking` (Phase 5); and `stopped` /
-    `error`. Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
+    (Phase 3 Wyoming turn); `replyToken`, `speaking`, `speakingDone` (Phase 5); and
+    `stopped` / `error`. `speakingDone` is UI-only: it fires when the reply audio has
+    finished playing out of the ring (drained or barge-in-flushed), so the UI can keep
+    the reply text on screen for exactly as long as it is being read, then remove it.
+    Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
     (payload fields carry neutral defaults when not relevant), so the boundary needs
     no `freezed` codegen and there is exactly one stream to manage.
   - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
@@ -178,15 +181,23 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - The **LLM backend + model and TTS voice** live on the Mac and are read/changed
   over a **project-local control protocol** on the device↔orchestrator hop —
   `ambient-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
-  memories; `list-models`) that ride the existing framing (byte-identical `types`
+  memories; `list-models`; `list-voices`) that ride the existing framing (byte-identical `types`
   in both crates, no off-the-shelf server sees them). The orchestrator's `Pipeline`
   reads a per-turn snapshot of runtime-swappable `SharedSettings`, so a
   backend/voice change takes effect on the next turn with no restart; the accept
   loop routes control frames to `control::handle_control` and audio-start frames to
   a turn. Backends are `ollama` (local), `anthropic` and `openai` (cloud), and
   `mock`; selecting a cloud backend needs its API key (`ANTHROPIC_API_KEY` /
-  `OPENAI_API_KEY`) on the Mac, else the change is rejected in-band (never dropping
-  the connection).
+  `OPENAI_API_KEY`), else the change is rejected in-band (never dropping the
+  connection). The key can come from the environment at boot **or** be entered at
+  runtime on the loopback config page: `SettingsUpdate` carries optional
+  `anthropic_api_key` / `openai_api_key` fields (same tri-state as the search key —
+  absent = keep, `null` = clear, value = set), so a cloud backend can be enabled
+  without a restart. Runtime keys live in `SharedSettings` (env is only the boot
+  seed) and persist to `ambient_settings.json` (0600). Key **entry** is deliberately
+  config-page-only — the Wyoming/device control path never accepts a provider key, so
+  cloud secrets never live on the shared Echo Show screen; the device is told only
+  whether a key is set (`anthropic_key_set` / `openai_key_set`), never its value.
 - **Model selection** is a drop-down of **specific Anthropic / OpenAI models from
   the last 12 months**, produced by `llm::catalog::ModelCatalog`: it live-queries
   each provider's `GET /v1/models` (Anthropic `created_at`, OpenAI `created`),
@@ -196,6 +207,17 @@ predictable memory use and no GC pauses under the 1 GB limit.
   browser via `GET /models` on the config page. The chosen `llm_model` flows through
   the same `SharedSettings::apply` → `LlmFactory::build` path into the concrete
   backend's request, and persists to `ambient_settings.json`.
+- **TTS voice selection** is likewise a drop-down. On `ambient-list-voices`, the
+  orchestrator asks Piper for its advertised catalog (a downstream Wyoming
+  `describe` → `info`) and, when `AMBIENT_TTS_VOICES_DIR` points at Piper's model
+  dir (Piper co-located on the Mac), intersects it with the `<name>.onnx` files
+  actually on disk so only installed voices are offered; with no dir set it returns
+  the full advertised list. Exposed to the device via `ambient-list-voices` →
+  `ambient-voices` (FRB `list_voices` → `listVoices`) and to the browser via
+  `GET /voices` on the config page. Both the settings screen and the config page
+  render a dropdown (with a "Server default" entry) and fall back to a free-text
+  field when the list is unavailable; a hand-set voice not in the list stays
+  selectable.
 - **Anthropic auth mode** (`llm::anthropic_auth`): a per-provider toggle selects
   **API key** (`x-api-key` from `ANTHROPIC_API_KEY`) or **subscription OAuth**
   (`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`). Subscription tokens
@@ -254,7 +276,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   per-sentence Piper bursts are **coalesced into one device-facing audio stream** (one
   `audio-start`, all chunks, one final `audio-stop`) because the device ends its turn
   on the first `audio-stop`.
-- **SPEAKING** — the coalesced Piper audio stream is played via `cpal`/`oboe`.
+- **SPEAKING** — the coalesced Piper audio stream is played via `cpal`/`oboe`. The
+  turn returns to IDLE on the first `audio-stop` (above), but the audio keeps
+  draining from the ring for seconds after; the device tracks ring occupancy
+  (`PlaybackSink::pending()`) and emits a UI-only `speakingDone` once it empties, so
+  the on-screen reply text stays up for the whole utterance and is removed only when
+  the audio actually stops (a barge-in flush zeroes the ring and triggers it too).
 - **Barge-in:** wake-word scoring keeps running during THINKING and SPEAKING. A wake
   word mid-reply **always flushes the playback ring immediately** (silencing the reply
   even after the turn has technically ended — the orchestrator relays audio faster than

@@ -98,6 +98,11 @@ pub struct Config {
     pub tts_addr: SocketAddr,
     /// Optional Piper voice name.
     pub tts_voice: Option<String>,
+    /// Directory holding Piper voice models (`<name>.onnx`). When set (Piper is
+    /// co-located with the orchestrator), the settings voice dropdown lists only the
+    /// voices actually present here; when `None`, it lists Piper's full advertised
+    /// catalog. Set via `AMBIENT_TTS_VOICES_DIR`.
+    pub tts_voices_dir: Option<PathBuf>,
     /// Selected LLM backend.
     pub llm: LlmChoice,
     /// SQLite memory database path.
@@ -206,6 +211,7 @@ impl Default for Config {
             stt_addr: "127.0.0.1:10300".parse().unwrap(), // wyoming-faster-whisper default
             tts_addr: "127.0.0.1:10200".parse().unwrap(), // wyoming-piper default
             tts_voice: None,
+            tts_voices_dir: None,
             llm: LlmChoice::Ollama {
                 url: "http://127.0.0.1:11434".to_string(),
                 model: "llama3.2".to_string(),
@@ -350,6 +356,11 @@ impl Config {
             stt_addr: env_addr("AMBIENT_STT_ADDR", d.stt_addr)?,
             tts_addr: env_addr("AMBIENT_TTS_ADDR", d.tts_addr)?,
             tts_voice: env::var("AMBIENT_TTS_VOICE").ok().filter(|s| !s.is_empty()),
+            tts_voices_dir: env::var("AMBIENT_TTS_VOICES_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .or(d.tts_voices_dir),
             llm,
             db_path: env::var("AMBIENT_DB_PATH")
                 .map(PathBuf::from)
@@ -400,10 +411,13 @@ impl Config {
         })
     }
 
-    /// The immutable inputs a runtime backend swap (Phase 6) needs, captured from
-    /// the environment once so a later swap never re-reads `env`. `ANTHROPIC_API_KEY`
-    /// is read here: if absent, the cloud backend simply can't be selected at
-    /// runtime (the request is rejected in-band).
+    /// The inputs a runtime backend swap (Phase 6) needs, captured from the
+    /// environment once so a later swap never re-reads `env`. The provider API keys
+    /// read here are only the **boot seed**: they flow into the live
+    /// [`RuntimeSettings`], where the config page can override them at runtime, so a
+    /// cloud backend can be enabled without a restart even if its key was unset at
+    /// boot. If no key is present at boot *or* runtime, selecting that backend is
+    /// rejected in-band.
     pub fn llm_factory(&self) -> LlmFactory {
         let anthropic_max_tokens = match &self.llm {
             LlmChoice::Anthropic { max_tokens, .. } => *max_tokens,
@@ -491,6 +505,11 @@ impl Config {
         let mut search_api_key = self.initial_search_api_key();
         let mut backend = backend_default;
         let mut model = model_default;
+        // Live provider keys start from the environment (the factory's boot seed) and
+        // become runtime-settable; a persisted key overlays them so a key entered on
+        // the config page enables the cloud backend without a restart.
+        let mut anthropic_api_key = factory.anthropic_api_key.clone();
+        let mut openai_api_key = factory.openai_api_key.clone();
         let mut anthropic_auth = anthropic_auth_from_env();
         let mut tts_voice = self.tts_voice.clone();
 
@@ -505,13 +524,27 @@ impl Config {
             search_api_key = p.search_api_key;
             backend = p.llm_backend;
             model = p.llm_model;
+            // Only override the env key when the persisted file actually carries one,
+            // so a pre-feature settings file (key absent → serde default `None`) can't
+            // wipe a working `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the environment.
+            if p.anthropic_api_key.is_some() {
+                anthropic_api_key = p.anthropic_api_key;
+            }
+            if p.openai_api_key.is_some() {
+                openai_api_key = p.openai_api_key;
+            }
             anthropic_auth = AnthropicAuth::from_label(&p.anthropic_auth);
             tts_voice = p.tts_voice;
             end_silence_ms = p.end_silence_ms;
             voice_rms_threshold = p.voice_rms_threshold;
         }
 
-        let (llm, llm_backend, llm_model) = factory
+        // Build the initial backend with the resolved live keys (env overlaid by any
+        // persisted key), never re-reading the environment during a later swap.
+        let mut build_factory = factory.clone();
+        build_factory.anthropic_api_key = anthropic_api_key.clone();
+        build_factory.openai_api_key = openai_api_key.clone();
+        let (llm, llm_backend, llm_model) = build_factory
             .build(
                 engine,
                 web_search,
@@ -532,6 +565,8 @@ impl Config {
                 search_api_key,
                 llm_backend,
                 llm_model,
+                anthropic_api_key,
+                openai_api_key,
                 anthropic_auth,
                 tts_voice,
                 end_silence_ms,
@@ -548,7 +583,8 @@ impl Config {
     /// the mock is not accurate for real voices.
     pub fn build_speaker_service(&self) -> Result<Option<Arc<crate::speaker::SpeakerService>>> {
         use crate::speaker::{
-            MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry, SpeakerService, SpeakerThresholds,
+            MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry, SpeakerService,
+            SpeakerThresholds,
         };
         if !self.speaker.enabled {
             return Ok(None);
@@ -565,8 +601,11 @@ impl Config {
             Some(path) => {
                 use crate::speaker::embed::OnnxSpeakerEmbedder;
                 use crate::speaker::features::FbankConfig;
-                match OnnxSpeakerEmbedder::open(path, self.speaker.embed_dims, FbankConfig::default())
-                {
+                match OnnxSpeakerEmbedder::open(
+                    path,
+                    self.speaker.embed_dims,
+                    FbankConfig::default(),
+                ) {
                     Ok(e) => {
                         log::info!("speaker embedder: ONNX model {}", path.display());
                         Arc::new(e)

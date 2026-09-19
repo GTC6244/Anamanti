@@ -56,6 +56,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             search_api_key: None,
             llm_backend: backend,
             llm_model: model,
+            anthropic_api_key: None,
+            openai_api_key: None,
             anthropic_auth: AnthropicAuth::ApiKey,
             tts_voice: None,
             end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -84,7 +86,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(ambient_orchestrator::server::serve(
-        listener, pipeline, connector, catalog,
+        listener, pipeline, connector, catalog, None,
     ));
     (addr, memory, settings)
 }

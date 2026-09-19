@@ -3,6 +3,7 @@
 //! device discovers over mDNS (Plan.MD Phase 4 bullet 5, "frames stream back to
 //! the Echo Show over the Wyoming socket").
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -21,6 +22,7 @@ pub async fn serve(
     pipeline: Pipeline,
     connector: Arc<dyn ServiceConnector>,
     catalog: Arc<ModelCatalog>,
+    voices_dir: Option<PathBuf>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -28,8 +30,9 @@ pub async fn serve(
         let pipeline = pipeline.clone();
         let connector = connector.clone();
         let catalog = catalog.clone();
+        let voices_dir = voices_dir.clone();
         tokio::spawn(async move {
-            match handle_connection(stream, pipeline, connector, catalog).await {
+            match handle_connection(stream, pipeline, connector, catalog, voices_dir).await {
                 Ok(()) => log::info!("device disconnected: {peer}"),
                 Err(e) => log::warn!("connection {peer} ended with error: {e:#}"),
             }
@@ -47,6 +50,7 @@ async fn handle_connection(
     pipeline: Pipeline,
     connector: Arc<dyn ServiceConnector>,
     catalog: Arc<ModelCatalog>,
+    voices_dir: Option<PathBuf>,
 ) -> Result<()> {
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
@@ -67,6 +71,8 @@ async fn handle_connection(
                     pipeline.settings(),
                     pipeline.speaker().map(|s| s.registry()),
                     &catalog,
+                    connector.as_ref(),
+                    voices_dir.as_deref(),
                 )
                 .await?;
             }

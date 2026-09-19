@@ -92,6 +92,14 @@ pub struct PersistedSettings {
     pub search_api_key: Option<String>,
     pub llm_backend: String,
     pub llm_model: Option<String>,
+    /// Runtime-set Anthropic API key, so the cloud backend can be selected without
+    /// a restart even if `ANTHROPIC_API_KEY` was absent at boot. Plaintext (0600
+    /// file); defaulted (absent) for older files, which then fall back to the env key.
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    /// Runtime-set OpenAI API key (same rationale as `anthropic_api_key`).
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
     /// Anthropic auth mode (`apikey`/`subscription`). Defaulted for older files.
     #[serde(default = "default_anthropic_auth")]
     pub anthropic_auth: String,
@@ -155,15 +163,19 @@ pub struct LlmFactory {
     pub ollama_url: String,
     /// Cloud Anthropic API base URL.
     pub anthropic_base_url: String,
-    /// Anthropic API key, if one is available in the environment. Absent means the
-    /// cloud backend cannot be selected and a request for it is rejected.
+    /// Anthropic API key seeded from the environment at boot. This is only the
+    /// initial default: the live key lives in [`RuntimeSettings::anthropic_api_key`]
+    /// and `apply` overrides a factory clone with it, so a key entered at runtime
+    /// (config page) takes effect without a restart. Absent here *and* in the
+    /// runtime settings means the cloud backend can't be selected (rejected in-band).
     pub anthropic_api_key: Option<String>,
     /// `max_tokens` for Anthropic replies (kept small for spoken output).
     pub anthropic_max_tokens: u32,
     /// Cloud OpenAI API base URL.
     pub openai_base_url: String,
-    /// OpenAI API key, if available. Absent means the OpenAI backend cannot be
-    /// selected and a request for it is rejected in-band.
+    /// OpenAI API key seeded from the environment at boot (initial default only;
+    /// the live key lives in [`RuntimeSettings::openai_api_key`] — see
+    /// `anthropic_api_key` above).
     pub openai_api_key: Option<String>,
     /// `max_completion_tokens` for OpenAI replies (kept small for spoken output).
     pub openai_max_tokens: u32,
@@ -311,6 +323,12 @@ pub struct RuntimeSettings {
     pub llm_backend: String,
     /// The resolved model name, if the backend uses one.
     pub llm_model: Option<String>,
+    /// Live Anthropic API key. Runtime-settable (config page) so the cloud backend
+    /// can be selected without a restart; seeded from `ANTHROPIC_API_KEY` at boot.
+    /// `None` = no key (selecting the api-key anthropic backend is rejected).
+    pub anthropic_api_key: Option<String>,
+    /// Live OpenAI API key. Runtime-settable; seeded from `OPENAI_API_KEY` at boot.
+    pub openai_api_key: Option<String>,
     /// How the Anthropic backend authenticates (API key vs subscription OAuth).
     pub anthropic_auth: AnthropicAuth,
     /// The Piper voice to synthesize with, or `None` for the server default.
@@ -328,6 +346,11 @@ pub struct RuntimeSettings {
 pub struct SettingsView {
     pub llm_backend: String,
     pub llm_model: Option<String>,
+    /// Whether an Anthropic API key is configured (env or runtime). The key itself
+    /// is never exposed.
+    pub anthropic_key_set: bool,
+    /// Whether an OpenAI API key is configured. The key itself is never exposed.
+    pub openai_key_set: bool,
     /// Anthropic auth mode (API key vs subscription OAuth).
     pub anthropic_auth: AnthropicAuth,
     pub tts_voice: Option<String>,
@@ -348,6 +371,11 @@ pub struct SettingsView {
 pub struct SettingsUpdate {
     pub llm_backend: Option<String>,
     pub llm_model: Option<String>,
+    /// Anthropic API key change: `None` = leave unchanged; `Some(None)` = clear;
+    /// `Some(Some(v))` = set to `v`. Lets the cloud backend be enabled at runtime.
+    pub anthropic_api_key: Option<Option<String>>,
+    /// OpenAI API key change (same tri-state semantics as `anthropic_api_key`).
+    pub openai_api_key: Option<Option<String>>,
     /// New Anthropic auth mode, or `None` to leave it unchanged.
     pub anthropic_auth: Option<AnthropicAuth>,
     /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(v))` = set to `v`.
@@ -404,6 +432,8 @@ impl SharedSettings {
             search_api_key: s.search_api_key.clone(),
             llm_backend: s.llm_backend.clone(),
             llm_model: s.llm_model.clone(),
+            anthropic_api_key: s.anthropic_api_key.clone(),
+            openai_api_key: s.openai_api_key.clone(),
             anthropic_auth: s.anthropic_auth.as_str().to_string(),
             tts_voice: s.tts_voice.clone(),
             end_silence_ms: s.end_silence_ms,
@@ -439,6 +469,8 @@ impl SharedSettings {
                 search_api_key: None,
                 llm_backend: llm_backend.into(),
                 llm_model: None,
+                anthropic_api_key: None,
+                openai_api_key: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -459,6 +491,11 @@ impl SharedSettings {
         SettingsView {
             llm_backend: s.llm_backend.clone(),
             llm_model: s.llm_model.clone(),
+            anthropic_key_set: s
+                .anthropic_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            openai_key_set: s.openai_api_key.as_deref().is_some_and(|k| !k.is_empty()),
             anthropic_auth: s.anthropic_auth,
             tts_voice: s.tts_voice.clone(),
             engine: s.engine,
@@ -482,7 +519,9 @@ impl SharedSettings {
             || update.engine.is_some()
             || update.web_search.is_some()
             || update.search_provider.is_some()
-            || update.search_api_key.is_some();
+            || update.search_api_key.is_some()
+            || update.anthropic_api_key.is_some()
+            || update.openai_api_key.is_some();
 
         // Build the new LLM *before* taking the write lock so a failed build never
         // leaves the settings half-changed.
@@ -510,8 +549,22 @@ impl SharedSettings {
                 None => current.search_api_key.clone(),
                 Some(k) => k.clone().filter(|s| !s.is_empty()),
             };
+            // LLM provider keys: tri-state like the search key. These make the cloud
+            // backend selectable at runtime, so build with a factory clone whose keys
+            // reflect the target — never re-reading the environment.
+            let target_anthropic_key = match &update.anthropic_api_key {
+                None => current.anthropic_api_key.clone(),
+                Some(k) => k.clone().filter(|s| !s.is_empty()),
+            };
+            let target_openai_key = match &update.openai_api_key {
+                None => current.openai_api_key.clone(),
+                Some(k) => k.clone().filter(|s| !s.is_empty()),
+            };
+            let mut factory = self.factory.clone();
+            factory.anthropic_api_key = target_anthropic_key.clone();
+            factory.openai_api_key = target_openai_key.clone();
             (
-                Some(self.factory.build(
+                Some(factory.build(
                     target_engine,
                     target_web_search,
                     &target_provider,
@@ -526,6 +579,8 @@ impl SharedSettings {
                     target_web_search,
                     target_provider,
                     target_key,
+                    target_anthropic_key,
+                    target_openai_key,
                 )),
             )
         } else {
@@ -534,7 +589,8 @@ impl SharedSettings {
 
         let mut w = self.inner.write().unwrap();
         if let Some((llm, label, model)) = rebuilt {
-            let (engine, auth, web_search, provider, key) = targets.unwrap();
+            let (engine, auth, web_search, provider, key, anthropic_key, openai_key) =
+                targets.unwrap();
             w.llm = llm;
             w.llm_backend = label;
             w.llm_model = model;
@@ -543,6 +599,8 @@ impl SharedSettings {
             w.web_search = web_search;
             w.search_provider = provider;
             w.search_api_key = key;
+            w.anthropic_api_key = anthropic_key;
+            w.openai_api_key = openai_key;
         }
         if let Some(voice) = &update.tts_voice {
             w.tts_voice = voice.clone().filter(|s| !s.is_empty());
@@ -559,6 +617,11 @@ impl SharedSettings {
         let view = SettingsView {
             llm_backend: w.llm_backend.clone(),
             llm_model: w.llm_model.clone(),
+            anthropic_key_set: w
+                .anthropic_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            openai_key_set: w.openai_api_key.as_deref().is_some_and(|k| !k.is_empty()),
             anthropic_auth: w.anthropic_auth,
             tts_voice: w.tts_voice.clone(),
             engine: w.engine,
@@ -600,6 +663,10 @@ mod tests {
     }
 
     fn shared(factory: LlmFactory) -> Arc<SharedSettings> {
+        // Seed the live keys from the factory's env keys, exactly as `Config::
+        // shared_settings` does at boot, so a later swap to that backend uses them.
+        let anthropic_api_key = factory.anthropic_api_key.clone();
+        let openai_api_key = factory.openai_api_key.clone();
         let (llm, label, model) = factory
             .build(
                 LlmEngine::Native,
@@ -621,6 +688,8 @@ mod tests {
                 search_api_key: None,
                 llm_backend: label,
                 llm_model: model,
+                anthropic_api_key,
+                openai_api_key,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -702,6 +771,8 @@ mod tests {
                 search_api_key: None,
                 llm_backend: label,
                 llm_model: model,
+                anthropic_api_key: None,
+                openai_api_key: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -763,6 +834,110 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("ANTHROPIC_API_KEY"));
         assert_eq!(s.view(), before, "a failed swap is atomic");
+    }
+
+    #[test]
+    fn runtime_anthropic_key_enables_the_backend_without_a_restart() {
+        // No env/boot key, so anthropic is rejected up front.
+        let s = shared(factory_with_key(None));
+        assert!(!s.view().anthropic_key_set);
+        assert!(s
+            .apply(&SettingsUpdate {
+                llm_backend: Some("anthropic".to_string()),
+                ..Default::default()
+            })
+            .is_err());
+
+        // Supply a key at runtime and select anthropic in the same change — it now
+        // builds without a restart, and the view reports the key as set (never the
+        // value: SettingsView carries only the boolean).
+        let view = s
+            .apply(&SettingsUpdate {
+                llm_backend: Some("anthropic".to_string()),
+                anthropic_api_key: Some(Some("sk-runtime".to_string())),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.llm_backend, "anthropic");
+        assert_eq!(view.llm_model.as_deref(), Some("claude-opus-5"));
+        assert!(view.anthropic_key_set);
+
+        // A later unrelated change keeps the runtime key (unchanged tri-state).
+        let view = s
+            .apply(&SettingsUpdate {
+                llm_model: Some("claude-haiku-4-5".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(view.anthropic_key_set);
+        assert_eq!(view.llm_model.as_deref(), Some("claude-haiku-4-5"));
+
+        // Clearing the key (Some(None)) while on anthropic is rejected atomically,
+        // so the working backend is never torn down by a bad clear.
+        let err = s
+            .apply(&SettingsUpdate {
+                anthropic_api_key: Some(None),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_API_KEY"));
+        assert!(s.view().anthropic_key_set, "rejected clear is atomic");
+    }
+
+    #[test]
+    fn runtime_key_is_persisted_so_a_restart_is_not_needed_either() {
+        let path = std::env::temp_dir().join(format!(
+            "ambient_key_persist_{}_{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let factory = factory_with_key(None);
+        let (llm, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+                AnthropicAuth::ApiKey,
+            )
+            .unwrap();
+        let s = SharedSettings::new_persistent(
+            factory,
+            RuntimeSettings {
+                llm,
+                engine: LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
+                llm_backend: label,
+                llm_model: model,
+                anthropic_api_key: None,
+                openai_api_key: None,
+                anthropic_auth: AnthropicAuth::ApiKey,
+                tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+            },
+            Some(path.clone()),
+        );
+
+        s.apply(&SettingsUpdate {
+            llm_backend: Some("anthropic".into()),
+            anthropic_api_key: Some(Some("sk-persist".into())),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // The key lands in the persisted file, so the next boot loads it and the
+        // cloud backend is selectable with no environment key and no restart.
+        let p = load_persisted(&path).expect("settings file should exist");
+        assert_eq!(p.llm_backend, "anthropic");
+        assert_eq!(p.anthropic_api_key.as_deref(), Some("sk-persist"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

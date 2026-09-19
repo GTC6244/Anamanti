@@ -105,6 +105,13 @@ pub mod types {
     /// orchestrator → device: the selectable models (data: `ok`, `models` array of
     /// `{provider, id, label}`), scoped to the last 12 months per provider.
     pub const MODELS: &str = "ambient-models";
+
+    /// device → orchestrator: list the installed Piper voices for the settings TTS
+    /// voice dropdown (no data). Byte-identical to the orchestrator's `LIST_VOICES`.
+    pub const LIST_VOICES: &str = "ambient-list-voices";
+    /// orchestrator → device: the installed voices (data: `ok`, `voices` array of
+    /// `{name, language, label}`). Byte-identical to the orchestrator's `VOICES`.
+    pub const VOICES: &str = "ambient-voices";
 }
 
 /// A decoded Wyoming event: a `type` tag, an optional structured `data` object,

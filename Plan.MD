@@ -287,7 +287,12 @@ services, inserting the pluggable LLM + persistent memory between them.
   clock + status), `conversation_view.dart` (transcript/reply bubbles with a
   streaming caret, reading-column capped for the 8-inch display),
   `status_indicator.dart`. Reply tokens accumulate into the reply bubble as they
-  arrive (`WakeWordEventKind::ReplyToken`).
+  arrive (`WakeWordEventKind::ReplyToken`). The reply text stays on screen for as
+  long as the audio is being read aloud: the device relays audio faster than
+  real-time, so the turn returns to idle while the playback ring is still draining;
+  Rust tracks ring occupancy (`PlaybackSink::pending()`) and emits a UI-only
+  `SpeakingDone` when it empties (or a barge-in flushes it), which is when the UI
+  removes the text (`AssistantState.audioPlaying` / `displayActive`).
 - **Idle ambient screen:** photo slideshow from a chosen Google Photos/Drive folder
   (**on-device OAuth**). Slideshow keeps running when disconnected. **Done** —
   `lib/src/slideshow/photo_source.dart`: a pluggable `PhotoSource`
@@ -410,6 +415,21 @@ services, inserting the pluggable LLM + persistent memory between them.
 > helix) + clippy/fmt + `--features rig` check, device `cargo test`
 > (`list_models` round trip), FRB regen, `flutter analyze` + `flutter test`.
 
+> **TTS voice dropdown (Phase 6 follow-up):** the settings TTS voice field is a
+> dropdown of **installed** Piper voices, mirroring the model dropdown. On
+> `ambient-list-voices`, the orchestrator queries Piper's advertised catalog (a
+> downstream Wyoming `describe` → `info`, parsed in `mac/src/wyoming/tts.rs`
+> `describe_voices`/`parse_voice_catalog`) and, when `AMBIENT_TTS_VOICES_DIR` is set
+> (Piper co-located on the Mac), keeps only voices whose `<name>.onnx` is present on
+> disk; unset → the full advertised list. Exposed via `ambient-list-voices` →
+> `ambient-voices` (new FRB `list_voices` → `listVoices`, `VoiceInfo`/`VoiceOption`)
+> and to the browser via `GET /voices` on the config page. Both the device screen
+> and the config page show a "Server default" entry, preserve a hand-set voice not
+> in the list, and fall back to a free-text field when the list is unavailable.
+> Verified: mac
+> `cargo test` + clippy, device `cargo test` (`list_voices` round trip) + clippy,
+> FRB regen, `flutter analyze` + `flutter test` (voice dropdown + free-text fallback).
+
 > **Anthropic auth mode (Phase 6 follow-up):** cloud Claude can authenticate with an
 > **API key** *or* a **Claude subscription (OAuth)**. `mac/src/llm/anthropic_auth.rs`
 > adds `AnthropicAuth` + an `AnthropicTokenProvider` that resolves a subscription
@@ -438,10 +458,27 @@ services, inserting the pluggable LLM + persistent memory between them.
 > device↔orchestrator hop (no off-the-shelf Wyoming server sees them), kept
 > byte-identical in `rust/` and `mac/` `wyoming::protocol::types` and guarded by
 > round-trip tests on both sides. Selecting the cloud (anthropic) backend at
-> runtime still requires `ANTHROPIC_API_KEY` on the orchestrator; if it's absent
-> the change is rejected **in-band** (the response's `ok:false` + message) and the
+> runtime still requires an API key on the orchestrator, but that key no longer has
+> to be present at boot (see the runtime-key note below); if none is available the
+> change is rejected **in-band** (the response's `ok:false` + message) and the
 > previous backend stays in force, so a control error never drops the device
 > connection or the turn.
+
+> **Runtime provider keys (Phase 6 follow-up):** a cloud API key no longer has to be
+> in the environment at launch. `SettingsUpdate` gains optional `anthropic_api_key` /
+> `openai_api_key` fields (tri-state like the Tavily search key: absent = keep,
+> `null` = clear, value = set); `SharedSettings::apply` builds the backend with a
+> factory clone whose keys reflect the target, so a key entered at runtime enables the
+> cloud backend **without a restart**. Keys live in `RuntimeSettings` (the env var is
+> only the boot seed) and persist to `ambient_settings.json` (0600); on load a
+> persisted key overlays the env key only when present, so a pre-feature settings file
+> can't wipe a working env key. Key **entry** is exposed only on the loopback config
+> page (`webconfig.rs` — password fields shown per backend); the device/Wyoming
+> control path never accepts a provider key, and both surfaces report only
+> `anthropic_key_set` / `openai_key_set` (a boolean), never the key value. Endpoints
+> (base URLs) stay boot-time env only — deferred. Verified: mac `cargo test`
+> (107 unit + integration, incl. runtime-key enable + persist tests) + clippy `-D
+> warnings` + fmt.
 
 ---
 

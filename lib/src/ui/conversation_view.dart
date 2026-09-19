@@ -26,7 +26,7 @@ class ConversationView extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                _PhaseHeader(phase: state.phase),
+                _PhaseHeader(phase: state.phase, audioPlaying: state.audioPlaying),
                 const SizedBox(height: 18),
                 if (state.transcript.isNotEmpty)
                   _Bubble(
@@ -56,13 +56,21 @@ class ConversationView extends StatelessWidget {
 }
 
 class _PhaseHeader extends StatelessWidget {
-  const _PhaseHeader({required this.phase});
+  const _PhaseHeader({required this.phase, this.audioPlaying = false});
 
   final TurnPhase phase;
 
+  /// Whether the reply audio is still playing. The turn returns to idle while the
+  /// audio keeps draining, so keep showing "Speaking…" for that window rather than
+  /// blanking the header mid-utterance.
+  final bool audioPlaying;
+
   @override
   Widget build(BuildContext context) {
-    final label = switch (phase) {
+    // Once the turn has ended but the reply is still audible, treat it as speaking.
+    final effectivePhase =
+        (phase == TurnPhase.idle && audioPlaying) ? TurnPhase.speaking : phase;
+    final label = switch (effectivePhase) {
       TurnPhase.listening => 'Listening…',
       TurnPhase.processing => 'Processing…',
       TurnPhase.connecting => 'Connecting…',
