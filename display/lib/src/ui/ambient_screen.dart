@@ -57,6 +57,22 @@ class AmbientScreen extends StatelessWidget {
                 color: Colors.black.withValues(alpha: active ? 0.55 : 0.15),
               ),
 
+              // Big, screen-filling timers — the idle presentation. Fades out while a
+              // turn is active (the conversation wins the screen); the timers survive
+              // as the compact badge below. Ignores pointers when hidden so it never
+              // steals taps meant for the conversation.
+              AnimatedOpacity(
+                opacity: active ? 0 : 1,
+                duration: const Duration(milliseconds: 300),
+                child: IgnorePointer(
+                  ignoring: active,
+                  child: TimersOverlay(
+                    timers: state.timers,
+                    onDismiss: assistant.dismissTimer,
+                  ),
+                ),
+              ),
+
               // The live conversation panel fades in for the duration of a turn.
               AnimatedOpacity(
                 opacity: active ? 1 : 0,
@@ -70,12 +86,13 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
-              // Idle clock, bottom-left.
+              // Idle clock, bottom-left. Also yields to the big timer display so the
+              // two don't overlap when a timer is running on the idle screen.
               Positioned(
                 left: 28,
                 bottom: 24,
                 child: AnimatedOpacity(
-                  opacity: active ? 0 : 1,
+                  opacity: (active || state.timers.isNotEmpty) ? 0 : 1,
                   duration: const Duration(milliseconds: 300),
                   child: const _AmbientClock(),
                 ),
@@ -88,18 +105,27 @@ class AmbientScreen extends StatelessWidget {
                 child: StatusIndicator(state: state),
               ),
 
-              // On-device timers, top-center — visible during both idle slideshow
-              // and a live turn (not gated by `active`). Padded clear of the
-              // settings button (top-left) and status chip (top-right).
+              // Compact timer badge, top-center — the presentation while a turn is
+              // active, so the timers yield the screen to the live conversation but
+              // stay glanceable. Padded clear of the settings button (top-left) and
+              // status chip (top-right).
               Positioned(
                 top: 16,
                 left: 64,
                 right: 120,
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  child: TimersOverlay(
-                    timers: state.timers,
-                    onDismiss: assistant.dismissTimer,
+                child: AnimatedOpacity(
+                  opacity: active ? 1 : 0,
+                  duration: const Duration(milliseconds: 300),
+                  child: IgnorePointer(
+                    ignoring: !active,
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: TimersOverlay(
+                        compact: true,
+                        timers: state.timers,
+                        onDismiss: assistant.dismissTimer,
+                      ),
+                    ),
                   ),
                 ),
               ),

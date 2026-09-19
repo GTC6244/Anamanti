@@ -856,6 +856,33 @@ impl Pipeline {
         }
         Ok(true)
     }
+
+    /// Synthesize a standalone phrase with Piper and stream it to the device as one
+    /// self-contained audio stream (`audio-start` → `audio-chunk`… → `audio-stop`).
+    ///
+    /// Unlike [`Pipeline::speak_chunk`] this is not part of a voice turn: it answers
+    /// an out-of-band `ambient-speak` request (see [`crate::server`]) so an on-device
+    /// timer can voice its "Time's up …" announcement in the real Piper voice when
+    /// the Mac is reachable. Best-effort — a device that drops the socket mid-stream
+    /// is a graceful stop, not an error.
+    pub async fn announce(
+        &self,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        text: &str,
+    ) -> Result<()> {
+        let runtime = self.settings.snapshot();
+        let (_reader, writer) = device.split_mut();
+        let mut audio_started = false;
+        self.speak_chunk(writer, &runtime, connector, text, &mut audio_started, None)
+            .await?;
+        // `speak_chunk` swallows Piper's per-request `audio-stop`; send the single
+        // terminating stop so the device ends playback (only if a stream was opened).
+        if audio_started {
+            let _ = protocol::write_event(writer, &WyomingEvent::audio_stop(0)).await;
+        }
+        Ok(())
+    }
 }
 
 /// The memory scope for a speaker: `None` (shared/household) for the sentinel

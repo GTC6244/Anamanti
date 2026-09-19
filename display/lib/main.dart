@@ -8,6 +8,7 @@
 // the slideshow, while assistant/memory settings are applied on the Mac.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:ambient_display/src/engine/assistant_controller.dart';
 import 'package:ambient_display/src/engine/model_assets.dart';
@@ -23,6 +24,9 @@ import 'package:ambient_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Kiosk display: hide the status + navigation bars and keep them hidden. Sticky
+  // mode re-hides them automatically after the transient reveal from an edge swipe.
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   await RustLib.init();
   runApp(const AmbientDisplayApp());
 }
