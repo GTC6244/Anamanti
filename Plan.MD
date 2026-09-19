@@ -443,6 +443,17 @@ services, inserting the pluggable LLM + persistent memory between them.
 > backend) and the config page. OpenAI stays API-key-only (no subscription→API path).
 > `AMBIENT_ANTHROPIC_AUTH=apikey|subscription` seeds the initial mode.
 
+> **Debug GUI pages (Phase 6 follow-up):** the loopback config server
+> (`mac/src/webconfig.rs`) now also serves four read-only inspection pages —
+> `/chatlog` (recent turns), `/prompts` (the exact assembled LLM prompt per turn,
+> captured to a separate `ambient_promptlog.jsonl` via `memory::PromptLog`, env
+> `AMBIENT_PROMPTLOG_PATH`), `/sqlite` (the memory store rows), and `/helix`
+> (HelixDB GraphRAG node counts + a sample of nodes, behind the read-only
+> `memory::GraphView` seam; reports "disabled" on the SQLite backend). Each has a
+> `*.json` data endpoint and a shared nav bar. Still no auth — loopback only.
+> Verified: mac `cargo test` (native + helix) + clippy `-D warnings`, plus an
+> end-to-end curl of every page/endpoint against a running mock-backend orchestrator.
+
 > **Wire note (Phase 6):** the `ambient-*` control frames are project-local to the
 > device↔orchestrator hop (no off-the-shelf Wyoming server sees them), kept
 > byte-identical in `rust/` and `mac/` `wyoming::protocol::types` and guarded by

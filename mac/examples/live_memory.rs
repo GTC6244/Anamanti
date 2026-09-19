@@ -11,14 +11,8 @@
 //!   cargo run --example live_memory
 //! ). It NEVER prints key material — only shapes, scores, and extracted entities.
 //!
-//! Requires the `helix` feature (on by default).
+//! The embedded HelixDB engine is always compiled in.
 
-#[cfg(not(feature = "helix"))]
-fn main() {
-    eprintln!("build with the `helix` feature to run this example");
-}
-
-#[cfg(feature = "helix")]
 fn main() {
     // Large worker stack: the embedded engine's async types overflow tokio's 2 MiB
     // default (mirrors the binary's WORKER_STACK_SIZE).
@@ -44,7 +38,6 @@ fn main() {
         .unwrap();
 }
 
-#[cfg(feature = "helix")]
 async fn run() -> anyhow::Result<()> {
     use std::sync::Arc;
 

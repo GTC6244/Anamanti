@@ -6,8 +6,7 @@
 //!                     →  HelixDB graph (Turn/Memory/Entity nodes + edges)
 //!                     →  vector + graph recall  →  context lines
 //!
-//! Requires the `helix` feature (on by default).
-#![cfg(feature = "helix")]
+//! The embedded HelixDB engine is always compiled in.
 
 use std::sync::Arc;
 
@@ -168,4 +167,42 @@ async fn disk_store_body() {
         "nodes should persist across reopen, got {after}"
     );
     helix.close().await.unwrap();
+}
+
+#[test]
+fn graph_view_reports_stats_and_samples_nodes() {
+    on_big_stack(graph_view_body());
+}
+
+/// The read-only [`GraphView`] used by the debug GUI (`/helix`) must return live
+/// per-label counts and non-embedding node samples over a real HelixDB store.
+async fn graph_view_body() {
+    use ambient_orchestrator::memory::GraphView;
+
+    let embedder = MockEmbedder::new(16);
+    let dims = embedder.dimensions();
+    let helix = HelixMemory::open_in_memory("graphview-test", dims)
+        .await
+        .unwrap();
+
+    let vec = embedder.embed_one("I love jazz music").await.unwrap();
+    helix
+        .ingest_turn("t1", "s", 1, "I love jazz music", vec, &[], "household", None)
+        .await
+        .unwrap();
+
+    // Stats: a total plus a per-label breakdown that includes the ingested Turn.
+    let stats = helix.stats().await.unwrap();
+    assert!(stats["total"].as_u64().unwrap() >= 2, "user + turn nodes");
+    assert_eq!(stats["by_label"]["Turn"].as_u64().unwrap(), 1);
+    assert_eq!(stats["by_label"]["User"].as_u64().unwrap(), 1);
+
+    // Sample: the Turn node carries its text (a projected property) and no
+    // `embedding` (deliberately excluded — it must never be dumped to the page).
+    let sample = helix.sample(10).await.unwrap();
+    let turns = sample["Turn"].as_array().unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["text"], "I love jazz music");
+    assert!(turns[0].get("embedding").is_none(), "embedding must be omitted");
+    assert!(turns[0].get("$id").is_some(), "node id present");
 }

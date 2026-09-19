@@ -381,6 +381,46 @@ impl HelixMemory {
         Ok(v["c"].as_u64().unwrap_or(0))
     }
 
+    /// Count nodes carrying a given label.
+    async fn label_count(&self, label: &str) -> Result<u64> {
+        let v = self
+            .read(
+                batch::read_batch()
+                    .var_as("c", g().n_with_label(label).count())
+                    .returning(["c"]),
+            )
+            .await?;
+        Ok(v["c"].as_u64().unwrap_or(0))
+    }
+
+    /// Up to `limit` nodes of `label` as an array of objects (each with its `$id`
+    /// and properties). The large `embedding` vector is stripped so it is never
+    /// dumped to the debug page. A projected `value_map` would omit `$id`, so we
+    /// fetch the full map and drop just `embedding`.
+    async fn sample_label(&self, label: &str, limit: usize) -> Result<Value> {
+        let v = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "n",
+                        g().n_with_label(label)
+                            .limit(limit)
+                            .value_map(None::<Vec<String>>),
+                    )
+                    .returning(["n"]),
+            )
+            .await?;
+        let mut arr = v.get("n").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        if let Some(items) = arr.as_array_mut() {
+            for item in items.iter_mut() {
+                if let Some(obj) = item.as_object_mut() {
+                    obj.remove("embedding");
+                }
+            }
+        }
+        Ok(arr)
+    }
+
     /// Close the store, flushing durable state.
     pub async fn close(self) -> Result<()> {
         self.db.close().await.context("closing embedded HelixDB")
@@ -484,6 +524,29 @@ impl HelixMemory {
             self.dims
         );
         Ok(())
+    }
+}
+
+/// Read-only introspection for the debug GUI (`webconfig.rs` → `/helix`).
+#[async_trait::async_trait]
+impl super::graphview::GraphView for HelixMemory {
+    async fn stats(&self) -> Result<Value> {
+        let mut by_label = serde_json::Map::new();
+        for label in [L_USER, L_TURN, L_MEMORY, L_ENTITY] {
+            by_label.insert(label.to_string(), Value::from(self.label_count(label).await?));
+        }
+        Ok(serde_json::json!({
+            "total": self.node_count().await?,
+            "by_label": Value::Object(by_label),
+        }))
+    }
+
+    async fn sample(&self, limit: usize) -> Result<Value> {
+        let mut out = serde_json::Map::new();
+        for label in [L_USER, L_TURN, L_MEMORY, L_ENTITY] {
+            out.insert(label.to_string(), self.sample_label(label, limit).await?);
+        }
+        Ok(Value::Object(out))
     }
 }
 

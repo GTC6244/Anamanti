@@ -111,10 +111,12 @@ pub struct Config {
     pub system_prompt: String,
     /// Idle timeout for a stalled turn.
     pub turn_timeout: Duration,
-    /// Memory retrieval backend: `sqlite` (FTS, default) or `helix` (GraphRAG).
+    /// Memory retrieval backend: `helix` (GraphRAG, default) or `sqlite` (FTS).
     pub memory_backend: MemoryBackendChoice,
     /// Append-only JSONL chat log path (always written; the ingester's queue).
     pub chatlog_path: PathBuf,
+    /// Append-only JSONL prompt log path (debug/audit of the exact LLM prompt).
+    pub promptlog_path: PathBuf,
     /// Embedded HelixDB on-disk store root (used when `memory_backend = helix`).
     pub helix_path: PathBuf,
     /// GraphRAG embedding + extraction settings (used when `memory_backend = helix`).
@@ -217,8 +219,9 @@ impl Default for Config {
             db_path: PathBuf::from("ambient_memory.sqlite"),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             turn_timeout: Duration::from_secs(30),
-            memory_backend: MemoryBackendChoice::Sqlite,
+            memory_backend: MemoryBackendChoice::Helix,
             chatlog_path: PathBuf::from("ambient_chatlog.jsonl"),
+            promptlog_path: PathBuf::from("ambient_promptlog.jsonl"),
             helix_path: PathBuf::from("ambient_helix"),
             graphrag: GraphRagConfig::default(),
             speaker: SpeakerConfig::default(),
@@ -270,12 +273,12 @@ impl Config {
         };
 
         let memory_backend = match env::var("AMBIENT_MEMORY_BACKEND")
-            .unwrap_or_else(|_| "sqlite".to_string())
+            .unwrap_or_else(|_| "helix".to_string())
             .to_lowercase()
             .as_str()
         {
-            "helix" | "graphrag" => MemoryBackendChoice::Helix,
-            _ => MemoryBackendChoice::Sqlite,
+            "sqlite" | "fts" => MemoryBackendChoice::Sqlite,
+            _ => MemoryBackendChoice::Helix,
         };
 
         let mut graphrag = GraphRagConfig::default();
@@ -368,6 +371,9 @@ impl Config {
             chatlog_path: env::var("AMBIENT_CHATLOG_PATH")
                 .map(PathBuf::from)
                 .unwrap_or(d.chatlog_path),
+            promptlog_path: env::var("AMBIENT_PROMPTLOG_PATH")
+                .map(PathBuf::from)
+                .unwrap_or(d.promptlog_path),
             helix_path: env::var("AMBIENT_HELIX_PATH")
                 .map(PathBuf::from)
                 .unwrap_or(d.helix_path),

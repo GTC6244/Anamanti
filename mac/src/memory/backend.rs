@@ -1,14 +1,15 @@
 //! Retrieval backend seam (memory_plan.md Q2: HelixDB runs *alongside* SQLite
-//! behind a trait; SQLite stays the default, Helix is opt-in).
+//! behind a trait; recall defaults to HelixDB GraphRAG, with SQLite FTS as the
+//! always-available fallback).
 //!
 //! [`Recall`] is the one operation the orchestrator's context builder needs:
 //! given the incoming transcript, return the memory snippets to inject into the
 //! system prompt. Two implementations:
 //!
-//! - [`SqliteRecall`] — today's behavior: FTS keyword search over the SQLite
-//!   [`MemoryStore`]. Always available; the default.
-//! - `HelixRecall` (feature `helix`) — GraphRAG: embed the query, then vector KNN
-//!   + graph expansion in the embedded HelixDB.
+//! - [`SqliteRecall`] — FTS keyword search over the SQLite [`MemoryStore`]. Always
+//!   available; the fallback when GraphRAG can't initialize.
+//! - `HelixRecall` — GraphRAG: embed the query, then vector KNN + graph expansion
+//!   in the embedded HelixDB.
 //!
 //! The explicit/inferred memory *writes* and the Phase-6 control protocol still go
 //! through the concrete [`MemoryStore`] regardless of which recall backend is
@@ -60,10 +61,8 @@ impl Recall for SqliteRecall {
     }
 }
 
-#[cfg(feature = "helix")]
 pub use helix_recall::HelixRecall;
 
-#[cfg(feature = "helix")]
 mod helix_recall {
     use super::*;
     use crate::memory::embed::Embedder;

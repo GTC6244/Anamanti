@@ -1,5 +1,5 @@
 //! [`LlmBackend`] implemented on top of the **rig-core** agent framework
-//! (`AMBIENT_LLM_ENGINE=rig`, feature `rig`).
+//! (selected at runtime with `AMBIENT_LLM_ENGINE=rig`).
 //!
 //! This routes the same `respond(turn) -> ReplyStream` seam through rig's unified
 //! `CompletionModel` trait instead of the hand-rolled HTTP clients in `ollama.rs`
