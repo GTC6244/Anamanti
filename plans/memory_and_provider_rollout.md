@@ -2,7 +2,7 @@
 
 _As of 2026-09-16_
 
-> **Reality check (2026-09-16):** the `mac/` orchestrator crate already implements most of this plan — a pluggable `LlmBackend` (ollama / anthropic / mock) with runtime hot-swap (`settings.rs`, `config.rs`), concurrent SQLite + embedded-HelixDB memory (`memory/`), and token streaming (`ReplyToken`). The one genuinely missing item — and the requested scope addition — is the **HTTP config page**, now **delivered** (`mac/src/webconfig.rs`, wired in `main.rs`). The remaining open item is whether to actually adopt **rig-core** in place of the working hand-rolled abstraction (see Phase 1 note).
+> **Reality check (2026-09-16):** the `mac/` orchestrator crate already implements most of this plan — a pluggable `LlmBackend` (ollama / anthropic / mock) with runtime hot-swap (`settings.rs`, `config.rs`), concurrent SQLite + embedded-HelixDB memory (`memory/`), and token streaming (`ReplyToken`). The one genuinely missing item — and the requested scope addition — is the **HTTP config page**, now **delivered** (`orchestrator/src/webconfig.rs`, wired in `main.rs`). The remaining open item is whether to actually adopt **rig-core** in place of the working hand-rolled abstraction (see Phase 1 note).
 
 ## Overview
 
@@ -15,7 +15,7 @@ Scope note: the Ollama web-search tool needs a running web server, so this rollo
 
 ## Phase 1 — Rig Framework Foundation (Day 1)
 
-> **Done — rig-core adopted behind the existing seam, now with tool calling.** `rig-core` v0.42 is wired in as an optional `rig` feature; `mac/src/llm/rig.rs` implements `LlmBackend` on rig's `CompletionModel`/streaming for both ollama and anthropic. Select at runtime with `AMBIENT_LLM_ENGINE=rig` (`config.rs` → `LlmFactory.engine`); native HTTP backends remain the default fallback.
+> **Done — rig-core adopted behind the existing seam, now with tool calling.** `rig-core` v0.42 is wired in as an optional `rig` feature; `orchestrator/src/llm/rig.rs` implements `LlmBackend` on rig's `CompletionModel`/streaming for both ollama and anthropic. Select at runtime with `AMBIENT_LLM_ENGINE=rig` (`config.rs` → `LlmFactory.engine`); native HTTP backends remain the default fallback.
 >
 > **Tool-calling parity (beyond native — native has no tools):** the plan's `InternetSearch` is a real rig `PortableTool` with typed `SearchArgs`, backed by a pluggable `SearchProvider` (default keyless DuckDuckGo Instant Answer, no auth). `respond` runs a bounded negotiation loop (`MAX_TOOL_ROUNDS`): stream a pass, and if the model calls a tool, execute it, thread the result back as a tool-result message, and stream again — forwarding text deltas throughout. A no-tool turn still streams straight through in one pass. Enable with `AMBIENT_WEB_SEARCH=1`. End-to-end test drives model → tool call → tool exec → streamed answer. Full suite **63 green**; native + helix+rig compile.
 >
@@ -95,7 +95,7 @@ What the page configures (all orchestrator-side settings, editable without a res
 | Guardrail patterns | the regex fast-path phrase list |
 | Search provider | Tavily / Serper / DuckDuckGo + API key field |
 
-Status — **delivered** in `mac/src/webconfig.rs` (dependency-free HTTP over tokio, matching the hand-rolled Wyoming style), wired into `main.rs`:
+Status — **delivered** in `orchestrator/src/webconfig.rs` (dependency-free HTTP over tokio, matching the hand-rolled Wyoming style), wired into `main.rs`:
 
 - `GET /` — the static HTML config page.
 - `GET /config` — live settings as JSON.

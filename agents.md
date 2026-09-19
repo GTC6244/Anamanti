@@ -1,8 +1,8 @@
 # agents.md
 
 Build guidance for AI coding agents (and humans) working in this repository.
-Read this together with [`architecture.md`](./architecture.md) (the design) and
-[`Plan.MD`](./Plan.MD) (phases, confirmed decisions, open questions).
+Read this together with [`architecture.md`](./plans/architecture.md) (the design) and
+[`Plan.MD`](./plans/Plan.MD) (phases, confirmed decisions, open questions).
 
 ---
 
@@ -57,16 +57,20 @@ If a task seems to require changing one of these, stop and confirm first.
 ## Repository layout
 
 ```
-/lib      Flutter app (Dart) — UI, state, FRB Dart API
-/rust     Rust engine (Echo Show device) — audio capture/playback, ring buffer,
-          wake word, Wyoming client, mDNS discovery
-/mac      Rust orchestrator (Mac Mini "brain", crate `ambient_orchestrator`) —
-          Wyoming server to the device + Wyoming client to Whisper/Piper,
-          pluggable LLM, persistent SQLite memory, mDNS advertise
-Plan.MD           Living plan + decision table
-architecture.md   Technical design (source of truth)
-agents.md         This file
-README.md         Product overview + setup
+display/       Everything installed on the Android device (the Echo Show). The
+               Flutter project root: Dart UI in `lib/`, the Rust engine (audio
+               capture/playback, ring buffer, wake word, Wyoming client, mDNS) in
+               `rust/`, `android/`, cargokit `rust_builder/`, bundled openWakeWord
+               models in `assets/`, and the Flutter `test/` + `integration_test/`.
+orchestrator/  Everything that runs on the Mac. Rust orchestrator (crate
+               `ambient_orchestrator`) — Wyoming server to the device + Wyoming
+               client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory, mDNS.
+plans/         Design + planning docs: architecture.md (design, source of truth),
+               Plan.MD (phases + decision table), TODO.md, and the *_plan / rollout
+               notes.
+agents.md      This file (repo root).
+CLAUDE.md      Harness entry point; points here (repo root).
+README.md      Product overview + setup (repo root).
 ```
 
 ## Boundaries & ownership (respect these)
@@ -89,7 +93,10 @@ README.md         Product overview + setup
 # Rust Android target (one-time). Echo Show 8 (crown) LineageOS is 32-bit:
 rustup target add armv7-linux-androideabi
 
-# Generate the Dart/JNI bindings from Rust signatures
+# All Flutter / FRB commands run from the display/ project root:
+cd display
+
+# Generate the Dart/JNI bindings from Rust signatures (reads display/flutter_rust_bridge.yaml)
 flutter_rust_bridge_codegen generate
 
 # Build a device APK (cargokit cross-compiles the Rust engine into it).
@@ -97,7 +104,7 @@ flutter_rust_bridge_codegen generate
 # (arm64 fails with INSTALL_FAILED_NO_MATCHING_ABIS on this device).
 flutter build apk --release --target-platform android-arm
 
-# Run the app on the Echo Show (LineageOS) via adb
+# Run the app on the Echo Show (LineageOS) via adb (path relative to display/)
 adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d <echo-show-device>
 ```
 
@@ -106,11 +113,11 @@ adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d
 
 ```bash
 # Mac Mini orchestrator (the "brain"). Runs on the Mac, not the device.
-cargo test  --manifest-path mac/Cargo.toml           # unit + pipeline integration tests
-cargo clippy --manifest-path mac/Cargo.toml --all-targets -- -D warnings
-cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp, serves turns
+cargo test  --manifest-path orchestrator/Cargo.toml           # unit + pipeline integration tests
+cargo clippy --manifest-path orchestrator/Cargo.toml --all-targets -- -D warnings
+cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyoming._tcp, serves turns
 
-# Backend selection + endpoints are env-driven (see mac/src/config.rs), e.g.:
+# Backend selection + endpoints are env-driven (see orchestrator/src/config.rs), e.g.:
 #   AMBIENT_LLM_BACKEND=ollama|anthropic|openai|mock (default ollama; anthropic needs
 #     ANTHROPIC_API_KEY, openai needs OPENAI_API_KEY)
 #   AMBIENT_ANTHROPIC_AUTH=apikey|subscription (default apikey; subscription uses a
@@ -135,7 +142,7 @@ cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp,
 #     there; unset → the dropdown shows Piper's full advertised catalog)
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
-  cargokit plugin (`rust_builder/cargokit`) uses the legacy AGP variant API and
+  cargokit plugin (`display/rust_builder/cargokit`) uses the legacy AGP variant API and
   `project.exec`, which Gradle 9 / AGP 9 removed. Pinned in
   `android/settings.gradle.kts` (AGP 8.7.3, Kotlin 2.1.0) and the Gradle wrapper
   (8.11.1). Revisit only when cargokit ships AGP-9 support. NDK: `28.2.13676358`.
@@ -148,7 +155,7 @@ external drive** at `/Volumes/External/DeveloperSupport`, which has plenty of
 space. Set these for every Cargo / Flutter / Gradle build in this repo:
 
 ```bash
-# Host-side Cargo builds/tests (both /rust host tests and /mac):
+# Host-side Cargo builds/tests (both display/rust host tests and orchestrator):
 export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
 
 # Gradle caches + a scratch TMPDIR for the APK build:
@@ -208,7 +215,7 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
   LLM+TTS) + starts a new turn. (AEC deferred — raise the wake-word threshold during
   SPEAKING to suppress self-triggers.)
 
-Full diagram and wire format: [`architecture.md`](./architecture.md) §4.
+Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
 
 ## Good first tasks (from Plan.MD phases)
 

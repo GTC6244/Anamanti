@@ -109,7 +109,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   conversation turns. Managed via a settings list (view/delete) and voice
   ("forget that"); kept until cleared. Private to the LAN; survives device
   reflashes. **Retrieval/recall runs behind a `memory::Recall` seam and defaults
-  to the embedded HelixDB GraphRAG backend** (`mac/src/memory/helix.rs`;
+  to the embedded HelixDB GraphRAG backend** (`orchestrator/src/memory/helix.rs`;
   in-process, no server/Docker): each completed turn is appended to
   `ambient_chatlog.jsonl` and a background ingester (`memory/ingester.rs`) embeds
   it (OpenAI `text-embedding-3-small`, `OPENAI_API_KEY`) into a graph of
@@ -117,14 +117,14 @@ predictable memory use and no GC pauses under the 1 GB limit.
   than keyword FTS. If `OPENAI_API_KEY` is absent or the graph fails to open,
   recall **falls back to SQLite FTS** (writes are unaffected); `AMBIENT_MEMORY_BACKEND=sqlite`
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
-  (`mac/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
+  (`orchestrator/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
   memory writes/recall and the prompt to that person (a shared "household" scope is
   the floor); see `speaker_id_plan.md`.
 - **End-of-speech / VAD** — runs in the **orchestrator**, not the STT server:
   `wyoming-faster-whisper` has no streaming VAD and only transcribes once it
   receives `audio-stop`, so the orchestrator scores per-chunk RMS energy over the
   incoming PCM and, after speech followed by ~900 ms of trailing silence (or a 6 s
-  no-speech fallback), sends `audio-stop` to STT to finalize (`mac/src/orchestrator.rs`,
+  no-speech fallback), sends `audio-stop` to STT to finalize (`orchestrator/src/orchestrator.rs`,
   `stream_to_transcript`). The Echo Show device still runs **no VAD of its own** —
   it streams continuously and waits for the transcript.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
@@ -135,7 +135,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 > Wyoming **server** to the Echo Show and a Wyoming **client** to the off-the-shelf
 > Whisper (STT) and Piper (TTS) Wyoming servers, with the pluggable `LlmBackend`
 > trait (Ollama / Claude / mock) and the SQLite+FTS5 memory store in the middle
-> (`mac/src/{orchestrator,server,discovery,llm,memory,wyoming}.rs`). It advertises
+> (`orchestrator/src/{orchestrator,server,discovery,llm,memory,wyoming}.rs`). It advertises
 > `_wyoming._tcp` over mDNS, symmetric with the device's Phase-3 browse. The
 > Wyoming wire codec is re-implemented there (byte-identical to the device's) since
 > the device crate is an Android `cdylib` and can't be shared as a Mac library.
@@ -157,7 +157,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
     (payload fields carry neutral defaults when not relevant), so the boundary needs
     no `freezed` codegen and there is exactly one stream to manage.
   - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
-    boundary. `AssistantController` (`lib/src/engine/assistant_controller.dart`)
+    boundary. `AssistantController` (`display/lib/src/engine/assistant_controller.dart`)
     folds this single event stream into an observable `AssistantState` / `TurnPhase`
     (`idle → listening → connecting → thinking → speaking`, plus `error`) that
     widgets watch. There are no separate `transcript_stream` / `reply_token_stream`
@@ -165,7 +165,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - Control flows **Dart → Rust** via generated function calls: `start_wake_word_engine`
   / `stop_wake_word_engine` (Phase 2–3) plus the Phase-6 settings functions
   (`fetch_orchestrator_settings`, `update_orchestrator_settings`, `list_memories`,
-  `delete_memory`, `clear_memories` in `rust/src/api/settings.rs`). The settings
+  `delete_memory`, `clear_memories` in `display/rust/src/api/settings.rs`). The settings
   functions are async: each stands up a small current-thread `tokio` runtime and
   drives one Wyoming control round trip, so FRB returns a `Future` off the UI
   isolate.
@@ -381,7 +381,7 @@ adding a new capability.
 
 ### 8.1 How tool calling works
 
-Tool calling lives in the **rig engine** (`mac/src/llm/rig.rs`), the default LLM
+Tool calling lives in the **rig engine** (`orchestrator/src/llm/rig.rs`), the default LLM
 engine (`AMBIENT_LLM_ENGINE=rig`; `native` opts out to the tool-less HTTP backends).
 Each turn the orchestrator advertises a set of **tool definitions** (name +
 description + JSON-schema for the arguments) to the model. If the model asks to call
@@ -405,7 +405,7 @@ There are **two flavors** of tool:
 
 ### 8.2 Adding an **info** tool (Mac-only)
 
-1. In `mac/src/llm/rig.rs`, add a tool `NAME`, a `Deserialize` args struct, a
+1. In `orchestrator/src/llm/rig.rs`, add a tool `NAME`, a `Deserialize` args struct, a
    `…_definition() -> ToolDefinition` (JSON-schema for the args), and an
    `…_invoke(args) -> Result<String>` that does the work and returns a short,
    speakable result.
@@ -417,7 +417,7 @@ There are **two flavors** of tool:
    `serve_sequence` test that has a fake model call the tool then answer).
 
 No protocol, device, or Flutter changes are needed — build + test with
-`cargo test --manifest-path mac/Cargo.toml`.
+`cargo test --manifest-path orchestrator/Cargo.toml`.
 
 ### 8.3 Adding a **device action** (spans all layers)
 
@@ -425,38 +425,38 @@ Worked example: **timers** (`set_timer` / `cancel_timer`). The flow is
 model → Mac tool → `DeviceAction` → `ambient-timer` frame → device timer manager →
 FRB event → Flutter UI. To add a new action, mirror these steps:
 
-1. **Mac tool** (`mac/src/llm/rig.rs`): as in §8.2, but `…_invoke` takes the per-turn
+1. **Mac tool** (`orchestrator/src/llm/rig.rs`): as in §8.2, but `…_invoke` takes the per-turn
    `Option<&ActionSink>` and `send`s a new `DeviceAction` variant
-   (`mac/src/llm/mod.rs`) instead of doing the work locally. Action tools are
+   (`orchestrator/src/llm/mod.rs`) instead of doing the work locally. Action tools are
    registered unconditionally (they need no config).
-2. **Relay** (`mac/src/orchestrator.rs`): the reply loop already drains the per-turn
+2. **Relay** (`orchestrator/src/orchestrator.rs`): the reply loop already drains the per-turn
    action channel (`drain_device_actions`) and writes the frame; add a match arm
    mapping the new `DeviceAction` to its `WyomingEvent` constructor.
-3. **Wire frame** (`mac/src/wyoming/protocol.rs` **and** `rust/src/wyoming/protocol.rs`,
+3. **Wire frame** (`orchestrator/src/wyoming/protocol.rs` **and** `display/rust/src/wyoming/protocol.rs`,
    kept **byte-identical** with round-trip tests in both crates): add an `ambient-*`
    `type` const, constructor(s), and — on the device side — a decoder
    (e.g. `timer_command()`).
-4. **Device intake** (`rust/src/wyoming/client.rs`): add a `TurnUpdate` variant and a
+4. **Device intake** (`display/rust/src/wyoming/client.rs`): add a `TurnUpdate` variant and a
    branch in `handle_server_event` that decodes the frame into it. The frame only
    arrives **mid-turn** (the device is always the Wyoming *client*; the socket exists
    only during a turn), which is fine — device actions are triggered by the very turn
    that carries them.
-5. **Device state** (`rust/src/engine/`): own the resulting state in a manager held by
+5. **Device state** (`display/rust/src/engine/`): own the resulting state in a manager held by
    the long-lived `Network`/`Shared` (so it outlives the turn socket), applied from
    the `on_update` closure in `net.rs`. Reuse the shared `PlaybackSink` for any sound
-   (no second audio path). See `rust/src/engine/timer.rs`.
-6. **FRB event** (`rust/src/api/engine.rs`): add `WakeWordEventKind` variant(s) +
+   (no second audio path). See `display/rust/src/engine/timer.rs`.
+6. **FRB event** (`display/rust/src/api/engine.rs`): add `WakeWordEventKind` variant(s) +
    neutral-default payload fields to the flat `WakeWordEvent`, plus `pub(crate)`
    builders; the manager emits them via the `StreamSink`. Then **regenerate**:
    `flutter_rust_bridge_codegen generate` (never hand-edit `frb_generated.rs` or
-   `lib/src/rust/`).
+   `display/lib/src/rust/`).
 7. **Flutter** (`lib/`): fold the new event kind into `AssistantState` in
    `AssistantController._onEvent` (the exhaustive `switch` forces you to handle it),
-   and render it. See `lib/src/ui/timers_overlay.dart`, mounted in the always-visible
+   and render it. See `display/lib/src/ui/timers_overlay.dart`, mounted in the always-visible
    `Stack` in `ambient_screen.dart` so it shows during both idle slideshow and a live
    turn.
 
-Build/verify each layer independently: `cargo test` for `mac/` and `rust/`,
+Build/verify each layer independently: `cargo test` for `orchestrator/` and `display/rust/`,
 `flutter test` + `flutter analyze` for the UI.
 
 ---
@@ -464,5 +464,5 @@ Build/verify each layer independently: `cargo test` for `mac/` and `rust/`,
 ## 9. Cross-references
 
 - Delivery phases & open questions → [`Plan.MD`](./Plan.MD)
-- Contributor / AI-agent build guidance → [`agents.md`](./agents.md)
-- Product overview & setup → [`README.md`](./README.md)
+- Contributor / AI-agent build guidance → [`agents.md`](../agents.md)
+- Product overview & setup → [`README.md`](../README.md)

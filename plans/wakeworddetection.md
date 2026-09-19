@@ -19,8 +19,8 @@ best cross-reference we have.
 - **Standalone openWakeWord-for-Android reference** (Java/ONNX, fork of
   `hasanatlodhi/OpenwakewordforAndroid`):
   `github.com/msp1974/OpenwakewordforAndroid`
-- **Our engine:** `rust/src/wakeword/detector.rs`, `rust/src/engine/mod.rs`,
-  `rust/src/audio/{capture,resample,ring_buffer}.rs`, `rust/src/api/engine.rs`
+- **Our engine:** `display/rust/src/wakeword/detector.rs`, `display/rust/src/engine/mod.rs`,
+  `display/rust/src/audio/{capture,resample,ring_buffer}.rs`, `display/rust/src/api/engine.rs`
 
 > License note: VACA ships `LICENSE` + `NOTICE` (Apache-2.0 family). We can
 > reference the design freely; verify the license before copying code verbatim.
@@ -132,7 +132,7 @@ equivalent of our capture → Wyoming handoff). Muting is reactive via
 Our Phase 2 engine lives in Rust and is functionally the same openWakeWord chain,
 built independently.
 
-### 2.1 Detector (`rust/src/wakeword/detector.rs`)
+### 2.1 Detector (`display/rust/src/wakeword/detector.rs`)
 
 `tract-onnx` runs all three models. Constants match VACA exactly:
 
@@ -150,7 +150,7 @@ const MEL_SCALE: f32 = 10.0;  const MEL_BIAS: f32 = 2.0;  // mel/10 + 2
 through mel → embedding → classifier, and returns the **max** score seen in the
 block. Rolling state (`audio_accum`, `mel`, `embeddings`) is carried across calls.
 
-### 2.2 Engine loop (`rust/src/engine/mod.rs`)
+### 2.2 Engine loop (`display/rust/src/engine/mod.rs`)
 
 One background thread owns the `!Send` `cpal` stream and runs
 drain → resample → score. Trigger logic is a **single-frame threshold**:
@@ -164,14 +164,14 @@ Ok(Some(score)) if score >= config.threshold => {
 There is **no moving-average smoothing, no cooldown, and only one model at a
 time.** If models are absent it degrades to capture-only RMS levels.
 
-### 2.3 Capture + resample (`rust/src/audio/{capture,resample}.rs`)
+### 2.3 Capture + resample (`display/rust/src/audio/{capture,resample}.rs`)
 
 - `capture.rs`: `cpal` (AAudio on device) opens the default input, downmixes
   interleaved frames to mono `i16` in the RT callback, `try_push` into the ring.
   **No AEC/AGC/NS, no mic-source selection, no gain, no self-trigger suppression.**
 - `resample.rs`: linear interpolator, device-native rate → 16 kHz, off the RT path.
 
-### 2.4 FRB surface (`rust/src/api/engine.rs`)
+### 2.4 FRB surface (`display/rust/src/api/engine.rs`)
 
 `WakeWordConfig { melspec/embedding/wakeword paths, model_name, threshold }` and a
 flat `WakeWordEvent { kind, message, device, device_sample_rate, channels, rms,

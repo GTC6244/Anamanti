@@ -44,7 +44,7 @@ Echo Show 8 (LineageOS)                     M4 Mac Mini
    mDNS: discovers _wyoming._tcp on the LAN
 ```
 
-See [`architecture.md`](./architecture.md) for the full design and
+See [`architecture.md`](./plans/architecture.md) for the full design and
 [`agents.md`](./agents.md) for AI-agent / contributor build guidance.
 
 ## Tech stack
@@ -121,7 +121,7 @@ persistent memory, and streams a Piper (TTS) reply back — advertising
 AMBIENT_LLM_BACKEND=ollama \
 AMBIENT_STT_ADDR=127.0.0.1:10300 \
 AMBIENT_TTS_ADDR=127.0.0.1:10200 \
-cargo run --manifest-path mac/Cargo.toml --release
+cargo run --manifest-path orchestrator/Cargo.toml --release
 ```
 
 - `AMBIENT_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
@@ -149,7 +149,7 @@ cargo run --manifest-path mac/Cargo.toml --release
   OpenAI is API-key-only (`OPENAI_API_KEY`) — its ChatGPT subscription does not grant
   API access.
 - Whisper and Piper are off-the-shelf Wyoming servers; the orchestrator is a
-  client to them. See `mac/src/config.rs` for all environment variables.
+  client to them. See `orchestrator/src/config.rs` for all environment variables.
 
 > **Android toolchain note:** the project pins **AGP 8.7.3 / Kotlin 2.1.0 /
 > Gradle 8.11.1** because the bundled cargokit Gradle plugin does not yet support

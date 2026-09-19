@@ -9,19 +9,19 @@ existing Mac-side Rust brain (`ambient_orchestrator`, `/mac`).
 ## Implementation status (2026-09-16)
 
 **Built & tested (56 tests green, clippy clean, both feature configs build):**
-- **Goal 2 — chat log:** `mac/src/memory/chatlog.rs` — append-only JSONL, one
+- **Goal 2 — chat log:** `orchestrator/src/memory/chatlog.rs` — append-only JSONL, one
   record per turn, written by `orchestrator.rs::log_turn`. Always on.
-- **Goal 3 — embeddings:** `mac/src/memory/embed.rs` — `Embedder` trait,
+- **Goal 3 — embeddings:** `orchestrator/src/memory/embed.rs` — `Embedder` trait,
   `OpenAiEmbedder` (`text-embedding-3-small`), `MockEmbedder` (offline tests).
-  `mac/src/memory/ingester.rs` — background batch ingester (drains JSONL →
+  `orchestrator/src/memory/ingester.rs` — background batch ingester (drains JSONL →
   batch-embed → extract → upsert → commit offset sidecar).
-- **Goal 1 — GraphRAG store:** `mac/src/memory/helix.rs` — embedded HelixDB
+- **Goal 1 — GraphRAG store:** `orchestrator/src/memory/helix.rs` — embedded HelixDB
   (`db::HelixDB`, in-process, `HelixDbSource::Disk`), schema
   (`User/Turn/Memory/Entity` + `SAID/MENTIONS/ABOUT/FOLLOWS/KNOWS`), vector
   indexes, idempotent upserts by `ext_id`. Entity extraction:
-  `mac/src/memory/entity.rs` (`AnthropicEntityExtractor` = Claude Haiku 4.5;
+  `orchestrator/src/memory/entity.rs` (`AnthropicEntityExtractor` = Claude Haiku 4.5;
   `NoopEntityExtractor` when no key; `MockEntityExtractor` for tests).
-- **Goal 4 — recall + inject:** `mac/src/memory/backend.rs` — `Recall` trait
+- **Goal 4 — recall + inject:** `orchestrator/src/memory/backend.rs` — `Recall` trait
   (`SqliteRecall` default, `HelixRecall` = embed query → vector KNN + graph
   expansion). Wired into `orchestrator.rs::build_context`.
 - **Wiring:** `config.rs` (all `AMBIENT_*` env vars below), `main.rs`
@@ -85,18 +85,18 @@ plus `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
 The current memory is deliberately simple (Plan.MD Phase 4):
 
 - **Store:** SQLite + FTS5, one row per fact/preference
-  (`mac/src/memory/mod.rs`, `MemoryStore`). Path from `AMBIENT_DB_PATH`
+  (`orchestrator/src/memory/mod.rs`, `MemoryStore`). Path from `AMBIENT_DB_PATH`
   (default `ambient_memory.sqlite`).
 - **Write policy:** *explicit* voice commands ("remember…"/"forget…") via
   `parse_command`, plus *inferred* heuristic extraction via `infer_memories`
-  (`mac/src/memory/extract.rs`).
+  (`orchestrator/src/memory/extract.rs`).
 - **Read/inject:** `orchestrator.rs::build_context()` runs
   `memory.search(transcript, 8)` (keyword FTS) and appends the hits as a
   `- bullet` list onto the system prompt for that turn.
 - **Management:** list/delete/clear over the Phase-6 control protocol
   (`control.rs`, `settings.rs`) and by voice.
-- HTTP-to-cloud pattern to copy: `mac/src/llm/anthropic.rs` (raw `reqwest`,
-  API key from env). Config/env wiring: `mac/src/config.rs`.
+- HTTP-to-cloud pattern to copy: `orchestrator/src/llm/anthropic.rs` (raw `reqwest`,
+  API key from env). Config/env wiring: `orchestrator/src/config.rs`.
 
 **These four goals extend that spine.** Every new piece needs to answer: does it
 *replace* SQLite, or run *alongside* it?
@@ -142,7 +142,7 @@ public embed API.
 
 **Chosen path:** run a **co-located local HelixDB instance** on the Mac Mini
 (installed via the `helix` CLI, `helix start dev`, listening on
-`localhost:6969`). The `HelixMemory` backend (`mac/src/memory/helix.rs`) uses
+`localhost:6969`). The `HelixMemory` backend (`orchestrator/src/memory/helix.rs`) uses
 the `helix-db` Rust SDK `Client` pointed at `http://localhost:6969` and runs
 queries authored with the Rust `#[query]` DSL via `POST /v2/query` (no separate
 build/deploy step in v3). Traffic never leaves the box, so this keeps the
@@ -182,7 +182,7 @@ incrementally.
 
 - **Model:** `text-embedding-3-small`, 1536 dims (supports dimension
   reduction via `dimensions` param if we want smaller vectors in Helix).
-- **Client:** new `mac/src/memory/embed.rs`, raw `reqwest` to
+- **Client:** new `orchestrator/src/memory/embed.rs`, raw `reqwest` to
   `POST https://api.openai.com/v1/embeddings`, key from `OPENAI_API_KEY`
   (same env pattern as `ANTHROPIC_API_KEY`). Supports batch input arrays.
 - **What gets embedded:** each `Turn` (transcript, or transcript+reply — see Q),
@@ -236,7 +236,7 @@ transcript
 
 ## Code surface (new / changed)
 
-New modules under `mac/src/memory/`:
+New modules under `orchestrator/src/memory/`:
 - `backend.rs` — `MemoryBackend` trait; `MemoryStore` (SQLite, existing) and
   `HelixMemory` both implement it. Selected in `config.rs`.
 - `helix.rs` — `helix-db` SDK `Client` (→ `localhost:6969`); schema + Rust
@@ -294,7 +294,7 @@ New env vars (following the existing `AMBIENT_*` convention):
 - Q8 embed → **transcript + reply + durable `Memory` rows** all get vectors.
 - Q9 interim speakers → all turns attributed to one shared `household` `User`.
 - Q10 extraction model → **Claude Haiku 4.5** (Anthropic) in the background
-  ingester, reusing the existing `mac/src/llm/anthropic.rs` HTTP client pattern
+  ingester, reusing the existing `orchestrator/src/llm/anthropic.rs` HTTP client pattern
   (needs `ANTHROPIC_API_KEY`).
 - Q11 migration → **backfill** existing SQLite fact/preference rows into HelixDB
   as `Memory` nodes (embedded + entity-extracted) via a one-time import tool.

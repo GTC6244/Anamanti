@@ -12,8 +12,8 @@ full loop has not been exercised against real services on the device.
 
 - [ ] Stand up the Mac services on the LAN: **wyoming-faster-whisper** (STT, 10300),
       **wyoming-piper** (TTS, 10200), and **Ollama** (11434) — all off-the-shelf.
-- [ ] Run the orchestrator: `cargo run --manifest-path mac/Cargo.toml --release`
-      (advertises `_wyoming._tcp`; env in `mac/src/config.rs`).
+- [ ] Run the orchestrator: `cargo run --manifest-path orchestrator/Cargo.toml --release`
+      (advertises `_wyoming._tcp`; env in `orchestrator/src/config.rs`).
 - [ ] Install the release APK on the Echo Show and run one full turn:
       wake word → STT → LLM → TTS playback, with the transcript/reply rendered live.
 - [ ] Confirm **mDNS discovery** works across the real network (no hardcoded IP).
@@ -88,7 +88,7 @@ far end — transparent to `AudioRecord`/AudioFlinger.
        work is finished.
 
 **Superseded by the on-device shim (kept in this repo, gated/dark):** the host-side
-WebRTC APM (`mac/src/aec/`, `aec` feature) and the AudioRecord capture shim landed for
+WebRTC APM (`orchestrator/src/aec/`, `aec` feature) and the AudioRecord capture shim landed for
 this effort still build and are useful (clean STT path / true-16 kHz capture), but the
 on-device shim is now the primary AEC. Decide later whether to invest in the host APM
 live-path wiring (Plan Phases 1-2) or retire it.
@@ -99,7 +99,7 @@ live-path wiring (Plan Phases 1-2) or retire it.
 ## 3. Real Google OAuth for the photo slideshow (feature stub)
 
 Currently a testable seam: `GoogleAuthenticator` + `StubGoogleAuthenticator` and the
-`GooglePhotoSource` path in `lib/src/slideshow/photo_source.dart`. Scopes already
+`GooglePhotoSource` path in `display/lib/src/slideshow/photo_source.dart`. Scopes already
 declared (`photoslibrary.readonly`, `drive.readonly`).
 
 - [ ] Decide the flow based on whether the Echo Show's LineageOS build has **Google
@@ -144,7 +144,7 @@ Mac. To take it from dormant code to a real feature:
       **ONNX** and place it on the Mac.
 - [ ] Confirm the model's **input contract** (raw waveform vs. precomputed log-mel;
       tensor layout `[1, frames, mels]` vs `[1, mels, frames]`) and align
-      `OnnxSpeakerEmbedder` + `FbankConfig` (`mac/src/speaker/{embed,features}.rs`)
+      `OnnxSpeakerEmbedder` + `FbankConfig` (`orchestrator/src/speaker/{embed,features}.rs`)
       to it; set `AMBIENT_SPEAKER_EMBED_DIMS` (192 for ECAPA).
 - [ ] Build/ship the orchestrator with **`--features speaker`** and set
       `AMBIENT_SPEAKER_MODEL_PATH` (else it falls back to the dev-only mock embedder).
@@ -186,7 +186,7 @@ Mac. To take it from dormant code to a real feature:
 
 ## 7. Tools & actions (agent capabilities)
 
-Tool calling runs on the **rig** engine, now the default (`mac/src/llm/rig.rs`).
+Tool calling runs on the **rig** engine, now the default (`orchestrator/src/llm/rig.rs`).
 Adding a capability = registering one tool in `Tools`. See Plan §3 "Tool calling &
 actions".
 
@@ -202,10 +202,10 @@ actions".
       and relays on the turn socket (`orchestrator::drain_device_actions`). The seam is
       `LlmTurn.actions` (an `ActionSink`).
 - [x] **Timers/alarms on-device** (unlimited concurrent): Rust `TimerManager`
-      (`rust/src/engine/timer.rs`) owns each countdown on the long-lived Network runtime
+      (`display/rust/src/engine/timer.rs`) owns each countdown on the long-lived Network runtime
       (outlives the turn socket), fires a synthesized chime via the shared `PlaybackSink`,
       and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`. Flutter renders a
-      countdown-chip overlay (`lib/src/ui/timers_overlay.dart`) visible in idle + turns.
+      countdown-chip overlay (`display/lib/src/ui/timers_overlay.dart`) visible in idle + turns.
 - [ ] **Verify timers on hardware**: "set a 5-minute pasta timer" → chip counts down →
       chime + "time's up" at zero; "cancel the pasta timer" / "cancel all timers"; two
       concurrent timers; a timer keeps running after the Mac disconnects mid-countdown.

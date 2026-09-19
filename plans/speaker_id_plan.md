@@ -18,7 +18,7 @@ build and existing deployments behave identically until `AMBIENT_SPEAKER_ID=on`.
 
 **Built & tested (lean SQLite and default `helix` builds both green, clippy clean):**
 
-- **Phase A — recognizer core** (`mac/src/speaker/{mod,embed,registry}.rs`):
+- **Phase A — recognizer core** (`orchestrator/src/speaker/{mod,embed,registry}.rs`):
   `SpeakerEmbedder` trait + deterministic `MockSpeakerEmbedder` (band-energy
   fingerprint), SQLite `SpeakerRegistry` (voiceprint centroids, identify /
   auto-cluster / rename / merge / delete), and the `SpeakerService` façade with
@@ -34,8 +34,8 @@ build and existing deployments behave identically until `AMBIENT_SPEAKER_ID=on`.
   control frames (`list-speakers`, `name-speaker`, `merge-speakers`,
   `delete-speaker`) handled in `control.rs` (merge also reassigns memory rows).
   Unit + control tests. **Device side done**: byte-identical frame types +
-  `control.rs` client + FRB functions in `rust/src/api/settings.rs` (regenerated
-  bindings), and a Flutter **"People"** settings screen (`lib/src/ui/people_screen.dart`)
+  `control.rs` client + FRB functions in `display/rust/src/api/settings.rs` (regenerated
+  bindings), and a Flutter **"People"** settings screen (`display/lib/src/ui/people_screen.dart`)
   that lists recognized voices (named or anonymous "Speaker N") and names / merges /
   forgets them — 5 widget tests, `flutter analyze` clean.
 - **Phase D — GraphRAG per-User**: `helix.rs` mints a `User` node per `speaker_id`
@@ -86,7 +86,7 @@ turn.
 
 ## 2. Design overview
 
-One new subsystem (`mac/src/speaker/`) plus a `speaker_id` threaded through the
+One new subsystem (`orchestrator/src/speaker/`) plus a `speaker_id` threaded through the
 existing turn path:
 
 ```
@@ -200,7 +200,7 @@ parse):
 
 ## 4. Component-by-component build
 
-### 4.1 New module `mac/src/speaker/` (Phase A)
+### 4.1 New module `orchestrator/src/speaker/` (Phase A)
 
 - **`mod.rs`** — `SpeakerContext { speaker_id: String, name: Option<String>,
   is_new: bool, confidence: f32 }`, re-exports, and an `Arc`-shareable
@@ -228,7 +228,7 @@ Unit tests (Phase A): centroid online-mean stays L2-normed; two separable mock
 voices identify distinctly and cluster stably across repeated turns; a third
 voice mints a new persona; sub-`MIN_SPEECH_MS` input yields no cluster.
 
-### 4.2 `mac/src/memory/` — scope by speaker (Phase B)
+### 4.2 `orchestrator/src/memory/` — scope by speaker (Phase B)
 
 - **`mod.rs`** — schema migration (§3.2); `add(kind, content, source,
   speaker_id: Option<&str>)`; `search(query, speaker_id: Option<&str>, limit)`
@@ -244,7 +244,7 @@ voice mints a new persona; sub-`MIN_SPEECH_MS` input yields no cluster.
 Tests: Sam-scoped recall returns Sam's "likes jazz" and shared facts but not
 Dana's "hates jazz"; NULL/`household` scope preserves today's behavior.
 
-### 4.3 `mac/src/orchestrator.rs` — thread identity through the turn (Phase B)
+### 4.3 `orchestrator/src/orchestrator.rs` — thread identity through the turn (Phase B)
 
 - **Buffer the utterance.** In `stream_to_transcript`, accumulate the voiced PCM
   (chunks already RMS-gated as `speech`) into a `Vec<i16>` and track voiced-ms.
@@ -272,7 +272,7 @@ Dana's "hates jazz"; NULL/`household` scope preserves today's behavior.
 Tests: a two-voice mock turn sequence attributes each turn correctly; the system
 prompt names a known speaker; a too-short turn falls back to `household`.
 
-### 4.4 `mac/src/memory/helix.rs` + `ingester.rs` — per-User graph (Phase D)
+### 4.4 `orchestrator/src/memory/helix.rs` + `ingester.rs` — per-User graph (Phase D)
 
 - `helix.rs`: drop the single `household_id`; add `ensure_user(speaker_id,
   name)` (get-or-create by `speaker_id`, set/refresh `name`). `ingest_turn` and
@@ -300,7 +300,7 @@ capture — it still records the fact; the new command additionally sets the
 profile name.
 
 **Control frames** (`wyoming/protocol.rs` `types`, byte-identical in the device
-crate `rust/src/wyoming/protocol.rs` — the round-trip tests in both crates are
+crate `display/rust/src/wyoming/protocol.rs` — the round-trip tests in both crates are
 the guardrail):
 
 - `ambient-list-speakers` → `ambient-speakers` (`{ ok, speakers: [{ id, name,
@@ -316,7 +316,7 @@ the guardrail):
 unit-testable.
 
 **Device UI** (Phase C tail, `/rust` + Flutter): FRB functions in
-`rust/src/api/settings.rs` (`list_speakers`, `name_speaker`, `merge_speakers`,
+`display/rust/src/api/settings.rs` (`list_speakers`, `name_speaker`, `merge_speakers`,
 `delete_speaker`) mirroring the existing memory settings calls, and a "People"
 section in the Flutter settings screen showing named people + anonymous
 `Speaker N` chips the user can rename or merge. This is the only cross-device
@@ -413,8 +413,8 @@ piece; it can land after the Mac-side A–D are green.
 
 ## 9. Files touched (summary)
 
-**New:** `mac/src/speaker/mod.rs`, `mac/src/speaker/embed.rs`,
-`mac/src/speaker/registry.rs`, an ECAPA `.onnx` asset (Phase E).
+**New:** `orchestrator/src/speaker/mod.rs`, `orchestrator/src/speaker/embed.rs`,
+`orchestrator/src/speaker/registry.rs`, an ECAPA `.onnx` asset (Phase E).
 
 **Changed (Mac):** `orchestrator.rs` (buffer PCM, identify, prompt, thread id),
 `memory/mod.rs` (schema + scoped add/search), `memory/backend.rs` (`Recall`
@@ -424,8 +424,8 @@ through), `memory/helix.rs` (per-`User` nodes + scoped recall),
 (speaker control frames), `config.rs` + `main.rs` (env vars + wiring + graceful
 degrade), `lib.rs` (module export).
 
-**Changed (device, Phase C):** `rust/src/wyoming/protocol.rs` (byte-identical
-frame types), `rust/src/api/settings.rs` (FRB speaker functions), Flutter
+**Changed (device, Phase C):** `display/rust/src/wyoming/protocol.rs` (byte-identical
+frame types), `display/rust/src/api/settings.rs` (FRB speaker functions), Flutter
 settings screen ("People" section).
 
 **Docs:** `architecture.md` (§2.3 memory, §7 decisions), `memory_plan.md`
