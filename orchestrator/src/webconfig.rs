@@ -518,22 +518,47 @@ load();
 </script>"#;
 
 /// `/helix` body — GraphRAG node counts + a sample of nodes per label.
-const HELIX_BODY: &str = r#"<p class="sub">GraphRAG memory (embedded HelixDB): nodes built from turns &amp; memories.</p>
+const HELIX_BODY: &str = r#"<p class="sub">GraphRAG memory (embedded HelixDB): nodes built from turns &amp; memories. Entity names are editable — fix a spelling mistake with "Edit name".</p>
 <div class="toolbar"><button onclick="load()">Refresh</button><span id="meta" class="muted"></span></div>
 <div id="out" class="muted">Loading…</div>
 <script>
+// esc() handles &<>; also escape quotes for use inside an HTML attribute.
+function attr(s){ return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function nodeTable(label, rows){
   if(!rows || !rows.length) return '<h2>'+esc(label)+' <span class="muted">(0)</span></h2>';
+  const editable = (label === 'Entity');
   const cols = Object.keys(rows[0]).filter(k => k !== '$id');
   let h = '<h2>'+esc(label)+' <span class="muted">('+rows.length+' shown)</span></h2><table><thead><tr><th>id</th>';
   for(const c of cols) h += '<th>'+esc(c)+'</th>';
+  if(editable) h += '<th></th>';
   h += '</tr></thead><tbody>';
   for(const r of rows){
     h += '<tr><td class="muted">'+esc(r['$id'])+'</td>';
     for(const c of cols) h += '<td class="pre">'+esc(r[c])+'</td>';
+    if(editable){
+      const name = r['name']==null ? '' : String(r['name']);
+      h += '<td><button data-rename="'+attr(name)+'">Edit name</button></td>';
+    }
     h += '</tr>';
   }
   return h + '</tbody></table>';
+}
+async function renameEntity(oldName){
+  const next = prompt('Correct the entity name:', oldName);
+  if(next === null) return;                 // cancelled
+  const newName = next.trim();
+  if(!newName || newName === oldName) return;
+  try{
+    const res = await fetch('/helix/rename-entity', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ old_name: oldName, new_name: newName }),
+    });
+    const j = await res.json();
+    if(!j.ok){ alert(j.message || 'Rename failed'); return; }
+    alert('Fixed "'+oldName+'" → "'+newName+'": '+(j.entities||0)+' entity, '+(j.turns||0)+' turn, '+(j.memories||0)+' memory node(s).');
+    load();
+  }catch(e){ alert('Request failed: ' + e); }
 }
 async function load(){
   const out = document.getElementById('out');
@@ -551,6 +576,9 @@ async function load(){
     const nodes = j.nodes || {};
     for(const label of Object.keys(nodes)) h += nodeTable(label, nodes[label]);
     out.innerHTML = h;
+    for(const btn of out.querySelectorAll('button[data-rename]')){
+      btn.addEventListener('click', () => renameEntity(btn.getAttribute('data-rename')));
+    }
   }catch(e){ out.textContent = 'Request failed: ' + e; }
 }
 load();
@@ -680,6 +708,14 @@ async fn handle(
         }
     }
 
+    // The only debug mutation: rename a GraphRAG `Entity` (fix a misspelled fact).
+    // Needs the async graph handle + request body, so it's handled here.
+    if method == "POST" && path == "/helix/rename-entity" {
+        let payload = helix_rename_json(&debug, &body).await;
+        return write_response(&mut stream, "200 OK", "application/json", payload.as_bytes())
+            .await;
+    }
+
     let (status, content_type, payload) = route(&method, &target, &body, &settings);
     write_response(&mut stream, status, content_type, &payload).await
 }
@@ -782,6 +818,52 @@ async fn helix_json(debug: &DebugSources) -> String {
         "nodes": nodes,
     })
     .to_string()
+}
+
+/// POST `/helix/rename-entity` — body `{ "old_name": "...", "new_name": "..." }`.
+/// Fixes a misspelled entity everywhere: the `Entity` node's `name` (id + edges
+/// preserved) plus whole-word occurrences in `Turn.text` / `Memory.content`.
+/// Returns `{ ok: true, entities, turns, memories, total }`, or `{ ok: false,
+/// message }` when the graph is inactive, the request is malformed, the name was
+/// found nowhere, or the target already names a different entity.
+async fn helix_rename_json(debug: &DebugSources, body: &[u8]) -> String {
+    let Some(graph) = &debug.graph else {
+        return json!({ "ok": false, "message": "GraphRAG (HelixDB) is not active." }).to_string();
+    };
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let old_name = data.get("old_name").and_then(Value::as_str).unwrap_or("").trim();
+    let new_name = data.get("new_name").and_then(Value::as_str).unwrap_or("").trim();
+    if old_name.is_empty() || new_name.is_empty() {
+        return json!({
+            "ok": false,
+            "message": "rename requires non-empty `old_name` and `new_name`",
+        })
+        .to_string();
+    }
+    match graph.rename_entity(old_name, new_name).await {
+        Ok(counts) => {
+            let total = counts.get("total").and_then(Value::as_u64).unwrap_or(0);
+            if total == 0 {
+                json!({ "ok": false, "message": format!("no occurrences of {old_name:?} found") })
+                    .to_string()
+            } else {
+                json!({
+                    "ok": true,
+                    "entities": counts.get("entities").cloned().unwrap_or(json!(0)),
+                    "turns": counts.get("turns").cloned().unwrap_or(json!(0)),
+                    "memories": counts.get("memories").cloned().unwrap_or(json!(0)),
+                    "total": total,
+                })
+                .to_string()
+            }
+        }
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
 }
 
 /// Pure request router: maps `(method, target, body)` to a response. Kept free of
@@ -1213,6 +1295,14 @@ mod tests {
         let v: Value = serde_json::from_str(&helix_json(&debug()).await).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["enabled"], false);
+        assert!(v["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn helix_rename_reports_disabled_without_a_graph() {
+        let body = br#"{"old_name":"Portlnad","new_name":"Portland"}"#;
+        let v: Value = serde_json::from_str(&helix_rename_json(&debug(), body).await).unwrap();
+        assert_eq!(v["ok"], false, "no graph backend → rename cannot apply");
         assert!(v["message"].is_string());
     }
 
