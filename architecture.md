@@ -288,13 +288,23 @@ predictable memory use and no GC pauses under the 1 GB limit.
   real-time, so the turn reaches IDLE while audio is still draining from the buffer),
   sends an `ambient-interrupt` frame so the orchestrator **aborts the in-flight LLM +
   TTS**, and starts a fresh turn.
-- **AEC:** not shipped. Investigated on real hardware (Echo Show 8): the platform
+- **In-app AEC:** not shipped. Investigated on real hardware (Echo Show 8): the platform
   `VOICE_COMMUNICATION` AEC preset is reachable but doesn't actually cancel on this
   device, and a software NLMS canceller is net-negative for this flush-on-wake barge-in
   (there's no simultaneous echo to cancel once playback is flushed). The interim
   mitigation remains **raising the wake-word confidence threshold while active**. Real
-  AEC would require a true keep-playing-while-listening full-duplex redesign — see
+  in-app AEC would require a true keep-playing-while-listening full-duplex redesign — see
   `Plan.MD` §4 / `TODO.md`.
+- **On-device AEC shim — REQUIRED on every Echo Show 8 (1st gen, codename `crown`).**
+  Echo cancellation is provided **outside this codebase** by a vendor audio-HAL shim
+  `LD_PRELOAD`ed into `android.hardware.audio.service`. It taps the FPGA capture stream
+  `pcmC0D22c` (6-ch 16 kHz — mics on ch0–3, a **sample-aligned DAC loopback** on ch4–5)
+  and runs SpeexDSP linear AEC on the mic before `AudioRecord`/AudioFlinger ever see it,
+  giving talker-preserving barge-in (~16 dB, measured). **Any Echo Show 8 gen-1 this app
+  is deployed to must have the shim installed and activated** (`persist.vendor.amznaec.enable=1`,
+  loaded via the audio-HAL init rc) — it is a **device prerequisite**, not part of this
+  build, and survives reboots. Source + reversible adb install/uninstall:
+  <https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim>.
 - Return to **IDLE** on playback completion, timeout, or reset.
 
 ### Wire format
@@ -351,7 +361,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 | openWakeWord via tract-onnx | Pre-trained models, minimal deps, offline |
 | Pluggable LLM behind a trait | Swap local/cloud without touching the pipeline |
 | Rust-side playback | One audio layer, symmetric with capture |
-| Wake-word barge-in (flush-on-wake + `ambient-interrupt`) | Natural interruption without full-duplex complexity; AEC investigated on hardware and deferred (see §4) |
+| Wake-word barge-in (flush-on-wake + `ambient-interrupt`) | Natural interruption without full-duplex complexity; in-app AEC deferred, but a **required device-side HAL AEC shim** delivers echo cancellation on Echo Show 8 gen-1 (see §4) |
 | Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
 | VAD in the orchestrator | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
 | SQLite is the memory store of record | Simple, debuggable; holds explicit+inferred facts and the settings-list/voice management |
