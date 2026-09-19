@@ -204,11 +204,25 @@ actions".
 - [x] **Timers/alarms on-device** (unlimited concurrent): Rust `TimerManager`
       (`display/rust/src/engine/timer.rs`) owns each countdown on the long-lived Network runtime
       (outlives the turn socket), fires a synthesized chime via the shared `PlaybackSink`,
-      and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`. Flutter renders a
-      countdown-chip overlay (`display/lib/src/ui/timers_overlay.dart`) visible in idle + turns.
-- [ ] **Verify timers on hardware**: "set a 5-minute pasta timer" → chip counts down →
-      chime + "time's up" at zero; "cancel the pasta timer" / "cancel all timers"; two
-      concurrent timers; a timer keeps running after the Mac disconnects mid-countdown.
+      and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`. Flutter renders them
+      (`display/lib/src/ui/timers_overlay.dart`) two ways: a big, screen-filling display on
+      the idle screen (one timer fills the screen, 2–3 sit side by side, 4+ tile into a grid;
+      each shows its name, a large mm:ss readout, and a circular ring that drains full→empty),
+      and a compact chip row top-center while a conversation is on screen (the turn wins the
+      screen). Unnamed timers read "Timer" (numbered only when several coexist).
+- [x] **Timer alarm = bell + Piper voice**: on fire the device rings a two-strike bell
+      (`alarm_pcm`), then requests "Time's up for {name}" from the orchestrator via the
+      project-local `ambient-speak` frame — the Mac synthesizes it with Piper and streams
+      the audio back into the same `PlaybackSink` (plays right after the bell). Bell-only
+      when the Mac is unreachable (offline). See `Pipeline::announce` + `server.rs`.
+- [x] **Immersive kiosk display**: `SystemUiMode.immersiveSticky` in `main()` hides the
+      status + navigation bars (verified on device); the big timer layout also wraps in a
+      `SafeArea` as belt-and-suspenders.
+- [ ] **Verify timers on hardware (audio)**: "set a 5-minute pasta timer" → ring drains +
+      counts down → **bell rings twice then "Time's up for pasta"** at zero; "cancel the
+      pasta timer" / "cancel all timers"; two concurrent timers; a timer keeps running (and
+      still bells) after the Mac disconnects mid-countdown. (Needs a spoken turn to set the
+      timer + the Mac orchestrator/Piper running; not drivable headlessly.)
 - [ ] Consider a dedicated **weather tool** if web-search summaries prove too coarse
       (structured forecast vs. a search snippet).
 - [ ] **Query/list timers** by voice ("how long left?") — needs a device→Mac timer-state

@@ -108,15 +108,27 @@ impl Network {
             n => Duration::from_secs(n),
         };
 
+        // Shared mDNS endpoint cache: used both by the turn path and by a fired
+        // timer voicing its announcement through the orchestrator.
+        let cache = Arc::new(EndpointCache::new());
+
         // The timer manager shares the event sink + playback and spawns countdown
-        // tasks on this runtime (so they outlive any single turn's socket).
-        let timers = TimerManager::new(sink.clone(), playback.clone(), runtime.handle().clone());
+        // tasks on this runtime (so they outlive any single turn's socket). It also
+        // shares the endpoint cache so a fired timer can reach the orchestrator for
+        // its Piper "Time's up …" announcement (bell-only when offline).
+        let timers = TimerManager::new(
+            sink.clone(),
+            playback.clone(),
+            runtime.handle().clone(),
+            cache.clone(),
+            discovery_timeout,
+        );
 
         Ok(Self {
             runtime,
             shared: Arc::new(Shared {
                 sink,
-                cache: Arc::new(EndpointCache::new()),
+                cache,
                 active: AtomicBool::new(false),
                 pcm_tx: Mutex::new(None),
                 interrupt_tx: Mutex::new(None),

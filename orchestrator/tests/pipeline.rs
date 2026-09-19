@@ -231,6 +231,53 @@ async fn run_one_turn(
     (device_out, events)
 }
 
+/// An out-of-band `ambient-speak` announcement (a fired timer's "Time's up …")
+/// synthesizes the phrase with Piper and streams one self-contained audio stream
+/// (`audio-start` → `audio-chunk`… → `audio-stop`) back to the device, outside any
+/// voice turn.
+#[tokio::test]
+async fn announce_synthesizes_and_streams_audio_to_device() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = build_pipeline(memory);
+    let connector = MockConnector::new(""); // transcript unused for announce
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+
+    // Device side: collect the streamed announcement audio frame kinds until stop.
+    let reader_task = tokio::spawn(async move {
+        let (r, _w) = split(dev_test);
+        let mut reader = BufReader::new(r);
+        let mut kinds = Vec::new();
+        while let Ok(Some(ev)) = read_event(&mut reader).await {
+            let kind = ev.event_type.clone();
+            kinds.push(kind.clone());
+            if kind == types::AUDIO_STOP {
+                break;
+            }
+        }
+        kinds
+    });
+
+    pipeline
+        .announce(&mut device, &connector, "Time's up for pasta")
+        .await
+        .expect("announce streams audio");
+    drop(device); // close the writer so the reader task can finish
+
+    let kinds = reader_task.await.unwrap();
+    assert_eq!(kinds.first().map(String::as_str), Some(types::AUDIO_START));
+    assert!(kinds.iter().any(|k| k == types::AUDIO_CHUNK), "got some audio: {kinds:?}");
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+
+    // Exactly the requested phrase was synthesized by Piper.
+    assert_eq!(
+        *connector.synthesized.lock().unwrap(),
+        vec!["Time's up for pasta".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn full_turn_streams_transcript_reply_and_tts_audio() {
     let memory = Arc::new(MemoryStore::open_in_memory().unwrap());

@@ -125,6 +125,13 @@ pub mod types {
     /// `"start"`/`"cancel"`; for `start`: `duration_secs` + optional `label`; for
     /// `cancel`: optional `label`, where an absent/null label cancels all timers).
     pub const TIMER: &str = "ambient-timer";
+
+    /// device → orchestrator: synthesize `text` with Piper and stream the audio back
+    /// on the same socket (data: `text`). A fired on-device timer sends this to voice
+    /// its "Time's up …" announcement in the real assistant voice when the Mac is
+    /// reachable (bell-only when offline). Byte-identical to the orchestrator crate's
+    /// `types::SPEAK`.
+    pub const SPEAK: &str = "ambient-speak";
 }
 
 /// A device-action timer command decoded from an `ambient-timer` frame (Phase 2).
@@ -259,6 +266,12 @@ impl WyomingEvent {
     /// True if this is an `ambient-interrupt` (barge-in) event.
     pub fn is_interrupt(&self) -> bool {
         self.event_type == types::INTERRUPT
+    }
+
+    /// An `ambient-speak` request (device → orchestrator): please synthesize `text`
+    /// and stream its audio back. Mirror of the orchestrator crate's `speak`.
+    pub fn speak(text: impl Into<String>) -> Self {
+        Self::with_data(types::SPEAK, json!({ "text": text.into() }))
     }
 
     /// An `ambient-timer` **start** action (used by tests + the mock server; the
@@ -482,6 +495,15 @@ mod tests {
         assert_eq!(WyomingEvent::interrupt().timer_command(), None);
         let bad = WyomingEvent::with_data(types::TIMER, json!({ "action": "start" }));
         assert_eq!(bad.timer_command(), None);
+    }
+
+    #[tokio::test]
+    async fn speak_frame_roundtrips_and_extracts_text() {
+        let ev = WyomingEvent::speak("Time's up for pasta");
+        let back = roundtrip(&ev).await;
+        assert_eq!(back, ev);
+        assert_eq!(back.event_type, types::SPEAK);
+        assert_eq!(back.data.get("text").and_then(Value::as_str), Some("Time's up for pasta"));
     }
 
     #[tokio::test]
