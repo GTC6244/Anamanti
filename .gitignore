@@ -55,4 +55,9 @@ ambient_settings.json
 # Orchestrator runtime chat log (append-only turn record; GraphRAG ingest queue)
 ambient_chatlog.jsonl
 ambient_chatlog.jsonl-*
+ambient_chatlog.jsonl.offset
 ambient_helix/
+
+# Orchestrator runtime prompt log (per-turn assembled LLM prompt; debug GUI)
+ambient_promptlog.jsonl
+ambient_promptlog.jsonl-*

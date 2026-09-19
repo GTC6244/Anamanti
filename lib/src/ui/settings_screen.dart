@@ -82,6 +82,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Selectable models (last 12 months) from the orchestrator, for the dropdown.
   List<ModelOption> _models = const <ModelOption>[];
 
+  /// Installed Piper voices from the orchestrator, for the voice dropdown. Empty
+  /// when the Mac is unreachable — the voice field then falls back to free text.
+  List<VoiceOption> _voices = const <VoiceOption>[];
+
   // Orchestrator-side VAD tuning (loaded from the Mac, applied on Save).
   int _endSilenceMs = 700;
   double _voiceRmsThreshold = 120;
@@ -116,9 +120,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       } catch (_) {
         models = const <ModelOption>[];
       }
+      // The voice list is best-effort too: if it fails, the voice field falls back
+      // to a free-text Piper voice name.
+      List<VoiceOption> voices;
+      try {
+        voices = await widget.client.listVoices();
+      } catch (_) {
+        voices = const <VoiceOption>[];
+      }
       if (!mounted) return;
       setState(() {
         _models = models;
+        _voices = voices;
         _backend = _kBackends.containsKey(remote.llmBackend) ? remote.llmBackend : 'ollama';
         _anthropicAuth = remote.anthropicAuth == 'subscription' ? 'subscription' : 'apikey';
         _modelController.text = remote.llmModel ?? '';
@@ -513,17 +526,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       _authField(),
       _modelField(),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-        child: TextField(
-          key: const Key('settings-voice'),
-          controller: _voiceController,
-          decoration: const InputDecoration(
-            labelText: 'TTS voice',
-            hintText: 'Piper voice, e.g. en_US-amy-medium (blank = default)',
-          ),
-        ),
-      ),
+      _voiceField(),
       // Orchestrator-side end-of-speech VAD tuning (applied on the Mac). Shortening
       // the silence window cuts the wait before the reply; lowering the level helps
       // a quiet far-field mic register as speech instead of hitting the slow timeout.
@@ -629,6 +632,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
           value: current.isEmpty ? '' : current,
           items: items,
           onChanged: (v) => setState(() => _modelController.text = v ?? ''),
+        ),
+      ),
+    );
+  }
+
+  /// The TTS voice control: a dropdown of the orchestrator's installed Piper
+  /// voices (with a "Server default" entry), or a free-text field when the voice
+  /// list is unavailable (Mac offline / no voices reported). A voice that isn't in
+  /// the fetched list stays selectable + visible so a hand-set value is preserved.
+  Widget _voiceField() {
+    if (_voices.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: TextField(
+          key: const Key('settings-voice'),
+          controller: _voiceController,
+          decoration: const InputDecoration(
+            labelText: 'TTS voice',
+            hintText: 'Piper voice, e.g. en_US-amy-medium (blank = default)',
+          ),
+        ),
+      );
+    }
+
+    final current = _voiceController.text.trim();
+    final names = _voices.map((v) => v.name).toSet();
+    String labelFor(VoiceOption v) =>
+        v.language == null ? v.label : '${v.label} · ${v.language}';
+    final items = <DropdownMenuItem<String>>[
+      const DropdownMenuItem(value: '', child: Text('Server default')),
+      for (final v in _voices)
+        DropdownMenuItem(value: v.name, child: Text(labelFor(v))),
+      // Keep a hand-set voice that isn't in the installed list selectable.
+      if (current.isNotEmpty && !names.contains(current))
+        DropdownMenuItem(value: current, child: Text('$current (not installed)')),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          labelText: 'TTS voice',
+          helperText: 'Installed Piper voices',
+        ),
+        child: DropdownButton<String>(
+          key: const Key('settings-voice'),
+          isExpanded: true,
+          underline: const SizedBox.shrink(),
+          value: current.isEmpty ? '' : current,
+          items: items,
+          onChanged: (v) => setState(() => _voiceController.text = v ?? ''),
         ),
       ),
     );

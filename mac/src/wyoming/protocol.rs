@@ -38,6 +38,12 @@ pub mod types {
     pub const TRANSCRIPT: &str = "transcript";
     /// client → TTS: request synthesis of `text` (data: `text`, optional `voice`).
     pub const SYNTHESIZE: &str = "synthesize";
+    /// client → downstream Wyoming service: request its capabilities (no data).
+    /// Sent to Piper to enumerate its advertised voice catalog.
+    pub const DESCRIBE: &str = "describe";
+    /// downstream Wyoming service → client: capabilities (data: `tts`/`asr` arrays;
+    /// each `tts` entry carries a `voices` array of `{name, languages, ...}`).
+    pub const INFO: &str = "info";
     /// orchestrator → device (Phase 5): one streamed LLM reply-token fragment
     /// (data: `text`), so the device renders the reply token-by-token as it is
     /// generated. A project-local extension on the device↔Mac hop (no off-the-shelf
@@ -103,6 +109,14 @@ pub mod types {
     /// orchestrator → device: the selectable models (data: `ok`, `models` array of
     /// `{provider, id, label}`), scoped to the last 12 months per provider.
     pub const MODELS: &str = "ambient-models";
+
+    /// device → orchestrator: list the installed Piper voices for the settings TTS
+    /// voice dropdown (no data).
+    pub const LIST_VOICES: &str = "ambient-list-voices";
+    /// orchestrator → device: the installed voices (data: `ok`, `voices` array of
+    /// `{name, language, label}`). The orchestrator intersects Piper's advertised
+    /// catalog with the voices actually present on disk.
+    pub const VOICES: &str = "ambient-voices";
 
     // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
     //

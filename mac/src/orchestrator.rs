@@ -25,9 +25,10 @@ use tokio::time::{sleep_until, Instant};
 use crate::audio_dump::TurnAudioDump;
 use crate::llm::{DeviceAction, LlmBackend, LlmTurn};
 use crate::memory::chatlog::now_secs;
+use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
     infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemoryKind, MemorySource,
-    MemoryStore, Recall, SqliteRecall,
+    MemoryStore, PromptLog, Recall, SqliteRecall,
 };
 use crate::settings::SharedSettings;
 use crate::speaker::{SpeakerContext, SpeakerService};
@@ -107,6 +108,9 @@ pub struct Pipeline {
     /// Optional append-only chat log; each completed turn is recorded for the
     /// background GraphRAG ingester. `None` disables logging.
     chatlog: Option<Arc<ChatLog>>,
+    /// Optional append-only prompt log; the exact assembled LLM prompt per turn,
+    /// for the debug GUI. `None` disables prompt logging.
+    promptlog: Option<Arc<PromptLog>>,
     /// Optional per-person speaker identification (speaker_id_plan.md). `None`
     /// preserves the shared-household behavior — every turn attributes to
     /// [`crate::speaker::HOUSEHOLD_SPEAKER`].
@@ -138,6 +142,7 @@ impl Pipeline {
             memory,
             recall,
             chatlog: None,
+            promptlog: None,
             speaker: None,
             system_prompt: system_prompt.into(),
             home_location: None,
@@ -157,6 +162,13 @@ impl Pipeline {
     /// background GraphRAG ingester.
     pub fn with_chatlog(mut self, chatlog: Arc<ChatLog>) -> Self {
         self.chatlog = Some(chatlog);
+        self
+    }
+
+    /// Attach an append-only prompt log; the exact assembled LLM prompt for each
+    /// turn is recorded for the debug GUI (`webconfig.rs` → `/prompts`).
+    pub fn with_promptlog(mut self, promptlog: Arc<PromptLog>) -> Self {
+        self.promptlog = Some(promptlog);
         self
     }
 
@@ -537,6 +549,10 @@ impl Pipeline {
         // frames on the same socket. Unbounded so a tool's `invoke` never blocks.
         let (action_tx, mut action_rx) =
             tokio::sync::mpsc::unbounded_channel::<DeviceAction>();
+        // Record the exact prompt the model is about to see (debug GUI). Best-effort:
+        // a logging failure must never break a turn.
+        self.log_prompt(runtime, speaker, &system_prompt, transcript);
+
         let mut stream = runtime
             .llm
             .respond(LlmTurn::new(system_prompt, transcript).with_actions(action_tx))
@@ -677,6 +693,33 @@ impl Pipeline {
         };
         if let Err(e) = log.append(&record) {
             log::warn!("failed to append chat log record: {e:#}");
+        }
+    }
+
+    /// Append the assembled LLM prompt to the prompt log, if one is attached. A
+    /// failure is logged and swallowed — logging must never break a turn.
+    fn log_prompt(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        speaker: &SpeakerContext,
+        system_prompt: &str,
+        user_message: &str,
+    ) {
+        let Some(log) = &self.promptlog else {
+            return;
+        };
+        let record = PromptLogRecord {
+            id: log.next_id(),
+            ts: now_secs(),
+            llm_backend: runtime.llm_backend.clone(),
+            model: runtime.llm_model.clone(),
+            speaker_id: speaker.speaker_id.clone(),
+            speaker_name: speaker.name.clone(),
+            system_prompt: system_prompt.to_string(),
+            user_message: user_message.to_string(),
+        };
+        if let Err(e) = log.append(&record) {
+            log::warn!("failed to append prompt log record: {e:#}");
         }
     }
 

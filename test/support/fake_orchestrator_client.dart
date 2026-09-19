@@ -10,11 +10,17 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<MemoryView>? memories,
     List<SpeakerView>? speakers,
     List<ModelOption>? models,
+    List<VoiceOption>? voices,
     this.throwOnFetch = false,
   })  : _models = models ??
             const <ModelOption>[
               ModelOption(provider: 'anthropic', id: 'claude-opus-5', label: 'Claude Opus 5'),
               ModelOption(provider: 'openai', id: 'gpt-4o-mini', label: 'gpt-4o-mini'),
+            ],
+        _voices = voices ??
+            const <VoiceOption>[
+              VoiceOption(name: 'en_US-amy-medium', label: 'amy (medium)', language: 'en_US'),
+              VoiceOption(name: 'en_US-lessac-medium', label: 'lessac (medium)', language: 'en_US'),
             ],
         _settings = settings ??
             const OrchestratorSettingsView(
@@ -31,6 +37,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<MemoryView> _memories;
   final List<SpeakerView> _speakers;
   final List<ModelOption> _models;
+  final List<VoiceOption> _voices;
   final bool throwOnFetch;
 
   // Call records for assertions.
@@ -85,6 +92,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
   Future<List<ModelOption>> listModels() async {
     if (throwOnFetch) throw Exception('offline');
     return List.of(_models);
+  }
+
+  @override
+  Future<List<VoiceOption>> listVoices() async {
+    if (throwOnFetch) throw Exception('offline');
+    return List.of(_voices);
   }
 
   @override

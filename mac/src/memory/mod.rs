@@ -24,19 +24,19 @@ pub mod backend;
 pub mod chatlog;
 pub mod embed;
 pub mod entity;
+pub mod graphview;
+pub mod promptlog;
 
-// GraphRAG memory (embedded HelixDB) — feature-gated so a lean build can skip the
-// heavy engine deps. See memory_plan.md.
-#[cfg(feature = "helix")]
+// GraphRAG memory (embedded HelixDB) — always compiled. See memory_plan.md.
 pub mod helix;
-#[cfg(feature = "helix")]
 pub mod ingester;
 
-#[cfg(feature = "helix")]
 pub use backend::HelixRecall;
 pub use backend::{Recall, SqliteRecall};
 pub use chatlog::{ChatLog, ChatLogRecord};
 pub use extract::{infer_memories, parse_command, MemoryCommand};
+pub use graphview::GraphView;
+pub use promptlog::{PromptLog, PromptLogRecord};
 
 /// Whether an entry is a discrete fact or a standing preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

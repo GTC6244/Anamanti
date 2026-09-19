@@ -12,7 +12,6 @@ pub mod catalog;
 pub mod mock;
 pub mod ollama;
 pub mod openai;
-#[cfg(feature = "rig")]
 pub mod rig;
 
 use std::pin::Pin;

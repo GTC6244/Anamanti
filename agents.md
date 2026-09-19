@@ -31,8 +31,15 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **VAD:** off-device — the **orchestrator** decides end-of-speech (energy VAD;
   faster-whisper has no streaming VAD, so the Mac sends `audio-stop`). The device
   never runs its own VAD.
-- **Memory:** persistent **SQLite** on the Mac; **explicit + inferred** policy;
-  managed via settings list + voice ("remember…"/"forget that").
+- **Memory:** persistent **SQLite** on the Mac is the store of record for
+  **explicit + inferred** facts (writes + the settings list + voice
+  "remember…"/"forget that"). **Retrieval/recall defaults to the embedded HelixDB
+  GraphRAG backend** (in-process, no server/Docker) — every completed turn is
+  appended to `ambient_chatlog.jsonl` and a background ingester embeds it into the
+  graph. GraphRAG needs `OPENAI_API_KEY` (embeddings); if it's absent or init
+  fails, recall **falls back to SQLite FTS** (writes are unaffected). Override with
+  `AMBIENT_MEMORY_BACKEND=sqlite` for pure FTS recall. The HelixDB engine and the
+  rig agent framework are **always compiled in** (no longer feature-gated).
 - **Idle screen:** photo slideshow from a Google Photos/Drive folder via
   **on-device OAuth**; keeps running when disconnected.
 - **Resilience:** **auto-reconnect** with backoff via mDNS + a subtle
@@ -119,6 +126,13 @@ cargo run   --manifest-path mac/Cargo.toml --release # advertises _wyoming._tcp,
 #     AMBIENT_SEARCH_PROVIDER=duckduckgo|tavily and TAVILY_API_KEY for real web search
 #   AMBIENT_HOME_LOCATION="Austin, Texas"  AMBIENT_WEATHER_UNITS=imperial|metric
 #     (grounds "here" for weather/location questions in the system prompt)
+#   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
+#     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
+#   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /chatlog,
+#     /prompts, /sqlite, /helix — no auth; `off` disables)
+#   AMBIENT_TTS_VOICES_DIR=<piper model dir>  (when Piper is co-located: the
+#     settings voice dropdown then lists only the `<name>.onnx` voices installed
+#     there; unset → the dropdown shows Piper's full advertised catalog)
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
   cargokit plugin (`rust_builder/cargokit`) uses the legacy AGP variant API and

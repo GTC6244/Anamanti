@@ -45,6 +45,15 @@ use crate::wyoming::{
 /// rather than back-pressuring the real-time capture thread.
 const PCM_CHANNEL_DEPTH: usize = 32;
 
+/// How often the post-turn watcher polls the playback ring to see whether the reply
+/// audio has finished draining (so the UI can drop the on-screen text).
+const PLAYBACK_DRAIN_POLL: Duration = Duration::from_millis(100);
+
+/// Safety cap on the drain watch. The playback ring holds at most a handful of tens
+/// of seconds of audio, so if it hasn't drained by now the stream is wedged; emit
+/// `SpeakingDone` anyway rather than leak the task or pin the text on screen forever.
+const PLAYBACK_DRAIN_CAP: Duration = Duration::from_secs(45);
+
 /// State shared between the capture thread and every (possibly restarted) turn
 /// task. Held in an `Arc` so a barge-in restart, spawned from the finishing
 /// turn's own cleanup, can re-enter [`Shared::spawn_turn`].
@@ -256,6 +265,9 @@ async fn run_turn_task(
 
     let playback = shared.playback.clone();
     let timers = shared.timers.clone();
+    // Set when this turn reaches SPEAKING, so we only watch for playback drain on a
+    // turn that actually produced audio (see the drain watcher below).
+    let spoke = AtomicBool::new(false);
     let on_update = |update: TurnUpdate| {
         let event = match update {
             TurnUpdate::Streaming => {
@@ -269,6 +281,7 @@ async fn run_turn_task(
             TurnUpdate::ReplyToken(text) => WakeWordEvent::reply_token(text),
             TurnUpdate::Speaking => {
                 log::info!("turn: speaking (TTS playback started)");
+                spoke.store(true, Ordering::SeqCst);
                 WakeWordEvent::speaking()
             }
             // A device action: hand it to the long-lived timer manager, which emits
@@ -303,5 +316,25 @@ async fn run_turn_task(
     {
         log::error!("turn error (aborting turn): {e:#}");
         let _ = sink.add(WakeWordEvent::disconnected(format!("turn error: {e}")));
+    }
+
+    // The turn has reached idle, but — because the orchestrator relays a whole reply
+    // faster than real-time — the reply audio is usually still draining from the
+    // playback ring for seconds after this point. The UI keeps the reply text on
+    // screen until the audio actually stops, so watch the ring drain (or a barge-in
+    // flush) and then emit `SpeakingDone` so the UI can remove the text. Runs
+    // detached, holding no turn state, so a barge-in during drain still sees an
+    // inactive turn and simply flushes.
+    if spoke.load(Ordering::SeqCst) {
+        if let Some(pb) = shared.playback.clone() {
+            let watch_shared = shared.clone();
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + PLAYBACK_DRAIN_CAP;
+                while pb.pending() > 0 && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(PLAYBACK_DRAIN_POLL).await;
+                }
+                let _ = watch_shared.sink.add(WakeWordEvent::speaking_done());
+            });
+        }
     }
 }

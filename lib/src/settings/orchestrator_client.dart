@@ -55,6 +55,25 @@ class ModelOption {
   final String label;
 }
 
+/// One selectable Piper voice for the settings TTS voice dropdown, as reported by
+/// the orchestrator (its installed-voice list).
+class VoiceOption {
+  const VoiceOption({
+    required this.name,
+    required this.label,
+    this.language,
+  });
+
+  /// The voice id sent as `ttsVoice` (e.g. `en_US-amy-medium`).
+  final String name;
+
+  /// A human-friendly label for the dropdown (falls back to `name`).
+  final String label;
+
+  /// Primary locale (e.g. `en_US`), or `null` if the server didn't report one.
+  final String? language;
+}
+
 /// One persistent memory entry.
 class MemoryView {
   const MemoryView({
@@ -124,6 +143,10 @@ abstract class OrchestratorClient {
   /// scoped to the last 12 months). May be empty if the Mac is unreachable.
   Future<List<ModelOption>> listModels();
 
+  /// The installed Piper voices for the TTS voice dropdown. May be empty if the
+  /// Mac is unreachable or Piper reports no voices.
+  Future<List<VoiceOption>> listVoices();
+
   Future<List<MemoryView>> listMemories();
 
   Future<bool> deleteMemory(int id);
@@ -187,6 +210,14 @@ class FrbOrchestratorClient implements OrchestratorClient {
     final models = await frb.listModels(discoveryTimeoutSecs: _timeout);
     return models
         .map((m) => ModelOption(provider: m.provider, id: m.id, label: m.label))
+        .toList();
+  }
+
+  @override
+  Future<List<VoiceOption>> listVoices() async {
+    final voices = await frb.listVoices(discoveryTimeoutSecs: _timeout);
+    return voices
+        .map((v) => VoiceOption(name: v.name, label: v.label, language: v.language))
         .toList();
   }
 
