@@ -21,6 +21,18 @@ existing Mac-side Rust brain (`ambient_orchestrator`, `/mac`).
   indexes, idempotent upserts by `ext_id`. Entity extraction:
   `orchestrator/src/memory/entity.rs` (`AnthropicEntityExtractor` = Claude Haiku 4.5;
   `NoopEntityExtractor` when no key; `MockEntityExtractor` for tests).
+  **Entity names are editable** to fix a misspelled fact: `HelixMemory::rename_entity`
+  (exposed on the `GraphView` trait) fixes the name *everywhere it appears* — the
+  `Entity` node's `name` property in place (node id + all `MENTIONS`/`ABOUT`/`KNOWS`
+  edges preserved) **and** every whole-word occurrence in the free text of `Turn`
+  (`text`) and `Memory` (`content`) nodes (case-sensitive, boundary-aware via
+  `replace_whole_word`, so `"Sam"` never mangles `"Samsung"`). It refuses a target
+  name already used by a different entity (would split that entity's edges), and
+  returns a `RenameOutcome { entities, turns, memories }` tally. The stale vector
+  `embedding` on a rewritten turn/memory is intentionally left as is (a one-token
+  spelling fix barely moves it; re-embedding would need the embedder). Surfaced as
+  an "Edit name" button on each `Entity` row of the `/helix` debug page
+  (`POST /helix/rename-entity`, `orchestrator/src/webconfig.rs`).
 - **Goal 4 — recall + inject:** `orchestrator/src/memory/backend.rs` — `Recall` trait
   (`SqliteRecall` default, `HelixRecall` = embed query → vector KNN + graph
   expansion). Wired into `orchestrator.rs::build_context`.

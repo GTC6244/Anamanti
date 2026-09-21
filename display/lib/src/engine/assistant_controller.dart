@@ -69,6 +69,7 @@ class TimerModel {
     required this.id,
     required this.label,
     required this.deadline,
+    required this.total,
     this.finished = false,
   });
 
@@ -82,6 +83,11 @@ class TimerModel {
   /// remaining seconds so the UI can count down smoothly without per-second events.
   final DateTime deadline;
 
+  /// The timer's full requested duration (from the reported remaining seconds at
+  /// start). Fixed for the timer's life; used to draw the progress ring, whose fill
+  /// is `remaining / total`.
+  final Duration total;
+
   /// True once the timer reached zero (the device alarm is sounding); the chip stays
   /// until acknowledged.
   final bool finished;
@@ -90,6 +96,7 @@ class TimerModel {
         id: id,
         label: label,
         deadline: deadline,
+        total: total,
         finished: finished ?? this.finished,
       );
 }
@@ -361,10 +368,16 @@ class AssistantController extends ChangeNotifier {
       case WakeWordEventKind.timerStarted:
         // Anchor a wall-clock deadline so the overlay can count down smoothly with
         // no per-second events from Rust. Replace any existing timer with this id.
-        final deadline = _clock().add(Duration(seconds: e.timerRemainingSecs));
+        final total = Duration(seconds: e.timerRemainingSecs);
+        final deadline = _clock().add(total);
         _emit(_state.copyWith(timers: [
           ..._state.timers.where((t) => t.id != e.timerId),
-          TimerModel(id: e.timerId, label: e.timerLabel, deadline: deadline),
+          TimerModel(
+            id: e.timerId,
+            label: e.timerLabel,
+            deadline: deadline,
+            total: total,
+          ),
         ]));
       case WakeWordEventKind.timerFinished:
         // Mark it finished (its alarm is sounding); the chip stays until dismissed.

@@ -87,6 +87,17 @@ async fn handle_connection(
                     TurnOutcome::Disconnected => return Ok(()),
                 }
             }
+            // device → orchestrator: synthesize an out-of-band announcement (e.g. a
+            // timer's "Time's up …") in the Piper voice and stream it straight back.
+            Some(ev) if ev.event_type == types::SPEAK => {
+                let text = ev.speak_text().unwrap_or_default().to_string();
+                log::info!("[{}] speak request: {text:?}", peer_str(peer.as_ref()));
+                if !text.trim().is_empty() {
+                    pipeline
+                        .announce(&mut device, connector.as_ref(), &text)
+                        .await?;
+                }
+            }
             Some(_) => continue, // ignore stray pre-turn frames
         }
     }

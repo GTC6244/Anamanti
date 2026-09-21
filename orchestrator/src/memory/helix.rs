@@ -50,6 +50,25 @@ const E_KNOWS: &str = "KNOWS";
 // their `spk-…` id (speaker_id_plan.md Phase D).
 const HOUSEHOLD: &str = "household";
 
+/// Per-kind tally of what a [`HelixMemory::rename_entity`] edit touched: `Entity`
+/// nodes renamed, plus `Turn`/`Memory` nodes whose free text was corrected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RenameOutcome {
+    /// `Entity` nodes whose `name` property was rewritten.
+    pub entities: u64,
+    /// `Turn` nodes whose `text` had the old name corrected.
+    pub turns: u64,
+    /// `Memory` nodes whose `content` had the old name corrected.
+    pub memories: u64,
+}
+
+impl RenameOutcome {
+    /// Total nodes touched across all kinds — `0` means the name was found nowhere.
+    pub fn total(&self) -> u64 {
+        self.entities + self.turns + self.memories
+    }
+}
+
 /// Embedded GraphRAG memory backend.
 pub struct HelixMemory {
     db: HelixDB,
@@ -297,6 +316,153 @@ impl HelixMemory {
         }
         let res = self.write(b.returning(["m"])).await?;
         first_id(&res, "m").context("ingest_memory: no memory id returned")
+    }
+
+    // ---- edits ------------------------------------------------------------
+
+    /// Rename an entity — fixing a spelling mistake — everywhere it appears:
+    ///
+    /// 1. every `Entity` node whose `name` exactly equals `old_name` (id + all
+    ///    `MENTIONS`/`ABOUT`/`KNOWS` edges preserved — only `name` is rewritten);
+    /// 2. every whole-word occurrence of `old_name` in the **free text** of `Turn`
+    ///    nodes (`text`) and `Memory` nodes (`content`), so the misspelling is gone
+    ///    from the stored transcript and remembered facts too.
+    ///
+    /// Matching is case-sensitive and whole-word: `"Sam"` is corrected but the
+    /// `"Sam"` inside `"Samsung"` is left alone. Returns a [`RenameOutcome`] with
+    /// the per-kind counts.
+    ///
+    /// A no-op rename (`old_name == new_name` after trimming) changes nothing and
+    /// reports how many entity nodes already carry the name. Rejects a rename whose
+    /// target already names a *different* entity: the graph keys entities by `name`
+    /// (get-or-create in [`Self::ensure_entity`]), so a collision would create two
+    /// nodes sharing a name and quietly split that entity's edges — merging is out
+    /// of scope. Nothing is written when the rename is rejected.
+    ///
+    /// Note: the stale vector `embedding` on a rewritten `Turn`/`Memory` is left as
+    /// is — a one-token spelling fix barely moves the embedding, and re-embedding
+    /// would need the embedder (which this store does not hold). Recall stays
+    /// correct; the vector just isn't recomputed for the corrected spelling.
+    pub async fn rename_entity(&self, old_name: &str, new_name: &str) -> Result<RenameOutcome> {
+        let old_name = old_name.trim();
+        let new_name = new_name.trim();
+        anyhow::ensure!(!new_name.is_empty(), "new entity name must not be empty");
+
+        // No-op rename: nothing to write, but report the current match count so the
+        // caller can still distinguish "entity exists" from "no such entity".
+        if old_name == new_name {
+            return Ok(RenameOutcome {
+                entities: self.count_entities_named(new_name).await?,
+                ..Default::default()
+            });
+        }
+
+        // Rename the Entity node(s), guarding the identity key first.
+        let entities = if self.count_entities_named(old_name).await? > 0 {
+            if self.count_entities_named(new_name).await? > 0 {
+                anyhow::bail!("an entity named {new_name:?} already exists");
+            }
+            let res = self
+                .write(
+                    batch::write_batch()
+                        .var_as(
+                            "n",
+                            g().n_with_label(L_ENTITY)
+                                .where_(Predicate::eq("name", old_name))
+                                .set_property("name", new_name)
+                                .value_map(Some(vec!["name"])),
+                        )
+                        .returning(["n"]),
+                )
+                .await?;
+            res.get("n")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Rewrite the free-text occurrences in turns and memories.
+        let turns = self.rewrite_free_text(L_TURN, "text", old_name, new_name).await?;
+        let memories = self
+            .rewrite_free_text(L_MEMORY, "content", old_name, new_name)
+            .await?;
+
+        // Persist the edits so they survive a restart and are visible to recall.
+        self.flush().await?;
+        Ok(RenameOutcome {
+            entities,
+            turns,
+            memories,
+        })
+    }
+
+    /// Count `Entity` nodes whose `name` exactly equals `name`.
+    async fn count_entities_named(&self, name: &str) -> Result<u64> {
+        let v = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "c",
+                        g().n_with_label(L_ENTITY)
+                            .where_(Predicate::eq("name", name))
+                            .count(),
+                    )
+                    .returning(["c"]),
+            )
+            .await?;
+        Ok(v["c"].as_u64().unwrap_or(0))
+    }
+
+    /// Replace every whole-word occurrence of `old` with `new` in the string
+    /// property `prop` of `label` nodes. `Predicate::contains` narrows the write to
+    /// candidate nodes; [`replace_whole_word`] then decides the precise, boundary-
+    /// aware edit (so a substring inside a larger token is never touched). Returns
+    /// the number of nodes actually changed.
+    async fn rewrite_free_text(
+        &self,
+        label: &str,
+        prop: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<u64> {
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "n",
+                        g().n_with_label(label)
+                            .where_(Predicate::contains(prop, old))
+                            .value_map(None::<Vec<String>>),
+                    )
+                    .returning(["n"]),
+            )
+            .await?;
+        let items = found
+            .get("n")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut changed = 0u64;
+        for item in items {
+            let (Some(id), Some(text)) = (
+                item.get("$id").and_then(|v| v.as_u64()),
+                item.get(prop).and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            if let Some(updated) = replace_whole_word(text, old, new) {
+                self.write(
+                    batch::write_batch()
+                        .var_as("_u", g().n(NodeRef::id(id)).set_property(prop, updated))
+                        .returning(["_u"]),
+                )
+                .await?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 
     // ---- reads ------------------------------------------------------------
@@ -548,11 +714,63 @@ impl super::graphview::GraphView for HelixMemory {
         }
         Ok(Value::Object(out))
     }
+
+    async fn rename_entity(&self, old_name: &str, new_name: &str) -> Result<Value> {
+        let outcome = HelixMemory::rename_entity(self, old_name, new_name).await?;
+        Ok(serde_json::json!({
+            "entities": outcome.entities,
+            "turns": outcome.turns,
+            "memories": outcome.memories,
+            "total": outcome.total(),
+        }))
+    }
 }
 
 /// Empty edge-property list with the concrete type the builder needs.
 fn no_props() -> Vec<(String, PropertyInput)> {
     Vec::new()
+}
+
+/// Replace every **whole-word** occurrence of `from` with `to` in `text`,
+/// case-sensitively. An occurrence counts only when both sides are word
+/// boundaries — the start/end of the string or a non-alphanumeric char — so
+/// correcting `"Portlnad"` never mangles `"Portlnadia"`, and `"Sam"` never
+/// touches `"Samsung"`. Returns `Some(new_text)` if anything changed, else `None`
+/// (so the caller can skip a no-op write). An empty `from` never matches.
+fn replace_whole_word(text: &str, from: &str, to: &str) -> Option<String> {
+    if from.is_empty() {
+        return None;
+    }
+    let is_word = |c: char| c.is_alphanumeric();
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    let mut rest = text;
+    // The source char immediately preceding `rest` (needed when a match sits at the
+    // very start of `rest`, i.e. right after the previous match we advanced past).
+    let mut prev_char: Option<char> = None;
+    while let Some(pos) = rest.find(from) {
+        let before_char = if pos == 0 {
+            prev_char
+        } else {
+            rest[..pos].chars().next_back()
+        };
+        let before_ok = before_char.is_none_or(|c| !is_word(c));
+        let after_idx = pos + from.len();
+        let after_ok = rest[after_idx..].chars().next().is_none_or(|c| !is_word(c));
+        out.push_str(&rest[..pos]);
+        if before_ok && after_ok {
+            out.push_str(to);
+            changed = true;
+        } else {
+            out.push_str(from);
+        }
+        // For the next iteration's boundary test, the relevant source char is the
+        // last char of the matched `from` (whether or not we replaced it).
+        prev_char = from.chars().next_back();
+        rest = &rest[after_idx..];
+    }
+    out.push_str(rest);
+    changed.then_some(out)
 }
 
 /// Extract the `$id` of the first element of `value[var]`, if any.
@@ -581,5 +799,46 @@ fn push_scoped(out: &mut Vec<String>, value: &Value, var: &str, prop: &str, want
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_whole_word;
+
+    #[test]
+    fn corrects_a_standalone_token_only() {
+        assert_eq!(
+            replace_whole_word("I live in Portlnad now", "Portlnad", "Portland").as_deref(),
+            Some("I live in Portland now")
+        );
+        // Leading/trailing position and punctuation boundaries both count.
+        assert_eq!(
+            replace_whole_word("Portlnad.", "Portlnad", "Portland").as_deref(),
+            Some("Portland.")
+        );
+    }
+
+    #[test]
+    fn leaves_substrings_inside_larger_words_alone() {
+        assert_eq!(replace_whole_word("Portlnadia", "Portlnad", "Portland"), None);
+        assert_eq!(replace_whole_word("aPortlnad", "Portlnad", "Portland"), None);
+    }
+
+    #[test]
+    fn handles_repeats_and_adjacent_word_chars() {
+        // Two whole-word hits replaced; the "Sam" inside "Samsung" is untouched.
+        assert_eq!(
+            replace_whole_word("Sam, Sam and Samsung", "Sam", "Sameer").as_deref(),
+            Some("Sameer, Sameer and Samsung")
+        );
+        // Adjacent word chars on the inner side block both (no whole word here).
+        assert_eq!(replace_whole_word("SamSam", "Sam", "Sameer"), None);
+    }
+
+    #[test]
+    fn no_match_and_empty_needle_yield_none() {
+        assert_eq!(replace_whole_word("nothing here", "Portlnad", "Portland"), None);
+        assert_eq!(replace_whole_word("anything", "", "x"), None);
     }
 }

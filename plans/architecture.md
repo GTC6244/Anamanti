@@ -322,7 +322,15 @@ predictable memory use and no GC pauses under the 1 GB limit.
   an LLM **tool** the model called on the Mac (`set_timer` / `cancel_timer`) asks to
   act on the device. The device owns the resulting state — unlimited concurrent
   countdowns, the on-screen UI, and the alarm — so a timer keeps running after the
-  turn's socket closes and even if the Mac disconnects. See §8.
+  turn's socket closes and even if the Mac disconnects. When a timer fires it rings a
+  two-strike **bell** locally, then (if the Mac is reachable) requests the spoken
+  announcement over **`ambient-speak`**; bell-only when offline. See §8.
+- **`ambient-speak`** (device → orchestrator): a project-local frame (`data.text`)
+  asking the orchestrator to synthesize the text with Piper and stream the audio
+  (`audio-start`/`audio-chunk`…/`audio-stop`) straight back on the same socket. A
+  fired timer uses it to voice "Time's up for {name}" in the real assistant voice; the
+  device opens a fresh socket (same mDNS path a turn uses), outside any voice turn, and
+  plays the returned audio through the shared `PlaybackSink` right after the bell.
 
 ---
 
@@ -454,7 +462,10 @@ FRB event → Flutter UI. To add a new action, mirror these steps:
    `AssistantController._onEvent` (the exhaustive `switch` forces you to handle it),
    and render it. See `display/lib/src/ui/timers_overlay.dart`, mounted in the always-visible
    `Stack` in `ambient_screen.dart` so it shows during both idle slideshow and a live
-   turn.
+   turn. Timers render in two presentations: a big, screen-filling display on the idle
+   screen (single / side-by-side / grid by count, each with a name, large mm:ss readout,
+   and a draining circular ring), and a compact chip row top-center while a turn is active,
+   so the conversation wins the screen and the timers stay glanceable.
 
 Build/verify each layer independently: `cargo test` for `orchestrator/` and `display/rust/`,
 `flutter test` + `flutter analyze` for the UI.

@@ -130,6 +130,12 @@ pub mod types {
     /// `"start"`/`"cancel"`; for `start`: `duration_secs` + optional `label`; for
     /// `cancel`: optional `label`, where an absent/null label cancels all timers).
     pub const TIMER: &str = "ambient-timer";
+
+    /// device → orchestrator: synthesize `text` with Piper and stream the audio
+    /// back on the same socket (data: `text`). Lets an on-device timer speak its
+    /// "Time's up …" announcement in the real assistant voice when the Mac is
+    /// reachable. Byte-identical to the device crate's `types::SPEAK`.
+    pub const SPEAK: &str = "ambient-speak";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -287,6 +293,21 @@ impl WyomingEvent {
     /// True if this is an `ambient-timer` device-action frame.
     pub fn is_timer(&self) -> bool {
         self.event_type == types::TIMER
+    }
+
+    /// An `ambient-speak` request (device → orchestrator): please synthesize `text`
+    /// and stream its audio back. Mirror of the device crate's `speak` constructor.
+    pub fn speak(text: impl Into<String>) -> Self {
+        Self::with_data(types::SPEAK, json!({ "text": text.into() }))
+    }
+
+    /// Extract the text from an `ambient-speak` request's `data.text`.
+    pub fn speak_text(&self) -> Option<&str> {
+        if self.event_type == types::SPEAK {
+            self.data.get("text").and_then(Value::as_str)
+        } else {
+            None
+        }
     }
 
     /// A `synthesize` request for the Piper TTS server. `voice` pins a named voice
@@ -484,6 +505,17 @@ mod tests {
         let back = roundtrip(&cancel_all).await;
         assert_eq!(back.data["action"], json!("cancel"));
         assert_eq!(back.data["label"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn speak_frame_roundtrips_and_extracts_text() {
+        let ev = WyomingEvent::speak("Time's up for pasta");
+        let back = roundtrip(&ev).await;
+        assert_eq!(back, ev);
+        assert_eq!(back.event_type, types::SPEAK);
+        assert_eq!(back.speak_text(), Some("Time's up for pasta"));
+        // A non-speak frame yields no text.
+        assert_eq!(WyomingEvent::audio_stop(0).speak_text(), None);
     }
 
     #[tokio::test]

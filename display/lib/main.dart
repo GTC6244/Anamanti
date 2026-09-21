@@ -30,9 +30,9 @@ import 'package:ambient_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Immersive full-screen: hide the Android status bar (top) and nav bar (bottom)
-  // so the ambient photo fills the whole display. `immersiveSticky` re-hides them
-  // automatically after a transient swipe-reveal — right for an always-on frame.
+  // Immersive full-screen kiosk: hide the Android status bar (top) and nav bar
+  // (bottom) so the ambient photo fills the whole display. `immersiveSticky`
+  // re-hides them automatically after the transient reveal from an edge swipe.
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   await RustLib.init();
   runApp(const AmbientDisplayApp());
