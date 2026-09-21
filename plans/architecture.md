@@ -81,6 +81,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
   last-known endpoint for fast reconnect.
 - **Audio Playback** — `cpal`/`oboe` output stream that plays returned TTS audio
   frames. Symmetric with capture; keeps all audio in one layer.
+- **Camera proximity sensor** (Android) — the front camera doubles as a proximity
+  sensor. A thin Kotlin `CameraBridge` shim (twin of the `AudioRecord` `MicBridge`)
+  opens the camera via Camera2 at 176×144 / ~5 fps and pushes packed luma frames over
+  JNI; the Rust `camera::presence::PresenceDetector` measures frame-to-frame motion
+  (mean absolute luma delta) and emits a `Presence` event when someone approaches or
+  the room goes quiet. No ML / no face recognition / no frames leave the device. The
+  brightness *actuation* is presentation and lives in Flutter (§2.2), not here.
 
 ### 2.2 Flutter UI (Echo Show)
 
@@ -94,6 +101,10 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Settings screen:** LLM backend, TTS voice, wake word, photo source (on-device
   Google auth + folder picker), and **memory management** (view/delete entries).
 - Renders reply tokens smoothly as they arrive.
+- **Screen brightness:** the camera proximity sensor's `Presence` events fold into
+  `AssistantState.userPresent`; `ScreenBrightnessController` actuates the window
+  backlight (bright on approach, dimmed when quiet) via a `MethodChannel` to
+  `MainActivity`. Sensing is Rust (§2.1); only the actuation is here.
 
 ### 2.3 Mac Mini services
 

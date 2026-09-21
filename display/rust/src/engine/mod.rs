@@ -69,6 +69,17 @@ const DEFAULT_SMOOTH_WINDOW: usize = 2;
 /// (WakeWordDetection.md §4.1).
 const DETECTION_COOLDOWN: Duration = Duration::from_millis(1500);
 
+/// Camera proximity capture geometry (Android). A tiny luma frame a few times a
+/// second is ample for frame-motion presence sensing and keeps the ISP + JNI cost
+/// negligible in the 1 GB budget (Plan.MD §5). The Kotlin shim snaps the width/height
+/// to the nearest camera-supported size.
+#[cfg(target_os = "android")]
+const PROXIMITY_WIDTH: i32 = 176;
+#[cfg(target_os = "android")]
+const PROXIMITY_HEIGHT: i32 = 144;
+#[cfg(target_os = "android")]
+const PROXIMITY_FPS: i32 = 5;
+
 /// Scores at or above this are logged for live tuning even when they don't fire.
 /// Kept well below any usable threshold so the logcat trace shows the confidence
 /// climbing toward the wake word without flooding (one line per drained block).
@@ -209,6 +220,38 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         info.sample_rate,
         info.channels,
     ));
+
+    // Camera proximity sensor (Android, opt-in): open the front camera and run the
+    // frame-motion presence detector, which emits `Presence` events the UI uses to
+    // brighten the idle screen on approach and dim it after a quiet spell (Plan.MD
+    // §5). It's fully independent of the audio pipeline and degrades silently if the
+    // camera can't be opened (permission denied, privacy shutter closed, no camera)
+    // — capture, wake-word detection, and the Wyoming turn all run regardless.
+    #[cfg(target_os = "android")]
+    let camera_proximity = config.camera_proximity;
+    #[cfg(target_os = "android")]
+    if camera_proximity {
+        match crate::camera::bridge::start(
+            sink.clone(),
+            config.proximity_motion_threshold,
+            config.proximity_release_secs,
+            PROXIMITY_WIDTH,
+            PROXIMITY_HEIGHT,
+            PROXIMITY_FPS,
+        ) {
+            Ok(()) => {
+                let _ = sink.add(WakeWordEvent::status(
+                    "camera proximity sensor started".to_string(),
+                ));
+            }
+            Err(e) => {
+                log::warn!("camera proximity unavailable: {e:#}");
+                let _ = sink.add(WakeWordEvent::status(format!(
+                    "camera proximity unavailable ({e}); screen brightness stays fixed"
+                )));
+            }
+        }
+    }
 
     // Load the wake-word model chain; on failure, degrade to capture-only so the
     // pipeline (capture -> ring -> resample) is still observable via levels.
@@ -469,6 +512,12 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // playback and capture streams.
     drop(network);
     drop(playback_stream);
+    // Release the camera before the audio streams so no more `Presence` events are
+    // emitted on the sink once we're tearing down.
+    #[cfg(target_os = "android")]
+    if camera_proximity {
+        crate::camera::bridge::stop();
+    }
     #[cfg(target_os = "android")]
     if use_audiorecord {
         crate::audio::mic_bridge::stop();

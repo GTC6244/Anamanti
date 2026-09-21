@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 
 import 'package:ambient_display/src/engine/assistant_controller.dart';
 import 'package:ambient_display/src/engine/model_assets.dart';
+import 'package:ambient_display/src/engine/screen_brightness.dart';
 import 'package:ambient_display/src/engine/wakeword_config.dart';
 import 'package:ambient_display/src/settings/app_settings.dart';
 import 'package:ambient_display/src/settings/orchestrator_client.dart';
@@ -67,6 +68,11 @@ class _AmbientHomeState extends State<AmbientHome> {
   final SettingsStore _store = SettingsStore();
   final OrchestratorClient _client = const FrbOrchestratorClient();
   final SlideshowController _slideshow = SlideshowController();
+
+  /// Actuates the window backlight from the camera proximity sensor's presence
+  /// state (Plan.MD §5). Long-lived across engine restarts so it only crosses the
+  /// platform channel when the target brightness actually changes.
+  final ScreenBrightnessController _brightness = ScreenBrightnessController();
 
   AppSettings _settings = const AppSettings();
   AssistantController? _assistant;
@@ -210,6 +216,9 @@ class _AmbientHomeState extends State<AmbientHome> {
         }
       },
     )..start();
+    // Actuate the screen backlight whenever the proximity sensor's presence flips.
+    // The old controller (if any) was just disposed, dropping its listeners.
+    assistant.addListener(() => _brightness.apply(assistant.state.userPresent));
     setState(() => _assistant = assistant);
   }
 
@@ -264,6 +273,7 @@ class _AmbientHomeState extends State<AmbientHome> {
     _photoRefreshTimer?.cancel();
     _assistant?.dispose();
     _slideshow.dispose();
+    _brightness.reset();
     super.dispose();
   }
 

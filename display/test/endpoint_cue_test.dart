@@ -26,6 +26,9 @@ WakeWordConfig _cfg() => WakeWordConfig(
       platformAec: false,
       platformAgc: true,
       platformNs: true,
+      cameraProximity: false,
+      proximityMotionThreshold: 0,
+      proximityReleaseSecs: 0,
     );
 
 WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =>
@@ -43,6 +46,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       timerId: 0,
       timerLabel: '',
       timerRemainingSecs: 0,
+      present: false,
     );
 
 void main() {

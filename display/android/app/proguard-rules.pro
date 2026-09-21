@@ -6,3 +6,10 @@
 # whole class and its members.
 -keep class com.ambientdisplay.ambient_display.MicBridge { *; }
 -keepclassmembers class com.ambientdisplay.ambient_display.MicBridge { *; }
+
+# CameraBridge is the camera-proximity capture layer (Plan.MD §5), the exact twin of
+# MicBridge: `startCamera`/`stopCamera` are up-called from the Rust engine and
+# `nativePushLuma`/`nativeCacheClass` are the native bridge. Same JNI-only reachability,
+# so keep it whole or R8 strips the up-call targets ("Method not found: startCamera").
+-keep class com.ambientdisplay.ambient_display.CameraBridge { *; }
+-keepclassmembers class com.ambientdisplay.ambient_display.CameraBridge { *; }

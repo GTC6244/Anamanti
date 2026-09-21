@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `presence`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
@@ -111,6 +111,23 @@ class WakeWordConfig {
   /// Attach the platform `NoiseSuppressor` to the AudioRecord session (if available).
   final bool platformNs;
 
+  /// **Android only.** Use the front camera as a proximity sensor: a cheap
+  /// frame-motion detector runs on low-res luma frames and, when someone
+  /// approaches, the UI brightens the idle screen (dimming again after a quiet
+  /// period). `false` (default off-Android) disables the camera entirely — no
+  /// frames are ever captured. See `camera/presence.rs` and Plan.MD §5.
+  final bool cameraProximity;
+
+  /// Mean absolute per-pixel luma delta (0..255) above which a frame counts as
+  /// motion. `0` uses the engine default (`presence::DEFAULT_MOTION_THRESHOLD`).
+  /// Lower = more sensitive (brightens on fainter/farther movement) at the cost of
+  /// more false wakes from noise/lighting; A/B-tunable.
+  final double proximityMotionThreshold;
+
+  /// Seconds of no motion before the screen is allowed to dim again. `0` uses the
+  /// engine default (`presence::DEFAULT_RELEASE`).
+  final int proximityReleaseSecs;
+
   const WakeWordConfig({
     required this.melspecModelPath,
     required this.embeddingModelPath,
@@ -128,6 +145,9 @@ class WakeWordConfig {
     required this.platformAec,
     required this.platformAgc,
     required this.platformNs,
+    required this.cameraProximity,
+    required this.proximityMotionThreshold,
+    required this.proximityReleaseSecs,
   });
 
   @override
@@ -147,7 +167,10 @@ class WakeWordConfig {
       micSource.hashCode ^
       platformAec.hashCode ^
       platformAgc.hashCode ^
-      platformNs.hashCode;
+      platformNs.hashCode ^
+      cameraProximity.hashCode ^
+      proximityMotionThreshold.hashCode ^
+      proximityReleaseSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -169,7 +192,10 @@ class WakeWordConfig {
           micSource == other.micSource &&
           platformAec == other.platformAec &&
           platformAgc == other.platformAgc &&
-          platformNs == other.platformNs;
+          platformNs == other.platformNs &&
+          cameraProximity == other.cameraProximity &&
+          proximityMotionThreshold == other.proximityMotionThreshold &&
+          proximityReleaseSecs == other.proximityReleaseSecs;
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
@@ -218,6 +244,10 @@ class WakeWordEvent {
   /// from `now + timer_remaining_secs`. Zero for finished/cancelled.
   final int timerRemainingSecs;
 
+  /// Camera proximity state (`Presence`): `true` = someone approached (brighten),
+  /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
+  final bool present;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -232,6 +262,7 @@ class WakeWordEvent {
     required this.timerId,
     required this.timerLabel,
     required this.timerRemainingSecs,
+    required this.present,
   });
 
   @override
@@ -248,7 +279,8 @@ class WakeWordEvent {
       reply.hashCode ^
       timerId.hashCode ^
       timerLabel.hashCode ^
-      timerRemainingSecs.hashCode;
+      timerRemainingSecs.hashCode ^
+      present.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -267,7 +299,8 @@ class WakeWordEvent {
           reply == other.reply &&
           timerId == other.timerId &&
           timerLabel == other.timerLabel &&
-          timerRemainingSecs == other.timerRemainingSecs;
+          timerRemainingSecs == other.timerRemainingSecs &&
+          present == other.present;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -333,4 +366,10 @@ enum WakeWordEventKind {
 
   /// Phase 2: a running timer was cancelled. `timer_id` identifies it.
   timerCancelled,
+
+  /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
+  /// is `true` when someone has approached the display (brighten) and `false` when
+  /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
+  /// transitions, never per frame.
+  presence,
 }

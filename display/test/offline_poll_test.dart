@@ -25,6 +25,9 @@ WakeWordConfig _cfg() => WakeWordConfig(
       platformAec: false,
       platformAgc: true,
       platformNs: true,
+      cameraProximity: false,
+      proximityMotionThreshold: 0,
+      proximityReleaseSecs: 0,
     );
 
 void main() {

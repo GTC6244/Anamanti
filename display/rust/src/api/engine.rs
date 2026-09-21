@@ -134,6 +134,20 @@ pub struct WakeWordConfig {
     pub platform_agc: bool,
     /// Attach the platform `NoiseSuppressor` to the AudioRecord session (if available).
     pub platform_ns: bool,
+    /// **Android only.** Use the front camera as a proximity sensor: a cheap
+    /// frame-motion detector runs on low-res luma frames and, when someone
+    /// approaches, the UI brightens the idle screen (dimming again after a quiet
+    /// period). `false` (default off-Android) disables the camera entirely — no
+    /// frames are ever captured. See `camera/presence.rs` and Plan.MD §5.
+    pub camera_proximity: bool,
+    /// Mean absolute per-pixel luma delta (0..255) above which a frame counts as
+    /// motion. `0` uses the engine default (`presence::DEFAULT_MOTION_THRESHOLD`).
+    /// Lower = more sensitive (brightens on fainter/farther movement) at the cost of
+    /// more false wakes from noise/lighting; A/B-tunable.
+    pub proximity_motion_threshold: f32,
+    /// Seconds of no motion before the screen is allowed to dim again. `0` uses the
+    /// engine default (`presence::DEFAULT_RELEASE`).
+    pub proximity_release_secs: u32,
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -185,6 +199,11 @@ pub enum WakeWordEventKind {
     TimerFinished,
     /// Phase 2: a running timer was cancelled. `timer_id` identifies it.
     TimerCancelled,
+    /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
+    /// is `true` when someone has approached the display (brighten) and `false` when
+    /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
+    /// transitions, never per frame.
+    Presence,
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
@@ -221,6 +240,9 @@ pub struct WakeWordEvent {
     /// Full timer duration in seconds at start (`TimerStarted`); the UI counts down
     /// from `now + timer_remaining_secs`. Zero for finished/cancelled.
     pub timer_remaining_secs: u32,
+    /// Camera proximity state (`Presence`): `true` = someone approached (brighten),
+    /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
+    pub present: bool,
 }
 
 impl WakeWordEvent {
@@ -239,6 +261,7 @@ impl WakeWordEvent {
             timer_id: 0,
             timer_label: String::new(),
             timer_remaining_secs: 0,
+            present: false,
         }
     }
 
@@ -345,6 +368,15 @@ impl WakeWordEvent {
         Self {
             timer_id: id,
             ..Self::base(WakeWordEventKind::TimerCancelled)
+        }
+    }
+
+    // Constructed only by the Android camera bridge; on host builds it's unused.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn presence(present: bool) -> Self {
+        Self {
+            present,
+            ..Self::base(WakeWordEventKind::Presence)
         }
     }
 }
