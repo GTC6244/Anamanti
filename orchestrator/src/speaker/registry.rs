@@ -324,7 +324,10 @@ mod tests {
         let sam2 = e.embed(&tone(180.0, 1800)).unwrap();
         let (mid, score) = reg.identify(&sam2).unwrap().unwrap();
         assert_eq!(mid, id);
-        assert!(score > 0.6, "same voice matches above threshold (got {score})");
+        assert!(
+            score > 0.6,
+            "same voice matches above threshold (got {score})"
+        );
 
         // A different voice: clearly weaker — below the match threshold and the
         // self-match — so it would not be attributed to Sam.
@@ -340,25 +343,37 @@ mod tests {
     fn centroid_update_stays_unit_length_and_counts_samples() {
         let reg = SpeakerRegistry::open_in_memory().unwrap();
         let e = MockSpeakerEmbedder::default();
-        let id = reg.create_cluster(&e.embed(&tone(200.0, 1500)).unwrap()).unwrap();
-        reg.update_centroid(&id, &e.embed(&tone(205.0, 1500)).unwrap()).unwrap();
+        let id = reg
+            .create_cluster(&e.embed(&tone(200.0, 1500)).unwrap())
+            .unwrap();
+        reg.update_centroid(&id, &e.embed(&tone(205.0, 1500)).unwrap())
+            .unwrap();
         let p = reg.get(&id).unwrap().unwrap();
         assert_eq!(p.samples, 2);
         // Read the centroid back and confirm it is still ~unit length.
         let conn = reg.conn.lock().unwrap();
         let blob: Vec<u8> = conn
-            .query_row("SELECT centroid FROM speakers WHERE id = ?1", params![id], |r| r.get(0))
+            .query_row(
+                "SELECT centroid FROM speakers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
             .unwrap();
         drop(conn);
         let c = decode_vec(&blob);
         let norm: f32 = c.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-4, "centroid stays normalized (got {norm})");
+        assert!(
+            (norm - 1.0).abs() < 1e-4,
+            "centroid stays normalized (got {norm})"
+        );
     }
 
     #[test]
     fn rename_marks_labeled() {
         let reg = SpeakerRegistry::open_in_memory().unwrap();
-        let id = reg.create_cluster(&l2_normalize(vec![1.0, 0.0, 0.0])).unwrap();
+        let id = reg
+            .create_cluster(&l2_normalize(vec![1.0, 0.0, 0.0]))
+            .unwrap();
         assert!(!reg.get(&id).unwrap().unwrap().labeled);
         assert!(reg.rename(&id, "Sam").unwrap());
         let p = reg.get(&id).unwrap().unwrap();

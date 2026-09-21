@@ -519,10 +519,13 @@ impl Pipeline {
         // Build per-person memory context and stream the LLM reply. A recall
         // failure (e.g. a transient GraphRAG backend error) must not sink the turn —
         // proceed with no memory context rather than erroring.
-        let context = self.build_context(transcript, scope).await.unwrap_or_else(|e| {
-            log::warn!("memory recall failed; answering without context: {e:#}");
-            String::new()
-        });
+        let context = self
+            .build_context(transcript, scope)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("memory recall failed; answering without context: {e:#}");
+                String::new()
+            });
         // Ground the model in the real wall-clock (it has no clock) and tell it who
         // it is speaking with, so time/date questions are answered from fact and it
         // can address the person by name / apply the right person's memory.
@@ -547,8 +550,7 @@ impl Pipeline {
         // Per-turn device-action channel: action tools (timers) push `DeviceAction`s
         // here and the drive loop below relays them to the device as `ambient-timer`
         // frames on the same socket. Unbounded so a tool's `invoke` never blocks.
-        let (action_tx, mut action_rx) =
-            tokio::sync::mpsc::unbounded_channel::<DeviceAction>();
+        let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceAction>();
         // Record the exact prompt the model is about to see (debug GUI). Best-effort:
         // a logging failure must never break a turn.
         self.log_prompt(runtime, speaker, &system_prompt, transcript);
@@ -752,8 +754,12 @@ impl Pipeline {
             MemoryCommand::NameSpeaker(name) => {
                 // Record the name as a per-person fact (parity with inferred capture)…
                 let fact = format!("The user's name is {name}");
-                self.memory
-                    .add_scoped(MemoryKind::Fact, &fact, MemorySource::Explicit, speaker_id)?;
+                self.memory.add_scoped(
+                    MemoryKind::Fact,
+                    &fact,
+                    MemorySource::Explicit,
+                    speaker_id,
+                )?;
                 on_event(TurnEvent::MemoryStored(fact));
                 // …and attach it to the voiceprint profile, when a person was identified.
                 if let (Some(svc), Some(id)) = (&self.speaker, speaker_id) {
@@ -899,7 +905,9 @@ fn speaker_scope(speaker: &SpeakerContext) -> Option<&str> {
 fn speaker_identity_line(speaker: &SpeakerContext) -> String {
     match &speaker.name {
         Some(name) => format!("You are speaking with {name}."),
-        None if speaker.is_household() => "You are speaking with a member of the household.".to_string(),
+        None if speaker.is_household() => {
+            "You are speaking with a member of the household.".to_string()
+        }
         None => "You are speaking with a household member you haven't been introduced to yet. \
                  If they tell you their name, greet them by it."
             .to_string(),
@@ -1048,8 +1056,10 @@ fn location_line(location: Option<&str>, units: Option<&str>) -> Option<String> 
 /// only takes actions already queued (a tool's `invoke` runs synchronously during
 /// the LLM turn, so its action is enqueued before we get here). Write failures are
 /// swallowed — the device dropping mid-turn is handled by the surrounding turn logic.
-async fn drain_device_actions<W>(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DeviceAction>, writer: &mut W)
-where
+async fn drain_device_actions<W>(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DeviceAction>,
+    writer: &mut W,
+) where
     W: tokio::io::AsyncWrite + Unpin,
 {
     while let Ok(action) = rx.try_recv() {

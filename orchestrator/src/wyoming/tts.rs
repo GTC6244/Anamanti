@@ -38,7 +38,11 @@ where
         match conn.read().await? {
             Some(ev) if ev.event_type == types::INFO => return Ok(parse_voice_catalog(&ev.data)),
             Some(_) => continue, // skip any stray frame before the info reply
-            None => return Err(anyhow!("Piper closed the connection without an info response")),
+            None => {
+                return Err(anyhow!(
+                    "Piper closed the connection without an info response"
+                ))
+            }
         }
     }
 }
@@ -55,7 +59,11 @@ pub fn parse_voice_catalog(data: &Value) -> Vec<VoiceEntry> {
             continue;
         };
         for v in voices {
-            let Some(name) = v.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+            let Some(name) = v
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
                 continue;
             };
             let language = v

@@ -403,7 +403,16 @@ TTS path, so there is no user-visible regression.
 There are **two flavors** of tool:
 
 - **Info tool** — runs entirely on the Mac and returns text the model speaks
-  (e.g. `internet_search`). Adding one is self-contained in `rig.rs`.
+  (e.g. `internet_search`, `calendar_lookup`). Adding one is self-contained in
+  `rig.rs`, though it may lean on a supporting module: `calendar_lookup` (read-only
+  web iCalendar) lives in `orchestrator/src/calendar/`, holds an injected
+  `Arc<dyn CalendarSource>` (mirroring how `internet_search` holds a
+  `SearchProvider`), and is advertised only when `AMBIENT_CALENDARS` lists one or
+  more `.ics` subscription URLs. It fetches the feeds live per query (with a short
+  TTL cache to dedupe fetches inside one tool-negotiation loop), expands recurring
+  events (`RRULE`) within the requested window, and filters by time / person
+  (fuzzy name match) / free text. A CalDAV or macOS-EventKit source can drop in
+  later behind the same `CalendarSource` trait.
 - **Action tool** — additionally causes an effect on the Echo Show (e.g.
   `set_timer`). The tool cannot reach the device directly (it runs inside the LLM
   loop, which has no socket), so it emits a **`DeviceAction`** onto a per-turn

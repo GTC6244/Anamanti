@@ -268,7 +268,10 @@ async fn announce_synthesizes_and_streams_audio_to_device() {
 
     let kinds = reader_task.await.unwrap();
     assert_eq!(kinds.first().map(String::as_str), Some(types::AUDIO_START));
-    assert!(kinds.iter().any(|k| k == types::AUDIO_CHUNK), "got some audio: {kinds:?}");
+    assert!(
+        kinds.iter().any(|k| k == types::AUDIO_CHUNK),
+        "got some audio: {kinds:?}"
+    );
     assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
 
     // Exactly the requested phrase was synthesized by Piper.
@@ -601,7 +604,10 @@ async fn per_person_identification_scopes_memory_and_context() {
     // Turn 3 — a different voice (high pitch): a distinct cluster.
     let (_, ev3) = run_voiced_turn(&pipeline, "I like tea", 600.0).await;
     let dana = speaker_of(&ev3);
-    assert_ne!(dana.speaker_id, sam.speaker_id, "different voice, new cluster");
+    assert_ne!(
+        dana.speaker_id, sam.speaker_id,
+        "different voice, new cluster"
+    );
     assert!(dana.is_new);
 
     // Memory is per-person: Sam's scope has his name + jazz, never Dana's tea.

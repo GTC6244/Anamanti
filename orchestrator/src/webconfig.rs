@@ -406,7 +406,11 @@ fn nav_html(active: &str) -> String {
     let items: String = LINKS
         .iter()
         .map(|(href, label)| {
-            let cls = if *href == active { " class=\"active\"" } else { "" };
+            let cls = if *href == active {
+                " class=\"active\""
+            } else {
+                ""
+            };
             format!("<a href=\"{href}\"{cls}>{label}</a>")
         })
         .collect();
@@ -712,8 +716,13 @@ async fn handle(
     // Needs the async graph handle + request body, so it's handled here.
     if method == "POST" && path == "/helix/rename-entity" {
         let payload = helix_rename_json(&debug, &body).await;
-        return write_response(&mut stream, "200 OK", "application/json", payload.as_bytes())
-            .await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
     }
 
     let (status, content_type, payload) = route(&method, &target, &body, &settings);
@@ -836,8 +845,16 @@ async fn helix_rename_json(debug: &DebugSources, body: &[u8]) -> String {
             return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
         }
     };
-    let old_name = data.get("old_name").and_then(Value::as_str).unwrap_or("").trim();
-    let new_name = data.get("new_name").and_then(Value::as_str).unwrap_or("").trim();
+    let old_name = data
+        .get("old_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let new_name = data
+        .get("new_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     if old_name.is_empty() || new_name.is_empty() {
         return json!({
             "ok": false,
@@ -1280,7 +1297,11 @@ mod tests {
         use crate::memory::{MemoryKind, MemorySource};
         let d = debug();
         d.memory
-            .add(MemoryKind::Fact, "The user likes tea", MemorySource::Explicit)
+            .add(
+                MemoryKind::Fact,
+                "The user likes tea",
+                MemorySource::Explicit,
+            )
             .unwrap();
         let v: Value = serde_json::from_str(&sqlite_json(&d)).unwrap();
         assert_eq!(v["ok"], true);
@@ -1386,9 +1407,16 @@ mod tests {
         let dir_for_task = dir.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), Some(dir_for_task), debug())
-                .await
-                .unwrap();
+            handle(
+                stream,
+                s,
+                catalog(),
+                connector(),
+                Some(dir_for_task),
+                debug(),
+            )
+            .await
+            .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();

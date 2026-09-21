@@ -201,7 +201,11 @@ mod tests {
         // 300 ms < the 1200 ms floor.
         let ctx = svc.identify_and_attribute(&tone(180.0, 300)).unwrap();
         assert!(ctx.is_household());
-        assert_eq!(svc.registry().count().unwrap(), 0, "no cluster from a short blip");
+        assert_eq!(
+            svc.registry().count().unwrap(),
+            0,
+            "no cluster from a short blip"
+        );
     }
 
     #[test]

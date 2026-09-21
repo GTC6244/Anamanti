@@ -236,7 +236,10 @@ mod tests {
             .collect();
         let fb = log_mel_fbank(&pcm, &cfg);
         assert_eq!(fb.n_mels, 80);
-        assert!(fb.frames > 90 && fb.frames < 110, "≈100 frames for 1 s @10ms hop");
+        assert!(
+            fb.frames > 90 && fb.frames < 110,
+            "≈100 frames for 1 s @10ms hop"
+        );
         assert_eq!(fb.data.len(), fb.frames * fb.n_mels);
         assert!(fb.data.iter().all(|x| x.is_finite()));
     }

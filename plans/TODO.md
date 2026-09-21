@@ -271,5 +271,21 @@ actions".
       (structured forecast vs. a search snippet).
 - [ ] **Query/list timers** by voice ("how long left?") — needs a device→Mac timer-state
       report so the model can answer; today the countdown UI answers visually.
-- [ ] **Calendar / reminders** (deferred): pick a backend — macOS EventKit (local,
-      no OAuth), Google Calendar (OAuth, needs a client ID), or generic CalDAV.
+- [x] **Calendar (read-only, web .ics)** — shipped: the `calendar_lookup` rig info tool
+      reads one or more web iCalendar subscriptions (`AMBIENT_CALENDARS`, `webcal://`
+      accepted), expands `RRULE` recurrences in the query window, and filters by
+      time / person (fuzzy name match) / free text. Lives in `orchestrator/src/calendar/`
+      behind a `CalendarSource` trait.
+- [ ] **Calendar — follow-ups** (deferred): (a) authenticated **CalDAV**
+      (`REPORT calendar-query`, which unlike a static `.ics` supports server-side
+      `time-range` filtering) and/or macOS **EventKit** / Google Calendar OAuth
+      sources behind the same `CalendarSource` trait; (b) canonicalize the `person`
+      filter against HelixDB `Entity`/`User` nodes (disambiguate "Mike" via the graph)
+      instead of matching only the names present in the feed; (c) write actions
+      (create/RSVP) — out of scope for the read-only cut; (d) **background refresh +
+      stale-while-revalidate** so lookups are always served from a warm cache and a
+      slow/failing feed falls back to last-good bodies, plus conditional GET
+      (ETag/`Last-Modified`) + gzip to make refreshes cheap. (Today: a synchronous
+      TTL cache, `AMBIENT_CALENDAR_CACHE_TTL`, default 300 s.)
+- [ ] **Reminders** (deferred): pick a backend — macOS EventKit (local, no OAuth),
+      Google Tasks/Calendar (OAuth), or generic CalDAV.

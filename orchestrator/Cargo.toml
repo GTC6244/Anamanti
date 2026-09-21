@@ -51,7 +51,14 @@ bytes = "1"
 # the model answers date/time questions from fact. `clock` enables `Local::now()` +
 # the system timezone; default features are off to keep the build lean.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Timezone database for resolving `TZID=…` datetimes in iCalendar feeds (aligned
+# with the version `rrule` pulls, so their `chrono_tz::Tz` types unify).
+chrono-tz = "0.10"
 env_logger = "0.11"
+# Read-only iCalendar (.ics) parsing for web-subscription calendars: `ical` parses
+# VEVENTs, `rrule` expands recurring events (RRULE) within a query window.
+ical = "0.11"
+rrule = "0.14"
 futures-util = "0.3"
 log = "0.4.34"
 mdns-sd = "0.11"
