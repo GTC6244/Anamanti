@@ -250,6 +250,13 @@ Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
   inference ~3.6× slower on the 32-bit device, which starves the wake-word loop and
   masquerades as unrelated audio bugs.
 
-Implementation note: the claude.ai Google Drive connector in this environment is
-unauthorized and cannot prototype photo access — wire real **on-device OAuth**
-into the app.
+Implementation note: photos have **two selectable backends** (see TODO §3):
+(1) the **Google Photos Ambient API** (`ambient_photos.dart`; device-code + QR,
+scope `photosambient.mediaitems`) — the ideal path, but **gated behind the Google
+Photos Partner Program** (`createDevice` → 403 until accepted); and (2) **Google
+Drive** (`drive_photos.dart`; `drive.readonly`) as the interim, whose consent runs
+once on the Mac (`tools/google_photo_consent.py`, a "Desktop app" client) with the
+token synced to the device. Both clients' creds are injected at build via
+`--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*` (TV,
+Ambient) + `GOOGLE_DRIVE_*` (Desktop, Drive). Dead ends: Photos Library API (no
+library read since 2025); Drive scopes via device-code/QR (rejected).

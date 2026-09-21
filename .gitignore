@@ -61,3 +61,11 @@ ambient_helix/
 # Orchestrator runtime prompt log (per-turn assembled LLM prompt; debug GUI)
 ambient_promptlog.jsonl
 ambient_promptlog.jsonl-*
+
+# On-device Google OAuth client credentials (client id + secret) for the photo
+# slideshow. Injected at build with --dart-define-from-file=google_oauth.json.
+# Never commit the real file; the committed google_oauth.example.json is the template.
+/display/google_oauth.json
+
+# Google Drive refresh token synced from the Mac consent helper. Live token — never commit.
+/display/google_drive_token.json

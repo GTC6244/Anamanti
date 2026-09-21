@@ -7,7 +7,11 @@
 // ambient screen; changing device-local settings restarts the engine and refreshes
 // the slideshow, while assistant/memory settings are applied on the Mac.
 
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:ambient_display/src/engine/assistant_controller.dart';
 import 'package:ambient_display/src/engine/model_assets.dart';
@@ -15,6 +19,9 @@ import 'package:ambient_display/src/engine/wakeword_config.dart';
 import 'package:ambient_display/src/settings/app_settings.dart';
 import 'package:ambient_display/src/settings/orchestrator_client.dart';
 import 'package:ambient_display/src/settings/settings_store.dart';
+import 'package:ambient_display/src/slideshow/ambient_photos.dart';
+import 'package:ambient_display/src/slideshow/drive_photos.dart';
+import 'package:ambient_display/src/slideshow/google_oauth_config.dart';
 import 'package:ambient_display/src/slideshow/photo_source.dart';
 import 'package:ambient_display/src/ui/ambient_screen.dart';
 import 'package:ambient_display/src/ui/settings_screen.dart';
@@ -23,6 +30,10 @@ import 'package:ambient_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Immersive full-screen: hide the Android status bar (top) and nav bar (bottom)
+  // so the ambient photo fills the whole display. `immersiveSticky` re-hides them
+  // automatically after a transient swipe-reveal — right for an always-on frame.
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   await RustLib.init();
   runApp(const AmbientDisplayApp());
 }
@@ -60,6 +71,15 @@ class _AmbientHomeState extends State<AmbientHome> {
   AppSettings _settings = const AppSettings();
   AssistantController? _assistant;
 
+  /// Live access tokens for each Google backend (minted from the persisted refresh
+  /// tokens on boot / after a re-link). Null when unlinked/offline → local gradients.
+  String? _ambientAccessToken;
+  String? _driveAccessToken;
+
+  /// Periodically re-mints the access token + re-lists the source so an always-on
+  /// frame never goes stale (tokens + media URLs expire ~1 h).
+  Timer? _photoRefreshTimer;
+
   @override
   void initState() {
     super.initState();
@@ -73,15 +93,94 @@ class _AmbientHomeState extends State<AmbientHome> {
     // Unpack the bundled wake-word models to the filesystem before the native
     // engine tries to load them (no-op on later runs / user-dropped models).
     await ensureWakeWordModels();
+    await _refreshGoogleTokens();
     await _applyPhotoSource();
     await _startEngine();
+    // Keep a linked Google source fresh: tokens + media/thumbnail URLs expire ~1 h,
+    // so re-mint + re-list every 30 min (well inside that window) so re-downloads
+    // never fail on an always-on frame.
+    _photoRefreshTimer?.cancel();
+    _photoRefreshTimer = Timer.periodic(
+      const Duration(minutes: 30),
+      (_) => _reloadPhotos(),
+    );
+  }
+
+  /// Refresh the linked Google source in place (re-mint token + re-list). Keeps the
+  /// current slideshow if the refresh fails (transient offline) rather than dropping
+  /// to gradients.
+  Future<void> _reloadPhotos() async {
+    if (_settings.photoSource == PhotoSourceKind.local) return;
+    await _refreshGoogleTokens();
+    final ok = _settings.photoSource == PhotoSourceKind.ambient
+        ? (_ambientAccessToken?.isNotEmpty ?? false)
+        : (_driveAccessToken?.isNotEmpty ?? false);
+    if (ok) await _applyPhotoSource();
+  }
+
+  /// Mint fresh access tokens from the persisted refresh tokens so the slideshow
+  /// resumes a linked source without re-linking. Each backend uses its own OAuth
+  /// client (Ambient = TV client; Drive = Desktop client). Leaves a token null when
+  /// unconfigured/unlinked/offline (→ local gradients).
+  Future<void> _refreshGoogleTokens() async {
+    _ambientAccessToken = null;
+    _driveAccessToken = null;
+    if (kGoogleOAuthConfigured &&
+        _settings.ambientLinked &&
+        _settings.ambientRefreshToken.isNotEmpty) {
+      final client = AmbientApiClient();
+      try {
+        _ambientAccessToken = (await client.refresh(
+          _settings.ambientRefreshToken,
+        )).accessToken;
+      } catch (_) {
+        _ambientAccessToken = null;
+      } finally {
+        client.close();
+      }
+    }
+    if (kGoogleDriveConfigured &&
+        _settings.driveLinked &&
+        _settings.driveRefreshToken.isNotEmpty) {
+      // Drive's refresh must use the Desktop client that issued the token.
+      final client = AmbientApiClient(
+        clientId: kGoogleDriveClientId,
+        clientSecret: kGoogleDriveClientSecret,
+      );
+      try {
+        _driveAccessToken = (await client.refresh(
+          _settings.driveRefreshToken,
+        )).accessToken;
+      } catch (_) {
+        _driveAccessToken = null;
+      } finally {
+        client.close();
+      }
+    }
+  }
+
+  /// List the user's picked Google Photos via the Ambient API for the slideshow.
+  Future<List<PhotoItem>> _listAmbientMedia({
+    required String accessToken,
+  }) async {
+    final client = AmbientApiClient();
+    try {
+      return await client.listMediaItems(accessToken);
+    } finally {
+      client.close();
+    }
   }
 
   Future<void> _applyPhotoSource() async {
-    // The Google access token/URLs come from a completed on-device consent flow.
-    // The default authenticator is a stub (real OAuth needs a client ID), so with
-    // no token this resolves to the local ambient source — see [photoSourceFromSettings].
-    final source = photoSourceFromSettings(_settings);
+    // Build the selected Google source from its live token; with no token
+    // (unlinked/offline) this resolves to the local ambient source.
+    final source = photoSourceFromSettings(
+      _settings,
+      ambientLister: _listAmbientMedia,
+      driveLister: listDrivePhotos,
+      ambientAccessToken: _ambientAccessToken,
+      driveAccessToken: _driveAccessToken,
+    );
     await _slideshow.setSource(source);
   }
 
@@ -102,7 +201,9 @@ class _AmbientHomeState extends State<AmbientHome> {
       // discover+connect handshake, so success means we're genuinely reachable.
       probeOrchestrator: () async {
         try {
-          await const FrbOrchestratorClient(discoveryTimeoutSecs: 2).fetchSettings();
+          await const FrbOrchestratorClient(
+            discoveryTimeoutSecs: 2,
+          ).fetchSettings();
           return true;
         } catch (_) {
           return false;
@@ -117,7 +218,8 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// wake-word/threshold knob changed. Assistant + memory settings are applied on
   /// the Mac by the settings screen itself.
   Future<void> _onSettingsApplied(AppSettings next) async {
-    final engineChanged = next.wakeWord != _settings.wakeWord ||
+    final engineChanged =
+        next.wakeWord != _settings.wakeWord ||
         next.threshold != _settings.threshold ||
         next.activeThreshold != _settings.activeThreshold ||
         next.smoothingWindow != _settings.smoothingWindow ||
@@ -126,12 +228,21 @@ class _AmbientHomeState extends State<AmbientHome> {
         next.endpointCueEnabled != _settings.endpointCueEnabled ||
         next.endpointSilenceMs != _settings.endpointSilenceMs ||
         next.endpointRmsThreshold != _settings.endpointRmsThreshold;
-    final photoChanged = next.photoSource != _settings.photoSource ||
-        next.googleFolderName != _settings.googleFolderName ||
-        next.googleLinked != _settings.googleLinked;
+    final photoChanged =
+        next.photoSource != _settings.photoSource ||
+        next.ambientRefreshToken != _settings.ambientRefreshToken ||
+        next.ambientDeviceId != _settings.ambientDeviceId ||
+        next.ambientLinked != _settings.ambientLinked ||
+        next.driveRefreshToken != _settings.driveRefreshToken ||
+        !listEquals(next.driveFolderIds, _settings.driveFolderIds) ||
+        next.driveLinked != _settings.driveLinked;
 
     _settings = next;
-    if (photoChanged) await _applyPhotoSource();
+    if (photoChanged) {
+      // A new/changed link means new refresh tokens: re-mint before rebuilding.
+      await _refreshGoogleTokens();
+      await _applyPhotoSource();
+    }
     if (engineChanged) await _startEngine();
   }
 
@@ -150,6 +261,7 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   @override
   void dispose() {
+    _photoRefreshTimer?.cancel();
     _assistant?.dispose();
     _slideshow.dispose();
     super.dispose();
