@@ -384,7 +384,9 @@ impl HelixMemory {
         };
 
         // Rewrite the free-text occurrences in turns and memories.
-        let turns = self.rewrite_free_text(L_TURN, "text", old_name, new_name).await?;
+        let turns = self
+            .rewrite_free_text(L_TURN, "text", old_name, new_name)
+            .await?;
         let memories = self
             .rewrite_free_text(L_MEMORY, "content", old_name, new_name)
             .await?;
@@ -576,7 +578,10 @@ impl HelixMemory {
                     .returning(["n"]),
             )
             .await?;
-        let mut arr = v.get("n").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+        let mut arr = v
+            .get("n")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
         if let Some(items) = arr.as_array_mut() {
             for item in items.iter_mut() {
                 if let Some(obj) = item.as_object_mut() {
@@ -699,7 +704,10 @@ impl super::graphview::GraphView for HelixMemory {
     async fn stats(&self) -> Result<Value> {
         let mut by_label = serde_json::Map::new();
         for label in [L_USER, L_TURN, L_MEMORY, L_ENTITY] {
-            by_label.insert(label.to_string(), Value::from(self.label_count(label).await?));
+            by_label.insert(
+                label.to_string(),
+                Value::from(self.label_count(label).await?),
+            );
         }
         Ok(serde_json::json!({
             "total": self.node_count().await?,
@@ -821,8 +829,14 @@ mod tests {
 
     #[test]
     fn leaves_substrings_inside_larger_words_alone() {
-        assert_eq!(replace_whole_word("Portlnadia", "Portlnad", "Portland"), None);
-        assert_eq!(replace_whole_word("aPortlnad", "Portlnad", "Portland"), None);
+        assert_eq!(
+            replace_whole_word("Portlnadia", "Portlnad", "Portland"),
+            None
+        );
+        assert_eq!(
+            replace_whole_word("aPortlnad", "Portlnad", "Portland"),
+            None
+        );
     }
 
     #[test]
@@ -838,7 +852,10 @@ mod tests {
 
     #[test]
     fn no_match_and_empty_needle_yield_none() {
-        assert_eq!(replace_whole_word("nothing here", "Portlnad", "Portland"), None);
+        assert_eq!(
+            replace_whole_word("nothing here", "Portlnad", "Portland"),
+            None
+        );
         assert_eq!(replace_whole_word("anything", "", "x"), None);
     }
 }

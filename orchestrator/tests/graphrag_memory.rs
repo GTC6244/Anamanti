@@ -151,7 +151,16 @@ async fn disk_store_body() {
         let helix = HelixMemory::open_disk(&dir, "persist", dims).await.unwrap();
         let vec = embedder.embed_one("remember the alamo").await.unwrap();
         helix
-            .ingest_turn("d1", "s", 1, "remember the alamo", vec, &[], "household", None)
+            .ingest_turn(
+                "d1",
+                "s",
+                1,
+                "remember the alamo",
+                vec,
+                &[],
+                "household",
+                None,
+            )
             .await
             .unwrap();
         let before = helix.node_count().await.unwrap();
@@ -194,12 +203,31 @@ async fn rename_entity_body() {
     }];
     let vec = embedder.embed_one("I live in Portlnad").await.unwrap();
     helix
-        .ingest_turn("t1", "s", 1, "I live in Portlnad", vec, &ents, "household", None)
+        .ingest_turn(
+            "t1",
+            "s",
+            1,
+            "I live in Portlnad",
+            vec,
+            &ents,
+            "household",
+            None,
+        )
         .await
         .unwrap();
-    let mvec = embedder.embed_one("The user lives in Portlnad").await.unwrap();
+    let mvec = embedder
+        .embed_one("The user lives in Portlnad")
+        .await
+        .unwrap();
     helix
-        .ingest_memory("m1", "fact", "The user lives in Portlnad", mvec, &ents, "household")
+        .ingest_memory(
+            "m1",
+            "fact",
+            "The user lives in Portlnad",
+            mvec,
+            &ents,
+            "household",
+        )
         .await
         .unwrap();
 
@@ -264,7 +292,16 @@ async fn graph_view_body() {
 
     let vec = embedder.embed_one("I love jazz music").await.unwrap();
     helix
-        .ingest_turn("t1", "s", 1, "I love jazz music", vec, &[], "household", None)
+        .ingest_turn(
+            "t1",
+            "s",
+            1,
+            "I love jazz music",
+            vec,
+            &[],
+            "household",
+            None,
+        )
         .await
         .unwrap();
 
@@ -280,6 +317,9 @@ async fn graph_view_body() {
     let turns = sample["Turn"].as_array().unwrap();
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0]["text"], "I love jazz music");
-    assert!(turns[0].get("embedding").is_none(), "embedding must be omitted");
+    assert!(
+        turns[0].get("embedding").is_none(),
+        "embedding must be omitted"
+    );
     assert!(turns[0].get("$id").is_some(), "node id present");
 }

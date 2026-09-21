@@ -58,10 +58,13 @@ async fn main() -> anyhow::Result<()> {
     // (we never guess one).
     let backend: Arc<dyn LlmBackend> = match backend_kind.as_str() {
         "anthropic" | "claude" => {
-            let key = std::env::var("ANTHROPIC_API_KEY")
-                .map_err(|_| anyhow::anyhow!("AMBIENT_LLM_BACKEND=anthropic needs ANTHROPIC_API_KEY"))?;
+            let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+                anyhow::anyhow!("AMBIENT_LLM_BACKEND=anthropic needs ANTHROPIC_API_KEY")
+            })?;
             let model = std::env::var("AMBIENT_ANTHROPIC_MODEL").map_err(|_| {
-                anyhow::anyhow!("set AMBIENT_ANTHROPIC_MODEL to a valid model id (e.g. a current Claude model)")
+                anyhow::anyhow!(
+                    "set AMBIENT_ANTHROPIC_MODEL to a valid model id (e.g. a current Claude model)"
+                )
             })?;
             let base = std::env::var("AMBIENT_ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".into());
@@ -83,7 +86,11 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
             let model = std::env::var("AMBIENT_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5".into());
             eprintln!("[rig_smoke] ollama={url} model={model} web_search={web_search}");
-            Arc::new(RigBackend::ollama(&url, &model, tools_from_flag(web_search))?)
+            Arc::new(RigBackend::ollama(
+                &url,
+                &model,
+                tools_from_flag(web_search),
+            )?)
         }
     };
 
@@ -91,9 +98,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("[rig_smoke] --- streamed reply below ---");
 
     let started = Instant::now();
-    let mut stream = backend
-        .respond(LlmTurn::new(SYSTEM_PROMPT, prompt))
-        .await?;
+    let mut stream = backend.respond(LlmTurn::new(SYSTEM_PROMPT, prompt)).await?;
 
     let mut stdout = std::io::stdout();
     let mut first_token_at: Option<Instant> = None;
@@ -115,7 +120,9 @@ async fn main() -> anyhow::Result<()> {
             t.duration_since(started).as_millis(),
             started.elapsed().as_millis(),
         ),
-        None => eprintln!("[rig_smoke] no tokens streamed (check the model/name and that Ollama is running)"),
+        None => eprintln!(
+            "[rig_smoke] no tokens streamed (check the model/name and that Ollama is running)"
+        ),
     }
     Ok(())
 }

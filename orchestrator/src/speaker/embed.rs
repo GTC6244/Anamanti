@@ -15,9 +15,9 @@
 //!   ONNX model run in-process. Deliberately deferred so Phases A–D carry no heavy
 //!   dependency; the trait below is the seam it slots into.
 
-use anyhow::{ensure, Result};
 #[cfg(feature = "speaker")]
 use anyhow::Context;
+use anyhow::{ensure, Result};
 
 /// Sample rate the orchestrator streams at (architecture.md §2.1). The embedder
 /// assumes mono `i16` PCM at this rate.
@@ -209,7 +209,10 @@ mod tests {
         let same = cosine(&sam_a, &sam_b);
         let diff = cosine(&sam_a, &dana);
         assert!(same > 0.95, "same voice should match strongly (got {same})");
-        assert!(diff < same - 0.3, "different voices should separate (got {diff})");
+        assert!(
+            diff < same - 0.3,
+            "different voices should separate (got {diff})"
+        );
     }
 
     #[test]

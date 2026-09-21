@@ -102,7 +102,11 @@ impl TurnAudioDump {
             return;
         }
         let mut inner = self.inner.lock().unwrap();
-        let slot = if is_mic { &mut inner.mic } else { &mut inner.tts };
+        let slot = if is_mic {
+            &mut inner.mic
+        } else {
+            &mut inner.tts
+        };
         if slot.is_none() {
             let kind = if is_mic { "mic" } else { "tts" };
             let path = self

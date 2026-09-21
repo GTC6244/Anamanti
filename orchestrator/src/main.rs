@@ -88,11 +88,10 @@ async fn run() -> Result<()> {
     // Prompt log (always on): the exact assembled LLM prompt per turn, for the
     // orchestrator's debug GUI (`/prompts`). Separate from the chat log, which the
     // GraphRAG ingester consumes.
-    let promptlog = Arc::new(
-        PromptLog::open(&config.promptlog_path).with_context(|| {
+    let promptlog =
+        Arc::new(PromptLog::open(&config.promptlog_path).with_context(|| {
             format!("opening prompt log at {}", config.promptlog_path.display())
-        })?,
-    );
+        })?);
     log::info!("prompt log at {}", config.promptlog_path.display());
 
     {
@@ -270,7 +269,10 @@ async fn ensure_ollama_model(config: &mut Config) {
 async fn build_graphrag_recall(
     config: &Config,
     chatlog: &Arc<ChatLog>,
-) -> Result<(Arc<dyn ambient_orchestrator::memory::Recall>, Arc<dyn GraphView>)> {
+) -> Result<(
+    Arc<dyn ambient_orchestrator::memory::Recall>,
+    Arc<dyn GraphView>,
+)> {
     use ambient_orchestrator::memory::embed::{Embedder, OpenAiEmbedder};
     use ambient_orchestrator::memory::entity::{
         AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor,

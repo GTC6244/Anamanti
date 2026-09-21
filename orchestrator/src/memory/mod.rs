@@ -500,7 +500,9 @@ mod tests {
             .unwrap();
 
         // Sam sees his own jazz pref + the shared wifi fact, not Dana's.
-        let sam = store.search_scoped("jazz wifi", Some("spk-sam"), 10).unwrap();
+        let sam = store
+            .search_scoped("jazz wifi", Some("spk-sam"), 10)
+            .unwrap();
         assert!(sam.iter().any(|m| m.content.contains("likes jazz")));
         assert!(sam.iter().any(|m| m.content.contains("FastNet")));
         assert!(!sam.iter().any(|m| m.content.contains("hates jazz")));
@@ -518,13 +520,28 @@ mod tests {
     fn same_content_different_speakers_not_coalesced() {
         let store = MemoryStore::open_in_memory().unwrap();
         let a = store
-            .add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Explicit, Some("spk-a"))
+            .add_scoped(
+                MemoryKind::Fact,
+                "likes tea",
+                MemorySource::Explicit,
+                Some("spk-a"),
+            )
             .unwrap();
         let b = store
-            .add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Explicit, Some("spk-b"))
+            .add_scoped(
+                MemoryKind::Fact,
+                "likes tea",
+                MemorySource::Explicit,
+                Some("spk-b"),
+            )
             .unwrap();
         let a2 = store
-            .add_scoped(MemoryKind::Fact, "likes tea", MemorySource::Inferred, Some("spk-a"))
+            .add_scoped(
+                MemoryKind::Fact,
+                "likes tea",
+                MemorySource::Inferred,
+                Some("spk-a"),
+            )
             .unwrap();
         assert_ne!(a, b, "different speakers kept separate");
         assert_eq!(a, a2, "same speaker + content coalesces");
