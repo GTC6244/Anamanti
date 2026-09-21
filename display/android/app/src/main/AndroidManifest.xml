@@ -7,6 +7,15 @@
          / AutomaticGainControl / NoiseSuppressor audio effects requires this. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-feature android:name="android.hardware.microphone" android:required="true"/>
+    <!-- Phase 5: the front camera is used as a proximity sensor — a cheap Rust
+         frame-motion detector brightens the idle screen when someone approaches
+         (Plan.MD §5). CAMERA is a runtime-dangerous permission; like RECORD_AUDIO it
+         is granted out-of-band on the kiosk device (adb `pm grant`). Marked
+         required=false so the app still installs on hardware without a camera —
+         proximity just stays disabled. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera.front" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera.any" android:required="false"/>
     <!-- Phase 3: the Rust engine opens a TCP (Wyoming) connection to the Mac Mini
          orchestrator. A release build needs INTERNET explicitly — Flutter only
          adds it to the debug/profile manifests by default. -->

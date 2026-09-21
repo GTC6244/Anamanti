@@ -37,6 +37,21 @@ class WakeWordDefaults {
   static const bool platformAgc = true;
   static const bool platformNs = true;
 
+  /// Camera-as-proximity sensor (Android only): a cheap Rust frame-motion detector
+  /// on low-res front-camera luma brightens the idle screen when someone approaches
+  /// and dims it after a quiet spell (Plan.MD §5). On by default. The `0` tuning
+  /// values tell the engine to use its built-in motion threshold / release window
+  /// (`camera/presence.rs`).
+  static const bool cameraProximity = true;
+  static const double proximityMotionThreshold = 0.0;
+  static const int proximityReleaseSecs = 0;
+
+  /// Absolute window brightness applied when the proximity sensor reports someone is
+  /// present vs. when the room has been quiet. Presentation-side (see
+  /// `ScreenBrightnessController`); the engine only reports presence.
+  static const double brightnessNear = 1.0;
+  static const double brightnessAway = 0.25;
+
   static const String melspecFile = 'melspectrogram.onnx';
   static const String embeddingFile = 'embedding_model.onnx';
   static String wakewordFile(String name) => '$name.onnx';
@@ -68,6 +83,9 @@ Future<WakeWordConfig> buildWakeWordConfig({
   bool platformAec = WakeWordDefaults.platformAec,
   bool platformAgc = WakeWordDefaults.platformAgc,
   bool platformNs = WakeWordDefaults.platformNs,
+  bool cameraProximity = WakeWordDefaults.cameraProximity,
+  double proximityMotionThreshold = WakeWordDefaults.proximityMotionThreshold,
+  int proximityReleaseSecs = WakeWordDefaults.proximityReleaseSecs,
 }) async {
   final dir = await wakeWordModelDir();
   return WakeWordConfig(
@@ -87,6 +105,9 @@ Future<WakeWordConfig> buildWakeWordConfig({
     platformAec: platformAec,
     platformAgc: platformAgc,
     platformNs: platformNs,
+    cameraProximity: cameraProximity,
+    proximityMotionThreshold: proximityMotionThreshold,
+    proximityReleaseSecs: proximityReleaseSecs,
   );
 }
 

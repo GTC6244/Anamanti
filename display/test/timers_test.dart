@@ -26,6 +26,9 @@ WakeWordConfig _cfg() => WakeWordConfig(
       platformAec: false,
       platformAgc: true,
       platformNs: true,
+      cameraProximity: false,
+      proximityMotionThreshold: 0,
+      proximityReleaseSecs: 0,
     );
 
 WakeWordEvent _ev(
@@ -48,6 +51,7 @@ WakeWordEvent _ev(
       timerId: timerId,
       timerLabel: timerLabel,
       timerRemainingSecs: timerRemainingSecs,
+      present: false,
     );
 
 void main() {

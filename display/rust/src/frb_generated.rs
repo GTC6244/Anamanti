@@ -981,6 +981,9 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_platformAec = <bool>::sse_decode(deserializer);
         let mut var_platformAgc = <bool>::sse_decode(deserializer);
         let mut var_platformNs = <bool>::sse_decode(deserializer);
+        let mut var_cameraProximity = <bool>::sse_decode(deserializer);
+        let mut var_proximityMotionThreshold = <f32>::sse_decode(deserializer);
+        let mut var_proximityReleaseSecs = <u32>::sse_decode(deserializer);
         return crate::api::engine::WakeWordConfig {
             melspec_model_path: var_melspecModelPath,
             embedding_model_path: var_embeddingModelPath,
@@ -998,6 +1001,9 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
             platform_aec: var_platformAec,
             platform_agc: var_platformAgc,
             platform_ns: var_platformNs,
+            camera_proximity: var_cameraProximity,
+            proximity_motion_threshold: var_proximityMotionThreshold,
+            proximity_release_secs: var_proximityReleaseSecs,
         };
     }
 }
@@ -1018,6 +1024,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_timerId = <u32>::sse_decode(deserializer);
         let mut var_timerLabel = <String>::sse_decode(deserializer);
         let mut var_timerRemainingSecs = <u32>::sse_decode(deserializer);
+        let mut var_present = <bool>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
             message: var_message,
@@ -1032,6 +1039,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             timer_id: var_timerId,
             timer_label: var_timerLabel,
             timer_remaining_secs: var_timerRemainingSecs,
+            present: var_present,
         };
     }
 }
@@ -1057,6 +1065,7 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             13 => crate::api::engine::WakeWordEventKind::TimerStarted,
             14 => crate::api::engine::WakeWordEventKind::TimerFinished,
             15 => crate::api::engine::WakeWordEventKind::TimerCancelled,
+            16 => crate::api::engine::WakeWordEventKind::Presence,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -1287,6 +1296,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.platform_aec.into_into_dart().into_dart(),
             self.platform_agc.into_into_dart().into_dart(),
             self.platform_ns.into_into_dart().into_dart(),
+            self.camera_proximity.into_into_dart().into_dart(),
+            self.proximity_motion_threshold.into_into_dart().into_dart(),
+            self.proximity_release_secs.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1319,6 +1331,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.timer_id.into_into_dart().into_dart(),
             self.timer_label.into_into_dart().into_dart(),
             self.timer_remaining_secs.into_into_dart().into_dart(),
+            self.present.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1354,6 +1367,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::TimerStarted => 13.into_dart(),
             Self::TimerFinished => 14.into_dart(),
             Self::TimerCancelled => 15.into_dart(),
+            Self::Presence => 16.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -1627,6 +1641,9 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <bool>::sse_encode(self.platform_aec, serializer);
         <bool>::sse_encode(self.platform_agc, serializer);
         <bool>::sse_encode(self.platform_ns, serializer);
+        <bool>::sse_encode(self.camera_proximity, serializer);
+        <f32>::sse_encode(self.proximity_motion_threshold, serializer);
+        <u32>::sse_encode(self.proximity_release_secs, serializer);
     }
 }
 
@@ -1646,6 +1663,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <u32>::sse_encode(self.timer_id, serializer);
         <String>::sse_encode(self.timer_label, serializer);
         <u32>::sse_encode(self.timer_remaining_secs, serializer);
+        <bool>::sse_encode(self.present, serializer);
     }
 }
 
@@ -1670,6 +1688,7 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::TimerStarted => 13,
                 crate::api::engine::WakeWordEventKind::TimerFinished => 14,
                 crate::api::engine::WakeWordEventKind::TimerCancelled => 15,
+                crate::api::engine::WakeWordEventKind::Presence => 16,
                 _ => {
                     unimplemented!("");
                 }

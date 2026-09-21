@@ -33,6 +33,9 @@ WakeWordConfig _testConfig() => WakeWordConfig(
       platformAec: false,
       platformAgc: true,
       platformNs: true,
+      cameraProximity: false,
+      proximityMotionThreshold: 0,
+      proximityReleaseSecs: 0,
     );
 
 WakeWordEvent _event(
@@ -44,6 +47,7 @@ WakeWordEvent _event(
   int timerId = 0,
   String timerLabel = '',
   int timerRemainingSecs = 0,
+  bool present = false,
 }) {
   return WakeWordEvent(
     kind: kind,
@@ -59,6 +63,7 @@ WakeWordEvent _event(
     timerId: timerId,
     timerLabel: timerLabel,
     timerRemainingSecs: timerRemainingSecs,
+    present: present,
   );
 }
 
@@ -111,6 +116,33 @@ void main() {
     await h.pump(tester);
 
     expect(find.text('Say the wake word to begin'), findsOneWidget);
+
+    await h.dispose(tester);
+  });
+
+  testWidgets('away mode shows the big centered clock and hides the rest',
+      (tester) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    double opacity(String key) =>
+        tester.widget<AnimatedOpacity>(find.byKey(Key(key))).opacity;
+
+    // Starts present (default): the small idle clock shows, the big away face is hidden.
+    expect(opacity('idle-clock'), 1);
+    expect(opacity('away-face'), 0);
+
+    // Proximity reports the room is empty → away/off mode: only the big clock.
+    h.add(_event(WakeWordEventKind.presence, present: false));
+    await h.settle(tester);
+    expect(opacity('away-face'), 1);
+    expect(opacity('idle-clock'), 0);
+
+    // Someone approaches → back to the full idle screen.
+    h.add(_event(WakeWordEventKind.presence, present: true));
+    await h.settle(tester);
+    expect(opacity('away-face'), 0);
+    expect(opacity('idle-clock'), 1);
 
     await h.dispose(tester);
   });

@@ -1,13 +1,18 @@
-// The always-on ambient display screen (Plan.MD §3, Phase 5).
+// The always-on ambient display screen (Plan.MD §3, Phase 5; §5 proximity).
 //
 // Layered, landscape-first layout tuned for the 8-inch Echo Show:
 //  * Background: the idle photo slideshow (always running).
 //  * A scrim + live conversation panel fades in while a turn is active.
 //  * A subtle clock (idle) and connection-status chip sit in the corners.
+//  * **Away / "off" mode:** when the camera proximity sensor reports nobody is in
+//    front of the display (and no turn is active), everything hides and only a
+//    large, dimmed, centered clock remains — a calm at-a-glance face. Someone
+//    approaching flips `userPresent` back and the full ambient screen returns.
 //
 // The screen is driven by two [ChangeNotifier]s — [AssistantController] for the
-// voice turn and [SlideshowController] for the idle imagery — so the photo cycle
-// is fully decoupled from connectivity and keeps running when the Mac is offline.
+// voice turn (and proximity presence) and [SlideshowController] for the idle
+// imagery — so the photo cycle is fully decoupled from connectivity and keeps
+// running when the Mac is offline.
 
 import 'package:flutter/material.dart';
 
@@ -45,11 +50,24 @@ class AmbientScreen extends StatelessWidget {
           // but for as long as the reply audio is still playing, so the text stays
           // on screen until it stops being read aloud.
           final active = state.displayActive;
+          // Away / "off" mode: nobody in front of the display and no active turn.
+          // Only the big centered clock shows; everything else fades away. A turn
+          // always wins (saying the wake word implies you're here), so off mode is
+          // strictly the idle-and-absent case.
+          final offMode = !state.userPresent && !active;
           return Stack(
             fit: StackFit.expand,
             children: [
               // Idle imagery, always cycling underneath.
               SlideshowView(controller: slideshow),
+
+              // Away mode blacks out the slideshow so only the big clock remains.
+              IgnorePointer(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 500),
+                  color: Colors.black.withValues(alpha: offMode ? 1.0 : 0.0),
+                ),
+              ),
 
               // Dim scrim that deepens while a turn is active so text stays legible.
               // Pointer-transparent so idle swipes reach the slideshow below.
@@ -61,14 +79,14 @@ class AmbientScreen extends StatelessWidget {
               ),
 
               // Big, screen-filling timers — the idle presentation. Fades out while a
-              // turn is active (the conversation wins the screen); the timers survive
-              // as the compact badge below. Ignores pointers when hidden so it never
-              // steals taps meant for the conversation.
+              // turn is active (the conversation wins the screen) and in away mode
+              // (only the clock shows); survives as the compact badge below. Ignores
+              // pointers when hidden so it never steals taps meant for the conversation.
               AnimatedOpacity(
-                opacity: active ? 0 : 1,
+                opacity: (active || offMode) ? 0 : 1,
                 duration: const Duration(milliseconds: 300),
                 child: IgnorePointer(
-                  ignoring: active,
+                  ignoring: active || offMode,
                   child: TimersOverlay(
                     timers: state.timers,
                     onDismiss: assistant.dismissTimer,
@@ -89,23 +107,41 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
-              // Idle clock, bottom-left. Also yields to the big timer display so the
-              // two don't overlap when a timer is running on the idle screen.
+              // Idle clock, bottom-left. Yields to the big timer display, to a turn,
+              // and to away mode (where the large centered clock takes over).
               Positioned(
                 left: 28,
                 bottom: 24,
                 child: AnimatedOpacity(
-                  opacity: (active || state.timers.isNotEmpty) ? 0 : 1,
+                  key: const Key('idle-clock'),
+                  opacity:
+                      (active || offMode || state.timers.isNotEmpty) ? 0 : 1,
                   duration: const Duration(milliseconds: 300),
                   child: const _AmbientClock(),
                 ),
               ),
 
-              // Connection-status chip, top-right.
+              // Away-mode face: a large, dimmed, centered clock. Fades in when the
+              // proximity sensor reports the room is empty; the low opacity (on top
+              // of the already-dimmed backlight) keeps it calm and glare-free.
+              IgnorePointer(
+                child: AnimatedOpacity(
+                  key: const Key('away-face'),
+                  opacity: offMode ? 1 : 0,
+                  duration: const Duration(milliseconds: 500),
+                  child: const Center(child: _AmbientClock(large: true)),
+                ),
+              ),
+
+              // Connection-status chip, top-right. Hidden in away mode.
               Positioned(
                 right: 20,
                 top: 18,
-                child: StatusIndicator(state: state),
+                child: AnimatedOpacity(
+                  opacity: offMode ? 0 : 1,
+                  duration: const Duration(milliseconds: 300),
+                  child: StatusIndicator(state: state),
+                ),
               ),
 
               // Compact timer badge, top-center — the presentation while a turn is
@@ -133,19 +169,19 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
-              // Discreet settings control, top-left. Fades out during a turn so it
-              // never competes with the live conversation.
+              // Discreet settings control, top-left. Fades out during a turn and in
+              // away mode so it never competes with the conversation or the face.
               if (onOpenSettings != null)
                 Positioned(
                   left: 12,
                   top: 10,
                   child: AnimatedOpacity(
-                    opacity: active ? 0 : 0.7,
+                    opacity: (active || offMode) ? 0 : 0.7,
                     duration: const Duration(milliseconds: 300),
                     child: IconButton(
                       key: const Key('open-settings'),
                       tooltip: 'Settings',
-                      onPressed: active ? null : onOpenSettings,
+                      onPressed: (active || offMode) ? null : onOpenSettings,
                       icon: Icon(
                         Icons.settings,
                         color: Colors.white.withValues(alpha: 0.9),
@@ -161,9 +197,14 @@ class AmbientScreen extends StatelessWidget {
   }
 }
 
-/// A minimal ticking clock for the idle screen.
+/// A minimal ticking clock for the idle screen. In [large] mode it renders as the
+/// big, dimmed, centered away-mode face (time only); otherwise it's the small
+/// bottom-left idle clock with the wake-word hint.
 class _AmbientClock extends StatefulWidget {
-  const _AmbientClock();
+  const _AmbientClock({this.large = false});
+
+  /// Render the large centered away-mode variant (dimmed, time only).
+  final bool large;
 
   @override
   State<_AmbientClock> createState() => _AmbientClockState();
@@ -188,6 +229,25 @@ class _AmbientClockState extends State<_AmbientClock> {
       stream: _ticks,
       builder: (context, snap) {
         final now = snap.data ?? DateTime.now();
+        if (widget.large) {
+          // Away-mode face: big and dimmed. FittedBox guards the widest times
+          // ("12:00 PM") against overflow on the 8-inch panel.
+          return FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Text(
+                _fmt(now),
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.5),
+                  fontSize: 168,
+                  fontWeight: FontWeight.w200,
+                  letterSpacing: 2.0,
+                ),
+              ),
+            ),
+          );
+        }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

@@ -936,8 +936,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordConfig dco_decode_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 16)
-      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
+    if (arr.length != 19)
+      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
     return WakeWordConfig(
       melspecModelPath: dco_decode_String(arr[0]),
       embeddingModelPath: dco_decode_String(arr[1]),
@@ -955,6 +955,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       platformAec: dco_decode_bool(arr[13]),
       platformAgc: dco_decode_bool(arr[14]),
       platformNs: dco_decode_bool(arr[15]),
+      cameraProximity: dco_decode_bool(arr[16]),
+      proximityMotionThreshold: dco_decode_f_32(arr[17]),
+      proximityReleaseSecs: dco_decode_u_32(arr[18]),
     );
   }
 
@@ -962,8 +965,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -978,6 +981,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerId: dco_decode_u_32(arr[10]),
       timerLabel: dco_decode_String(arr[11]),
       timerRemainingSecs: dco_decode_u_32(arr[12]),
+      present: dco_decode_bool(arr[13]),
     );
   }
 
@@ -1301,6 +1305,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_platformAec = sse_decode_bool(deserializer);
     var var_platformAgc = sse_decode_bool(deserializer);
     var var_platformNs = sse_decode_bool(deserializer);
+    var var_cameraProximity = sse_decode_bool(deserializer);
+    var var_proximityMotionThreshold = sse_decode_f_32(deserializer);
+    var var_proximityReleaseSecs = sse_decode_u_32(deserializer);
     return WakeWordConfig(
       melspecModelPath: var_melspecModelPath,
       embeddingModelPath: var_embeddingModelPath,
@@ -1318,6 +1325,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       platformAec: var_platformAec,
       platformAgc: var_platformAgc,
       platformNs: var_platformNs,
+      cameraProximity: var_cameraProximity,
+      proximityMotionThreshold: var_proximityMotionThreshold,
+      proximityReleaseSecs: var_proximityReleaseSecs,
     );
   }
 
@@ -1337,6 +1347,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_timerId = sse_decode_u_32(deserializer);
     var var_timerLabel = sse_decode_String(deserializer);
     var var_timerRemainingSecs = sse_decode_u_32(deserializer);
+    var var_present = sse_decode_bool(deserializer);
     return WakeWordEvent(
       kind: var_kind,
       message: var_message,
@@ -1351,6 +1362,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerId: var_timerId,
       timerLabel: var_timerLabel,
       timerRemainingSecs: var_timerRemainingSecs,
+      present: var_present,
     );
   }
 
@@ -1661,6 +1673,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.platformAec, serializer);
     sse_encode_bool(self.platformAgc, serializer);
     sse_encode_bool(self.platformNs, serializer);
+    sse_encode_bool(self.cameraProximity, serializer);
+    sse_encode_f_32(self.proximityMotionThreshold, serializer);
+    sse_encode_u_32(self.proximityReleaseSecs, serializer);
   }
 
   @protected
@@ -1682,6 +1697,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.timerId, serializer);
     sse_encode_String(self.timerLabel, serializer);
     sse_encode_u_32(self.timerRemainingSecs, serializer);
+    sse_encode_bool(self.present, serializer);
   }
 
   @protected

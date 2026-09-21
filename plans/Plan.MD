@@ -30,6 +30,7 @@ These answers override any earlier ambiguity in this document:
 | **Photo auth** | **Ambient API:** on-device device-code + QR (`photosambient.mediaitems`) — blocked by Partner Program (`createDevice` 403). **Drive:** `drive.readonly` via one-time Mac consent (Desktop client) → token synced to device. Dual OAuth clients |
 | **AEC** | **Ship full-duplex**; raise wake-word confidence **threshold during playback** to suppress self-triggers; real AEC only if still bad |
 | **Settings screen** | User-configurable: **LLM backend**, **TTS voice**, **wake word**, **photo source** |
+| **Camera proximity (2026-09-21)** | Front camera doubles as a **proximity sensor**: a cheap **frame-motion** detector in **Rust** (no ML, no face recognition) brightens the idle screen on approach and dims it after a quiet spell. Sensing lives in Rust (`camera/presence.rs` + Kotlin `CameraBridge` capture shim, twin of `MicBridge`); **brightness actuation stays in Flutter/Android** (`ScreenBrightnessController` → `MainActivity` `MethodChannel`). Degrades silently if the camera is unavailable (permission denied / **privacy shutter** closed / no camera) — the screen just stays bright. `CAMERA` is granted out-of-band (`pm grant`), like `RECORD_AUDIO` |
 | **Tool calling / actions** | **rig-core is the default engine** (tool-calling loop); info tools run on the Mac, device actions (timers/alarms) emit `ambient-*` frames and execute **on-device**. Weather is grounded by a configured **home location** (`AMBIENT_HOME_LOCATION`). Calendar/reminders designed but deferred. |
 | **Doc intent** | Onboarding + AI codegen — docs guide AI agents and humans to build from scratch |
 
@@ -464,6 +465,48 @@ services, inserting the pluggable LLM + persistent memory between them.
 > change is rejected **in-band** (the response's `ok:false` + message) and the
 > previous backend stays in force, so a control error never drops the device
 > connection or the turn.
+
+### Camera proximity → screen brightness (post-Phase-6, 2026-09-21)
+
+The Echo Show's **front camera is used as a proximity sensor** to brighten the idle
+screen when someone approaches and dim it when the room is quiet — no ML, no face
+recognition, no frames ever leave the device.
+
+- **Boundary:** sensing in Rust, actuation in Flutter (per `agents.md`). A Kotlin
+  `CameraBridge` (the visual twin of `MicBridge`) opens the front camera via Camera2
+  at a tiny resolution (176×144, ~5 fps), pulls the packed **Y (luma)** plane from
+  each frame, and pushes it over JNI to `rust/src/camera/bridge.rs`. The pure,
+  unit-tested `camera/presence.rs` `PresenceDetector` measures the **mean absolute
+  per-pixel luma delta** (frame-to-frame motion); it flips to *present* above a
+  motion threshold and back to *absent* after a quiet **release window** (defaults
+  2.5 / 20 s, both config-tunable via `WakeWordConfig`). Transitions emit a new
+  `WakeWordEventKind::Presence` (`present: bool`) on the existing engine event stream.
+- **Actuation (presentation):** `AssistantController` folds `Presence` into
+  `AssistantState.userPresent`; `ScreenBrightnessController` crosses a
+  `ambient_display/brightness` `MethodChannel` to `MainActivity`, which sets the
+  window `screenBrightness` (near 1.0 / away 0.25, tunable). Starts **bright** and
+  stays bright if the camera is unavailable.
+- **Away-mode UI:** `userPresent` also drives the ambient screen's presentation, not
+  just the backlight — when nobody's in front (and no turn is active), everything
+  fades out and only a **large, dimmed, centered clock** remains (`AmbientScreen`
+  `offMode = !userPresent && !displayActive`); the slideshow, status chip, settings,
+  timers, and wake-word hint all hide. Someone approaching flips it back to the full
+  ambient screen. This makes presence visible independent of the (subtle, panel- and
+  ambient-light-dependent) backlight change.
+- **Lifecycle & failure modes:** the camera is opened alongside the engine and
+  released on teardown; it is fully independent of the audio pipeline. It **degrades
+  silently** — `CAMERA` permission denied, the **physical privacy shutter** closed
+  (frames go black → no motion → treated as absent/quiet), or no front camera — never
+  breaks capture, wake-word detection, or a turn. Known v1 limitation: a perfectly
+  **still** person eventually reads as absent and the screen dims until the next
+  movement (motion-only signal, by design/choice).
+- **Permission:** `CAMERA` is a runtime-dangerous permission declared in the
+  manifest (`uses-feature` `required=false`) and, like `RECORD_AUDIO`, granted
+  out-of-band on the kiosk device: `adb shell pm grant com.ambientdisplay.ambient_display android.permission.CAMERA`.
+- **Follow-ups (not done):** no settings-screen toggle yet (on by default via
+  `WakeWordDefaults.cameraProximity`); brightness levels + motion/release tuning are
+  compile-time defaults. Could later add an ambient-light (mean-luma) auto-brightness
+  curve and/or a settings toggle.
 
 ### Tool calling & actions (post-Phase-6)
 

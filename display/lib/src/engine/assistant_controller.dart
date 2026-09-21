@@ -115,6 +115,7 @@ class AssistantState {
     this.captureReady = false,
     this.timers = const [],
     this.audioPlaying = false,
+    this.userPresent = true,
   });
 
   final TurnPhase phase;
@@ -152,6 +153,13 @@ class AssistantState {
   /// Keeps the on-screen reply text up for exactly as long as it is being read.
   final bool audioPlaying;
 
+  /// Whether the camera proximity sensor currently sees someone in front of the
+  /// display. Drives the screen-brightness actuation (bright when present, dimmed
+  /// when the room's been quiet). Defaults to `true` so the screen starts bright and
+  /// stays bright if the camera is unavailable (permission denied / privacy shutter),
+  /// rather than sitting dim (Plan.MD §5).
+  final bool userPresent;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -172,6 +180,7 @@ class AssistantState {
     bool? captureReady,
     List<TimerModel>? timers,
     bool? audioPlaying,
+    bool? userPresent,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -184,6 +193,7 @@ class AssistantState {
       captureReady: captureReady ?? this.captureReady,
       timers: timers ?? this.timers,
       audioPlaying: audioPlaying ?? this.audioPlaying,
+      userPresent: userPresent ?? this.userPresent,
     );
   }
 }
@@ -390,6 +400,10 @@ class AssistantController extends ChangeNotifier {
         _emit(_state.copyWith(
           timers: _state.timers.where((t) => t.id != e.timerId).toList(),
         ));
+      case WakeWordEventKind.presence:
+        // Camera proximity transition (brighten on approach / dim when quiet). The
+        // brightness actuation lives in the UI layer, which reads `userPresent`.
+        _emit(_state.copyWith(userPresent: e.present));
     }
   }
 
