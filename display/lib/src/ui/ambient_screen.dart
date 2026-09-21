@@ -52,9 +52,12 @@ class AmbientScreen extends StatelessWidget {
               SlideshowView(controller: slideshow),
 
               // Dim scrim that deepens while a turn is active so text stays legible.
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 400),
-                color: Colors.black.withValues(alpha: active ? 0.55 : 0.15),
+              // Pointer-transparent so idle swipes reach the slideshow below.
+              IgnorePointer(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 400),
+                  color: Colors.black.withValues(alpha: active ? 0.55 : 0.15),
+                ),
               ),
 
               // Big, screen-filling timers — the idle presentation. Fades out while a
@@ -167,8 +170,10 @@ class _AmbientClock extends StatefulWidget {
 }
 
 class _AmbientClockState extends State<_AmbientClock> {
-  late final Stream<DateTime> _ticks =
-      Stream<DateTime>.periodic(const Duration(seconds: 1), (_) => DateTime.now());
+  late final Stream<DateTime> _ticks = Stream<DateTime>.periodic(
+    const Duration(seconds: 1),
+    (_) => DateTime.now(),
+  );
 
   String _fmt(DateTime t) {
     final h = t.hour % 12 == 0 ? 12 : t.hour % 12;

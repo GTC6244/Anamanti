@@ -11,7 +11,10 @@
 import 'package:flutter/foundation.dart';
 
 /// Which idle-screen photo source to use.
-enum PhotoSourceKind { local, google }
+///  * [local]   — built-in ambient gradients (offline fallback).
+///  * [ambient] — Google Photos via the Ambient API (device-code/QR; partner-gated).
+///  * [drive]   — a Google Drive folder (`drive.readonly`; consent on the Mac).
+enum PhotoSourceKind { local, ambient, drive }
 
 /// The set of wake words the app offers in settings. These map to openWakeWord
 /// `.onnx` classifier files (`<name>.onnx`) in the model dir. Only `hey_jarvis`
@@ -39,8 +42,12 @@ class AppSettings {
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
     this.photoSource = PhotoSourceKind.local,
-    this.googleFolderName = '',
-    this.googleLinked = false,
+    this.ambientRefreshToken = '',
+    this.ambientDeviceId = '',
+    this.ambientLinked = false,
+    this.driveRefreshToken = '',
+    this.driveFolderIds = const <String>[],
+    this.driveLinked = false,
   });
 
   /// Selected wake-word model name (`<name>.onnx`).
@@ -85,11 +92,28 @@ class AppSettings {
   /// Idle photo source.
   final PhotoSourceKind photoSource;
 
-  /// The chosen Google Photos album / Drive folder name (for display + loading).
-  final String googleFolderName;
+  /// Ambient API (Google Photos) OAuth refresh token from the on-device device-code
+  /// flow, persisted so the slideshow re-mints an access token on boot without
+  /// re-scanning the QR. TODO: move to platform secure storage.
+  final String ambientRefreshToken;
 
-  /// Whether an on-device Google account has been linked (a token is present).
-  final bool googleLinked;
+  /// The Ambient API device id created during linking; used to list the user's
+  /// picked media.
+  final String ambientDeviceId;
+
+  /// Whether Google Photos (Ambient API) has been linked.
+  final bool ambientLinked;
+
+  /// Google Drive OAuth refresh token (issued by the Desktop client via Mac
+  /// consent), persisted so the slideshow re-mints an access token on boot.
+  /// TODO: move to platform secure storage.
+  final String driveRefreshToken;
+
+  /// Drive folder IDs the slideshow pulls images from (owned or "Shared with me").
+  final List<String> driveFolderIds;
+
+  /// Whether Google Drive has been linked (a refresh token is held).
+  final bool driveLinked;
 
   AppSettings copyWith({
     String? wakeWord,
@@ -103,8 +127,12 @@ class AppSettings {
     int? endpointSilenceMs,
     double? endpointRmsThreshold,
     PhotoSourceKind? photoSource,
-    String? googleFolderName,
-    bool? googleLinked,
+    String? ambientRefreshToken,
+    String? ambientDeviceId,
+    bool? ambientLinked,
+    String? driveRefreshToken,
+    List<String>? driveFolderIds,
+    bool? driveLinked,
   }) {
     return AppSettings(
       wakeWord: wakeWord ?? this.wakeWord,
@@ -118,26 +146,34 @@ class AppSettings {
       endpointSilenceMs: endpointSilenceMs ?? this.endpointSilenceMs,
       endpointRmsThreshold: endpointRmsThreshold ?? this.endpointRmsThreshold,
       photoSource: photoSource ?? this.photoSource,
-      googleFolderName: googleFolderName ?? this.googleFolderName,
-      googleLinked: googleLinked ?? this.googleLinked,
+      ambientRefreshToken: ambientRefreshToken ?? this.ambientRefreshToken,
+      ambientDeviceId: ambientDeviceId ?? this.ambientDeviceId,
+      ambientLinked: ambientLinked ?? this.ambientLinked,
+      driveRefreshToken: driveRefreshToken ?? this.driveRefreshToken,
+      driveFolderIds: driveFolderIds ?? this.driveFolderIds,
+      driveLinked: driveLinked ?? this.driveLinked,
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'wakeWord': wakeWord,
-        'threshold': threshold,
-        'activeThreshold': activeThreshold,
-        'smoothingWindow': smoothingWindow,
-        'fireOnPeak': fireOnPeak,
-        'playbackBufferSecs': playbackBufferSecs,
-        'useAudioRecord': useAudioRecord,
-        'endpointCueEnabled': endpointCueEnabled,
-        'endpointSilenceMs': endpointSilenceMs,
-        'endpointRmsThreshold': endpointRmsThreshold,
-        'photoSource': photoSource.name,
-        'googleFolderName': googleFolderName,
-        'googleLinked': googleLinked,
-      };
+    'wakeWord': wakeWord,
+    'threshold': threshold,
+    'activeThreshold': activeThreshold,
+    'smoothingWindow': smoothingWindow,
+    'fireOnPeak': fireOnPeak,
+    'playbackBufferSecs': playbackBufferSecs,
+    'useAudioRecord': useAudioRecord,
+    'endpointCueEnabled': endpointCueEnabled,
+    'endpointSilenceMs': endpointSilenceMs,
+    'endpointRmsThreshold': endpointRmsThreshold,
+    'photoSource': photoSource.name,
+    'ambientRefreshToken': ambientRefreshToken,
+    'ambientDeviceId': ambientDeviceId,
+    'ambientLinked': ambientLinked,
+    'driveRefreshToken': driveRefreshToken,
+    'driveFolderIds': driveFolderIds,
+    'driveLinked': driveLinked,
+  };
 
   /// Parse from persisted JSON, tolerating missing/invalid keys by falling back to
   /// defaults so a partial or older settings file never crashes startup.
@@ -148,33 +184,66 @@ class AppSettings {
     int asInt(Object? v, int fallback, {int min = 1, int max = 1 << 30}) =>
         v is num ? v.toInt().clamp(min, max) : fallback;
     return AppSettings(
-      wakeWord: json['wakeWord'] is String && (json['wakeWord'] as String).isNotEmpty
+      wakeWord:
+          json['wakeWord'] is String && (json['wakeWord'] as String).isNotEmpty
           ? json['wakeWord'] as String
           : defaults.wakeWord,
       threshold: asDouble(json['threshold'], defaults.threshold),
-      activeThreshold: asDouble(json['activeThreshold'], defaults.activeThreshold),
-      smoothingWindow:
-          asInt(json['smoothingWindow'], defaults.smoothingWindow, min: 1, max: 10),
+      activeThreshold: asDouble(
+        json['activeThreshold'],
+        defaults.activeThreshold,
+      ),
+      smoothingWindow: asInt(
+        json['smoothingWindow'],
+        defaults.smoothingWindow,
+        min: 1,
+        max: 10,
+      ),
       fireOnPeak: json['fireOnPeak'] == true,
-      playbackBufferSecs:
-          asInt(json['playbackBufferSecs'], defaults.playbackBufferSecs, min: 2, max: 120),
+      playbackBufferSecs: asInt(
+        json['playbackBufferSecs'],
+        defaults.playbackBufferSecs,
+        min: 2,
+        max: 120,
+      ),
       useAudioRecord: json['useAudioRecord'] is bool
           ? json['useAudioRecord'] as bool
           : defaults.useAudioRecord,
       endpointCueEnabled: json['endpointCueEnabled'] is bool
           ? json['endpointCueEnabled'] as bool
           : defaults.endpointCueEnabled,
-      endpointSilenceMs:
-          asInt(json['endpointSilenceMs'], defaults.endpointSilenceMs, min: 100, max: 3000),
-      endpointRmsThreshold:
-          asDouble(json['endpointRmsThreshold'], defaults.endpointRmsThreshold),
+      endpointSilenceMs: asInt(
+        json['endpointSilenceMs'],
+        defaults.endpointSilenceMs,
+        min: 100,
+        max: 3000,
+      ),
+      endpointRmsThreshold: asDouble(
+        json['endpointRmsThreshold'],
+        defaults.endpointRmsThreshold,
+      ),
       photoSource: PhotoSourceKind.values.firstWhere(
         (k) => k.name == json['photoSource'],
         orElse: () => defaults.photoSource,
       ),
-      googleFolderName:
-          json['googleFolderName'] is String ? json['googleFolderName'] as String : '',
-      googleLinked: json['googleLinked'] == true,
+      ambientRefreshToken: json['ambientRefreshToken'] is String
+          ? json['ambientRefreshToken'] as String
+          : '',
+      ambientDeviceId: json['ambientDeviceId'] is String
+          ? json['ambientDeviceId'] as String
+          : '',
+      ambientLinked: json['ambientLinked'] == true,
+      driveRefreshToken: json['driveRefreshToken'] is String
+          ? json['driveRefreshToken'] as String
+          : '',
+      driveFolderIds: json['driveFolderIds'] is List
+          ? (json['driveFolderIds'] as List)
+                .whereType<String>()
+                .map((s) => s.trim())
+                .where((s) => s.isNotEmpty)
+                .toList()
+          : const <String>[],
+      driveLinked: json['driveLinked'] == true,
     );
   }
 
@@ -193,23 +262,31 @@ class AppSettings {
       endpointSilenceMs == other.endpointSilenceMs &&
       endpointRmsThreshold == other.endpointRmsThreshold &&
       photoSource == other.photoSource &&
-      googleFolderName == other.googleFolderName &&
-      googleLinked == other.googleLinked;
+      ambientRefreshToken == other.ambientRefreshToken &&
+      ambientDeviceId == other.ambientDeviceId &&
+      ambientLinked == other.ambientLinked &&
+      driveRefreshToken == other.driveRefreshToken &&
+      listEquals(driveFolderIds, other.driveFolderIds) &&
+      driveLinked == other.driveLinked;
 
   @override
   int get hashCode => Object.hash(
-        wakeWord,
-        threshold,
-        activeThreshold,
-        smoothingWindow,
-        fireOnPeak,
-        playbackBufferSecs,
-        useAudioRecord,
-        endpointCueEnabled,
-        endpointSilenceMs,
-        endpointRmsThreshold,
-        photoSource,
-        googleFolderName,
-        googleLinked,
-      );
+    wakeWord,
+    threshold,
+    activeThreshold,
+    smoothingWindow,
+    fireOnPeak,
+    playbackBufferSecs,
+    useAudioRecord,
+    endpointCueEnabled,
+    endpointSilenceMs,
+    endpointRmsThreshold,
+    photoSource,
+    ambientRefreshToken,
+    ambientDeviceId,
+    ambientLinked,
+    driveRefreshToken,
+    Object.hashAll(driveFolderIds),
+    driveLinked,
+  );
 }

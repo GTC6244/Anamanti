@@ -10,6 +10,12 @@
 //    on-device OAuth source wired in the settings screen (Phase 6).
 //  * Loading is resilient: if the configured source fails (no auth / offline) the
 //    controller silently falls back to the local source.
+//
+// Google Photos linking uses the **Ambient API** (device-code + QR; the Echo Show
+// has no Play Services). The flow + media listing + token refresh live in
+// `ambient_photos.dart`; this file only defines the [PhotoSource] abstraction and
+// the [AmbientMediaLister] seam, so it carries no network dependency and stays
+// trivially testable.
 
 import 'dart:async';
 
@@ -21,13 +27,19 @@ import 'package:ambient_display/src/settings/app_settings.dart';
 /// built-in ambient gradient. Kept intentionally small so sources can be mocked.
 @immutable
 class PhotoItem {
-  const PhotoItem.network(this.imageUrl, {this.caption})
-      : gradient = _defaultGradient;
+  const PhotoItem.network(this.imageUrl, {this.caption, this.headers})
+    : gradient = _defaultGradient;
 
-  const PhotoItem.gradient(this.gradient, {this.caption}) : imageUrl = null;
+  const PhotoItem.gradient(this.gradient, {this.caption})
+    : imageUrl = null,
+      headers = null;
 
   /// Remote image URL, or null for a pure gradient slide.
   final String? imageUrl;
+
+  /// Optional HTTP headers used to fetch [imageUrl] (e.g. the Drive
+  /// `Authorization: Bearer <token>` header for `?alt=media` downloads).
+  final Map<String, String>? headers;
 
   /// Fallback / background gradient colors.
   final List<Color> gradient;
@@ -40,6 +52,22 @@ class PhotoItem {
     Color(0xFF0B0E1A),
   ];
 }
+
+/// Loads the user's picked Google Photos media items using an OAuth access token.
+/// Implemented by `AmbientApiClient.listMediaItems` in `ambient_photos.dart`;
+/// injected so [AmbientPhotoSource] and [photoSourceFromSettings] carry no network
+/// dependency.
+typedef AmbientMediaLister =
+    Future<List<PhotoItem>> Function({required String accessToken});
+
+/// Loads the images in a set of Drive folder IDs using an OAuth access token.
+/// Implemented by `listDrivePhotos` in `drive_photos.dart`; injected so
+/// [DrivePhotoSource] and [photoSourceFromSettings] carry no network dependency.
+typedef DrivePhotoLister =
+    Future<List<PhotoItem>> Function({
+      required String accessToken,
+      required List<String> folderIds,
+    });
 
 /// A source of slideshow photos.
 abstract class PhotoSource {
@@ -62,121 +90,125 @@ class LocalPhotoSource implements PhotoSource {
   @override
   Future<List<PhotoItem>> loadPhotos() async {
     return const [
-      PhotoItem.gradient([Color(0xFF243B55), Color(0xFF141E30)], caption: 'Dusk'),
-      PhotoItem.gradient([Color(0xFF3A1C71), Color(0xFF161226)], caption: 'Aurora'),
-      PhotoItem.gradient([Color(0xFF0F2027), Color(0xFF203A43)], caption: 'Deep'),
-      PhotoItem.gradient([Color(0xFF42275A), Color(0xFF1B1035)], caption: 'Twilight'),
-      PhotoItem.gradient([Color(0xFF16222A), Color(0xFF3A6073)], caption: 'Slate'),
+      PhotoItem.gradient([
+        Color(0xFF243B55),
+        Color(0xFF141E30),
+      ], caption: 'Dusk'),
+      PhotoItem.gradient([
+        Color(0xFF3A1C71),
+        Color(0xFF161226),
+      ], caption: 'Aurora'),
+      PhotoItem.gradient([
+        Color(0xFF0F2027),
+        Color(0xFF203A43),
+      ], caption: 'Deep'),
+      PhotoItem.gradient([
+        Color(0xFF42275A),
+        Color(0xFF1B1035),
+      ], caption: 'Twilight'),
+      PhotoItem.gradient([
+        Color(0xFF16222A),
+        Color(0xFF3A6073),
+      ], caption: 'Slate'),
     ];
   }
 }
 
-/// On-device Google Photos / Drive source (Plan.MD decision: on-device OAuth — the
-/// Echo Show runs the consent flow and calls Google directly).
-///
-/// The OAuth flow itself is wired in the Phase-6 settings screen (it needs a
-/// registered Google client ID and the `google_sign_in` / `googleapis` packages);
-/// this class is the seam the slideshow talks to. Until an access token + folder
-/// are configured, [loadPhotos] throws so the controller falls back to
-/// [LocalPhotoSource]. (Per Plan.MD §4, the claude.ai Drive connector in this
-/// environment is unauthorized and cannot prototype the flow — real OAuth is wired
-/// into the app.)
-class GooglePhotoSource implements PhotoSource {
-  const GooglePhotoSource({
-    required this.folderName,
-    this.accessToken,
-    this.photoUrls = const [],
-  });
+/// On-device Google Photos source via the **Ambient API** (the purpose-built API
+/// for ambient devices). Reads the media items the user selected in the Google
+/// Photos app for this device, via the injected [lister]. Throws (→ caller falls
+/// back to [LocalPhotoSource]) when there's no token.
+class AmbientPhotoSource implements PhotoSource {
+  const AmbientPhotoSource({required this.accessToken, required this.lister});
 
-  /// The chosen album / Drive folder name (shown in settings).
-  final String folderName;
+  /// OAuth access token (minted on boot from the persisted refresh token).
+  final String accessToken;
 
-  /// OAuth access token obtained by the on-device consent flow, or null if the
-  /// account is not yet linked.
-  final String? accessToken;
-
-  /// Pre-resolved image URLs for the folder (populated by the folder picker).
-  final List<String> photoUrls;
-
-  /// The scopes the on-device consent flow requests.
-  static const List<String> oauthScopes = [
-    'https://www.googleapis.com/auth/photoslibrary.readonly',
-    'https://www.googleapis.com/auth/drive.readonly',
-  ];
+  /// Injected media loader (see `AmbientApiClient.listMediaItems`).
+  final AmbientMediaLister lister;
 
   @override
-  String get label => 'Google Photos: $folderName';
+  String get label => 'Google Photos';
 
   @override
   Future<List<PhotoItem>> loadPhotos() async {
-    if (accessToken == null) {
-      throw StateError('Google account not linked — run the settings consent flow');
+    if (accessToken.isEmpty) {
+      throw StateError('Google Photos not linked — link it in settings');
     }
-    return [
-      for (final url in photoUrls) PhotoItem.network(url, caption: folderName),
-    ];
+    return lister(accessToken: accessToken);
   }
 }
 
-/// The outcome of the on-device Google consent flow (Phase 6): an access token
-/// plus the resolved photo URLs for the chosen folder.
-@immutable
-class GoogleLinkResult {
-  const GoogleLinkResult({
-    required this.folderName,
+/// On-device Google **Drive** source (interim, while the Ambient API is
+/// partner-gated). Lists every image in the configured [folderIds] via the injected
+/// [lister]. Throws (→ caller falls back to [LocalPhotoSource]) when there's no token
+/// or no folder configured.
+class DrivePhotoSource implements PhotoSource {
+  const DrivePhotoSource({
     required this.accessToken,
-    this.photoUrls = const [],
+    required this.folderIds,
+    required this.lister,
   });
 
-  final String folderName;
+  /// OAuth access token (minted on boot from the persisted Drive refresh token).
   final String accessToken;
-  final List<String> photoUrls;
-}
 
-/// The on-device Google consent + folder-picker seam (Plan.MD §4: on-device
-/// OAuth). The settings screen calls [link] to run the flow. A real implementation
-/// needs a registered Google client ID and the `google_sign_in` / `googleapis`
-/// packages; those cannot be provisioned in this environment, so the default
-/// [StubGoogleAuthenticator] reports that clearly instead of silently pretending.
-abstract class GoogleAuthenticator {
-  /// Run the consent flow + folder picker, returning the linked folder + token.
-  /// Throws with a human-readable reason if the flow can't complete.
-  Future<GoogleLinkResult> link();
-}
+  /// Drive folder IDs to pull images from.
+  final List<String> folderIds;
 
-/// Honest placeholder used until real OAuth is wired (see class docs on
-/// [GoogleAuthenticator]). Always throws with an explanatory message so the
-/// settings screen surfaces *why* linking is unavailable rather than failing
-/// opaquely or faking a link.
-class StubGoogleAuthenticator implements GoogleAuthenticator {
-  const StubGoogleAuthenticator();
+  /// Injected Drive image loader (see `listDrivePhotos`).
+  final DrivePhotoLister lister;
 
   @override
-  Future<GoogleLinkResult> link() async {
-    throw UnimplementedError(
-      'Google account linking needs a registered OAuth client ID. '
-      'Add google_sign_in with your client ID to enable on-device consent.',
-    );
+  String get label => 'Google Drive';
+
+  @override
+  Future<List<PhotoItem>> loadPhotos() async {
+    if (accessToken.isEmpty) {
+      throw StateError('Google Drive not linked — link it in settings');
+    }
+    if (folderIds.isEmpty) {
+      throw StateError('No Drive folder configured');
+    }
+    return lister(accessToken: accessToken, folderIds: folderIds);
   }
 }
 
-/// Build the [PhotoSource] the slideshow should use for the given [settings].
-/// Falls back to [LocalPhotoSource] whenever Google is selected but not linked, so
-/// the idle screen is always populated. `accessToken`/`photoUrls` are supplied by a
-/// completed [GoogleLinkResult] (held in memory by the app for the session).
+/// Build the [PhotoSource] the slideshow should use for the given [settings], based
+/// on the selected [PhotoSourceKind]. Falls back to [LocalPhotoSource] whenever the
+/// chosen Google source isn't linked or has no live access token, so the idle screen
+/// is always populated. Access tokens are minted from the persisted refresh tokens
+/// on boot; the listers are the concrete Ambient / Drive loaders.
 PhotoSource photoSourceFromSettings(
   AppSettings settings, {
-  String? googleAccessToken,
-  List<String> googlePhotoUrls = const [],
+  required AmbientMediaLister ambientLister,
+  required DrivePhotoLister driveLister,
+  String? ambientAccessToken,
+  String? driveAccessToken,
 }) {
-  if (settings.photoSource == PhotoSourceKind.google &&
-      settings.googleLinked &&
-      googleAccessToken != null) {
-    return GooglePhotoSource(
-      folderName: settings.googleFolderName,
-      accessToken: googleAccessToken,
-      photoUrls: googlePhotoUrls,
-    );
+  switch (settings.photoSource) {
+    case PhotoSourceKind.ambient:
+      if (settings.ambientLinked &&
+          ambientAccessToken != null &&
+          ambientAccessToken.isNotEmpty) {
+        return AmbientPhotoSource(
+          accessToken: ambientAccessToken,
+          lister: ambientLister,
+        );
+      }
+    case PhotoSourceKind.drive:
+      if (settings.driveLinked &&
+          driveAccessToken != null &&
+          driveAccessToken.isNotEmpty &&
+          settings.driveFolderIds.isNotEmpty) {
+        return DrivePhotoSource(
+          accessToken: driveAccessToken,
+          folderIds: settings.driveFolderIds,
+          lister: driveLister,
+        );
+      }
+    case PhotoSourceKind.local:
+      break;
   }
   return const LocalPhotoSource();
 }
@@ -200,7 +232,8 @@ class SlideshowController extends ChangeNotifier {
   List<PhotoItem> get photos => _photos;
 
   /// The slide currently on screen, or null before the first load.
-  PhotoItem? get current => _photos.isEmpty ? null : _photos[_index % _photos.length];
+  PhotoItem? get current =>
+      _photos.isEmpty ? null : _photos[_index % _photos.length];
 
   int get index => _index;
 
@@ -208,6 +241,10 @@ class SlideshowController extends ChangeNotifier {
   /// configured source throws (offline / not authorized).
   Future<void> start() async {
     await _reload();
+    _restartTimer();
+  }
+
+  void _restartTimer() {
     _timer?.cancel();
     _timer = Timer.periodic(interval, (_) => next());
   }
@@ -235,10 +272,20 @@ class SlideshowController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Advance to the next slide (wraps around).
-  void next() {
+  /// Advance to the next slide (wraps around). [userInitiated] (e.g. a swipe) resets
+  /// the auto-advance timer so it waits a full interval after manual navigation.
+  void next({bool userInitiated = false}) {
     if (_photos.isEmpty || _disposed) return;
     _index = (_index + 1) % _photos.length;
+    if (userInitiated) _restartTimer();
+    notifyListeners();
+  }
+
+  /// Go back to the previous slide (wraps around). See [next] re [userInitiated].
+  void previous({bool userInitiated = false}) {
+    if (_photos.isEmpty || _disposed) return;
+    _index = (_index - 1 + _photos.length) % _photos.length;
+    if (userInitiated) _restartTimer();
     notifyListeners();
   }
 

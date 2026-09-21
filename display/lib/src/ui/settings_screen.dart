@@ -15,10 +15,15 @@
 
 import 'package:flutter/material.dart';
 
+import 'package:qr_flutter/qr_flutter.dart';
+
 import 'package:ambient_display/src/settings/app_settings.dart';
 import 'package:ambient_display/src/settings/orchestrator_client.dart';
 import 'package:ambient_display/src/settings/settings_store.dart';
-import 'package:ambient_display/src/slideshow/photo_source.dart';
+import 'package:ambient_display/src/slideshow/ambient_photos.dart';
+import 'package:ambient_display/src/slideshow/drive_photos.dart';
+import 'package:ambient_display/src/slideshow/google_oauth_config.dart';
+import 'package:ambient_display/src/slideshow/google_token_import.dart';
 import 'package:ambient_display/src/ui/memory_screen.dart';
 import 'package:ambient_display/src/ui/people_screen.dart';
 
@@ -42,7 +47,6 @@ class SettingsScreen extends StatefulWidget {
     required this.store,
     required this.client,
     required this.onApplied,
-    this.authenticator = const StubGoogleAuthenticator(),
   });
 
   /// The current device-local settings to edit.
@@ -57,9 +61,6 @@ class SettingsScreen extends StatefulWidget {
   /// Called after a successful Save with the new device-local settings, so the app
   /// can restart the engine (wake word/thresholds) and refresh the slideshow.
   final ValueChanged<AppSettings> onApplied;
-
-  /// The on-device Google consent seam (Phase 6).
-  final GoogleAuthenticator authenticator;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -79,6 +80,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _remoteError;
   bool _saving = false;
 
+  // Ambient-link QR dialog state: whether a QR dialog is showing, and whether the
+  // user cancelled (so a late-completing poll doesn't apply a link they aborted).
+  bool _qrDialogOpen = false;
+  bool _linkCancelled = false;
+
   /// Selectable models (last 12 months) from the orchestrator, for the dropdown.
   List<ModelOption> _models = const <ModelOption>[];
 
@@ -93,7 +99,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    _folderController.text = _settings.googleFolderName;
+    _folderController.text = _settings.driveFolderIds.join(', ');
     _loadRemote();
   }
 
@@ -132,13 +138,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(() {
         _models = models;
         _voices = voices;
-        _backend = _kBackends.containsKey(remote.llmBackend) ? remote.llmBackend : 'ollama';
-        _anthropicAuth = remote.anthropicAuth == 'subscription' ? 'subscription' : 'apikey';
+        _backend = _kBackends.containsKey(remote.llmBackend)
+            ? remote.llmBackend
+            : 'ollama';
+        _anthropicAuth = remote.anthropicAuth == 'subscription'
+            ? 'subscription'
+            : 'apikey';
         _modelController.text = remote.llmModel ?? '';
         _voiceController.text = remote.ttsVoice ?? '';
         // Adopt the orchestrator's live VAD values (0 = unknown → keep the default).
         if (remote.endSilenceMs > 0) _endSilenceMs = remote.endSilenceMs;
-        if (remote.voiceRmsThreshold > 0) _voiceRmsThreshold = remote.voiceRmsThreshold;
+        if (remote.voiceRmsThreshold > 0) {
+          _voiceRmsThreshold = remote.voiceRmsThreshold;
+        }
         _remoteLoading = false;
       });
     } catch (e) {
@@ -150,22 +162,241 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _linkGoogle() async {
+  /// Link Google Photos via the **Ambient API** device-code flow. Shows a sign-in QR
+  /// (approve on a phone), creates an ambient device, shows a 2nd QR to pick albums
+  /// in the Google Photos app, polls until the user has selected sources, then stores
+  /// the refresh token + device id. All on-device — no keyboard, no Mac.
+  Future<void> _linkAmbient() async {
+    _linkCancelled = false;
+    final client = AmbientApiClient();
     try {
-      final result = await widget.authenticator.link();
-      if (!mounted) return;
+      // 1. Sign-in QR.
+      final start = await client.requestDeviceCode();
+      if (!mounted || _linkCancelled) return;
+      _showQrDialog(
+        title: 'Step 1 · Sign in',
+        instruction: 'Scan with your phone and sign in to Google.',
+        qrData: start.prompt.verificationUrlComplete,
+        url: start.prompt.verificationUrl,
+        code: start.prompt.userCode,
+      );
+      final tokens = await client.pollForTokens(start);
+      if (!mounted || _linkCancelled) return;
+
+      // 2. Create the ambient device, then show the album-picker QR.
+      final device = await client.createDevice(tokens.accessToken);
+      if (!mounted || _linkCancelled) return;
+      _dismissQrDialog();
+      _showQrDialog(
+        title: 'Step 2 · Choose albums',
+        instruction: 'Scan to open Google Photos and pick the albums to show.',
+        qrData: device.settingsUri,
+        url: device.settingsUri,
+      );
+
+      // 3. Poll until the user has selected media sources.
+      var current = device;
+      while (!current.mediaSourcesSet) {
+        await Future<void>.delayed(current.pollInterval);
+        if (!mounted || _linkCancelled) return;
+        current = await client.getDevice(tokens.accessToken, device.deviceId);
+      }
+      if (!mounted || _linkCancelled) return;
+      _dismissQrDialog();
       setState(() {
-        _folderController.text = result.folderName;
         _settings = _settings.copyWith(
-          photoSource: PhotoSourceKind.google,
-          googleFolderName: result.folderName,
-          googleLinked: true,
+          photoSource: PhotoSourceKind.ambient,
+          ambientLinked: true,
+          ambientRefreshToken:
+              tokens.refreshToken ?? _settings.ambientRefreshToken,
+          ambientDeviceId: device.deviceId,
         );
       });
-      _snack('Linked Google folder "${result.folderName}"');
+      _snack('Google Photos linked. Tap Save to apply.');
     } catch (e) {
       if (!mounted) return;
-      _snack('Google linking unavailable: $e');
+      _dismissQrDialog();
+      if (!_linkCancelled) _snack('Google Photos linking failed: $e');
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Import the Google **Drive** refresh token synced from the Mac consent helper
+  /// (`tools/google_photo_consent.py` → adb-pushed to the app's external files dir).
+  /// Drive's `drive.readonly` scope can't be granted on-device, so consent runs on
+  /// the Mac and the token is read here.
+  Future<void> _importDriveToken() async {
+    final imported = await importDriveTokenFromFile();
+    if (!mounted) return;
+    if (imported == null) {
+      _snack(
+        'No token file found. Run the Mac consent helper and adb-push it first.',
+      );
+      return;
+    }
+    setState(() {
+      if (imported.folderIds.isNotEmpty) {
+        _folderController.text = imported.folderIds.join(', ');
+      }
+      _settings = _settings.copyWith(
+        photoSource: PhotoSourceKind.drive,
+        driveLinked: true,
+        driveRefreshToken: imported.refreshToken,
+      );
+    });
+    final extra = imported.folderIds.isNotEmpty
+        ? ' + ${imported.folderIds.length} folder(s)'
+        : '';
+    _snack(
+      'Imported Drive token$extra. Add folder ID(s) if needed, then Save.',
+    );
+  }
+
+  /// Show a picker of the account's Drive folders (owned + shared) so the user can
+  /// choose which to display without knowing folder IDs. Needs an imported Drive
+  /// token (mints an access token from it) and the Desktop client creds.
+  Future<void> _pickDriveFolders() async {
+    if (!kGoogleDriveConfigured) {
+      _snack('Drive client not configured in this build.');
+      return;
+    }
+    if (_settings.driveRefreshToken.isEmpty) {
+      _snack('Import a Drive token first (Import Drive token).');
+      return;
+    }
+    // Brief loading dialog while we mint a token + list folders.
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 16),
+            Text('Loading your Drive folders…'),
+          ],
+        ),
+      ),
+    );
+    List<DriveFolder> folders;
+    final client = AmbientApiClient(
+      clientId: kGoogleDriveClientId,
+      clientSecret: kGoogleDriveClientSecret,
+    );
+    try {
+      final token = (await client.refresh(
+        _settings.driveRefreshToken,
+      )).accessToken;
+      folders = await listDriveFolders(accessToken: token);
+    } catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop(); // loading
+      if (mounted) _snack('Could not list folders: $e');
+      return;
+    } finally {
+      client.close();
+    }
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop(); // dismiss loading
+
+    final preselected = _parseFolderIds(_folderController.text).toSet();
+    final chosen = await showDialog<Set<String>>(
+      context: context,
+      builder: (_) =>
+          _DriveFolderPicker(folders: folders, initiallySelected: preselected),
+    );
+    if (chosen == null || !mounted) return;
+    setState(() {
+      _folderController.text = chosen.join(', ');
+      _settings = _settings.copyWith(
+        photoSource: PhotoSourceKind.drive,
+        driveFolderIds: chosen.toList(),
+      );
+    });
+    _snack('${chosen.length} folder(s) selected. Tap Save to apply.');
+  }
+
+  /// Parse the folder field into Drive folder IDs. Accepts bare IDs or full folder
+  /// share links (`.../folders/<id>`), comma/space/newline separated.
+  List<String> _parseFolderIds(String raw) {
+    return raw
+        .split(RegExp(r'[\s,]+'))
+        .map((t) => _extractFolderId(t.trim()))
+        .where((t) => t.isNotEmpty)
+        .toList();
+  }
+
+  String _extractFolderId(String token) {
+    if (token.isEmpty) return '';
+    final byPath = RegExp(r'/folders/([A-Za-z0-9_-]+)').firstMatch(token);
+    if (byPath != null) return byPath.group(1)!;
+    final byQuery = RegExp(r'[?&]id=([A-Za-z0-9_-]+)').firstMatch(token);
+    if (byQuery != null) return byQuery.group(1)!;
+    return token;
+  }
+
+  void _showQrDialog({
+    required String title,
+    required String instruction,
+    required String qrData,
+    required String url,
+    String? code,
+  }) {
+    _qrDialogOpen = true;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        key: const Key('ambient-qr-dialog'),
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(instruction, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            Container(
+              color: Colors.white,
+              padding: const EdgeInsets.all(12),
+              child: QrImageView(
+                data: qrData,
+                size: 200,
+                backgroundColor: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 16),
+            SelectableText(url, textAlign: TextAlign.center),
+            if (code != null) ...[
+              const SizedBox(height: 8),
+              SelectableText(
+                code,
+                style: Theme.of(
+                  ctx,
+                ).textTheme.headlineSmall?.copyWith(letterSpacing: 2),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              _linkCancelled = true;
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    ).then((_) => _qrDialogOpen = false);
+  }
+
+  void _dismissQrDialog() {
+    if (_qrDialogOpen && mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+      _qrDialogOpen = false;
     }
   }
 
@@ -173,7 +404,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _saving = true);
 
     // 1. Persist + apply the device-local settings (wake word, thresholds, photo).
-    final local = _settings.copyWith(googleFolderName: _folderController.text.trim());
+    final local = _settings.copyWith(
+      driveFolderIds: _parseFolderIds(_folderController.text),
+    );
     await widget.store.save(local);
     widget.onApplied(local);
 
@@ -183,10 +416,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       try {
         final result = await widget.client.applySettings(
           llmBackend: _backend,
-          llmModel: _modelController.text.trim().isEmpty ? null : _modelController.text.trim(),
+          llmModel: _modelController.text.trim().isEmpty
+              ? null
+              : _modelController.text.trim(),
           anthropicAuth: _backend == 'anthropic' ? _anthropicAuth : null,
           setTtsVoice: true,
-          ttsVoice: _voiceController.text.trim().isEmpty ? null : _voiceController.text.trim(),
+          ttsVoice: _voiceController.text.trim().isEmpty
+              ? null
+              : _voiceController.text.trim(),
           endSilenceMs: _endSilenceMs,
           voiceRmsThreshold: _voiceRmsThreshold,
         );
@@ -206,7 +443,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _snack(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -253,7 +492,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             key: const Key('settings-memory'),
             leading: const Icon(Icons.psychology_outlined),
             title: const Text('Manage remembered facts'),
-            subtitle: const Text('View and delete what the assistant remembers'),
+            subtitle: const Text(
+              'View and delete what the assistant remembers',
+            ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
@@ -282,15 +523,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _section(String title) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-        child: Text(
-          title.toUpperCase(),
-          style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                letterSpacing: 1.1,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-        ),
-      );
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+    child: Text(
+      title.toUpperCase(),
+      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+        letterSpacing: 1.1,
+        color: Theme.of(context).colorScheme.primary,
+      ),
+    ),
+  );
 
   Widget _wakeWordTile() {
     // The current wake word may not be in the built-in list (dropped in manually);
@@ -307,7 +548,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             DropdownMenuItem(value: w, child: Text(w.replaceAll('_', ' '))),
         ],
         onChanged: (v) {
-          if (v != null) setState(() => _settings = _settings.copyWith(wakeWord: v));
+          if (v != null) {
+            setState(() => _settings = _settings.copyWith(wakeWord: v));
+          }
         },
       ),
     );
@@ -319,13 +562,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _slider(
           label: 'Sensitivity (idle)',
           value: _settings.threshold,
-          onChanged: (v) => setState(() => _settings = _settings.copyWith(threshold: v)),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(threshold: v)),
         ),
         _slider(
           label: 'Sensitivity while speaking',
           value: _settings.activeThreshold,
-          onChanged: (v) =>
-              setState(() => _settings = _settings.copyWith(activeThreshold: v)),
+          onChanged: (v) => setState(
+            () => _settings = _settings.copyWith(activeThreshold: v),
+          ),
         ),
       ],
     );
@@ -403,26 +648,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
         divisions: 5,
         format: (v) => v.round().toString(),
         sliderKey: const Key('settings-smoothing'),
-        onChanged: (v) =>
-            setState(() => _settings = _settings.copyWith(smoothingWindow: v.round())),
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(smoothingWindow: v.round()),
+        ),
       ),
       SwitchListTile(
         key: const Key('settings-fire-on-peak'),
         secondary: const Icon(Icons.bolt),
         title: const Text('Fire on peak'),
         subtitle: const Text(
-            'Trigger on the strongest frame, not the average — snappier for quiet wake words'),
+          'Trigger on the strongest frame, not the average — snappier for quiet wake words',
+        ),
         value: _settings.fireOnPeak,
-        onChanged: (v) => setState(() => _settings = _settings.copyWith(fireOnPeak: v)),
+        onChanged: (v) =>
+            setState(() => _settings = _settings.copyWith(fireOnPeak: v)),
       ),
       SwitchListTile(
         key: const Key('settings-use-audiorecord'),
         secondary: const Icon(Icons.settings_voice),
         title: const Text('AudioRecord capture (far-field)'),
         subtitle: const Text(
-            'Android: capture via VOICE_RECOGNITION + platform noise-suppression/AGC instead of cpal'),
+          'Android: capture via VOICE_RECOGNITION + platform noise-suppression/AGC instead of cpal',
+        ),
         value: _settings.useAudioRecord,
-        onChanged: (v) => setState(() => _settings = _settings.copyWith(useAudioRecord: v)),
+        onChanged: (v) =>
+            setState(() => _settings = _settings.copyWith(useAudioRecord: v)),
       ),
     ];
   }
@@ -439,18 +689,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
         divisions: 58,
         format: (v) => '${v.round()}s',
         sliderKey: const Key('settings-playback-buffer'),
-        onChanged: (v) =>
-            setState(() => _settings = _settings.copyWith(playbackBufferSecs: v.round())),
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(playbackBufferSecs: v.round()),
+        ),
       ),
       SwitchListTile(
         key: const Key('settings-endpoint-cue'),
         secondary: const Icon(Icons.hourglass_top),
         title: const Text('Instant "processing" cue'),
         subtitle: const Text(
-            'Show a processing indicator the moment you stop speaking, before the reply'),
+          'Show a processing indicator the moment you stop speaking, before the reply',
+        ),
         value: _settings.endpointCueEnabled,
-        onChanged: (v) =>
-            setState(() => _settings = _settings.copyWith(endpointCueEnabled: v)),
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(endpointCueEnabled: v),
+        ),
       ),
       if (_settings.endpointCueEnabled) ...[
         _rangeSlider(
@@ -461,8 +714,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           divisions: 26,
           format: (v) => '${v.round()}',
           sliderKey: const Key('settings-endpoint-silence'),
-          onChanged: (v) =>
-              setState(() => _settings = _settings.copyWith(endpointSilenceMs: v.round())),
+          onChanged: (v) => setState(
+            () => _settings = _settings.copyWith(endpointSilenceMs: v.round()),
+          ),
         ),
         _rangeSlider(
           label: 'Silence level',
@@ -472,8 +726,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           divisions: 48,
           format: (v) => v.toStringAsFixed(3),
           sliderKey: const Key('settings-endpoint-level'),
-          onChanged: (v) =>
-              setState(() => _settings = _settings.copyWith(endpointRmsThreshold: v)),
+          onChanged: (v) => setState(
+            () => _settings = _settings.copyWith(endpointRmsThreshold: v),
+          ),
         ),
       ],
     ];
@@ -497,8 +752,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ListTile(
           leading: const Icon(Icons.cloud_off),
           title: const Text('Assistant offline'),
-          subtitle: const Text('LLM and voice settings need the Mac to be reachable.'),
-          trailing: TextButton(onPressed: _loadRemote, child: const Text('Retry')),
+          subtitle: const Text(
+            'LLM and voice settings need the Mac to be reachable.',
+          ),
+          trailing: TextButton(
+            onPressed: _loadRemote,
+            child: const Text('Retry'),
+          ),
         ),
       ];
     }
@@ -560,15 +820,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return ListTile(
         leading: const Icon(Icons.key_outlined),
         title: const Text('Anthropic auth'),
-        subtitle: Text(_anthropicAuth == 'subscription'
-            ? 'Claude subscription (OAuth via claude setup-token)'
-            : 'API key (ANTHROPIC_API_KEY)'),
+        subtitle: Text(
+          _anthropicAuth == 'subscription'
+              ? 'Claude subscription (OAuth via claude setup-token)'
+              : 'API key (ANTHROPIC_API_KEY)',
+        ),
         trailing: DropdownButton<String>(
           key: const Key('settings-anthropic-auth'),
           value: _anthropicAuth == 'subscription' ? 'subscription' : 'apikey',
           items: const [
             DropdownMenuItem(value: 'apikey', child: Text('API key')),
-            DropdownMenuItem(value: 'subscription', child: Text('Subscription')),
+            DropdownMenuItem(
+              value: 'subscription',
+              child: Text('Subscription'),
+            ),
           ],
           onChanged: (v) {
             if (v != null) setState(() => _anthropicAuth = v);
@@ -607,7 +872,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     final current = _modelController.text.trim();
-    final providerModels = _models.where((m) => m.provider == _backend).toList();
+    final providerModels = _models
+        .where((m) => m.provider == _backend)
+        .toList();
     final ids = providerModels.map((m) => m.id).toSet();
     final items = <DropdownMenuItem<String>>[
       const DropdownMenuItem(value: '', child: Text('Backend default')),
@@ -666,7 +933,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         DropdownMenuItem(value: v.name, child: Text(labelFor(v))),
       // Keep a hand-set voice that isn't in the installed list selectable.
       if (current.isNotEmpty && !names.contains(current))
-        DropdownMenuItem(value: current, child: Text('$current (not installed)')),
+        DropdownMenuItem(
+          value: current,
+          child: Text('$current (not installed)'),
+        ),
     ];
 
     return Padding(
@@ -693,7 +963,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       RadioGroup<PhotoSourceKind>(
         groupValue: _settings.photoSource,
         onChanged: (v) => setState(
-          () => _settings = _settings.copyWith(photoSource: v ?? PhotoSourceKind.local),
+          () => _settings = _settings.copyWith(
+            photoSource: v ?? PhotoSourceKind.local,
+          ),
         ),
         child: Column(
           children: [
@@ -703,24 +975,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
               title: Text('Local ambient gradients'),
             ),
             RadioListTile<PhotoSourceKind>(
-              key: const Key('settings-photos-google'),
-              value: PhotoSourceKind.google,
-              title: const Text('Google Photos / Drive folder'),
-              subtitle: Text(_settings.googleLinked
-                  ? 'Linked: ${_settings.googleFolderName}'
-                  : 'Not linked'),
+              key: const Key('settings-photos-ambient'),
+              value: PhotoSourceKind.ambient,
+              title: const Text('Google Photos (Ambient API)'),
+              subtitle: Text(
+                _settings.ambientLinked
+                    ? 'Linked'
+                    : 'Not linked · needs partner-program access',
+              ),
+            ),
+            RadioListTile<PhotoSourceKind>(
+              key: const Key('settings-photos-drive'),
+              value: PhotoSourceKind.drive,
+              title: const Text('Google Drive folder'),
+              subtitle: Text(
+                _settings.driveLinked
+                    ? 'Linked · ${_settings.driveFolderIds.length} folder(s)'
+                    : 'Not linked',
+              ),
             ),
           ],
         ),
       ),
-      if (_settings.photoSource == PhotoSourceKind.google) ...[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-          child: TextField(
-            controller: _folderController,
-            decoration: const InputDecoration(
-              labelText: 'Folder / album name',
-            ),
+      if (_settings.photoSource == PhotoSourceKind.ambient) ...[
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Text(
+            'Link with a QR: sign in on your phone, then pick the albums to show. '
+            'Uses the Google Photos Ambient API (requires partner-program access).',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ),
         Padding(
@@ -728,14 +1011,125 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Align(
             alignment: Alignment.centerLeft,
             child: FilledButton.tonalIcon(
-              key: const Key('settings-google-link'),
-              onPressed: _linkGoogle,
-              icon: const Icon(Icons.link),
-              label: Text(_settings.googleLinked ? 'Re-link Google account' : 'Link Google account'),
+              key: const Key('settings-ambient-link'),
+              onPressed: _linkAmbient,
+              icon: const Icon(Icons.qr_code_2),
+              label: Text(
+                _settings.ambientLinked
+                    ? 'Re-link Google Photos'
+                    : 'Link Google Photos',
+              ),
+            ),
+          ),
+        ),
+      ],
+      if (_settings.photoSource == PhotoSourceKind.drive) ...[
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Text(
+            '1. Consent once on the Mac (tools/google_photo_consent.py) → Import the '
+            'synced token.  2. Choose folders (or paste IDs).',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              FilledButton.tonalIcon(
+                key: const Key('settings-drive-import'),
+                onPressed: _importDriveToken,
+                icon: const Icon(Icons.download_for_offline_outlined),
+                label: Text(
+                  _settings.driveLinked
+                      ? 'Re-import Drive token'
+                      : 'Import Drive token',
+                ),
+              ),
+              FilledButton.icon(
+                key: const Key('settings-drive-pick'),
+                onPressed: _settings.driveLinked ? _pickDriveFolders : null,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Choose folders'),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: TextField(
+            key: const Key('settings-drive-folders'),
+            controller: _folderController,
+            decoration: const InputDecoration(
+              labelText: 'Drive folder ID(s) or link(s)',
+              helperText: 'Filled by "Choose folders", or paste manually.',
             ),
           ),
         ),
       ],
     ];
+  }
+}
+
+/// A checkbox list of Drive folders for the user to pick which to show. Returns the
+/// set of selected folder IDs (or null if cancelled).
+class _DriveFolderPicker extends StatefulWidget {
+  const _DriveFolderPicker({
+    required this.folders,
+    required this.initiallySelected,
+  });
+
+  final List<DriveFolder> folders;
+  final Set<String> initiallySelected;
+
+  @override
+  State<_DriveFolderPicker> createState() => _DriveFolderPickerState();
+}
+
+class _DriveFolderPickerState extends State<_DriveFolderPicker> {
+  late final Set<String> _selected = {...widget.initiallySelected};
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Choose Drive folders'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: widget.folders.isEmpty
+            ? const Text('No folders found in this account.')
+            : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final f in widget.folders)
+                    CheckboxListTile(
+                      key: Key('folder-${f.id}'),
+                      value: _selected.contains(f.id),
+                      title: Text(f.name),
+                      subtitle: f.shared ? const Text('Shared with me') : null,
+                      onChanged: (v) => setState(() {
+                        if (v == true) {
+                          _selected.add(f.id);
+                        } else {
+                          _selected.remove(f.id);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_selected),
+          child: Text('Use ${_selected.length}'),
+        ),
+      ],
+    );
   }
 }

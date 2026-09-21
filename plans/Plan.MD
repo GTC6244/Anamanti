@@ -26,8 +26,8 @@ These answers override any earlier ambiguity in this document:
 | **Memory policy** | **Explicit + inferred** — remember on request *and* auto-extract facts/prefs from conversation |
 | **Memory UX** | Manage via **settings list (view/delete)** + **voice** ("remember…", "forget that") |
 | **Resilience** | **Auto-reconnect** with backoff via mDNS + a subtle **disconnected** status; slideshow keeps running |
-| **Idle screen** | **Photo slideshow** sourced from a chosen **Google Photos / Drive** folder |
-| **Photo auth** | **On-device OAuth** — the Echo Show runs the flow and calls Google directly |
+| **Idle screen** | **Photo slideshow** — two selectable backends: **Google Photos** (Ambient API; ideal, but **partner-program gated**) and **Google Drive** folder (interim, works now); plus local gradients |
+| **Photo auth** | **Ambient API:** on-device device-code + QR (`photosambient.mediaitems`) — blocked by Partner Program (`createDevice` 403). **Drive:** `drive.readonly` via one-time Mac consent (Desktop client) → token synced to device. Dual OAuth clients |
 | **AEC** | **Ship full-duplex**; raise wake-word confidence **threshold during playback** to suppress self-triggers; real AEC only if still bad |
 | **Settings screen** | User-configurable: **LLM backend**, **TTS voice**, **wake word**, **photo source** |
 | **Tool calling / actions** | **rig-core is the default engine** (tool-calling loop); info tools run on the Mac, device actions (timers/alarms) emit `ambient-*` frames and execute **on-device**. Weather is grounded by a configured **home location** (`AMBIENT_HOME_LOCATION`). Calendar/reminders designed but deferred. |
@@ -523,11 +523,26 @@ implementers:
   suppress self-triggers from the device's own speaker. Only build real AEC
   (Rust-side WebRTC/speexdsp with the playback signal as reference, or Android
   hardware `AcousticEchoCanceler`) if self-triggering remains a problem.
-- **Google Photos/Drive auth:** **on-device OAuth** — the Echo Show runs the
-  consent flow and calls Google directly; the token is stored on the device.
-  Needs a usable consent flow on the 8-inch screen and a folder picker in
-  settings. *(Note: the claude.ai Google Drive connector in this environment is
-  unauthorized and cannot prototype this — wire real OAuth into the app.)*
+- **Photo auth (two backends, selectable in settings):**
+  - **Google Photos Ambient API** (the ideal): OAuth 2.0 for TVs and Limited Input
+    devices (device-code + QR), fully on-device — sign-in QR → `createDevice` →
+    album-picker QR → poll `mediaSourcesSet` → `listMediaItems` (`baseUrl` +
+    `=w…-h…` + Bearer). Scope `photosambient.mediaitems` (the flow rejects
+    `photosambient.tv`). **Gated: the Ambient API requires Google Photos Partner
+    Program acceptance** — `createDevice` returns 403 until the project is accepted
+    (a valid token/scope is not enough). Built + on-device; works once accepted.
+  - **Google Drive** (interim): `drive.readonly` folder listing. The device-code
+    flow rejects Drive scopes, so consent runs **once on the Mac**
+    (`tools/google_photo_consent.py`, loopback+PKCE, a **"Desktop app"** client) and
+    the refresh token is adb-pushed to the device (Settings → Import Drive token).
+    Reads a folder (owned or "Shared with me"); `drive.file` is unusable here (can't
+    list a folder without an interactive Picker).
+  - Both clients' creds are injected at build via
+    `--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*` (TV) +
+    `GOOGLE_DRIVE_*` (Desktop). Ruled out: the Photos Library API (no library read
+    since March 2025). Implemented in `slideshow/ambient_photos.dart`,
+    `drive_photos.dart`, `photo_source.dart`, settings, `main.dart`. Consent screens
+    stay in **Testing** mode with household test users.
 - **Persistent memory:** **SQLite** on the Mac. Schema holds structured facts +
   preferences with full-text search (no embedding model for v1). Policy is
   **explicit + inferred** — store on request and auto-extract facts/prefs from

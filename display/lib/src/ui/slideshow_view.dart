@@ -11,21 +11,35 @@ class SlideshowView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        final item = controller.current;
-        return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 1200),
-          switchInCurve: Curves.easeInOut,
-          switchOutCurve: Curves.easeInOut,
-          child: _Slide(
-            // Keying by index makes AnimatedSwitcher cross-fade between slides.
-            key: ValueKey<int>(controller.index),
-            item: item,
-          ),
-        );
+    return GestureDetector(
+      // Swipe left → next photo, swipe right → previous (manual navigation also
+      // resets the auto-advance timer). `opaque` so drags anywhere on the photo are
+      // captured, even over transparent gradient areas.
+      behavior: HitTestBehavior.opaque,
+      onHorizontalDragEnd: (details) {
+        final v = details.primaryVelocity ?? 0;
+        if (v < 0) {
+          controller.next(userInitiated: true);
+        } else if (v > 0) {
+          controller.previous(userInitiated: true);
+        }
       },
+      child: AnimatedBuilder(
+        animation: controller,
+        builder: (context, _) {
+          final item = controller.current;
+          return AnimatedSwitcher(
+            duration: const Duration(milliseconds: 1200),
+            switchInCurve: Curves.easeInOut,
+            switchOutCurve: Curves.easeInOut,
+            child: _Slide(
+              // Keying by index makes AnimatedSwitcher cross-fade between slides.
+              key: ValueKey<int>(controller.index),
+              item: item,
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -37,7 +51,8 @@ class _Slide extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final gradient = item?.gradient ?? const [Color(0xFF1A2036), Color(0xFF0B0E1A)];
+    final gradient =
+        item?.gradient ?? const [Color(0xFF1A2036), Color(0xFF0B0E1A)];
     final decoration = BoxDecoration(
       gradient: LinearGradient(
         begin: Alignment.topLeft,
@@ -55,6 +70,7 @@ class _Slide extends StatelessWidget {
           ? null
           : Image.network(
               url,
+              headers: item?.headers,
               fit: BoxFit.cover,
               width: double.infinity,
               height: double.infinity,

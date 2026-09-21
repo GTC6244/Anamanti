@@ -39,6 +39,11 @@ dependencies:
   flutter_rust_bridge: 2.11.1
   # Resolves the on-device model directory for the wake-word engine (Phase 5).
   path_provider: ^2.1.4
+  # On-device Google Photos Ambient API (Phase 6): device-code OAuth + media
+  # listing over http, and the QR shown on the Echo Show for phone sign-in / album
+  # selection (qr_flutter is pure Dart — no Play Services / native dependency).
+  http: ^1.1.0
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:

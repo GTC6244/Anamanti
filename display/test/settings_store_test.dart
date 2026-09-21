@@ -38,9 +38,13 @@ void main() {
       wakeWord: 'hey_jarvis',
       threshold: 0.4,
       activeThreshold: 0.8,
-      photoSource: PhotoSourceKind.google,
-      googleFolderName: 'Family',
-      googleLinked: true,
+      photoSource: PhotoSourceKind.drive,
+      ambientRefreshToken: 'refresh-abc',
+      ambientDeviceId: 'dev-77',
+      ambientLinked: true,
+      driveRefreshToken: 'drive-refresh',
+      driveFolderIds: ['fld-1', 'fld-2'],
+      driveLinked: true,
     );
     await store.save(settings);
     final loaded = await store.load();

@@ -96,28 +96,72 @@ live-path wiring (Plan Phases 1-2) or retire it.
 - Note: **on-device perf/audio testing must use `--release` APKs** (debug Rust makes
       inference ~3.6× slower on the 32-bit device and masks the real behavior).
 
-## 3. Real Google OAuth for the photo slideshow (feature stub)
+## 3. Google Photos for the slideshow — two selectable backends
 
-Currently a testable seam: `GoogleAuthenticator` + `StubGoogleAuthenticator` and the
-`GooglePhotoSource` path in `display/lib/src/slideshow/photo_source.dart`. Scopes already
-declared (`photoslibrary.readonly`, `drive.readonly`).
+The device offers two Google photo backends (plus local gradients), chosen in
+Settings → Idle photos:
 
-- [ ] Decide the flow based on whether the Echo Show's LineageOS build has **Google
-      Play Services**:
-  - No Play Services (typical): use the **Device Authorization flow**
-    (OAuth client type "TVs and Limited Input devices") — show a code + URL, approve
-    on a phone. Does not need Play Services or a keyboard.
-  - Has Play Services (GApps): standard `google_sign_in` with an **Android** OAuth
-    client ID (package `com.ambientdisplay.ambient_display` + release/debug SHA-1).
-- [ ] Create the OAuth client ID in Google Cloud Console; enable the Photos Library
-      and/or Drive API; configure the consent screen + test users.
-- [ ] Implement a real `GoogleAuthenticator.link()` for the chosen flow.
-- [ ] Propagate the resulting **access token + photo URLs** from the settings screen
-      back to the slideshow: thread a `GoogleLinkResult` through `onApplied` in
-      `lib/main.dart` into `photoSourceFromSettings(...)` (today the token isn't
-      carried, so the slideshow stays on local ambient gradients even when linked).
-- [ ] Implement folder/album listing so the picker shows real folders and resolves
-      their image URLs.
+**(a) Google Photos Ambient API** — the ideal, purpose-built API
+(https://developers.google.com/photos/ambient): on-device device-code/QR, user
+picks albums in the Google Photos app. Fully built + on-device. **BLOCKED: the
+Ambient API is gated behind the Google Photos Partner Program** — `devices.create`
+returns `403 PERMISSION_DENIED` ("refer to the partner program") even with a valid
+`photosambient.mediaitems` token. Owner is applying; the moment the project is
+accepted, this option works with no code change.
+
+**(b) Google Drive** (interim, works today) — `drive.readonly` folder listing.
+Consent can't happen on-device (the device-code flow rejects Drive scopes), so it
+uses **one-time consent on the Mac** (`tools/google_photo_consent.py`, loopback+PKCE,
+a **"Desktop app"** OAuth client) → refresh token adb-pushed → Settings "Import Drive
+token". Reads a Drive folder (owned or "Shared with me").
+
+Dead ends ruled out (keep, so we don't relitigate):
+- **Photos Library API** — since March 2025 can't read a user's existing library.
+- **Device-code/QR + Drive** — `/device/code` rejects `drive.readonly`/`drive.photos.readonly`
+  (`invalid_scope`); only `drive.file` passes but it can't list a folder (Picker-only).
+- **Ambient scope gotcha** — the device flow rejects `photosambient.tv`; the real
+  accepted scope is `photosambient.mediaitems`.
+
+Done:
+- [x] `AmbientApiClient` (`display/lib/src/slideshow/ambient_photos.dart`): device-code
+      (`requestDeviceCode`/`pollForTokens`), `refresh`, `createDevice` (v4-UUID
+      `requestId`), `getDevice` (poll `mediaSourcesSet`), `listMediaItems` (maps each
+      `mediaFile.baseUrl` → `PhotoItem` with `=w…-h…` size + Bearer header,
+      paginated). Injectable http; covered by `test/ambient_photos_test.dart`.
+- [x] Settings two-QR link flow (`qr_flutter`): sign-in QR → create device →
+      album-picker QR → poll until `mediaSourcesSet`; stores refresh token +
+      `ambientDeviceId` in `AppSettings`.
+- [x] Boot refresh + slideshow source (`main.dart` → `AmbientPhotoSource` via
+      `photoSourceFromSettings`); falls back to local gradients when unlinked/offline.
+      Covered by `test/photo_source_test.dart`.
+- [x] Drive backend restored: `listDrivePhotos` (`drive_photos.dart`), Mac helper
+      `tools/google_photo_consent.py`, `google_token_import.dart` + Settings "Import
+      Drive token", `DrivePhotoSource`. Boot refresh uses the Desktop client.
+- [x] Both clients' creds injected at build via `--dart-define-from-file=google_oauth.json`
+      (gitignored; `.example` committed): TV client (`GOOGLE_OAUTH_CLIENT_ID/SECRET`,
+      Ambient) + Desktop client (`GOOGLE_DRIVE_CLIENT_ID/SECRET`, Drive).
+- [x] `AppSettings` carries per-backend state (ambient*/drive*); 60 tests green.
+
+Frame UX (done, verified on-device):
+- [x] **Drive works end-to-end on the Echo Show**: Desktop client + Mac consent →
+      token synced → Settings **folder picker** (`listDriveFolders`, checkboxes) →
+      slideshow of the chosen folders.
+- [x] Images use Drive's **`thumbnailLink` sized to ~1600px** (not the full-res
+      `alt=media` originals, which were too heavy for the 1 GB device — slow + OOM).
+- [x] **Periodic refresh** (`main.dart`, every 30 min): re-mint token + re-list so an
+      always-on frame never goes stale when tokens/URLs expire (~1 h). Keeps the
+      current photos on a transient refresh failure.
+- [x] **Immersive full-screen** (`SystemUiMode.immersiveSticky`) — no status/nav bars.
+- [x] **Swipe** left/right to navigate photos (wraps; resets auto-advance; disabled
+      mid-conversation via the pointer-transparent scrim).
+
+Remaining:
+- [ ] **Ambient:** apply to the Google Photos Partner Program; once accepted it works.
+- [ ] Follow-up: refresh tokens are device-local **plaintext** (`shared_preferences`)
+      — move to platform secure storage.
+- [ ] Polish (optional): lighten the idle scrim further; investigate the device's
+      "Offline"/clock-drift (device lost the Mac link + NTP, not a photo bug).
+- [ ] Nice-to-have (Ambient): streamlined single-QR flow via the `state` param.
 
 ## 4. Ops & deployment polish
 
