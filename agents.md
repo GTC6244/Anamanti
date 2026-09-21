@@ -131,6 +131,14 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     internet_search tool; set `native` for the hand-rolled HTTP backends / no tools)
 #   AMBIENT_WEB_SEARCH=on|off  (default on with the rig engine) plus
 #     AMBIENT_SEARCH_PROVIDER=duckduckgo|tavily and TAVILY_API_KEY for real web search
+#   AMBIENT_CALENDARS=Name=URL;Name=URL  (read-only web iCalendar/.ics subscriptions;
+#     `webcal://` is accepted. Enables the rig-engine `calendar_lookup` tool — the LLM
+#     answers schedule/meeting/"who am I seeing" questions live from these feeds. Unset
+#     → the tool isn't advertised. Bare URLs are auto-named "Calendar N".)
+#   AMBIENT_CALENDAR_CACHE_TTL=300  (seconds a fetched .ics feed is cached before the
+#     next lookup re-fetches; default 300. The fetch dominates cost — parsing a ~1 MB
+#     feed is ~20 ms — so a few minutes of staleness makes back-to-back questions
+#     instant. `0` disables caching / always re-fetches.)
 #   AMBIENT_HOME_LOCATION="Austin, Texas"  AMBIENT_WEATHER_UNITS=imperial|metric
 #     (grounds "here" for weather/location questions in the system prompt)
 #   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY

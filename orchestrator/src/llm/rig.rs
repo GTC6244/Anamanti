@@ -35,7 +35,10 @@ use rig_core::providers::{anthropic, ollama};
 use rig_core::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
 use rig_core::tool::PortableTool;
 
+use chrono::Local;
+
 use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, ReplyStream};
+use crate::calendar::CalendarSource;
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
 /// calls can never spin forever. Each round is one streamed completion pass.
@@ -64,6 +67,15 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              (convert the requested time to whole seconds) and `cancel_timer` tools. When the user \
              asks to set, start, or cancel a timer, call the tool — never say you are unable to set \
              timers. There can be any number of timers running at once.",
+        );
+    }
+    if has(CalendarLookup::NAME) {
+        parts.push(
+            "You have a `calendar_lookup` tool that reads the user's real connected calendars. \
+             Whenever the user asks about their schedule, meetings, appointments, plans, \
+             availability, or when they are seeing a particular person, you MUST call \
+             `calendar_lookup` and answer from its results. Never guess at their schedule or claim \
+             you cannot access their calendar — use the tool.",
         );
     }
     parts.join(" ")
@@ -479,6 +491,165 @@ fn cancel_timer_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Resul
 }
 
 // ===========================================================================
+// Calendar tool (read-only web iCalendar subscriptions)
+// ===========================================================================
+
+/// Default number of events folded into a `calendar_lookup` result.
+pub const DEFAULT_CALENDAR_RESULTS: u8 = 10;
+
+/// Typed arguments for [`CalendarLookup`].
+#[derive(Debug, Deserialize)]
+pub struct CalendarArgs {
+    /// Which window to look at: `today`, `tomorrow`, `this_week`, `next_7_days`,
+    /// `next_14_days`, `next_30_days`/`next_month`, `this_month`, `on:YYYY-MM-DD`, or
+    /// `range:YYYY-MM-DD..YYYY-MM-DD`. Defaults to `next_7_days`.
+    #[serde(default)]
+    pub when: Option<String>,
+    /// Optional person name to filter by (fuzzy match on attendees/organizer/title).
+    #[serde(default)]
+    pub person: Option<String>,
+    /// Optional free-text filter over event title/description/location.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Maximum events to return (defaults to [`DEFAULT_CALENDAR_RESULTS`], clamped
+    /// to 1..=50).
+    #[serde(default)]
+    pub max_results: Option<u8>,
+}
+
+/// A concrete, `std::error::Error` failure for the calendar tool (rig requires the
+/// tool's error type to implement `std::error::Error`, which `anyhow::Error` does
+/// not).
+#[derive(Debug)]
+pub struct CalendarError(pub String);
+
+impl std::fmt::Display for CalendarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "calendar lookup failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for CalendarError {}
+
+/// Reads the user's connected web calendars. Injected [`CalendarSource`] so the tool
+/// is testable offline, mirroring how [`InternetSearch`] holds a `SearchProvider`.
+pub struct CalendarLookup {
+    source: Arc<dyn CalendarSource>,
+}
+
+impl CalendarLookup {
+    pub fn new(source: Arc<dyn CalendarSource>) -> Self {
+        Self { source }
+    }
+
+    /// The rig tool definition to advertise on a completion request.
+    pub fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: self.description(),
+            parameters: self.parameters(),
+        }
+    }
+
+    /// Execute the tool from the model's raw JSON arguments (the runtime path).
+    pub async fn invoke(&self, arguments: &Value) -> Result<String> {
+        let args: CalendarArgs = if arguments.is_null() {
+            CalendarArgs {
+                when: None,
+                person: None,
+                query: None,
+                max_results: None,
+            }
+        } else {
+            serde_json::from_value(arguments.clone())
+                .context("parsing calendar_lookup arguments")?
+        };
+        self.call(args)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+impl PortableTool for CalendarLookup {
+    const NAME: &'static str = "calendar_lookup";
+    type Args = CalendarArgs;
+    type Output = String;
+    type Error = CalendarError;
+
+    fn description(&self) -> String {
+        let names = self.source.calendar_names().join(", ");
+        format!(
+            "Look up events from the user's connected calendars ({names}). Use this for \
+             ANY question about the user's schedule, meetings, appointments, plans, or \
+             availability — what is coming up, what is on a particular day, or when they \
+             are seeing a specific person. Returns a short text list of matching events."
+        )
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "when": {
+                    "type": "string",
+                    "description": "Time window to search. One of: 'today', 'tomorrow', \
+                        'this_week', 'next_7_days', 'next_14_days', 'next_30_days' (use \
+                        this for 'next month'/'this month'/'the coming weeks'), \
+                        'on:YYYY-MM-DD' (a specific day), or \
+                        'range:YYYY-MM-DD..YYYY-MM-DD'. Prefer a wider window when the \
+                        user is vague. Defaults to 'next_7_days'."
+                },
+                "person": {
+                    "type": "string",
+                    "description": "Optional. Only return events involving this person \
+                        (matched against attendees, organizer, and the event title)."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional free-text filter over the event title, \
+                        description, and location."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "How many events to list (default 10)."
+                }
+            }
+        })
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let (window, label) = crate::calendar::resolve_window(args.when.as_deref(), Local::now())
+            .map_err(CalendarError)?;
+        let mut events = self
+            .source
+            .events(window)
+            .await
+            .map_err(|e| CalendarError(format!("{e:#}")))?;
+
+        if let Some(person) = args.person.as_deref().filter(|s| !s.trim().is_empty()) {
+            events.retain(|e| crate::calendar::person_matches(e, person));
+        }
+        if let Some(query) = args.query.as_deref().filter(|s| !s.trim().is_empty()) {
+            events.retain(|e| crate::calendar::query_matches(e, query));
+        }
+
+        let max = args
+            .max_results
+            .unwrap_or(DEFAULT_CALENDAR_RESULTS)
+            .clamp(1, 50) as usize;
+        Ok(crate::calendar::render_events(
+            &events,
+            &label,
+            max,
+            args.person.as_deref(),
+            args.query.as_deref(),
+        ))
+    }
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -487,24 +658,34 @@ fn cancel_timer_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Resul
 ///
 /// The **timer** tools (`set_timer` / `cancel_timer`) are always present — they are
 /// stateless device actions needing no config. The **web-search** tool is included
-/// only when a provider is configured (`web_search` on).
+/// only when a provider is configured (`web_search` on); the **calendar** tool only
+/// when calendar subscriptions are configured (`AMBIENT_CALENDARS`).
 pub struct Tools {
     definitions: Vec<ToolDefinition>,
     search: Option<Arc<InternetSearch>>,
+    calendar: Option<Arc<CalendarLookup>>,
 }
 
 impl Tools {
     /// Build the tool set. Timer tools are always advertised; the web-search tool is
-    /// added when `search` is `Some`.
-    pub fn new(search: Option<Arc<dyn SearchProvider>>) -> Self {
+    /// added when `search` is `Some`, and the calendar tool when `calendar` is `Some`.
+    pub fn new(
+        search: Option<Arc<dyn SearchProvider>>,
+        calendar: Option<Arc<dyn CalendarSource>>,
+    ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
         if let Some(s) = &search {
             definitions.push(s.definition());
         }
+        let calendar = calendar.map(|source| Arc::new(CalendarLookup::new(source)));
+        if let Some(c) = &calendar {
+            definitions.push(c.definition());
+        }
         Self {
             definitions,
             search,
+            calendar,
         }
     }
 
@@ -523,6 +704,10 @@ impl Tools {
             InternetSearch::NAME => match &self.search {
                 Some(search) => search.invoke(arguments).await,
                 None => anyhow::bail!("web search is not enabled"),
+            },
+            CalendarLookup::NAME => match &self.calendar {
+                Some(calendar) => calendar.invoke(arguments).await,
+                None => anyhow::bail!("calendar lookup is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
@@ -567,7 +752,10 @@ pub fn tools_from_config(
     api_key: Option<&str>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
-    Some(Arc::new(Tools::new(search)))
+    // Calendar subscriptions are read from `AMBIENT_CALENDARS` (read-only web .ics);
+    // absent → the calendar tool simply isn't advertised.
+    let calendar = crate::calendar::from_env();
+    Some(Arc::new(Tools::new(search, calendar)))
 }
 
 /// Build the tool set from the environment (used by the example / env-driven
@@ -867,6 +1055,22 @@ mod tests {
         }
     }
 
+    /// A canned calendar source so tool tests never touch the network.
+    struct StaticCalendar(Vec<crate::calendar::CalEvent>);
+
+    #[async_trait]
+    impl CalendarSource for StaticCalendar {
+        async fn events(
+            &self,
+            _window: crate::calendar::TimeWindow,
+        ) -> Result<Vec<crate::calendar::CalEvent>> {
+            Ok(self.0.clone())
+        }
+        fn calendar_names(&self) -> Vec<String> {
+            vec!["Work".to_string()]
+        }
+    }
+
     /// Serve a fixed sequence of raw HTTP responses, one per inbound connection.
     fn serve_sequence(bodies: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -966,13 +1170,59 @@ mod tests {
         let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"It is sunny in Paris.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
         let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
 
-        let tools = Some(Arc::new(Tools::new(Some(Arc::new(StaticSearch("Sunny, 21C."))))));
+        let tools = Some(Arc::new(Tools::new(
+            Some(Arc::new(StaticSearch("Sunny, 21C."))),
+            None,
+        )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "what is the weather in paris"))
             .await
             .unwrap();
-        assert_eq!(collect_reply(stream).await.unwrap(), "It is sunny in Paris.");
+        assert_eq!(
+            collect_reply(stream).await.unwrap(),
+            "It is sunny in Paris."
+        );
+        server.await.unwrap();
+    }
+
+    /// End-to-end tool loop for the calendar tool: round 0 the fake Ollama asks for
+    /// `calendar_lookup`; round 1 (after the rendered events are threaded back) it
+    /// streams the answer. Proves the tool is advertised, dispatched, and its result
+    /// reaches the model — using a canned source so no network/feed is touched.
+    #[tokio::test]
+    async fn rig_ollama_runs_calendar_tool_then_streams_answer() {
+        use chrono::{Duration, Local};
+
+        let tool_call = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"calendar_lookup\",\"arguments\":{\"when\":\"today\",\"person\":\"Alice\"}}}]},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"You have a 1:1 with Alice at 2 PM.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
+
+        let start = Local::now() + Duration::hours(2);
+        let event = crate::calendar::CalEvent {
+            calendar: "Work".into(),
+            summary: "1:1".into(),
+            start,
+            end: Some(start + Duration::hours(1)),
+            all_day: false,
+            location: None,
+            organizer: None,
+            attendees: vec!["Alice".into()],
+            description: None,
+        };
+        let tools = Some(Arc::new(Tools::new(
+            None,
+            Some(Arc::new(StaticCalendar(vec![event]))),
+        )));
+        let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
+        let stream = backend
+            .respond(LlmTurn::new("sys", "am I seeing Alice today?"))
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_reply(stream).await.unwrap(),
+            "You have a 1:1 with Alice at 2 PM."
+        );
         server.await.unwrap();
     }
 
@@ -1038,7 +1288,7 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None);
+        let tools = Tools::new(None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -1055,7 +1305,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
-        let tools = Some(Arc::new(Tools::new(None)));
+        let tools = Some(Arc::new(Tools::new(None, None)));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "set a 5 minute pasta timer").with_actions(tx))
