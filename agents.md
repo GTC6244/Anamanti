@@ -160,7 +160,13 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     feed is ~20 ms — so a few minutes of staleness makes back-to-back questions
 #     instant. `0` disables caching / always re-fetches.)
 #   AMBIENT_HOME_LOCATION="Austin, Texas"  AMBIENT_WEATHER_UNITS=imperial|metric
-#     (grounds "here" for weather/location questions in the system prompt)
+#     (grounds "here" for weather/location questions in the system prompt; also the
+#     default origin + distance units for the directions tool below)
+#   AMBIENT_DIRECTIONS_PROVIDER=mapbox  MAPBOX_TOKEN=<token>  (enables the rig-engine
+#     `directions_lookup` tool — real distance, travel time, and LIVE TRAFFIC between
+#     two places via Mapbox Geocoding v6 + Directions v5 `driving-traffic`. Unset token
+#     → the tool isn't advertised. Origin defaults to AMBIENT_HOME_LOCATION; voice-only
+#     in v1. Only `mapbox` is supported today; MAPBOX_ACCESS_TOKEN is also accepted.)
 #   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
 #     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
 #   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /chatlog,

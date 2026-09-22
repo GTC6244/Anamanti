@@ -347,8 +347,14 @@ async fn two_devices_share_one_pipeline_and_each_reply_goes_to_its_own_socket() 
     assert_eq!(reply_b, "You said: device B question");
 
     // Cross-routing check: neither device saw the other's content.
-    assert!(!reply_a.contains('B'), "device A reply leaked device B: {reply_a:?}");
-    assert!(!reply_b.contains('A'), "device B reply leaked device A: {reply_b:?}");
+    assert!(
+        !reply_a.contains('B'),
+        "device A reply leaked device B: {reply_a:?}"
+    );
+    assert!(
+        !reply_b.contains('A'),
+        "device B reply leaked device A: {reply_b:?}"
+    );
 }
 
 /// An LLM that emits one complete sentence and then hangs forever, so a turn is

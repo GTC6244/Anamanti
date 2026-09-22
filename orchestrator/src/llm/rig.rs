@@ -39,6 +39,7 @@ use chrono::Local;
 
 use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, ReplyStream};
 use crate::calendar::CalendarSource;
+use crate::directions::{DirectionsConfig, DirectionsProvider, TravelMode};
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
 /// calls can never spin forever. Each round is one streamed completion pass.
@@ -76,6 +77,16 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              availability, or when they are seeing a particular person, you MUST call \
              `calendar_lookup` and answer from its results. Never guess at their schedule or claim \
              you cannot access their calendar — use the tool.",
+        );
+    }
+    if has(DirectionsLookup::NAME) {
+        parts.push(
+            "You have a `directions_lookup` tool that returns real distance, travel time, and \
+             live traffic between two places. Whenever the user asks how to get somewhere, how \
+             far away it is, how long it takes to drive/walk/bike there, or about current \
+             traffic, you MUST call `directions_lookup` and answer from its result. If the user \
+             names only a destination, omit the origin — it defaults to home. Never guess at \
+             distances or travel times.",
         );
     }
     parts.join(" ")
@@ -650,6 +661,151 @@ impl PortableTool for CalendarLookup {
 }
 
 // ===========================================================================
+// Directions tool (distance / travel time / live traffic)
+// ===========================================================================
+
+/// Typed arguments for [`DirectionsLookup`].
+#[derive(Debug, Deserialize)]
+pub struct DirectionsArgs {
+    /// Where to start from. Omit to use the device's home location.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Where to go (required).
+    pub destination: String,
+    /// How to travel: `driving` (default, live-traffic), `walking`, or `cycling`.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// A concrete, `std::error::Error` failure for the directions tool (rig requires the
+/// tool's error type to implement `std::error::Error`, which `anyhow::Error` does
+/// not).
+#[derive(Debug)]
+pub struct DirectionsError(pub String);
+
+impl std::fmt::Display for DirectionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "directions lookup failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for DirectionsError {}
+
+/// Looks up a route via an injected [`DirectionsProvider`] so the tool is testable
+/// offline, mirroring [`CalendarLookup`]. Holds the default origin (the device's
+/// home location) and the preferred distance units.
+pub struct DirectionsLookup {
+    provider: Arc<dyn DirectionsProvider>,
+    default_origin: Option<String>,
+    imperial: bool,
+}
+
+impl DirectionsLookup {
+    pub fn new(
+        provider: Arc<dyn DirectionsProvider>,
+        default_origin: Option<String>,
+        imperial: bool,
+    ) -> Self {
+        Self {
+            provider,
+            default_origin,
+            imperial,
+        }
+    }
+
+    /// The rig tool definition to advertise on a completion request.
+    pub fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: self.description(),
+            parameters: self.parameters(),
+        }
+    }
+
+    /// Execute the tool from the model's raw JSON arguments (the runtime path).
+    pub async fn invoke(&self, arguments: &Value) -> Result<String> {
+        let args: DirectionsArgs = serde_json::from_value(arguments.clone())
+            .context("parsing directions_lookup arguments")?;
+        self.call(args)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+impl PortableTool for DirectionsLookup {
+    const NAME: &'static str = "directions_lookup";
+    type Args = DirectionsArgs;
+    type Output = String;
+    type Error = DirectionsError;
+
+    fn description(&self) -> String {
+        let home = self
+            .default_origin
+            .as_deref()
+            .map(|h| format!(" The origin defaults to the device's home ({h}) when omitted."))
+            .unwrap_or_default();
+        format!(
+            "Get the real driving distance, travel time, and live traffic between two places. \
+             Use this for ANY question about how to get somewhere, how far away it is, how long \
+             it takes to drive/walk/bike there, or current traffic conditions.{home} Returns a \
+             short spoken summary."
+        )
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "Where the trip starts (an address, place, or city). Omit to \
+                        start from the device's home location."
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "Where the trip ends (an address, place, or city)."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["driving", "walking", "cycling"],
+                    "description": "Travel mode. Defaults to driving (with live traffic)."
+                }
+            },
+            "required": ["destination"]
+        })
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let origin = args
+            .origin
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.default_origin.clone())
+            .ok_or_else(|| {
+                DirectionsError(
+                    "no starting point given and no home location is configured".to_string(),
+                )
+            })?;
+        let destination = args.destination.trim();
+        if destination.is_empty() {
+            return Err(DirectionsError("no destination given".to_string()));
+        }
+        let mode = TravelMode::from_arg(args.mode.as_deref());
+        let directions = self
+            .provider
+            .directions(&origin, destination, mode)
+            .await
+            .map_err(|e| DirectionsError(format!("{e:#}")))?;
+        Ok(crate::directions::render_directions(
+            &directions,
+            self.imperial,
+        ))
+    }
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -659,19 +815,23 @@ impl PortableTool for CalendarLookup {
 /// The **timer** tools (`set_timer` / `cancel_timer`) are always present — they are
 /// stateless device actions needing no config. The **web-search** tool is included
 /// only when a provider is configured (`web_search` on); the **calendar** tool only
-/// when calendar subscriptions are configured (`AMBIENT_CALENDARS`).
+/// when calendar subscriptions are configured (`AMBIENT_CALENDARS`); the
+/// **directions** tool only when a routing provider is configured (`MAPBOX_TOKEN`).
 pub struct Tools {
     definitions: Vec<ToolDefinition>,
     search: Option<Arc<InternetSearch>>,
     calendar: Option<Arc<CalendarLookup>>,
+    directions: Option<Arc<DirectionsLookup>>,
 }
 
 impl Tools {
     /// Build the tool set. Timer tools are always advertised; the web-search tool is
-    /// added when `search` is `Some`, and the calendar tool when `calendar` is `Some`.
+    /// added when `search` is `Some`, the calendar tool when `calendar` is `Some`, and
+    /// the directions tool when `directions` is `Some`.
     pub fn new(
         search: Option<Arc<dyn SearchProvider>>,
         calendar: Option<Arc<dyn CalendarSource>>,
+        directions: Option<DirectionsConfig>,
     ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
@@ -682,10 +842,21 @@ impl Tools {
         if let Some(c) = &calendar {
             definitions.push(c.definition());
         }
+        let directions = directions.map(|cfg| {
+            Arc::new(DirectionsLookup::new(
+                cfg.provider,
+                cfg.default_origin,
+                cfg.imperial,
+            ))
+        });
+        if let Some(d) = &directions {
+            definitions.push(d.definition());
+        }
         Self {
             definitions,
             search,
             calendar,
+            directions,
         }
     }
 
@@ -708,6 +879,10 @@ impl Tools {
             CalendarLookup::NAME => match &self.calendar {
                 Some(calendar) => calendar.invoke(arguments).await,
                 None => anyhow::bail!("calendar lookup is not enabled"),
+            },
+            DirectionsLookup::NAME => match &self.directions {
+                Some(directions) => directions.invoke(arguments).await,
+                None => anyhow::bail!("directions lookup is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
@@ -755,7 +930,10 @@ pub fn tools_from_config(
     // Calendar subscriptions are read from `AMBIENT_CALENDARS` (read-only web .ics);
     // absent → the calendar tool simply isn't advertised.
     let calendar = crate::calendar::from_env();
-    Some(Arc::new(Tools::new(search, calendar)))
+    // Directions come from a routing provider (`MAPBOX_TOKEN`); absent → the
+    // directions tool simply isn't advertised.
+    let directions = crate::directions::from_env();
+    Some(Arc::new(Tools::new(search, calendar, directions)))
 }
 
 /// Build the tool set from the environment (used by the example / env-driven
@@ -1071,6 +1249,32 @@ mod tests {
         }
     }
 
+    /// A canned directions provider so tool tests never touch the network. Records
+    /// the origin it was called with so tests can assert the home-location default.
+    struct StaticDirections {
+        seen_origin: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl DirectionsProvider for StaticDirections {
+        async fn directions(
+            &self,
+            origin: &str,
+            destination: &str,
+            mode: TravelMode,
+        ) -> Result<crate::directions::Directions> {
+            *self.seen_origin.lock().unwrap() = Some(origin.to_string());
+            Ok(crate::directions::Directions {
+                origin_label: origin.to_string(),
+                destination_label: destination.to_string(),
+                distance_meters: 20000.0,
+                duration_seconds: 1200.0,
+                duration_typical_seconds: Some(900.0),
+                mode,
+            })
+        }
+    }
+
     /// Serve a fixed sequence of raw HTTP responses, one per inbound connection.
     fn serve_sequence(bodies: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1173,6 +1377,7 @@ mod tests {
         let tools = Some(Arc::new(Tools::new(
             Some(Arc::new(StaticSearch("Sunny, 21C."))),
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1213,6 +1418,7 @@ mod tests {
         let tools = Some(Arc::new(Tools::new(
             None,
             Some(Arc::new(StaticCalendar(vec![event]))),
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1224,6 +1430,68 @@ mod tests {
             "You have a 1:1 with Alice at 2 PM."
         );
         server.await.unwrap();
+    }
+
+    /// End-to-end tool loop for the directions tool: round 0 the fake Ollama asks for
+    /// `directions_lookup` with only a destination; round 1 (after the rendered route
+    /// is threaded back) it streams the answer. Proves the tool is advertised,
+    /// dispatched with the home-location default filled in for the missing origin, and
+    /// that its result reaches the model — using a canned provider (no network).
+    #[tokio::test]
+    async fn rig_ollama_runs_directions_tool_with_home_default() {
+        let tool_call = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"directions_lookup\",\"arguments\":{\"destination\":\"the airport\"}}}]},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"About 20 minutes to the airport — traffic is heavy.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
+
+        let provider = Arc::new(StaticDirections {
+            seen_origin: std::sync::Mutex::new(None),
+        });
+        let directions = DirectionsConfig {
+            provider: provider.clone(),
+            default_origin: Some("Home, Austin".to_string()),
+            imperial: true,
+        };
+        let tools = Some(Arc::new(Tools::new(None, None, Some(directions))));
+        let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
+        let stream = backend
+            .respond(LlmTurn::new("sys", "how long to the airport?"))
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_reply(stream).await.unwrap(),
+            "About 20 minutes to the airport — traffic is heavy."
+        );
+        // The missing origin defaulted to the configured home location.
+        assert_eq!(
+            provider.seen_origin.lock().unwrap().as_deref(),
+            Some("Home, Austin")
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn directions_tool_advertised_only_when_configured() {
+        let none = Tools::new(None, None, None);
+        assert!(!none
+            .definitions
+            .iter()
+            .any(|d| d.name == DirectionsLookup::NAME));
+
+        let with = Tools::new(
+            None,
+            None,
+            Some(DirectionsConfig {
+                provider: Arc::new(StaticDirections {
+                    seen_origin: std::sync::Mutex::new(None),
+                }),
+                default_origin: None,
+                imperial: false,
+            }),
+        );
+        assert!(with
+            .definitions
+            .iter()
+            .any(|d| d.name == DirectionsLookup::NAME));
     }
 
     #[test]
@@ -1288,7 +1556,7 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None);
+        let tools = Tools::new(None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -1305,7 +1573,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
-        let tools = Some(Arc::new(Tools::new(None, None)));
+        let tools = Some(Arc::new(Tools::new(None, None, None)));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "set a 5 minute pasta timer").with_actions(tx))

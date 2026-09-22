@@ -291,6 +291,21 @@ actions".
       timer + the Mac orchestrator/Piper running; not drivable headlessly.)
 - [ ] Consider a dedicated **weather tool** if web-search summaries prove too coarse
       (structured forecast vs. a search snippet).
+- [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
+      tool returns real distance, travel time, and **live traffic** between two places
+      (`driving`/`walking`/`cycling`). Lives in `orchestrator/src/directions/` behind a
+      `DirectionsProvider` trait; v1 backend is **Mapbox** (`MAPBOX_TOKEN`, provider
+      selected by `AMBIENT_DIRECTIONS_PROVIDER=mapbox`), geocoding v6 + Directions v5
+      `driving-traffic` (traffic-aware ETA + typical-time delta → a spoken "traffic is
+      heavy/normal/light" note). The origin defaults to `AMBIENT_HOME_LOCATION`;
+      distances follow `AMBIENT_WEATHER_UNITS`. Absent token → tool not advertised.
+- [ ] **Directions — follow-ups** (deferred): (a) alternate providers behind the same
+      `DirectionsProvider` trait — Google (best traffic, stricter ToS), HERE/TomTom, or
+      keyless OSRM (no live traffic); (b) **render the route/map on the display** (v1 is
+      voice-only) — a Flutter map surface fed a polyline over FRB; (c) transit/departure
+      times and multi-stop; (d) verify on hardware ("how long to drive downtown?" with a
+      `MAPBOX_TOKEN` + `AMBIENT_HOME_LOCATION` set → model calls `directions_lookup` and
+      speaks a traffic-correct ETA).
 - [ ] **Query/list timers** by voice ("how long left?") — needs a device→Mac timer-state
       report so the model can answer; today the countdown UI answers visually.
 - [x] **Calendar (read-only, web .ics)** — shipped: the `calendar_lookup` rig info tool
