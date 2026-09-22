@@ -9,8 +9,10 @@ speaker"). Layers passive, local speaker recognition onto the Mac-side brain
 LLM answers with per-person context ("you're talking to Sam; here's what you know
 about Sam") instead of one undifferentiated `household` blob.
 
-Opt-in and off by default, exactly like the `helix` GraphRAG backend: a lean
-build and existing deployments behave identically until `AMBIENT_SPEAKER_ID=on`.
+Opt-in and off by default: existing deployments behave identically until speaker
+ID is turned on in config (`speaker.enabled`). The real ECAPA-TDNN ONNX embedder is
+**always compiled in** — there is no longer a `speaker` build feature — so with no
+`speaker.model_path` set it degrades to the dev-only mock embedder.
 
 ---
 
