@@ -118,6 +118,16 @@ pub mod types {
     /// catalog with the voices actually present on disk.
     pub const VOICES: &str = "ambient-voices";
 
+    /// device → orchestrator: fetch the Google Drive photo-slideshow credentials +
+    /// linkage the orchestrator owns (no data). The orchestrator runs the one-time
+    /// OAuth consent (config page); the device pulls the bundle and mints Drive
+    /// access tokens on-device, so the APK ships credential-free.
+    pub const GET_DRIVE_TOKEN: &str = "ambient-get-drive-token";
+    /// orchestrator → device: the Drive bundle (data: `ok`, `linked`, `configured`,
+    /// `client_id`, `client_secret`, `refresh_token`, `folder_ids` array, `scope`).
+    /// Secrets ride the device↔orchestrator LAN hop only.
+    pub const DRIVE_TOKEN: &str = "ambient-drive-token";
+
     // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
     //
     // A tool the LLM calls on the Mac emits a **device action** that the pipeline

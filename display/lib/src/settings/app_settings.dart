@@ -42,6 +42,7 @@ class AppSettings {
     this.endpointCueEnabled = true,
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
+    this.dimDelaySecs = 20,
     this.photoSource = PhotoSourceKind.local,
     this.ambientRefreshToken = '',
     this.ambientDeviceId = '',
@@ -49,6 +50,8 @@ class AppSettings {
     this.driveRefreshToken = '',
     this.driveFolderIds = const <String>[],
     this.driveLinked = false,
+    this.driveClientId = '',
+    this.driveClientSecret = '',
   });
 
   /// Stable selection key (`instance_id` TXT) of the orchestrator this display is
@@ -96,6 +99,14 @@ class AppSettings {
   /// Mic RMS level (0..1) below which audio counts as silence for the local cue.
   final double endpointRmsThreshold;
 
+  /// How long (seconds) the idle screen stays fully bright after the room goes
+  /// quiet before it dims to the calm "away" clock face. Maps to the camera
+  /// proximity detector's release window (`WakeWordConfig.proximityReleaseSecs`):
+  /// once no motion has been seen for this long, the engine reports the room empty,
+  /// which dims the backlight and shows the large centered clock. The default (20 s)
+  /// matches the engine's built-in release window.
+  final int dimDelaySecs;
+
   /// Idle photo source.
   final PhotoSourceKind photoSource;
 
@@ -122,6 +133,19 @@ class AppSettings {
   /// Whether Google Drive has been linked (a refresh token is held).
   final bool driveLinked;
 
+  /// Google Drive "Desktop app" OAuth client id, synced from the orchestrator (which
+  /// owns consent). Used with [driveClientSecret] to mint access tokens on-device, so
+  /// the APK ships credential-free. Empty = Drive not configured. TODO: secure storage.
+  final String driveClientId;
+
+  /// Google Drive OAuth client secret, synced from the orchestrator. TODO: secure storage.
+  final String driveClientSecret;
+
+  /// True when both Drive client credentials are present — the device can mint Drive
+  /// access tokens. Runtime replacement for the old build-time `kGoogleDriveConfigured`.
+  bool get driveConfigured =>
+      driveClientId.isNotEmpty && driveClientSecret.isNotEmpty;
+
   AppSettings copyWith({
     String? orchestratorKey,
     String? wakeWord,
@@ -134,6 +158,7 @@ class AppSettings {
     bool? endpointCueEnabled,
     int? endpointSilenceMs,
     double? endpointRmsThreshold,
+    int? dimDelaySecs,
     PhotoSourceKind? photoSource,
     String? ambientRefreshToken,
     String? ambientDeviceId,
@@ -141,6 +166,8 @@ class AppSettings {
     String? driveRefreshToken,
     List<String>? driveFolderIds,
     bool? driveLinked,
+    String? driveClientId,
+    String? driveClientSecret,
   }) {
     return AppSettings(
       orchestratorKey: orchestratorKey ?? this.orchestratorKey,
@@ -154,6 +181,7 @@ class AppSettings {
       endpointCueEnabled: endpointCueEnabled ?? this.endpointCueEnabled,
       endpointSilenceMs: endpointSilenceMs ?? this.endpointSilenceMs,
       endpointRmsThreshold: endpointRmsThreshold ?? this.endpointRmsThreshold,
+      dimDelaySecs: dimDelaySecs ?? this.dimDelaySecs,
       photoSource: photoSource ?? this.photoSource,
       ambientRefreshToken: ambientRefreshToken ?? this.ambientRefreshToken,
       ambientDeviceId: ambientDeviceId ?? this.ambientDeviceId,
@@ -161,6 +189,8 @@ class AppSettings {
       driveRefreshToken: driveRefreshToken ?? this.driveRefreshToken,
       driveFolderIds: driveFolderIds ?? this.driveFolderIds,
       driveLinked: driveLinked ?? this.driveLinked,
+      driveClientId: driveClientId ?? this.driveClientId,
+      driveClientSecret: driveClientSecret ?? this.driveClientSecret,
     );
   }
 
@@ -176,6 +206,7 @@ class AppSettings {
     'endpointCueEnabled': endpointCueEnabled,
     'endpointSilenceMs': endpointSilenceMs,
     'endpointRmsThreshold': endpointRmsThreshold,
+    'dimDelaySecs': dimDelaySecs,
     'photoSource': photoSource.name,
     'ambientRefreshToken': ambientRefreshToken,
     'ambientDeviceId': ambientDeviceId,
@@ -183,6 +214,8 @@ class AppSettings {
     'driveRefreshToken': driveRefreshToken,
     'driveFolderIds': driveFolderIds,
     'driveLinked': driveLinked,
+    'driveClientId': driveClientId,
+    'driveClientSecret': driveClientSecret,
   };
 
   /// Parse from persisted JSON, tolerating missing/invalid keys by falling back to
@@ -235,6 +268,12 @@ class AppSettings {
         json['endpointRmsThreshold'],
         defaults.endpointRmsThreshold,
       ),
+      dimDelaySecs: asInt(
+        json['dimDelaySecs'],
+        defaults.dimDelaySecs,
+        min: 5,
+        max: 600,
+      ),
       photoSource: PhotoSourceKind.values.firstWhere(
         (k) => k.name == json['photoSource'],
         orElse: () => defaults.photoSource,
@@ -257,6 +296,12 @@ class AppSettings {
                 .toList()
           : const <String>[],
       driveLinked: json['driveLinked'] == true,
+      driveClientId: json['driveClientId'] is String
+          ? json['driveClientId'] as String
+          : '',
+      driveClientSecret: json['driveClientSecret'] is String
+          ? json['driveClientSecret'] as String
+          : '',
     );
   }
 
@@ -275,13 +320,16 @@ class AppSettings {
       endpointCueEnabled == other.endpointCueEnabled &&
       endpointSilenceMs == other.endpointSilenceMs &&
       endpointRmsThreshold == other.endpointRmsThreshold &&
+      dimDelaySecs == other.dimDelaySecs &&
       photoSource == other.photoSource &&
       ambientRefreshToken == other.ambientRefreshToken &&
       ambientDeviceId == other.ambientDeviceId &&
       ambientLinked == other.ambientLinked &&
       driveRefreshToken == other.driveRefreshToken &&
       listEquals(driveFolderIds, other.driveFolderIds) &&
-      driveLinked == other.driveLinked;
+      driveLinked == other.driveLinked &&
+      driveClientId == other.driveClientId &&
+      driveClientSecret == other.driveClientSecret;
 
   @override
   int get hashCode => Object.hash(
@@ -296,6 +344,7 @@ class AppSettings {
     endpointCueEnabled,
     endpointSilenceMs,
     endpointRmsThreshold,
+    dimDelaySecs,
     photoSource,
     ambientRefreshToken,
     ambientDeviceId,
@@ -303,5 +352,6 @@ class AppSettings {
     driveRefreshToken,
     Object.hashAll(driveFolderIds),
     driveLinked,
+    Object.hash(driveClientId, driveClientSecret),
   );
 }

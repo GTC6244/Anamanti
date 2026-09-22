@@ -111,9 +111,13 @@ accepted, this option works with no code change.
 
 **(b) Google Drive** (interim, works today) — `drive.readonly` folder listing.
 Consent can't happen on-device (the device-code flow rejects Drive scopes), so it
-uses **one-time consent on the Mac** (`tools/google_photo_consent.py`, loopback+PKCE,
-a **"Desktop app"** OAuth client) → refresh token adb-pushed → Settings "Import Drive
-token". Reads a Drive folder (owned or "Shared with me").
+uses **one-time consent on the Mac** — now run **inside the orchestrator**
+(`orchestrator/src/drive_consent.rs`, loopback+PKCE, a **"Desktop app"** OAuth
+client) and driven from the config page **Photos tab** (`/drive`). The orchestrator
+stores the client id/secret + refresh token + folder ids and the device **pulls the
+bundle over Wyoming** (`ambient-get-drive-token`); it mints access tokens on-device.
+Reads a Drive folder (owned or "Shared with me"). *(Migrated 2026-09-22 from the
+standalone `tools/google_photo_consent.py` + adb-push + Settings "Import" flow.)*
 
 Dead ends ruled out (keep, so we don't relitigate):
 - **Photos Library API** — since March 2025 can't read a user's existing library.
@@ -134,18 +138,31 @@ Done:
 - [x] Boot refresh + slideshow source (`main.dart` → `AmbientPhotoSource` via
       `photoSourceFromSettings`); falls back to local gradients when unlinked/offline.
       Covered by `test/photo_source_test.dart`.
-- [x] Drive backend restored: `listDrivePhotos` (`drive_photos.dart`), Mac helper
-      `tools/google_photo_consent.py`, `google_token_import.dart` + Settings "Import
-      Drive token", `DrivePhotoSource`. Boot refresh uses the Desktop client.
-- [x] Both clients' creds injected at build via `--dart-define-from-file=google_oauth.json`
-      (gitignored; `.example` committed): TV client (`GOOGLE_OAUTH_CLIENT_ID/SECRET`,
-      Ambient) + Desktop client (`GOOGLE_DRIVE_CLIENT_ID/SECRET`, Drive).
-- [x] `AppSettings` carries per-backend state (ambient*/drive*); 60 tests green.
+- [x] Drive backend: `listDrivePhotos` (`drive_photos.dart`), `DrivePhotoSource`.
+      Boot refresh mints access tokens on-device from the synced client creds.
+- [x] **Drive consent moved into the orchestrator (2026-09-22).** New
+      `orchestrator/src/drive_consent.rs` (loopback+PKCE) + config-page Photos tab
+      (`/drive`, `/drive/save`, `/drive/link`, `/drive/status.json` in
+      `webconfig.rs`); creds+token persisted in `DriveConfig` inside
+      `ambient_settings.json`. New Wyoming control `ambient-get-drive-token`
+      (`control.rs` + both `protocol.rs` copies); device `get_drive_token`
+      (`display/rust/.../control.rs` + FRB `DriveToken`); Dart pulls it on boot /
+      photo-refresh (`main.dart`) and via Settings **"Sync Drive from Mac"**. The
+      standalone `tools/google_photo_consent.py`, `google_token_import.dart`, and the
+      build-time `GOOGLE_DRIVE_*` dart-defines were **removed** — the APK is now
+      credential-free for Drive; `AppSettings.driveConfigured` is a runtime check.
+- [x] Only the TV (Ambient) client creds are injected at build via
+      `--dart-define-from-file=google_oauth.json` (gitignored; `.example` committed):
+      `GOOGLE_OAUTH_CLIENT_ID/SECRET`. The Mac's Drive client is set via
+      `AMBIENT_GOOGLE_DRIVE_CLIENT_ID/SECRET` (optional `_FOLDER_IDS`).
+- [x] `AppSettings` carries per-backend state (ambient* + drive* incl. synced
+      `driveClientId`/`driveClientSecret`); orchestrator + device + Dart tests green.
 
 Frame UX (done, verified on-device):
 - [x] **Drive works end-to-end on the Echo Show**: Desktop client + Mac consent →
       token synced → Settings **folder picker** (`listDriveFolders`, checkboxes) →
-      slideshow of the chosen folders.
+      slideshow of the chosen folders. *(Re-verify on hardware after the 2026-09-22
+      migration of consent into the orchestrator + Wyoming token delivery.)*
 - [x] Images use Drive's **`thumbnailLink` sized to ~1600px** (not the full-res
       `alt=media` originals, which were too heavy for the 1 GB device — slow + OOM).
 - [x] **Periodic refresh** (`main.dart`, every 30 min): re-mint token + re-list so an
@@ -157,8 +174,11 @@ Frame UX (done, verified on-device):
 
 Remaining:
 - [ ] **Ambient:** apply to the Google Photos Partner Program; once accepted it works.
-- [ ] Follow-up: refresh tokens are device-local **plaintext** (`shared_preferences`)
-      — move to platform secure storage.
+- [ ] Follow-up: refresh tokens are **plaintext** on both sides — device-local
+      (`shared_preferences`, incl. the synced Drive client secret) and the
+      orchestrator's `0600 ambient_settings.json` — and the Drive bundle rides the
+      device↔Mac Wyoming hop **unencrypted**. Move device secrets to platform secure
+      storage; consider a paired/TLS control channel if the LAN isn't trusted.
 - [ ] Polish (optional): lighten the idle scrim further; investigate the device's
       "Offline"/clock-drift (device lost the Mac link + NTP, not a photo bug).
 - [ ] Nice-to-have (Ambient): streamlined single-QR flow via the `state` param.
@@ -291,6 +311,21 @@ actions".
       timer + the Mac orchestrator/Piper running; not drivable headlessly.)
 - [ ] Consider a dedicated **weather tool** if web-search summaries prove too coarse
       (structured forecast vs. a search snippet).
+- [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
+      tool returns real distance, travel time, and **live traffic** between two places
+      (`driving`/`walking`/`cycling`). Lives in `orchestrator/src/directions/` behind a
+      `DirectionsProvider` trait; v1 backend is **Mapbox** (`MAPBOX_TOKEN`, provider
+      selected by `AMBIENT_DIRECTIONS_PROVIDER=mapbox`), geocoding v6 + Directions v5
+      `driving-traffic` (traffic-aware ETA + typical-time delta → a spoken "traffic is
+      heavy/normal/light" note). The origin defaults to `AMBIENT_HOME_LOCATION`;
+      distances follow `AMBIENT_WEATHER_UNITS`. Absent token → tool not advertised.
+- [ ] **Directions — follow-ups** (deferred): (a) alternate providers behind the same
+      `DirectionsProvider` trait — Google (best traffic, stricter ToS), HERE/TomTom, or
+      keyless OSRM (no live traffic); (b) **render the route/map on the display** (v1 is
+      voice-only) — a Flutter map surface fed a polyline over FRB; (c) transit/departure
+      times and multi-stop; (d) verify on hardware ("how long to drive downtown?" with a
+      `MAPBOX_TOKEN` + `AMBIENT_HOME_LOCATION` set → model calls `directions_lookup` and
+      speaks a traffic-correct ETA).
 - [ ] **Query/list timers** by voice ("how long left?") — needs a device→Mac timer-state
       report so the model can answer; today the countdown UI answers visually.
 - [x] **Calendar (read-only, web .ics)** — shipped: the `calendar_lookup` rig info tool

@@ -27,12 +27,13 @@ These answers override any earlier ambiguity in this document:
 | **Memory UX** | Manage via **settings list (view/delete)** + **voice** ("remember…", "forget that") |
 | **Resilience** | **Auto-reconnect** with backoff via mDNS + a subtle **disconnected** status; slideshow keeps running |
 | **Idle screen** | **Photo slideshow** — two selectable backends: **Google Photos** (Ambient API; ideal, but **partner-program gated**) and **Google Drive** folder (interim, works now); plus local gradients |
-| **Photo auth** | **Ambient API:** on-device device-code + QR (`photosambient.mediaitems`) — blocked by Partner Program (`createDevice` 403). **Drive:** `drive.readonly` via one-time Mac consent (Desktop client) → token synced to device. Dual OAuth clients |
+| **Photo auth** | **Ambient API:** on-device device-code + QR (`photosambient.mediaitems`) — blocked by Partner Program (`createDevice` 403); TV client baked into the APK. **Drive:** `drive.readonly` consent runs **in the orchestrator** (Desktop client, config-page Photos tab) → device pulls the token over Wyoming (`ambient-get-drive-token`). APK is credential-free for Drive; Mac holds the Drive client (`AMBIENT_GOOGLE_DRIVE_CLIENT_ID/SECRET`) |
 | **AEC** | **Ship full-duplex**; raise wake-word confidence **threshold during playback** to suppress self-triggers; real AEC only if still bad |
 | **Settings screen** | User-configurable: **LLM backend**, **TTS voice**, **wake word**, **photo source** |
 | **Camera proximity (2026-09-21)** | Front camera doubles as a **proximity sensor**: a cheap **frame-motion** detector in **Rust** (no ML, no face recognition) brightens the idle screen on approach and dims it after a quiet spell. Sensing lives in Rust (`camera/presence.rs` + Kotlin `CameraBridge` capture shim, twin of `MicBridge`); **brightness actuation stays in Flutter/Android** (`ScreenBrightnessController` → `MainActivity` `MethodChannel`). Degrades silently if the camera is unavailable (permission denied / **privacy shutter** closed / no camera) — the screen just stays bright. `CAMERA` is granted out-of-band (`pm grant`), like `RECORD_AUDIO` |
 | **Tool calling / actions** | **rig-core is the default engine** (tool-calling loop); info tools run on the Mac, device actions (timers/alarms) emit `ambient-*` frames and execute **on-device**. Weather is grounded by a configured **home location** (`AMBIENT_HOME_LOCATION`). Calendar/reminders designed but deferred. **Spotify** playback is a further tool of this kind — see [`MusicPlan.md`](./MusicPlan.md) (control plane on the orchestrator; audio via librespot + Snapcast, not the TTS pipeline). |
 | **Doc intent** | Onboarding + AI codegen — docs guide AI agents and humans to build from scratch |
+| **Music routing / Snapcast (2026-09-22)** | House-wide music originates on the **Mac orchestrator host**, not the Echo Show (offloads the ~1 GB device; **no on-device system-audio capture, no second device audio path**), and reaches synchronized speakers via **Snapcast** (~1 s buffered latency accepted). Two Mac-hosted **external** sources — **librespot** (Spotify Connect, the shared "Ambient" device) and a **web-URL/stream player** (mpv/ffmpeg) — each write raw PCM to a **snapfifo**; **snapserver runs on the Mac** and reads the fifos. **PCM never enters `ambient_orchestrator`** — the orchestrator only issues control (Web API, mpv IPC, and snapserver **JSON-RPC** for ducking on THINKING/SPEAKING + stream-select). Snapclients: the **Linux main speaker**, other rooms, **and the Echo Show(s)** — the device client is the **prebuilt `snapclient` binary bundled in the existing app but run as a *separate OS process*** (Kotlin foreground service; **not** in the Rust engine, **not** a separate APK), so the app's single locked cpal path (capture + TTS) is untouched. Per-device toggle `AMBIENT_MUSIC_INCLUDE_DEVICE` (default **off**): the device playing continuous music with **no AEC** worsens wake-word self-triggering, so enable only where needed and hold the raised wake-word threshold while it's in the active group. Full design: [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (the "Snapcast routing" transport layer) + [`MusicPlan.md`](./MusicPlan.md) (Spotify source + `spotify_control` control plane). |
 | **Multi-device / multi-orchestrator (2026-09-22)** | (1) **Many displays → one orchestrator**: already correct — the accept loop handles each connection independently and replies on that socket; memory + settings are one shared **household** pool (speaker ID scopes per person, not per device). (2) **Many orchestrators → device picks one**: orchestrators advertise TXT `role`/`name`/`instance_id`; the device filters by `role=orchestrator` (excludes raw STT/TTS), enumerates all, and pins a chosen `instance_id` from a settings dropdown. `instance_id` resolves env → git **branch code** → sanitized service name, so a copy run from a test worktree self-names by its branch. "Local production" is a copied release binary at `/Volumes/External/DeveloperSupport/Ambient Orchestrator/` that sets `AMBIENT_INSTANCE_ID` in `~/.zshenv`; test copies run from their worktree on distinct ports. **Strict**: a pinned display stays offline if its orchestrator is unreachable (never switches Macs); `"Auto"` = first responder. (3) **Shared backend data**: SQLite in **WAL** mode for cross-process sharing; embedded HelixDB is single-process, so a test instance sharing prod data runs `AMBIENT_MEMORY_BACKEND=sqlite`. |
 
 ---
@@ -504,10 +505,16 @@ recognition, no frames ever leave the device.
 - **Permission:** `CAMERA` is a runtime-dangerous permission declared in the
   manifest (`uses-feature` `required=false`) and, like `RECORD_AUDIO`, granted
   out-of-band on the kiosk device: `adb shell pm grant com.ambientdisplay.ambient_display android.permission.CAMERA`.
-- **Follow-ups (not done):** no settings-screen toggle yet (on by default via
-  `WakeWordDefaults.cameraProximity`); brightness levels + motion/release tuning are
+- **Dim delay (settings, 2026-09-22):** the **release window** — how long the screen
+  stays fully bright after the room goes quiet before dimming to the away-mode clock —
+  is now a **device-local setting** (Settings → *Display* → "Stay bright before dim",
+  5 s–5 min; default 20 s). Persisted in `AppSettings.dimDelaySecs`, mapped to
+  `WakeWordConfig.proximityReleaseSecs`, and applied by restarting the engine on Save
+  (so the `PresenceDetector` rebuilds with the new window).
+- **Follow-ups (not done):** no settings-screen on/off toggle yet (on by default via
+  `WakeWordDefaults.cameraProximity`); brightness levels + motion threshold are still
   compile-time defaults. Could later add an ambient-light (mean-luma) auto-brightness
-  curve and/or a settings toggle.
+  curve and/or a proximity on/off toggle.
 
 ### Tool calling & actions (post-Phase-6)
 
@@ -526,6 +533,13 @@ more tool in `Tools`.
   this tool; it is grounded by a configured home location + units
   (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`), injected into the system
   prompt next to the wall-clock and speaker-identity lines (`location_line`).
+  `calendar_lookup` reads connected web `.ics` calendars (`AMBIENT_CALENDARS`).
+  `directions_lookup` returns real distance, travel time, and **live traffic**
+  between two places (`orchestrator/src/directions/`, `DirectionsProvider` trait;
+  v1 backend **Mapbox** via `MAPBOX_TOKEN` / `AMBIENT_DIRECTIONS_PROVIDER`). The
+  origin defaults to `AMBIENT_HOME_LOCATION`; it is **voice-only** in v1 (spoken ETA
+  + traffic note; an on-screen route/map is a deferred follow-up). Each info tool is
+  advertised only when its config is present.
 - **Device actions (implemented, on-device):** the `set_timer` / `cancel_timer`
   tools emit a `DeviceAction` onto a per-turn `ActionSink` (`LlmTurn.actions`); the
   orchestrator's reply loop drains it (`drain_device_actions`) and relays an
@@ -536,8 +550,8 @@ more tool in `Tools`.
   `PlaybackSink`, and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`.
   Flutter renders a countdown-chip overlay visible during idle + turns. The full
   add-a-capability process is documented in `architecture.md` §8.
-- **Calendar / reminders:** designed, **deferred** — backend (macOS EventKit vs
-  Google vs CalDAV) undecided.
+- **Calendar / reminders:** calendar shipped (read-only web `.ics`); **reminders**
+  designed, **deferred** — backend (macOS EventKit vs Google vs CalDAV) undecided.
 
 > **Runtime provider keys (Phase 6 follow-up):** a cloud API key no longer has to be
 > in the environment at launch. `SettingsUpdate` gains optional `anthropic_api_key` /
@@ -576,17 +590,24 @@ implementers:
     Program acceptance** — `createDevice` returns 403 until the project is accepted
     (a valid token/scope is not enough). Built + on-device; works once accepted.
   - **Google Drive** (interim): `drive.readonly` folder listing. The device-code
-    flow rejects Drive scopes, so consent runs **once on the Mac**
-    (`tools/google_photo_consent.py`, loopback+PKCE, a **"Desktop app"** client) and
-    the refresh token is adb-pushed to the device (Settings → Import Drive token).
-    Reads a folder (owned or "Shared with me"); `drive.file` is unusable here (can't
-    list a folder without an interactive Picker).
-  - Both clients' creds are injected at build via
-    `--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*` (TV) +
-    `GOOGLE_DRIVE_*` (Desktop). Ruled out: the Photos Library API (no library read
+    flow rejects Drive scopes, so consent runs **once on the Mac — inside the
+    orchestrator** (`orchestrator/src/drive_consent.rs`, loopback+PKCE, a **"Desktop
+    app"** client), driven from the config page **Photos tab** (`/drive`). The
+    orchestrator holds the client id/secret + refresh token + folder ids
+    (`DriveConfig` in `ambient_settings.json`) and the device **pulls the bundle over
+    Wyoming** (`ambient-get-drive-token`), minting access tokens on-device. Reads a
+    folder (owned or "Shared with me"); `drive.file` is unusable here (can't list a
+    folder without an interactive Picker). *(Migrated 2026-09-22 from the standalone
+    `tools/google_photo_consent.py` + adb-push + Settings "Import" flow.)*
+  - Only the **TV (Ambient)** client creds are injected at build via
+    `--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*`. The
+    APK is **credential-free for Drive** (`AppSettings.driveConfigured` is a runtime
+    check); the Mac's Drive client comes from `AMBIENT_GOOGLE_DRIVE_CLIENT_ID/SECRET`
+    (optional `_FOLDER_IDS`). Ruled out: the Photos Library API (no library read
     since March 2025). Implemented in `slideshow/ambient_photos.dart`,
-    `drive_photos.dart`, `photo_source.dart`, settings, `main.dart`. Consent screens
-    stay in **Testing** mode with household test users.
+    `drive_photos.dart`, `photo_source.dart`, settings, `main.dart`, and orchestrator
+    `drive_consent.rs`/`webconfig.rs`/`control.rs`. Consent screens stay in
+    **Testing** mode with household test users.
 - **Persistent memory:** **SQLite** on the Mac. Schema holds structured facts +
   preferences with full-text search (no embedding model for v1). Policy is
   **explicit + inferred** — store on request and auto-extract facts/prefs from

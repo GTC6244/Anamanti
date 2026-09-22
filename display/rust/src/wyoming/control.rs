@@ -19,28 +19,44 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 use crate::api::settings::{
-    MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo, VoiceInfo,
+    DriveToken, MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo,
+    VoiceInfo,
 };
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
 use super::protocol::{self, types, WyomingEvent};
 
-/// One control request/response round trip over a fresh connection to `endpoint`.
+/// Hard cap on a single control round trip. A responsive orchestrator answers in
+/// milliseconds (a catalog fetch a few seconds); this only bounds a peer that
+/// connects but never replies — e.g. an **older orchestrator** that doesn't
+/// recognize a newer `ambient-*` frame and holds the socket open. Without this a
+/// control call (notably the boot-time Drive-token sync) would hang forever.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One control request/response round trip over a fresh connection to `endpoint`,
+/// bounded by [`CONTROL_TIMEOUT`] so a non-responsive peer can never wedge the
+/// caller (e.g. the boot sequence).
 async fn round_trip(endpoint: &WyomingEndpoint, request: WyomingEvent) -> Result<WyomingEvent> {
-    let stream = TcpStream::connect(endpoint.socket_addr())
-        .await
-        .with_context(|| format!("connecting to orchestrator {endpoint}"))?;
-    stream.set_nodelay(true).ok();
-    let (read_half, write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
-    let mut writer = write_half;
-    protocol::write_event(&mut writer, &request)
-        .await
-        .context("sending control request")?;
-    protocol::read_event(&mut reader)
-        .await
-        .context("reading control response")?
-        .ok_or_else(|| anyhow!("orchestrator closed the connection without responding"))
+    tokio::time::timeout(CONTROL_TIMEOUT, async {
+        let stream = TcpStream::connect(endpoint.socket_addr())
+            .await
+            .with_context(|| format!("connecting to orchestrator {endpoint}"))?;
+        stream.set_nodelay(true).ok();
+        let (read_half, write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut writer = write_half;
+        protocol::write_event(&mut writer, &request)
+            .await
+            .context("sending control request")?;
+        protocol::read_event(&mut reader)
+            .await
+            .context("reading control response")?
+            .ok_or_else(|| anyhow!("orchestrator closed the connection without responding"))
+    })
+    .await
+    .map_err(|_| {
+        anyhow!("orchestrator {endpoint} did not respond within {CONTROL_TIMEOUT:?} (is it an older build?)")
+    })?
 }
 
 fn opt_str(data: &Value, key: &str) -> Option<String> {
@@ -119,6 +135,39 @@ fn parse_voice(v: &Value) -> VoiceInfo {
             .map(str::to_string),
         name,
         label,
+    }
+}
+
+fn parse_drive_token(ev: &WyomingEvent) -> DriveToken {
+    let s = |k: &str| {
+        ev.data
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let folder_ids = ev
+        .data
+        .get("folder_ids")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    DriveToken {
+        linked: ev.data.get("linked").and_then(Value::as_bool).unwrap_or(false),
+        configured: ev
+            .data
+            .get("configured")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        client_id: s("client_id"),
+        client_secret: s("client_secret"),
+        refresh_token: s("refresh_token"),
+        folder_ids,
+        scope: s("scope"),
     }
 }
 
@@ -238,6 +287,29 @@ pub async fn list_voices(
         .map(|a| a.iter().map(parse_voice).collect())
         .unwrap_or_default();
     Ok(voices)
+}
+
+/// Fetch the Google Drive photo-slideshow bundle (client creds + refresh token +
+/// folder ids) the orchestrator owns. The device mints Drive access tokens on-device
+/// from this, so the APK ships credential-free. An unlinked orchestrator answers
+/// with empty fields (`linked: false`), which the caller treats as "not configured".
+pub async fn get_drive_token(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<DriveToken> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::GET_DRIVE_TOKEN)).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("fetching the Drive token failed")
+        ));
+    }
+    Ok(parse_drive_token(&resp))
 }
 
 /// List every persistent memory entry.
@@ -436,6 +508,40 @@ mod tests {
             protocol::write_event(&mut writer, &response).await.unwrap();
             request
         })
+    }
+
+    #[tokio::test]
+    async fn get_drive_token_parses_the_bundle() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::DRIVE_TOKEN,
+            json!({
+                "ok": true,
+                "linked": true,
+                "configured": true,
+                "client_id": "cid.apps",
+                "client_secret": "gocspx-secret",
+                "refresh_token": "1//refresh",
+                "folder_ids": ["1AbC", "1XyZ"],
+                "scope": "scope-x",
+            }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let token = get_drive_token(&cache, Duration::from_millis(0), None)
+            .await
+            .unwrap();
+        assert!(token.linked && token.configured);
+        assert_eq!(token.client_id, "cid.apps");
+        assert_eq!(token.client_secret, "gocspx-secret");
+        assert_eq!(token.refresh_token, "1//refresh");
+        assert_eq!(token.folder_ids, vec!["1AbC".to_string(), "1XyZ".to_string()]);
+        assert_eq!(token.scope, "scope-x");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::GET_DRIVE_TOKEN);
     }
 
     #[tokio::test]

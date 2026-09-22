@@ -40,8 +40,9 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
+use crate::music::{ManagedProc, MusicHub};
 use crate::orchestrator::ServiceConnector;
-use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
+use crate::settings::{DriveUpdate, LlmEngine, SettingsUpdate, SharedSettings};
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
 /// HelixDB). Cheaply cloneable — everything is behind an `Arc` or a small `PathBuf`.
@@ -62,6 +63,51 @@ pub struct DebugSources {
     /// Read-only view of the graph store when GraphRAG is live; `None` otherwise
     /// (feature off, SQLite backend, or init failed → `/helix` reports disabled).
     pub graph: Option<Arc<dyn GraphView>>,
+}
+
+// Build metadata for the About tab, captured at compile time by `build.rs` so a
+// running orchestrator can report exactly which build it is.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_SHA: &str = env!("AMBIENT_GIT_SHA");
+const GIT_BRANCH: &str = env!("AMBIENT_GIT_BRANCH");
+const BUILD_TIME: &str = env!("AMBIENT_BUILD_TIME");
+
+/// `/about` body — the running build's version, git commit, and build time, so you
+/// can confirm what's actually deployed. Values are compile-time constants.
+fn about_body() -> String {
+    let cell = |v: &str| {
+        if v.is_empty() {
+            "—".to_string()
+        } else {
+            v.to_string()
+        }
+    };
+    format!(
+        "<p class=\"sub\">The running orchestrator build — use this to confirm what's deployed.</p>\
+         <table><tbody>\
+         <tr><th>Version</th><td>{version}</td></tr>\
+         <tr><th>Git branch</th><td>{branch}</td></tr>\
+         <tr><th>Git commit</th><td><code>{sha}</code></td></tr>\
+         <tr><th>Built (UTC)</th><td>{built}</td></tr>\
+         <tr><th>Drive support</th><td>yes — Photos tab + <code>ambient-get-drive-token</code></td></tr>\
+         </tbody></table>",
+        version = cell(VERSION),
+        branch = cell(GIT_BRANCH),
+        sha = cell(GIT_SHA),
+        built = cell(BUILD_TIME),
+    )
+}
+
+/// `/about.json` — machine-readable build metadata (same values as the About page).
+fn about_json() -> String {
+    json!({
+        "ok": true,
+        "version": VERSION,
+        "git_branch": GIT_BRANCH,
+        "git_sha": GIT_SHA,
+        "build_time": BUILD_TIME,
+    })
+    .to_string()
 }
 
 /// Default cap on how many log records a debug page returns per request.
@@ -102,10 +148,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <body>
   <nav class="nav">
     <a href="/" class="active">Config</a>
+    <a href="/music">Music</a>
+    <a href="/drive">Photos</a>
     <a href="/chatlog">Chat log</a>
     <a href="/prompts">Prompts</a>
     <a href="/sqlite">SQLite</a>
     <a href="/helix">HelixDB</a>
+    <a href="/about">About</a>
   </nav>
   <h1>Ambient Orchestrator</h1>
   <p class="sub">Runtime settings — changes apply live, no restart.</p>
@@ -396,12 +445,15 @@ const SHELL_SCRIPT: &str = r#"
 
 /// Nav bar markup with `active` highlighted (same links as the config page).
 fn nav_html(active: &str) -> String {
-    const LINKS: [(&str, &str); 5] = [
+    const LINKS: [(&str, &str); 8] = [
         ("/", "Config"),
+        ("/music", "Music"),
+        ("/drive", "Photos"),
         ("/chatlog", "Chat log"),
         ("/prompts", "Prompts"),
         ("/sqlite", "SQLite"),
         ("/helix", "HelixDB"),
+        ("/about", "About"),
     ];
     let items: String = LINKS
         .iter()
@@ -418,12 +470,15 @@ fn nav_html(active: &str) -> String {
 }
 
 /// Wrap a page `body` in the shared HTML shell (head, style, nav, shared script).
+/// The shared helper script (`esc`/`fmtTime`/`getJSON`) is emitted **before** the
+/// body so a body's inline `load()` (which runs as it is parsed) can rely on those
+/// helpers already being defined.
 fn page(active: &str, title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>Ambient — {title}</title><style>{SHELL_STYLE}</style></head>\
-         <body>{nav}<h1>{title}</h1>{body}<script>{SHELL_SCRIPT}</script></body></html>",
+         <body>{nav}<h1>{title}</h1><script>{SHELL_SCRIPT}</script>{body}</body></html>",
         nav = nav_html(active),
     )
 }
@@ -588,12 +643,182 @@ async function load(){
 load();
 </script>"#;
 
+/// `/music` body — start/stop the music sibling processes and see snapserver status.
+const MUSIC_BODY: &str = r#"<p class="sub">Start/stop the local music processes (snapserver, librespot, mpv) and see snapserver status. The orchestrator launches these; it never handles the audio.</p>
+<div id="disabled" class="muted" style="display:none"></div>
+<div id="panel" style="display:none">
+  <h2>Processes</h2>
+  <div class="toolbar">
+    <button onclick="startall()">Start all</button>
+    <button onclick="stopall()">Stop all</button>
+    <button onclick="load()">Refresh</button>
+    <span id="meta" class="muted"></span>
+  </div>
+  <table><thead><tr><th>Process</th><th>Status</th><th>PID</th><th></th><th>Log</th></tr></thead><tbody id="procs"></tbody></table>
+
+  <h2>Web-URL player</h2>
+  <div class="toolbar">
+    <input id="url" type="text" placeholder="https://stream-url or file path" style="min-width:22rem; padding:0.35rem 0.6rem">
+    <button onclick="play()">Play</button>
+    <button onclick="stopweb()">Stop</button>
+    <span id="webmsg" class="muted"></span>
+  </div>
+
+  <h2>Snapserver</h2>
+  <div id="snap" class="muted">Loading…</div>
+</div>
+<script>
+async function proc(key, action){
+  try{
+    const r = await fetch('/music/proc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proc:key, action})});
+    const j = await r.json();
+    if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
+  }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
+  setTimeout(load, 500);
+}
+async function postAction(url){
+  try{ const r = await fetch(url, {method:'POST'}); const j = await r.json();
+    if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
+  }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
+  setTimeout(load, 700);
+}
+async function startall(){ await postAction('/music/startall'); }
+async function stopall(){ await postAction('/music/stopall'); }
+async function play(){
+  const url = document.getElementById('url').value.trim(); const msg = document.getElementById('webmsg');
+  if(!url){ msg.textContent = 'Enter a URL.'; return; }
+  try{
+    const r = await fetch('/music/play', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+    const j = await r.json(); msg.textContent = j.ok ? 'Playing.' : (j.message || 'Error');
+  }catch(e){ msg.textContent = 'Request failed: ' + e; }
+  setTimeout(load, 500);
+}
+async function stopweb(){
+  const msg = document.getElementById('webmsg');
+  try{ const r = await fetch('/music/stopweb', {method:'POST'}); const j = await r.json(); msg.textContent = j.ok ? 'Stopped.' : (j.message || 'Error'); }
+  catch(e){ msg.textContent = 'Request failed: ' + e; }
+}
+async function load(){
+  let j;
+  try{ j = await getJSON('/music/status.json'); }
+  catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; return; }
+  const dis = document.getElementById('disabled'), panel = document.getElementById('panel');
+  if(!j.enabled){
+    dis.style.display = ''; panel.style.display = 'none';
+    dis.innerHTML = 'Music routing is disabled. Restart the orchestrator with <code>AMBIENT_MUSIC=on</code> to enable this panel.';
+    return;
+  }
+  dis.style.display = 'none'; panel.style.display = '';
+  const procs = j.procs || [];
+  document.getElementById('meta').textContent = procs.filter(p => p.running).length + ' of ' + procs.length + ' running';
+  let h = '';
+  for(const p of procs){
+    const badge = p.running
+      ? '<span class="badge" style="background:rgba(46,160,67,0.2)">running</span>'
+      : '<span class="badge">stopped</span>';
+    const btn = p.running ? '<button data-stop="'+esc(p.key)+'">Stop</button>' : '<button data-start="'+esc(p.key)+'">Start</button>';
+    h += '<tr><td>'+esc(p.label)+'</td><td>'+badge+'</td><td class="muted">'+esc(p.pid||'')+'</td><td>'+btn+'</td><td class="muted pre">'+esc(p.log_path)+'</td></tr>';
+  }
+  document.getElementById('procs').innerHTML = h;
+  for(const b of document.querySelectorAll('button[data-start]')) b.addEventListener('click', () => proc(b.getAttribute('data-start'), 'start'));
+  for(const b of document.querySelectorAll('button[data-stop]'))  b.addEventListener('click', () => proc(b.getAttribute('data-stop'), 'stop'));
+  const snap = document.getElementById('snap');
+  const ss = j.snapserver || {};
+  if(!ss.reachable){ snap.innerHTML = '<span class="muted">snapserver not reachable at '+esc(j.snapserver_addr||'')+' — start it above.</span>'; return; }
+  const groups = ss.groups || [];
+  if(!groups.length){ snap.innerHTML = '<span class="muted">Connected at '+esc(j.snapserver_addr||'')+'. No groups yet.</span>'; return; }
+  let s = '<table><thead><tr><th>Group</th><th>Stream</th><th>Muted</th><th>Clients</th></tr></thead><tbody>';
+  for(const g of groups){
+    const clients = (g.clients||[]).map(c => esc(c.name||c.id) + ' (' + esc(c.volume) + '%' + (c.muted?' muted':'') + ')').join(', ');
+    s += '<tr><td>'+esc(g.id)+'</td><td><span class="badge">'+esc(g.stream)+'</span></td><td>'+(g.muted?'yes':'no')+'</td><td class="pre">'+clients+'</td></tr>';
+  }
+  snap.innerHTML = s + '</tbody></table>';
+}
+load();
+</script>"#;
+
+/// `/drive` body — link a Google Drive folder for the idle photo slideshow. The
+/// orchestrator runs the one-time OAuth consent here (a browser opens on the Mac);
+/// the tablet then pulls the token over Wyoming. Uses a private `apiJSON` helper —
+/// NOT the shared `getJSON`, which the page shell redefines (single-arg, GET-only)
+/// in a script appended after this one, so calling it here would silently downgrade
+/// our POSTs to GET.
+const DRIVE_BODY: &str = r#"<style>
+  label { display:block; margin:1rem 0 0.25rem; font-weight:600; }
+  input { width:100%; max-width:36rem; padding:0.5rem; font:inherit; box-sizing:border-box; }
+  .status { margin-top:1rem; padding:0.6rem 0.8rem; border-radius:6px; min-height:1.2rem; max-width:36rem; }
+  .ok { background:rgba(46,160,67,0.15); } .err { background:rgba(248,81,73,0.15); }
+  .hint { opacity:0.6; font-weight:400; font-size:0.85rem; }
+</style>
+<p class="sub">Link a Google Drive folder for the idle photo slideshow. Consent runs once here on the Mac — a browser window opens; the tablet then pulls the token over Wyoming (no adb, no rebuild). Requires a Google Cloud OAuth client of type <b>Desktop app</b>.</p>
+<div id="statusline" class="muted">Loading…</div>
+<label>OAuth client ID <span class="hint" id="cid_state"></span>
+  <input id="client_id" type="text" placeholder="(leave blank to keep current)" autocomplete="off">
+</label>
+<label>OAuth client secret <span class="hint" id="secret_state"></span>
+  <input id="client_secret" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+</label>
+<label>Folder IDs <span class="hint">comma-separated Drive folder IDs</span>
+  <input id="folder_ids" type="text" placeholder="1AbC...,1XyZ...">
+</label>
+<div class="toolbar">
+  <button id="save">Save credentials</button>
+  <button id="link">Link Google Drive</button>
+</div>
+<div id="status" class="status"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  async function load(){
+    try{
+      const j = await apiJSON('/drive/status.json');
+      $('cid_state').textContent = j.client_id_set ? '(set)' : '(not set)';
+      $('secret_state').textContent = j.client_secret_set ? '(set)' : '(not set)';
+      $('client_id').value = '';
+      $('client_secret').value = '';
+      $('folder_ids').value = (j.folder_ids||[]).join(', ');
+      const state = j.linked ? 'Linked ✓' : (j.configured ? 'Configured — not linked yet' : 'Not configured — set the client id + secret');
+      $('statusline').textContent = state + ' · scope: ' + (j.scope || '—');
+    }catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+  async function save(){
+    const body = {
+      client_id: $('client_id').value.trim() || undefined,
+      client_secret: $('client_secret').value.trim() || undefined,
+      folder_ids: $('folder_ids').value.split(',').map(s=>s.trim()).filter(Boolean),
+    };
+    try{
+      const j = await apiJSON('/drive/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  async function link(){
+    show(true, 'Opening a browser on this Mac — approve access, then return here…');
+    try{
+      const j = await apiJSON('/drive/link', {method:'POST'});
+      if(j.ok){
+        let m = j.message || 'Linked.';
+        if(j.verify && j.verify.length){
+          m += ' ' + j.verify.map(v => v.error ? ('folder '+v.folder_id+': '+v.error) : ('folder '+v.folder_id+': '+v.images+' image(s)')).join('; ');
+        }
+        show(true, m); load();
+      } else { show(false, j.message || 'Link failed.'); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('save').addEventListener('click', save);
+  $('link').addEventListener('click', link);
+  load();
+</script>"#;
+
 /// Cap on request bytes we buffer before the body — a config request is tiny; this
 /// just bounds a misbehaving/hostile client on the (unauthenticated) socket.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 /// Accept config-page connections forever, one task per connection. Returns only if
 /// the listener itself fails.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     listener: TcpListener,
     settings: Arc<SharedSettings>,
@@ -601,6 +826,7 @@ pub async fn serve(
     connector: Arc<dyn ServiceConnector>,
     voices_dir: Option<PathBuf>,
     debug: DebugSources,
+    music: Option<MusicHub>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -609,8 +835,13 @@ pub async fn serve(
         let connector = connector.clone();
         let voices_dir = voices_dir.clone();
         let debug = debug.clone();
+        let music = music.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, settings, catalog, connector, voices_dir, debug).await {
+            if let Err(e) = handle(
+                stream, settings, catalog, connector, voices_dir, debug, music,
+            )
+            .await
+            {
                 log::debug!("config page connection {peer} ended: {e:#}");
             }
         });
@@ -619,6 +850,7 @@ pub async fn serve(
 
 /// Read one HTTP request, route it, write one response, close. One request per
 /// connection (`Connection: close`) — ample for a settings page.
+#[allow(clippy::too_many_arguments)]
 async fn handle(
     mut stream: TcpStream,
     settings: Arc<SharedSettings>,
@@ -626,6 +858,7 @@ async fn handle(
     connector: Arc<dyn ServiceConnector>,
     voices_dir: Option<PathBuf>,
     debug: DebugSources,
+    music: Option<MusicHub>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
@@ -656,7 +889,7 @@ async fn handle(
     let request_line = lines.next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
-    let target = parts.next().unwrap_or("/").to_string();
+    let target = normalize_target(parts.next().unwrap_or("/"));
 
     let content_length = lines
         .find_map(|line| {
@@ -695,6 +928,11 @@ async fn handle(
         let payload = ev.data.to_string().into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
+    // Google Drive photo linkage status (booleans + folder ids; never secrets).
+    if method == "GET" && path == "/drive/status.json" {
+        let payload = drive_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
 
     // Debug/inspection data endpoints — need I/O and the debug sources, so they're
     // handled here (like `/models`) rather than in the pure `route` function.
@@ -716,6 +954,57 @@ async fn handle(
     // Needs the async graph handle + request body, so it's handled here.
     if method == "POST" && path == "/helix/rename-entity" {
         let payload = helix_rename_json(&debug, &body).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+
+    // Music control endpoints — need async I/O (process spawn, snapserver JSON-RPC,
+    // mpv IPC) and the `MusicHub`, so they're handled here like `/models`.
+    if method == "GET" && path == "/music/status.json" {
+        let payload = music_status_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/proc" {
+        let payload = music_proc_json(music.as_ref(), &body).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/play" {
+        let payload = music_play_json(music.as_ref(), &body).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/stopweb" {
+        let payload = music_stopweb_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/startall" {
+        let payload = music_startall_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/stopall" {
+        let payload = music_stopall_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the Drive OAuth client credentials / folder ids (no consent yet).
+    if method == "POST" && path == "/drive/save" {
+        let payload = drive_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Run the one-time OAuth consent (opens a browser on the Mac) and store the
+    // resulting refresh token. Blocks this connection until consent completes or
+    // times out — fine for a single admin request on the loopback page.
+    if method == "POST" && path == "/drive/link" {
+        let payload = drive_link_json(&settings).await;
         return write_response(
             &mut stream,
             "200 OK",
@@ -883,6 +1172,256 @@ async fn helix_rename_json(debug: &DebugSources, body: &[u8]) -> String {
     }
 }
 
+/// `GET /music/status.json` — supervised process state + live snapserver status.
+/// `{ ok, enabled, snapserver_addr, procs: [...], snapserver: { reachable, groups } }`.
+async fn music_status_json(music: Option<&MusicHub>) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": true, "enabled": false }).to_string();
+    };
+    let procs = serde_json::to_value(hub.supervisor.status().await).unwrap_or_else(|_| json!([]));
+    let snapserver = match hub.snapcast.get_status().await {
+        Ok(status) => {
+            let groups: Vec<Value> = status
+                .groups
+                .iter()
+                .map(|g| {
+                    let clients: Vec<Value> = g
+                        .clients
+                        .iter()
+                        .map(|c| {
+                            json!({
+                                "id": c.id,
+                                "name": c.host.name,
+                                "volume": c.volume_percent(),
+                                "muted": c.volume_muted(),
+                            })
+                        })
+                        .collect();
+                    json!({ "id": g.id, "stream": g.stream_id, "muted": g.muted, "clients": clients })
+                })
+                .collect();
+            json!({ "reachable": true, "groups": groups })
+        }
+        Err(_) => json!({ "reachable": false }),
+    };
+    json!({
+        "ok": true,
+        "enabled": true,
+        "snapserver_addr": hub.snapserver_addr,
+        "procs": procs,
+        "snapserver": snapserver,
+    })
+    .to_string()
+}
+
+/// `GET /drive/status.json` — the Drive photo linkage state for the `/drive` page.
+/// Reports only booleans + folder ids + scope; the client secret and refresh token
+/// are never included (they leave the orchestrator only over the device Wyoming hop).
+fn drive_status_json(settings: &SharedSettings) -> String {
+    let d = settings.drive();
+    json!({
+        "ok": true,
+        "configured": d.configured(),
+        "linked": d.linked(),
+        "client_id_set": d.client_id.as_deref().is_some_and(|s| !s.is_empty()),
+        "client_secret_set": d.client_secret.as_deref().is_some_and(|s| !s.is_empty()),
+        "has_refresh_token": d.refresh_token.as_deref().is_some_and(|s| !s.is_empty()),
+        "folder_ids": d.folder_ids,
+        "scope": d.scope.unwrap_or_default(),
+    })
+    .to_string()
+}
+
+/// `POST /music/proc` — body `{ proc, action }` starts/stops a managed process.
+async fn music_proc_json(music: Option<&MusicHub>, body: &[u8]) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
+    };
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let Some(proc) = data
+        .get("proc")
+        .and_then(Value::as_str)
+        .and_then(ManagedProc::from_key)
+    else {
+        return json!({ "ok": false, "message": "unknown proc" }).to_string();
+    };
+    let action = data.get("action").and_then(Value::as_str).unwrap_or("");
+    let res = match action {
+        "start" => hub.supervisor.start(proc).await,
+        "stop" => hub.supervisor.stop(proc).await,
+        other => Err(anyhow::anyhow!("unknown action {other:?}")),
+    };
+    match res {
+        Ok(()) => json!({ "ok": true }).to_string(),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// `POST /music/play` — body `{ url }` loads a URL in the mpv web player.
+async fn music_play_json(music: Option<&MusicHub>, body: &[u8]) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
+    };
+    let Some(mpv) = &hub.mpv else {
+        return json!({ "ok": false, "message": "no mpv IPC configured (AMBIENT_MUSIC_WEB_IPC)" })
+            .to_string();
+    };
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let url = data.get("url").and_then(Value::as_str).unwrap_or("").trim();
+    if url.is_empty() {
+        return json!({ "ok": false, "message": "empty url" }).to_string();
+    }
+    match mpv.load(url).await {
+        Ok(()) => json!({ "ok": true }).to_string(),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// `POST /music/stopweb` — stop the mpv web player.
+async fn music_stopweb_json(music: Option<&MusicHub>) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
+    };
+    let Some(mpv) = &hub.mpv else {
+        return json!({ "ok": false, "message": "no mpv IPC configured (AMBIENT_MUSIC_WEB_IPC)" })
+            .to_string();
+    };
+    match mpv.stop().await {
+        Ok(()) => json!({ "ok": true }).to_string(),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// `POST /music/startall` — start all managed processes (skips a snapserver that is
+/// already running).
+async fn music_startall_json(music: Option<&MusicHub>) -> String {
+    match music {
+        Some(hub) => {
+            hub.start_all().await;
+            json!({ "ok": true }).to_string()
+        }
+        None => json!({ "ok": false, "message": "music routing is disabled" }).to_string(),
+    }
+}
+
+/// `POST /music/stopall` — stop every process this orchestrator started.
+async fn music_stopall_json(music: Option<&MusicHub>) -> String {
+    match music {
+        Some(hub) => {
+            hub.stop_all().await;
+            json!({ "ok": true }).to_string()
+        }
+        None => json!({ "ok": false, "message": "music routing is disabled" }).to_string(),
+    }
+}
+
+/// `POST /drive/save` — set the Drive OAuth client id/secret and folder ids. A blank
+/// or absent credential is left unchanged (a page reload never wipes a stored
+/// secret); `folder_ids` (array or comma string) always replaces the stored list.
+fn drive_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    // Blank/absent = leave unchanged; a non-empty string sets the value.
+    let opt_set = |key: &str| match data.get(key).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+        _ => None,
+    };
+    let folder_ids = data.get("folder_ids").and_then(|v| {
+        if let Some(arr) = v.as_array() {
+            Some(
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            v.as_str().map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
+        }
+    });
+    settings.apply_drive(&DriveUpdate {
+        client_id: opt_set("client_id"),
+        client_secret: opt_set("client_secret"),
+        folder_ids,
+        ..Default::default()
+    });
+    drive_status_json(settings)
+}
+
+/// `POST /drive/link` — run the one-time OAuth consent using the stored client
+/// credentials (opens a browser on the Mac), store the resulting refresh token, and
+/// verify the configured folders with the immediate access token.
+async fn drive_link_json(settings: &SharedSettings) -> String {
+    let d = settings.drive();
+    let (Some(cid), Some(secret)) = (
+        d.client_id.clone().filter(|s| !s.is_empty()),
+        d.client_secret.clone().filter(|s| !s.is_empty()),
+    ) else {
+        return json!({
+            "ok": false,
+            "message": "Set the Drive client id and secret first (a 'Desktop app' OAuth client).",
+        })
+        .to_string();
+    };
+    let scope = d
+        .scope
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::config::DEFAULT_DRIVE_SCOPE.to_string());
+    let outcome = match crate::drive_consent::run_consent(
+        &cid,
+        &secret,
+        &scope,
+        std::time::Duration::from_secs(180),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => return json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    };
+    settings.apply_drive(&DriveUpdate {
+        refresh_token: Some(Some(outcome.refresh_token.clone())),
+        scope: Some(Some(outcome.scope.clone())),
+        ..Default::default()
+    });
+    // Best-effort verification of each folder with the freshly minted access token.
+    let mut verify = Vec::new();
+    if let Some(at) = &outcome.access_token {
+        for fid in &d.folder_ids {
+            match crate::drive_consent::verify_folder(at, fid).await {
+                Ok(n) => verify.push(json!({ "folder_id": fid, "images": n })),
+                Err(e) => verify.push(json!({ "folder_id": fid, "error": format!("{e:#}") })),
+            }
+        }
+    }
+    let now = settings.drive();
+    json!({
+        "ok": true,
+        "message": "Linked. The tablet picks this up on its next refresh (or reboot).",
+        "linked": now.linked(),
+        "folder_ids": now.folder_ids,
+        "verify": verify,
+    })
+    .to_string()
+}
+
 /// Pure request router: maps `(method, target, body)` to a response. Kept free of
 /// I/O so it is unit-testable against a [`SharedSettings`].
 fn route(
@@ -897,6 +1436,11 @@ fn route(
             "200 OK",
             "text/html; charset=utf-8",
             INDEX_HTML.as_bytes().to_vec(),
+        ),
+        ("GET", "/drive") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/drive", "Photos", DRIVE_BODY).into_bytes(),
         ),
         ("GET", "/chatlog") => (
             "200 OK",
@@ -918,6 +1462,17 @@ fn route(
             "text/html; charset=utf-8",
             page("/helix", "HelixDB", HELIX_BODY).into_bytes(),
         ),
+        ("GET", "/music") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/music", "Music", MUSIC_BODY).into_bytes(),
+        ),
+        ("GET", "/about") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/about", "About", &about_body()).into_bytes(),
+        ),
+        ("GET", "/about.json") => ("200 OK", "application/json", about_json().into_bytes()),
         ("GET", "/config") => (
             "200 OK",
             "application/json",
@@ -1066,6 +1621,25 @@ async fn write_response(
     Ok(())
 }
 
+/// Reduce a request target to origin-form (`/path?query`). Clients behind an HTTP
+/// **proxy** send the **absolute-form** target (RFC 7230 §5.3.2), e.g.
+/// `POST http://127.0.0.1:8731/drive/save HTTP/1.1`; a server MUST accept it. Our
+/// routing matches on the path, so strip any `scheme://authority` prefix down to the
+/// first `/` (an absolute URI with no path becomes `/`). Origin-form is returned
+/// unchanged.
+fn normalize_target(target: &str) -> String {
+    let rest = target
+        .strip_prefix("http://")
+        .or_else(|| target.strip_prefix("https://"));
+    match rest {
+        Some(after_scheme) => match after_scheme.find('/') {
+            Some(i) => after_scheme[i..].to_string(),
+            None => "/".to_string(),
+        },
+        None => target.to_string(),
+    }
+}
+
 /// First index of `needle` in `haystack`, or `None`.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
@@ -1149,6 +1723,23 @@ mod tests {
         assert_eq!(status, "200 OK");
         assert!(ctype.starts_with("text/html"));
         assert!(String::from_utf8_lossy(&body).contains("Ambient Orchestrator"));
+    }
+
+    #[test]
+    fn music_page_renders_with_nav() {
+        let (status, ctype, body) = route("GET", "/music", b"", &settings());
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Web-URL player"), "music page body");
+        assert!(html.contains("href=\"/music\""), "nav links music");
+    }
+
+    #[tokio::test]
+    async fn music_status_reports_disabled_without_a_hub() {
+        let v: Value = serde_json::from_str(&music_status_json(None).await).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["enabled"], false);
     }
 
     #[test]
@@ -1254,9 +1845,137 @@ mod tests {
     }
 
     #[test]
+    fn about_page_and_json_report_the_build() {
+        let (status, ctype, body) = route("GET", "/about", b"", &settings());
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Version"));
+        assert!(html.contains(env!("CARGO_PKG_VERSION")));
+        assert!(
+            html.contains("href=\"/drive\""),
+            "About page missing shared nav"
+        );
+
+        let (status, ctype, body) = route("GET", "/about.json", b"", &settings());
+        assert_eq!(status, "200 OK");
+        assert_eq!(ctype, "application/json");
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert!(v.get("git_sha").is_some());
+        assert!(v.get("build_time").is_some());
+    }
+
+    #[test]
+    fn get_drive_page_renders_with_nav() {
+        let (status, ctype, body) = route("GET", "/drive", b"", &settings());
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Link Google Drive"));
+        assert!(html.contains("href=\"/helix\""), "missing shared nav");
+    }
+
+    #[test]
+    fn drive_status_reports_unconfigured_by_default() {
+        let v: Value = serde_json::from_str(&drive_status_json(&settings())).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["configured"], false);
+        assert_eq!(v["linked"], false);
+        assert_eq!(v["client_secret_set"], false);
+        assert_eq!(v["folder_ids"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn drive_save_sets_creds_and_folders_without_leaking_the_secret() {
+        let s = settings();
+        let body = br#"{"client_id":"cid.apps","client_secret":"gocspx-secret","folder_ids":"1AbC, 1XyZ"}"#;
+        let out = drive_save_json(&s, body);
+        // The status echo must never contain the secret.
+        assert!(!out.contains("gocspx-secret"), "secret leaked: {out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["configured"], true, "client id + secret now set");
+        assert_eq!(v["client_secret_set"], true);
+        assert_eq!(v["linked"], false, "no refresh token yet");
+        assert_eq!(v["folder_ids"][0], "1AbC");
+        assert_eq!(v["folder_ids"][1], "1XyZ");
+        // The live settings hold the real secret, but a status read never exposes it.
+        let d = s.drive();
+        assert_eq!(d.client_secret.as_deref(), Some("gocspx-secret"));
+        assert!(!drive_status_json(&s).contains("gocspx-secret"));
+    }
+
+    #[test]
+    fn drive_save_blank_credential_leaves_the_stored_one_intact() {
+        let s = settings();
+        drive_save_json(&s, br#"{"client_id":"cid.apps","client_secret":"keep-me"}"#);
+        // A later save with a blank secret (page reload) must not wipe it.
+        drive_save_json(
+            &s,
+            br#"{"client_id":"cid.apps","client_secret":"","folder_ids":["1AbC"]}"#,
+        );
+        assert_eq!(s.drive().client_secret.as_deref(), Some("keep-me"));
+        assert_eq!(s.drive().folder_ids, vec!["1AbC".to_string()]);
+    }
+
+    #[test]
     fn invalid_json_is_a_400() {
         let (status, _c, _b) = route("POST", "/config", b"not json", &settings());
         assert_eq!(status, "400 Bad Request");
+    }
+
+    #[test]
+    fn normalize_target_reduces_absolute_form_to_path() {
+        // Origin-form is unchanged.
+        assert_eq!(normalize_target("/drive/save"), "/drive/save");
+        assert_eq!(normalize_target("/config?_=1"), "/config?_=1");
+        assert_eq!(normalize_target("/"), "/");
+        // Absolute-form (proxied client) is reduced to origin-form.
+        assert_eq!(
+            normalize_target("http://127.0.0.1:8731/drive/save"),
+            "/drive/save"
+        );
+        assert_eq!(
+            normalize_target("https://host:8731/config?_=1"),
+            "/config?_=1"
+        );
+        // Absolute URI with no path → root.
+        assert_eq!(normalize_target("http://127.0.0.1:8731"), "/");
+    }
+
+    #[tokio::test]
+    async fn serves_a_proxied_absolute_form_post() {
+        // A browser behind an HTTP proxy sends the absolute-form request target;
+        // the server must route it the same as origin-form (regression: this used to
+        // fall through to a 404 "not found", which broke the Drive config page).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let s = settings();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle(stream, s, catalog(), connector(), None, debug(), None)
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let body = br#"{"tts_voice":"en_US-amy-medium"}"#;
+        // Absolute-form target, exactly as an HTTP proxy forwards it.
+        let req = format!(
+            "POST http://127.0.0.1:{}/config HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            addr.port(),
+            body.len()
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.write_all(body).await.unwrap();
+
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
+        assert!(resp.contains("en_US-amy-medium"), "resp: {resp}");
     }
 
     #[test]
@@ -1338,7 +2057,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug())
+            handle(stream, s, catalog(), connector(), None, debug(), None)
                 .await
                 .unwrap();
         });
@@ -1368,7 +2087,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug())
+            handle(stream, s, catalog(), connector(), None, debug(), None)
                 .await
                 .unwrap();
         });
@@ -1414,6 +2133,7 @@ mod tests {
                 connector(),
                 Some(dir_for_task),
                 debug(),
+                None,
             )
             .await
             .unwrap();

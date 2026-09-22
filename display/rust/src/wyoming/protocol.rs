@@ -113,6 +113,15 @@ pub mod types {
     /// `{name, language, label}`). Byte-identical to the orchestrator's `VOICES`.
     pub const VOICES: &str = "ambient-voices";
 
+    /// device → orchestrator: fetch the Google Drive photo-slideshow credentials +
+    /// linkage the orchestrator owns (no data). Byte-identical to the orchestrator's
+    /// `GET_DRIVE_TOKEN`.
+    pub const GET_DRIVE_TOKEN: &str = "ambient-get-drive-token";
+    /// orchestrator → device: the Drive bundle (data: `ok`, `linked`, `configured`,
+    /// `client_id`, `client_secret`, `refresh_token`, `folder_ids` array, `scope`).
+    /// Byte-identical to the orchestrator's `DRIVE_TOKEN`.
+    pub const DRIVE_TOKEN: &str = "ambient-drive-token";
+
     // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
     //
     // orchestrator → device: a tool the LLM called on the Mac emits a device action

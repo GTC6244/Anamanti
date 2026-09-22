@@ -46,6 +46,12 @@ helix-ast = { git = "https://github.com/HelixDB/helix-db.git", package = "helix-
 anyhow = "1.0.104"
 async-stream = "0.3"
 async-trait = "0.1"
+# Google Drive OAuth consent (PKCE): base64url verifier/challenge, SHA-256
+# challenge, CSPRNG for the verifier, and URL building for the auth request.
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+url = "2"
 bytes = "1"
 # Local (timezone-aware) wall-clock time, injected into the LLM prompt each turn so
 # the model answers date/time questions from fact. `clock` enables `Local::now()` +
@@ -83,6 +89,7 @@ tokio = { version = "1.34", features = [
     "time",
     "macros",
     "signal",
+    "process",
 ] }
 # Host-side WebRTC Audio Processing (feature `aec`). `bundled` statically builds
 # the vendored libwebrtc APM (meson/ninja + abseil) so no system lib is required;

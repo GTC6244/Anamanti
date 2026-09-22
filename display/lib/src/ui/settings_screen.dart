@@ -22,8 +22,6 @@ import 'package:ambient_display/src/settings/orchestrator_client.dart';
 import 'package:ambient_display/src/settings/settings_store.dart';
 import 'package:ambient_display/src/slideshow/ambient_photos.dart';
 import 'package:ambient_display/src/slideshow/drive_photos.dart';
-import 'package:ambient_display/src/slideshow/google_oauth_config.dart';
-import 'package:ambient_display/src/slideshow/google_token_import.dart';
 import 'package:ambient_display/src/ui/memory_screen.dart';
 import 'package:ambient_display/src/ui/people_screen.dart';
 
@@ -237,34 +235,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// Import the Google **Drive** refresh token synced from the Mac consent helper
-  /// (`tools/google_photo_consent.py` → adb-pushed to the app's external files dir).
-  /// Drive's `drive.readonly` scope can't be granted on-device, so consent runs on
-  /// the Mac and the token is read here.
-  Future<void> _importDriveToken() async {
-    final imported = await importDriveTokenFromFile();
+  /// Sync the Google **Drive** bundle (OAuth client creds + refresh token + folder
+  /// ids) from the orchestrator, which owns consent. Link Drive once on the
+  /// orchestrator's config page (Photos tab, `http://<mac>:8730/drive`); the device
+  /// then pulls everything over Wyoming — no adb, no build-time credentials. This
+  /// also runs automatically on boot / the periodic photo refresh.
+  Future<void> _syncDriveFromOrchestrator() async {
+    _snack('Syncing Drive from the orchestrator…');
+    DriveTokenView token;
+    try {
+      token = await widget.client.fetchDriveToken();
+    } catch (e) {
+      if (!mounted) return;
+      _snack('Could not reach the orchestrator: $e');
+      return;
+    }
     if (!mounted) return;
-    if (imported == null) {
+    if (!token.configured) {
       _snack(
-        'No token file found. Run the Mac consent helper and adb-push it first.',
+        'The orchestrator has no Drive credentials yet. Link Drive on its config '
+        'page (Photos tab), then Sync.',
       );
       return;
     }
     setState(() {
-      if (imported.folderIds.isNotEmpty) {
-        _folderController.text = imported.folderIds.join(', ');
+      if (token.folderIds.isNotEmpty) {
+        _folderController.text = token.folderIds.join(', ');
       }
       _settings = _settings.copyWith(
         photoSource: PhotoSourceKind.drive,
-        driveLinked: true,
-        driveRefreshToken: imported.refreshToken,
+        driveClientId: token.clientId,
+        driveClientSecret: token.clientSecret,
+        driveRefreshToken: token.refreshToken,
+        driveFolderIds: token.folderIds,
+        driveLinked: token.linked,
       );
     });
-    final extra = imported.folderIds.isNotEmpty
-        ? ' + ${imported.folderIds.length} folder(s)'
-        : '';
     _snack(
-      'Imported Drive token$extra. Add folder ID(s) if needed, then Save.',
+      token.linked
+          ? 'Drive synced. Tap Save to apply.'
+          : 'Drive credentials synced, but not linked yet — link Drive on the '
+              'orchestrator config page, then Sync again.',
     );
   }
 
@@ -272,12 +283,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// choose which to display without knowing folder IDs. Needs an imported Drive
   /// token (mints an access token from it) and the Desktop client creds.
   Future<void> _pickDriveFolders() async {
-    if (!kGoogleDriveConfigured) {
-      _snack('Drive client not configured in this build.');
+    if (!_settings.driveConfigured) {
+      _snack('Drive not configured yet. Sync from the orchestrator first.');
       return;
     }
     if (_settings.driveRefreshToken.isEmpty) {
-      _snack('Import a Drive token first (Import Drive token).');
+      _snack('Drive not linked yet. Link it on the orchestrator, then Sync.');
       return;
     }
     // Brief loading dialog while we mint a token + list folders.
@@ -300,8 +311,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     List<DriveFolder> folders;
     final client = AmbientApiClient(
-      clientId: kGoogleDriveClientId,
-      clientSecret: kGoogleDriveClientSecret,
+      clientId: _settings.driveClientId,
+      clientSecret: _settings.driveClientSecret,
     );
     try {
       final token = (await client.refresh(
@@ -501,6 +512,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const Divider(),
           _section('Idle photos'),
           ..._photoTiles(),
+          const Divider(),
+          _section('Display'),
+          ..._displayTiles(),
           const Divider(),
           _section('Speech & detection'),
           ..._detectionTuningTiles(),
@@ -1011,6 +1025,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  /// Idle-screen presentation: how long the display stays fully bright after the
+  /// room goes quiet before dimming to the calm away-mode clock face. Maps to the
+  /// camera proximity release window (device-local; restarts the engine on Save).
+  List<Widget> _displayTiles() {
+    return [
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          'How long the screen stays bright after the room goes quiet before dimming '
+          'to the clock. Approaching the display brightens it again instantly.',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ),
+      _rangeSlider(
+        label: 'Stay bright before dim',
+        value: _settings.dimDelaySecs.toDouble(),
+        min: 5,
+        max: 300,
+        divisions: 59,
+        format: _fmtDuration,
+        sliderKey: const Key('settings-dim-delay'),
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(dimDelaySecs: v.round()),
+        ),
+      ),
+    ];
+  }
+
+  /// Human-readable seconds → "45s" / "2m" / "2m 30s" for the dim-delay slider.
+  String _fmtDuration(double seconds) {
+    final s = seconds.round();
+    if (s < 60) return '${s}s';
+    final m = s ~/ 60;
+    final rem = s % 60;
+    return rem == 0 ? '${m}m' : '${m}m ${rem}s';
+  }
+
   List<Widget> _photoTiles() {
     return [
       RadioGroup<PhotoSourceKind>(
@@ -1080,8 +1131,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
           child: Text(
-            '1. Consent once on the Mac (tools/google_photo_consent.py) → Import the '
-            'synced token.  2. Choose folders (or paste IDs).',
+            '1. Link Drive once on the orchestrator config page (Photos tab).  '
+            '2. Sync from the orchestrator here.  3. Choose folders (or paste IDs). '
+            'Syncing also happens automatically on boot.',
             style: TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ),
@@ -1093,18 +1145,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               FilledButton.tonalIcon(
-                key: const Key('settings-drive-import'),
-                onPressed: _importDriveToken,
-                icon: const Icon(Icons.download_for_offline_outlined),
+                key: const Key('settings-drive-sync'),
+                onPressed: _syncDriveFromOrchestrator,
+                icon: const Icon(Icons.sync),
                 label: Text(
                   _settings.driveLinked
-                      ? 'Re-import Drive token'
-                      : 'Import Drive token',
+                      ? 'Re-sync Drive from Mac'
+                      : 'Sync Drive from Mac',
                 ),
               ),
               FilledButton.icon(
                 key: const Key('settings-drive-pick'),
-                onPressed: _settings.driveLinked ? _pickDriveFolders : null,
+                onPressed:
+                    _settings.driveConfigured && _settings.driveRefreshToken.isNotEmpty
+                        ? _pickDriveFolders
+                        : null,
                 icon: const Icon(Icons.folder_open),
                 label: const Text('Choose folders'),
               ),
