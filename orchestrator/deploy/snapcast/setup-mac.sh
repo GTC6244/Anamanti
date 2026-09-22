@@ -34,9 +34,14 @@ done
 
 echo "==> Installing snapserver.conf → $CONF_DST"
 if [ -f "$CONF_DST" ] && ! cmp -s "$CONF_SRC" "$CONF_DST"; then
+  # cp dereferences a symlink, so this captures the current content (the Homebrew
+  # default snapserver.conf is a symlink into the Cellar).
   cp "$CONF_DST" "$CONF_DST.bak.$(date +%s)"
   echo "    backed up existing config"
 fi
+# Remove first so we replace a Homebrew symlink with a real file instead of writing
+# through it into the Cellar (which `brew upgrade` would later clobber).
+rm -f "$CONF_DST"
 cp "$CONF_SRC" "$CONF_DST"
 
 cat <<EOF
