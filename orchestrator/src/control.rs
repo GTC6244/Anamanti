@@ -451,6 +451,7 @@ mod tests {
                 openai_api_key: None,
                 openai_max_tokens: 10,
                 anthropic_token: None,
+                home_location: crate::directions::LiveHomeLocation::default(),
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -467,6 +468,7 @@ mod tests {
                 end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: crate::settings::DriveConfig::default(),
+                household: crate::settings::Household::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();

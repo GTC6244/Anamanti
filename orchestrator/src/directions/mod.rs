@@ -17,7 +17,7 @@
 //! display is a deferred follow-up (see `TODO.md §7`).
 
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
@@ -89,12 +89,42 @@ pub trait DirectionsProvider: Send + Sync {
     ) -> Result<Directions>;
 }
 
-/// The wired directions capability: the routing provider, the default origin (the
-/// device's home location) used when the user names only a destination, and whether
-/// to speak distances in imperial units.
+/// A cheaply-cloneable, thread-safe handle to the current home location, used as the
+/// directions tool's default origin when the user names only a destination. It reads
+/// **live** so an edit to the household record (config page Household tab) changes the
+/// origin without rebuilding the LLM backend: the orchestrator updates the same cell
+/// every tool clone shares. Seeds from `AMBIENT_HOME_LOCATION` at boot (via the
+/// `Household` record); an empty/blank value means "no default origin".
+#[derive(Clone, Default)]
+pub struct LiveHomeLocation(Arc<RwLock<Option<String>>>);
+
+impl LiveHomeLocation {
+    /// A handle initialized to `value` (blank/whitespace is treated as unset).
+    pub fn new(value: Option<String>) -> Self {
+        let this = Self::default();
+        this.set(value);
+        this
+    }
+
+    /// The current home location, or `None` when unset. Cheap `String` clone.
+    pub fn get(&self) -> Option<String> {
+        self.0.read().unwrap().clone()
+    }
+
+    /// Replace the current home location. Blank/whitespace is stored as `None`.
+    pub fn set(&self, value: Option<String>) {
+        *self.0.write().unwrap() = value
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+}
+
+/// The wired directions capability: the routing provider, the live home location
+/// used as the default origin when the user names only a destination, and whether to
+/// speak distances in imperial units.
 pub struct DirectionsConfig {
     pub provider: Arc<dyn DirectionsProvider>,
-    pub default_origin: Option<String>,
+    pub home_location: LiveHomeLocation,
     pub imperial: bool,
 }
 
@@ -261,8 +291,14 @@ fn typical_duration(route: &Value) -> Option<f64> {
 ///
 /// - `AMBIENT_DIRECTIONS_PROVIDER` selects the backend (default/only: `mapbox`).
 /// - `MAPBOX_TOKEN` (or `MAPBOX_ACCESS_TOKEN`) is the API token.
-/// - `AMBIENT_HOME_LOCATION` seeds the default origin.
 /// - `AMBIENT_WEATHER_UNITS` picks imperial vs metric distances.
+///
+/// The default origin is **not** read here — it comes from the live [`Household`]
+/// record (`LiveHomeLocation`), injected by the caller (`llm::rig::tools_from_config`)
+/// so a config-page location edit changes the origin without a restart. The returned
+/// config starts with an empty [`LiveHomeLocation`]; the caller sets it.
+///
+/// [`Household`]: crate::settings::Household
 pub fn from_env() -> Option<DirectionsConfig> {
     let provider = env::var("AMBIENT_DIRECTIONS_PROVIDER")
         .unwrap_or_default()
@@ -281,20 +317,15 @@ pub fn from_env() -> Option<DirectionsConfig> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())?;
 
-    let default_origin = env::var("AMBIENT_HOME_LOCATION")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
     let imperial = units_are_imperial(env::var("AMBIENT_WEATHER_UNITS").ok().as_deref());
 
     log::info!(
-        "directions_lookup enabled (mapbox; default origin {}, {} units)",
-        default_origin.as_deref().unwrap_or("<none>"),
+        "directions_lookup enabled (mapbox; {} units; origin from the live household location)",
         if imperial { "imperial" } else { "metric" }
     );
     Some(DirectionsConfig {
         provider: Arc::new(MapboxDirections::new(token)),
-        default_origin,
+        home_location: LiveHomeLocation::default(),
         imperial,
     })
 }

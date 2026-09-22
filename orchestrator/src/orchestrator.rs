@@ -30,7 +30,7 @@ use crate::memory::{
     infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemoryKind, MemorySource,
     MemoryStore, PromptLog, Recall, SqliteRecall,
 };
-use crate::settings::SharedSettings;
+use crate::settings::{Household, HouseholdMember, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::stt::SttSession;
@@ -116,13 +116,6 @@ pub struct Pipeline {
     /// [`crate::speaker::HOUSEHOLD_SPEAKER`].
     speaker: Option<Arc<SpeakerService>>,
     system_prompt: String,
-    /// The device's physical home location (e.g. "Austin, Texas"), injected into the
-    /// prompt so location-relative questions (weather, sunset, nearby places)
-    /// resolve an unqualified "here" to it. `None` omits the location line.
-    home_location: Option<String>,
-    /// Preferred measurement units for answers (e.g. "imperial" / "metric"), paired
-    /// with `home_location` in the prompt. `None` leaves it to the model.
-    weather_units: Option<String>,
     turn_timeout: Duration,
 }
 
@@ -145,8 +138,6 @@ impl Pipeline {
             promptlog: None,
             speaker: None,
             system_prompt: system_prompt.into(),
-            home_location: None,
-            weather_units: None,
             turn_timeout,
         }
     }
@@ -183,20 +174,6 @@ impl Pipeline {
     /// its registry).
     pub fn speaker(&self) -> Option<&Arc<SpeakerService>> {
         self.speaker.as_ref()
-    }
-
-    /// Ground the assistant in the device's physical location (and preferred units)
-    /// so location-relative questions — weather, sunset, "what's nearby" — resolve an
-    /// unqualified "here" to the configured home instead of the model guessing. Both
-    /// are optional; a `None`/blank location omits the line entirely.
-    pub fn with_location(
-        mut self,
-        home_location: Option<String>,
-        weather_units: Option<String>,
-    ) -> Self {
-        self.home_location = home_location.filter(|s| !s.trim().is_empty());
-        self.weather_units = weather_units.filter(|s| !s.trim().is_empty());
-        self
     }
 
     /// Build a pipeline around a fixed LLM backend + voice (the Phase-4 behavior).
@@ -526,19 +503,28 @@ impl Pipeline {
                 log::warn!("memory recall failed; answering without context: {e:#}");
                 String::new()
             });
-        // Ground the model in the real wall-clock (it has no clock) and tell it who
-        // it is speaking with, so time/date questions are answered from fact and it
-        // can address the person by name / apply the right person's memory.
-        let identity = speaker_identity_line(speaker);
+        // Ground "here" and who lives here from the canonical household record (live
+        // per-turn snapshot, so config-page edits take effect without a restart).
+        let household = &runtime.household;
+        // Ground the model in the real wall-clock (it has no clock) and tell it who it
+        // is speaking with, so time/date questions are answered from fact and it can
+        // address the person by name / apply the right person's memory. When the
+        // identified speaker matches a household member, the line notes who they are.
+        let identity = speaker_identity_line(speaker, household);
         let mut system_prompt = format!(
             "{}\n\n{}\n\n{}",
             self.system_prompt,
             current_datetime_line(),
             identity
         );
-        if let Some(line) =
-            location_line(self.home_location.as_deref(), self.weather_units.as_deref())
-        {
+        if let Some(line) = location_line(
+            household.location.as_deref(),
+            household.weather_units.as_deref(),
+        ) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&line);
+        }
+        if let Some(line) = household_line(&household.members) {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&line);
         }
@@ -901,10 +887,31 @@ fn speaker_scope(speaker: &SpeakerContext) -> Option<&str> {
     }
 }
 
-/// The system-prompt line telling the model who it is speaking with.
-fn speaker_identity_line(speaker: &SpeakerContext) -> String {
+/// The system-prompt line telling the model who it is speaking with. When the
+/// identified speaker's name matches a [`Household`] member (speaker_id_plan.md
+/// reconciliation), the line notes that they live here — and their relationship when
+/// one is recorded — so the model has the right context for that specific person.
+fn speaker_identity_line(speaker: &SpeakerContext, household: &Household) -> String {
     match &speaker.name {
-        Some(name) => format!("You are speaking with {name}."),
+        Some(name) => match household.member_matching(name) {
+            // Prefer the household's canonical name (correct spelling/capitalization)
+            // over the raw voiceprint label — that's the point of the roster.
+            Some(m) => {
+                let canonical = m.name.trim();
+                match m
+                    .relationship
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(rel) => {
+                        format!("You are speaking with {canonical} ({rel}), who lives here.")
+                    }
+                    None => format!("You are speaking with {canonical}, who lives here."),
+                }
+            }
+            None => format!("You are speaking with {name}."),
+        },
         None if speaker.is_household() => {
             "You are speaking with a member of the household.".to_string()
         }
@@ -1051,6 +1058,49 @@ fn location_line(location: Option<&str>, units: Option<&str>) -> Option<String> 
     Some(line)
 }
 
+/// A system-prompt block naming the people who live in the home (the canonical
+/// household directory), so the model can address them correctly and has their
+/// contact details on hand when a request needs one. Phrased non-leadingly (like the
+/// clock/location lines): it must only be used when the user actually asks something
+/// that needs it, never volunteered. Returns `None` when the roster is empty so the
+/// prompt omits the block entirely.
+fn household_line(members: &[HouseholdMember]) -> Option<String> {
+    let named: Vec<&HouseholdMember> = members
+        .iter()
+        .filter(|m| !m.name.trim().is_empty())
+        .collect();
+    if named.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "The people who live in this home (use only when a request needs to know who \
+         is here or how to reach them; do not recite this otherwise):",
+    );
+    for m in named {
+        let mut detail = Vec::new();
+        if let Some(rel) = m
+            .relationship
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            detail.push(rel.to_string());
+        }
+        if !m.emails.is_empty() {
+            detail.push(format!("email {}", m.emails.join(", ")));
+        }
+        if !m.phones.is_empty() {
+            detail.push(format!("phone {}", m.phones.join(", ")));
+        }
+        if detail.is_empty() {
+            block.push_str(&format!("\n- {}", m.name.trim()));
+        } else {
+            block.push_str(&format!("\n- {} ({})", m.name.trim(), detail.join("; ")));
+        }
+    }
+    Some(block)
+}
+
 /// Drain every currently-pending [`DeviceAction`] from the per-turn channel and
 /// relay it to the device as an `ambient-timer` frame on `writer`. Non-blocking: it
 /// only takes actions already queued (a tool's `invoke` runs synchronously during
@@ -1117,6 +1167,95 @@ mod location_tests {
     fn no_location_yields_no_line() {
         assert!(location_line(None, Some("metric")).is_none());
         assert!(location_line(Some("   "), None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod household_tests {
+    use super::{household_line, speaker_identity_line};
+    use crate::settings::{Household, HouseholdMember};
+    use crate::speaker::SpeakerContext;
+
+    fn member(name: &str, emails: &[&str], phones: &[&str], rel: Option<&str>) -> HouseholdMember {
+        HouseholdMember {
+            name: name.to_string(),
+            emails: emails.iter().map(|s| s.to_string()).collect(),
+            phones: phones.iter().map(|s| s.to_string()).collect(),
+            relationship: rel.map(str::to_string),
+        }
+    }
+
+    fn named_speaker(name: &str) -> SpeakerContext {
+        SpeakerContext {
+            speaker_id: "spk-1".to_string(),
+            name: Some(name.to_string()),
+            is_new: false,
+            confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn empty_roster_yields_no_block() {
+        assert!(household_line(&[]).is_none());
+        // A single nameless entry is also nothing to say.
+        assert!(household_line(&[member("  ", &["x@y.z"], &[], None)]).is_none());
+    }
+
+    #[test]
+    fn lists_people_with_their_contact_details() {
+        let line = household_line(&[
+            member(
+                "Alice",
+                &["alice@example.com"],
+                &["+1 555 0001"],
+                Some("parent"),
+            ),
+            member("Bob", &[], &[], None),
+        ])
+        .unwrap();
+        assert!(line.contains("Alice"));
+        assert!(line.contains("alice@example.com"));
+        assert!(line.contains("+1 555 0001"));
+        assert!(line.contains("parent"));
+        // Bob has no details, so he appears as a bare name (no empty parens).
+        assert!(line.contains("- Bob"));
+        assert!(!line.contains("Bob ()"));
+    }
+
+    #[test]
+    fn identity_line_reconciles_a_named_speaker_with_the_roster() {
+        let hh = Household {
+            members: vec![member("Alice", &[], &[], Some("parent"))],
+            ..Default::default()
+        };
+        // Case-insensitive match on the voiceprint's name links to the member.
+        let line = speaker_identity_line(&named_speaker("alice"), &hh);
+        assert!(line.contains("Alice"), "keeps the spoken-to name: {line}");
+        assert!(line.contains("parent"), "notes the relationship: {line}");
+        assert!(
+            line.contains("lives here"),
+            "notes they're a resident: {line}"
+        );
+    }
+
+    #[test]
+    fn identity_line_for_a_matched_member_without_a_relationship() {
+        let hh = Household {
+            members: vec![member("Bob", &[], &[], None)],
+            ..Default::default()
+        };
+        let line = speaker_identity_line(&named_speaker("Bob"), &hh);
+        assert!(line.contains("Bob") && line.contains("lives here"));
+        assert!(
+            !line.contains('('),
+            "no empty parens without a relationship: {line}"
+        );
+    }
+
+    #[test]
+    fn identity_line_stays_plain_for_a_non_member() {
+        let line = speaker_identity_line(&named_speaker("Zoe"), &Household::default());
+        assert_eq!(line, "You are speaking with Zoe.");
     }
 }
 
