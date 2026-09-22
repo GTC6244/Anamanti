@@ -104,7 +104,10 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Screen brightness:** the camera proximity sensor's `Presence` events fold into
   `AssistantState.userPresent`; `ScreenBrightnessController` actuates the window
   backlight (bright on approach, dimmed when quiet) via a `MethodChannel` to
-  `MainActivity`. Sensing is Rust (§2.1); only the actuation is here.
+  `MainActivity`. Sensing is Rust (§2.1); only the actuation is here. The **dim
+  delay** — how long the screen stays bright after the room goes quiet before it
+  dims to the away-mode clock — is a device-local setting (`AppSettings.dimDelaySecs`
+  → the proximity detector's release window; Settings → *Display*).
 
 ### 2.3 Mac Mini services
 
@@ -546,3 +549,11 @@ Build/verify each layer independently: `cargo test` for `orchestrator/` and `dis
 - Delivery phases & open questions → [`Plan.MD`](./Plan.MD)
 - Contributor / AI-agent build guidance → [`agents.md`](../agents.md)
 - Product overview & setup → [`README.md`](../README.md)
+- **Music (planned, pre-implementation):** house-wide music is a **Mac-hosted,
+  Snapcast-routed** capability that is deliberately **separate from the Wyoming/TTS
+  audio path and the device's cpal/oboe path** — music PCM never enters
+  `ambient_orchestrator`. Sources (librespot + web-URL player) write raw PCM to
+  snapfifos on the Mac; snapserver (on the Mac) fans out to snapclient speakers;
+  the orchestrator only controls (Web API / mpv IPC / snapserver JSON-RPC ducking).
+  Design → [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (transport) +
+  [`MusicPlan.md`](./MusicPlan.md) (Spotify source + control plane).

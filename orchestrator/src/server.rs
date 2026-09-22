@@ -11,6 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::control;
 use crate::llm::catalog::ModelCatalog;
+use crate::music::MusicDucker;
 use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome};
 use crate::wyoming::protocol::{self, types, AudioFormat};
 use crate::wyoming::DynConnection;
@@ -23,6 +24,7 @@ pub async fn serve(
     connector: Arc<dyn ServiceConnector>,
     catalog: Arc<ModelCatalog>,
     voices_dir: Option<PathBuf>,
+    ducker: Option<Arc<MusicDucker>>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -31,8 +33,10 @@ pub async fn serve(
         let connector = connector.clone();
         let catalog = catalog.clone();
         let voices_dir = voices_dir.clone();
+        let ducker = ducker.clone();
         tokio::spawn(async move {
-            match handle_connection(stream, pipeline, connector, catalog, voices_dir).await {
+            match handle_connection(stream, pipeline, connector, catalog, voices_dir, ducker).await
+            {
                 Ok(()) => log::info!("device disconnected: {peer}"),
                 Err(e) => log::warn!("connection {peer} ended with error: {e:#}"),
             }
@@ -51,6 +55,7 @@ async fn handle_connection(
     connector: Arc<dyn ServiceConnector>,
     catalog: Arc<ModelCatalog>,
     voices_dir: Option<PathBuf>,
+    ducker: Option<Arc<MusicDucker>>,
 ) -> Result<()> {
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
@@ -78,7 +83,34 @@ async fn handle_connection(
             }
             Some(ev) if ev.event_type == types::AUDIO_START => {
                 let format = protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO);
-                let mut on_event = |ev: TurnEvent| log_event(peer.as_ref(), &ev);
+                // Best-effort music ducking: lower the music group's volume while
+                // the assistant speaks and restore it when the turn ends. Fired on
+                // a spawned task so it never blocks (or fails) the turn; `duck`/
+                // `restore` are idempotent, so repeated `Speaking` events are safe.
+                let mut on_event = |ev: TurnEvent| {
+                    log_event(peer.as_ref(), &ev);
+                    if let Some(d) = ducker.as_ref() {
+                        match &ev {
+                            TurnEvent::Speaking => {
+                                let d = d.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = d.duck().await {
+                                        log::debug!("music duck failed: {e:#}");
+                                    }
+                                });
+                            }
+                            TurnEvent::Finished => {
+                                let d = d.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = d.restore().await {
+                                        log::debug!("music restore failed: {e:#}");
+                                    }
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                };
                 match pipeline
                     .run_turn_after_start(&mut device, connector.as_ref(), format, &mut on_event)
                     .await?

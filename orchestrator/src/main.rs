@@ -168,11 +168,16 @@ async fn run() -> Result<()> {
     // same runtime-swappable settings the device controls over Wyoming, so you can
     // change the LLM backend/model/voice live from a browser. Best-effort: a bind
     // failure disables the page but never stops the orchestrator.
+    // The Music tab's control hub (process supervisor + snapserver/mpv control),
+    // shared into the config page. `None` when AMBIENT_MUSIC is off.
+    let music_hub = config.build_hub();
+
     if let Some(config_addr) = config.config_addr {
         let settings = pipeline.settings().clone();
         let catalog = catalog.clone();
         let connector = connector.clone();
         let voices_dir = config.tts_voices_dir.clone();
+        let music = music_hub.clone();
         let debug = DebugSources {
             memory: pipeline.memory().clone(),
             chatlog_path: config.chatlog_path.clone(),
@@ -194,9 +199,10 @@ async fn run() -> Result<()> {
                      (chat log, prompts, SQLite, HelixDB — no auth, keep it on a trusted network)"
                 );
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        webconfig::serve(listener, settings, catalog, connector, voices_dir, debug)
-                            .await
+                    if let Err(e) = webconfig::serve(
+                        listener, settings, catalog, connector, voices_dir, debug, music,
+                    )
+                    .await
                     {
                         log::error!("config page stopped: {e:#}");
                     }
@@ -216,17 +222,52 @@ async fn run() -> Result<()> {
     let _mdns = MdnsAdvertiser::advertise(&config.service_name, &config.instance_id, local.port())
         .context("advertising Wyoming service over mDNS")?;
 
-    log::info!("orchestrator ready on {local}; waiting for the device");
-
-    tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone()) => {
-            res.context("device-facing server stopped")?;
-        }
-        _ = tokio::signal::ctrl_c() => {
-            log::info!("shutdown signal received; stopping");
+    // House-wide music routing (Snapcast) control plane. Dormant unless
+    // AMBIENT_MUSIC=on; when on, the ducker lowers the music group's volume while
+    // the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
+    let ducker = config.build_ducker();
+    if config.music.enabled {
+        log::info!(
+            "music routing on: snapserver={} duck_on_speech={} duck_to={}% group={:?}",
+            config.music.snapserver_addr,
+            config.music.duck_on_speech,
+            config.music.duck_percent,
+            config.music.group,
+        );
+        if let Some(p) = &config.music.mpv_ipc {
+            log::info!("music web-URL player mpv IPC at {}", p.display());
         }
     }
 
+    // Auto-start the managed music processes (snapserver/librespot/mpv) as part of
+    // the orchestrator lifecycle, when enabled. The Music tab's buttons still work.
+    if let Some(hub) = &music_hub {
+        if config.music.autostart {
+            log::info!("music: auto-starting managed processes (snapserver, librespot, mpv)");
+            hub.start_all().await;
+        }
+    }
+
+    log::info!("orchestrator ready on {local}; waiting for the device");
+
+    let outcome = tokio::select! {
+        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker) => {
+            res.context("device-facing server stopped")
+        }
+        _ = tokio::signal::ctrl_c() => {
+            log::info!("shutdown signal received; stopping");
+            Ok(())
+        }
+    };
+
+    // On shutdown, stop the processes this orchestrator started (externally-started
+    // ones are untracked and left alone).
+    if let Some(hub) = &music_hub {
+        log::info!("music: stopping managed processes");
+        hub.stop_all().await;
+    }
+
+    outcome?;
     Ok(())
 }
 

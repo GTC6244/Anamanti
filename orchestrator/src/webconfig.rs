@@ -43,6 +43,7 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
+use crate::music::{ManagedProc, MusicHub};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     DriveUpdate, Household, HouseholdMember, LlmEngine, SettingsUpdate, SharedSettings,
@@ -153,6 +154,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <nav class="nav">
     <a href="/" class="active">Config</a>
     <a href="/household">Household</a>
+    <a href="/music">Music</a>
     <a href="/drive">Photos</a>
     <a href="/chatlog">Chat log</a>
     <a href="/prompts">Prompts</a>
@@ -449,9 +451,10 @@ const SHELL_SCRIPT: &str = r#"
 
 /// Nav bar markup with `active` highlighted (same links as the config page).
 fn nav_html(active: &str) -> String {
-    const LINKS: [(&str, &str); 8] = [
+    const LINKS: [(&str, &str); 9] = [
         ("/", "Config"),
         ("/household", "Household"),
+        ("/music", "Music"),
         ("/drive", "Photos"),
         ("/chatlog", "Chat log"),
         ("/prompts", "Prompts"),
@@ -474,12 +477,15 @@ fn nav_html(active: &str) -> String {
 }
 
 /// Wrap a page `body` in the shared HTML shell (head, style, nav, shared script).
+/// The shared helper script (`esc`/`fmtTime`/`getJSON`) is emitted **before** the
+/// body so a body's inline `load()` (which runs as it is parsed) can rely on those
+/// helpers already being defined.
 fn page(active: &str, title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>Ambient — {title}</title><style>{SHELL_STYLE}</style></head>\
-         <body>{nav}<h1>{title}</h1>{body}<script>{SHELL_SCRIPT}</script></body></html>",
+         <body>{nav}<h1>{title}</h1><script>{SHELL_SCRIPT}</script>{body}</body></html>",
         nav = nav_html(active),
     )
 }
@@ -640,6 +646,100 @@ async function load(){
       btn.addEventListener('click', () => renameEntity(btn.getAttribute('data-rename')));
     }
   }catch(e){ out.textContent = 'Request failed: ' + e; }
+}
+load();
+</script>"#;
+
+/// `/music` body — start/stop the music sibling processes and see snapserver status.
+const MUSIC_BODY: &str = r#"<p class="sub">Start/stop the local music processes (snapserver, librespot, mpv) and see snapserver status. The orchestrator launches these; it never handles the audio.</p>
+<div id="disabled" class="muted" style="display:none"></div>
+<div id="panel" style="display:none">
+  <h2>Processes</h2>
+  <div class="toolbar">
+    <button onclick="startall()">Start all</button>
+    <button onclick="stopall()">Stop all</button>
+    <button onclick="load()">Refresh</button>
+    <span id="meta" class="muted"></span>
+  </div>
+  <table><thead><tr><th>Process</th><th>Status</th><th>PID</th><th></th><th>Log</th></tr></thead><tbody id="procs"></tbody></table>
+
+  <h2>Web-URL player</h2>
+  <div class="toolbar">
+    <input id="url" type="text" placeholder="https://stream-url or file path" style="min-width:22rem; padding:0.35rem 0.6rem">
+    <button onclick="play()">Play</button>
+    <button onclick="stopweb()">Stop</button>
+    <span id="webmsg" class="muted"></span>
+  </div>
+
+  <h2>Snapserver</h2>
+  <div id="snap" class="muted">Loading…</div>
+</div>
+<script>
+async function proc(key, action){
+  try{
+    const r = await fetch('/music/proc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proc:key, action})});
+    const j = await r.json();
+    if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
+  }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
+  setTimeout(load, 500);
+}
+async function postAction(url){
+  try{ const r = await fetch(url, {method:'POST'}); const j = await r.json();
+    if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
+  }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
+  setTimeout(load, 700);
+}
+async function startall(){ await postAction('/music/startall'); }
+async function stopall(){ await postAction('/music/stopall'); }
+async function play(){
+  const url = document.getElementById('url').value.trim(); const msg = document.getElementById('webmsg');
+  if(!url){ msg.textContent = 'Enter a URL.'; return; }
+  try{
+    const r = await fetch('/music/play', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+    const j = await r.json(); msg.textContent = j.ok ? 'Playing.' : (j.message || 'Error');
+  }catch(e){ msg.textContent = 'Request failed: ' + e; }
+  setTimeout(load, 500);
+}
+async function stopweb(){
+  const msg = document.getElementById('webmsg');
+  try{ const r = await fetch('/music/stopweb', {method:'POST'}); const j = await r.json(); msg.textContent = j.ok ? 'Stopped.' : (j.message || 'Error'); }
+  catch(e){ msg.textContent = 'Request failed: ' + e; }
+}
+async function load(){
+  let j;
+  try{ j = await getJSON('/music/status.json'); }
+  catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; return; }
+  const dis = document.getElementById('disabled'), panel = document.getElementById('panel');
+  if(!j.enabled){
+    dis.style.display = ''; panel.style.display = 'none';
+    dis.innerHTML = 'Music routing is disabled. Restart the orchestrator with <code>AMBIENT_MUSIC=on</code> to enable this panel.';
+    return;
+  }
+  dis.style.display = 'none'; panel.style.display = '';
+  const procs = j.procs || [];
+  document.getElementById('meta').textContent = procs.filter(p => p.running).length + ' of ' + procs.length + ' running';
+  let h = '';
+  for(const p of procs){
+    const badge = p.running
+      ? '<span class="badge" style="background:rgba(46,160,67,0.2)">running</span>'
+      : '<span class="badge">stopped</span>';
+    const btn = p.running ? '<button data-stop="'+esc(p.key)+'">Stop</button>' : '<button data-start="'+esc(p.key)+'">Start</button>';
+    h += '<tr><td>'+esc(p.label)+'</td><td>'+badge+'</td><td class="muted">'+esc(p.pid||'')+'</td><td>'+btn+'</td><td class="muted pre">'+esc(p.log_path)+'</td></tr>';
+  }
+  document.getElementById('procs').innerHTML = h;
+  for(const b of document.querySelectorAll('button[data-start]')) b.addEventListener('click', () => proc(b.getAttribute('data-start'), 'start'));
+  for(const b of document.querySelectorAll('button[data-stop]'))  b.addEventListener('click', () => proc(b.getAttribute('data-stop'), 'stop'));
+  const snap = document.getElementById('snap');
+  const ss = j.snapserver || {};
+  if(!ss.reachable){ snap.innerHTML = '<span class="muted">snapserver not reachable at '+esc(j.snapserver_addr||'')+' — start it above.</span>'; return; }
+  const groups = ss.groups || [];
+  if(!groups.length){ snap.innerHTML = '<span class="muted">Connected at '+esc(j.snapserver_addr||'')+'. No groups yet.</span>'; return; }
+  let s = '<table><thead><tr><th>Group</th><th>Stream</th><th>Muted</th><th>Clients</th></tr></thead><tbody>';
+  for(const g of groups){
+    const clients = (g.clients||[]).map(c => esc(c.name||c.id) + ' (' + esc(c.volume) + '%' + (c.muted?' muted':'') + ')').join(', ');
+    s += '<tr><td>'+esc(g.id)+'</td><td><span class="badge">'+esc(g.stream)+'</span></td><td>'+(g.muted?'yes':'no')+'</td><td class="pre">'+clients+'</td></tr>';
+  }
+  snap.innerHTML = s + '</tbody></table>';
 }
 load();
 </script>"#;
@@ -809,6 +909,7 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 /// Accept config-page connections forever, one task per connection. Returns only if
 /// the listener itself fails.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     listener: TcpListener,
     settings: Arc<SharedSettings>,
@@ -816,6 +917,7 @@ pub async fn serve(
     connector: Arc<dyn ServiceConnector>,
     voices_dir: Option<PathBuf>,
     debug: DebugSources,
+    music: Option<MusicHub>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -824,8 +926,13 @@ pub async fn serve(
         let connector = connector.clone();
         let voices_dir = voices_dir.clone();
         let debug = debug.clone();
+        let music = music.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, settings, catalog, connector, voices_dir, debug).await {
+            if let Err(e) = handle(
+                stream, settings, catalog, connector, voices_dir, debug, music,
+            )
+            .await
+            {
                 log::debug!("config page connection {peer} ended: {e:#}");
             }
         });
@@ -834,6 +941,7 @@ pub async fn serve(
 
 /// Read one HTTP request, route it, write one response, close. One request per
 /// connection (`Connection: close`) — ample for a settings page.
+#[allow(clippy::too_many_arguments)]
 async fn handle(
     mut stream: TcpStream,
     settings: Arc<SharedSettings>,
@@ -841,6 +949,7 @@ async fn handle(
     connector: Arc<dyn ServiceConnector>,
     voices_dir: Option<PathBuf>,
     debug: DebugSources,
+    music: Option<MusicHub>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
@@ -945,6 +1054,32 @@ async fn handle(
         .await;
     }
 
+    // Music control endpoints — need async I/O (process spawn, snapserver JSON-RPC,
+    // mpv IPC) and the `MusicHub`, so they're handled here like `/models`.
+    if method == "GET" && path == "/music/status.json" {
+        let payload = music_status_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/proc" {
+        let payload = music_proc_json(music.as_ref(), &body).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/play" {
+        let payload = music_play_json(music.as_ref(), &body).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/stopweb" {
+        let payload = music_stopweb_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/startall" {
+        let payload = music_startall_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/stopall" {
+        let payload = music_stopall_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
     // Save the Drive OAuth client credentials / folder ids (no consent yet).
     if method == "POST" && path == "/drive/save" {
         let payload = drive_save_json(&settings, &body);
@@ -1128,6 +1263,48 @@ async fn helix_rename_json(debug: &DebugSources, body: &[u8]) -> String {
     }
 }
 
+/// `GET /music/status.json` — supervised process state + live snapserver status.
+/// `{ ok, enabled, snapserver_addr, procs: [...], snapserver: { reachable, groups } }`.
+async fn music_status_json(music: Option<&MusicHub>) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": true, "enabled": false }).to_string();
+    };
+    let procs = serde_json::to_value(hub.supervisor.status().await).unwrap_or_else(|_| json!([]));
+    let snapserver = match hub.snapcast.get_status().await {
+        Ok(status) => {
+            let groups: Vec<Value> = status
+                .groups
+                .iter()
+                .map(|g| {
+                    let clients: Vec<Value> = g
+                        .clients
+                        .iter()
+                        .map(|c| {
+                            json!({
+                                "id": c.id,
+                                "name": c.host.name,
+                                "volume": c.volume_percent(),
+                                "muted": c.volume_muted(),
+                            })
+                        })
+                        .collect();
+                    json!({ "id": g.id, "stream": g.stream_id, "muted": g.muted, "clients": clients })
+                })
+                .collect();
+            json!({ "reachable": true, "groups": groups })
+        }
+        Err(_) => json!({ "reachable": false }),
+    };
+    json!({
+        "ok": true,
+        "enabled": true,
+        "snapserver_addr": hub.snapserver_addr,
+        "procs": procs,
+        "snapserver": snapserver,
+    })
+    .to_string()
+}
+
 /// `GET /drive/status.json` — the Drive photo linkage state for the `/drive` page.
 /// Reports only booleans + folder ids + scope; the client secret and refresh token
 /// are never included (they leave the orchestrator only over the device Wyoming hop).
@@ -1218,6 +1395,99 @@ fn household_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     };
     settings.apply_household(&household);
     household_status_json(settings)
+}
+
+/// `POST /music/proc` — body `{ proc, action }` starts/stops a managed process.
+async fn music_proc_json(music: Option<&MusicHub>, body: &[u8]) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
+    };
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let Some(proc) = data
+        .get("proc")
+        .and_then(Value::as_str)
+        .and_then(ManagedProc::from_key)
+    else {
+        return json!({ "ok": false, "message": "unknown proc" }).to_string();
+    };
+    let action = data.get("action").and_then(Value::as_str).unwrap_or("");
+    let res = match action {
+        "start" => hub.supervisor.start(proc).await,
+        "stop" => hub.supervisor.stop(proc).await,
+        other => Err(anyhow::anyhow!("unknown action {other:?}")),
+    };
+    match res {
+        Ok(()) => json!({ "ok": true }).to_string(),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// `POST /music/play` — body `{ url }` loads a URL in the mpv web player.
+async fn music_play_json(music: Option<&MusicHub>, body: &[u8]) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
+    };
+    let Some(mpv) = &hub.mpv else {
+        return json!({ "ok": false, "message": "no mpv IPC configured (AMBIENT_MUSIC_WEB_IPC)" })
+            .to_string();
+    };
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let url = data.get("url").and_then(Value::as_str).unwrap_or("").trim();
+    if url.is_empty() {
+        return json!({ "ok": false, "message": "empty url" }).to_string();
+    }
+    match mpv.load(url).await {
+        Ok(()) => json!({ "ok": true }).to_string(),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// `POST /music/stopweb` — stop the mpv web player.
+async fn music_stopweb_json(music: Option<&MusicHub>) -> String {
+    let Some(hub) = music else {
+        return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
+    };
+    let Some(mpv) = &hub.mpv else {
+        return json!({ "ok": false, "message": "no mpv IPC configured (AMBIENT_MUSIC_WEB_IPC)" })
+            .to_string();
+    };
+    match mpv.stop().await {
+        Ok(()) => json!({ "ok": true }).to_string(),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// `POST /music/startall` — start all managed processes (skips a snapserver that is
+/// already running).
+async fn music_startall_json(music: Option<&MusicHub>) -> String {
+    match music {
+        Some(hub) => {
+            hub.start_all().await;
+            json!({ "ok": true }).to_string()
+        }
+        None => json!({ "ok": false, "message": "music routing is disabled" }).to_string(),
+    }
+}
+
+/// `POST /music/stopall` — stop every process this orchestrator started.
+async fn music_stopall_json(music: Option<&MusicHub>) -> String {
+    match music {
+        Some(hub) => {
+            hub.stop_all().await;
+            json!({ "ok": true }).to_string()
+        }
+        None => json!({ "ok": false, "message": "music routing is disabled" }).to_string(),
+    }
 }
 
 /// `POST /drive/save` — set the Drive OAuth client id/secret and folder ids. A blank
@@ -1371,6 +1641,11 @@ fn route(
             "200 OK",
             "text/html; charset=utf-8",
             page("/helix", "HelixDB", HELIX_BODY).into_bytes(),
+        ),
+        ("GET", "/music") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/music", "Music", MUSIC_BODY).into_bytes(),
         ),
         ("GET", "/about") => (
             "200 OK",
@@ -1631,6 +1906,23 @@ mod tests {
     }
 
     #[test]
+    fn music_page_renders_with_nav() {
+        let (status, ctype, body) = route("GET", "/music", b"", &settings());
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Web-URL player"), "music page body");
+        assert!(html.contains("href=\"/music\""), "nav links music");
+    }
+
+    #[tokio::test]
+    async fn music_status_reports_disabled_without_a_hub() {
+        let v: Value = serde_json::from_str(&music_status_json(None).await).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["enabled"], false);
+    }
+
+    #[test]
     fn get_config_reports_current_backend() {
         let (status, ctype, body) = route("GET", "/config?_=1", b"", &settings());
         assert_eq!(status, "200 OK");
@@ -1885,7 +2177,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug())
+            handle(stream, s, catalog(), connector(), None, debug(), None)
                 .await
                 .unwrap();
         });
@@ -1986,7 +2278,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug())
+            handle(stream, s, catalog(), connector(), None, debug(), None)
                 .await
                 .unwrap();
         });
@@ -2016,7 +2308,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug())
+            handle(stream, s, catalog(), connector(), None, debug(), None)
                 .await
                 .unwrap();
         });
@@ -2062,6 +2354,7 @@ mod tests {
                 connector(),
                 Some(dir_for_task),
                 debug(),
+                None,
             )
             .await
             .unwrap();
