@@ -220,9 +220,11 @@ Phases A–D **and** the device "People" UI are implemented, tested, and merged
 (see [`speaker_id_plan.md`](./speaker_id_plan.md)): passive voiceprint +
 auto-clustering, per-person SQLite + GraphRAG memory, the prompt identity line,
 voice naming ("my name is …"), and the `ambient-*speaker*` control frames. It is
-**not running yet** — `AMBIENT_SPEAKER_ID` is unset (household), the release binary
-is built without `--features speaker`, and there is no real embedding model on the
-Mac. To take it from dormant code to a real feature:
+**not running yet** — `speaker.enabled` is false (household) and there is no real
+embedding model on the Mac. (The ONNX embedder is now always compiled in — there is
+no longer a `speaker` build feature — so with no `speaker.model_path` set it just
+falls back to the dev-only mock embedder.) To take it from dormant code to a real
+feature:
 
 ### 6a. Real embedding model (Phase E — the blocker for accuracy)
 
@@ -232,13 +234,14 @@ Mac. To take it from dormant code to a real feature:
       tensor layout `[1, frames, mels]` vs `[1, mels, frames]`) and align
       `OnnxSpeakerEmbedder` + `FbankConfig` (`orchestrator/src/speaker/{embed,features}.rs`)
       to it; set `AMBIENT_SPEAKER_EMBED_DIMS` (192 for ECAPA).
-- [ ] Build/ship the orchestrator with **`--features speaker`** and set
-      `AMBIENT_SPEAKER_MODEL_PATH` (else it falls back to the dev-only mock embedder).
+- [ ] Set **`speaker.model_path`** in `ambient.json` to the ONNX model (else it
+      falls back to the dev-only mock embedder). No build feature is needed — the
+      ONNX embedder is always compiled in.
 
 ### 6b. Enable + calibrate on hardware
 
-- [ ] Launch with **`AMBIENT_SPEAKER_ID=on`** and fold it (plus `--features speaker`
-      + the model path) into the launchd/run script from §4.
+- [ ] Set **`speaker.enabled = true`** (plus the model path) in `ambient.json` and
+      fold it into the launchd/run script from §4.
 - [ ] **Calibrate** `AMBIENT_SPEAKER_MATCH_THRESHOLD` / `_NEW_THRESHOLD` /
       `_MIN_SPEECH_MS` against real Echo Show far-field captures; measure EER and
       record the chosen operating point.

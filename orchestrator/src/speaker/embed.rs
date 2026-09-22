@@ -11,11 +11,10 @@
 //!   synthetic voices at different pitches are separable and *stable* across
 //!   turns, with no model file or network. This is what makes the whole
 //!   identification pipeline verifiable offline.
-//! - `OnnxSpeakerEmbedder` (Phase E, feature `speaker`) — the real ECAPA-TDNN
-//!   ONNX model run in-process. Deliberately deferred so Phases A–D carry no heavy
-//!   dependency; the trait below is the seam it slots into.
+//! - [`OnnxSpeakerEmbedder`] (Phase E) — the real ECAPA-TDNN ONNX model run
+//!   in-process. Always compiled; selected at runtime when `speaker.model_path`
+//!   is set (otherwise the mock embedder is used).
 
-#[cfg(feature = "speaker")]
 use anyhow::Context;
 use anyhow::{ensure, Result};
 
@@ -93,8 +92,8 @@ impl SpeakerEmbedder for MockSpeakerEmbedder {
     }
 }
 
-/// The real ECAPA-TDNN ONNX voiceprint embedder (speaker_id_plan.md Phase E),
-/// behind the `speaker` feature so the default build carries no ONNX dependency.
+/// The real ECAPA-TDNN ONNX voiceprint embedder (speaker_id_plan.md Phase E).
+/// Always compiled; used at runtime only when `speaker.model_path` is set.
 ///
 /// Runs a local ONNX model with `tract` (pure Rust, no external runtime) over the
 /// [`features`](crate::speaker::features) log-mel front-end and L2-normalizes the
@@ -102,14 +101,12 @@ impl SpeakerEmbedder for MockSpeakerEmbedder {
 /// tensor layout, and the fbank parameters must match the exported model — the
 /// values here follow the common 80-mel ECAPA contract and are the knobs to tune
 /// during on-hardware calibration.
-#[cfg(feature = "speaker")]
 pub struct OnnxSpeakerEmbedder {
     model: tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>,
     fbank: crate::speaker::features::FbankConfig,
     dims: usize,
 }
 
-#[cfg(feature = "speaker")]
 impl OnnxSpeakerEmbedder {
     /// Load an ONNX speaker-embedding model from `path`, producing `dims`-length
     /// vectors. `fbank` describes the log-mel front-end the model expects.
@@ -130,7 +127,6 @@ impl OnnxSpeakerEmbedder {
     }
 }
 
-#[cfg(feature = "speaker")]
 impl SpeakerEmbedder for OnnxSpeakerEmbedder {
     fn embed(&self, pcm: &[i16]) -> Result<Vec<f32>> {
         use tract_onnx::prelude::*;

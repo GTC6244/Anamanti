@@ -529,8 +529,9 @@ more tool in `Tools`.
   (`AMBIENT_LLM_ENGINE=rig`); `native` opts back out to the tool-less HTTP backends.
   Tool turns answer **non-streaming** (rig 0.42's ollama streaming parser drops
   non-final tool calls) — fine, since the reply is spoken whole.
-- **Info tools (Mac-side):** `internet_search` (DuckDuckGo keyless / Tavily with
-  `TAVILY_API_KEY`), on by default (`AMBIENT_WEB_SEARCH`). **Weather works** via
+- **Info tools (Mac-side):** `internet_search`, on by default (`llm.web_search`).
+  The default provider is now **Tavily** (`llm.search_provider="tavily"`, needs the
+  `TAVILY_API_KEY` secret); keyless **DuckDuckGo** is the alternative. **Weather works** via
   this tool; it is grounded by a configured home location + units
   (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`), injected into the system
   prompt next to the wall-clock and speaker-identity lines (`location_line`).
