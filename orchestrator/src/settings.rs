@@ -24,6 +24,7 @@ use crate::llm::{
     anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
     LlmBackend,
 };
+use crate::music::{SpotifyController, SpotifyWebApi};
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
 /// clients, or the rig-core agent framework (selected at runtime with
@@ -139,6 +140,86 @@ pub struct DriveUpdate {
     pub scope: Option<Option<String>>,
 }
 
+/// Spotify voice-control credentials + linkage, owned by the orchestrator.
+///
+/// Drives the rig-engine `spotify_control` tool (`crate::llm::rig`) over the
+/// Spotify Web API (`crate::music::spotify`). The orchestrator holds the Premium
+/// account's app **client id/secret** plus the **refresh token** minted by the
+/// one-time consent flow ([`crate::spotify_consent`], driven from the config page
+/// Music tab). Unlike Drive, this is used by the LLM tool set, so a change rebuilds
+/// the backend so the tool is advertised/withdrawn live.
+///
+/// Plaintext secrets (0600 settings file); keep on a trusted machine. Requires
+/// Spotify Premium.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SpotifyConfig {
+    /// Spotify app client id. `None`/empty = unset.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Spotify app client secret. `None`/empty = unset.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Long-lived refresh token minted by consent. `None` = not linked.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// librespot Connect device to target (default `"Ambient"` when unset).
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// OAuth scope granted (informational).
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+impl SpotifyConfig {
+    fn non_empty(v: &Option<String>) -> bool {
+        v.as_deref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// True when both app credentials are present (consent can run).
+    pub fn configured(&self) -> bool {
+        Self::non_empty(&self.client_id) && Self::non_empty(&self.client_secret)
+    }
+
+    /// True when configured *and* a refresh token exists — the tool can be built.
+    pub fn linked(&self) -> bool {
+        self.configured() && Self::non_empty(&self.refresh_token)
+    }
+
+    /// The device name to target, defaulting to `"Ambient"` (matches librespot).
+    pub fn device_label(&self) -> String {
+        self.device_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Ambient")
+            .to_string()
+    }
+
+    /// Build the live controller when fully linked, else `None` (so the
+    /// `spotify_control` tool simply isn't advertised).
+    pub fn controller(&self) -> Option<Arc<dyn SpotifyController>> {
+        if !self.linked() {
+            return None;
+        }
+        Some(Arc::new(SpotifyWebApi::new(
+            self.client_id.clone().unwrap_or_default(),
+            self.client_secret.clone().unwrap_or_default(),
+            self.refresh_token.clone().unwrap_or_default(),
+            self.device_label(),
+        )))
+    }
+}
+
+/// A requested change to the Spotify config (tri-state per field, like `DriveUpdate`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpotifyUpdate {
+    pub client_id: Option<Option<String>>,
+    pub client_secret: Option<Option<String>>,
+    pub refresh_token: Option<Option<String>>,
+    pub device_name: Option<Option<String>>,
+    pub scope: Option<Option<String>>,
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -172,6 +253,10 @@ pub struct PersistedSettings {
     /// older files.
     #[serde(default)]
     pub drive: DriveConfig,
+    /// Spotify voice-control credentials + linkage. Defaulted (empty) for older
+    /// files.
+    #[serde(default)]
+    pub spotify: SpotifyConfig,
 }
 
 /// Load persisted settings, or `None` if the file is absent/unreadable.
@@ -244,6 +329,10 @@ pub struct LlmFactory {
     /// Subscription (OAuth) token source for Anthropic, used when the auth mode is
     /// `Subscription`. Shared with the model catalog so both authenticate the same.
     pub anthropic_token: Option<Arc<AnthropicTokenProvider>>,
+    /// The live Spotify controller for the `spotify_control` tool, or `None` when
+    /// Spotify isn't linked. Set from the current [`SpotifyConfig`] on every
+    /// (re)build so the tool reflects the latest consent without re-reading env.
+    pub spotify: Option<Arc<dyn SpotifyController>>,
 }
 
 impl LlmFactory {
@@ -311,6 +400,7 @@ impl LlmFactory {
                                     web_search,
                                     search_provider,
                                     search_api_key,
+                                    self.spotify.clone(),
                                 ),
                             )?),
                             _ => Arc::new(AnthropicBackend::new(
@@ -353,6 +443,7 @@ impl LlmFactory {
                             web_search,
                             search_provider,
                             search_api_key,
+                            self.spotify.clone(),
                         ),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
@@ -403,6 +494,10 @@ pub struct RuntimeSettings {
     /// Google Drive photo-slideshow credentials + linkage (orchestrator-owned;
     /// pulled by the device over Wyoming). Orthogonal to the LLM rebuild path.
     pub drive: DriveConfig,
+    /// Spotify voice-control credentials + linkage. Unlike Drive, a change here
+    /// rebuilds the backend (via [`SpotifyConfig::controller`]) so the
+    /// `spotify_control` tool is advertised/withdrawn live.
+    pub spotify: SpotifyConfig,
 }
 
 /// A description of the settings currently in effect, for reporting back to the
@@ -504,6 +599,7 @@ impl SharedSettings {
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
             drive: s.drive.clone(),
+            spotify: s.spotify.clone(),
         }
     }
 
@@ -524,6 +620,7 @@ impl SharedSettings {
             openai_api_key: None,
             openai_max_tokens: 1024,
             anthropic_token: None,
+            spotify: None,
         };
         Self::new(
             factory,
@@ -542,6 +639,7 @@ impl SharedSettings {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                spotify: SpotifyConfig::default(),
             },
         )
     }
@@ -630,6 +728,9 @@ impl SharedSettings {
             let mut factory = self.factory.clone();
             factory.anthropic_api_key = target_anthropic_key.clone();
             factory.openai_api_key = target_openai_key.clone();
+            // Spotify isn't changed by a normal settings update, but the rebuilt tool
+            // set must still carry the live controller — source it from current config.
+            factory.spotify = current.spotify.controller();
             (
                 Some(factory.build(
                     target_engine,
@@ -753,6 +854,77 @@ impl SharedSettings {
         }
         result
     }
+
+    /// A snapshot of the live Spotify config (client creds + refresh token + device
+    /// name). Read by the config-page status endpoint and the consent flow.
+    pub fn spotify(&self) -> SpotifyConfig {
+        self.inner.read().unwrap().spotify.clone()
+    }
+
+    /// Apply a Spotify config change, rebuild the LLM so the `spotify_control` tool
+    /// is advertised/withdrawn to match, and persist (best-effort, 0600). Empty-string
+    /// sets are treated as clears. Returns the resulting [`SpotifyConfig`].
+    ///
+    /// The rebuild is best-effort: if it fails (e.g. the current cloud backend can no
+    /// longer build), the new Spotify config is still stored and persisted — the tool
+    /// then activates on the next successful rebuild or restart — so consent is never
+    /// lost to a transient backend error.
+    pub fn apply_spotify(&self, update: &SpotifyUpdate) -> SpotifyConfig {
+        // Compute the target config from a snapshot of the current settings.
+        let current = self.inner.read().unwrap().clone();
+        let mut target = current.spotify.clone();
+        if let Some(v) = &update.client_id {
+            target.client_id = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.client_secret {
+            target.client_secret = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.refresh_token {
+            target.refresh_token = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.device_name {
+            target.device_name = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.scope {
+            target.scope = v.clone().filter(|s| !s.is_empty());
+        }
+
+        // Rebuild the backend so the tool set reflects the new linkage. Build before
+        // taking the write lock; on failure, fall through and still store the config.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = target.controller();
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("spotify: applied config but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.spotify = target.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        target
+    }
 }
 
 #[cfg(test)]
@@ -769,6 +941,7 @@ mod tests {
             openai_api_key: None,
             openai_max_tokens: 256,
             anthropic_token: None,
+            spotify: None,
         }
     }
 
@@ -805,6 +978,7 @@ mod tests {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                spotify: SpotifyConfig::default(),
             },
         )
     }
@@ -889,6 +1063,7 @@ mod tests {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                spotify: SpotifyConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1034,6 +1209,7 @@ mod tests {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                spotify: SpotifyConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1085,5 +1261,88 @@ mod tests {
         // The earlier snapshot still points at the original backend name.
         assert_eq!(snap.llm_model.as_deref(), Some("llama3.2"));
         assert_eq!(s.view().llm_model.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn spotify_config_controller_only_builds_when_linked() {
+        let mut c = SpotifyConfig::default();
+        assert!(!c.configured() && !c.linked() && c.controller().is_none());
+        assert_eq!(c.device_label(), "Ambient"); // default device name
+        c.client_id = Some("cid".into());
+        c.client_secret = Some("sec".into());
+        assert!(c.configured() && !c.linked() && c.controller().is_none());
+        c.refresh_token = Some("rt".into());
+        assert!(c.linked() && c.controller().is_some());
+    }
+
+    #[test]
+    fn apply_spotify_links_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "ambient_spotify_test_{}_{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let factory = factory_with_key(None);
+        let (llm, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+                AnthropicAuth::ApiKey,
+            )
+            .unwrap();
+        let s = SharedSettings::new_persistent(
+            factory,
+            RuntimeSettings {
+                llm,
+                engine: LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
+                llm_backend: label,
+                llm_model: model,
+                anthropic_api_key: None,
+                openai_api_key: None,
+                anthropic_auth: AnthropicAuth::ApiKey,
+                tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
+                spotify: SpotifyConfig::default(),
+            },
+            Some(path.clone()),
+        );
+
+        // Save creds (not linked yet), then link with a refresh token.
+        s.apply_spotify(&SpotifyUpdate {
+            client_id: Some(Some("cid".into())),
+            client_secret: Some(Some("sec".into())),
+            device_name: Some(Some("Kitchen".into())),
+            ..Default::default()
+        });
+        assert!(s.spotify().configured() && !s.spotify().linked());
+        s.apply_spotify(&SpotifyUpdate {
+            refresh_token: Some(Some("rt".into())),
+            ..Default::default()
+        });
+        assert!(s.spotify().linked());
+        assert_eq!(s.spotify().device_label(), "Kitchen");
+
+        // The persisted file carries the linkage so a restart needs no re-consent.
+        let reloaded = load_persisted(&path).expect("settings file written");
+        assert_eq!(reloaded.spotify.refresh_token.as_deref(), Some("rt"));
+        assert_eq!(reloaded.spotify.device_name.as_deref(), Some("Kitchen"));
+
+        // A blank secret on a later save must not wipe the stored one.
+        s.apply_spotify(&SpotifyUpdate {
+            client_secret: Some(None),
+            ..Default::default()
+        });
+        assert!(!s.spotify().configured(), "secret cleared explicitly");
+        let _ = std::fs::remove_file(&path);
     }
 }

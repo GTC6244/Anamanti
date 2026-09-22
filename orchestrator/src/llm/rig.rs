@@ -40,6 +40,7 @@ use chrono::Local;
 use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, ReplyStream};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsConfig, DirectionsProvider, TravelMode};
+use crate::music::{SearchKind, SpotifyCommand, SpotifyController};
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
 /// calls can never spin forever. Each round is one streamed completion pass.
@@ -87,6 +88,15 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              traffic, you MUST call `directions_lookup` and answer from its result. If the user \
              names only a destination, omit the origin — it defaults to home. Never guess at \
              distances or travel times.",
+        );
+    }
+    if has(SpotifyControl::NAME) {
+        parts.push(
+            "You can control the house music with the `spotify_control` tool. Whenever the user \
+             asks to play, pause, resume, skip, go back to, queue, or change the volume of music \
+             or a song/artist/album/playlist, you MUST call `spotify_control` — never say you \
+             cannot play music. For \"play some <artist>\" or a mood/genre use action=play with \
+             kind=artist or kind=playlist; for one named song use kind=track.",
         );
     }
     parts.join(" ")
@@ -806,6 +816,160 @@ impl PortableTool for DirectionsLookup {
 }
 
 // ===========================================================================
+// Spotify tool (house-wide music control via the Web API)
+// ===========================================================================
+
+/// Typed arguments for [`SpotifyControl`].
+#[derive(Debug, Deserialize)]
+pub struct SpotifyArgs {
+    /// What to do: `play`, `pause`, `resume`, `next`, `previous`, `queue`, or
+    /// `volume`.
+    pub action: String,
+    /// What to play/queue (song, artist, album, or playlist name). Only used by
+    /// `play`/`queue`; omit for `play` to resume the current track.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// For `play`: what the query names — `track` (a specific song, default),
+    /// `artist`, `album`, or `playlist` (a vibe / "some X" plays a whole context).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// For `volume`: the target level, 0–100.
+    #[serde(default)]
+    pub volume_percent: Option<u8>,
+}
+
+/// A concrete, `std::error::Error` failure for the Spotify tool (rig requires the
+/// tool's error type to implement `std::error::Error`, which `anyhow::Error` does
+/// not).
+#[derive(Debug)]
+pub struct SpotifyToolError(pub String);
+
+impl std::fmt::Display for SpotifyToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "spotify control failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for SpotifyToolError {}
+
+/// Controls house-wide Spotify playback through an injected [`SpotifyController`]
+/// so the tool is testable offline, mirroring [`InternetSearch`]. The controller
+/// targets the librespot Connect device; audio never flows through here.
+pub struct SpotifyControl {
+    controller: Arc<dyn SpotifyController>,
+}
+
+impl SpotifyControl {
+    pub fn new(controller: Arc<dyn SpotifyController>) -> Self {
+        Self { controller }
+    }
+
+    /// The rig tool definition to advertise on a completion request.
+    pub fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: self.description(),
+            parameters: self.parameters(),
+        }
+    }
+
+    /// Map the typed args to a [`SpotifyCommand`]. Errors on an unknown action or a
+    /// missing required field (returned to the model as the tool result).
+    fn to_command(args: SpotifyArgs) -> Result<SpotifyCommand, SpotifyToolError> {
+        let query = args
+            .query
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty());
+        match args.action.trim().to_lowercase().as_str() {
+            "play" | "start" => Ok(SpotifyCommand::Play {
+                query,
+                kind: SearchKind::from_arg(args.kind.as_deref()),
+            }),
+            "queue" | "add" => {
+                let q = query.ok_or_else(|| {
+                    SpotifyToolError("queue needs the name of a song to add".to_string())
+                })?;
+                Ok(SpotifyCommand::Queue { query: q })
+            }
+            "pause" | "stop" => Ok(SpotifyCommand::Pause),
+            "resume" | "unpause" => Ok(SpotifyCommand::Resume),
+            "next" | "skip" | "forward" => Ok(SpotifyCommand::Next),
+            "previous" | "prev" | "back" => Ok(SpotifyCommand::Previous),
+            "volume" | "set_volume" => {
+                let percent = args.volume_percent.ok_or_else(|| {
+                    SpotifyToolError("volume needs a level from 0 to 100".to_string())
+                })?;
+                Ok(SpotifyCommand::SetVolume { percent })
+            }
+            other => Err(SpotifyToolError(format!("unknown action `{other}`"))),
+        }
+    }
+
+    /// Execute the tool from the model's raw JSON arguments (the runtime path).
+    pub async fn invoke(&self, arguments: &Value) -> Result<String> {
+        let args: SpotifyArgs = serde_json::from_value(arguments.clone())
+            .context("parsing spotify_control arguments")?;
+        self.call(args)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+impl PortableTool for SpotifyControl {
+    const NAME: &'static str = "spotify_control";
+    type Args = SpotifyArgs;
+    type Output = String;
+    type Error = SpotifyToolError;
+
+    fn description(&self) -> String {
+        "Control house-wide Spotify music playback on the speakers. Use this for ANY request to \
+         play, pause, resume, skip, go back, queue a song, or change the music volume. For \
+         \"play some Radiohead\" or a genre/mood, use action=play with kind=artist or \
+         kind=playlist; for a specific song use kind=track. Returns a short spoken confirmation."
+            .to_string()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["play", "pause", "resume", "next", "previous", "queue", "volume"],
+                    "description": "The playback operation to perform."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "What to play or queue (song, artist, album, or playlist). \
+                        Omit with action=play to resume the current track."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["track", "artist", "album", "playlist"],
+                    "description": "For action=play: what 'query' names. Use 'track' for one \
+                        specific song (default), or 'artist'/'playlist' to play a whole set."
+                },
+                "volume_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "For action=volume: the target level, 0–100."
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let cmd = Self::to_command(args)?;
+        self.controller
+            .command(cmd)
+            .await
+            .map_err(|e| SpotifyToolError(format!("{e:#}")))
+    }
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -822,16 +986,19 @@ pub struct Tools {
     search: Option<Arc<InternetSearch>>,
     calendar: Option<Arc<CalendarLookup>>,
     directions: Option<Arc<DirectionsLookup>>,
+    spotify: Option<Arc<SpotifyControl>>,
 }
 
 impl Tools {
     /// Build the tool set. Timer tools are always advertised; the web-search tool is
-    /// added when `search` is `Some`, the calendar tool when `calendar` is `Some`, and
-    /// the directions tool when `directions` is `Some`.
+    /// added when `search` is `Some`, the calendar tool when `calendar` is `Some`, the
+    /// directions tool when `directions` is `Some`, and the Spotify tool when
+    /// `spotify` is `Some`.
     pub fn new(
         search: Option<Arc<dyn SearchProvider>>,
         calendar: Option<Arc<dyn CalendarSource>>,
         directions: Option<DirectionsConfig>,
+        spotify: Option<Arc<dyn SpotifyController>>,
     ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
@@ -852,11 +1019,16 @@ impl Tools {
         if let Some(d) = &directions {
             definitions.push(d.definition());
         }
+        let spotify = spotify.map(|c| Arc::new(SpotifyControl::new(c)));
+        if let Some(s) = &spotify {
+            definitions.push(s.definition());
+        }
         Self {
             definitions,
             search,
             calendar,
             directions,
+            spotify,
         }
     }
 
@@ -883,6 +1055,10 @@ impl Tools {
             DirectionsLookup::NAME => match &self.directions {
                 Some(directions) => directions.invoke(arguments).await,
                 None => anyhow::bail!("directions lookup is not enabled"),
+            },
+            SpotifyControl::NAME => match &self.spotify {
+                Some(spotify) => spotify.invoke(arguments).await,
+                None => anyhow::bail!("spotify control is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
@@ -925,6 +1101,7 @@ pub fn tools_from_config(
     web_search: bool,
     provider: &str,
     api_key: Option<&str>,
+    spotify: Option<Arc<dyn SpotifyController>>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
     // Calendar subscriptions are read from `AMBIENT_CALENDARS` (read-only web .ics);
@@ -933,7 +1110,10 @@ pub fn tools_from_config(
     // Directions come from a routing provider (`MAPBOX_TOKEN`); absent → the
     // directions tool simply isn't advertised.
     let directions = crate::directions::from_env();
-    Some(Arc::new(Tools::new(search, calendar, directions)))
+    // Spotify control is passed in from the live settings (`SpotifyConfig::controller`),
+    // which is seeded from `AMBIENT_SPOTIFY_*` at boot and updated by the config-page
+    // consent flow; `None` → the spotify_control tool isn't advertised.
+    Some(Arc::new(Tools::new(search, calendar, directions, spotify)))
 }
 
 /// Build the tool set from the environment (used by the example / env-driven
@@ -941,7 +1121,9 @@ pub fn tools_from_config(
 pub fn tools_from_flag(web_search: bool) -> Option<Arc<Tools>> {
     let provider = std::env::var("AMBIENT_SEARCH_PROVIDER").unwrap_or_default();
     let key = std::env::var("TAVILY_API_KEY").ok();
-    tools_from_config(web_search, &provider, key.as_deref())
+    // The env-driven path (example / smoke test) builds Spotify from env directly.
+    let spotify = crate::music::spotify::from_env();
+    tools_from_config(web_search, &provider, key.as_deref(), spotify)
 }
 
 // ===========================================================================
@@ -1275,6 +1457,31 @@ mod tests {
         }
     }
 
+    /// A canned Spotify controller so tool tests never touch the network. Records
+    /// the last command it was asked to run so tests can assert the mapping.
+    struct StaticSpotify {
+        last: std::sync::Mutex<Option<SpotifyCommand>>,
+    }
+
+    #[async_trait]
+    impl SpotifyController for StaticSpotify {
+        async fn command(&self, cmd: SpotifyCommand) -> Result<String> {
+            let reply = match &cmd {
+                SpotifyCommand::Play { query: Some(q), .. } => format!("Playing {q}."),
+                SpotifyCommand::Play { query: None, .. } | SpotifyCommand::Resume => {
+                    "Resuming playback.".to_string()
+                }
+                SpotifyCommand::Pause => "Paused.".to_string(),
+                SpotifyCommand::Next => "Skipping.".to_string(),
+                SpotifyCommand::Previous => "Going back.".to_string(),
+                SpotifyCommand::Queue { query } => format!("Queued {query}."),
+                SpotifyCommand::SetVolume { percent } => format!("Volume {percent}."),
+            };
+            *self.last.lock().unwrap() = Some(cmd);
+            Ok(reply)
+        }
+    }
+
     /// Serve a fixed sequence of raw HTTP responses, one per inbound connection.
     fn serve_sequence(bodies: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1378,6 +1585,7 @@ mod tests {
             Some(Arc::new(StaticSearch("Sunny, 21C."))),
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1419,6 +1627,7 @@ mod tests {
             None,
             Some(Arc::new(StaticCalendar(vec![event]))),
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1451,7 +1660,7 @@ mod tests {
             default_origin: Some("Home, Austin".to_string()),
             imperial: true,
         };
-        let tools = Some(Arc::new(Tools::new(None, None, Some(directions))));
+        let tools = Some(Arc::new(Tools::new(None, None, Some(directions), None)));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "how long to the airport?"))
@@ -1471,7 +1680,7 @@ mod tests {
 
     #[test]
     fn directions_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None);
+        let none = Tools::new(None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -1487,11 +1696,133 @@ mod tests {
                 default_origin: None,
                 imperial: false,
             }),
+            None,
         );
         assert!(with
             .definitions
             .iter()
             .any(|d| d.name == DirectionsLookup::NAME));
+    }
+
+    #[test]
+    fn spotify_tool_advertised_only_when_configured() {
+        let none = Tools::new(None, None, None, None);
+        assert!(!none
+            .definitions
+            .iter()
+            .any(|d| d.name == SpotifyControl::NAME));
+
+        let with = Tools::new(
+            None,
+            None,
+            None,
+            Some(Arc::new(StaticSpotify {
+                last: std::sync::Mutex::new(None),
+            })),
+        );
+        assert!(with
+            .definitions
+            .iter()
+            .any(|d| d.name == SpotifyControl::NAME));
+    }
+
+    #[test]
+    fn spotify_args_map_to_commands() {
+        let play = SpotifyControl::to_command(SpotifyArgs {
+            action: "PLAY".into(),
+            query: Some("  radiohead ".into()),
+            kind: Some("artist".into()),
+            volume_percent: None,
+        })
+        .unwrap();
+        assert_eq!(
+            play,
+            SpotifyCommand::Play {
+                query: Some("radiohead".into()),
+                kind: SearchKind::Artist
+            }
+        );
+
+        // Resume: play with no query.
+        assert_eq!(
+            SpotifyControl::to_command(SpotifyArgs {
+                action: "play".into(),
+                query: None,
+                kind: None,
+                volume_percent: None,
+            })
+            .unwrap(),
+            SpotifyCommand::Play {
+                query: None,
+                kind: SearchKind::Track
+            }
+        );
+
+        assert_eq!(
+            SpotifyControl::to_command(SpotifyArgs {
+                action: "skip".into(),
+                query: None,
+                kind: None,
+                volume_percent: None,
+            })
+            .unwrap(),
+            SpotifyCommand::Next
+        );
+
+        // volume without a level, and unknown action, both error (surfaced to model).
+        assert!(SpotifyControl::to_command(SpotifyArgs {
+            action: "volume".into(),
+            query: None,
+            kind: None,
+            volume_percent: None,
+        })
+        .is_err());
+        assert!(SpotifyControl::to_command(SpotifyArgs {
+            action: "teleport".into(),
+            query: None,
+            kind: None,
+            volume_percent: None,
+        })
+        .is_err());
+    }
+
+    /// End-to-end tool loop for the Spotify tool: round 0 the fake Ollama asks for
+    /// `spotify_control` (play an artist); round 1 (after the confirmation is threaded
+    /// back) it streams the reply. Proves the tool is advertised, dispatched with the
+    /// parsed command, and its result reaches the model — using a canned controller.
+    #[tokio::test]
+    async fn rig_ollama_runs_spotify_tool_then_streams_answer() {
+        let tool_call = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"spotify_control\",\"arguments\":{\"action\":\"play\",\"query\":\"Radiohead\",\"kind\":\"artist\"}}}]},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"Playing Radiohead now.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
+
+        let controller = Arc::new(StaticSpotify {
+            last: std::sync::Mutex::new(None),
+        });
+        let tools = Some(Arc::new(Tools::new(
+            None,
+            None,
+            None,
+            Some(controller.clone()),
+        )));
+        let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
+        let stream = backend
+            .respond(LlmTurn::new("sys", "play some Radiohead"))
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_reply(stream).await.unwrap(),
+            "Playing Radiohead now."
+        );
+        // The controller received the parsed command.
+        assert_eq!(
+            controller.last.lock().unwrap().clone(),
+            Some(SpotifyCommand::Play {
+                query: Some("Radiohead".into()),
+                kind: SearchKind::Artist
+            })
+        );
+        server.await.unwrap();
     }
 
     #[test]
@@ -1556,7 +1887,7 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None, None);
+        let tools = Tools::new(None, None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -1573,7 +1904,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
-        let tools = Some(Arc::new(Tools::new(None, None, None)));
+        let tools = Some(Arc::new(Tools::new(None, None, None, None)));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "set a 5 minute pasta timer").with_actions(tx))
