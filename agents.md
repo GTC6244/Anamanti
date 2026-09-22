@@ -3,6 +3,8 @@
 Build guidance for AI coding agents (and humans) working in this repository.
 Read this together with [`architecture.md`](./plans/architecture.md) (the design) and
 [`Plan.MD`](./plans/Plan.MD) (phases, confirmed decisions, open questions).
+Feature-specific plans branch off these — e.g.
+[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the orchestrator).
 
 ---
 
@@ -77,8 +79,8 @@ orchestrator/  Everything that runs on the Mac. Rust orchestrator (crate
                `ambient_orchestrator`) — Wyoming server to the device + Wyoming
                client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory, mDNS.
 plans/         Design + planning docs: architecture.md (design, source of truth),
-               Plan.MD (phases + decision table), TODO.md, and the *_plan / rollout
-               notes.
+               Plan.MD (phases + decision table), TODO.md, the *_plan / rollout
+               notes, and MusicPlan.md (Spotify playback via the orchestrator).
 agents.md      This file (repo root).
 CLAUDE.md      Harness entry point; points here (repo root).
 README.md      Product overview + setup (repo root).
