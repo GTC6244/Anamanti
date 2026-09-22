@@ -286,7 +286,8 @@ class _AmbientHomeState extends State<AmbientHome> {
         next.playbackBufferSecs != _settings.playbackBufferSecs ||
         next.endpointCueEnabled != _settings.endpointCueEnabled ||
         next.endpointSilenceMs != _settings.endpointSilenceMs ||
-        next.endpointRmsThreshold != _settings.endpointRmsThreshold;
+        next.endpointRmsThreshold != _settings.endpointRmsThreshold ||
+        next.dimDelaySecs != _settings.dimDelaySecs;
     final photoChanged =
         next.photoSource != _settings.photoSource ||
         next.ambientRefreshToken != _settings.ambientRefreshToken ||

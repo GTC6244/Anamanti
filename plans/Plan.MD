@@ -505,10 +505,16 @@ recognition, no frames ever leave the device.
 - **Permission:** `CAMERA` is a runtime-dangerous permission declared in the
   manifest (`uses-feature` `required=false`) and, like `RECORD_AUDIO`, granted
   out-of-band on the kiosk device: `adb shell pm grant com.ambientdisplay.ambient_display android.permission.CAMERA`.
-- **Follow-ups (not done):** no settings-screen toggle yet (on by default via
-  `WakeWordDefaults.cameraProximity`); brightness levels + motion/release tuning are
+- **Dim delay (settings, 2026-09-22):** the **release window** — how long the screen
+  stays fully bright after the room goes quiet before dimming to the away-mode clock —
+  is now a **device-local setting** (Settings → *Display* → "Stay bright before dim",
+  5 s–5 min; default 20 s). Persisted in `AppSettings.dimDelaySecs`, mapped to
+  `WakeWordConfig.proximityReleaseSecs`, and applied by restarting the engine on Save
+  (so the `PresenceDetector` rebuilds with the new window).
+- **Follow-ups (not done):** no settings-screen on/off toggle yet (on by default via
+  `WakeWordDefaults.cameraProximity`); brightness levels + motion threshold are still
   compile-time defaults. Could later add an ambient-light (mean-luma) auto-brightness
-  curve and/or a settings toggle.
+  curve and/or a proximity on/off toggle.
 
 ### Tool calling & actions (post-Phase-6)
 

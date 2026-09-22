@@ -303,6 +303,51 @@ void main() {
     expect(find.text('Auto (first available)').last, findsOneWidget);
   });
 
+  testWidgets('dim-delay slider renders the current value and Save preserves it',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+    AppSettings? applied;
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        // A non-default dim delay (2 minutes) so we can see it rendered + saved.
+        initial: const AppSettings(dimDelaySecs: 120),
+        store: store,
+        client: client,
+        onApplied: (s) => applied = s,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // The Display section exposes the dim-delay slider, labelled with the current
+    // value formatted as minutes.
+    final scrollable = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-dim-delay')),
+      200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-dim-delay')));
+    await tester.pumpAndSettle();
+    expect(find.text('2m'), findsOneWidget);
+
+    // Saving persists the device-local dim delay and surfaces it to the parent so
+    // the engine restarts with the new proximity release window.
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-save')),
+      -200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-save')));
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(applied, isNotNull);
+    expect(applied!.dimDelaySecs, 120);
+    expect(store.value.dimDelaySecs, 120);
+  });
+
   testWidgets('memory tile navigates to the memory screen', (tester) async {
     final store = InMemorySettingsStore();
     final client = FakeOrchestratorClient();

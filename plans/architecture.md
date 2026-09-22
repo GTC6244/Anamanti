@@ -104,7 +104,10 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Screen brightness:** the camera proximity sensor's `Presence` events fold into
   `AssistantState.userPresent`; `ScreenBrightnessController` actuates the window
   backlight (bright on approach, dimmed when quiet) via a `MethodChannel` to
-  `MainActivity`. Sensing is Rust (§2.1); only the actuation is here.
+  `MainActivity`. Sensing is Rust (§2.1); only the actuation is here. The **dim
+  delay** — how long the screen stays bright after the room goes quiet before it
+  dims to the away-mode clock — is a device-local setting (`AppSettings.dimDelaySecs`
+  → the proximity detector's release window; Settings → *Display*).
 
 ### 2.3 Mac Mini services
 
