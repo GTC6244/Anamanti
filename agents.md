@@ -51,8 +51,10 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   fails, recall **falls back to SQLite FTS** (writes are unaffected). Override with
   `AMBIENT_MEMORY_BACKEND=sqlite` for pure FTS recall. The HelixDB engine and the
   rig agent framework are **always compiled in** (no longer feature-gated).
-- **Idle screen:** photo slideshow from a Google Photos/Drive folder via
-  **on-device OAuth**; keeps running when disconnected.
+- **Idle screen:** photo slideshow from a Google Photos/Drive folder; keeps running
+  when disconnected. Google Photos (Ambient) links via **on-device OAuth**
+  (device-code/QR); **Google Drive links on the orchestrator** (consent on the Mac,
+  config page → Photos tab) and the device pulls the token over Wyoming.
 - **Resilience:** **auto-reconnect** with backoff via mDNS + a subtle
   disconnected indicator; wake words queue until reconnected.
 - **AEC interim:** raise the wake-word confidence **threshold during playback** to
@@ -170,7 +172,11 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
 #     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
 #   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /chatlog,
-#     /prompts, /sqlite, /helix — no auth; `off` disables)
+#     /prompts, /sqlite, /helix, /drive — no auth; `off` disables)
+#   AMBIENT_GOOGLE_DRIVE_CLIENT_ID / AMBIENT_GOOGLE_DRIVE_CLIENT_SECRET (the Drive
+#     "Desktop app" OAuth client the orchestrator uses to run consent from the config
+#     page Photos tab; the device pulls the resulting token over Wyoming). Optional
+#     AMBIENT_GOOGLE_DRIVE_FOLDER_IDS=id1,id2 seeds the slideshow folders.
 #   AMBIENT_TTS_VOICES_DIR=<piper model dir>  (when Piper is co-located: the
 #     settings voice dropdown then lists only the `<name>.onnx` voices installed
 #     there; unset → the dropdown shows Piper's full advertised catalog)
@@ -333,9 +339,18 @@ Implementation note: photos have **two selectable backends** (see TODO §3):
 (1) the **Google Photos Ambient API** (`ambient_photos.dart`; device-code + QR,
 scope `photosambient.mediaitems`) — the ideal path, but **gated behind the Google
 Photos Partner Program** (`createDevice` → 403 until accepted); and (2) **Google
-Drive** (`drive_photos.dart`; `drive.readonly`) as the interim, whose consent runs
-once on the Mac (`tools/google_photo_consent.py`, a "Desktop app" client) with the
-token synced to the device. Both clients' creds are injected at build via
-`--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*` (TV,
-Ambient) + `GOOGLE_DRIVE_*` (Desktop, Drive). Dead ends: Photos Library API (no
-library read since 2025); Drive scopes via device-code/QR (rejected).
+Drive** (`drive_photos.dart`; `drive.readonly`) as the interim. **Drive is
+orchestrator-owned:** the Mac runs the one-time OAuth consent itself
+(`orchestrator/src/drive_consent.rs`, a "Desktop app" client, loopback + PKCE),
+driven from the config page **Photos tab** (`/drive` on `AMBIENT_CONFIG_ADDR`).
+The orchestrator holds the Drive client id/secret + refresh token + folder ids (in
+its `0600` `ambient_settings.json`), and the device **pulls the whole bundle over
+Wyoming** (`ambient-get-drive-token`) and mints Drive access tokens on-device — so
+the tablet APK ships **credential-free** for Drive (there is no build-time
+`GOOGLE_DRIVE_*` any more; `AppSettings.driveConfigured` is a runtime check). Set the
+Mac's Drive client via `AMBIENT_GOOGLE_DRIVE_CLIENT_ID` / `_SECRET` (optional
+`_FOLDER_IDS`). Only the **Ambient** (TV) client is still built into the APK, via
+`--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*`. Dead
+ends: Photos Library API (no library read since 2025); Drive scopes via
+device-code/QR (rejected); the old standalone `tools/google_photo_consent.py` +
+adb-push (replaced by the orchestrator consent + Wyoming delivery).

@@ -69,3 +69,6 @@ ambient_promptlog.jsonl-*
 
 # Google Drive refresh token synced from the Mac consent helper. Live token — never commit.
 /display/google_drive_token.json
+
+# Local test-orchestrator run dir (worktree-local; never commit)
+.ambient-test-run/

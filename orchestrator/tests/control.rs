@@ -13,7 +13,7 @@ use ambient_orchestrator::llm::anthropic_auth::AnthropicAuth;
 use ambient_orchestrator::memory::{MemoryKind, MemorySource, MemoryStore};
 use ambient_orchestrator::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
 use ambient_orchestrator::settings::{
-    LlmEngine, LlmFactory, RuntimeSettings, SharedSettings, DEFAULT_END_SILENCE_MS,
+    DriveConfig, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings, DEFAULT_END_SILENCE_MS,
     DEFAULT_VOICE_RMS_THRESHOLD,
 };
 use ambient_orchestrator::wyoming::protocol::{read_event, types, write_event, WyomingEvent};
@@ -62,6 +62,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             tts_voice: None,
             end_silence_ms: DEFAULT_END_SILENCE_MS,
             voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+            drive: DriveConfig::default(),
         },
     );
     let pipeline = Pipeline::with_settings(

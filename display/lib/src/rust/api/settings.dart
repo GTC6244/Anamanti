@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `block_on`, `preferred`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Discover every orchestrator on the LAN for the settings "Orchestrator"
 /// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
@@ -53,6 +53,18 @@ Future<List<VoiceInfo>> listVoices({
   required String orchestratorKey,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsListVoices(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Fetch the Google Drive photo bundle (client creds + refresh token + folder ids)
+/// from the orchestrator, for the idle photo slideshow. Called at boot / on the
+/// periodic photo refresh; the device stores the result in app settings and mints
+/// Drive access tokens on-device.
+Future<DriveToken> getDriveToken({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsGetDriveToken(
   orchestratorKey: orchestratorKey,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
@@ -132,6 +144,69 @@ Future<bool> deleteSpeaker({
   id: id,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
+
+/// The Google Drive photo-slideshow bundle the orchestrator owns, pulled by the
+/// device to drive the idle slideshow. The device mints Drive access tokens
+/// on-device from `refresh_token` using `client_id`/`client_secret`, so the tablet
+/// APK ships with no baked-in Google credentials. When the orchestrator isn't linked
+/// the fields are empty and `linked`/`configured` are false (the device then falls
+/// back to local gradient images).
+class DriveToken {
+  /// True when a refresh token is present (Drive is fully linked and usable).
+  final bool linked;
+
+  /// True when the OAuth client id + secret are present (access tokens can be
+  /// minted). Mirrors the old build-time `kGoogleDriveConfigured`, now runtime.
+  final bool configured;
+
+  /// "Desktop app" OAuth client id (empty when unset).
+  final String clientId;
+
+  /// "Desktop app" OAuth client secret (empty when unset).
+  final String clientSecret;
+
+  /// Long-lived refresh token (empty when not linked).
+  final String refreshToken;
+
+  /// Drive folder ids the slideshow reads images from.
+  final List<String> folderIds;
+
+  /// OAuth scope granted (informational).
+  final String scope;
+
+  const DriveToken({
+    required this.linked,
+    required this.configured,
+    required this.clientId,
+    required this.clientSecret,
+    required this.refreshToken,
+    required this.folderIds,
+    required this.scope,
+  });
+
+  @override
+  int get hashCode =>
+      linked.hashCode ^
+      configured.hashCode ^
+      clientId.hashCode ^
+      clientSecret.hashCode ^
+      refreshToken.hashCode ^
+      folderIds.hashCode ^
+      scope.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DriveToken &&
+          runtimeType == other.runtimeType &&
+          linked == other.linked &&
+          configured == other.configured &&
+          clientId == other.clientId &&
+          clientSecret == other.clientSecret &&
+          refreshToken == other.refreshToken &&
+          folderIds == other.folderIds &&
+          scope == other.scope;
+}
 
 /// One persistent memory entry, for the settings memory list.
 class MemoryEntry {

@@ -74,6 +74,34 @@ class VoiceOption {
   final String? language;
 }
 
+/// The Google Drive photo-slideshow bundle the orchestrator owns, pulled by the
+/// device to drive the idle slideshow. The device mints Drive access tokens
+/// on-device from these, so the APK ships credential-free.
+class DriveTokenView {
+  const DriveTokenView({
+    required this.linked,
+    required this.configured,
+    required this.clientId,
+    required this.clientSecret,
+    required this.refreshToken,
+    required this.folderIds,
+    required this.scope,
+  });
+
+  /// True when a refresh token is present (Drive is fully linked and usable).
+  final bool linked;
+
+  /// True when the OAuth client id + secret are present (access tokens can be
+  /// minted). Runtime replacement for the old build-time `kGoogleDriveConfigured`.
+  final bool configured;
+
+  final String clientId;
+  final String clientSecret;
+  final String refreshToken;
+  final List<String> folderIds;
+  final String scope;
+}
+
 /// One discovered orchestrator, for the settings "Orchestrator" dropdown.
 class OrchestratorOption {
   const OrchestratorOption({
@@ -174,6 +202,11 @@ abstract class OrchestratorClient {
   /// The installed Piper voices for the TTS voice dropdown. May be empty if the
   /// Mac is unreachable or Piper reports no voices.
   Future<List<VoiceOption>> listVoices();
+
+  /// Fetch the Google Drive photo bundle (client creds + refresh token + folder
+  /// ids) for the idle slideshow. Throws if the Mac is unreachable; callers fall
+  /// back to the last-synced values persisted in app settings.
+  Future<DriveTokenView> fetchDriveToken();
 
   Future<List<MemoryView>> listMemories();
 
@@ -278,6 +311,23 @@ class FrbOrchestratorClient implements OrchestratorClient {
     return voices
         .map((v) => VoiceOption(name: v.name, label: v.label, language: v.language))
         .toList();
+  }
+
+  @override
+  Future<DriveTokenView> fetchDriveToken() async {
+    final t = await frb.getDriveToken(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return DriveTokenView(
+      linked: t.linked,
+      configured: t.configured,
+      clientId: t.clientId,
+      clientSecret: t.clientSecret,
+      refreshToken: t.refreshToken,
+      folderIds: t.folderIds,
+      scope: t.scope,
+    );
   }
 
   @override
