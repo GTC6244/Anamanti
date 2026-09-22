@@ -174,8 +174,10 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #   AMBIENT_SPOTIFY_CLIENT_ID / AMBIENT_SPOTIFY_CLIENT_SECRET / AMBIENT_SPOTIFY_REFRESH_TOKEN
 #     (enables the rig-engine `spotify_control` tool — voice play/pause/skip/queue/volume
 #     over the Spotify Web API, targeting the librespot Connect device. Requires Spotify
-#     PREMIUM. All three unset → the tool isn't advertised. Get the refresh token via the
-#     one-time consent runbook in plans/MusicPlan.md. AMBIENT_SPOTIFY_DEVICE_NAME (default
+#     PREMIUM. All three unset → the tool isn't advertised. Easiest setup: config page →
+#     Music tab → "Connect Spotify" (loopback OAuth consent; stores the refresh token in
+#     settings and activates the tool live). Env vars are the headless alternative — see
+#     the one-time runbook in plans/MusicPlan.md. AMBIENT_SPOTIFY_DEVICE_NAME (default
 #     "Ambient") is the librespot device to control — see the AMBIENT_MUSIC_* block.)
 #   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
 #     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)

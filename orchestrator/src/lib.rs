@@ -28,5 +28,6 @@ pub mod orchestrator;
 pub mod server;
 pub mod settings;
 pub mod speaker;
+pub mod spotify_consent;
 pub mod webconfig;
 pub mod wyoming;

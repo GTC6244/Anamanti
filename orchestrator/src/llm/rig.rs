@@ -1101,6 +1101,7 @@ pub fn tools_from_config(
     web_search: bool,
     provider: &str,
     api_key: Option<&str>,
+    spotify: Option<Arc<dyn SpotifyController>>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
     // Calendar subscriptions are read from `AMBIENT_CALENDARS` (read-only web .ics);
@@ -1109,9 +1110,9 @@ pub fn tools_from_config(
     // Directions come from a routing provider (`MAPBOX_TOKEN`); absent → the
     // directions tool simply isn't advertised.
     let directions = crate::directions::from_env();
-    // Spotify control needs the Premium app credentials + refresh token
-    // (`AMBIENT_SPOTIFY_*`); absent → the spotify_control tool isn't advertised.
-    let spotify = crate::music::spotify::from_env();
+    // Spotify control is passed in from the live settings (`SpotifyConfig::controller`),
+    // which is seeded from `AMBIENT_SPOTIFY_*` at boot and updated by the config-page
+    // consent flow; `None` → the spotify_control tool isn't advertised.
     Some(Arc::new(Tools::new(search, calendar, directions, spotify)))
 }
 
@@ -1120,7 +1121,9 @@ pub fn tools_from_config(
 pub fn tools_from_flag(web_search: bool) -> Option<Arc<Tools>> {
     let provider = std::env::var("AMBIENT_SEARCH_PROVIDER").unwrap_or_default();
     let key = std::env::var("TAVILY_API_KEY").ok();
-    tools_from_config(web_search, &provider, key.as_deref())
+    // The env-driven path (example / smoke test) builds Spotify from env directly.
+    let spotify = crate::music::spotify::from_env();
+    tools_from_config(web_search, &provider, key.as_deref(), spotify)
 }
 
 // ===========================================================================

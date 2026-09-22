@@ -3,12 +3,13 @@
 **Targets:** M4 Mac Mini (control + audio source) + Snapcast speakers on the LAN
 **Feature:** hands-free Spotify — *"play some Radiohead"* → music on the house speakers.
 
-> **Status:** Voice control **implemented** (2026-09-22). The `spotify_control`
-> rig tool + Spotify Web API client (`orchestrator/src/music/spotify.rs`) ship on
-> top of PR 38's Snapcast transport + `librespot` supervisor. Remaining: obtain a
-> Premium refresh token (one-time consent, §8) and, optionally, a config-page
-> consent UI (§9). No Spotify audio flows through the Wyoming TTS pipeline or the
-> device — the tool is control-only.
+> **Status:** Voice control **+ config-page consent UI implemented** (2026-09-22).
+> The `spotify_control` rig tool + Spotify Web API client
+> (`orchestrator/src/music/spotify.rs`), settings-backed credentials, and a
+> config-page "Connect Spotify" consent flow (`spotify_consent.rs`, Music tab) all
+> ship on top of PR 38's Snapcast transport + `librespot` supervisor. Remaining:
+> just a Premium account + a one-time click-through consent. No Spotify audio flows
+> through the Wyoming TTS pipeline or the device — the tool is control-only.
 
 This plan reads together with [`Plan.MD`](./Plan.MD) (the tool-calling / rig
 engine decisions), [`architecture.md`](./architecture.md) (the design), and the
@@ -139,9 +140,11 @@ who started playback — no extra work here.
 
 1. **P1 — librespot + Snapcast bring-up.** ✅ **Done (PR 38).** librespot Connect
    device "Ambient" → snapfifo → snapserver, supervised by the orchestrator.
-2. **P2 — OAuth consent + token.** ⏳ **Manual runbook ready (§8).** One-time
-   Authorization-Code flow → refresh token in `AMBIENT_SPOTIFY_REFRESH_TOKEN`. A
-   config-page consent UI (twin of the Drive flow) is the follow-up in §9.
+2. **P2 — OAuth consent + token.** ✅ **Done (config-page UI + manual runbook).**
+   The **Music tab** of the config page has a "Connect Spotify" flow
+   (`spotify_consent.rs`, loopback Authorization-Code + PKCE) that stores the
+   refresh token in settings and activates the tool live — no restart, no `curl`.
+   The env/manual path (§8) still works for headless setup.
 3. **P3 — `spotify_control` tool.** ✅ **Done (this change).** `PortableTool` +
    `definition()` + guidance in `llm/rig.rs` over `music/spotify.rs`; all actions
    (`play`/`pause`/`resume`/`next`/`previous`/`queue`/`volume`); unit + end-to-end
@@ -232,11 +235,21 @@ then, do this by hand.)
 
 ---
 
-## 9. Follow-up: config-page consent UI (optional polish)
+## 9. Config-page consent UI — **implemented**
 
-Mirror `orchestrator/src/drive_consent.rs` (the Google Drive loopback
-authorization-code flow driven from the config page's Photos tab) with a Spotify
-equivalent on a **Music** tab: a "Connect Spotify" button runs the loopback
-consent in-process and stores the refresh token in settings, so no manual `curl`.
-Deferred to keep this change focused; the manual runbook (§8) is sufficient to
-ship.
+The Google-Drive loopback consent pattern is mirrored for Spotify:
+
+- **`orchestrator/src/spotify_consent.rs`** — loopback Authorization-Code + PKCE
+  flow. **Unlike Drive**, Spotify requires an *exact pre-registered* redirect, so
+  it binds a **fixed** port (default 8888) and the operator registers
+  `http://127.0.0.1:8888/callback` in their Spotify app (the page tells them so).
+- **`SpotifyConfig` in `settings.rs`** — client id/secret/refresh-token/device,
+  persisted (0600) and seeded from `AMBIENT_SPOTIFY_*` at boot. Unlike Drive, a
+  change **rebuilds the LLM** (`apply_spotify`) so `spotify_control` is advertised/
+  withdrawn live — the tool activates the instant consent completes.
+- **Config page → Music tab** — a "Spotify (voice control)" card: client id/secret/
+  device inputs, **Save**, and **Connect Spotify** (`POST /spotify/save`,
+  `/spotify/link`, `GET /spotify/status.json`). Secrets are never echoed back.
+
+So the end-to-end setup is now: open the config page → Music tab → paste client
+id/secret → Connect Spotify → approve in the browser → say "play some Radiohead."
