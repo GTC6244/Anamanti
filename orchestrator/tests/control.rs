@@ -36,6 +36,10 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         anthropic_token: None,
         home_location: ambient_orchestrator::directions::LiveHomeLocation::default(),
         spotify: None,
+        calendar: None,
+        directions: None,
+        directions_provider: String::new(),
+        directions_imperial: false,
     };
     let (llm, backend, model) = factory
         .build(
@@ -60,6 +64,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             llm_model: model,
             anthropic_api_key: None,
             openai_api_key: None,
+            anthropic_oauth_token: None,
+            mapbox_token: None,
             anthropic_auth: AnthropicAuth::ApiKey,
             tts_voice: None,
             end_silence_ms: DEFAULT_END_SILENCE_MS,

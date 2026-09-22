@@ -8,9 +8,11 @@
 //! The subscription token is resolved by [`AnthropicTokenProvider`], in order:
 //!   1. `ANTHROPIC_OAUTH_TOKEN` — a long-lived token from `claude setup-token`
 //!      (the `claude` CLI's subscription token). Simplest; no per-request work.
-//!   2. `AMBIENT_ANTHROPIC_TOKEN_CMD` — a command that prints a fresh access token
-//!      to stdout (default `ant auth print-credentials --access-token`, for hosts
-//!      with the `ant` CLI logged in). Cached briefly and refreshed on a 401.
+//!      This is a **secret**, so it stays an environment variable.
+//!   2. The configured `llm.anthropic_token_cmd` (from the JSON config file) — a
+//!      command that prints a fresh access token to stdout (default
+//!      `ant auth print-credentials --access-token`, for hosts with the `ant` CLI
+//!      logged in). Cached briefly and refreshed on a 401.
 //!
 //! Both the chat backend ([`crate::llm::anthropic`]) and the model catalog
 //! ([`crate::llm::catalog`]) authenticate through here so the two never drift.
@@ -75,15 +77,23 @@ pub fn apply_auth(
 
 /// Fetches + caches a subscription OAuth access token via the `ant` CLI. The fetch
 /// command is injectable so tests never depend on a real `ant` install.
+///
+/// A runtime **override** (set from the config page) takes precedence over both the
+/// env token and the fetch command: a token pasted in the UI is used directly.
 pub struct AnthropicTokenProvider {
     fetch: Arc<dyn Fn() -> Result<String> + Send + Sync>,
     cache: Mutex<Option<(Instant, String)>>,
+    /// A long-lived token set at runtime (config page). When present & non-empty it
+    /// is returned as-is, bypassing the env var and the fetch command.
+    override_token: Mutex<Option<String>>,
 }
 
 impl AnthropicTokenProvider {
-    /// Production provider: env token, else a token-printing CLI.
-    pub fn new() -> Self {
-        Self::with_fetcher(Arc::new(default_fetch_token))
+    /// Production provider: runtime override → env token (`ANTHROPIC_OAUTH_TOKEN`) →
+    /// the configured `token_cmd` (from `llm.anthropic_token_cmd` in the config file,
+    /// defaulting to the `ant` CLI when `None`).
+    pub fn new(token_cmd: Option<String>) -> Self {
+        Self::with_fetcher(Arc::new(move || default_fetch_token(token_cmd.as_deref())))
     }
 
     /// Provider with a custom token fetcher (tests).
@@ -91,12 +101,33 @@ impl AnthropicTokenProvider {
         Self {
             fetch,
             cache: Mutex::new(None),
+            override_token: Mutex::new(None),
         }
     }
 
-    /// A valid Bearer token, served from cache when fresh or fetched via `ant`. The
-    /// subprocess runs on a blocking thread so it never stalls the async runtime.
+    /// Set (or clear) the runtime override token — a long-lived subscription token
+    /// entered on the config page. Blank/whitespace clears it. Shared across every
+    /// backend that holds this provider `Arc`, so it takes effect without a rebuild.
+    pub fn set_override(&self, token: Option<String>) {
+        let token = token
+            .map(|s| s.split_whitespace().collect::<String>())
+            .filter(|s| !s.is_empty());
+        *self.override_token.lock().unwrap() = token;
+    }
+
+    /// Whether a runtime override token is currently set.
+    pub fn has_override(&self) -> bool {
+        self.override_token.lock().unwrap().is_some()
+    }
+
+    /// A valid Bearer token: the runtime override if set, else served from cache when
+    /// fresh or fetched via `ant`. The subprocess runs on a blocking thread so it
+    /// never stalls the async runtime.
     pub async fn bearer(&self) -> Result<String> {
+        // A runtime override (config-page token) wins over env / the fetch command.
+        if let Some(tok) = self.override_token.lock().unwrap().clone() {
+            return Ok(tok);
+        }
         {
             let cache = self.cache.lock().unwrap();
             if let Some((at, tok)) = cache.as_ref() {
@@ -130,26 +161,30 @@ impl AnthropicTokenProvider {
 
 impl Default for AnthropicTokenProvider {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
 /// Resolve a subscription token: a long-lived env token first (from
-/// `claude setup-token`), else a configurable token-printing CLI.
-fn default_fetch_token() -> Result<String> {
+/// `claude setup-token`), else the configured token-printing CLI (`token_cmd`,
+/// defaulting to the `ant` CLI when `None`/blank).
+fn default_fetch_token(token_cmd: Option<&str>) -> Result<String> {
     // 1. A long-lived OAuth token supplied directly (e.g. `claude setup-token`).
+    //    This is a secret, so it remains an environment variable.
     if let Ok(tok) = std::env::var("ANTHROPIC_OAUTH_TOKEN") {
         if !tok.trim().is_empty() {
             return Ok(tok);
         }
     }
     // 2. A command that prints a fresh access token (default: the `ant` CLI).
-    let cmd = std::env::var("AMBIENT_ANTHROPIC_TOKEN_CMD")
-        .unwrap_or_else(|_| "ant auth print-credentials --access-token".to_string());
+    let default_cmd = "ant auth print-credentials --access-token";
+    let cmd = token_cmd
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_cmd)
+        .to_string();
     let mut parts = cmd.split_whitespace();
-    let program = parts
-        .next()
-        .context("AMBIENT_ANTHROPIC_TOKEN_CMD is empty")?;
+    let program = parts.next().context("anthropic_token_cmd is empty")?;
     let args: Vec<&str> = parts.collect();
     let out = std::process::Command::new(program)
         .args(&args)
@@ -202,6 +237,26 @@ mod tests {
         provider.invalidate();
         assert_eq!(provider.bearer().await.unwrap(), "tok-1"); // re-fetched
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn override_token_wins_over_the_fetcher() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let provider = AnthropicTokenProvider::with_fetcher(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok("fetched".into())
+        }));
+        // With an override set, bearer() returns it and never calls the fetcher.
+        provider.set_override(Some("  pasted-token  ".into())); // whitespace stripped
+        assert!(provider.has_override());
+        assert_eq!(provider.bearer().await.unwrap(), "pasted-token");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Clearing the override falls back to the fetcher again.
+        provider.set_override(Some("   ".into())); // blank clears
+        assert!(!provider.has_override());
+        assert_eq!(provider.bearer().await.unwrap(), "fetched");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

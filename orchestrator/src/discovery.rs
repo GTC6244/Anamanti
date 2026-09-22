@@ -61,7 +61,7 @@ impl MdnsAdvertiser {
     ///
     /// **Note:** `mdns-sd` does **not** probe for or auto-rename on fullname
     /// collisions, so two orchestrators MUST be launched with distinct
-    /// `AMBIENT_SERVICE_NAME` values — otherwise both answer under the same
+    /// `service_name` values — otherwise both answer under the same
     /// instance name and the device cannot tell them apart. The device
     /// disambiguates by the `instance_id` TXT record.
     pub fn advertise(instance_name: &str, instance_id: &str, port: u16) -> Result<Self> {

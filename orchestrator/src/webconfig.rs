@@ -46,8 +46,8 @@ use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
-    DriveUpdate, Household, HouseholdMember, LlmEngine, SettingsUpdate, SharedSettings,
-    SpotifyUpdate,
+    DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine, SettingsUpdate,
+    SharedSettings, SpotifyUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -157,6 +157,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <a href="/household">Household</a>
     <a href="/music">Music</a>
     <a href="/drive">Photos</a>
+    <a href="/tools">Tools</a>
     <a href="/chatlog">Chat log</a>
     <a href="/prompts">Prompts</a>
     <a href="/sqlite">SQLite</a>
@@ -191,6 +192,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
   <label id="anthropic_key_row">Anthropic API key <span class="hint" id="anthropic_key_state"></span>
     <input id="anthropic_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+
+  <label id="anthropic_oauth_row">Anthropic subscription token <span class="hint" id="anthropic_oauth_state"></span>
+    <input id="anthropic_oauth_token" type="password" placeholder="(leave blank to keep current; from `claude setup-token`)">
   </label>
 
   <label id="openai_key_row">OpenAI API key <span class="hint" id="openai_key_state"></span>
@@ -327,6 +332,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const auth = $('anthropic_auth').value;
     $('anthropic_key_row').style.display =
       (backend === 'anthropic' && auth === 'apikey') ? '' : 'none';
+    // The subscription token field shows only under Anthropic subscription auth.
+    $('anthropic_oauth_row').style.display =
+      (backend === 'anthropic' && auth === 'subscription') ? '' : 'none';
     $('openai_key_row').style.display = backend === 'openai' ? '' : 'none';
   }
 
@@ -336,8 +344,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     $('anthropic_auth').value = v.anthropic_auth || 'apikey';
     $('anthropic_api_key').value = '';
     $('openai_api_key').value = '';
+    $('anthropic_oauth_token').value = '';
     $('anthropic_key_state').textContent = v.anthropic_key_set ? '(a key is set)' : '(no key set)';
     $('openai_key_state').textContent = v.openai_key_set ? '(a key is set)' : '(no key set)';
+    $('anthropic_oauth_state').textContent = v.anthropic_oauth_token_set ? '(a token is set)' : '(no token set)';
     renderAuthRow($('llm_backend').value);
     renderModel($('llm_backend').value, v.llm_model || '');
     renderVoice(v.tts_voice || '');
@@ -385,6 +395,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       search_api_key: $('search_api_key').value.trim() || undefined,
       anthropic_api_key: $('anthropic_api_key').value.trim() || undefined,
       openai_api_key: $('openai_api_key').value.trim() || undefined,
+      anthropic_oauth_token: $('anthropic_oauth_token').value.trim() || undefined,
     };
     try {
       const r = await fetch('/config', {
@@ -452,11 +463,12 @@ const SHELL_SCRIPT: &str = r#"
 
 /// Nav bar markup with `active` highlighted (same links as the config page).
 fn nav_html(active: &str) -> String {
-    const LINKS: [(&str, &str); 9] = [
+    const LINKS: [(&str, &str); 10] = [
         ("/", "Config"),
         ("/household", "Household"),
         ("/music", "Music"),
         ("/drive", "Photos"),
+        ("/tools", "Tools"),
         ("/chatlog", "Chat log"),
         ("/prompts", "Prompts"),
         ("/sqlite", "SQLite"),
@@ -724,7 +736,7 @@ async function load(){
   const dis = document.getElementById('disabled'), panel = document.getElementById('panel');
   if(!j.enabled){
     dis.style.display = ''; panel.style.display = 'none';
-    dis.innerHTML = 'Music routing is disabled. Restart the orchestrator with <code>AMBIENT_MUSIC=on</code> to enable this panel.';
+    dis.innerHTML = 'Music routing is disabled. Set <code>"music": {"enabled": true}</code> in ambient.json and restart to enable this panel.';
     return;
   }
   dis.style.display = 'none'; panel.style.display = '';
@@ -864,6 +876,53 @@ const DRIVE_BODY: &str = r#"<style>
   }
   $('save').addEventListener('click', save);
   $('link').addEventListener('click', link);
+  load();
+</script>"#;
+
+/// `/tools` body — credentials for the LLM tools that need a secret. v1 hosts the
+/// **Mapbox token** for the `directions_lookup` tool; a saved token rebuilds the tool
+/// set live (no restart). Uses a private `apiJSON` helper (not the shell's GET-only
+/// `getJSON`, which is appended after this script).
+const TOOLS_BODY: &str = r#"<style>
+  label { display:block; margin:1rem 0 0.25rem; font-weight:600; }
+  input { width:100%; max-width:36rem; padding:0.5rem; font:inherit; box-sizing:border-box; }
+  .status { margin-top:1rem; padding:0.6rem 0.8rem; border-radius:6px; min-height:1.2rem; max-width:36rem; }
+  .ok { background:rgba(46,160,67,0.15); } .err { background:rgba(248,81,73,0.15); }
+  .hint { opacity:0.6; font-weight:400; font-size:0.85rem; }
+</style>
+<p class="sub">Secrets for the LLM tools. Set once here on the Mac; changes apply live (no restart). Tokens are stored on the orchestrator and never shown back.</p>
+<h2 style="margin-top:1.5rem">Directions (Mapbox)</h2>
+<p class="sub">Enables the <code>directions_lookup</code> tool — distance, travel time, and live traffic. Get a token at account.mapbox.com. Requires <code>directions.provider = "mapbox"</code> in the config file (the default).</p>
+<div id="statusline" class="muted">Loading…</div>
+<label>Mapbox token <span class="hint" id="token_state"></span>
+  <input id="mapbox_token" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+</label>
+<div class="toolbar">
+  <button id="save">Save token</button>
+</div>
+<div id="status" class="status"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  async function load(){
+    try{
+      const j = await apiJSON('/tools/status.json');
+      $('token_state').textContent = j.token_set ? '(a token is set)' : '(no token set)';
+      $('mapbox_token').value = '';
+      $('statusline').textContent = 'directions_lookup: ' + (j.tool_active ? 'active ✓' : 'inactive — set a token');
+    }catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+  async function save(){
+    const body = { mapbox_token: $('mapbox_token').value.trim() || undefined };
+    try{
+      const j = await apiJSON('/tools/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); }
+      load();
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('save').addEventListener('click', save);
   load();
 </script>"#;
 
@@ -1072,6 +1131,16 @@ async fn handle(
         let payload = drive_status_json(&settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
+    // Directions tool (Mapbox) status — only a token-set boolean, never the token.
+    if method == "GET" && path == "/tools/status.json" {
+        let payload = directions_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the Mapbox token for the directions tool (rebuilds the tool set live).
+    if method == "POST" && path == "/tools/save" {
+        let payload = directions_save_json(&settings, &body);
+        return write_response(&mut stream, "200 OK", "application/json", payload.as_bytes()).await;
+    }
 
     // Debug/inspection data endpoints — need I/O and the debug sources, so they're
     // handled here (like `/models`) rather than in the pure `route` function.
@@ -1263,8 +1332,8 @@ async fn helix_json(debug: &DebugSources) -> String {
         return json!({
             "ok": true,
             "enabled": false,
-            "message": "GraphRAG (HelixDB) is not active. Start with AMBIENT_MEMORY_BACKEND=helix \
-                        (binary built with the `helix` feature) to enable it.",
+            "message": "GraphRAG (HelixDB) is not active. Set memory_backend=\"helix\" in \
+                        ambient.json to enable it.",
         })
         .to_string();
     };
@@ -1400,6 +1469,37 @@ fn drive_status_json(settings: &SharedSettings) -> String {
     .to_string()
 }
 
+/// `GET /tools/status.json` — the directions tool state for the `/tools` page.
+/// Reports only whether a Mapbox token is set (never the token) and whether the
+/// `directions_lookup` tool is therefore active (v1 provider is always Mapbox).
+fn directions_status_json(settings: &SharedSettings) -> String {
+    let token_set = settings.mapbox_token_set();
+    json!({
+        "ok": true,
+        "token_set": token_set,
+        "tool_active": token_set,
+    })
+    .to_string()
+}
+
+/// `POST /tools/save` — set the Mapbox token for the directions tool. A blank/absent
+/// token is left unchanged (a page reload never wipes the stored token); a non-empty
+/// value sets it and rebuilds the backend so `directions_lookup` activates live.
+fn directions_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let mapbox_token = match data.get("mapbox_token").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+        _ => None,
+    };
+    settings.apply_directions(&DirectionsUpdate { mapbox_token });
+    directions_status_json(settings)
+}
+
 /// `GET /household/status.json` — the canonical household record (home location +
 /// units + roster). Contact details are shown so they can be edited on the page;
 /// this surface is loopback + unauthenticated by design (same as the rest).
@@ -1510,7 +1610,7 @@ async fn music_play_json(music: Option<&MusicHub>, body: &[u8]) -> String {
         return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
     };
     let Some(mpv) = &hub.mpv else {
-        return json!({ "ok": false, "message": "no mpv IPC configured (AMBIENT_MUSIC_WEB_IPC)" })
+        return json!({ "ok": false, "message": "no mpv IPC configured (music.web_ipc)" })
             .to_string();
     };
     let data: Value = match serde_json::from_slice(body) {
@@ -1535,7 +1635,7 @@ async fn music_stopweb_json(music: Option<&MusicHub>) -> String {
         return json!({ "ok": false, "message": "music routing is disabled" }).to_string();
     };
     let Some(mpv) = &hub.mpv else {
-        return json!({ "ok": false, "message": "no mpv IPC configured (AMBIENT_MUSIC_WEB_IPC)" })
+        return json!({ "ok": false, "message": "no mpv IPC configured (music.web_ipc)" })
             .to_string();
     };
     match mpv.stop().await {
@@ -1783,6 +1883,11 @@ fn route(
             "text/html; charset=utf-8",
             page("/drive", "Photos", DRIVE_BODY).into_bytes(),
         ),
+        ("GET", "/tools") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/tools", "Tools", TOOLS_BODY).into_bytes(),
+        ),
         ("GET", "/chatlog") => (
             "200 OK",
             "text/html; charset=utf-8",
@@ -1859,6 +1964,7 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "llm_model": v.llm_model,
         "anthropic_key_set": v.anthropic_key_set,
         "openai_key_set": v.openai_key_set,
+        "anthropic_oauth_token_set": v.anthropic_oauth_token_set,
         "anthropic_auth": v.anthropic_auth.as_str(),
         "tts_voice": v.tts_voice,
         "engine": engine,
@@ -1923,6 +2029,7 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         llm_model: string_field("llm_model"),
         anthropic_api_key: key_field("anthropic_api_key"),
         openai_api_key: key_field("openai_api_key"),
+        anthropic_oauth_token: key_field("anthropic_oauth_token"),
         anthropic_auth,
         tts_voice,
         engine,
@@ -2298,6 +2405,45 @@ mod tests {
         );
         assert_eq!(s.spotify().client_secret.as_deref(), Some("keep-me"));
         assert_eq!(s.spotify().device_label(), "Den");
+    }
+
+    #[test]
+    fn tools_save_sets_mapbox_token_without_leaking_it() {
+        let s = settings();
+        let before: Value = serde_json::from_str(&directions_status_json(&s)).unwrap();
+        assert_eq!(before["token_set"], false);
+        assert_eq!(before["tool_active"], false);
+        let out = directions_save_json(&s, br#"{"mapbox_token":"pk.secret-token"}"#);
+        assert!(!out.contains("pk.secret-token"), "token leaked: {out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["token_set"], true);
+        assert_eq!(v["tool_active"], true);
+        // The live settings hold the real token, but a status read never exposes it.
+        assert!(!directions_status_json(&s).contains("pk.secret-token"));
+        // A page reload posting a blank token must not wipe the stored one.
+        directions_save_json(&s, br#"{"mapbox_token":""}"#);
+        assert!(s.mapbox_token_set());
+    }
+
+    #[test]
+    fn post_config_sets_anthropic_oauth_token_without_leaking_it() {
+        let s = settings();
+        assert!(!s.view().anthropic_oauth_token_set);
+        let (status, _c, out) = route(
+            "POST",
+            "/config",
+            br#"{"anthropic_oauth_token":"oauth-secret"}"#,
+            &s,
+        );
+        assert_eq!(status, "200 OK");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["anthropic_oauth_token_set"], true);
+        // The token must never appear in a POST response or a later GET.
+        assert!(!String::from_utf8_lossy(&out).contains("oauth-secret"));
+        let (_s, _c, g) = route("GET", "/config", b"", &s);
+        assert!(!String::from_utf8_lossy(&g).contains("oauth-secret"));
+        assert!(s.view().anthropic_oauth_token_set);
     }
 
     #[tokio::test]

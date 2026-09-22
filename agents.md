@@ -25,13 +25,17 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   servers are never picked) and can **pin a specific orchestrator** by its stable
   TXT `instance_id` (settings screen "Orchestrator" dropdown; strict — stays
   offline rather than switching Macs; `"Auto"` = first responder).
-  **Deployment:** the "local production" orchestrator is installed at
+  **Deployment:** the orchestrator is configured by a **per-instance JSON file**
+  (`ambient.json` in the working directory by default; `--config <path>` overrides).
+  Only provider API keys/tokens remain environment variables (secrets); everything
+  else — identity, endpoints, feature toggles — lives in the JSON file. The "local
+  production" orchestrator is installed at
   `/Volumes/External/DeveloperSupport/Ambient Orchestrator/` (a copied release
-  binary, run outside any git checkout) and pins its identity via
-  `AMBIENT_INSTANCE_ID` in `~/.zshenv`. Test copies run from their git
-  branch/worktree, where `AMBIENT_INSTANCE_ID` is left unset so it defaults to the
-  branch code; give each a distinct `AMBIENT_BIND_ADDR` + `AMBIENT_CONFIG_ADDR`
-  (and `AMBIENT_SERVICE_NAME`) to run alongside production.
+  binary, run outside any git checkout) and pins its identity via `instance_id` in
+  that folder's `ambient.json`; its provider keys still come from `~/.zshenv`. Test
+  copies run from their git branch/worktree, where `instance_id` is left unset so it
+  defaults to the branch code; give each a distinct `bind_addr` + `config_addr` (and
+  `service_name`) in its own `ambient.json` to run alongside production.
 - **Wake word:** openWakeWord `.onnx` via `tract-onnx`. No custom training in v1.
 - **LLM:** pluggable behind a trait (local Ollama/llama.cpp **or** cloud API).
 - **TTS:** Piper via Wyoming.
@@ -132,71 +136,59 @@ cargo test  --manifest-path orchestrator/Cargo.toml           # unit + pipeline 
 cargo clippy --manifest-path orchestrator/Cargo.toml --all-targets -- -D warnings
 cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyoming._tcp, serves turns
 
-# Backend selection + endpoints are env-driven (see orchestrator/src/config.rs), e.g.:
-#   AMBIENT_LLM_BACKEND=ollama|anthropic|openai|mock (default ollama; anthropic needs
-#     ANTHROPIC_API_KEY, openai needs OPENAI_API_KEY)
-#   AMBIENT_ANTHROPIC_AUTH=apikey|subscription (default apikey; subscription uses a
-#     Claude OAuth token from ANTHROPIC_OAUTH_TOKEN (`claude setup-token`) or
-#     AMBIENT_ANTHROPIC_TOKEN_CMD)
-#   AMBIENT_ANTHROPIC_MODEL / AMBIENT_OPENAI_MODEL   (initial pinned model; the
-#     settings screen / config page pick a specific model from a last-12-months list)
-#   AMBIENT_STT_ADDR=127.0.0.1:10300  AMBIENT_TTS_ADDR=127.0.0.1:10200
-#   AMBIENT_BIND_ADDR=0.0.0.0:10700   AMBIENT_TTS_VOICE=en_US-amy-medium
-#   AMBIENT_SERVICE_NAME="Ambient Orchestrator"  (mDNS instance name / dropdown label)
-#   AMBIENT_INSTANCE_ID=<stable key>  (mDNS TXT instance_id the device pins to; must
-#     be stable across restarts. Resolution: this env → the working dir's git BRANCH
-#     CODE (so a copy run from a test branch/worktree names itself by its branch) →
-#     the sanitized service name. The "local production" install (see below) sets it
-#     in ~/.zshenv. A second/test orchestrator on the same Mac needs distinct
-#     BIND_ADDR + CONFIG_ADDR (and a distinct SERVICE_NAME to avoid an mDNS name
-#     clash); sharing prod's data files means AMBIENT_MEMORY_BACKEND=sqlite — two
-#     processes can't share an embedded Helix graph)
-#   AMBIENT_LLM_ENGINE=rig|native  (default rig — enables tool calling incl. the
-#     internet_search tool; set `native` for the hand-rolled HTTP backends / no tools)
-#   AMBIENT_WEB_SEARCH=on|off  (default on with the rig engine) plus
-#     AMBIENT_SEARCH_PROVIDER=duckduckgo|tavily and TAVILY_API_KEY for real web search
-#   AMBIENT_CALENDARS=Name=URL;Name=URL  (read-only web iCalendar/.ics subscriptions;
-#     `webcal://` is accepted. Enables the rig-engine `calendar_lookup` tool — the LLM
-#     answers schedule/meeting/"who am I seeing" questions live from these feeds. Unset
-#     → the tool isn't advertised. Bare URLs are auto-named "Calendar N".)
-#   AMBIENT_CALENDAR_CACHE_TTL=300  (seconds a fetched .ics feed is cached before the
-#     next lookup re-fetches; default 300. The fetch dominates cost — parsing a ~1 MB
-#     feed is ~20 ms — so a few minutes of staleness makes back-to-back questions
-#     instant. `0` disables caching / always re-fetches.)
-#   AMBIENT_HOME_LOCATION="Austin, Texas"  AMBIENT_WEATHER_UNITS=imperial|metric
-#     (grounds "here" for weather/location questions in the system prompt; also the
-#     default origin + distance units for the directions tool below). These now only
-#     *seed* the canonical Household record at first boot: location + units (and the
-#     people roster) are persisted in ambient_settings.json and edited live from the
-#     config page **Household tab** (`/household`), so a persisted value wins over the
-#     env at the next boot. The prompt reads location + roster from the per-turn
-#     settings snapshot, so edits apply without a restart. The directions tool's
-#     default origin also tracks this live household location (a shared
-#     `LiveHomeLocation` handle), so editing it re-homes routing with no restart.
-#   AMBIENT_DIRECTIONS_PROVIDER=mapbox  MAPBOX_TOKEN=<token>  (enables the rig-engine
-#     `directions_lookup` tool — real distance, travel time, and LIVE TRAFFIC between
-#     two places via Mapbox Geocoding v6 + Directions v5 `driving-traffic`. Unset token
-#     → the tool isn't advertised. Origin defaults to AMBIENT_HOME_LOCATION; voice-only
-#     in v1. Only `mapbox` is supported today; MAPBOX_ACCESS_TOKEN is also accepted.)
-#   AMBIENT_SPOTIFY_CLIENT_ID / AMBIENT_SPOTIFY_CLIENT_SECRET / AMBIENT_SPOTIFY_REFRESH_TOKEN
-#     (enables the rig-engine `spotify_control` tool — voice play/pause/skip/queue/volume
-#     over the Spotify Web API, targeting the librespot Connect device. Requires Spotify
-#     PREMIUM. All three unset → the tool isn't advertised. Easiest setup: config page →
-#     Music tab → "Connect Spotify" (loopback OAuth consent; stores the refresh token in
-#     settings and activates the tool live). Env vars are the headless alternative — see
-#     the one-time runbook in plans/MusicPlan.md. AMBIENT_SPOTIFY_DEVICE_NAME (default
-#     "Ambient") is the librespot device to control — see the AMBIENT_MUSIC_* block.)
-#   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
-#     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
-#   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /household,
-#     /chatlog, /prompts, /sqlite, /helix, /drive — no auth; `off` disables)
-#   AMBIENT_GOOGLE_DRIVE_CLIENT_ID / AMBIENT_GOOGLE_DRIVE_CLIENT_SECRET (the Drive
-#     "Desktop app" OAuth client the orchestrator uses to run consent from the config
-#     page Photos tab; the device pulls the resulting token over Wyoming). Optional
-#     AMBIENT_GOOGLE_DRIVE_FOLDER_IDS=id1,id2 seeds the slideshow folders.
-#   AMBIENT_TTS_VOICES_DIR=<piper model dir>  (when Piper is co-located: the
-#     settings voice dropdown then lists only the `<name>.onnx` voices installed
-#     there; unset → the dropdown shows Piper's full advertised catalog)
+# Configuration lives in a PER-INSTANCE JSON FILE (see orchestrator/src/config.rs and
+# the committed orchestrator/ambient.example.json). Default path: `ambient.json` in the
+# working directory; override with `--config <path>`. A missing convention file → built-in
+# defaults; a missing/malformed --config file (or an unknown key — deny_unknown_fields)
+# → a hard error at boot. Every key is optional and falls back to its default.
+#
+#   cargo run --manifest-path orchestrator/Cargo.toml --release -- --config ./ambient.json
+#
+# ONLY SECRETS remain environment variables (never put these in the JSON file). Each
+# is a BOOT SEED: it is also settable at runtime from the loopback config page (masked,
+# never echoed back) and then persisted to settings_path, so a headless host needs no
+# shell env at all.
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY  (anthropic/openai backends and, for
+#     OPENAI_API_KEY, the helix GraphRAG embeddings; UI: Config tab)
+#   TAVILY_API_KEY                       (real web search when llm.search_provider=tavily;
+#     UI: Config tab)
+#   MAPBOX_TOKEN (or MAPBOX_ACCESS_TOKEN) (the directions_lookup provider token;
+#     UI: Tools tab → /tools)
+#   ANTHROPIC_OAUTH_TOKEN                (Claude subscription token from `claude setup-token`;
+#     UI: Config tab when Anthropic auth = subscription)
+#   RUST_LOG                             (standard env_logger filter; env-only — read at
+#     process start, so it has no config-page control)
+#
+# The JSON file holds everything else. Key fields (defaults in ambient.example.json):
+#   bind_addr / config_addr / stt_addr / tts_addr / service_name / instance_id
+#     (instance_id resolution: the JSON value → the working dir's git BRANCH CODE → the
+#     sanitized service_name; must be stable across restarts. config_addr "off"/"none"
+#     disables the loopback config+debug pages. A second/test orchestrator on the same
+#     Mac needs distinct bind_addr + config_addr + service_name; sharing prod's data
+#     files means memory_backend="sqlite" — two processes can't share an embedded Helix graph.)
+#   db_path / chatlog_path / promptlog_path / helix_path / settings_path / audio_dump_dir
+#     (settings_path is the runtime OVERLAY file — see below; "off"/"none" disables persistence)
+#   system_prompt / home_location / weather_units / turn_timeout_secs / memory_backend
+#     (helix|sqlite; helix needs OPENAI_API_KEY and falls back to sqlite FTS if absent)
+#   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig),
+#     llm.anthropic_auth (apikey|subscription), llm.anthropic_token_cmd (default `ant`),
+#     llm.web_search, llm.search_provider (duckduckgo|tavily), and the per-provider
+#     sub-blocks llm.ollama{url,model} / llm.anthropic{model,max_tokens} / llm.openai{…}
+#   graphrag{…}, speaker{…}, music{…} (see ambient.example.json for the full shape)
+#   calendar.subscriptions=[{name,url}], calendar.cache_ttl_secs (read-only web .ics;
+#     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised)
+#   directions.provider="mapbox" (+ the MAPBOX_TOKEN secret, set via env or the Tools
+#     tab) → the directions_lookup tool
+#   drive{client_id,client_secret,folder_ids,scope} (Google Drive photo slideshow OAuth
+#     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
+#   spotify{client_id,client_secret,refresh_token,device_name} (spotify_control tool;
+#     Premium; easiest setup is config page → Music tab → "Connect Spotify")
+#
+# home_location/weather_units, drive, spotify, the tts_voice, and the llm engine/
+# backend/model/web_search/search_provider fields only SEED the live settings at boot:
+# they are then editable from the config page and persisted to settings_path
+# (ambient_settings.json), and a PERSISTED value wins over the JSON seed at the next boot.
+# Provider API keys must never appear in either JSON file — they stay in the environment.
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
   cargokit plugin (`display/rust_builder/cargokit`) uses the legacy AGP variant API and
@@ -234,11 +226,12 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 
 "Local production" is a **copied release binary** at
 `/Volumes/External/DeveloperSupport/Ambient Orchestrator/ambient-orchestrator`,
-run **outside any git checkout** so its identity comes from `~/.zshenv`
-(`AMBIENT_INSTANCE_ID="Paul Family"`, the shared data paths, provider keys) on the
-default ports (10700 / config 8730). To push the current branch's orchestrator to
-production, follow this runbook exactly (it does **not** touch any test copy running
-from a worktree):
+run **outside any git checkout**. Its identity, data paths, and ports (10700 /
+config 8730) come from `ambient.json` in that folder (`instance_id="Paul Family"`
+etc.; `chmod 0600` it — it may hold OAuth client secrets). Only the provider API
+keys/tokens still come from `~/.zshenv` (they're secrets). To push the current
+branch's orchestrator to production, follow this runbook exactly (it does **not**
+touch any test copy running from a worktree):
 
 ```bash
 export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
@@ -257,8 +250,9 @@ while lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1; do sleep 0.3; done
 cp "$CARGO_TARGET_DIR/release/ambient-orchestrator" "$PROD/ambient-orchestrator"
 chmod +x "$PROD/ambient-orchestrator"
 
-# 4. Restart from the production folder, sourcing ~/.zshenv so it picks up
-#    AMBIENT_INSTANCE_ID etc. Detached, logging to the folder.
+# 4. Restart from the production folder, sourcing ~/.zshenv for the provider API
+#    keys (secrets). Identity/ports/paths come from "$PROD/ambient.json" (cwd is $PROD,
+#    so its convention ambient.json is picked up). Detached, logging to the folder.
 ( source ~/.zshenv 2>/dev/null; cd "$PROD"; \
   ./ambient-orchestrator > "$PROD/orchestrator.log" 2>&1 & )
 

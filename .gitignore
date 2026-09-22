@@ -49,6 +49,10 @@ app.*.map.json
 ambient_memory.sqlite
 ambient_memory.sqlite-*
 
+# Orchestrator per-instance boot config (may contain OAuth client secrets / refresh
+# tokens in plaintext — keep 0600, never commit). See orchestrator/ambient.example.json.
+ambient.json
+
 # Orchestrator persisted runtime settings (contains the search API key in plaintext)
 ambient_settings.json
 

@@ -1,11 +1,12 @@
 //! Driving directions, distance, travel time, and **live traffic**, exposed to the
 //! LLM as the `directions_lookup` tool (wired in `llm/rig.rs`).
 //!
-//! Enabled when a routing provider is configured (v1: **Mapbox**, via `MAPBOX_TOKEN`
-//! and the default `AMBIENT_DIRECTIONS_PROVIDER=mapbox`). A lookup geocodes the
-//! origin + destination and asks the provider for a route; the origin defaults to the
-//! device's `AMBIENT_HOME_LOCATION` so "how long to the airport?" works without
-//! naming a starting point. Everything is read-only.
+//! Enabled when a routing provider is configured (v1: **Mapbox**, `directions.provider
+//! = "mapbox"` in the JSON config file) with a Mapbox token. The token is a secret,
+//! seeded from `MAPBOX_TOKEN`/`MAPBOX_ACCESS_TOKEN` at boot and runtime-settable from
+//! the config page's Tools tab. A lookup geocodes the origin + destination and asks the
+//! provider for a route; the origin defaults to the household `home_location` so "how
+//! long to the airport?" works without naming a starting point. Everything is read-only.
 //!
 //! The provider is abstracted behind the [`DirectionsProvider`] trait so the tool is
 //! testable offline and a second backend (Google, HERE, OSRM…) can be dropped in
@@ -16,7 +17,6 @@
 //! traffic-aware ETA + a plain-language traffic note). Rendering a map/route on the
 //! display is a deferred follow-up (see `TODO.md §7`).
 
-use std::env;
 use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
 
@@ -93,7 +93,7 @@ pub trait DirectionsProvider: Send + Sync {
 /// directions tool's default origin when the user names only a destination. It reads
 /// **live** so an edit to the household record (config page Household tab) changes the
 /// origin without rebuilding the LLM backend: the orchestrator updates the same cell
-/// every tool clone shares. Seeds from `AMBIENT_HOME_LOCATION` at boot (via the
+/// every tool clone shares. Seeds from the config file's home_location at boot (via the
 /// `Household` record); an empty/blank value means "no default origin".
 #[derive(Clone, Default)]
 pub struct LiveHomeLocation(Arc<RwLock<Option<String>>>);
@@ -286,48 +286,41 @@ fn typical_duration(route: &Value) -> Option<f64> {
     any.then_some(total)
 }
 
-/// Build the directions capability from the environment. Returns `None` (tool not
-/// advertised) unless a supported provider is configured with a usable token.
+/// Build the directions provider from an explicit token. Returns `None` (tool not
+/// advertised) unless a supported provider is selected and a usable token is present.
 ///
-/// - `AMBIENT_DIRECTIONS_PROVIDER` selects the backend (default/only: `mapbox`).
-/// - `MAPBOX_TOKEN` (or `MAPBOX_ACCESS_TOKEN`) is the API token.
-/// - `AMBIENT_WEATHER_UNITS` picks imperial vs metric distances.
+/// - `provider` selects the backend (from `directions.provider`; default/only:
+///   `mapbox`; empty is treated as `mapbox`).
+/// - `token` is the Mapbox API token — a **secret**. It is seeded from `MAPBOX_TOKEN`/
+///   `MAPBOX_ACCESS_TOKEN` at boot but is runtime-settable from the config page's Tools
+///   tab, so it's passed in here rather than read from the environment.
+/// - `imperial` (derived from the household `weather_units`) picks imperial vs metric.
 ///
-/// The default origin is **not** read here — it comes from the live [`Household`]
-/// record (`LiveHomeLocation`), injected by the caller (`llm::rig::tools_from_config`)
-/// so a config-page location edit changes the origin without a restart. The returned
-/// config starts with an empty [`LiveHomeLocation`]; the caller sets it.
-///
-/// [`Household`]: crate::settings::Household
-pub fn from_env() -> Option<DirectionsConfig> {
-    let provider = env::var("AMBIENT_DIRECTIONS_PROVIDER")
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase();
+/// Returns the built provider plus the `imperial` flag as a tuple carried on the
+/// [`crate::settings::LlmFactory`]; the default origin ([`LiveHomeLocation`]) is not
+/// set here — the caller (`llm::rig::tools_from_config`) injects the live handle so a
+/// config-page location edit changes the origin without a restart.
+pub fn from_token(
+    provider: &str,
+    token: Option<&str>,
+    imperial: bool,
+) -> Option<(Arc<dyn DirectionsProvider>, bool)> {
+    let provider = provider.trim().to_lowercase();
     if !(provider.is_empty() || provider == "mapbox") {
         log::warn!(
-            "AMBIENT_DIRECTIONS_PROVIDER='{provider}' is not supported (only 'mapbox' in v1); \
+            "directions.provider='{provider}' is not supported (only 'mapbox' in v1); \
              directions_lookup disabled"
         );
         return None;
     }
-    let token = env::var("MAPBOX_TOKEN")
-        .ok()
-        .or_else(|| env::var("MAPBOX_ACCESS_TOKEN").ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
-
-    let imperial = units_are_imperial(env::var("AMBIENT_WEATHER_UNITS").ok().as_deref());
+    let token = token.map(str::trim).filter(|s| !s.is_empty())?;
 
     log::info!(
         "directions_lookup enabled (mapbox; {} units; origin from the live household location)",
         if imperial { "imperial" } else { "metric" }
     );
-    Some(DirectionsConfig {
-        provider: Arc::new(MapboxDirections::new(token)),
-        home_location: LiveHomeLocation::default(),
-        imperial,
-    })
+    let provider: Arc<dyn DirectionsProvider> = Arc::new(MapboxDirections::new(token));
+    Some((provider, imperial))
 }
 
 /// Whether to speak distances in imperial units. Recognizes `imperial` / `us` /

@@ -3,22 +3,22 @@
 //!
 //! This is control-only, exactly like the rest of `crate::music`: it never
 //! touches audio PCM. The music itself is produced by the **librespot** sibling
-//! process (the Spotify Connect device named by `AMBIENT_SPOTIFY_DEVICE_NAME`,
+//! process (the Spotify Connect device named by `music.spotify_device_name`,
 //! default `"Ambient"`) whose PCM Snapcast routes to the speakers. Here we only
 //! issue Web API calls — search, start/resume, pause, skip, queue, volume —
 //! **targeting that librespot device** so a spoken "play some Radiohead" turns
 //! into music on the house speakers.
 //!
 //! Requires **Spotify Premium**: the Web API's playback-control endpoints
-//! (`/me/player/*`) are Premium-only. Credentials come from the environment (see
-//! [`from_env`]); the tool is simply not advertised when they are absent.
+//! (`/me/player/*`) are Premium-only. Credentials come from the JSON config file's
+//! `spotify` block (or the config-page consent flow), held in
+//! [`crate::settings::SpotifyConfig`]; the tool is simply not advertised when they
+//! are absent.
 //!
 //! The [`SpotifyController`] trait is the seam the `spotify_control` rig tool
 //! (`crate::llm::rig`) depends on, so the tool is unit-testable without hitting
 //! the network — mirroring how `InternetSearch` holds a `SearchProvider`.
 
-use std::env;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -426,39 +426,6 @@ impl SpotifyController for SpotifyWebApi {
             }
         }
     }
-}
-
-/// Build a live Spotify controller from the environment, or `None` when the
-/// credentials are not fully configured (so the `spotify_control` tool is simply
-/// not advertised). Reads:
-///
-/// * `AMBIENT_SPOTIFY_CLIENT_ID`, `AMBIENT_SPOTIFY_CLIENT_SECRET`,
-///   `AMBIENT_SPOTIFY_REFRESH_TOKEN` — the Premium account's app credentials +
-///   one-time-consent refresh token (all three required), and
-/// * `AMBIENT_SPOTIFY_DEVICE_NAME` — the librespot Connect device to target
-///   (default `"Ambient"`, matching `MusicConfig`).
-pub fn from_env() -> Option<Arc<dyn SpotifyController>> {
-    let nonempty = |v: String| Some(v).filter(|s| !s.trim().is_empty());
-    let client_id = env::var("AMBIENT_SPOTIFY_CLIENT_ID")
-        .ok()
-        .and_then(nonempty)?;
-    let client_secret = env::var("AMBIENT_SPOTIFY_CLIENT_SECRET")
-        .ok()
-        .and_then(nonempty)?;
-    let refresh_token = env::var("AMBIENT_SPOTIFY_REFRESH_TOKEN")
-        .ok()
-        .and_then(nonempty)?;
-    let device_name = env::var("AMBIENT_SPOTIFY_DEVICE_NAME")
-        .ok()
-        .and_then(nonempty)
-        .unwrap_or_else(|| "Ambient".to_string());
-    log::info!("spotify_control: enabled, targeting Connect device \"{device_name}\"");
-    Some(Arc::new(SpotifyWebApi::new(
-        client_id,
-        client_secret,
-        refresh_token,
-        device_name,
-    )))
 }
 
 #[cfg(test)]

@@ -237,11 +237,12 @@ fn parse_update(data: &Value) -> SettingsUpdate {
     SettingsUpdate {
         llm_backend: string_field("llm_backend"),
         llm_model: string_field("llm_model"),
-        // Provider API keys are intentionally NOT accepted from the device control
-        // path — they are entered only on the orchestrator's loopback config page, so
-        // cloud secrets never travel from or live on the shared Echo Show screen.
+        // Provider API keys / tokens are intentionally NOT accepted from the device
+        // control path — they are entered only on the orchestrator's loopback config
+        // page, so cloud secrets never travel from or live on the shared Echo Show screen.
         anthropic_api_key: None,
         openai_api_key: None,
+        anthropic_oauth_token: None,
         anthropic_auth,
         tts_voice,
         engine,
@@ -453,6 +454,10 @@ mod tests {
                 anthropic_token: None,
                 home_location: crate::directions::LiveHomeLocation::default(),
                 spotify: None,
+                calendar: None,
+                directions: None,
+                directions_provider: String::new(),
+                directions_imperial: false,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -464,6 +469,8 @@ mod tests {
                 llm_model: Some("llama3.2".into()),
                 anthropic_api_key: None,
                 openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
                 anthropic_auth: crate::llm::anthropic_auth::AnthropicAuth::ApiKey,
                 tts_voice: Some("amy".into()),
                 end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,

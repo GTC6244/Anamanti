@@ -1,10 +1,10 @@
 //! Read-only, web-based iCalendar (`.ics`) subscriptions, exposed to the LLM as the
 //! `calendar_lookup` tool (wired in `llm/rig.rs`).
 //!
-//! One or more subscription URLs are configured via `AMBIENT_CALENDARS`. On each
-//! lookup the [`IcalSubscription`] source fetches the feeds (cached with a TTL —
-//! `AMBIENT_CALENDAR_CACHE_TTL`, default 5 min — since the fetch dominates cost and
-//! parsing even a ~1 MB feed is ~20 ms), parses the `VEVENT`s, expands recurring
+//! One or more subscriptions are configured in the JSON config file's `calendar`
+//! block. On each lookup the [`IcalSubscription`] source fetches the feeds (cached
+//! with a TTL — `calendar.cache_ttl_secs`, default 5 min — since the fetch dominates
+//! cost and parsing even a ~1 MB feed is ~20 ms), parses the `VEVENT`s, expands recurring
 //! events within the requested [`TimeWindow`], and returns the matching
 //! [`CalEvent`]s. Everything is read-only: we never write back to a feed.
 //!
@@ -83,8 +83,8 @@ impl IcalSubscription {
     /// Default cache TTL. The dominant cost of a lookup is the HTTPS fetch (parsing
     /// a ~1 MB feed is ~20 ms); calendar contents don't change second-to-second, so
     /// a few minutes of staleness makes back-to-back questions instant at negligible
-    /// freshness cost. Override with `AMBIENT_CALENDAR_CACHE_TTL` (seconds; `0`
-    /// disables caching).
+    /// freshness cost. Override with `calendar.cache_ttl_secs` in the config file
+    /// (`0` disables caching).
     pub const DEFAULT_TTL: StdDuration = StdDuration::from_secs(300);
 
     pub fn new(specs: Vec<CalendarSpec>) -> Self {
@@ -166,15 +166,12 @@ fn normalize_url(url: &str) -> String {
     }
 }
 
-/// Build the source from `AMBIENT_CALENDARS`. Returns `None` (tool not advertised)
-/// when the variable is unset or lists no usable URLs.
-pub fn from_env() -> Option<Arc<dyn CalendarSource>> {
-    let raw = std::env::var("AMBIENT_CALENDARS").ok()?;
-    let specs = parse_specs(&raw);
+/// Build the calendar source from the configured subscriptions + cache TTL.
+/// Returns `None` (tool not advertised) when there are no usable subscriptions.
+pub fn build(specs: Vec<CalendarSpec>, ttl: StdDuration) -> Option<Arc<dyn CalendarSource>> {
     if specs.is_empty() {
         return None;
     }
-    let ttl = parse_ttl(std::env::var("AMBIENT_CALENDAR_CACHE_TTL").ok().as_deref());
     log::info!(
         "calendar_lookup enabled with {} subscription(s): {} (cache TTL {}s)",
         specs.len(),
@@ -186,56 +183,6 @@ pub fn from_env() -> Option<Arc<dyn CalendarSource>> {
         ttl.as_secs()
     );
     Some(Arc::new(IcalSubscription::with_ttl(specs, ttl)))
-}
-
-/// Parse `AMBIENT_CALENDAR_CACHE_TTL` (whole seconds). Falls back to
-/// [`IcalSubscription::DEFAULT_TTL`] when unset or unparseable; `0` disables caching
-/// (every lookup re-fetches).
-pub fn parse_ttl(raw: Option<&str>) -> StdDuration {
-    match raw.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(s) => match s.parse::<u64>() {
-            Ok(secs) => StdDuration::from_secs(secs),
-            Err(_) => {
-                log::warn!(
-                    "AMBIENT_CALENDAR_CACHE_TTL='{s}' is not a whole number of seconds; \
-                     using default {}s",
-                    IcalSubscription::DEFAULT_TTL.as_secs()
-                );
-                IcalSubscription::DEFAULT_TTL
-            }
-        },
-        None => IcalSubscription::DEFAULT_TTL,
-    }
-}
-
-/// Parse the `AMBIENT_CALENDARS` value: entries separated by `;` or newlines, each
-/// either `Name=URL` or a bare URL (auto-named `Calendar N`). A leading `http(s)://`
-/// or `webcal://` marks a bare URL, so `=` inside a query string isn't mistaken for
-/// a name separator.
-pub fn parse_specs(raw: &str) -> Vec<CalendarSpec> {
-    let looks_like_url = |s: &str| {
-        let l = s.trim_start().to_ascii_lowercase();
-        l.starts_with("http://") || l.starts_with("https://") || l.starts_with("webcal://")
-    };
-    raw.split([';', '\n'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .enumerate()
-        .filter_map(|(i, entry)| {
-            let (name, url) = if looks_like_url(entry) {
-                (format!("Calendar {}", i + 1), entry.to_string())
-            } else if let Some((n, u)) = entry.split_once('=') {
-                (n.trim().to_string(), u.trim().to_string())
-            } else {
-                (format!("Calendar {}", i + 1), entry.to_string())
-            };
-            if url.is_empty() || name.is_empty() {
-                None
-            } else {
-                Some(CalendarSpec { name, url })
-            }
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -470,32 +417,6 @@ mod tests {
             .with_ymd_and_hms(2026, 9, 19, 10, 0, 0)
             .single()
             .unwrap()
-    }
-
-    #[test]
-    fn parse_specs_named_and_bare() {
-        let specs = parse_specs(
-            "Work=https://ex.com/w.ics; https://ex.com/personal.ics?token=a=b\nHome = webcal://ex.com/h.ics",
-        );
-        assert_eq!(specs.len(), 3);
-        assert_eq!(specs[0].name, "Work");
-        assert_eq!(specs[0].url, "https://ex.com/w.ics");
-        // Bare URL with '=' in the query string must not be split on '='.
-        assert_eq!(specs[1].name, "Calendar 2");
-        assert_eq!(specs[1].url, "https://ex.com/personal.ics?token=a=b");
-        assert_eq!(specs[2].name, "Home");
-    }
-
-    #[test]
-    fn parse_ttl_defaults_and_overrides() {
-        assert_eq!(parse_ttl(None), IcalSubscription::DEFAULT_TTL);
-        assert_eq!(parse_ttl(Some("")), IcalSubscription::DEFAULT_TTL);
-        assert_eq!(
-            parse_ttl(Some("not-a-number")),
-            IcalSubscription::DEFAULT_TTL
-        );
-        assert_eq!(parse_ttl(Some(" 600 ")), StdDuration::from_secs(600));
-        assert_eq!(parse_ttl(Some("0")), StdDuration::from_secs(0));
     }
 
     #[test]
