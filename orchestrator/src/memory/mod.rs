@@ -118,6 +118,13 @@ impl MemoryStore {
         // A second connection (the speaker registry) may touch the same file;
         // wait on a transient write lock rather than failing.
         conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
+        // WAL lets multiple *processes* share this file safely: several
+        // orchestrator instances (e.g. a "production" instance plus short-lived
+        // test instances) can point at the same `ambient_memory.sqlite` with
+        // concurrent readers and a single writer, instead of hitting
+        // SQLITE_BUSY under the default rollback journal. A no-op for the
+        // in-memory test store (which stays in `memory` journal mode).
+        conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS memories (

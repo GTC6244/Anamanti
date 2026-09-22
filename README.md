@@ -150,6 +150,36 @@ cargo run --manifest-path orchestrator/Cargo.toml --release
   API access.
 - Whisper and Piper are off-the-shelf Wyoming servers; the orchestrator is a
   client to them. See `orchestrator/src/config.rs` for all environment variables.
+- **Multiple displays, one orchestrator:** N Echo Shows can share a single
+  orchestrator — each connection is handled independently and every reply is
+  routed back to the display that asked. Memory + settings are one shared
+  household pool (speaker ID scopes per person, not per device).
+- **Multiple orchestrators (prod + test):** each orchestrator advertises a
+  friendly `name` and a stable `instance_id` over mDNS. The device settings screen
+  has an **Orchestrator** dropdown to pick one; `"Auto"` uses the first available.
+  The pick is **strict** — a display pinned to one orchestrator stays offline if
+  it's unreachable rather than silently connecting to another.
+  - **Local production** is a copied release binary installed at
+    `/Volumes/External/DeveloperSupport/Ambient Orchestrator/`. It runs outside any
+    git checkout and pins its identity via `AMBIENT_INSTANCE_ID` (set in
+    `~/.zshenv`), using the default ports (10700 / config 8730) and the shared
+    runtime data under `.../ambient-orchestrator/`.
+  - **Test copies** run straight from a git branch/worktree. `AMBIENT_INSTANCE_ID`
+    is resolved from that env → the working dir's **git branch code** → the
+    sanitized service name, so a worktree copy is auto-named by its branch with no
+    extra config. Run one alongside production with distinct ports (and a distinct
+    service name to avoid an mDNS name clash); sharing production's memory means
+    `AMBIENT_MEMORY_BACKEND=sqlite` (two processes can't share one embedded HelixDB
+    graph; SQLite is shared safely via WAL):
+
+    ```bash
+    # AMBIENT_INSTANCE_ID is intentionally unset here → defaults to the branch code.
+    env -u AMBIENT_INSTANCE_ID \
+      AMBIENT_SERVICE_NAME="Ambient Orchestrator (test)" \
+      AMBIENT_BIND_ADDR=0.0.0.0:10701 AMBIENT_CONFIG_ADDR=127.0.0.1:8731 \
+      AMBIENT_MEMORY_BACKEND=sqlite \
+      cargo run --manifest-path orchestrator/Cargo.toml --release
+    ```
 
 > **Android toolchain note:** the project pins **AGP 8.7.3 / Kotlin 2.1.0 /
 > Gradle 8.11.1** because the bundled cargokit Gradle plugin does not yet support

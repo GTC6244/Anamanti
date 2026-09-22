@@ -142,8 +142,9 @@ fn parse_entry(v: &Value) -> MemoryEntry {
 pub async fn describe_settings(
     cache: &EndpointCache,
     timeout: Duration,
+    preferred: Option<&str>,
 ) -> Result<OrchestratorSettings> {
-    let endpoint = resolve(cache, timeout).await?;
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, WyomingEvent::new(types::DESCRIBE_SETTINGS)).await?;
     Ok(parse_settings(&resp))
 }
@@ -152,9 +153,10 @@ pub async fn describe_settings(
 pub async fn update_settings(
     cache: &EndpointCache,
     timeout: Duration,
+    preferred: Option<&str>,
     update: &SettingsUpdate,
 ) -> Result<OrchestratorSettings> {
-    let endpoint = resolve(cache, timeout).await?;
+    let endpoint = resolve(cache, timeout, preferred).await?;
 
     let mut data = Map::new();
     if let Some(backend) = update.llm_backend.as_deref().filter(|s| !s.is_empty()) {
@@ -187,8 +189,12 @@ pub async fn update_settings(
 }
 
 /// List the orchestrator's selectable LLM models for the settings model dropdown.
-pub async fn list_models(cache: &EndpointCache, timeout: Duration) -> Result<Vec<ModelInfo>> {
-    let endpoint = resolve(cache, timeout).await?;
+pub async fn list_models(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<ModelInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_MODELS)).await?;
     if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
         return Err(anyhow!(
@@ -209,8 +215,12 @@ pub async fn list_models(cache: &EndpointCache, timeout: Duration) -> Result<Vec
 }
 
 /// List the installed Piper voices for the settings TTS voice dropdown.
-pub async fn list_voices(cache: &EndpointCache, timeout: Duration) -> Result<Vec<VoiceInfo>> {
-    let endpoint = resolve(cache, timeout).await?;
+pub async fn list_voices(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<VoiceInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_VOICES)).await?;
     if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
         return Err(anyhow!(
@@ -231,8 +241,12 @@ pub async fn list_voices(cache: &EndpointCache, timeout: Duration) -> Result<Vec
 }
 
 /// List every persistent memory entry.
-pub async fn list_memories(cache: &EndpointCache, timeout: Duration) -> Result<Vec<MemoryEntry>> {
-    let endpoint = resolve(cache, timeout).await?;
+pub async fn list_memories(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<MemoryEntry>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_MEMORIES)).await?;
     if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
         return Err(anyhow!(
@@ -253,8 +267,13 @@ pub async fn list_memories(cache: &EndpointCache, timeout: Duration) -> Result<V
 }
 
 /// Delete one entry by id; returns whether a row was removed.
-pub async fn delete_memory(cache: &EndpointCache, timeout: Duration, id: i64) -> Result<bool> {
-    let endpoint = resolve(cache, timeout).await?;
+pub async fn delete_memory(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: i64,
+) -> Result<bool> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let request = WyomingEvent::with_data(types::DELETE_MEMORY, json!({ "id": id }));
     let resp = round_trip(&endpoint, request).await?;
     let ok = resp
@@ -267,8 +286,12 @@ pub async fn delete_memory(cache: &EndpointCache, timeout: Duration, id: i64) ->
 }
 
 /// Delete every entry; returns the number removed.
-pub async fn clear_memories(cache: &EndpointCache, timeout: Duration) -> Result<u32> {
-    let endpoint = resolve(cache, timeout).await?;
+pub async fn clear_memories(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<u32> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, WyomingEvent::new(types::CLEAR_MEMORIES)).await?;
     Ok(resp
         .data
@@ -307,8 +330,12 @@ fn speaker_ok(resp: &WyomingEvent) -> Result<bool> {
 }
 
 /// List the identified speakers (settings "People" view).
-pub async fn list_speakers(cache: &EndpointCache, timeout: Duration) -> Result<Vec<SpeakerInfo>> {
-    let endpoint = resolve(cache, timeout).await?;
+pub async fn list_speakers(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<SpeakerInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_SPEAKERS)).await?;
     if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
         return Err(anyhow!(
@@ -331,10 +358,11 @@ pub async fn list_speakers(cache: &EndpointCache, timeout: Duration) -> Result<V
 pub async fn name_speaker(
     cache: &EndpointCache,
     timeout: Duration,
+    preferred: Option<&str>,
     id: &str,
     name: &str,
 ) -> Result<bool> {
-    let endpoint = resolve(cache, timeout).await?;
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let request = WyomingEvent::with_data(types::NAME_SPEAKER, json!({ "id": id, "name": name }));
     let resp = round_trip(&endpoint, request).await?;
     speaker_ok(&resp)
@@ -344,10 +372,11 @@ pub async fn name_speaker(
 pub async fn merge_speakers(
     cache: &EndpointCache,
     timeout: Duration,
+    preferred: Option<&str>,
     keep: &str,
     drop: &str,
 ) -> Result<bool> {
-    let endpoint = resolve(cache, timeout).await?;
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let request =
         WyomingEvent::with_data(types::MERGE_SPEAKERS, json!({ "keep": keep, "drop": drop }));
     let resp = round_trip(&endpoint, request).await?;
@@ -355,8 +384,13 @@ pub async fn merge_speakers(
 }
 
 /// Delete a speaker profile; returns whether one was removed.
-pub async fn delete_speaker(cache: &EndpointCache, timeout: Duration, id: &str) -> Result<bool> {
-    let endpoint = resolve(cache, timeout).await?;
+pub async fn delete_speaker(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: &str,
+) -> Result<bool> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let request = WyomingEvent::with_data(types::DELETE_SPEAKER, json!({ "id": id }));
     let resp = round_trip(&endpoint, request).await?;
     speaker_ok(&resp)
@@ -372,11 +406,17 @@ mod tests {
     /// A cache pre-seeded with a loopback endpoint. `resolve(_, 0)` fails the browse
     /// immediately and falls back to this, so tests never depend on real mDNS.
     fn cache_for(addr: std::net::SocketAddr) -> EndpointCache {
+        cache_for_keyed(addr, "test-orch")
+    }
+
+    fn cache_for_keyed(addr: std::net::SocketAddr, key: &str) -> EndpointCache {
         let cache = EndpointCache::new();
         cache.set(WyomingEndpoint {
             address: IpAddr::from([127, 0, 0, 1]),
             port: addr.port(),
             hostname: "localhost.".to_string(),
+            key: key.to_string(),
+            name: "Test Orchestrator".to_string(),
         });
         cache
     }
@@ -415,7 +455,7 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let settings = describe_settings(&cache, Duration::from_millis(0))
+        let settings = describe_settings(&cache, Duration::from_millis(0), None)
             .await
             .unwrap();
         assert!(settings.ok);
@@ -448,7 +488,7 @@ mod tests {
             end_silence_ms: None,
             voice_rms_threshold: None,
         };
-        let out = update_settings(&cache, Duration::from_millis(0), &update)
+        let out = update_settings(&cache, Duration::from_millis(0), None, &update)
             .await
             .unwrap();
         assert_eq!(out.tts_voice.as_deref(), Some("en_US-amy-medium"));
@@ -481,7 +521,7 @@ mod tests {
             end_silence_ms: None,
             voice_rms_threshold: None,
         };
-        let out = update_settings(&cache, Duration::from_millis(0), &update)
+        let out = update_settings(&cache, Duration::from_millis(0), None, &update)
             .await
             .unwrap();
         assert_eq!(out.anthropic_auth, "subscription");
@@ -511,7 +551,7 @@ mod tests {
             end_silence_ms: Some(550),
             voice_rms_threshold: Some(80.0),
         };
-        let out = update_settings(&cache, Duration::from_millis(0), &update)
+        let out = update_settings(&cache, Duration::from_millis(0), None, &update)
             .await
             .unwrap();
         // Response parsing surfaces the VAD values to the settings screen.
@@ -544,7 +584,7 @@ mod tests {
             end_silence_ms: None,
             voice_rms_threshold: None,
         };
-        update_settings(&cache, Duration::from_millis(0), &update)
+        update_settings(&cache, Duration::from_millis(0), None, &update)
             .await
             .unwrap();
 
@@ -566,7 +606,7 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let entries = list_memories(&cache, Duration::from_millis(0))
+        let entries = list_memories(&cache, Duration::from_millis(0), None)
             .await
             .unwrap();
         assert_eq!(entries.len(), 2);
@@ -591,7 +631,7 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let models = list_models(&cache, Duration::from_millis(0)).await.unwrap();
+        let models = list_models(&cache, Duration::from_millis(0), None).await.unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].provider, "anthropic");
         assert_eq!(models[0].id, "claude-opus-5");
@@ -617,7 +657,7 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let voices = list_voices(&cache, Duration::from_millis(0)).await.unwrap();
+        let voices = list_voices(&cache, Duration::from_millis(0), None).await.unwrap();
         assert_eq!(voices.len(), 3);
         assert_eq!(voices[0].name, "en_US-amy-medium");
         assert_eq!(voices[0].language.as_deref(), Some("en_US"));
@@ -641,7 +681,7 @@ mod tests {
         serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let err = list_voices(&cache, Duration::from_millis(0)).await.unwrap_err();
+        let err = list_voices(&cache, Duration::from_millis(0), None).await.unwrap_err();
         assert!(err.to_string().contains("piper unreachable"));
     }
 
@@ -654,7 +694,7 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let removed = delete_memory(&cache, Duration::from_millis(0), 7)
+        let removed = delete_memory(&cache, Duration::from_millis(0), None, 7)
             .await
             .unwrap();
         assert!(removed);
@@ -678,7 +718,7 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let people = list_speakers(&cache, Duration::from_millis(0)).await.unwrap();
+        let people = list_speakers(&cache, Duration::from_millis(0), None).await.unwrap();
         assert_eq!(people.len(), 2);
         assert_eq!(people[0].id, "spk-1");
         assert_eq!(people[0].name.as_deref(), Some("Sam"));
@@ -698,7 +738,7 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let ok = name_speaker(&cache, Duration::from_millis(0), "spk-2", "Dana")
+        let ok = name_speaker(&cache, Duration::from_millis(0), None, "spk-2", "Dana")
             .await
             .unwrap();
         assert!(ok);
@@ -720,7 +760,7 @@ mod tests {
         serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let err = delete_speaker(&cache, Duration::from_millis(0), "nope")
+        let err = delete_speaker(&cache, Duration::from_millis(0), None, "nope")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no such speaker"));
@@ -731,9 +771,26 @@ mod tests {
         // Empty cache + 0 s browse → resolve fails, so the call errors rather than
         // hanging or panicking.
         let cache = EndpointCache::new();
-        let err = describe_settings(&cache, Duration::from_millis(0))
+        let err = describe_settings(&cache, Duration::from_millis(0), None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no cached endpoint"));
+    }
+
+    #[tokio::test]
+    async fn preferred_key_mismatch_never_round_trips_to_the_wrong_host() {
+        // A cache seeded with orchestrator "mac-a" must NOT be used to satisfy a
+        // control call pinned to "mac-b": strict selection means the settings path
+        // stays offline rather than talking to a different Mac.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cache = cache_for_keyed(addr, "mac-a");
+        let err = describe_settings(&cache, Duration::from_millis(0), Some("mac-b"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("mac-b"),
+            "error names the selected orchestrator, not the cached one: {err}"
+        );
     }
 }

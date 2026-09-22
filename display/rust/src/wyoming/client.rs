@@ -596,6 +596,8 @@ mod tests {
             address: IpAddr::from([127, 0, 0, 1]),
             port: addr.port(),
             hostname: "localhost.".to_string(),
+            key: "test-orch".to_string(),
+            name: "Test Orchestrator".to_string(),
         };
         let mut conn = WyomingConnection::connect(&endpoint, AudioFormat::default())
             .await

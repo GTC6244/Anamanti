@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -580267714;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1258835725;
 
 // Section: executor
 
@@ -67,13 +67,16 @@ fn wire__crate__api__settings__clear_memories_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
-                        let output_ok =
-                            crate::api::settings::clear_memories(api_discovery_timeout_secs)?;
+                        let output_ok = crate::api::settings::clear_memories(
+                            api_orchestrator_key,
+                            api_discovery_timeout_secs,
+                        )?;
                         Ok(output_ok)
                     })(),
                 )
@@ -103,6 +106,7 @@ fn wire__crate__api__settings__delete_memory_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_id = <i64>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -110,6 +114,7 @@ fn wire__crate__api__settings__delete_memory_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok = crate::api::settings::delete_memory(
+                            api_orchestrator_key,
                             api_id,
                             api_discovery_timeout_secs,
                         )?;
@@ -142,6 +147,7 @@ fn wire__crate__api__settings__delete_speaker_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_id = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -149,6 +155,7 @@ fn wire__crate__api__settings__delete_speaker_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok = crate::api::settings::delete_speaker(
+                            api_orchestrator_key,
                             api_id,
                             api_discovery_timeout_secs,
                         )?;
@@ -240,12 +247,14 @@ fn wire__crate__api__settings__fetch_orchestrator_settings_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok = crate::api::settings::fetch_orchestrator_settings(
+                            api_orchestrator_key,
                             api_discovery_timeout_secs,
                         )?;
                         Ok(output_ok)
@@ -341,13 +350,16 @@ fn wire__crate__api__settings__list_memories_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
-                        let output_ok =
-                            crate::api::settings::list_memories(api_discovery_timeout_secs)?;
+                        let output_ok = crate::api::settings::list_memories(
+                            api_orchestrator_key,
+                            api_discovery_timeout_secs,
+                        )?;
                         Ok(output_ok)
                     })(),
                 )
@@ -377,13 +389,52 @@ fn wire__crate__api__settings__list_models_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
+            let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::settings::list_models(
+                            api_orchestrator_key,
+                            api_discovery_timeout_secs,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__settings__list_orchestrators_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_orchestrators",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok =
-                            crate::api::settings::list_models(api_discovery_timeout_secs)?;
+                            crate::api::settings::list_orchestrators(api_discovery_timeout_secs)?;
                         Ok(output_ok)
                     })(),
                 )
@@ -413,13 +464,16 @@ fn wire__crate__api__settings__list_speakers_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
-                        let output_ok =
-                            crate::api::settings::list_speakers(api_discovery_timeout_secs)?;
+                        let output_ok = crate::api::settings::list_speakers(
+                            api_orchestrator_key,
+                            api_discovery_timeout_secs,
+                        )?;
                         Ok(output_ok)
                     })(),
                 )
@@ -449,13 +503,16 @@ fn wire__crate__api__settings__list_voices_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
-                        let output_ok =
-                            crate::api::settings::list_voices(api_discovery_timeout_secs)?;
+                        let output_ok = crate::api::settings::list_voices(
+                            api_orchestrator_key,
+                            api_discovery_timeout_secs,
+                        )?;
                         Ok(output_ok)
                     })(),
                 )
@@ -485,6 +542,7 @@ fn wire__crate__api__settings__merge_speakers_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_keep = <String>::sse_decode(&mut deserializer);
             let api_drop = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
@@ -493,6 +551,7 @@ fn wire__crate__api__settings__merge_speakers_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok = crate::api::settings::merge_speakers(
+                            api_orchestrator_key,
                             api_keep,
                             api_drop,
                             api_discovery_timeout_secs,
@@ -526,6 +585,7 @@ fn wire__crate__api__settings__name_speaker_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_id = <String>::sse_decode(&mut deserializer);
             let api_name = <String>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
@@ -534,6 +594,7 @@ fn wire__crate__api__settings__name_speaker_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok = crate::api::settings::name_speaker(
+                            api_orchestrator_key,
                             api_id,
                             api_name,
                             api_discovery_timeout_secs,
@@ -641,6 +702,7 @@ fn wire__crate__api__settings__update_orchestrator_settings_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_update = <crate::api::settings::SettingsUpdate>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -648,6 +710,7 @@ fn wire__crate__api__settings__update_orchestrator_settings_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || {
                         let output_ok = crate::api::settings::update_orchestrator_settings(
+                            api_orchestrator_key,
                             api_update,
                             api_discovery_timeout_secs,
                         )?;
@@ -743,6 +806,20 @@ impl SseDecode for Vec<crate::api::settings::ModelInfo> {
         let mut ans_ = vec![];
         for idx_ in 0..len_ {
             ans_.push(<crate::api::settings::ModelInfo>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::settings::OrchestratorInfo> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::settings::OrchestratorInfo>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -848,6 +925,22 @@ impl SseDecode for Option<u32> {
         } else {
             return None;
         }
+    }
+}
+
+impl SseDecode for crate::api::settings::OrchestratorInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_key = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_host = <String>::sse_decode(deserializer);
+        let mut var_port = <u16>::sse_decode(deserializer);
+        return crate::api::settings::OrchestratorInfo {
+            key: var_key,
+            name: var_name,
+            host: var_host,
+            port: var_port,
+        };
     }
 }
 
@@ -972,6 +1065,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_threshold = <f32>::sse_decode(deserializer);
         let mut var_activeThreshold = <f32>::sse_decode(deserializer);
         let mut var_discoveryTimeoutSecs = <u64>::sse_decode(deserializer);
+        let mut var_orchestratorKey = <String>::sse_decode(deserializer);
         let mut var_turnTimeoutSecs = <u64>::sse_decode(deserializer);
         let mut var_smoothingWindow = <u32>::sse_decode(deserializer);
         let mut var_fireOnPeak = <bool>::sse_decode(deserializer);
@@ -992,6 +1086,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
             threshold: var_threshold,
             active_threshold: var_activeThreshold,
             discovery_timeout_secs: var_discoveryTimeoutSecs,
+            orchestrator_key: var_orchestratorKey,
             turn_timeout_secs: var_turnTimeoutSecs,
             smoothing_window: var_smoothingWindow,
             fire_on_peak: var_fireOnPeak,
@@ -1092,17 +1187,20 @@ fn pde_ffi_dispatcher_primary_impl(
         7 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
         10 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        15 => {
+        11 => {
+            wire__crate__api__settings__list_orchestrators_impl(port, ptr, rust_vec_len, data_len)
+        }
+        12 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
+        16 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        16 => {
+        17 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        17 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        18 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -1174,6 +1272,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::settings::ModelInfo>
     for crate::api::settings::ModelInfo
 {
     fn into_into_dart(self) -> crate::api::settings::ModelInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::settings::OrchestratorInfo {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.key.into_into_dart().into_dart(),
+            self.name.into_into_dart().into_dart(),
+            self.host.into_into_dart().into_dart(),
+            self.port.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::settings::OrchestratorInfo
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::settings::OrchestratorInfo>
+    for crate::api::settings::OrchestratorInfo
+{
+    fn into_into_dart(self) -> crate::api::settings::OrchestratorInfo {
         self
     }
 }
@@ -1287,6 +1408,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.threshold.into_into_dart().into_dart(),
             self.active_threshold.into_into_dart().into_dart(),
             self.discovery_timeout_secs.into_into_dart().into_dart(),
+            self.orchestrator_key.into_into_dart().into_dart(),
             self.turn_timeout_secs.into_into_dart().into_dart(),
             self.smoothing_window.into_into_dart().into_dart(),
             self.fire_on_peak.into_into_dart().into_dart(),
@@ -1462,6 +1584,16 @@ impl SseEncode for Vec<crate::api::settings::ModelInfo> {
     }
 }
 
+impl SseEncode for Vec<crate::api::settings::OrchestratorInfo> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::settings::OrchestratorInfo>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1539,6 +1671,16 @@ impl SseEncode for Option<u32> {
         if let Some(value) = self {
             <u32>::sse_encode(value, serializer);
         }
+    }
+}
+
+impl SseEncode for crate::api::settings::OrchestratorInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.key, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <String>::sse_encode(self.host, serializer);
+        <u16>::sse_encode(self.port, serializer);
     }
 }
 
@@ -1632,6 +1774,7 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <f32>::sse_encode(self.threshold, serializer);
         <f32>::sse_encode(self.active_threshold, serializer);
         <u64>::sse_encode(self.discovery_timeout_secs, serializer);
+        <String>::sse_encode(self.orchestrator_key, serializer);
         <u64>::sse_encode(self.turn_timeout_secs, serializer);
         <u32>::sse_encode(self.smoothing_window, serializer);
         <bool>::sse_encode(self.fire_on_peak, serializer);

@@ -319,6 +319,38 @@ async fn full_turn_streams_transcript_reply_and_tts_audio() {
     );
 }
 
+#[tokio::test]
+async fn two_devices_share_one_pipeline_and_each_reply_goes_to_its_own_socket() {
+    // Multiple displays attach to a single orchestrator. The shared `Pipeline`
+    // is reused across connections, but each turn drives its own borrowed socket,
+    // so a reply must land on the device that asked — never cross-routed to the
+    // other display. Run two turns concurrently through one shared pipeline with
+    // distinct transcripts and assert each device sees only its own transcript +
+    // reply.
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = build_pipeline(memory);
+
+    let connector_a = MockConnector::new("device A question");
+    let connector_b = MockConnector::new("device B question");
+
+    let ((out_a, _ev_a), (out_b, _ev_b)) = tokio::join!(
+        run_one_turn(&pipeline, &connector_a),
+        run_one_turn(&pipeline, &connector_b),
+    );
+
+    let (transcript_a, reply_a, _) = out_a;
+    let (transcript_b, reply_b, _) = out_b;
+
+    assert_eq!(transcript_a, "device A question");
+    assert_eq!(reply_a, "You said: device A question");
+    assert_eq!(transcript_b, "device B question");
+    assert_eq!(reply_b, "You said: device B question");
+
+    // Cross-routing check: neither device saw the other's content.
+    assert!(!reply_a.contains('B'), "device A reply leaked device B: {reply_a:?}");
+    assert!(!reply_b.contains('A'), "device B reply leaked device A: {reply_b:?}");
+}
+
 /// An LLM that emits one complete sentence and then hangs forever, so a turn is
 /// still generating when a barge-in arrives — letting us prove the orchestrator
 /// aborts the in-flight reply instead of blocking on the stalled backend.

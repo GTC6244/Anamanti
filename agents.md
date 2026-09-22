@@ -18,7 +18,18 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 ## Locked decisions (do not relitigate without asking)
 
 - **Scope:** full voice assistant (STT → LLM → TTS), not transcript-only.
-- **Discovery:** mDNS / Zeroconf (`_wyoming._tcp`). No hardcoded IPs.
+- **Discovery:** mDNS / Zeroconf (`_wyoming._tcp`). No hardcoded IPs. The device
+  filters browse results by TXT `role=orchestrator` (so raw Whisper/Piper Wyoming
+  servers are never picked) and can **pin a specific orchestrator** by its stable
+  TXT `instance_id` (settings screen "Orchestrator" dropdown; strict — stays
+  offline rather than switching Macs; `"Auto"` = first responder).
+  **Deployment:** the "local production" orchestrator is installed at
+  `/Volumes/External/DeveloperSupport/Ambient Orchestrator/` (a copied release
+  binary, run outside any git checkout) and pins its identity via
+  `AMBIENT_INSTANCE_ID` in `~/.zshenv`. Test copies run from their git
+  branch/worktree, where `AMBIENT_INSTANCE_ID` is left unset so it defaults to the
+  branch code; give each a distinct `AMBIENT_BIND_ADDR` + `AMBIENT_CONFIG_ADDR`
+  (and `AMBIENT_SERVICE_NAME`) to run alongside production.
 - **Wake word:** openWakeWord `.onnx` via `tract-onnx`. No custom training in v1.
 - **LLM:** pluggable behind a trait (local Ollama/llama.cpp **or** cloud API).
 - **TTS:** Piper via Wyoming.
@@ -127,6 +138,15 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     settings screen / config page pick a specific model from a last-12-months list)
 #   AMBIENT_STT_ADDR=127.0.0.1:10300  AMBIENT_TTS_ADDR=127.0.0.1:10200
 #   AMBIENT_BIND_ADDR=0.0.0.0:10700   AMBIENT_TTS_VOICE=en_US-amy-medium
+#   AMBIENT_SERVICE_NAME="Ambient Orchestrator"  (mDNS instance name / dropdown label)
+#   AMBIENT_INSTANCE_ID=<stable key>  (mDNS TXT instance_id the device pins to; must
+#     be stable across restarts. Resolution: this env → the working dir's git BRANCH
+#     CODE (so a copy run from a test branch/worktree names itself by its branch) →
+#     the sanitized service name. The "local production" install (see below) sets it
+#     in ~/.zshenv. A second/test orchestrator on the same Mac needs distinct
+#     BIND_ADDR + CONFIG_ADDR (and a distinct SERVICE_NAME to avoid an mDNS name
+#     clash); sharing prod's data files means AMBIENT_MEMORY_BACKEND=sqlite — two
+#     processes can't share an embedded Helix graph)
 #   AMBIENT_LLM_ENGINE=rig|native  (default rig — enables tool calling incl. the
 #     internet_search tool; set `native` for the hand-rolled HTTP backends / no tools)
 #   AMBIENT_WEB_SEARCH=on|off  (default on with the rig engine) plus
@@ -180,6 +200,51 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
   clear to reclaim space; Cargo refetches on the next build.
 - Do **not** commit the `build` symlink (it's git-ignored) or these paths — they
   are machine-local.
+
+### Deploying / updating the local production orchestrator
+
+"Local production" is a **copied release binary** at
+`/Volumes/External/DeveloperSupport/Ambient Orchestrator/ambient-orchestrator`,
+run **outside any git checkout** so its identity comes from `~/.zshenv`
+(`AMBIENT_INSTANCE_ID="Paul Family"`, the shared data paths, provider keys) on the
+default ports (10700 / config 8730). To push the current branch's orchestrator to
+production, follow this runbook exactly (it does **not** touch any test copy running
+from a worktree):
+
+```bash
+export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
+PROD="/Volumes/External/DeveloperSupport/Ambient Orchestrator"
+
+# 1. Build the release binary from the branch you want to ship.
+cargo build --release --manifest-path orchestrator/Cargo.toml
+
+# 2. Stop the running production copy. Match on the PROD binary path so ONLY
+#    production is killed — never a test copy (which runs from cargo-target/…).
+pkill -f "$PROD/ambient-orchestrator"    # no-op if it isn't running
+# Wait for the socket to free up before rebinding :10700.
+while lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1; do sleep 0.3; done
+
+# 3. Copy the freshly built binary into the production folder (overwrites).
+cp "$CARGO_TARGET_DIR/release/ambient-orchestrator" "$PROD/ambient-orchestrator"
+chmod +x "$PROD/ambient-orchestrator"
+
+# 4. Restart from the production folder, sourcing ~/.zshenv so it picks up
+#    AMBIENT_INSTANCE_ID etc. Detached, logging to the folder.
+( source ~/.zshenv 2>/dev/null; cd "$PROD"; \
+  ./ambient-orchestrator > "$PROD/orchestrator.log" 2>&1 & )
+
+# 5. Verify: bound on :10700 and advertising instance_id=`Paul Family`.
+sleep 2; tail -5 "$PROD/orchestrator.log"
+```
+
+Notes:
+- **Only production is stopped.** `pkill -f "$PROD/ambient-orchestrator"` matches the
+  absolute production path, so a worktree/test orchestrator (launched from
+  `…/cargo-target/release/ambient-orchestrator` on ports 10701+) keeps running.
+- The binary is machine-local; do **not** commit it or the `Ambient Orchestrator/`
+  folder.
+- Persistence: the process is detached but does **not** survive a reboot — running
+  it under launchd is the open item in `TODO.md §4`.
 
 ## Conventions
 

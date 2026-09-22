@@ -75,6 +75,10 @@ struct Shared {
     timers: TimerManager,
     discovery_timeout: Duration,
     turn_timeout: Duration,
+    /// Stable selection key of the pinned orchestrator; `None` = Auto (first
+    /// available). Threaded into every `resolve` so voice turns hit the selected
+    /// Mac (strict: stay offline if it's unreachable).
+    orchestrator_key: Option<String>,
 }
 
 /// Owns the tokio runtime and the shared turn state.
@@ -107,6 +111,15 @@ impl Network {
             0 => DEFAULT_TURN_TIMEOUT,
             n => Duration::from_secs(n),
         };
+        // Empty selection key = Auto (first available orchestrator).
+        let orchestrator_key = {
+            let k = config.orchestrator_key.trim();
+            if k.is_empty() {
+                None
+            } else {
+                Some(k.to_string())
+            }
+        };
 
         // Shared mDNS endpoint cache: used both by the turn path and by a fired
         // timer voicing its announcement through the orchestrator.
@@ -122,6 +135,7 @@ impl Network {
             runtime.handle().clone(),
             cache.clone(),
             discovery_timeout,
+            orchestrator_key.clone(),
         );
 
         Ok(Self {
@@ -137,6 +151,7 @@ impl Network {
                 timers,
                 discovery_timeout,
                 turn_timeout,
+                orchestrator_key,
             }),
         })
     }
@@ -250,7 +265,13 @@ async fn run_turn_task(
 ) {
     let sink = &shared.sink;
 
-    let endpoint = match wyoming::resolve(&shared.cache, shared.discovery_timeout).await {
+    let endpoint = match wyoming::resolve(
+        &shared.cache,
+        shared.discovery_timeout,
+        shared.orchestrator_key.as_deref(),
+    )
+    .await
+    {
         Ok(ep) => ep,
         Err(e) => {
             log::warn!("turn: no Wyoming host: {e}");

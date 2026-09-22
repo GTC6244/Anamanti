@@ -97,6 +97,11 @@ pub struct WakeWordConfig {
     /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
     /// (0 = use the built-in default).
     pub discovery_timeout_secs: u64,
+    /// Stable selection key (`instance_id` TXT) of the orchestrator this display
+    /// is pinned to. Empty = "Auto" (connect to the first available orchestrator).
+    /// When set, discovery resolves *only* this orchestrator and stays offline if
+    /// it is unreachable, rather than silently connecting to a different one.
+    pub orchestrator_key: String,
     /// Seconds of server silence before a turn is defensively abandoned
     /// (0 = use the built-in default).
     pub turn_timeout_secs: u64,

@@ -64,6 +64,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ModelInfo> dco_decode_list_model_info(dynamic raw);
 
   @protected
+  List<OrchestratorInfo> dco_decode_list_orchestrator_info(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -86,6 +89,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  OrchestratorInfo dco_decode_orchestrator_info(dynamic raw);
 
   @protected
   OrchestratorSettings dco_decode_orchestrator_settings(dynamic raw);
@@ -172,6 +178,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ModelInfo> sse_decode_list_model_info(SseDeserializer deserializer);
 
   @protected
+  List<OrchestratorInfo> sse_decode_list_orchestrator_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -194,6 +205,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  OrchestratorInfo sse_decode_orchestrator_info(SseDeserializer deserializer);
 
   @protected
   OrchestratorSettings sse_decode_orchestrator_settings(
@@ -296,6 +310,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_orchestrator_info(
+    List<OrchestratorInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -327,6 +347,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_orchestrator_info(
+    OrchestratorInfo self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_orchestrator_settings(

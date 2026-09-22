@@ -350,6 +350,39 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **mDNS / Zeroconf**: the device browses `_wyoming._tcp`, resolves the Mac's
   host + port, and caches it for fast reconnect.
 - No static IP configuration required.
+- **Orchestrator TXT records**: each orchestrator advertises TXT
+  `role=orchestrator`, a friendly `name` (from `AMBIENT_SERVICE_NAME`), and a
+  **stable** `instance_id`. The `instance_id` resolves from `AMBIENT_INSTANCE_ID` →
+  the working directory's **git branch code** (so a copy run from a test
+  branch/worktree names itself by its branch) → the sanitized service name. The
+  device **filters browse results by `role=orchestrator`**, so the raw
+  off-the-shelf Whisper (STT) and Piper (TTS) servers — which also advertise
+  `_wyoming._tcp` — are never resolved or connected to.
+- **Deployment layout**: the "local production" orchestrator is a copied release
+  binary at `/Volumes/External/DeveloperSupport/Ambient Orchestrator/`, run outside
+  any git checkout with `AMBIENT_INSTANCE_ID` set in `~/.zshenv`; test copies run
+  from their git worktree and fall through to the branch-code default.
+- **Multiple displays → one orchestrator**: the orchestrator's accept loop already
+  spawns a task per connection and every reply is written back on that
+  connection's own socket, so N displays share one orchestrator with no
+  cross-routing. Memory + settings are a single shared household pool (speaker ID
+  scopes per person, not per device).
+- **Multiple orchestrators → device picks one**: a display can run a "production"
+  orchestrator plus short-lived test instances (each launched with a distinct
+  `AMBIENT_SERVICE_NAME` / `AMBIENT_INSTANCE_ID` / `AMBIENT_BIND_ADDR` /
+  `AMBIENT_CONFIG_ADDR`; `mdns-sd` does not auto-rename on collision, so the names
+  must differ). The settings screen shows a device-local **Orchestrator** dropdown
+  (populated by a full-window mDNS enumeration, `list_orchestrators`), persisted
+  by stable `instance_id` key in `AppSettings`. The selection is **strict**: a
+  display pinned to one orchestrator resolves *only* that `instance_id` and stays
+  **offline** if it is unreachable, never silently switching Macs; the `"Auto"`
+  entry (empty key) restores first-responder behavior. The key steers **both**
+  discovery paths — voice turns (`WakeWordConfig.orchestrator_key` → `Shared` →
+  `resolve(preferred)`) and the settings/control calls (`api/settings.rs` →
+  `control` → `resolve(preferred)`) — so both hit the same Mac. Shared backend data
+  across instances relies on SQLite **WAL** mode; two processes writing the same
+  embedded HelixDB graph is unsupported, so a test instance sharing prod data uses
+  `AMBIENT_MEMORY_BACKEND=sqlite` (see `Plan.MD`).
 - **Resilience**: **auto-reconnect** with exponential backoff via mDNS when the
   Mac is unreachable. The idle photo slideshow keeps running; a subtle
   **disconnected** indicator reflects status; wake words queue until the socket
@@ -377,6 +410,8 @@ predictable memory use and no GC pauses under the 1 GB limit.
 | FRB v2 stream sinks over polling | Push-based, smooth real-time UI updates |
 | Wyoming Protocol | Standard, streaming-friendly, pairs STT + Piper TTS cleanly |
 | mDNS discovery | Robust to IP changes; zero manual config |
+| Device-selectable orchestrator (TXT `instance_id`, strict offline) | Multi-Mac homes (prod + test instances); pin by stable key so a display never silently switches Macs and survives IP changes; `role=orchestrator` filtering also excludes raw STT/TTS servers |
+| Multiple displays share one orchestrator | Per-connection reply routing already isolates devices; one shared household memory/settings pool (speaker ID scopes per person) |
 | openWakeWord via tract-onnx | Pre-trained models, minimal deps, offline |
 | Pluggable LLM behind a trait | Swap local/cloud without touching the pipeline |
 | Rust-side playback | One audio layer, symmetric with capture |

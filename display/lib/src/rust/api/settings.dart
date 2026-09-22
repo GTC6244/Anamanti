@@ -6,73 +6,103 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `block_on`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `block_on`, `preferred`, `timeout`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+
+/// Discover every orchestrator on the LAN for the settings "Orchestrator"
+/// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
+/// always show all choices (including ones the device isn't currently pinned to).
+Future<List<OrchestratorInfo>> listOrchestrators({
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListOrchestrators(
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
 
 /// Read the orchestrator's current runtime settings.
 Future<OrchestratorSettings> fetchOrchestratorSettings({
+  required String orchestratorKey,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsFetchOrchestratorSettings(
+  orchestratorKey: orchestratorKey,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
 /// Apply a settings change on the orchestrator and return the resulting settings.
 Future<OrchestratorSettings> updateOrchestratorSettings({
+  required String orchestratorKey,
   required SettingsUpdate update,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsUpdateOrchestratorSettings(
+  orchestratorKey: orchestratorKey,
   update: update,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
 /// List the orchestrator's selectable LLM models (Anthropic + OpenAI, scoped to the
 /// last 12 months) for the settings model dropdown.
-Future<List<ModelInfo>> listModels({required BigInt discoveryTimeoutSecs}) =>
-    RustLib.instance.api.crateApiSettingsListModels(
-      discoveryTimeoutSecs: discoveryTimeoutSecs,
-    );
+Future<List<ModelInfo>> listModels({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListModels(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
 
 /// List the installed Piper voices for the settings TTS voice dropdown.
-Future<List<VoiceInfo>> listVoices({required BigInt discoveryTimeoutSecs}) =>
-    RustLib.instance.api.crateApiSettingsListVoices(
-      discoveryTimeoutSecs: discoveryTimeoutSecs,
-    );
+Future<List<VoiceInfo>> listVoices({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListVoices(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
 
 /// List all persistent memory entries (settings memory management view).
 Future<List<MemoryEntry>> listMemories({
+  required String orchestratorKey,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsListMemories(
+  orchestratorKey: orchestratorKey,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
 /// Delete one memory entry by id. Returns whether a row was removed.
 Future<bool> deleteMemory({
+  required String orchestratorKey,
   required PlatformInt64 id,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsDeleteMemory(
+  orchestratorKey: orchestratorKey,
   id: id,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
 /// Delete every memory entry. Returns the number removed.
-Future<int> clearMemories({required BigInt discoveryTimeoutSecs}) => RustLib
-    .instance
-    .api
-    .crateApiSettingsClearMemories(discoveryTimeoutSecs: discoveryTimeoutSecs);
+Future<int> clearMemories({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsClearMemories(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
 
 /// List the identified speakers (settings "People" view).
 Future<List<SpeakerInfo>> listSpeakers({
+  required String orchestratorKey,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsListSpeakers(
+  orchestratorKey: orchestratorKey,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
 /// Name (or rename) a speaker. Returns whether the change was applied.
 Future<bool> nameSpeaker({
+  required String orchestratorKey,
   required String id,
   required String name,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsNameSpeaker(
+  orchestratorKey: orchestratorKey,
   id: id,
   name: name,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
@@ -81,10 +111,12 @@ Future<bool> nameSpeaker({
 /// Merge the `drop` speaker into `keep` (same person, two clusters). Returns
 /// whether the merge was applied.
 Future<bool> mergeSpeakers({
+  required String orchestratorKey,
   required String keep,
   required String drop,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsMergeSpeakers(
+  orchestratorKey: orchestratorKey,
   keep: keep,
   drop: drop,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
@@ -92,9 +124,11 @@ Future<bool> mergeSpeakers({
 
 /// Delete a speaker profile. Returns whether a profile was removed.
 Future<bool> deleteSpeaker({
+  required String orchestratorKey,
   required String id,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsDeleteSpeaker(
+  orchestratorKey: orchestratorKey,
   id: id,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
@@ -170,6 +204,43 @@ class ModelInfo {
           provider == other.provider &&
           id == other.id &&
           label == other.label;
+}
+
+/// One discovered orchestrator, for the settings "Orchestrator" dropdown.
+class OrchestratorInfo {
+  /// Stable selection key (TXT `instance_id`) the device persists to pin this
+  /// orchestrator across restarts / IP changes.
+  final String key;
+
+  /// Human-friendly label (TXT `name`) shown in the dropdown.
+  final String name;
+
+  /// Resolved LAN address (for display / diagnostics).
+  final String host;
+
+  /// Resolved Wyoming port.
+  final int port;
+
+  const OrchestratorInfo({
+    required this.key,
+    required this.name,
+    required this.host,
+    required this.port,
+  });
+
+  @override
+  int get hashCode =>
+      key.hashCode ^ name.hashCode ^ host.hashCode ^ port.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OrchestratorInfo &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          name == other.name &&
+          host == other.host &&
+          port == other.port;
 }
 
 /// The orchestrator's runtime settings, as reported by a describe/set response.

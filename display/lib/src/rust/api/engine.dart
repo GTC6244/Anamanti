@@ -65,6 +65,12 @@ class WakeWordConfig {
   /// (0 = use the built-in default).
   final BigInt discoveryTimeoutSecs;
 
+  /// Stable selection key (`instance_id` TXT) of the orchestrator this display
+  /// is pinned to. Empty = "Auto" (connect to the first available orchestrator).
+  /// When set, discovery resolves *only* this orchestrator and stays offline if
+  /// it is unreachable, rather than silently connecting to a different one.
+  final String orchestratorKey;
+
   /// Seconds of server silence before a turn is defensively abandoned
   /// (0 = use the built-in default).
   final BigInt turnTimeoutSecs;
@@ -136,6 +142,7 @@ class WakeWordConfig {
     required this.threshold,
     required this.activeThreshold,
     required this.discoveryTimeoutSecs,
+    required this.orchestratorKey,
     required this.turnTimeoutSecs,
     required this.smoothingWindow,
     required this.fireOnPeak,
@@ -159,6 +166,7 @@ class WakeWordConfig {
       threshold.hashCode ^
       activeThreshold.hashCode ^
       discoveryTimeoutSecs.hashCode ^
+      orchestratorKey.hashCode ^
       turnTimeoutSecs.hashCode ^
       smoothingWindow.hashCode ^
       fireOnPeak.hashCode ^
@@ -184,6 +192,7 @@ class WakeWordConfig {
           threshold == other.threshold &&
           activeThreshold == other.activeThreshold &&
           discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
+          orchestratorKey == other.orchestratorKey &&
           turnTimeoutSecs == other.turnTimeoutSecs &&
           smoothingWindow == other.smoothingWindow &&
           fireOnPeak == other.fireOnPeak &&

@@ -35,6 +35,7 @@ void main() {
 
   test('save then load round-trips every field', () async {
     const settings = AppSettings(
+      orchestratorKey: 'test-mac',
       wakeWord: 'hey_jarvis',
       threshold: 0.4,
       activeThreshold: 0.8,
@@ -68,6 +69,18 @@ void main() {
     await file.writeAsString('{ this is not valid json');
     final loaded = await store.load();
     expect(loaded, const AppSettings());
+  });
+
+  test('orchestratorKey round-trips and legacy JSON defaults to Auto', () {
+    // A persisted selection survives a JSON round trip.
+    final withKey = AppSettings.fromJson(
+      const AppSettings(orchestratorKey: 'mac-mini').toJson(),
+    );
+    expect(withKey.orchestratorKey, 'mac-mini');
+
+    // A pre-feature settings file (no orchestratorKey) defaults to '' = Auto.
+    final legacy = AppSettings.fromJson({'wakeWord': 'hey_jarvis'});
+    expect(legacy.orchestratorKey, '');
   });
 
   test('copyWith changes only the given fields', () {

@@ -11,8 +11,14 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<SpeakerView>? speakers,
     List<ModelOption>? models,
     List<VoiceOption>? voices,
+    List<OrchestratorOption>? orchestrators,
     this.throwOnFetch = false,
-  })  : _models = models ??
+  })  : _orchestrators = orchestrators ??
+            const <OrchestratorOption>[
+              OrchestratorOption(
+                  key: 'mac-mini', name: 'Mac Mini', host: '192.168.1.10', port: 10700),
+            ],
+        _models = models ??
             const <ModelOption>[
               ModelOption(provider: 'anthropic', id: 'claude-opus-5', label: 'Claude Opus 5'),
               ModelOption(provider: 'openai', id: 'gpt-4o-mini', label: 'gpt-4o-mini'),
@@ -38,6 +44,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<SpeakerView> _speakers;
   final List<ModelOption> _models;
   final List<VoiceOption> _voices;
+  final List<OrchestratorOption> _orchestrators;
   final bool throwOnFetch;
 
   // Call records for assertions.
@@ -48,6 +55,14 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<Map<String, String>> namedCalls = <Map<String, String>>[];
   final List<Map<String, String>> mergeCalls = <Map<String, String>>[];
   final List<String> deletedSpeakers = <String>[];
+
+  @override
+  Future<List<OrchestratorOption>> listOrchestrators() async {
+    // Discovery is a separate mDNS path from the selected-orchestrator round
+    // trip, so it succeeds even when `throwOnFetch` simulates the selected Mac
+    // being unreachable.
+    return List.of(_orchestrators);
+  }
 
   @override
   Future<OrchestratorSettingsView> fetchSettings() async {

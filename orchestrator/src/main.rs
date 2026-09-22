@@ -49,7 +49,9 @@ async fn run() -> Result<()> {
 
     let mut config = Config::from_env().context("loading configuration")?;
     log::info!(
-        "starting orchestrator: bind={} stt={} tts={} llm={} db={}",
+        "starting orchestrator: name={:?} instance_id={} bind={} stt={} tts={} llm={} db={}",
+        config.service_name,
+        config.instance_id,
         config.bind_addr,
         config.stt_addr,
         config.tts_addr,
@@ -209,7 +211,7 @@ async fn run() -> Result<()> {
 
     // Advertise over mDNS so the Echo Show discovers us without a hardcoded IP.
     // Held for the process lifetime; unregisters on drop.
-    let _mdns = MdnsAdvertiser::advertise(&config.service_name, local.port())
+    let _mdns = MdnsAdvertiser::advertise(&config.service_name, &config.instance_id, local.port())
         .context("advertising Wyoming service over mDNS")?;
 
     log::info!("orchestrator ready on {local}; waiting for the device");

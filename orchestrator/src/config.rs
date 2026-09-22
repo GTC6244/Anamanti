@@ -94,8 +94,18 @@ pub struct Config {
     /// Address the local HTTP **config page** binds to, or `None` to disable it.
     /// Defaults to loopback (`127.0.0.1:8730`) since the page has no auth.
     pub config_addr: Option<SocketAddr>,
-    /// Human-readable mDNS instance name.
+    /// Human-readable mDNS instance name (the friendly label shown in the
+    /// device's orchestrator dropdown).
     pub service_name: String,
+    /// Stable mDNS selection key advertised in the `instance_id` TXT record. The
+    /// device persists this to pin a specific orchestrator across restarts / IP
+    /// changes, so it MUST be stable across restarts (never random per boot).
+    /// Resolution order: `AMBIENT_INSTANCE_ID` env → the **git branch code** of the
+    /// working directory (so a copy running from a test branch/worktree identifies
+    /// itself by its branch without extra config) → the sanitized `service_name`.
+    /// The "local production" install lives outside a git checkout and sets
+    /// `AMBIENT_INSTANCE_ID` in `~/.zshenv`, so it never falls through to the branch.
+    pub instance_id: String,
     /// Downstream Wyoming STT (Whisper) address.
     pub stt_addr: SocketAddr,
     /// Downstream Wyoming TTS (Piper) address.
@@ -220,6 +230,7 @@ impl Default for Config {
             // disable with AMBIENT_CONFIG_ADDR.
             config_addr: Some("127.0.0.1:8730".parse().unwrap()),
             service_name: "Ambient Orchestrator".to_string(),
+            instance_id: "ambient-orchestrator".to_string(),
             stt_addr: "127.0.0.1:10300".parse().unwrap(), // wyoming-faster-whisper default
             tts_addr: "127.0.0.1:10200".parse().unwrap(), // wyoming-piper default
             tts_voice: None,
@@ -249,6 +260,44 @@ fn env_addr(key: &str, default: SocketAddr) -> Result<SocketAddr> {
             .parse()
             .with_context(|| format!("parsing {key}=`{v}` as host:port")),
         Err(_) => Ok(default),
+    }
+}
+
+/// The git branch code of the current working directory, or `None` when this
+/// process is not running inside a checkout (e.g. the "local production" install,
+/// which runs a copied binary from outside a repo and sets `AMBIENT_INSTANCE_ID`
+/// explicitly). Used as the default `instance_id` so a copy launched from a test
+/// branch/worktree advertises itself by its branch with no extra configuration.
+/// Detached HEAD (`branch == "HEAD"`) is treated as "no branch".
+fn git_branch_code() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+/// Reduce a service name to a stable selection key: lowercase, alphanumerics and
+/// hyphens only, collapsed/trimmed. Kept in sync with the device's expectation
+/// that the `instance_id` TXT record is a stable, human-ish identifier.
+fn sanitize_id(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let trimmed = mapped.trim_matches('-');
+    if trimmed.is_empty() {
+        "ambient-orchestrator".to_string()
+    } else {
+        trimmed.to_lowercase()
     }
 }
 
@@ -363,10 +412,23 @@ impl Config {
             Err(_) => d.config_addr,
         };
 
+        let service_name = env::var("AMBIENT_SERVICE_NAME").unwrap_or(d.service_name);
+        // Stable selection key: explicit env override, else the git branch code of
+        // the working directory (a copy running from a test branch/worktree names
+        // itself by its branch), else the sanitized service name. All must be stable
+        // across restarts — persisted device selections depend on this not changing.
+        let instance_id = env::var("AMBIENT_INSTANCE_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(git_branch_code)
+            .unwrap_or_else(|| sanitize_id(&service_name));
+
         Ok(Self {
             bind_addr: env_addr("AMBIENT_BIND_ADDR", d.bind_addr)?,
             config_addr,
-            service_name: env::var("AMBIENT_SERVICE_NAME").unwrap_or(d.service_name),
+            service_name,
+            instance_id,
             stt_addr: env_addr("AMBIENT_STT_ADDR", d.stt_addr)?,
             tts_addr: env_addr("AMBIENT_TTS_ADDR", d.tts_addr)?,
             tts_voice: env::var("AMBIENT_TTS_VOICE").ok().filter(|s| !s.is_empty()),
@@ -673,5 +735,23 @@ impl Config {
             LlmChoice::Anthropic { .. } => "anthropic",
             LlmChoice::OpenAI { .. } => "openai",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_id_defaults_match_service_name() {
+        assert_eq!(Config::default().instance_id, "ambient-orchestrator");
+    }
+
+    #[test]
+    fn sanitize_id_maps_service_names_to_stable_keys() {
+        assert_eq!(sanitize_id("Ambient Orchestrator"), "ambient-orchestrator");
+        assert_eq!(sanitize_id("Test Mac"), "test-mac");
+        assert_eq!(sanitize_id("Mac Mini (prod)"), "mac-mini--prod");
+        assert_eq!(sanitize_id("***"), "ambient-orchestrator");
     }
 }

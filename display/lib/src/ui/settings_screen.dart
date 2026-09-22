@@ -92,6 +92,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// when the Mac is unreachable — the voice field then falls back to free text.
   List<VoiceOption> _voices = const <VoiceOption>[];
 
+  /// Orchestrators discovered on the LAN, for the device-local Orchestrator
+  /// dropdown. Populated by pure mDNS (independent of the selected orchestrator's
+  /// reachability), so the picker works even when the current selection is offline.
+  List<OrchestratorOption> _orchestrators = const <OrchestratorOption>[];
+
   // Orchestrator-side VAD tuning (loaded from the Mac, applied on Save).
   int _endSilenceMs = 700;
   double _voiceRmsThreshold = 120;
@@ -116,6 +121,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _remoteLoading = true;
       _remoteError = null;
     });
+    // Discover orchestrators first, in their own best-effort try: this is a pure
+    // mDNS browse independent of whether the *selected* orchestrator is reachable,
+    // so the Orchestrator dropdown populates even when the pinned Mac is offline.
+    List<OrchestratorOption> orchestrators;
+    try {
+      orchestrators = await widget.client.listOrchestrators();
+    } catch (_) {
+      orchestrators = const <OrchestratorOption>[];
+    }
+    if (mounted) setState(() => _orchestrators = orchestrators);
     try {
       final remote = await widget.client.fetchSettings();
       // The model catalog is best-effort: if it fails, the model field falls back
@@ -478,6 +493,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _thresholdTile(),
           const Divider(),
           _section('Assistant'),
+          // Device-local: which orchestrator this display talks to. Shown above
+          // (and outside) the orchestrator-fetched tiles so it stays usable even
+          // when the selected orchestrator is offline.
+          _orchestratorTile(),
           ..._assistantTiles(),
           const Divider(),
           _section('Idle photos'),
@@ -532,6 +551,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ),
   );
+
+  /// Device-local picker for which orchestrator this display connects to. "Auto"
+  /// (empty key) uses the first available orchestrator; selecting a specific one
+  /// pins the device to it (strict: it stays offline rather than switching if that
+  /// orchestrator is unreachable). Persisted via [SettingsStore]; a change restarts
+  /// the engine (see `main.dart`). A persisted selection not currently discovered
+  /// stays selected with a "(not found)" label so it isn't silently dropped.
+  Widget _orchestratorTile() {
+    final current = _settings.orchestratorKey.trim();
+    final keys = _orchestrators.map((o) => o.key).toSet();
+    final items = <DropdownMenuItem<String>>[
+      const DropdownMenuItem(value: '', child: Text('Auto (first available)')),
+      for (final o in _orchestrators)
+        DropdownMenuItem(
+          value: o.key,
+          child: Text(o.host.isEmpty ? o.name : '${o.name} · ${o.host}'),
+        ),
+      if (current.isNotEmpty && !keys.contains(current))
+        DropdownMenuItem(value: current, child: Text('$current (not found)')),
+    ];
+    return ListTile(
+      leading: const Icon(Icons.dns_outlined),
+      title: const Text('Orchestrator'),
+      subtitle: const Text('Which Mac this display connects to'),
+      trailing: DropdownButton<String>(
+        key: const Key('settings-orchestrator'),
+        value: current.isEmpty ? '' : current,
+        items: items,
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(orchestratorKey: v ?? ''),
+        ),
+      ),
+    );
+  }
 
   Widget _wakeWordTile() {
     // The current wake word may not be in the built-in list (dropped in manually);

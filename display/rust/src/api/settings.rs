@@ -69,6 +69,20 @@ pub struct VoiceInfo {
     pub label: String,
 }
 
+/// One discovered orchestrator, for the settings "Orchestrator" dropdown.
+#[derive(Debug, Clone)]
+pub struct OrchestratorInfo {
+    /// Stable selection key (TXT `instance_id`) the device persists to pin this
+    /// orchestrator across restarts / IP changes.
+    pub key: String,
+    /// Human-friendly label (TXT `name`) shown in the dropdown.
+    pub name: String,
+    /// Resolved LAN address (for display / diagnostics).
+    pub host: String,
+    /// Resolved Wyoming port.
+    pub port: u16,
+}
+
 /// One persistent memory entry, for the settings memory list.
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
@@ -136,95 +150,222 @@ where
     rt.block_on(fut)
 }
 
+/// Normalize a persisted selection key: empty (Auto) → `None`, else the trimmed
+/// key. Every control call is pinned through this so the settings/control path
+/// hits the *same* orchestrator the voice-turn path does.
+fn preferred(key: &str) -> Option<&str> {
+    let k = key.trim();
+    if k.is_empty() {
+        None
+    } else {
+        Some(k)
+    }
+}
+
+/// Discover every orchestrator on the LAN for the settings "Orchestrator"
+/// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
+/// always show all choices (including ones the device isn't currently pinned to).
+pub fn list_orchestrators(discovery_timeout_secs: u64) -> Result<Vec<OrchestratorInfo>> {
+    block_on(async move {
+        let endpoints = crate::wyoming::discovery::discover_all(timeout(discovery_timeout_secs))
+            .await?;
+        Ok(endpoints
+            .into_iter()
+            .map(|e| OrchestratorInfo {
+                key: e.key,
+                name: e.name,
+                host: e.address.to_string(),
+                port: e.port,
+            })
+            .collect())
+    })
+}
+
 /// Read the orchestrator's current runtime settings.
-pub fn fetch_orchestrator_settings(discovery_timeout_secs: u64) -> Result<OrchestratorSettings> {
+pub fn fetch_orchestrator_settings(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<OrchestratorSettings> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::describe_settings(&cache, timeout(discovery_timeout_secs)).await
+        control::describe_settings(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
     })
 }
 
 /// Apply a settings change on the orchestrator and return the resulting settings.
 pub fn update_orchestrator_settings(
+    orchestrator_key: String,
     update: SettingsUpdate,
     discovery_timeout_secs: u64,
 ) -> Result<OrchestratorSettings> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::update_settings(&cache, timeout(discovery_timeout_secs), &update).await
+        control::update_settings(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &update,
+        )
+        .await
     })
 }
 
 /// List the orchestrator's selectable LLM models (Anthropic + OpenAI, scoped to the
 /// last 12 months) for the settings model dropdown.
-pub fn list_models(discovery_timeout_secs: u64) -> Result<Vec<ModelInfo>> {
+pub fn list_models(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<ModelInfo>> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::list_models(&cache, timeout(discovery_timeout_secs)).await
+        control::list_models(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
     })
 }
 
 /// List the installed Piper voices for the settings TTS voice dropdown.
-pub fn list_voices(discovery_timeout_secs: u64) -> Result<Vec<VoiceInfo>> {
+pub fn list_voices(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<VoiceInfo>> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::list_voices(&cache, timeout(discovery_timeout_secs)).await
+        control::list_voices(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
     })
 }
 
 /// List all persistent memory entries (settings memory management view).
-pub fn list_memories(discovery_timeout_secs: u64) -> Result<Vec<MemoryEntry>> {
+pub fn list_memories(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<MemoryEntry>> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::list_memories(&cache, timeout(discovery_timeout_secs)).await
+        control::list_memories(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
     })
 }
 
 /// Delete one memory entry by id. Returns whether a row was removed.
-pub fn delete_memory(id: i64, discovery_timeout_secs: u64) -> Result<bool> {
+pub fn delete_memory(
+    orchestrator_key: String,
+    id: i64,
+    discovery_timeout_secs: u64,
+) -> Result<bool> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::delete_memory(&cache, timeout(discovery_timeout_secs), id).await
+        control::delete_memory(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            id,
+        )
+        .await
     })
 }
 
 /// Delete every memory entry. Returns the number removed.
-pub fn clear_memories(discovery_timeout_secs: u64) -> Result<u32> {
+pub fn clear_memories(orchestrator_key: String, discovery_timeout_secs: u64) -> Result<u32> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::clear_memories(&cache, timeout(discovery_timeout_secs)).await
+        control::clear_memories(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
     })
 }
 
 /// List the identified speakers (settings "People" view).
-pub fn list_speakers(discovery_timeout_secs: u64) -> Result<Vec<SpeakerInfo>> {
+pub fn list_speakers(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<SpeakerInfo>> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::list_speakers(&cache, timeout(discovery_timeout_secs)).await
+        control::list_speakers(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
     })
 }
 
 /// Name (or rename) a speaker. Returns whether the change was applied.
-pub fn name_speaker(id: String, name: String, discovery_timeout_secs: u64) -> Result<bool> {
+pub fn name_speaker(
+    orchestrator_key: String,
+    id: String,
+    name: String,
+    discovery_timeout_secs: u64,
+) -> Result<bool> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::name_speaker(&cache, timeout(discovery_timeout_secs), &id, &name).await
+        control::name_speaker(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &id,
+            &name,
+        )
+        .await
     })
 }
 
 /// Merge the `drop` speaker into `keep` (same person, two clusters). Returns
 /// whether the merge was applied.
-pub fn merge_speakers(keep: String, drop: String, discovery_timeout_secs: u64) -> Result<bool> {
+pub fn merge_speakers(
+    orchestrator_key: String,
+    keep: String,
+    drop: String,
+    discovery_timeout_secs: u64,
+) -> Result<bool> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::merge_speakers(&cache, timeout(discovery_timeout_secs), &keep, &drop).await
+        control::merge_speakers(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &keep,
+            &drop,
+        )
+        .await
     })
 }
 
 /// Delete a speaker profile. Returns whether a profile was removed.
-pub fn delete_speaker(id: String, discovery_timeout_secs: u64) -> Result<bool> {
+pub fn delete_speaker(
+    orchestrator_key: String,
+    id: String,
+    discovery_timeout_secs: u64,
+) -> Result<bool> {
     block_on(async move {
         let cache = EndpointCache::new();
-        control::delete_speaker(&cache, timeout(discovery_timeout_secs), &id).await
+        control::delete_speaker(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &id,
+        )
+        .await
     })
 }

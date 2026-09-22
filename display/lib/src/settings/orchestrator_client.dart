@@ -74,6 +74,29 @@ class VoiceOption {
   final String? language;
 }
 
+/// One discovered orchestrator, for the settings "Orchestrator" dropdown.
+class OrchestratorOption {
+  const OrchestratorOption({
+    required this.key,
+    required this.name,
+    required this.host,
+    required this.port,
+  });
+
+  /// Stable selection key (TXT `instance_id`) persisted device-locally to pin
+  /// this orchestrator across restarts / IP changes.
+  final String key;
+
+  /// Human-friendly label shown in the dropdown.
+  final String name;
+
+  /// Resolved LAN address (for display / diagnostics).
+  final String host;
+
+  /// Resolved Wyoming port.
+  final int port;
+}
+
 /// One persistent memory entry.
 class MemoryView {
   const MemoryView({
@@ -127,6 +150,11 @@ class SpeakerView {
 /// hit the network (mDNS discovery + a short Wyoming control connection) and may
 /// throw if the Mac is unreachable; callers surface that as an offline state.
 abstract class OrchestratorClient {
+  /// Discover every orchestrator on the LAN for the "Orchestrator" dropdown.
+  /// Unfiltered by the current selection (pure mDNS), so the picker always shows
+  /// all choices. May be empty if none are reachable.
+  Future<List<OrchestratorOption>> listOrchestrators();
+
   Future<OrchestratorSettingsView> fetchSettings();
 
   Future<OrchestratorSettingsView> applySettings({
@@ -168,16 +196,40 @@ abstract class OrchestratorClient {
 
 /// Production client backed by the generated FRB control functions.
 class FrbOrchestratorClient implements OrchestratorClient {
-  const FrbOrchestratorClient({this.discoveryTimeoutSecs = 4});
+  const FrbOrchestratorClient({
+    this.discoveryTimeoutSecs = 4,
+    this.orchestratorKey = '',
+  });
 
   /// Seconds to browse mDNS for the orchestrator before falling back to the cache.
   final int discoveryTimeoutSecs;
 
+  /// Stable selection key of the pinned orchestrator; empty = Auto (first
+  /// available). Threaded into every control call so the settings path hits the
+  /// same Mac the voice-turn path does (strict: errors if it's unreachable).
+  final String orchestratorKey;
+
   BigInt get _timeout => BigInt.from(discoveryTimeoutSecs);
 
   @override
+  Future<List<OrchestratorOption>> listOrchestrators() async {
+    final list = await frb.listOrchestrators(discoveryTimeoutSecs: _timeout);
+    return list
+        .map((o) => OrchestratorOption(
+              key: o.key,
+              name: o.name,
+              host: o.host,
+              port: o.port,
+            ))
+        .toList();
+  }
+
+  @override
   Future<OrchestratorSettingsView> fetchSettings() async {
-    return _view(await frb.fetchOrchestratorSettings(discoveryTimeoutSecs: _timeout));
+    return _view(await frb.fetchOrchestratorSettings(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    ));
   }
 
   @override
@@ -191,6 +243,7 @@ class FrbOrchestratorClient implements OrchestratorClient {
     double? voiceRmsThreshold,
   }) async {
     final result = await frb.updateOrchestratorSettings(
+      orchestratorKey: orchestratorKey,
       update: frb.SettingsUpdate(
         llmBackend: llmBackend,
         llmModel: llmModel,
@@ -207,7 +260,10 @@ class FrbOrchestratorClient implements OrchestratorClient {
 
   @override
   Future<List<ModelOption>> listModels() async {
-    final models = await frb.listModels(discoveryTimeoutSecs: _timeout);
+    final models = await frb.listModels(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
     return models
         .map((m) => ModelOption(provider: m.provider, id: m.id, label: m.label))
         .toList();
@@ -215,7 +271,10 @@ class FrbOrchestratorClient implements OrchestratorClient {
 
   @override
   Future<List<VoiceOption>> listVoices() async {
-    final voices = await frb.listVoices(discoveryTimeoutSecs: _timeout);
+    final voices = await frb.listVoices(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
     return voices
         .map((v) => VoiceOption(name: v.name, label: v.label, language: v.language))
         .toList();
@@ -223,7 +282,10 @@ class FrbOrchestratorClient implements OrchestratorClient {
 
   @override
   Future<List<MemoryView>> listMemories() async {
-    final entries = await frb.listMemories(discoveryTimeoutSecs: _timeout);
+    final entries = await frb.listMemories(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
     return entries
         .map((e) => MemoryView(
               id: e.id.toInt(),
@@ -236,15 +298,24 @@ class FrbOrchestratorClient implements OrchestratorClient {
   }
 
   @override
-  Future<bool> deleteMemory(int id) =>
-      frb.deleteMemory(id: id, discoveryTimeoutSecs: _timeout);
+  Future<bool> deleteMemory(int id) => frb.deleteMemory(
+        orchestratorKey: orchestratorKey,
+        id: id,
+        discoveryTimeoutSecs: _timeout,
+      );
 
   @override
-  Future<int> clearMemories() => frb.clearMemories(discoveryTimeoutSecs: _timeout);
+  Future<int> clearMemories() => frb.clearMemories(
+        orchestratorKey: orchestratorKey,
+        discoveryTimeoutSecs: _timeout,
+      );
 
   @override
   Future<List<SpeakerView>> listSpeakers() async {
-    final people = await frb.listSpeakers(discoveryTimeoutSecs: _timeout);
+    final people = await frb.listSpeakers(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
     return people
         .map((s) => SpeakerView(
               id: s.id,
@@ -257,16 +328,28 @@ class FrbOrchestratorClient implements OrchestratorClient {
   }
 
   @override
-  Future<bool> nameSpeaker(String id, String name) =>
-      frb.nameSpeaker(id: id, name: name, discoveryTimeoutSecs: _timeout);
+  Future<bool> nameSpeaker(String id, String name) => frb.nameSpeaker(
+        orchestratorKey: orchestratorKey,
+        id: id,
+        name: name,
+        discoveryTimeoutSecs: _timeout,
+      );
 
   @override
   Future<bool> mergeSpeakers({required String keep, required String drop}) =>
-      frb.mergeSpeakers(keep: keep, drop: drop, discoveryTimeoutSecs: _timeout);
+      frb.mergeSpeakers(
+        orchestratorKey: orchestratorKey,
+        keep: keep,
+        drop: drop,
+        discoveryTimeoutSecs: _timeout,
+      );
 
   @override
-  Future<bool> deleteSpeaker(String id) =>
-      frb.deleteSpeaker(id: id, discoveryTimeoutSecs: _timeout);
+  Future<bool> deleteSpeaker(String id) => frb.deleteSpeaker(
+        orchestratorKey: orchestratorKey,
+        id: id,
+        discoveryTimeoutSecs: _timeout,
+      );
 
   OrchestratorSettingsView _view(frb.OrchestratorSettings s) => OrchestratorSettingsView(
         ok: s.ok,
