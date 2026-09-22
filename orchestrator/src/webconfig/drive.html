@@ -1,0 +1,68 @@
+<p class="sub">Link a Google Drive folder for the idle photo slideshow. Consent runs once here on the Mac — a browser window opens; the tablet then pulls the token over Wyoming (no adb, no rebuild). Requires a Google Cloud OAuth client of type <b>Desktop app</b>.</p>
+
+<div class="card">
+  <h2>Google Drive slideshow</h2>
+  <p class="desc" id="statusline">Loading…</p>
+
+  <label>OAuth client ID <span class="hint" id="cid_state"></span>
+    <input id="client_id" type="text" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+  <label>OAuth client secret <span class="hint" id="secret_state"></span>
+    <input id="client_secret" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+  <label>Folder IDs <span class="hint">comma-separated Drive folder IDs</span>
+    <input id="folder_ids" type="text" placeholder="1AbC...,1XyZ...">
+  </label>
+
+  <div class="card-actions">
+    <div id="status" class="status"></div>
+    <button id="link">Link Google Drive</button>
+    <button id="save" class="primary">Save credentials</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  async function load(){
+    try{
+      const j = await apiJSON('/drive/status.json');
+      $('cid_state').textContent = j.client_id_set ? '(set)' : '(not set)';
+      $('secret_state').textContent = j.client_secret_set ? '(set)' : '(not set)';
+      $('client_id').value = '';
+      $('client_secret').value = '';
+      $('folder_ids').value = (j.folder_ids||[]).join(', ');
+      const state = j.linked ? 'Linked ✓' : (j.configured ? 'Configured — not linked yet' : 'Not configured — set the client id + secret');
+      $('statusline').textContent = state + ' · scope: ' + (j.scope || '—');
+    }catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+  async function save(){
+    const body = {
+      client_id: $('client_id').value.trim() || undefined,
+      client_secret: $('client_secret').value.trim() || undefined,
+      folder_ids: $('folder_ids').value.split(',').map(s=>s.trim()).filter(Boolean),
+    };
+    try{
+      const j = await apiJSON('/drive/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  async function link(){
+    show(true, 'Opening a browser on this Mac — approve access, then return here…');
+    try{
+      const j = await apiJSON('/drive/link', {method:'POST'});
+      if(j.ok){
+        let m = j.message || 'Linked.';
+        if(j.verify && j.verify.length){
+          m += ' ' + j.verify.map(v => v.error ? ('folder '+v.folder_id+': '+v.error) : ('folder '+v.folder_id+': '+v.images+' image(s)')).join('; ');
+        }
+        show(true, m); load();
+      } else { show(false, j.message || 'Link failed.'); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('save').addEventListener('click', save);
+  $('link').addEventListener('click', link);
+  load();
+</script>

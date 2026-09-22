@@ -1,0 +1,90 @@
+<p class="sub">Canonical context the assistant uses to ground answers: where "here" is (for weather and nearby questions) and who lives in the home, with their emails and phone numbers. Changes apply live, no restart.</p>
+
+<div class="card">
+  <h2>Home</h2>
+  <p class="desc">Grounds "here" for weather and nearby questions, and sets the units the assistant answers in.</p>
+  <label>Home location <span class="hint">e.g. "Austin, Texas" or a street address</span>
+    <input id="location" type="text" placeholder="(unset)" autocomplete="off">
+  </label>
+  <label>Measurement units
+    <select id="weather_units">
+      <option value="">(let the assistant choose)</option>
+      <option value="imperial">imperial (°F, miles)</option>
+      <option value="metric">metric (°C, km)</option>
+    </select>
+  </label>
+</div>
+
+<div class="card">
+  <h2>People</h2>
+  <p class="desc">Who lives in the home. Fix spellings, emails, and numbers here — the assistant uses this roster to recognize people and answer "who" questions.</p>
+  <div id="members"></div>
+  <div class="toolbar"><button id="add">+ Add person</button></div>
+</div>
+
+<div class="card danger-zone">
+  <h2>Danger zone</h2>
+  <div class="callout">
+    <span class="ico">⚠</span>
+    <div>Removing a person and clicking <b>Save</b> permanently deletes their record — name, relationship, emails and phone numbers. This can't be undone from here.</div>
+  </div>
+</div>
+
+<div class="sticky-actions">
+  <div id="status" class="status"></div>
+  <button id="save" class="primary">Save</button>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function memberRow(m){
+    m = m || {};
+    const div = document.createElement('div');
+    div.className = 'member';
+    div.innerHTML =
+      '<div class="row"><label>Name</label><button type="button" class="rm danger">Remove</button></div>' +
+      '<input class="m-name" type="text" placeholder="Name" value="'+esc(m.name)+'">' +
+      '<label>Relationship <span class="hint">optional, e.g. parent, kid, roommate</span></label>' +
+      '<input class="m-rel" type="text" value="'+esc(m.relationship)+'">' +
+      '<label>Emails <span class="hint">comma-separated</span></label>' +
+      '<input class="m-emails" type="text" value="'+esc((m.emails||[]).join(', '))+'">' +
+      '<label>Phone numbers <span class="hint">comma-separated</span></label>' +
+      '<input class="m-phones" type="text" value="'+esc((m.phones||[]).join(', '))+'">';
+    div.querySelector('.rm').addEventListener('click', () => div.remove());
+    return div;
+  }
+  function splitList(v){ return v.split(',').map(s=>s.trim()).filter(Boolean); }
+  async function load(){
+    try{
+      const j = await apiJSON('/household/status.json');
+      $('location').value = j.location || '';
+      $('weather_units').value = j.weather_units || '';
+      const box = $('members'); box.innerHTML = '';
+      (j.members||[]).forEach(m => box.appendChild(memberRow(m)));
+    }catch(e){ show(false, 'Could not load: ' + e); }
+  }
+  async function save(){
+    const members = [...document.querySelectorAll('#members .member')].map(d => ({
+      name: d.querySelector('.m-name').value.trim(),
+      relationship: d.querySelector('.m-rel').value.trim() || null,
+      emails: splitList(d.querySelector('.m-emails').value),
+      phones: splitList(d.querySelector('.m-phones').value),
+    })).filter(m => m.name);
+    const body = {
+      location: $('location').value.trim() || null,
+      weather_units: $('weather_units').value || null,
+      members,
+    };
+    try{
+      const j = await apiJSON('/household/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('add').addEventListener('click', () => $('members').appendChild(memberRow({})));
+  $('save').addEventListener('click', save);
+  load();
+</script>

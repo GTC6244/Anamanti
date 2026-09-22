@@ -1,0 +1,278 @@
+<p class="sub">Runtime settings — changes apply live, no restart.</p>
+
+<div class="card">
+  <h2>Model &amp; engine</h2>
+  <p class="desc">Choose the reasoning engine, the LLM backend that answers turns, and the model.</p>
+
+  <label>Engine
+    <select id="engine">
+      <option value="native">native (HTTP clients)</option>
+      <option value="rig">rig (agent framework + tools)</option>
+    </select>
+  </label>
+
+  <label>LLM backend
+    <select id="llm_backend">
+      <option value="ollama">ollama (local)</option>
+      <option value="anthropic">anthropic (cloud)</option>
+      <option value="openai">openai (cloud)</option>
+      <option value="mock">mock (offline)</option>
+    </select>
+  </label>
+
+  <label>Model <span class="hint" id="model_hint">last 12 months, per provider</span>
+    <!-- Cloud backends (anthropic/openai): a dropdown of last-12-months models. -->
+    <select id="llm_model_select"></select>
+    <!-- Local/mock: a free-text model tag (e.g. an Ollama tag like qwen2.5). -->
+    <input id="llm_model_text" type="text" placeholder="(backend default)" style="display:none">
+  </label>
+</div>
+
+<div class="card">
+  <h2>Provider credentials</h2>
+  <p class="desc">Keys are stored on the orchestrator and never shown back. Leave a field blank to keep the current secret.</p>
+
+  <label id="anthropic_auth_row">Anthropic auth
+    <select id="anthropic_auth">
+      <option value="apikey">API key (ANTHROPIC_API_KEY)</option>
+      <option value="subscription">Subscription — Claude OAuth (claude setup-token)</option>
+    </select>
+  </label>
+
+  <label id="anthropic_key_row">Anthropic API key <span class="hint" id="anthropic_key_state"></span>
+    <input id="anthropic_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+
+  <label id="anthropic_oauth_row">Anthropic subscription token <span class="hint" id="anthropic_oauth_state"></span>
+    <input id="anthropic_oauth_token" type="password" placeholder="(leave blank to keep current; from `claude setup-token`)">
+  </label>
+
+  <label id="openai_key_row">OpenAI API key <span class="hint" id="openai_key_state"></span>
+    <input id="openai_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+</div>
+
+<div class="card">
+  <h2>Web search</h2>
+  <p class="desc">Let the assistant look things up on the internet during a turn (rig engine only).</p>
+
+  <label class="check">
+    <span class="check-label">Web search tool <span class="hint">rig engine only</span></span>
+    <input id="web_search" type="checkbox">
+  </label>
+
+  <label>Search provider
+    <select id="search_provider">
+      <option value="duckduckgo">DuckDuckGo (keyless; entity queries only)</option>
+      <option value="tavily">Tavily (real web results; needs a key)</option>
+    </select>
+  </label>
+
+  <label>Search API key <span class="hint" id="key_state"></span>
+    <input id="search_api_key" type="password" placeholder="(leave blank to keep current)">
+  </label>
+</div>
+
+<div class="card">
+  <h2>Voice</h2>
+  <p class="desc">The Piper voice used for spoken replies.</p>
+
+  <label>Piper TTS voice <span class="hint" id="voice_hint">blank = server default</span>
+    <!-- When the orchestrator can list voices: a dropdown of installed Piper voices. -->
+    <select id="tts_voice_select" style="display:none"></select>
+    <!-- Fallback (voices unavailable): a free-text Piper voice name. -->
+    <input id="tts_voice_text" type="text" placeholder="(default)">
+  </label>
+</div>
+
+<div class="sticky-actions">
+  <div id="status" class="status"></div>
+  <button id="save" class="primary">Apply</button>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const status = $('status');
+  let MODELS = [];               // [{provider, id, label}] from /models
+  let VOICES = [];               // [{name, language, label}] from /voices
+  const CLOUD = ['anthropic', 'openai'];
+
+  function show(ok, msg) {
+    status.textContent = msg;
+    status.className = 'status ' + (ok ? 'ok' : 'err');
+  }
+
+  // Show the right model control for the backend, and populate the dropdown with
+  // that provider's last-12-months models (keeping `selected` even if off-list).
+  function renderModel(backend, selected) {
+    const sel = $('llm_model_select');
+    const txt = $('llm_model_text');
+    if (CLOUD.includes(backend)) {
+      sel.style.display = '';
+      txt.style.display = 'none';
+      $('model_hint').textContent = 'last 12 months, per provider';
+      const list = MODELS.filter((m) => m.provider === backend);
+      sel.innerHTML = '<option value="">(backend default)</option>';
+      let matched = !selected;
+      for (const m of list) {
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.label || m.id;
+        if (m.id === selected) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      }
+      if (!matched) {   // a pinned model not in the fetched list — keep it visible
+        const o = document.createElement('option');
+        o.value = selected; o.textContent = selected + ' (pinned)'; o.selected = true;
+        sel.appendChild(o);
+      }
+    } else {
+      sel.style.display = 'none';
+      txt.style.display = '';
+      txt.value = selected || '';
+      $('model_hint').textContent = 'e.g. qwen2.5, llama3.2';
+    }
+  }
+
+  function currentModel() {
+    const backend = $('llm_backend').value;
+    const raw = CLOUD.includes(backend) ? $('llm_model_select').value : $('llm_model_text').value;
+    return raw.trim() || null;
+  }
+
+  // Show a dropdown of installed voices when we have them, else a free-text field.
+  // Keeps `selected` visible even if it isn't an installed voice.
+  function renderVoice(selected) {
+    const sel = $('tts_voice_select');
+    const txt = $('tts_voice_text');
+    if (VOICES.length) {
+      sel.style.display = '';
+      txt.style.display = 'none';
+      $('voice_hint').textContent = 'installed voices';
+      sel.innerHTML = '<option value="">(server default)</option>';
+      let matched = !selected;
+      for (const v of VOICES) {
+        const o = document.createElement('option');
+        o.value = v.name;
+        o.textContent = v.language ? (v.label || v.name) + ' · ' + v.language : (v.label || v.name);
+        if (v.name === selected) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      }
+      if (!matched) {   // a voice not in the installed list — keep it visible
+        const o = document.createElement('option');
+        o.value = selected; o.textContent = selected + ' (not installed)'; o.selected = true;
+        sel.appendChild(o);
+      }
+    } else {
+      sel.style.display = 'none';
+      txt.style.display = '';
+      txt.value = selected || '';
+      $('voice_hint').textContent = 'blank = server default';
+    }
+  }
+
+  function currentVoice() {
+    const raw = VOICES.length ? $('tts_voice_select').value : $('tts_voice_text').value;
+    return raw.trim() || null;
+  }
+
+  // The Anthropic auth toggle only applies to the anthropic backend.
+  function renderAuthRow(backend) {
+    $('anthropic_auth_row').style.display = backend === 'anthropic' ? '' : 'none';
+    renderKeyRows(backend);
+  }
+
+  // Show a provider's API-key field only when that backend is selected (and, for
+  // Anthropic, only under API-key auth — subscription auth uses an OAuth token).
+  function renderKeyRows(backend) {
+    const auth = $('anthropic_auth').value;
+    $('anthropic_key_row').style.display =
+      (backend === 'anthropic' && auth === 'apikey') ? '' : 'none';
+    // The subscription token field shows only under Anthropic subscription auth.
+    $('anthropic_oauth_row').style.display =
+      (backend === 'anthropic' && auth === 'subscription') ? '' : 'none';
+    $('openai_key_row').style.display = backend === 'openai' ? '' : 'none';
+  }
+
+  function fill(v) {
+    $('engine').value = v.engine || 'native';
+    $('llm_backend').value = v.llm_backend || 'ollama';
+    $('anthropic_auth').value = v.anthropic_auth || 'apikey';
+    $('anthropic_api_key').value = '';
+    $('openai_api_key').value = '';
+    $('anthropic_oauth_token').value = '';
+    $('anthropic_key_state').textContent = v.anthropic_key_set ? '(a key is set)' : '(no key set)';
+    $('openai_key_state').textContent = v.openai_key_set ? '(a key is set)' : '(no key set)';
+    $('anthropic_oauth_state').textContent = v.anthropic_oauth_token_set ? '(a token is set)' : '(no token set)';
+    renderAuthRow($('llm_backend').value);
+    renderModel($('llm_backend').value, v.llm_model || '');
+    renderVoice(v.tts_voice || '');
+    $('web_search').checked = !!v.web_search;
+    $('search_provider').value = v.search_provider || 'duckduckgo';
+    $('search_api_key').value = '';
+    $('key_state').textContent = v.search_key_set ? '(a key is set)' : '(no key set)';
+  }
+
+  async function loadModels() {
+    try {
+      const r = await fetch('/models');
+      MODELS = (await r.json()).models || [];
+    } catch (e) { MODELS = []; }
+  }
+
+  async function loadVoices() {
+    try {
+      const r = await fetch('/voices');
+      VOICES = (await r.json()).voices || [];
+    } catch (e) { VOICES = []; }
+  }
+
+  async function load() {
+    await Promise.all([loadModels(), loadVoices()]);
+    try {
+      const r = await fetch('/config');
+      fill(await r.json());
+      show(true, 'Loaded current settings.');
+    } catch (e) {
+      show(false, 'Could not load settings: ' + e);
+    }
+  }
+
+  async function save() {
+    const body = {
+      engine: $('engine').value,
+      llm_backend: $('llm_backend').value,
+      anthropic_auth: $('anthropic_auth').value,
+      llm_model: currentModel(),
+      tts_voice: currentVoice(),
+      web_search: $('web_search').checked,
+      search_provider: $('search_provider').value,
+      // Only send a key when the user typed one; blank keeps the current key.
+      search_api_key: $('search_api_key').value.trim() || undefined,
+      anthropic_api_key: $('anthropic_api_key').value.trim() || undefined,
+      openai_api_key: $('openai_api_key').value.trim() || undefined,
+      anthropic_oauth_token: $('anthropic_oauth_token').value.trim() || undefined,
+    };
+    try {
+      const r = await fetch('/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const v = await r.json();
+      if (v.ok) { fill(v); show(true, v.message || 'Applied.'); }
+      else { show(false, v.message || 'Rejected.'); }
+    } catch (e) {
+      show(false, 'Request failed: ' + e);
+    }
+  }
+
+  // Switching backend resets the model to that backend's default + toggles auth row.
+  $('llm_backend').addEventListener('change', () => {
+    renderAuthRow($('llm_backend').value);
+    renderModel($('llm_backend').value, '');
+  });
+  // Switching Anthropic auth toggles whether the API-key field is relevant.
+  $('anthropic_auth').addEventListener('change', () => renderKeyRows($('llm_backend').value));
+  $('save').addEventListener('click', save);
+  load();
+</script>
