@@ -23,9 +23,25 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
-use ambient_orchestrator::llm::rig::{tools_from_flag, RigBackend};
+use ambient_orchestrator::directions::LiveHomeLocation;
+use ambient_orchestrator::llm::rig::{tools_from_config, RigBackend, Tools};
 use ambient_orchestrator::llm::{LlmBackend, LlmTurn};
 use futures_util::StreamExt;
+
+/// Minimal tool set for the smoke test: just the (optional) keyless DuckDuckGo web
+/// search. Calendar / directions / Spotify are orchestrator features, not exercised
+/// here.
+fn smoke_tools(web_search: bool) -> Option<Arc<Tools>> {
+    tools_from_config(
+        web_search,
+        "duckduckgo",
+        None,
+        LiveHomeLocation::default(),
+        None,
+        None,
+        None,
+    )
+}
 
 const SYSTEM_PROMPT: &str =
     "You are a friendly, concise voice assistant. Answer in one or two short spoken \
@@ -78,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
                 &key,
                 &model,
                 max_tokens,
-                tools_from_flag(web_search),
+                smoke_tools(web_search),
             )?)
         }
         _ => {
@@ -89,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(RigBackend::ollama(
                 &url,
                 &model,
-                tools_from_flag(web_search),
+                smoke_tools(web_search),
             )?)
         }
     };

@@ -98,7 +98,7 @@ impl SpeakerEmbedder for MockSpeakerEmbedder {
 ///
 /// Runs a local ONNX model with `tract` (pure Rust, no external runtime) over the
 /// [`features`](crate::speaker::features) log-mel front-end and L2-normalizes the
-/// output embedding. The model file (`AMBIENT_SPEAKER_MODEL_PATH`), its input
+/// output embedding. The model file (`speaker.model_path`), its input
 /// tensor layout, and the fbank parameters must match the exported model — the
 /// values here follow the common 80-mel ECAPA contract and are the knobs to tune
 /// during on-hardware calibration.

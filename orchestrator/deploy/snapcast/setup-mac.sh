@@ -53,6 +53,6 @@ Done. Next (manual — see deploy/snapcast/README.md):
                               --ao=pcm --ao-pcm-waveheader=no --ao-pcm-file="$RUN_DIR/snap-web" \\
                               --audio-samplerate=48000 --audio-channels=stereo --audio-format=s16
   4. Point a snapclient at this Mac (Linux unit in deploy/snapcast/linux/).
-  5. Enable ducking on the orchestrator: AMBIENT_MUSIC=on (see README).
+  5. Enable ducking on the orchestrator: "music": {"enabled": true} in ambient.json (see README).
 Or install the launchd agents in deploy/snapcast/launchd/ once validated.
 EOF

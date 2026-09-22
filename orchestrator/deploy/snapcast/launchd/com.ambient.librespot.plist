@@ -3,7 +3,7 @@
      the snap-spotify FIFO. Zeroconf (Spotify Connect) discovery — no credentials
      here; select "Ambient" from the Spotify app on the same LAN. THIS is the one
      shared librespot instance MusicPlan.md's spotify_control tool targets (device
-     name "Ambient" == AMBIENT_SPOTIFY_DEVICE_NAME). Do not run a second one.
+     name "Ambient" == music.spotify_device_name). Do not run a second one.
      Install: cp to ~/Library/LaunchAgents/ and launchctl load. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

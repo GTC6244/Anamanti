@@ -1,5 +1,5 @@
 //! [`LlmBackend`] implemented on top of the **rig-core** agent framework
-//! (selected at runtime with `AMBIENT_LLM_ENGINE=rig`).
+//! (selected at runtime with `llm.engine="rig"`).
 //!
 //! This routes the same `respond(turn) -> ReplyStream` seam through rig's unified
 //! `CompletionModel` trait instead of the hand-rolled HTTP clients in `ollama.rs`
@@ -10,7 +10,7 @@
 //!
 //! Unlike the native backends (plain text only), the rig path supports **tool
 //! calling**. When tools are configured (currently [`InternetSearch`], enabled via
-//! `AMBIENT_WEB_SEARCH`), `respond` runs a short negotiation loop: it streams a
+//! `llm.web_search`), `respond` runs a short negotiation loop: it streams a
 //! turn, and if the model asks to call a tool it executes it, appends the result
 //! to the conversation, and streams again — up to [`MAX_TOOL_ROUNDS`] rounds —
 //! forwarding assistant text deltas as reply tokens throughout. A turn that needs
@@ -981,7 +981,7 @@ impl PortableTool for SpotifyControl {
 /// The **timer** tools (`set_timer` / `cancel_timer`) are always present — they are
 /// stateless device actions needing no config. The **web-search** tool is included
 /// only when a provider is configured (`web_search` on); the **calendar** tool only
-/// when calendar subscriptions are configured (`AMBIENT_CALENDARS`); the
+/// when calendar subscriptions are configured (`calendar.subscriptions`); the
 /// **directions** tool only when a routing provider is configured (`MAPBOX_TOKEN`).
 pub struct Tools {
     definitions: Vec<ToolDefinition>,
@@ -1099,47 +1099,31 @@ pub fn build_search_provider(provider: &str, api_key: Option<&str>) -> Arc<dyn S
 /// Build the tool set from explicit config. Always returns a tool set (the timer
 /// tools are unconditional device actions); the web-search tool is included only
 /// when `web_search` is on.
+#[allow(clippy::too_many_arguments)]
 pub fn tools_from_config(
     web_search: bool,
     provider: &str,
     api_key: Option<&str>,
     home_location: LiveHomeLocation,
     spotify: Option<Arc<dyn SpotifyController>>,
+    calendar: Option<Arc<dyn CalendarSource>>,
+    directions: Option<(Arc<dyn DirectionsProvider>, bool)>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
-    // Calendar subscriptions are read from `AMBIENT_CALENDARS` (read-only web .ics);
-    // absent → the calendar tool simply isn't advertised.
-    let calendar = crate::calendar::from_env();
-    // directions tool simply isn't advertised. Its default origin reads from the live
-    // household location (`home_location`), so a config-page edit takes effect without
-    // a restart — inject the shared handle into the env-built config.
-    let directions = crate::directions::from_env().map(|mut cfg| {
-        cfg.home_location = home_location;
-        cfg
+    // Calendar + directions are prebuilt once on the `LlmFactory` from the JSON
+    // config (read-only web .ics subscriptions / the Mapbox provider); absent → the
+    // corresponding tool simply isn't advertised. The directions default origin reads
+    // from the live household location (`home_location`), so a config-page edit takes
+    // effect without a restart — inject the shared handle into the config here.
+    let directions = directions.map(|(provider, imperial)| DirectionsConfig {
+        provider,
+        home_location,
+        imperial,
     });
     // Spotify control is passed in from the live settings (`SpotifyConfig::controller`),
-    // which is seeded from `AMBIENT_SPOTIFY_*` at boot and updated by the config-page
-    // consent flow; `None` → the spotify_control tool isn't advertised.
+    // seeded from the config file's `spotify` block at boot and updated by the
+    // config-page consent flow; `None` → the spotify_control tool isn't advertised.
     Some(Arc::new(Tools::new(search, calendar, directions, spotify)))
-}
-
-/// Build the tool set from the environment (used by the example / env-driven
-/// default): `AMBIENT_SEARCH_PROVIDER` + `TAVILY_API_KEY`. The directions default
-/// origin is seeded from `AMBIENT_HOME_LOCATION` here (there is no live `Household`
-/// record on this env-only path).
-pub fn tools_from_flag(web_search: bool) -> Option<Arc<Tools>> {
-    let provider = std::env::var("AMBIENT_SEARCH_PROVIDER").unwrap_or_default();
-    let key = std::env::var("TAVILY_API_KEY").ok();
-    let home_location = LiveHomeLocation::new(std::env::var("AMBIENT_HOME_LOCATION").ok());
-    // The env-driven path (example / smoke test) builds Spotify from env directly.
-    let spotify = crate::music::spotify::from_env();
-    tools_from_config(
-        web_search,
-        &provider,
-        key.as_deref(),
-        home_location,
-        spotify,
-    )
 }
 
 // ===========================================================================

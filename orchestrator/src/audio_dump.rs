@@ -1,6 +1,6 @@
 //! Debug-only per-turn audio capture for the Phase 0 AEC corpus.
 //!
-//! When the env var `AMBIENT_AUDIO_DUMP_DIR` is set, each voice turn writes the
+//! When `audio_dump_dir` is set in the config file, each voice turn writes the
 //! two streams the host-side APM will need — the device's far-field **mic** PCM
 //! (near-end, as streamed up for STT) and the **Piper TTS** PCM relayed back
 //! (far-end reference) — as raw little-endian `i16` files, plus a JSON-lines
@@ -53,7 +53,7 @@ struct Inner {
     reply: String,
 }
 
-/// One turn's capture. Cheap no-op unless `AMBIENT_AUDIO_DUMP_DIR` is set.
+/// One turn's capture. Cheap no-op unless a dump dir is configured.
 pub struct TurnAudioDump {
     dir: PathBuf,
     seq: u64,
@@ -62,12 +62,11 @@ pub struct TurnAudioDump {
 }
 
 impl TurnAudioDump {
-    /// Begin capturing a turn if `AMBIENT_AUDIO_DUMP_DIR` is set; otherwise `None`.
+    /// Begin capturing a turn when a dump `dir` is configured; otherwise `None`.
     /// Files are created lazily on the first mic/TTS byte so silent turns leave no
     /// stray empties.
-    pub fn for_turn() -> Option<Self> {
-        let dir = std::env::var_os("AMBIENT_AUDIO_DUMP_DIR")?;
-        let dir = PathBuf::from(dir);
+    pub fn for_turn(dir: Option<&Path>) -> Option<Self> {
+        let dir = dir?.to_path_buf();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             log::warn!("audio-dump: cannot create {}: {e}", dir.display());
             return None;

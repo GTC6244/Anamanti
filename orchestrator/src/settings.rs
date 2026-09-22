@@ -19,6 +19,8 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::calendar::CalendarSource;
+use crate::directions::DirectionsProvider;
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
 use crate::llm::{
     anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
@@ -28,13 +30,13 @@ use crate::music::{SpotifyController, SpotifyWebApi};
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
 /// clients, or the rig-core agent framework (selected at runtime with
-/// `AMBIENT_LLM_ENGINE=rig`; required for the web-search tool).
+/// `llm.engine="rig"`; required for the web-search tool).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LlmEngine {
     /// Hand-rolled `ollama.rs` / `anthropic.rs` HTTP clients (always available).
     #[default]
     Native,
-    /// rig-core agents (`AMBIENT_LLM_ENGINE=rig`; needs the `rig` feature to take
+    /// rig-core agents (`llm.engine="rig"`; needs the `rig` feature to take
     /// effect — otherwise it transparently falls back to `Native`).
     Rig,
 }
@@ -163,7 +165,7 @@ pub struct HouseholdMember {
 /// Canonical household + home information the orchestrator provides as context:
 /// **where** the home is (grounds an unqualified "here" for weather / nearby
 /// questions) and **who** lives in it (names + contact details). The location seeds
-/// from `AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS` at boot and then becomes
+/// from the config file's home_location / weather_units at boot and then becomes
 /// editable from the config dashboard; the roster is dashboard-only.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Household {
@@ -313,6 +315,15 @@ pub struct SpotifyUpdate {
     pub scope: Option<Option<String>>,
 }
 
+/// A requested change to the directions tool config. `mapbox_token` is tri-state:
+/// `None` = leave unchanged; `Some(None)`/`Some(Some(""))` = clear; `Some(Some(v))` =
+/// set. Applied by [`SharedSettings::apply_directions`], which rebuilds the backend so
+/// the `directions_lookup` tool is advertised/withdrawn live.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DirectionsUpdate {
+    pub mapbox_token: Option<Option<String>>,
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -332,6 +343,14 @@ pub struct PersistedSettings {
     /// Runtime-set OpenAI API key (same rationale as `anthropic_api_key`).
     #[serde(default)]
     pub openai_api_key: Option<String>,
+    /// Runtime-set Anthropic subscription OAuth token (config page). Defaulted (absent)
+    /// for older files, which then fall back to the env token / token command.
+    #[serde(default)]
+    pub anthropic_oauth_token: Option<String>,
+    /// Runtime-set Mapbox token for the directions tool. Defaulted (absent) for older
+    /// files, which then fall back to the `MAPBOX_TOKEN` env seed.
+    #[serde(default)]
+    pub mapbox_token: Option<String>,
     /// Anthropic auth mode (`apikey`/`subscription`). Defaulted for older files.
     #[serde(default = "default_anthropic_auth")]
     pub anthropic_auth: String,
@@ -436,6 +455,21 @@ pub struct LlmFactory {
     /// Spotify isn't linked. Set from the current [`SpotifyConfig`] on every
     /// (re)build so the tool reflects the latest consent without re-reading env.
     pub spotify: Option<Arc<dyn SpotifyController>>,
+    /// The web-calendar source for the `calendar_lookup` tool, or `None` when no
+    /// subscriptions are configured. Prebuilt once from the config file's `calendar`
+    /// block so a rebuild never re-parses config; shared into every rebuilt backend.
+    pub calendar: Option<Arc<dyn CalendarSource>>,
+    /// The routing provider + imperial-units flag for the `directions_lookup` tool,
+    /// or `None` when no provider/token is configured. Built from the live Mapbox token
+    /// ([`RuntimeSettings::mapbox_token`]) and refreshed on every (re)build — like
+    /// `spotify` — so a token entered on the config page advertises the tool live.
+    pub directions: Option<(Arc<dyn DirectionsProvider>, bool)>,
+    /// The routing provider label (`directions.provider`, default `mapbox`), kept so
+    /// `directions` can be rebuilt from a new runtime token.
+    pub directions_provider: String,
+    /// Whether directions distances are spoken in imperial units (from the household
+    /// `weather_units` at boot). Kept alongside `directions_provider` for rebuilds.
+    pub directions_imperial: bool,
 }
 
 impl LlmFactory {
@@ -505,6 +539,8 @@ impl LlmFactory {
                                     search_api_key,
                                     self.home_location.clone(),
                                     self.spotify.clone(),
+                                    self.calendar.clone(),
+                                    self.directions.clone(),
                                 ),
                             )?),
                             _ => Arc::new(AnthropicBackend::new(
@@ -549,6 +585,8 @@ impl LlmFactory {
                             search_api_key,
                             self.home_location.clone(),
                             self.spotify.clone(),
+                            self.calendar.clone(),
+                            self.directions.clone(),
                         ),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
@@ -587,6 +625,14 @@ pub struct RuntimeSettings {
     pub anthropic_api_key: Option<String>,
     /// Live OpenAI API key. Runtime-settable; seeded from `OPENAI_API_KEY` at boot.
     pub openai_api_key: Option<String>,
+    /// Live Anthropic subscription OAuth token. Runtime-settable (config page, when
+    /// auth = subscription); seeded from `ANTHROPIC_OAUTH_TOKEN` at boot. `None` = no
+    /// override (the provider falls back to env / the token command).
+    pub anthropic_oauth_token: Option<String>,
+    /// Live Mapbox token for the `directions_lookup` tool. Runtime-settable (config
+    /// page Tools tab); seeded from `MAPBOX_TOKEN`/`MAPBOX_ACCESS_TOKEN` at boot.
+    /// `None` = the tool isn't advertised.
+    pub mapbox_token: Option<String>,
     /// How the Anthropic backend authenticates (API key vs subscription OAuth).
     pub anthropic_auth: AnthropicAuth,
     /// The Piper voice to synthesize with, or `None` for the server default.
@@ -619,6 +665,10 @@ pub struct SettingsView {
     pub anthropic_key_set: bool,
     /// Whether an OpenAI API key is configured. The key itself is never exposed.
     pub openai_key_set: bool,
+    /// Whether a runtime Anthropic subscription OAuth token is set. Never exposed.
+    pub anthropic_oauth_token_set: bool,
+    /// Whether a Mapbox token (directions tool) is configured. Never exposed.
+    pub mapbox_token_set: bool,
     /// Anthropic auth mode (API key vs subscription OAuth).
     pub anthropic_auth: AnthropicAuth,
     pub tts_voice: Option<String>,
@@ -644,6 +694,9 @@ pub struct SettingsUpdate {
     pub anthropic_api_key: Option<Option<String>>,
     /// OpenAI API key change (same tri-state semantics as `anthropic_api_key`).
     pub openai_api_key: Option<Option<String>>,
+    /// Anthropic subscription OAuth token change (tri-state). Applied without a
+    /// backend rebuild — the shared token provider is updated in place.
+    pub anthropic_oauth_token: Option<Option<String>>,
     /// New Anthropic auth mode, or `None` to leave it unchanged.
     pub anthropic_auth: Option<AnthropicAuth>,
     /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(v))` = set to `v`.
@@ -702,6 +755,8 @@ impl SharedSettings {
             llm_model: s.llm_model.clone(),
             anthropic_api_key: s.anthropic_api_key.clone(),
             openai_api_key: s.openai_api_key.clone(),
+            anthropic_oauth_token: s.anthropic_oauth_token.clone(),
+            mapbox_token: s.mapbox_token.clone(),
             anthropic_auth: s.anthropic_auth.as_str().to_string(),
             tts_voice: s.tts_voice.clone(),
             end_silence_ms: s.end_silence_ms,
@@ -731,6 +786,10 @@ impl SharedSettings {
             anthropic_token: None,
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
+            calendar: None,
+            directions: None,
+            directions_provider: String::new(),
+            directions_imperial: false,
         };
         Self::new(
             factory,
@@ -744,6 +803,8 @@ impl SharedSettings {
                 llm_model: None,
                 anthropic_api_key: None,
                 openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -772,6 +833,11 @@ impl SharedSettings {
                 .as_deref()
                 .is_some_and(|k| !k.is_empty()),
             openai_key_set: s.openai_api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            anthropic_oauth_token_set: s
+                .anthropic_oauth_token
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            mapbox_token_set: s.mapbox_token.as_deref().is_some_and(|k| !k.is_empty()),
             anthropic_auth: s.anthropic_auth,
             tts_voice: s.tts_voice.clone(),
             engine: s.engine,
@@ -842,6 +908,13 @@ impl SharedSettings {
             // Spotify isn't changed by a normal settings update, but the rebuilt tool
             // set must still carry the live controller — source it from current config.
             factory.spotify = current.spotify.controller();
+            // Same for the directions tool: rebuild it from the live Mapbox token so a
+            // normal settings change never drops `directions_lookup`.
+            factory.directions = crate::directions::from_token(
+                &factory.directions_provider,
+                current.mapbox_token.as_deref(),
+                factory.directions_imperial,
+            );
             (
                 Some(factory.build(
                     target_engine,
@@ -884,6 +957,16 @@ impl SharedSettings {
         if let Some(voice) = &update.tts_voice {
             w.tts_voice = voice.clone().filter(|s| !s.is_empty());
         }
+        // The Anthropic subscription OAuth token needs no backend rebuild: the shared
+        // token provider is consulted per request, so updating its override cell (and
+        // the stored value) takes effect immediately.
+        if let Some(tok) = &update.anthropic_oauth_token {
+            let tok = tok.clone().filter(|s| !s.is_empty());
+            w.anthropic_oauth_token = tok.clone();
+            if let Some(provider) = &self.factory.anthropic_token {
+                provider.set_override(tok);
+            }
+        }
         // VAD tuning needs no backend rebuild — it's read from the per-turn snapshot
         // by `stream_to_transcript`. Clamp to sane ranges so a bad request can't wedge
         // end-of-speech detection.
@@ -901,6 +984,11 @@ impl SharedSettings {
                 .as_deref()
                 .is_some_and(|k| !k.is_empty()),
             openai_key_set: w.openai_api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            anthropic_oauth_token_set: w
+                .anthropic_oauth_token
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            mapbox_token_set: w.mapbox_token.as_deref().is_some_and(|k| !k.is_empty()),
             anthropic_auth: w.anthropic_auth,
             tts_voice: w.tts_voice.clone(),
             engine: w.engine,
@@ -1068,6 +1156,73 @@ impl SharedSettings {
         }
         target
     }
+
+    /// A snapshot of the live Mapbox token presence (never the value). Read by the
+    /// config-page Tools tab status endpoint.
+    pub fn mapbox_token_set(&self) -> bool {
+        self.inner
+            .read()
+            .unwrap()
+            .mapbox_token
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Apply a directions-tool config change (the Mapbox token), rebuild the LLM so the
+    /// `directions_lookup` tool is advertised/withdrawn to match, and persist
+    /// (best-effort, 0600). An empty token is treated as a clear. Like
+    /// [`Self::apply_spotify`], the rebuild is best-effort: on failure the token is
+    /// still stored, so it activates on the next successful rebuild or restart. Returns
+    /// whether a token is now set.
+    pub fn apply_directions(&self, update: &DirectionsUpdate) -> bool {
+        let current = self.inner.read().unwrap().clone();
+        let target_token = match &update.mapbox_token {
+            None => current.mapbox_token.clone(),
+            Some(t) => t.clone().filter(|s| !s.is_empty()),
+        };
+
+        // Rebuild the backend so the tool set reflects the new token. Build before
+        // taking the write lock; on failure, fall through and still store the token.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            target_token.as_deref(),
+            factory.directions_imperial,
+        );
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("directions: applied token but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.mapbox_token = target_token.clone();
+        let set = target_token.as_deref().is_some_and(|s| !s.is_empty());
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        set
+    }
 }
 
 #[cfg(test)]
@@ -1086,6 +1241,10 @@ mod tests {
             anthropic_token: None,
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
+            calendar: None,
+            directions: None,
+            directions_provider: String::new(),
+            directions_imperial: false,
         }
     }
 
@@ -1117,6 +1276,8 @@ mod tests {
                 llm_model: model,
                 anthropic_api_key,
                 openai_api_key,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -1203,6 +1364,8 @@ mod tests {
                 llm_model: model,
                 anthropic_api_key: None,
                 openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -1350,6 +1513,8 @@ mod tests {
                 llm_model: model,
                 anthropic_api_key: None,
                 openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -1486,6 +1651,8 @@ mod tests {
                 llm_model: model,
                 anthropic_api_key: None,
                 openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -1552,6 +1719,8 @@ mod tests {
                 llm_model: model,
                 anthropic_api_key: None,
                 openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
                 anthropic_auth: AnthropicAuth::ApiKey,
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
@@ -1589,6 +1758,137 @@ mod tests {
             ..Default::default()
         });
         assert!(!s.spotify().configured(), "secret cleared explicitly");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_directions_sets_mapbox_token_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "ambient_directions_test_{}_{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // A factory whose directions provider is mapbox (empty label ⇒ mapbox).
+        let factory = factory_with_key(None);
+        let (llm, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+                AnthropicAuth::ApiKey,
+            )
+            .unwrap();
+        let s = SharedSettings::new_persistent(
+            factory,
+            RuntimeSettings {
+                llm,
+                engine: LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
+                llm_backend: label,
+                llm_model: model,
+                anthropic_api_key: None,
+                openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
+                anthropic_auth: AnthropicAuth::ApiKey,
+                tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
+                household: Household::default(),
+                spotify: SpotifyConfig::default(),
+            },
+            Some(path.clone()),
+        );
+
+        assert!(!s.view().mapbox_token_set);
+        assert!(!s.mapbox_token_set());
+        let set = s.apply_directions(&DirectionsUpdate {
+            mapbox_token: Some(Some("pk.test-token".into())),
+        });
+        assert!(set);
+        assert!(s.view().mapbox_token_set);
+
+        // Persisted so a restart keeps it; a blank re-save leaves it intact.
+        let p = load_persisted(&path).expect("settings file written");
+        assert_eq!(p.mapbox_token.as_deref(), Some("pk.test-token"));
+        s.apply_directions(&DirectionsUpdate { mapbox_token: None });
+        assert!(s.mapbox_token_set(), "blank re-save keeps the token");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_anthropic_oauth_token_overrides_provider_and_persists() {
+        use crate::llm::anthropic_auth::AnthropicTokenProvider;
+        let path = std::env::temp_dir().join(format!(
+            "ambient_oauth_test_{}_{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // Keep an Arc to the provider so we can assert the override was set (the factory
+        // clone stored in SharedSettings shares the same instance).
+        let provider = Arc::new(AnthropicTokenProvider::new(None));
+        let mut factory = factory_with_key(None);
+        factory.anthropic_token = Some(provider.clone());
+        let (llm, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+                AnthropicAuth::ApiKey,
+            )
+            .unwrap();
+        let s = SharedSettings::new_persistent(
+            factory,
+            RuntimeSettings {
+                llm,
+                engine: LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
+                llm_backend: label,
+                llm_model: model,
+                anthropic_api_key: None,
+                openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
+                anthropic_auth: AnthropicAuth::ApiKey,
+                tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
+                household: Household::default(),
+                spotify: SpotifyConfig::default(),
+            },
+            Some(path.clone()),
+        );
+
+        assert!(!s.view().anthropic_oauth_token_set);
+        assert!(!provider.has_override());
+        let view = s
+            .apply(&SettingsUpdate {
+                anthropic_oauth_token: Some(Some("oauth-xyz".into())),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(view.anthropic_oauth_token_set);
+        assert!(provider.has_override(), "the shared provider got the override");
+
+        // Persisted (plaintext, 0600) so a restart re-applies it; never leaked in view.
+        let p = load_persisted(&path).expect("settings file written");
+        assert_eq!(p.anthropic_oauth_token.as_deref(), Some("oauth-xyz"));
         let _ = std::fs::remove_file(&path);
     }
 }

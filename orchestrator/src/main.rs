@@ -8,10 +8,13 @@
 //! downstream Whisper (STT) → a pluggable LLM + persistent SQLite memory → Piper
 //! (TTS), and streaming the synthesized reply back to the device.
 //!
-//! Configuration is environment-driven (see `config.rs`); with the defaults it
-//! advertises `_wyoming._tcp` on port 10700 and talks to a local Whisper (10300),
-//! Piper (10200), and Ollama (11434).
+//! Configuration is loaded from a per-instance JSON file (`ambient.json` in the
+//! working directory by default, overridable with `--config <path>`; see
+//! `config.rs`). Only provider API keys/tokens remain environment variables. With
+//! the defaults it advertises `_wyoming._tcp` on port 10700 and talks to a local
+//! Whisper (10300), Piper (10200), and Ollama (11434).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -47,7 +50,8 @@ fn main() -> Result<()> {
 async fn run() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let mut config = Config::from_env().context("loading configuration")?;
+    let cli = parse_cli().context("parsing command-line arguments")?;
+    let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     log::info!(
         "starting orchestrator: name={:?} instance_id={} bind={} stt={} tts={} llm={} db={}",
         config.service_name,
@@ -109,7 +113,8 @@ async fn run() -> Result<()> {
         if v.web_search && v.engine != ambient_orchestrator::settings::LlmEngine::Rig {
             log::warn!(
                 "web_search is on but engine is not rig; the web-search tool only runs on \
-                 the rig engine. Set AMBIENT_LLM_ENGINE=rig (or switch it on the config page)."
+                 the rig engine. Set llm.engine=\"rig\" in the config file (or switch it on \
+                 the config page)."
             );
         }
     }
@@ -121,10 +126,11 @@ async fn run() -> Result<()> {
         config.turn_timeout,
     )
     .with_chatlog(chatlog.clone())
-    .with_promptlog(promptlog.clone());
+    .with_promptlog(promptlog.clone())
+    .with_audio_dump(config.audio_dump_dir.clone());
     // Home location + household roster are grounded from the runtime settings
-    // snapshot each turn (seeded from AMBIENT_HOME_LOCATION at boot, then editable
-    // from the config dashboard's Household tab), not fixed onto the pipeline here.
+    // snapshot each turn (seeded from the config file's home_location at boot, then
+    // editable from the config dashboard's Household tab), not fixed onto the pipeline.
 
     // Read-only handle onto the GraphRAG store for the debug GUI (`/helix`); stays
     // `None` on the SQLite backend or when the graph backend fails to initialize.
@@ -169,7 +175,7 @@ async fn run() -> Result<()> {
     // change the LLM backend/model/voice live from a browser. Best-effort: a bind
     // failure disables the page but never stops the orchestrator.
     // The Music tab's control hub (process supervisor + snapserver/mpv control),
-    // shared into the config page. `None` when AMBIENT_MUSIC is off.
+    // shared into the config page. `None` when music is disabled in the config file.
     let music_hub = config.build_hub();
 
     if let Some(config_addr) = config.config_addr {
@@ -222,9 +228,9 @@ async fn run() -> Result<()> {
     let _mdns = MdnsAdvertiser::advertise(&config.service_name, &config.instance_id, local.port())
         .context("advertising Wyoming service over mDNS")?;
 
-    // House-wide music routing (Snapcast) control plane. Dormant unless
-    // AMBIENT_MUSIC=on; when on, the ducker lowers the music group's volume while
-    // the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
+    // House-wide music routing (Snapcast) control plane. Dormant unless music is
+    // enabled in the config file; when on, the ducker lowers the music group's volume
+    // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
     let ducker = config.build_ducker();
     if config.music.enabled {
         log::info!(
@@ -271,6 +277,36 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Parsed command-line arguments. The only flag is `--config <path>` (or
+/// `--config=<path>`), which points at the per-instance JSON config file and
+/// overrides the convention `ambient.json`. Reading argv is not an env-var read, so
+/// this is compatible with the JSON-only configuration model.
+struct CliArgs {
+    config: Option<PathBuf>,
+}
+
+/// Hand-rolled argv parser (no `clap` dependency for a single flag).
+fn parse_cli() -> Result<CliArgs> {
+    let mut config = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(val) = arg.strip_prefix("--config=") {
+            config = Some(PathBuf::from(val));
+        } else if arg == "--config" {
+            let val = args
+                .next()
+                .context("--config requires a path argument (e.g. --config ./ambient.json)")?;
+            config = Some(PathBuf::from(val));
+        } else if arg == "--help" || arg == "-h" {
+            println!("Usage: ambient-orchestrator [--config <path>]");
+            std::process::exit(0);
+        } else {
+            anyhow::bail!("unknown argument `{arg}` (supported: --config <path>)");
+        }
+    }
+    Ok(CliArgs { config })
+}
+
 /// Startup model check for the Ollama backend: verify the configured model is
 /// installed; if not, fall back to an installed one (with a loud warning) so a
 /// misconfigured/absent model fails visibly at boot instead of as a silent
@@ -289,7 +325,8 @@ async fn ensure_ollama_model(config: &mut Config) {
             ModelCheck::FallBack(fallback) => {
                 log::warn!(
                     "ollama model '{model}' is not installed at {url}; falling back to '{fallback}'. \
-                     Installed: {models:?}. Set AMBIENT_OLLAMA_MODEL or run `ollama pull {model}`."
+                     Installed: {models:?}. Set llm.ollama.model in the config file or run \
+                     `ollama pull {model}`."
                 );
                 config.llm = LlmChoice::Ollama {
                     url,
@@ -328,7 +365,7 @@ async fn build_graphrag_recall(
 
     let g = &config.graphrag;
     let openai_key = std::env::var("OPENAI_API_KEY")
-        .context("AMBIENT_MEMORY_BACKEND=helix requires OPENAI_API_KEY for embeddings")?;
+        .context("memory_backend=\"helix\" requires OPENAI_API_KEY for embeddings")?;
     let embedder: Arc<dyn Embedder> = Arc::new(OpenAiEmbedder::new(
         g.openai_base_url.clone(),
         openai_key,

@@ -12,7 +12,7 @@
 //! * drive the web-URL player over **mpv's JSON IPC** (a Unix socket) to
 //!   play/stop/volume a URL.
 //!
-//! Everything here is **best-effort and inert unless `AMBIENT_MUSIC` is on**: a
+//! Everything here is **best-effort and inert unless music is enabled**: a
 //! missing/unreachable snapserver or mpv never breaks a voice turn — the caller
 //! logs and moves on. See `crate::config::MusicConfig` for the env wiring and
 //! `crate::server` for where ducking hooks the turn lifecycle
@@ -45,7 +45,7 @@ pub enum GroupSelector {
 }
 
 impl GroupSelector {
-    /// Parse the `AMBIENT_MUSIC_GROUP` / `AMBIENT_MUSIC_STREAM` pair. A non-empty
+    /// Parse the `music.group` / `music.stream` pair. A non-empty
     /// stream id wins (most specific); then a group id; else `Auto`.
     pub fn from_parts(group_id: Option<&str>, stream_id: Option<&str>) -> Self {
         if let Some(s) = stream_id.map(str::trim).filter(|s| !s.is_empty()) {

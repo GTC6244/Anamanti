@@ -14,6 +14,7 @@
 //! so production dials TCP while tests wire in-memory mock servers — the turn
 //! logic is identical either way.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,6 +116,9 @@ pub struct Pipeline {
     /// preserves the shared-household behavior — every turn attributes to
     /// [`crate::speaker::HOUSEHOLD_SPEAKER`].
     speaker: Option<Arc<SpeakerService>>,
+    /// Debug-only per-turn audio capture directory (AEC corpus). `None` disables
+    /// capture entirely; set from the config file's `audio_dump_dir`.
+    audio_dump_dir: Option<PathBuf>,
     system_prompt: String,
     turn_timeout: Duration,
 }
@@ -137,9 +141,17 @@ impl Pipeline {
             chatlog: None,
             promptlog: None,
             speaker: None,
+            audio_dump_dir: None,
             system_prompt: system_prompt.into(),
             turn_timeout,
         }
+    }
+
+    /// Set the debug-only per-turn audio capture directory (AEC corpus). `None`
+    /// leaves capture disabled. Sourced from the config file's `audio_dump_dir`.
+    pub fn with_audio_dump(mut self, dir: Option<PathBuf>) -> Self {
+        self.audio_dump_dir = dir;
+        self
     }
 
     /// Swap the retrieval backend used to build prompt context (e.g. the HelixDB
@@ -239,9 +251,9 @@ impl Pipeline {
         // swap never changes the backend/voice mid-reply.
         let runtime = self.settings.snapshot();
 
-        // Debug-only AEC corpus capture (no-op unless AMBIENT_AUDIO_DUMP_DIR is set):
+        // Debug-only AEC corpus capture (no-op unless `audio_dump_dir` is configured):
         // records this turn's device mic (near-end) and Piper TTS (far-end reference).
-        let dump = TurnAudioDump::for_turn();
+        let dump = TurnAudioDump::for_turn(self.audio_dump_dir.as_deref());
 
         // 2. Open the STT stream and pump device PCM into it until the transcript.
         let stt_conn = connector.connect_stt().await?;

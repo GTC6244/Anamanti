@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Ambient web-URL player: an idle mpv whose PCM feeds the snap-web FIFO and
      which the orchestrator drives over the JSON IPC socket
-     (AMBIENT_MUSIC_WEB_IPC=/tmp/ambient-mpv.sock) to loadfile/stop/volume URLs.
+     (music.web_ipc=/tmp/ambient-mpv.sock) to loadfile/stop/volume URLs.
      VALIDATE at P3: mpv's pcm ao must emit raw s16le at the snapserver-declared
      48000:16:2 (no WAV header). Adjust flags if snapserver reports format errors.
      Install: cp to ~/Library/LaunchAgents/ and launchctl load. -->
