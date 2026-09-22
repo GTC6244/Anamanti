@@ -18,6 +18,7 @@ pub mod audio_dump;
 pub mod calendar;
 pub mod config;
 pub mod control;
+pub mod directions;
 pub mod discovery;
 pub mod drive_consent;
 pub mod llm;

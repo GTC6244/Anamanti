@@ -526,6 +526,13 @@ more tool in `Tools`.
   this tool; it is grounded by a configured home location + units
   (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`), injected into the system
   prompt next to the wall-clock and speaker-identity lines (`location_line`).
+  `calendar_lookup` reads connected web `.ics` calendars (`AMBIENT_CALENDARS`).
+  `directions_lookup` returns real distance, travel time, and **live traffic**
+  between two places (`orchestrator/src/directions/`, `DirectionsProvider` trait;
+  v1 backend **Mapbox** via `MAPBOX_TOKEN` / `AMBIENT_DIRECTIONS_PROVIDER`). The
+  origin defaults to `AMBIENT_HOME_LOCATION`; it is **voice-only** in v1 (spoken ETA
+  + traffic note; an on-screen route/map is a deferred follow-up). Each info tool is
+  advertised only when its config is present.
 - **Device actions (implemented, on-device):** the `set_timer` / `cancel_timer`
   tools emit a `DeviceAction` onto a per-turn `ActionSink` (`LlmTurn.actions`); the
   orchestrator's reply loop drains it (`drain_device_actions`) and relays an
@@ -536,8 +543,8 @@ more tool in `Tools`.
   `PlaybackSink`, and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`.
   Flutter renders a countdown-chip overlay visible during idle + turns. The full
   add-a-capability process is documented in `architecture.md` §8.
-- **Calendar / reminders:** designed, **deferred** — backend (macOS EventKit vs
-  Google vs CalDAV) undecided.
+- **Calendar / reminders:** calendar shipped (read-only web `.ics`); **reminders**
+  designed, **deferred** — backend (macOS EventKit vs Google vs CalDAV) undecided.
 
 > **Runtime provider keys (Phase 6 follow-up):** a cloud API key no longer has to be
 > in the environment at launch. `SettingsUpdate` gains optional `anthropic_api_key` /

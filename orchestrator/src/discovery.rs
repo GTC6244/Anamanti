@@ -94,7 +94,9 @@ impl MdnsAdvertiser {
         daemon
             .register(service)
             .context("registering _wyoming._tcp with mDNS")?;
-        log::info!("advertising `{fullname}` (instance_id=`{instance_id}`) on port {port} via mDNS");
+        log::info!(
+            "advertising `{fullname}` (instance_id=`{instance_id}`) on port {port} via mDNS"
+        );
 
         Ok(Self { daemon, fullname })
     }
@@ -154,9 +156,14 @@ mod tests {
 
     #[test]
     fn advertises_orchestrator_txt_records() {
-        let info =
-            build_service_info("Test Mac", "test-mac", "test-mac.local.", "127.0.0.1", 10700)
-                .expect("build service info");
+        let info = build_service_info(
+            "Test Mac",
+            "test-mac",
+            "test-mac.local.",
+            "127.0.0.1",
+            10700,
+        )
+        .expect("build service info");
         assert_eq!(info.get_property_val_str("role"), Some("orchestrator"));
         assert_eq!(info.get_property_val_str("name"), Some("Test Mac"));
         assert_eq!(info.get_property_val_str("instance_id"), Some("test-mac"));
