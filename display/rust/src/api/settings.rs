@@ -69,6 +69,31 @@ pub struct VoiceInfo {
     pub label: String,
 }
 
+/// The Google Drive photo-slideshow bundle the orchestrator owns, pulled by the
+/// device to drive the idle slideshow. The device mints Drive access tokens
+/// on-device from `refresh_token` using `client_id`/`client_secret`, so the tablet
+/// APK ships with no baked-in Google credentials. When the orchestrator isn't linked
+/// the fields are empty and `linked`/`configured` are false (the device then falls
+/// back to local gradient images).
+#[derive(Debug, Clone)]
+pub struct DriveToken {
+    /// True when a refresh token is present (Drive is fully linked and usable).
+    pub linked: bool,
+    /// True when the OAuth client id + secret are present (access tokens can be
+    /// minted). Mirrors the old build-time `kGoogleDriveConfigured`, now runtime.
+    pub configured: bool,
+    /// "Desktop app" OAuth client id (empty when unset).
+    pub client_id: String,
+    /// "Desktop app" OAuth client secret (empty when unset).
+    pub client_secret: String,
+    /// Long-lived refresh token (empty when not linked).
+    pub refresh_token: String,
+    /// Drive folder ids the slideshow reads images from.
+    pub folder_ids: Vec<String>,
+    /// OAuth scope granted (informational).
+    pub scope: String,
+}
+
 /// One discovered orchestrator, for the settings "Orchestrator" dropdown.
 #[derive(Debug, Clone)]
 pub struct OrchestratorInfo {
@@ -240,6 +265,25 @@ pub fn list_voices(
     block_on(async move {
         let cache = EndpointCache::new();
         control::list_voices(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
+    })
+}
+
+/// Fetch the Google Drive photo bundle (client creds + refresh token + folder ids)
+/// from the orchestrator, for the idle photo slideshow. Called at boot / on the
+/// periodic photo refresh; the device stores the result in app settings and mints
+/// Drive access tokens on-device.
+pub fn get_drive_token(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<DriveToken> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::get_drive_token(
             &cache,
             timeout(discovery_timeout_secs),
             preferred(&orchestrator_key),

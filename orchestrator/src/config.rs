@@ -18,7 +18,12 @@ use crate::llm::{
     anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
     LlmBackend,
 };
-use crate::settings::{load_persisted, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings};
+use crate::settings::{
+    load_persisted, DriveConfig, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
+};
+
+/// Default Google Drive OAuth scope for the photo slideshow (read-only).
+pub const DEFAULT_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 
 /// Where runtime settings are persisted, or `None` to disable persistence
 /// (`AMBIENT_SETTINGS_PATH=off`). Defaults to `ambient_settings.json`.
@@ -567,6 +572,34 @@ impl Config {
         env::var("TAVILY_API_KEY").ok().filter(|s| !s.is_empty())
     }
 
+    /// Initial Google Drive photo-slideshow config seeded from the environment. The
+    /// "Desktop app" OAuth client id/secret come from
+    /// `AMBIENT_GOOGLE_DRIVE_CLIENT_ID` / `_SECRET` (the outside-git production
+    /// install sets these in `~/.zshenv`); optional folder ids from
+    /// `AMBIENT_GOOGLE_DRIVE_FOLDER_IDS` (comma-separated). The refresh token is
+    /// never seeded from env — it's minted by the consent flow. A persisted file
+    /// overlays these at boot (see [`Self::shared_settings`]).
+    pub fn initial_drive(&self) -> DriveConfig {
+        let env_opt = |k: &str| env::var(k).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        DriveConfig {
+            client_id: env_opt("AMBIENT_GOOGLE_DRIVE_CLIENT_ID"),
+            client_secret: env_opt("AMBIENT_GOOGLE_DRIVE_CLIENT_SECRET"),
+            refresh_token: None,
+            folder_ids: env_opt("AMBIENT_GOOGLE_DRIVE_FOLDER_IDS")
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            scope: Some(
+                env_opt("AMBIENT_GOOGLE_DRIVE_SCOPE")
+                    .unwrap_or_else(|| DEFAULT_DRIVE_SCOPE.to_string()),
+            ),
+        }
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
@@ -599,6 +632,9 @@ impl Config {
 
         let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
         let mut voice_rms_threshold = crate::settings::DEFAULT_VOICE_RMS_THRESHOLD;
+        // Google Drive photo config: env seed (client creds/folders), overlaid by
+        // any persisted values below (the refresh token + page-set fields win).
+        let mut drive = self.initial_drive();
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -621,6 +657,25 @@ impl Config {
             tts_voice = p.tts_voice;
             end_silence_ms = p.end_silence_ms;
             voice_rms_threshold = p.voice_rms_threshold;
+            // Overlay persisted Drive fields onto the env seed: a persisted value
+            // wins (refresh token, page-set creds/folders), but keep the env seed
+            // for any field the persisted file leaves empty so setting a client id
+            // in `~/.zshenv` still takes effect after an older file is loaded.
+            if p.drive.client_id.is_some() {
+                drive.client_id = p.drive.client_id;
+            }
+            if p.drive.client_secret.is_some() {
+                drive.client_secret = p.drive.client_secret;
+            }
+            if p.drive.refresh_token.is_some() {
+                drive.refresh_token = p.drive.refresh_token;
+            }
+            if !p.drive.folder_ids.is_empty() {
+                drive.folder_ids = p.drive.folder_ids;
+            }
+            if p.drive.scope.is_some() {
+                drive.scope = p.drive.scope;
+            }
         }
 
         // Build the initial backend with the resolved live keys (env overlaid by any
@@ -655,6 +710,7 @@ impl Config {
                 tts_voice,
                 end_silence_ms,
                 voice_rms_threshold,
+                drive,
             },
             persist_path,
         ))

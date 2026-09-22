@@ -43,6 +43,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::DELETE_SPEAKER
             | types::LIST_MODELS
             | types::LIST_VOICES
+            | types::GET_DRIVE_TOKEN
     )
 }
 
@@ -140,6 +141,29 @@ pub async fn models_response(catalog: &ModelCatalog) -> WyomingEvent {
     WyomingEvent::with_data(types::MODELS, json!({ "ok": true, "models": models }))
 }
 
+/// Build the `ambient-drive-token` response: the Google Drive photo-slideshow
+/// bundle the orchestrator owns (client creds + refresh token + folder ids). The
+/// device pulls this and mints Drive access tokens on-device. The client secret and
+/// refresh token ride the device↔orchestrator LAN hop only (never an off-the-shelf
+/// Wyoming server); an unlinked orchestrator still answers `ok: true` with empty
+/// fields so the device can degrade to local gradients.
+pub fn drive_token_response(settings: &SharedSettings) -> WyomingEvent {
+    let d = settings.drive();
+    WyomingEvent::with_data(
+        types::DRIVE_TOKEN,
+        json!({
+            "ok": true,
+            "linked": d.linked(),
+            "configured": d.configured(),
+            "client_id": d.client_id.unwrap_or_default(),
+            "client_secret": d.client_secret.unwrap_or_default(),
+            "refresh_token": d.refresh_token.unwrap_or_default(),
+            "folder_ids": d.folder_ids,
+            "scope": d.scope.unwrap_or_default(),
+        }),
+    )
+}
+
 /// Build the response event for a control `request`. Never fails: a bad request or
 /// a rejected settings change is reported in the response's `ok`/`message` fields
 /// rather than raised, so a control error never drops the device connection.
@@ -154,6 +178,7 @@ pub fn respond(
         types::NAME_SPEAKER => name_speaker(request, speaker),
         types::MERGE_SPEAKERS => merge_speakers(request, memory, speaker),
         types::DELETE_SPEAKER => delete_speaker(request, speaker),
+        types::GET_DRIVE_TOKEN => drive_token_response(settings),
         types::DESCRIBE_SETTINGS => settings_response(settings, true, "current settings"),
         types::SET_SETTINGS => match settings.apply(&parse_update(&request.data)) {
             Ok(_) => settings_response(settings, true, "settings applied"),
@@ -441,6 +466,7 @@ mod tests {
                 tts_voice: Some("amy".into()),
                 end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: crate::settings::DriveConfig::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();
@@ -450,6 +476,38 @@ mod tests {
         assert_eq!(resp.data["llm_backend"], json!("ollama"));
         assert_eq!(resp.data["llm_model"], json!("llama3.2"));
         assert_eq!(resp.data["tts_voice"], json!("amy"));
+    }
+
+    #[test]
+    fn get_drive_token_is_a_control_request_and_reports_the_bundle() {
+        use crate::settings::DriveUpdate;
+        assert!(is_control_request(types::GET_DRIVE_TOKEN));
+        let s = settings();
+        // Unlinked orchestrator: ok with empty fields so the device degrades cleanly.
+        let mem = MemoryStore::open_in_memory().unwrap();
+        let resp = respond(&WyomingEvent::new(types::GET_DRIVE_TOKEN), &mem, &s, None);
+        assert_eq!(resp.event_type, types::DRIVE_TOKEN);
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(resp.data["linked"], json!(false));
+        assert_eq!(resp.data["configured"], json!(false));
+        assert_eq!(resp.data["refresh_token"], json!(""));
+
+        // Fully linked: the bundle carries the creds + token for the device.
+        s.apply_drive(&DriveUpdate {
+            client_id: Some(Some("cid.apps".into())),
+            client_secret: Some(Some("gocspx-secret".into())),
+            refresh_token: Some(Some("1//refresh".into())),
+            folder_ids: Some(vec!["1AbC".into()]),
+            scope: Some(Some("scope-x".into())),
+        });
+        let resp = respond(&WyomingEvent::new(types::GET_DRIVE_TOKEN), &mem, &s, None);
+        assert_eq!(resp.data["linked"], json!(true));
+        assert_eq!(resp.data["configured"], json!(true));
+        assert_eq!(resp.data["client_id"], json!("cid.apps"));
+        assert_eq!(resp.data["client_secret"], json!("gocspx-secret"));
+        assert_eq!(resp.data["refresh_token"], json!("1//refresh"));
+        assert_eq!(resp.data["folder_ids"][0], json!("1AbC"));
+        assert_eq!(resp.data["scope"], json!("scope-x"));
     }
 
     #[test]

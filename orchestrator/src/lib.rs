@@ -19,6 +19,7 @@ pub mod calendar;
 pub mod config;
 pub mod control;
 pub mod discovery;
+pub mod drive_consent;
 pub mod llm;
 pub mod memory;
 pub mod orchestrator;
