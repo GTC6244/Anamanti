@@ -21,6 +21,7 @@ pub mod control;
 pub mod discovery;
 pub mod llm;
 pub mod memory;
+pub mod music;
 pub mod orchestrator;
 pub mod server;
 pub mod settings;

@@ -1,0 +1,27 @@
+# Snapcast client for the Ambient main speaker (the Linux box).
+# Install on the Linux box:
+#   sudo apt install snapclient        # or your distro's package
+#   sudo cp snapclient.service /etc/systemd/system/ambient-snapclient.service
+#   sudoedit the ExecStart host if mDNS auto-discovery doesn't reach the Mac
+#   sudo systemctl enable --now ambient-snapclient
+#
+# By default snapclient auto-discovers the server via mDNS (_snapcast._tcp). If the
+# Mac is on a different subnet or discovery is unreliable, pass -h <mac-host/ip>.
+[Unit]
+Description=Ambient Snapcast client (main speaker)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+# Auto-discover the server via mDNS:
+ExecStart=/usr/bin/snapclient --hostID ambient-linux-main
+# ...or pin the Mac explicitly (uncomment + set host, comment the line above):
+# ExecStart=/usr/bin/snapclient -h ambient-mac.local --hostID ambient-linux-main
+Restart=on-failure
+RestartSec=3
+# Run as a normal user with audio access (adjust to your box):
+# User=pi
+# SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

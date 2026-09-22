@@ -18,6 +18,7 @@ use crate::llm::{
     anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
     LlmBackend,
 };
+use crate::music::{GroupSelector, MpvControl, MusicDucker};
 use crate::settings::{load_persisted, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings};
 
 /// Where runtime settings are persisted, or `None` to disable persistence
@@ -145,6 +146,8 @@ pub struct Config {
     pub graphrag: GraphRagConfig,
     /// Per-person speaker identification settings (speaker_id_plan.md).
     pub speaker: SpeakerConfig,
+    /// House-wide music routing (Snapcast) control-plane settings.
+    pub music: MusicConfig,
 }
 
 /// Speaker-identification configuration. Off by default (opt-in like `helix`); a
@@ -174,6 +177,41 @@ impl Default for SpeakerConfig {
             new_threshold: 0.40,
             min_speech_ms: 1200,
             embed_dims: 192,
+        }
+    }
+}
+
+/// House-wide music routing (Snapcast) control-plane settings. **Inert unless
+/// `enabled`** (`AMBIENT_MUSIC=on`): the orchestrator only ducks the music group
+/// while it speaks and (later) selects the active stream. It never handles PCM —
+/// see `crate::music` and `plans/snapcast_routing_plan.md`.
+#[derive(Debug, Clone)]
+pub struct MusicConfig {
+    /// Master switch (`AMBIENT_MUSIC`). Off ⇒ the whole feature is dormant.
+    pub enabled: bool,
+    /// snapserver JSON-RPC control endpoint (`AMBIENT_MUSIC_SNAPSERVER`).
+    pub snapserver_addr: SocketAddr,
+    /// Duck the music group's volume while the assistant speaks
+    /// (`AMBIENT_MUSIC_DUCK_ON_SPEECH`, default on).
+    pub duck_on_speech: bool,
+    /// Volume percent to duck to during speech (`AMBIENT_MUSIC_DUCK_PERCENT`).
+    pub duck_percent: u8,
+    /// Which group to duck: `auto`, a group id (`AMBIENT_MUSIC_GROUP`), or the
+    /// group playing a stream id (`AMBIENT_MUSIC_STREAM`, most specific).
+    pub group: GroupSelector,
+    /// mpv JSON IPC socket for the web-URL player (`AMBIENT_MUSIC_WEB_IPC`).
+    pub mpv_ipc: Option<PathBuf>,
+}
+
+impl Default for MusicConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            snapserver_addr: "127.0.0.1:1705".parse().unwrap(),
+            duck_on_speech: true,
+            duck_percent: 30,
+            group: GroupSelector::Auto,
+            mpv_ipc: None,
         }
     }
 }
@@ -250,6 +288,7 @@ impl Default for Config {
             helix_path: PathBuf::from("ambient_helix"),
             graphrag: GraphRagConfig::default(),
             speaker: SpeakerConfig::default(),
+            music: MusicConfig::default(),
         }
     }
 }
@@ -401,6 +440,40 @@ impl Config {
                 .unwrap_or(sd.embed_dims),
         };
 
+        let md = MusicConfig::default();
+        let music = MusicConfig {
+            enabled: matches!(
+                env::var("AMBIENT_MUSIC")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "on" | "1" | "true" | "yes"
+            ),
+            snapserver_addr: env_addr("AMBIENT_MUSIC_SNAPSERVER", md.snapserver_addr)?,
+            duck_on_speech: !matches!(
+                env::var("AMBIENT_MUSIC_DUCK_ON_SPEECH")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+            duck_percent: env::var("AMBIENT_MUSIC_DUCK_PERCENT")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .map(|p| p.min(100))
+                .unwrap_or(md.duck_percent),
+            group: GroupSelector::from_parts(
+                env::var("AMBIENT_MUSIC_GROUP").ok().as_deref(),
+                env::var("AMBIENT_MUSIC_STREAM").ok().as_deref(),
+            ),
+            mpv_ipc: env::var("AMBIENT_MUSIC_WEB_IPC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        };
+
         // The config page: `off`/`none`/empty disables it, otherwise a host:port.
         let config_addr = match env::var("AMBIENT_CONFIG_ADDR") {
             Ok(v) if matches!(v.trim().to_lowercase().as_str(), "off" | "none" | "") => None,
@@ -463,7 +536,32 @@ impl Config {
                 .unwrap_or(d.helix_path),
             graphrag,
             speaker,
+            music,
         })
+    }
+
+    /// Build the music ducker when music routing **and** duck-on-speech are both
+    /// enabled; otherwise `None` (the whole path stays dormant). Best-effort at
+    /// runtime — a missing/unreachable snapserver never breaks a turn.
+    pub fn build_ducker(&self) -> Option<Arc<MusicDucker>> {
+        if self.music.enabled && self.music.duck_on_speech {
+            Some(Arc::new(MusicDucker::new(
+                self.music.snapserver_addr,
+                self.music.group.clone(),
+                self.music.duck_percent,
+            )))
+        } else {
+            None
+        }
+    }
+
+    /// Build the mpv IPC control for the web-URL player, when music is enabled and
+    /// an IPC socket is configured (`AMBIENT_MUSIC_WEB_IPC`).
+    pub fn mpv_control(&self) -> Option<MpvControl> {
+        if !self.music.enabled {
+            return None;
+        }
+        self.music.mpv_ipc.as_ref().map(MpvControl::new)
     }
 
     /// Instantiate the selected LLM backend behind the trait object the pipeline

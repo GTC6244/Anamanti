@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ambient web-URL player: an idle mpv whose PCM feeds the snap-web FIFO and
+     which the orchestrator drives over the JSON IPC socket
+     (AMBIENT_MUSIC_WEB_IPC=/tmp/ambient-mpv.sock) to loadfile/stop/volume URLs.
+     VALIDATE at P3: mpv's pcm ao must emit raw s16le at the snapserver-declared
+     48000:16:2 (no WAV header). Adjust flags if snapserver reports format errors.
+     Install: cp to ~/Library/LaunchAgents/ and launchctl load. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ambient.mpv-web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/mpv</string>
+    <string>--idle=yes</string>
+    <string>--no-video</string>
+    <string>--input-ipc-server=/tmp/ambient-mpv.sock</string>
+    <string>--ao=pcm</string>
+    <string>--ao-pcm-waveheader=no</string>
+    <string>--ao-pcm-file=/opt/homebrew/var/run/ambient/snap-web</string>
+    <string>--audio-samplerate=48000</string>
+    <string>--audio-channels=stereo</string>
+    <string>--audio-format=s16</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/opt/homebrew/var/log/ambient-mpv-web.log</string>
+  <key>StandardErrorPath</key>
+  <string>/opt/homebrew/var/log/ambient-mpv-web.log</string>
+</dict>
+</plist>

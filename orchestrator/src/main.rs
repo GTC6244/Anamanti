@@ -214,10 +214,27 @@ async fn run() -> Result<()> {
     let _mdns = MdnsAdvertiser::advertise(&config.service_name, &config.instance_id, local.port())
         .context("advertising Wyoming service over mDNS")?;
 
+    // House-wide music routing (Snapcast) control plane. Dormant unless
+    // AMBIENT_MUSIC=on; when on, the ducker lowers the music group's volume while
+    // the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
+    let ducker = config.build_ducker();
+    if config.music.enabled {
+        log::info!(
+            "music routing on: snapserver={} duck_on_speech={} duck_to={}% group={:?}",
+            config.music.snapserver_addr,
+            config.music.duck_on_speech,
+            config.music.duck_percent,
+            config.music.group,
+        );
+        if let Some(p) = &config.music.mpv_ipc {
+            log::info!("music web-URL player mpv IPC at {}", p.display());
+        }
+    }
+
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone()) => {
+        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker) => {
             res.context("device-facing server stopped")?;
         }
         _ = tokio::signal::ctrl_c() => {

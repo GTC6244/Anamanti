@@ -532,3 +532,11 @@ Build/verify each layer independently: `cargo test` for `orchestrator/` and `dis
 - Delivery phases & open questions → [`Plan.MD`](./Plan.MD)
 - Contributor / AI-agent build guidance → [`agents.md`](../agents.md)
 - Product overview & setup → [`README.md`](../README.md)
+- **Music (planned, pre-implementation):** house-wide music is a **Mac-hosted,
+  Snapcast-routed** capability that is deliberately **separate from the Wyoming/TTS
+  audio path and the device's cpal/oboe path** — music PCM never enters
+  `ambient_orchestrator`. Sources (librespot + web-URL player) write raw PCM to
+  snapfifos on the Mac; snapserver (on the Mac) fans out to snapclient speakers;
+  the orchestrator only controls (Web API / mpv IPC / snapserver JSON-RPC ducking).
+  Design → [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (transport) +
+  [`MusicPlan.md`](./MusicPlan.md) (Spotify source + control plane).
