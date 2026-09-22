@@ -237,17 +237,35 @@ async fn run() -> Result<()> {
         }
     }
 
-    log::info!("orchestrator ready on {local}; waiting for the device");
-
-    tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker) => {
-            res.context("device-facing server stopped")?;
-        }
-        _ = tokio::signal::ctrl_c() => {
-            log::info!("shutdown signal received; stopping");
+    // Auto-start the managed music processes (snapserver/librespot/mpv) as part of
+    // the orchestrator lifecycle, when enabled. The Music tab's buttons still work.
+    if let Some(hub) = &music_hub {
+        if config.music.autostart {
+            log::info!("music: auto-starting managed processes (snapserver, librespot, mpv)");
+            hub.start_all().await;
         }
     }
 
+    log::info!("orchestrator ready on {local}; waiting for the device");
+
+    let outcome = tokio::select! {
+        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker) => {
+            res.context("device-facing server stopped")
+        }
+        _ = tokio::signal::ctrl_c() => {
+            log::info!("shutdown signal received; stopping");
+            Ok(())
+        }
+    };
+
+    // On shutdown, stop the processes this orchestrator started (externally-started
+    // ones are untracked and left alone).
+    if let Some(hub) = &music_hub {
+        log::info!("music: stopping managed processes");
+        hub.stop_all().await;
+    }
+
+    outcome?;
     Ok(())
 }
 

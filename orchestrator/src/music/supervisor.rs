@@ -161,6 +161,17 @@ impl MusicSupervisor {
         Ok(())
     }
 
+    /// Stop every process this supervisor started (leaves externally-started
+    /// processes alone, since only what we spawned is tracked).
+    pub async fn stop_all(&self) {
+        let procs: Vec<ManagedProc> = { self.running.lock().await.keys().copied().collect() };
+        for proc in procs {
+            if let Err(e) = self.stop(proc).await {
+                log::warn!("music: failed to stop {}: {e:#}", proc.key());
+            }
+        }
+    }
+
     /// Current status of every managed process (pruning any that have exited).
     pub async fn status(&self) -> Vec<ProcStatus> {
         let mut running = self.running.lock().await;
@@ -201,6 +212,35 @@ pub struct MusicHub {
     pub snapcast: SnapcastClient,
     pub snapserver_addr: String,
     pub mpv: Option<MpvControl>,
+}
+
+impl MusicHub {
+    /// Start all managed processes (used by boot autostart and the "Start all" UI
+    /// button). Skips snapserver if one is already reachable — e.g. a
+    /// launchd-managed server — so we neither spawn a duplicate (port clash) nor
+    /// later stop a server we did not start. librespot + mpv are then started
+    /// best-effort. Snapserver goes first so the fifo readers exist before the
+    /// producers block on opening them.
+    pub async fn start_all(&self) {
+        if self.snapcast.get_status().await.is_ok() {
+            log::info!(
+                "music: snapserver already reachable at {}, not starting another",
+                self.snapserver_addr
+            );
+        } else if let Err(e) = self.supervisor.start(ManagedProc::Snapserver).await {
+            log::warn!("music: could not start snapserver: {e:#}");
+        }
+        for proc in [ManagedProc::Librespot, ManagedProc::MpvWeb] {
+            if let Err(e) = self.supervisor.start(proc).await {
+                log::warn!("music: could not start {}: {e:#}", proc.key());
+            }
+        }
+    }
+
+    /// Stop every process this orchestrator started (UI- or autostart-launched).
+    pub async fn stop_all(&self) {
+        self.supervisor.stop_all().await;
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +289,34 @@ mod tests {
         let st = sup.status().await;
         assert!(!st[0].running, "stopped after stop");
         let _ = std::fs::remove_file(&log);
+    }
+
+    #[tokio::test]
+    async fn stop_all_stops_everything_started() {
+        let dir = std::env::temp_dir();
+        let mut specs = HashMap::new();
+        specs.insert(
+            ManagedProc::Snapserver,
+            ProcSpec {
+                program: PathBuf::from("sleep"),
+                args: vec!["30".into()],
+                log_path: dir.join("ambient-sa-1.log"),
+            },
+        );
+        specs.insert(
+            ManagedProc::Librespot,
+            ProcSpec {
+                program: PathBuf::from("sleep"),
+                args: vec!["30".into()],
+                log_path: dir.join("ambient-sa-2.log"),
+            },
+        );
+        let sup = MusicSupervisor::new(specs);
+        sup.start(ManagedProc::Snapserver).await.unwrap();
+        sup.start(ManagedProc::Librespot).await.unwrap();
+        assert_eq!(sup.status().await.iter().filter(|p| p.running).count(), 2);
+        sup.stop_all().await;
+        assert_eq!(sup.status().await.iter().filter(|p| p.running).count(), 0);
     }
 
     #[tokio::test]

@@ -596,7 +596,12 @@ const MUSIC_BODY: &str = r#"<p class="sub">Start/stop the local music processes 
 <div id="disabled" class="muted" style="display:none"></div>
 <div id="panel" style="display:none">
   <h2>Processes</h2>
-  <div class="toolbar"><button onclick="load()">Refresh</button><span id="meta" class="muted"></span></div>
+  <div class="toolbar">
+    <button onclick="startall()">Start all</button>
+    <button onclick="stopall()">Stop all</button>
+    <button onclick="load()">Refresh</button>
+    <span id="meta" class="muted"></span>
+  </div>
   <table><thead><tr><th>Process</th><th>Status</th><th>PID</th><th></th><th>Log</th></tr></thead><tbody id="procs"></tbody></table>
 
   <h2>Web-URL player</h2>
@@ -619,6 +624,14 @@ async function proc(key, action){
   }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
   setTimeout(load, 500);
 }
+async function postAction(url){
+  try{ const r = await fetch(url, {method:'POST'}); const j = await r.json();
+    if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
+  }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
+  setTimeout(load, 700);
+}
+async function startall(){ await postAction('/music/startall'); }
+async function stopall(){ await postAction('/music/stopall'); }
 async function play(){
   const url = document.getElementById('url').value.trim(); const msg = document.getElementById('webmsg');
   if(!url){ msg.textContent = 'Enter a URL.'; return; }
@@ -834,6 +847,14 @@ async fn handle(
     }
     if method == "POST" && path == "/music/stopweb" {
         let payload = music_stopweb_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/startall" {
+        let payload = music_startall_json(music.as_ref()).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/music/stopall" {
+        let payload = music_stopall_json(music.as_ref()).await.into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
 
@@ -1104,6 +1125,29 @@ async fn music_stopweb_json(music: Option<&MusicHub>) -> String {
     match mpv.stop().await {
         Ok(()) => json!({ "ok": true }).to_string(),
         Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// `POST /music/startall` — start all managed processes (skips a snapserver that is
+/// already running).
+async fn music_startall_json(music: Option<&MusicHub>) -> String {
+    match music {
+        Some(hub) => {
+            hub.start_all().await;
+            json!({ "ok": true }).to_string()
+        }
+        None => json!({ "ok": false, "message": "music routing is disabled" }).to_string(),
+    }
+}
+
+/// `POST /music/stopall` — stop every process this orchestrator started.
+async fn music_stopall_json(music: Option<&MusicHub>) -> String {
+    match music {
+        Some(hub) => {
+            hub.stop_all().await;
+            json!({ "ok": true }).to_string()
+        }
+        None => json!({ "ok": false, "message": "music routing is disabled" }).to_string(),
     }
 }
 

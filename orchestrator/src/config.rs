@@ -217,6 +217,10 @@ pub struct MusicConfig {
     /// librespot Spotify Connect device name (`AMBIENT_SPOTIFY_DEVICE_NAME`,
     /// default `Ambient`; the shared instance MusicPlan.md's tool targets).
     pub spotify_device_name: String,
+    /// Auto-start the managed processes (snapserver/librespot/mpv) when the
+    /// orchestrator boots, and stop them on shutdown (`AMBIENT_MUSIC_AUTOSTART`,
+    /// default on when music is enabled). The Music tab's manual buttons still work.
+    pub autostart: bool,
 }
 
 impl Default for MusicConfig {
@@ -233,6 +237,7 @@ impl Default for MusicConfig {
             log_dir: PathBuf::from("/opt/homebrew/var/log"),
             snapserver_conf: PathBuf::from("/opt/homebrew/etc/snapserver.conf"),
             spotify_device_name: "Ambient".to_string(),
+            autostart: true,
         }
     }
 }
@@ -511,6 +516,14 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| md.spotify_device_name.clone()),
+            autostart: !matches!(
+                env::var("AMBIENT_MUSIC_AUTOSTART")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "0" | "false" | "off" | "no"
+            ),
         };
 
         // The config page: `off`/`none`/empty disables it, otherwise a host:port.
