@@ -421,12 +421,15 @@ fn nav_html(active: &str) -> String {
 }
 
 /// Wrap a page `body` in the shared HTML shell (head, style, nav, shared script).
+/// The shared helper script (`esc`/`fmtTime`/`getJSON`) is emitted **before** the
+/// body so a body's inline `load()` (which runs as it is parsed) can rely on those
+/// helpers already being defined.
 fn page(active: &str, title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>Ambient — {title}</title><style>{SHELL_STYLE}</style></head>\
-         <body>{nav}<h1>{title}</h1>{body}<script>{SHELL_SCRIPT}</script></body></html>",
+         <body>{nav}<h1>{title}</h1><script>{SHELL_SCRIPT}</script>{body}</body></html>",
         nav = nav_html(active),
     )
 }
