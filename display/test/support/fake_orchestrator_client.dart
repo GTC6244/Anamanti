@@ -12,8 +12,19 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<ModelOption>? models,
     List<VoiceOption>? voices,
     List<OrchestratorOption>? orchestrators,
+    DriveTokenView? driveToken,
     this.throwOnFetch = false,
-  })  : _orchestrators = orchestrators ??
+  })  : _driveToken = driveToken ??
+            const DriveTokenView(
+              linked: false,
+              configured: false,
+              clientId: '',
+              clientSecret: '',
+              refreshToken: '',
+              folderIds: <String>[],
+              scope: '',
+            ),
+        _orchestrators = orchestrators ??
             const <OrchestratorOption>[
               OrchestratorOption(
                   key: 'mac-mini', name: 'Mac Mini', host: '192.168.1.10', port: 10700),
@@ -45,6 +56,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<ModelOption> _models;
   final List<VoiceOption> _voices;
   final List<OrchestratorOption> _orchestrators;
+  final DriveTokenView _driveToken;
   final bool throwOnFetch;
 
   // Call records for assertions.
@@ -113,6 +125,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
   Future<List<VoiceOption>> listVoices() async {
     if (throwOnFetch) throw Exception('offline');
     return List.of(_voices);
+  }
+
+  @override
+  Future<DriveTokenView> fetchDriveToken() async {
+    if (throwOnFetch) throw Exception('offline');
+    return _driveToken;
   }
 
   @override

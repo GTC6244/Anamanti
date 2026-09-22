@@ -81,6 +81,64 @@ fn default_anthropic_auth() -> String {
     AnthropicAuth::ApiKey.as_str().to_string()
 }
 
+/// Google Drive photo-slideshow credentials + linkage, owned by the orchestrator.
+///
+/// The interim idle-screen photo source is Google Drive (`drive.readonly`). The
+/// orchestrator is the single source of truth: it runs the one-time OAuth consent
+/// (see [`crate::drive_consent`], driven from the config page) and holds the
+/// "Desktop app" OAuth **client id/secret** plus the resulting **refresh token**
+/// and the chosen **folder ids**. The device pulls this whole bundle over Wyoming
+/// (`ambient-get-drive-token`) and mints Drive access tokens on-device — so the
+/// tablet APK ships with no baked-in credentials.
+///
+/// Plaintext secrets (0600 settings file); keep on a trusted machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DriveConfig {
+    /// "Desktop app" OAuth client id (loopback consent). `None`/empty = unset.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// "Desktop app" OAuth client secret. `None`/empty = unset.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// Long-lived refresh token minted by the consent flow. `None` = not linked.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// Drive folder ids the slideshow reads images from.
+    #[serde(default)]
+    pub folder_ids: Vec<String>,
+    /// OAuth scope granted (informational; `drive.readonly` by default).
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+impl DriveConfig {
+    fn non_empty(v: &Option<String>) -> bool {
+        v.as_deref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// True when both OAuth client credentials are present — i.e. the device can
+    /// refresh Drive access tokens. Mirrors the old build-time `kGoogleDriveConfigured`.
+    pub fn configured(&self) -> bool {
+        Self::non_empty(&self.client_id) && Self::non_empty(&self.client_secret)
+    }
+
+    /// True when configured *and* a refresh token exists — Drive is fully linked.
+    pub fn linked(&self) -> bool {
+        self.configured() && Self::non_empty(&self.refresh_token)
+    }
+}
+
+/// A requested change to the Drive config. Absent fields are left unchanged; a
+/// `Some(None)` clears a value, `Some(Some(v))` sets it (empty strings clear).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DriveUpdate {
+    pub client_id: Option<Option<String>>,
+    pub client_secret: Option<Option<String>>,
+    pub refresh_token: Option<Option<String>>,
+    pub folder_ids: Option<Vec<String>>,
+    pub scope: Option<Option<String>>,
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -110,6 +168,10 @@ pub struct PersistedSettings {
     /// Speech-vs-noise RMS threshold (VAD). Defaulted for older files.
     #[serde(default = "default_voice_rms_threshold")]
     pub voice_rms_threshold: f64,
+    /// Google Drive photo-slideshow credentials + linkage. Defaulted (empty) for
+    /// older files.
+    #[serde(default)]
+    pub drive: DriveConfig,
 }
 
 /// Load persisted settings, or `None` if the file is absent/unreadable.
@@ -338,6 +400,9 @@ pub struct RuntimeSettings {
     pub end_silence_ms: u64,
     /// RMS (i16 units) above which a chunk counts as speech for the VAD.
     pub voice_rms_threshold: f64,
+    /// Google Drive photo-slideshow credentials + linkage (orchestrator-owned;
+    /// pulled by the device over Wyoming). Orthogonal to the LLM rebuild path.
+    pub drive: DriveConfig,
 }
 
 /// A description of the settings currently in effect, for reporting back to the
@@ -438,6 +503,7 @@ impl SharedSettings {
             tts_voice: s.tts_voice.clone(),
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
+            drive: s.drive.clone(),
         }
     }
 
@@ -475,6 +541,7 @@ impl SharedSettings {
                 tts_voice,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
             },
         )
     }
@@ -643,6 +710,49 @@ impl SharedSettings {
         }
         Ok(view)
     }
+
+    /// A snapshot of the live Google Drive config (client creds + refresh token +
+    /// folder ids). Read by the `ambient-get-drive-token` control handler and the
+    /// consent flow. Cheap clone.
+    pub fn drive(&self) -> DriveConfig {
+        self.inner.read().unwrap().drive.clone()
+    }
+
+    /// Apply a Drive config change and persist it (best-effort, 0600). Drive is
+    /// orthogonal to the LLM backend, so this never rebuilds anything. Empty-string
+    /// sets are treated as clears. Returns the resulting [`DriveConfig`].
+    pub fn apply_drive(&self, update: &DriveUpdate) -> DriveConfig {
+        let mut w = self.inner.write().unwrap();
+        if let Some(v) = &update.client_id {
+            w.drive.client_id = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.client_secret {
+            w.drive.client_secret = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.refresh_token {
+            w.drive.refresh_token = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(ids) = &update.folder_ids {
+            w.drive.folder_ids = ids
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Some(v) = &update.scope {
+            w.drive.scope = v.clone().filter(|s| !s.is_empty());
+        }
+        let result = w.drive.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -694,6 +804,7 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
             },
         )
     }
@@ -777,6 +888,7 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
             },
             Some(path.clone()),
         );
@@ -921,6 +1033,7 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
             },
             Some(path.clone()),
         );

@@ -332,4 +332,76 @@ void main() {
     // The memory screen's app bar title is shown.
     expect(find.text('Memory'), findsOneWidget);
   });
+
+  testWidgets('syncs Drive from the orchestrator, enabling folder pick + Save',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(
+      driveToken: const DriveTokenView(
+        linked: true,
+        configured: true,
+        clientId: 'cid.apps',
+        clientSecret: 'gocspx-secret',
+        refreshToken: '1//refresh',
+        folderIds: <String>['1AbC', '1XyZ'],
+        scope: 'drive.readonly',
+      ),
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        // Start on the Drive source so the Drive controls render.
+        initial: const AppSettings(photoSource: PhotoSourceKind.drive),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final scrollable = find.byType(Scrollable).first;
+
+    // Before syncing there are no Drive credentials, so "Choose folders" is disabled.
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-drive-pick')),
+      200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-drive-pick')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('settings-drive-pick'))).onPressed,
+      isNull,
+    );
+
+    // Sync pulls the bundle from the (fake) orchestrator.
+    await tester.ensureVisible(find.byKey(const Key('settings-drive-sync')));
+    await tester.tap(find.byKey(const Key('settings-drive-sync')));
+    await tester.pumpAndSettle();
+
+    // Folder field populated from the synced bundle, and folder-pick now enabled.
+    expect(find.text('1AbC, 1XyZ'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('settings-drive-pick')));
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('settings-drive-pick'))).onPressed,
+      isNotNull,
+    );
+
+    // Save persists the synced Drive credentials device-locally (no rebuild needed).
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-save')),
+      -200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-save')));
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(store.value.driveClientId, 'cid.apps');
+    expect(store.value.driveClientSecret, 'gocspx-secret');
+    expect(store.value.driveRefreshToken, '1//refresh');
+    expect(store.value.driveLinked, isTrue);
+    expect(store.value.driveConfigured, isTrue);
+    expect(store.value.driveFolderIds, <String>['1AbC', '1XyZ']);
+  });
 }

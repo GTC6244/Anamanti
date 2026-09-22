@@ -103,9 +103,19 @@ class _AmbientHomeState extends State<AmbientHome> {
     // Unpack the bundled wake-word models to the filesystem before the native
     // engine tries to load them (no-op on later runs / user-dropped models).
     await ensureWakeWordModels();
-    await _refreshGoogleTokens();
-    await _applyPhotoSource();
+    // Start the engine + UI chrome (clock, status, settings gear) FIRST so the
+    // screen is usable immediately. The photo/token refresh below is network-bound
+    // (mDNS + a Wyoming control round trip to the orchestrator) and must never gate
+    // the UI — otherwise a slow/older/unreachable orchestrator would leave the
+    // screen stuck on the loading background with no chrome.
     await _startEngine();
+    // Best-effort, off the critical path: mint Google tokens (incl. the Drive bundle
+    // synced from the orchestrator) and apply the selected photo source. The
+    // slideshow already shows local gradients until this resolves.
+    unawaited(() async {
+      await _refreshGoogleTokens();
+      await _applyPhotoSource();
+    }());
     // Keep a linked Google source fresh: tokens + media/thumbnail URLs expire ~1 h,
     // so re-mint + re-list every 30 min (well inside that window) so re-downloads
     // never fail on an always-on frame.
@@ -149,13 +159,20 @@ class _AmbientHomeState extends State<AmbientHome> {
         client.close();
       }
     }
-    if (kGoogleDriveConfigured &&
+    // Drive is orchestrator-owned: pull the latest client creds + refresh token +
+    // folder ids from the Mac (which runs consent), then mint an access token
+    // on-device. The APK ships no Drive credentials — they arrive over Wyoming.
+    if (_settings.photoSource == PhotoSourceKind.drive) {
+      await _syncDriveFromOrchestrator();
+    }
+    if (_settings.driveConfigured &&
         _settings.driveLinked &&
         _settings.driveRefreshToken.isNotEmpty) {
-      // Drive's refresh must use the Desktop client that issued the token.
+      // Drive's refresh must use the Desktop client that issued the token (synced
+      // from the orchestrator).
       final client = AmbientApiClient(
-        clientId: kGoogleDriveClientId,
-        clientSecret: kGoogleDriveClientSecret,
+        clientId: _settings.driveClientId,
+        clientSecret: _settings.driveClientSecret,
       );
       try {
         _driveAccessToken = (await client.refresh(
@@ -166,6 +183,30 @@ class _AmbientHomeState extends State<AmbientHome> {
       } finally {
         client.close();
       }
+    }
+  }
+
+  /// Pull the Google Drive bundle (client creds + refresh token + folder ids) from
+  /// the orchestrator, which owns consent, and persist it so the slideshow keeps
+  /// working offline afterward. Silently keeps the last-synced values if the Mac is
+  /// unreachable, or if the orchestrator has no Drive credentials configured.
+  Future<void> _syncDriveFromOrchestrator() async {
+    try {
+      final t = await _client.fetchDriveToken();
+      if (!t.configured) return; // orchestrator not set up for Drive; keep our values
+      final next = _settings.copyWith(
+        driveClientId: t.clientId,
+        driveClientSecret: t.clientSecret,
+        driveRefreshToken: t.refreshToken,
+        driveFolderIds: t.folderIds,
+        driveLinked: t.linked,
+      );
+      if (next != _settings) {
+        _settings = next;
+        await _store.save(_settings);
+      }
+    } catch (_) {
+      // Offline / unreachable: keep the persisted bundle.
     }
   }
 
