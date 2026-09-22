@@ -175,8 +175,8 @@ pub struct Config {
     pub spotify: SpotifyConfig,
 }
 
-/// Speaker-identification configuration. Off by default (opt-in like `helix`); a
-/// missing model path degrades gracefully to the shared household.
+/// Speaker-identification configuration. Off by default (`speaker.enabled`); a
+/// missing model path degrades gracefully to the deterministic mock embedder.
 #[derive(Debug, Clone)]
 pub struct SpeakerConfig {
     /// Whether to identify speakers per turn (`speaker.enabled`).
@@ -247,7 +247,7 @@ pub struct MusicConfig {
 impl Default for MusicConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             snapserver_addr: "127.0.0.1:1705".parse().unwrap(),
             duck_on_speech: true,
             duck_percent: 30,
@@ -266,9 +266,10 @@ impl Default for MusicConfig {
 /// Which memory retrieval backend the pipeline uses for prompt context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryBackendChoice {
-    /// SQLite FTS over the explicit/inferred memory store (default).
+    /// SQLite FTS over the explicit/inferred memory store (recall fallback when
+    /// Helix init fails, e.g. no `OPENAI_API_KEY`).
     Sqlite,
-    /// Embedded HelixDB GraphRAG (vector KNN + graph expansion).
+    /// Embedded HelixDB GraphRAG (vector KNN + graph expansion). The default.
     Helix,
 }
 
@@ -341,7 +342,7 @@ impl Default for Config {
             anthropic_auth: AnthropicAuth::ApiKey,
             engine: LlmEngine::Rig,
             web_search: true,
-            search_provider: "duckduckgo".to_string(),
+            search_provider: "tavily".to_string(),
             anthropic_token_cmd: None,
             ollama_url: "http://127.0.0.1:11434".to_string(),
             anthropic_max_tokens: 1024,
@@ -1065,7 +1066,7 @@ impl Config {
     pub fn initial_web_search(&self) -> bool {
         self.web_search
     }
-    /// Initial search provider (`llm.search_provider`, default `duckduckgo`).
+    /// Initial search provider (`llm.search_provider`, default `tavily`).
     pub fn initial_search_provider(&self) -> String {
         self.search_provider.clone()
     }
@@ -1316,10 +1317,10 @@ impl Config {
     }
 
     /// Build the per-person [`SpeakerService`], or `None` when speaker ID is
-    /// disabled. The registry lives in the same SQLite file as memory. Until the
-    /// ONNX embedder lands (Phase E) this uses the deterministic mock embedder so
-    /// the end-to-end per-person plumbing is exercisable — with a loud warning, as
-    /// the mock is not accurate for real voices.
+    /// disabled (`speaker.enabled = false`). The registry lives in the same SQLite
+    /// file as memory. When `speaker.model_path` is set the real ECAPA-TDNN ONNX
+    /// embedder is loaded; otherwise it falls back to the deterministic mock
+    /// embedder (with a loud warning, as the mock is not accurate for real voices).
     pub fn build_speaker_service(&self) -> Result<Option<Arc<crate::speaker::SpeakerService>>> {
         use crate::speaker::{
             MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry, SpeakerService,
@@ -1336,7 +1337,6 @@ impl Config {
             self.speaker.min_speech_ms,
         );
         let embedder: Arc<dyn SpeakerEmbedder> = match &self.speaker.model_path {
-            #[cfg(feature = "speaker")]
             Some(path) => {
                 use crate::speaker::embed::OnnxSpeakerEmbedder;
                 use crate::speaker::features::FbankConfig;
@@ -1358,21 +1358,11 @@ impl Config {
                     }
                 }
             }
-            #[cfg(not(feature = "speaker"))]
-            Some(path) => {
-                log::warn!(
-                    "speaker.model_path is set ({}) but the binary was built without the \
-                     `speaker` feature; using the deterministic mock embedder (dev only). Rebuild \
-                     with --features speaker to use the ONNX model.",
-                    path.display()
-                );
-                Arc::new(MockSpeakerEmbedder::default())
-            }
             None => {
                 log::warn!(
                     "speaker ID enabled with no model path; using the deterministic mock embedder \
                      (dev/testing only — not accurate for real voices). Set speaker.model_path \
-                     and build with --features speaker to use the ONNX model."
+                     to use the ONNX model."
                 );
                 Arc::new(MockSpeakerEmbedder::default())
             }
@@ -1432,7 +1422,7 @@ mod tests {
         assert_eq!(c.ollama_url, d.ollama_url);
         assert_eq!(c.engine, d.engine);
         assert!(c.web_search);
-        assert_eq!(c.search_provider, "duckduckgo");
+        assert_eq!(c.search_provider, "tavily");
         assert_eq!(c.anthropic_auth, AnthropicAuth::ApiKey);
         assert_eq!(c.settings_path, d.settings_path);
         assert!(c.audio_dump_dir.is_none());
@@ -1440,7 +1430,7 @@ mod tests {
         assert_eq!(c.calendar_cache_ttl, d.calendar_cache_ttl);
         assert_eq!(c.drive.scope.as_deref(), Some(DEFAULT_DRIVE_SCOPE));
         assert!(!c.speaker.enabled);
-        assert!(!c.music.enabled);
+        assert!(c.music.enabled);
     }
 
     #[test]

@@ -55,8 +55,10 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   appended to `ambient_chatlog.jsonl` and a background ingester embeds it into the
   graph. GraphRAG needs `OPENAI_API_KEY` (embeddings); if it's absent or init
   fails, recall **falls back to SQLite FTS** (writes are unaffected). Override with
-  `AMBIENT_MEMORY_BACKEND=sqlite` for pure FTS recall. The HelixDB engine and the
-  rig agent framework are **always compiled in** (no longer feature-gated).
+  `memory_backend: "sqlite"` in `ambient.json` for pure FTS recall. The HelixDB
+  engine, the rig agent framework, and the ECAPA-TDNN speaker embedder are **always
+  compiled in** (no longer feature-gated); speaker ID is selected purely at runtime
+  via `speaker.enabled` / `speaker.model_path`.
 - **Idle screen:** photo slideshow from a Google Photos/Drive folder; keeps running
   when disconnected. Google Photos (Ambient) links via **on-device OAuth**
   (device-code/QR); **Google Drive links on the orchestrator** (consent on the Mac,
@@ -172,9 +174,13 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     (helix|sqlite; helix needs OPENAI_API_KEY and falls back to sqlite FTS if absent)
 #   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig),
 #     llm.anthropic_auth (apikey|subscription), llm.anthropic_token_cmd (default `ant`),
-#     llm.web_search, llm.search_provider (duckduckgo|tavily), and the per-provider
+#     llm.web_search, llm.search_provider (duckduckgo|tavily, default tavily — needs
+#     the TAVILY_API_KEY secret; duckduckgo is keyless), and the per-provider
 #     sub-blocks llm.ollama{url,model} / llm.anthropic{model,max_tokens} / llm.openai{…}
-#   graphrag{…}, speaker{…}, music{…} (see ambient.example.json for the full shape)
+#   graphrag{…}, speaker{…}, music{…} (music.enabled defaults to true, so the
+#     orchestrator ducks the music group while it speaks and — with music.autostart,
+#     also default on — supervises snapserver/librespot/mpv at boot; see
+#     ambient.example.json for the full shape)
 #   calendar.subscriptions=[{name,url}], calendar.cache_ttl_secs (read-only web .ics;
 #     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised)
 #   directions.provider="mapbox" (+ the MAPBOX_TOKEN secret, set via env or the Tools

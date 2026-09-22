@@ -563,14 +563,26 @@ fn sqlite_json(debug: &DebugSources) -> String {
 }
 
 /// `{ ok, enabled, helix_path, stats, nodes }` — GraphRAG store overview, or
-/// `{ ok, enabled: false, message }` when the graph backend is not live.
+/// `{ ok, enabled: false, message }` when the graph backend is not live. The
+/// message distinguishes "not configured for HelixDB" from "configured for HelixDB
+/// but init failed, so recall fell back to SQLite FTS" (commonly a missing
+/// `OPENAI_API_KEY`), so the page doesn't tell you to set a value that is already set.
 async fn helix_json(debug: &DebugSources) -> String {
     let Some(graph) = &debug.graph else {
+        let message = if debug.memory_backend.eq_ignore_ascii_case("helix") {
+            "GraphRAG (HelixDB) is configured (memory_backend=\"helix\") but failed to \
+             initialize, so recall fell back to SQLite FTS. The usual cause is a missing \
+             OPENAI_API_KEY (required for embeddings); a HelixDB store that could not be \
+             opened — e.g. two orchestrators sharing one helix_path — does this too. Check \
+             the orchestrator log for \"GraphRAG init failed\"."
+        } else {
+            "GraphRAG (HelixDB) is not active. Set memory_backend=\"helix\" in \
+             ambient.json to enable it."
+        };
         return json!({
             "ok": true,
             "enabled": false,
-            "message": "GraphRAG (HelixDB) is not active. Set memory_backend=\"helix\" in \
-                        ambient.json to enable it.",
+            "message": message,
         })
         .to_string();
     };
@@ -1851,6 +1863,26 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["enabled"], false);
         assert!(v["message"].is_string());
+        // memory_backend="sqlite" → tell the user how to turn HelixDB on.
+        assert!(v["message"]
+            .as_str()
+            .unwrap()
+            .contains("Set memory_backend"));
+    }
+
+    #[tokio::test]
+    async fn helix_json_explains_the_fallback_when_configured_for_helix() {
+        // memory_backend="helix" but no graph → init failed and recall fell back.
+        // The message must NOT tell the user to set a value that is already set;
+        // it should point at the likely cause (OPENAI_API_KEY) and the log line.
+        let mut d = debug();
+        d.memory_backend = "helix".to_string();
+        let v: Value = serde_json::from_str(&helix_json(&d).await).unwrap();
+        assert_eq!(v["enabled"], false);
+        let msg = v["message"].as_str().unwrap();
+        assert!(msg.contains("fell back to SQLite FTS"), "got: {msg}");
+        assert!(msg.contains("OPENAI_API_KEY"), "got: {msg}");
+        assert!(!msg.contains("Set memory_backend"), "got: {msg}");
     }
 
     #[tokio::test]

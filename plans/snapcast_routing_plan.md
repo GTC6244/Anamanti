@@ -143,7 +143,7 @@ that never touches PCM:
   MusicPlan.md's `AMBIENT_SPOTIFY_*`):
 
 ```bash
-AMBIENT_MUSIC=on|off                 # master toggle for the routing/control layer (default off until shipped)
+AMBIENT_MUSIC=on|off                 # master toggle for the routing/control layer (now the JSON key `music.enabled`; default ON)
 AMBIENT_MUSIC_SNAPSERVER=127.0.0.1:1705   # JSON-RPC control endpoint
 AMBIENT_MUSIC_DUCK_ON_SPEECH=on      # duck group volume while the assistant speaks
 AMBIENT_MUSIC_INCLUDE_DEVICE=off     # add the Echo Show snapclient to the group
@@ -228,8 +228,8 @@ hardware and the Linux box:
   a `SnapcastClient` (JSON-RPC over TCP :1705, ndjson), a `MusicDucker`
   (per-client attenuate-and-restore, idempotent), and an `MpvControl` (mpv JSON
   IPC). Wired at the `server.rs` `on_event` seam (`Speaking`→duck, `Finished`→
-  restore) via `tokio::spawn`, gated behind `AMBIENT_MUSIC` (default **off** — the
-  default build is behaviourally unchanged). Config keys added to `config.rs`
+  restore) via `tokio::spawn`, gated behind `music.enabled` (now default **on**;
+  set `music.enabled=false` in `ambient.json` to keep it dormant). Config keys in `config.rs`
   (`AMBIENT_MUSIC*`). **166 lib unit tests pass** (incl. 6 new music tests against
   a fake snapserver + fake mpv socket); `cargo clippy -D warnings` and `cargo fmt`
   clean on the changed files.

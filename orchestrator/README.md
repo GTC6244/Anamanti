@@ -48,7 +48,7 @@ cargo clippy --all-targets -- -D warnings
 | `AMBIENT_BIND_ADDR` | `0.0.0.0:10700` | device-facing bind address |
 | `AMBIENT_DB_PATH` | `ambient_memory.sqlite` | memory database path |
 | `AMBIENT_SERVICE_NAME` | `Ambient Orchestrator` | mDNS instance name |
-| `AMBIENT_MEMORY_BACKEND` | `sqlite` | recall backend: `sqlite` (FTS) \| `helix` (GraphRAG) |
+| `AMBIENT_MEMORY_BACKEND` | `helix` | recall backend: `helix` (GraphRAG, default) \| `sqlite` (FTS) |
 | `AMBIENT_CHATLOG_PATH` | `ambient_chatlog.jsonl` | append-only turn log (always written) |
 | `AMBIENT_HELIX_PATH` | `ambient_helix` | embedded HelixDB on-disk store root |
 | `OPENAI_API_KEY` | — | required for `helix` (embeddings) |
@@ -60,8 +60,9 @@ cargo clippy --all-targets -- -D warnings
 
 ### GraphRAG memory (embedded HelixDB)
 
-The `helix` cargo feature (on by default) compiles HelixDB's engine crate
-**in-process** — no server, no Docker. With `AMBIENT_MEMORY_BACKEND=helix` the
+HelixDB's engine crate is compiled **in-process** (always — there is no `helix`
+cargo feature to toggle; no server, no Docker). With `memory_backend=helix` (the
+default) the
 orchestrator writes each turn to the JSONL chat log, a background ingester
 embeds new turns (OpenAI `text-embedding-3-small`) and extracts entities (Claude
 Haiku) into a graph (`User/Turn/Memory/Entity` nodes; `SAID/MENTIONS/ABOUT/
