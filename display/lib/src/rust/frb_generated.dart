@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -580267714;
+  int get rustContentHash => -1258835725;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -79,15 +79,18 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 
 abstract class RustLibApi extends BaseApi {
   Future<int> crateApiSettingsClearMemories({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   });
 
   Future<bool> crateApiSettingsDeleteMemory({
+    required String orchestratorKey,
     required PlatformInt64 id,
     required BigInt discoveryTimeoutSecs,
   });
 
   Future<bool> crateApiSettingsDeleteSpeaker({
+    required String orchestratorKey,
     required String id,
     required BigInt discoveryTimeoutSecs,
   });
@@ -97,6 +100,7 @@ abstract class RustLibApi extends BaseApi {
   String crateApiEngineEngineVersion();
 
   Future<OrchestratorSettings> crateApiSettingsFetchOrchestratorSettings({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   });
 
@@ -105,28 +109,38 @@ abstract class RustLibApi extends BaseApi {
   bool crateApiEngineIsWakeWordEngineRunning();
 
   Future<List<MemoryEntry>> crateApiSettingsListMemories({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   });
 
   Future<List<ModelInfo>> crateApiSettingsListModels({
+    required String orchestratorKey,
+    required BigInt discoveryTimeoutSecs,
+  });
+
+  Future<List<OrchestratorInfo>> crateApiSettingsListOrchestrators({
     required BigInt discoveryTimeoutSecs,
   });
 
   Future<List<SpeakerInfo>> crateApiSettingsListSpeakers({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   });
 
   Future<List<VoiceInfo>> crateApiSettingsListVoices({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   });
 
   Future<bool> crateApiSettingsMergeSpeakers({
+    required String orchestratorKey,
     required String keep,
     required String drop,
     required BigInt discoveryTimeoutSecs,
   });
 
   Future<bool> crateApiSettingsNameSpeaker({
+    required String orchestratorKey,
     required String id,
     required String name,
     required BigInt discoveryTimeoutSecs,
@@ -139,6 +153,7 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiEngineStopWakeWordEngine();
 
   Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
+    required String orchestratorKey,
     required SettingsUpdate update,
     required BigInt discoveryTimeoutSecs,
   });
@@ -154,12 +169,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<int> crateApiSettingsClearMemories({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -173,7 +190,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSettingsClearMemoriesConstMeta,
-        argValues: [discoveryTimeoutSecs],
+        argValues: [orchestratorKey, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -182,11 +199,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSettingsClearMemoriesConstMeta =>
       const TaskConstMeta(
         debugName: "clear_memories",
-        argNames: ["discoveryTimeoutSecs"],
+        argNames: ["orchestratorKey", "discoveryTimeoutSecs"],
       );
 
   @override
   Future<bool> crateApiSettingsDeleteMemory({
+    required String orchestratorKey,
     required PlatformInt64 id,
     required BigInt discoveryTimeoutSecs,
   }) {
@@ -194,6 +212,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_i_64(id, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
@@ -208,7 +227,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSettingsDeleteMemoryConstMeta,
-        argValues: [id, discoveryTimeoutSecs],
+        argValues: [orchestratorKey, id, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -217,11 +236,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSettingsDeleteMemoryConstMeta =>
       const TaskConstMeta(
         debugName: "delete_memory",
-        argNames: ["id", "discoveryTimeoutSecs"],
+        argNames: ["orchestratorKey", "id", "discoveryTimeoutSecs"],
       );
 
   @override
   Future<bool> crateApiSettingsDeleteSpeaker({
+    required String orchestratorKey,
     required String id,
     required BigInt discoveryTimeoutSecs,
   }) {
@@ -229,6 +249,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_String(id, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
@@ -243,7 +264,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSettingsDeleteSpeakerConstMeta,
-        argValues: [id, discoveryTimeoutSecs],
+        argValues: [orchestratorKey, id, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -252,7 +273,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSettingsDeleteSpeakerConstMeta =>
       const TaskConstMeta(
         debugName: "delete_speaker",
-        argNames: ["id", "discoveryTimeoutSecs"],
+        argNames: ["orchestratorKey", "id", "discoveryTimeoutSecs"],
       );
 
   @override
@@ -302,12 +323,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<OrchestratorSettings> crateApiSettingsFetchOrchestratorSettings({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -321,7 +344,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSettingsFetchOrchestratorSettingsConstMeta,
-        argValues: [discoveryTimeoutSecs],
+        argValues: [orchestratorKey, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -330,7 +353,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSettingsFetchOrchestratorSettingsConstMeta =>
       const TaskConstMeta(
         debugName: "fetch_orchestrator_settings",
-        argNames: ["discoveryTimeoutSecs"],
+        argNames: ["orchestratorKey", "discoveryTimeoutSecs"],
       );
 
   @override
@@ -387,12 +410,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<List<MemoryEntry>> crateApiSettingsListMemories({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -406,7 +431,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSettingsListMemoriesConstMeta,
-        argValues: [discoveryTimeoutSecs],
+        argValues: [orchestratorKey, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -415,17 +440,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSettingsListMemoriesConstMeta =>
       const TaskConstMeta(
         debugName: "list_memories",
-        argNames: ["discoveryTimeoutSecs"],
+        argNames: ["orchestratorKey", "discoveryTimeoutSecs"],
       );
 
   @override
   Future<List<ModelInfo>> crateApiSettingsListModels({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -439,7 +466,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSettingsListModelsConstMeta,
-        argValues: [discoveryTimeoutSecs],
+        argValues: [orchestratorKey, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -447,11 +474,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiSettingsListModelsConstMeta => const TaskConstMeta(
     debugName: "list_models",
-    argNames: ["discoveryTimeoutSecs"],
+    argNames: ["orchestratorKey", "discoveryTimeoutSecs"],
   );
 
   @override
-  Future<List<SpeakerInfo>> crateApiSettingsListSpeakers({
+  Future<List<OrchestratorInfo>> crateApiSettingsListOrchestrators({
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
@@ -467,30 +494,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_list_speaker_info,
+          decodeSuccessData: sse_decode_list_orchestrator_info,
           decodeErrorData: sse_decode_AnyhowException,
         ),
-        constMeta: kCrateApiSettingsListSpeakersConstMeta,
+        constMeta: kCrateApiSettingsListOrchestratorsConstMeta,
         argValues: [discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSettingsListSpeakersConstMeta =>
+  TaskConstMeta get kCrateApiSettingsListOrchestratorsConstMeta =>
       const TaskConstMeta(
-        debugName: "list_speakers",
+        debugName: "list_orchestrators",
         argNames: ["discoveryTimeoutSecs"],
       );
 
   @override
-  Future<List<VoiceInfo>> crateApiSettingsListVoices({
+  Future<List<SpeakerInfo>> crateApiSettingsListSpeakers({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -500,33 +529,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_list_voice_info,
+          decodeSuccessData: sse_decode_list_speaker_info,
           decodeErrorData: sse_decode_AnyhowException,
         ),
-        constMeta: kCrateApiSettingsListVoicesConstMeta,
-        argValues: [discoveryTimeoutSecs],
+        constMeta: kCrateApiSettingsListSpeakersConstMeta,
+        argValues: [orchestratorKey, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSettingsListVoicesConstMeta => const TaskConstMeta(
-    debugName: "list_voices",
-    argNames: ["discoveryTimeoutSecs"],
-  );
+  TaskConstMeta get kCrateApiSettingsListSpeakersConstMeta =>
+      const TaskConstMeta(
+        debugName: "list_speakers",
+        argNames: ["orchestratorKey", "discoveryTimeoutSecs"],
+      );
 
   @override
-  Future<bool> crateApiSettingsMergeSpeakers({
-    required String keep,
-    required String drop,
+  Future<List<VoiceInfo>> crateApiSettingsListVoices({
+    required String orchestratorKey,
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(keep, serializer);
-          sse_encode_String(drop, serializer);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -536,34 +564,35 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_bool,
+          decodeSuccessData: sse_decode_list_voice_info,
           decodeErrorData: sse_decode_AnyhowException,
         ),
-        constMeta: kCrateApiSettingsMergeSpeakersConstMeta,
-        argValues: [keep, drop, discoveryTimeoutSecs],
+        constMeta: kCrateApiSettingsListVoicesConstMeta,
+        argValues: [orchestratorKey, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSettingsMergeSpeakersConstMeta =>
-      const TaskConstMeta(
-        debugName: "merge_speakers",
-        argNames: ["keep", "drop", "discoveryTimeoutSecs"],
-      );
+  TaskConstMeta get kCrateApiSettingsListVoicesConstMeta => const TaskConstMeta(
+    debugName: "list_voices",
+    argNames: ["orchestratorKey", "discoveryTimeoutSecs"],
+  );
 
   @override
-  Future<bool> crateApiSettingsNameSpeaker({
-    required String id,
-    required String name,
+  Future<bool> crateApiSettingsMergeSpeakers({
+    required String orchestratorKey,
+    required String keep,
+    required String drop,
     required BigInt discoveryTimeoutSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(id, serializer);
-          sse_encode_String(name, serializer);
+          sse_encode_String(orchestratorKey, serializer);
+          sse_encode_String(keep, serializer);
+          sse_encode_String(drop, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -576,8 +605,47 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_bool,
           decodeErrorData: sse_decode_AnyhowException,
         ),
+        constMeta: kCrateApiSettingsMergeSpeakersConstMeta,
+        argValues: [orchestratorKey, keep, drop, discoveryTimeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSettingsMergeSpeakersConstMeta =>
+      const TaskConstMeta(
+        debugName: "merge_speakers",
+        argNames: ["orchestratorKey", "keep", "drop", "discoveryTimeoutSecs"],
+      );
+
+  @override
+  Future<bool> crateApiSettingsNameSpeaker({
+    required String orchestratorKey,
+    required String id,
+    required String name,
+    required BigInt discoveryTimeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
+          sse_encode_String(id, serializer);
+          sse_encode_String(name, serializer);
+          sse_encode_u_64(discoveryTimeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
         constMeta: kCrateApiSettingsNameSpeakerConstMeta,
-        argValues: [id, name, discoveryTimeoutSecs],
+        argValues: [orchestratorKey, id, name, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -586,7 +654,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSettingsNameSpeakerConstMeta =>
       const TaskConstMeta(
         debugName: "name_speaker",
-        argNames: ["id", "name", "discoveryTimeoutSecs"],
+        argNames: ["orchestratorKey", "id", "name", "discoveryTimeoutSecs"],
       );
 
   @override
@@ -604,7 +672,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 15,
+              funcId: 16,
               port: port_,
             );
           },
@@ -636,7 +704,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 17,
             port: port_,
           );
         },
@@ -656,6 +724,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
+    required String orchestratorKey,
     required SettingsUpdate update,
     required BigInt discoveryTimeoutSecs,
   }) {
@@ -663,12 +732,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
           sse_encode_box_autoadd_settings_update(update, serializer);
           sse_encode_u_64(discoveryTimeoutSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 18,
             port: port_,
           );
         },
@@ -677,7 +747,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSettingsUpdateOrchestratorSettingsConstMeta,
-        argValues: [update, discoveryTimeoutSecs],
+        argValues: [orchestratorKey, update, discoveryTimeoutSecs],
         apiImpl: this,
       ),
     );
@@ -686,7 +756,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSettingsUpdateOrchestratorSettingsConstMeta =>
       const TaskConstMeta(
         debugName: "update_orchestrator_settings",
-        argNames: ["update", "discoveryTimeoutSecs"],
+        argNames: ["orchestratorKey", "update", "discoveryTimeoutSecs"],
       );
 
   @protected
@@ -776,6 +846,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<OrchestratorInfo> dco_decode_list_orchestrator_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_orchestrator_info).toList();
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
@@ -837,6 +913,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
+  OrchestratorInfo dco_decode_orchestrator_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return OrchestratorInfo(
+      key: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      host: dco_decode_String(arr[2]),
+      port: dco_decode_u_16(arr[3]),
+    );
   }
 
   @protected
@@ -936,8 +1026,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordConfig dco_decode_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 19)
-      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
+    if (arr.length != 20)
+      throw Exception('unexpected arr length: expect 20 but see ${arr.length}');
     return WakeWordConfig(
       melspecModelPath: dco_decode_String(arr[0]),
       embeddingModelPath: dco_decode_String(arr[1]),
@@ -946,18 +1036,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       threshold: dco_decode_f_32(arr[4]),
       activeThreshold: dco_decode_f_32(arr[5]),
       discoveryTimeoutSecs: dco_decode_u_64(arr[6]),
-      turnTimeoutSecs: dco_decode_u_64(arr[7]),
-      smoothingWindow: dco_decode_u_32(arr[8]),
-      fireOnPeak: dco_decode_bool(arr[9]),
-      playbackBufferSecs: dco_decode_u_32(arr[10]),
-      useAudiorecord: dco_decode_bool(arr[11]),
-      micSource: dco_decode_u_32(arr[12]),
-      platformAec: dco_decode_bool(arr[13]),
-      platformAgc: dco_decode_bool(arr[14]),
-      platformNs: dco_decode_bool(arr[15]),
-      cameraProximity: dco_decode_bool(arr[16]),
-      proximityMotionThreshold: dco_decode_f_32(arr[17]),
-      proximityReleaseSecs: dco_decode_u_32(arr[18]),
+      orchestratorKey: dco_decode_String(arr[7]),
+      turnTimeoutSecs: dco_decode_u_64(arr[8]),
+      smoothingWindow: dco_decode_u_32(arr[9]),
+      fireOnPeak: dco_decode_bool(arr[10]),
+      playbackBufferSecs: dco_decode_u_32(arr[11]),
+      useAudiorecord: dco_decode_bool(arr[12]),
+      micSource: dco_decode_u_32(arr[13]),
+      platformAec: dco_decode_bool(arr[14]),
+      platformAgc: dco_decode_bool(arr[15]),
+      platformNs: dco_decode_bool(arr[16]),
+      cameraProximity: dco_decode_bool(arr[17]),
+      proximityMotionThreshold: dco_decode_f_32(arr[18]),
+      proximityReleaseSecs: dco_decode_u_32(arr[19]),
     );
   }
 
@@ -1096,6 +1187,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<OrchestratorInfo> sse_decode_list_orchestrator_info(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <OrchestratorInfo>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_orchestrator_info(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -1183,6 +1288,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     } else {
       return null;
     }
+  }
+
+  @protected
+  OrchestratorInfo sse_decode_orchestrator_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_key = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_host = sse_decode_String(deserializer);
+    var var_port = sse_decode_u_16(deserializer);
+    return OrchestratorInfo(
+      key: var_key,
+      name: var_name,
+      host: var_host,
+      port: var_port,
+    );
   }
 
   @protected
@@ -1296,6 +1416,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_threshold = sse_decode_f_32(deserializer);
     var var_activeThreshold = sse_decode_f_32(deserializer);
     var var_discoveryTimeoutSecs = sse_decode_u_64(deserializer);
+    var var_orchestratorKey = sse_decode_String(deserializer);
     var var_turnTimeoutSecs = sse_decode_u_64(deserializer);
     var var_smoothingWindow = sse_decode_u_32(deserializer);
     var var_fireOnPeak = sse_decode_bool(deserializer);
@@ -1316,6 +1437,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       threshold: var_threshold,
       activeThreshold: var_activeThreshold,
       discoveryTimeoutSecs: var_discoveryTimeoutSecs,
+      orchestratorKey: var_orchestratorKey,
       turnTimeoutSecs: var_turnTimeoutSecs,
       smoothingWindow: var_smoothingWindow,
       fireOnPeak: var_fireOnPeak,
@@ -1492,6 +1614,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_orchestrator_info(
+    List<OrchestratorInfo> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_orchestrator_info(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1571,6 +1705,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     if (self != null) {
       sse_encode_box_autoadd_u_32(self, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_orchestrator_info(
+    OrchestratorInfo self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.key, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.host, serializer);
+    sse_encode_u_16(self.port, serializer);
   }
 
   @protected
@@ -1664,6 +1810,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_32(self.threshold, serializer);
     sse_encode_f_32(self.activeThreshold, serializer);
     sse_encode_u_64(self.discoveryTimeoutSecs, serializer);
+    sse_encode_String(self.orchestratorKey, serializer);
     sse_encode_u_64(self.turnTimeoutSecs, serializer);
     sse_encode_u_32(self.smoothingWindow, serializer);
     sse_encode_bool(self.fireOnPeak, serializer);

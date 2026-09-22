@@ -16,8 +16,41 @@ pub struct MdnsAdvertiser {
     fullname: String,
 }
 
+/// Build the `ServiceInfo` advertised for this orchestrator, including the TXT
+/// records the device uses to (a) filter orchestrators from raw Whisper/Piper
+/// Wyoming servers (`role=orchestrator`), (b) show a friendly label (`name`),
+/// and (c) pin a stable selection key (`instance_id`). Split out so the TXT
+/// records are unit-testable without registering a live daemon.
+///
+/// Pass `ip = ""` to enable auto address detection (caller applies
+/// `.enable_addr_auto()`); otherwise a single pinned IPv4 string.
+pub fn build_service_info(
+    instance_name: &str,
+    instance_id: &str,
+    host_name: &str,
+    ip: &str,
+    port: u16,
+) -> Result<ServiceInfo> {
+    let props: Vec<(&str, &str)> = vec![
+        ("version", "1"),
+        ("role", "orchestrator"),
+        ("name", instance_name),
+        ("instance_id", instance_id),
+    ];
+    ServiceInfo::new(
+        WYOMING_SERVICE_TYPE,
+        instance_name,
+        host_name,
+        ip,
+        port,
+        &props[..],
+    )
+    .context("building Wyoming ServiceInfo")
+}
+
 impl MdnsAdvertiser {
-    /// Advertise `_wyoming._tcp` on `port` under `instance_name`.
+    /// Advertise `_wyoming._tcp` on `port` under `instance_name`, tagged with the
+    /// stable `instance_id` the device pins its selection to.
     ///
     /// We advertise **only the routable LAN IPv4 address**, not every interface
     /// address. `enable_addr_auto()` announces all interfaces — including the
@@ -25,40 +58,35 @@ impl MdnsAdvertiser {
     /// discovery picks an arbitrary entry from an unordered set, so it usually
     /// grabs an unreachable link-local address and can never connect. Pinning the
     /// single reachable IPv4 makes discovery deterministic.
-    pub fn advertise(instance_name: &str, port: u16) -> Result<Self> {
+    ///
+    /// **Note:** `mdns-sd` does **not** probe for or auto-rename on fullname
+    /// collisions, so two orchestrators MUST be launched with distinct
+    /// `AMBIENT_SERVICE_NAME` values — otherwise both answer under the same
+    /// instance name and the device cannot tell them apart. The device
+    /// disambiguates by the `instance_id` TXT record.
+    pub fn advertise(instance_name: &str, instance_id: &str, port: u16) -> Result<Self> {
         let daemon = ServiceDaemon::new().context("starting mDNS daemon")?;
         let host_label = sanitize_label(instance_name);
         let host_name = format!("{host_label}.local.");
 
-        let props = &[("version", "1"), ("role", "orchestrator")][..];
         let service = match primary_ipv4() {
             Some(ip) => {
                 log::info!("advertising Wyoming service at LAN IPv4 {ip}");
-                ServiceInfo::new(
-                    WYOMING_SERVICE_TYPE,
+                build_service_info(
                     instance_name,
+                    instance_id,
                     &host_name,
                     ip.to_string().as_str(),
                     port,
-                    props,
-                )
-                .context("building Wyoming ServiceInfo")?
+                )?
             }
             None => {
                 log::warn!(
                     "could not determine a routable LAN IPv4; \
                      falling back to auto address detection (all interfaces)"
                 );
-                ServiceInfo::new(
-                    WYOMING_SERVICE_TYPE,
-                    instance_name,
-                    &host_name,
-                    "",
-                    port,
-                    props,
-                )
-                .context("building Wyoming ServiceInfo")?
-                .enable_addr_auto()
+                build_service_info(instance_name, instance_id, &host_name, "", port)?
+                    .enable_addr_auto()
             }
         };
 
@@ -66,7 +94,7 @@ impl MdnsAdvertiser {
         daemon
             .register(service)
             .context("registering _wyoming._tcp with mDNS")?;
-        log::info!("advertising `{fullname}` on port {port} via mDNS");
+        log::info!("advertising `{fullname}` (instance_id=`{instance_id}`) on port {port} via mDNS");
 
         Ok(Self { daemon, fullname })
     }
@@ -122,5 +150,17 @@ mod tests {
         );
         assert_eq!(sanitize_label("Mac Mini!"), "mac-mini");
         assert_eq!(sanitize_label("***"), "ambient-orchestrator");
+    }
+
+    #[test]
+    fn advertises_orchestrator_txt_records() {
+        let info =
+            build_service_info("Test Mac", "test-mac", "test-mac.local.", "127.0.0.1", 10700)
+                .expect("build service info");
+        assert_eq!(info.get_property_val_str("role"), Some("orchestrator"));
+        assert_eq!(info.get_property_val_str("name"), Some("Test Mac"));
+        assert_eq!(info.get_property_val_str("instance_id"), Some("test-mac"));
+        assert_eq!(info.get_property_val_str("version"), Some("1"));
+        assert!(info.get_fullname().contains("Test Mac"));
     }
 }

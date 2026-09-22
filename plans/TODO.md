@@ -163,6 +163,28 @@ Remaining:
       "Offline"/clock-drift (device lost the Mac link + NTP, not a photo bug).
 - [ ] Nice-to-have (Ambient): streamlined single-QR flow via the `state` param.
 
+## 3a. Multi-device / multi-orchestrator (implemented 2026-09-22 — verify on hardware)
+
+Code + tests landed (Plan.MD decision table 2026-09-22): orchestrator advertises
+`role`/`name`/`instance_id` TXT; device filters by `role=orchestrator`, enumerates
+all (`list_orchestrators`), and pins a chosen `instance_id` via the settings
+**Orchestrator** dropdown (strict offline; `"Auto"` = first responder). The key
+steers both the voice-turn path and the settings/control path. SQLite opens WAL.
+
+- [ ] **Two displays, one orchestrator**: run a real turn from each Echo Show
+      concurrently; confirm each reply lands on the display that asked and both
+      share the same memory pool.
+- [ ] **Pick a test orchestrator on-device**: launch prod + a test instance
+      (distinct `AMBIENT_SERVICE_NAME`/`AMBIENT_INSTANCE_ID`/`AMBIENT_BIND_ADDR`/
+      `AMBIENT_CONFIG_ADDR`); confirm both appear in the dropdown, selecting the
+      test one routes turns there (check its logs), and stopping it makes the
+      display go **Offline** (does *not* fall back to prod). Switch to `"Auto"` →
+      reconnects.
+- [ ] **Validate HelixDB cross-process open** before promising shared Helix data:
+      two orchestrator processes opening the same `ambient_helix` graph. If it
+      single-locks/errs, keep the test instance on `AMBIENT_MEMORY_BACKEND=sqlite`
+      (shared SQLite/WAL data, FTS recall) as documented; otherwise lift that note.
+
 ## 4. Ops & deployment polish
 
 - [ ] Run the orchestrator as a managed service on the Mac (launchd/login item) so it

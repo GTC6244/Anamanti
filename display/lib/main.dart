@@ -66,7 +66,9 @@ class AmbientHome extends StatefulWidget {
 
 class _AmbientHomeState extends State<AmbientHome> {
   final SettingsStore _store = SettingsStore();
-  final OrchestratorClient _client = const FrbOrchestratorClient();
+  // Rebuilt whenever the selected orchestrator changes (boot + settings apply) so
+  // every control call is pinned to the chosen Mac.
+  OrchestratorClient _client = const FrbOrchestratorClient();
   final SlideshowController _slideshow = SlideshowController();
 
   /// Actuates the window backlight from the camera proximity sensor's presence
@@ -96,6 +98,8 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   Future<void> _boot() async {
     _settings = await _store.load();
+    // Pin the control client to the persisted orchestrator selection.
+    _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
     // Unpack the bundled wake-word models to the filesystem before the native
     // engine tries to load them (no-op on later runs / user-dropped models).
     await ensureWakeWordModels();
@@ -207,8 +211,12 @@ class _AmbientHomeState extends State<AmbientHome> {
       // discover+connect handshake, so success means we're genuinely reachable.
       probeOrchestrator: () async {
         try {
-          await const FrbOrchestratorClient(
+          // Pin the probe to the selected orchestrator; otherwise the Offline
+          // chip could clear against a *different* Mac while the pinned one is
+          // still down (strict selection).
+          await FrbOrchestratorClient(
             discoveryTimeoutSecs: 2,
+            orchestratorKey: _settings.orchestratorKey,
           ).fetchSettings();
           return true;
         } catch (_) {
@@ -228,6 +236,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// the Mac by the settings screen itself.
   Future<void> _onSettingsApplied(AppSettings next) async {
     final engineChanged =
+        next.orchestratorKey != _settings.orchestratorKey ||
         next.wakeWord != _settings.wakeWord ||
         next.threshold != _settings.threshold ||
         next.activeThreshold != _settings.activeThreshold ||
@@ -247,6 +256,8 @@ class _AmbientHomeState extends State<AmbientHome> {
         next.driveLinked != _settings.driveLinked;
 
     _settings = next;
+    // Re-pin the control client to the (possibly new) orchestrator selection.
+    _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
     if (photoChanged) {
       // A new/changed link means new refresh tokens: re-mint before rebuilding.
       await _refreshGoogleTokens();

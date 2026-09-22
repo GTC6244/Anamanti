@@ -31,6 +31,7 @@ const List<String> kAvailableWakeWords = <String>[
 @immutable
 class AppSettings {
   const AppSettings({
+    this.orchestratorKey = '',
     this.wakeWord = 'hey_jarvis',
     this.threshold = 0.5,
     this.activeThreshold = 0.7,
@@ -49,6 +50,12 @@ class AppSettings {
     this.driveFolderIds = const <String>[],
     this.driveLinked = false,
   });
+
+  /// Stable selection key (`instance_id` TXT) of the orchestrator this display is
+  /// pinned to. Empty = "Auto" (connect to the first available orchestrator).
+  /// Device-local: applied by rebuilding the engine's [WakeWordConfig] and used to
+  /// pin the settings-control client to the same Mac.
+  final String orchestratorKey;
 
   /// Selected wake-word model name (`<name>.onnx`).
   final String wakeWord;
@@ -116,6 +123,7 @@ class AppSettings {
   final bool driveLinked;
 
   AppSettings copyWith({
+    String? orchestratorKey,
     String? wakeWord,
     double? threshold,
     double? activeThreshold,
@@ -135,6 +143,7 @@ class AppSettings {
     bool? driveLinked,
   }) {
     return AppSettings(
+      orchestratorKey: orchestratorKey ?? this.orchestratorKey,
       wakeWord: wakeWord ?? this.wakeWord,
       threshold: threshold ?? this.threshold,
       activeThreshold: activeThreshold ?? this.activeThreshold,
@@ -156,6 +165,7 @@ class AppSettings {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
+    'orchestratorKey': orchestratorKey,
     'wakeWord': wakeWord,
     'threshold': threshold,
     'activeThreshold': activeThreshold,
@@ -184,6 +194,9 @@ class AppSettings {
     int asInt(Object? v, int fallback, {int min = 1, int max = 1 << 30}) =>
         v is num ? v.toInt().clamp(min, max) : fallback;
     return AppSettings(
+      orchestratorKey: json['orchestratorKey'] is String
+          ? json['orchestratorKey'] as String
+          : defaults.orchestratorKey,
       wakeWord:
           json['wakeWord'] is String && (json['wakeWord'] as String).isNotEmpty
           ? json['wakeWord'] as String
@@ -251,6 +264,7 @@ class AppSettings {
   bool operator ==(Object other) =>
       other is AppSettings &&
       runtimeType == other.runtimeType &&
+      orchestratorKey == other.orchestratorKey &&
       wakeWord == other.wakeWord &&
       threshold == other.threshold &&
       activeThreshold == other.activeThreshold &&
@@ -271,6 +285,7 @@ class AppSettings {
 
   @override
   int get hashCode => Object.hash(
+    orchestratorKey,
     wakeWord,
     threshold,
     activeThreshold,

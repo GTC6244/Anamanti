@@ -15,6 +15,7 @@ WakeWordConfig _cfg() => WakeWordConfig(
       modelName: 'test',
       threshold: 0.5,
       activeThreshold: 0.7,
+      orchestratorKey: '',
       discoveryTimeoutSecs: BigInt.zero,
       turnTimeoutSecs: BigInt.zero,
       smoothingWindow: 2,

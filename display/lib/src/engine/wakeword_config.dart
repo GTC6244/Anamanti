@@ -86,6 +86,7 @@ Future<WakeWordConfig> buildWakeWordConfig({
   bool cameraProximity = WakeWordDefaults.cameraProximity,
   double proximityMotionThreshold = WakeWordDefaults.proximityMotionThreshold,
   int proximityReleaseSecs = WakeWordDefaults.proximityReleaseSecs,
+  String orchestratorKey = '',
 }) async {
   final dir = await wakeWordModelDir();
   return WakeWordConfig(
@@ -95,6 +96,7 @@ Future<WakeWordConfig> buildWakeWordConfig({
     modelName: modelName,
     threshold: threshold,
     activeThreshold: activeThreshold,
+    orchestratorKey: orchestratorKey,
     discoveryTimeoutSecs: BigInt.from(WakeWordDefaults.discoveryTimeoutSecs),
     turnTimeoutSecs: BigInt.from(WakeWordDefaults.turnTimeoutSecs),
     smoothingWindow: smoothingWindow,
@@ -124,5 +126,6 @@ Future<WakeWordConfig> buildWakeWordConfigFrom(AppSettings settings) {
     fireOnPeak: settings.fireOnPeak,
     playbackBufferSecs: settings.playbackBufferSecs,
     useAudioRecord: settings.useAudioRecord,
+    orchestratorKey: settings.orchestratorKey,
   );
 }

@@ -27,8 +27,8 @@ pub mod state;
 
 pub use client::{run_turn, AudioFormat, TurnUpdate, WyomingConnection, DEFAULT_TURN_TIMEOUT};
 pub use discovery::{
-    discover, resolve, EndpointCache, WyomingEndpoint, DEFAULT_DISCOVERY_TIMEOUT,
-    WYOMING_SERVICE_TYPE,
+    discover, discover_all, discover_preferred, resolve, EndpointCache, WyomingEndpoint,
+    DEFAULT_DISCOVERY_TIMEOUT, ORCHESTRATOR_ROLE, WYOMING_SERVICE_TYPE,
 };
 pub use protocol::{read_event, write_event, WyomingEvent};
 pub use state::{Action, ControlInput, Session, SessionState};

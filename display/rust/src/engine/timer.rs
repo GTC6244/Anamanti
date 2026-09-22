@@ -55,6 +55,9 @@ struct Inner {
     /// reach the orchestrator to voice its announcement, and the discovery timeout.
     cache: Arc<EndpointCache>,
     discovery_timeout: Duration,
+    /// Pinned orchestrator selection key (`None` = Auto); a fired timer's Piper
+    /// announcement resolves the same Mac the turns use.
+    orchestrator_key: Option<String>,
     next_id: AtomicU32,
     timers: Mutex<HashMap<u32, TimerEntry>>,
 }
@@ -72,6 +75,7 @@ impl TimerManager {
         handle: Handle,
         cache: Arc<EndpointCache>,
         discovery_timeout: Duration,
+        orchestrator_key: Option<String>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -80,6 +84,7 @@ impl TimerManager {
                 handle,
                 cache,
                 discovery_timeout,
+                orchestrator_key,
                 next_id: AtomicU32::new(1),
                 timers: Mutex::new(HashMap::new()),
             }),
@@ -117,8 +122,14 @@ impl TimerManager {
                 // after the two bell rings. Ask the orchestrator to synthesize it;
                 // best-effort — if the Mac is unreachable the timer is bell-only.
                 let phrase = announce_phrase(task_label.as_deref());
-                if let Err(e) =
-                    speak_via_orchestrator(&inner.cache, inner.discovery_timeout, pb, &phrase).await
+                if let Err(e) = speak_via_orchestrator(
+                    &inner.cache,
+                    inner.discovery_timeout,
+                    inner.orchestrator_key.as_deref(),
+                    pb,
+                    &phrase,
+                )
+                .await
                 {
                     log::info!("timer voice announcement skipped ({phrase:?}): {e:#}");
                 }
@@ -218,10 +229,11 @@ fn announce_phrase(label: Option<&str>) -> String {
 async fn speak_via_orchestrator(
     cache: &EndpointCache,
     discovery_timeout: Duration,
+    preferred: Option<&str>,
     playback: &PlaybackSink,
     text: &str,
 ) -> anyhow::Result<()> {
-    let endpoint = resolve(cache, discovery_timeout).await?;
+    let endpoint = resolve(cache, discovery_timeout, preferred).await?;
     let stream = TcpStream::connect(endpoint.socket_addr()).await?;
     stream.set_nodelay(true).ok();
     let (read_half, mut write_half) = stream.into_split();

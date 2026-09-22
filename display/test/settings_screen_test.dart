@@ -240,6 +240,69 @@ void main() {
     expect(store.value, isNotNull);
   });
 
+  testWidgets('orchestrator dropdown lists discovered orchestrators and persists the selection',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(orchestrators: const [
+      OrchestratorOption(
+          key: 'mac-mini', name: 'Mac Mini', host: '192.168.1.10', port: 10700),
+      OrchestratorOption(
+          key: 'test-mac', name: 'Test Mac', host: '192.168.1.11', port: 10700),
+    ]);
+    AppSettings? applied;
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (s) => applied = s,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // The dropdown offers Auto plus each discovered orchestrator.
+    await tester.tap(find.byKey(const Key('settings-orchestrator')));
+    await tester.pumpAndSettle();
+    expect(find.text('Auto (first available)').last, findsOneWidget);
+    expect(find.text('Test Mac · 192.168.1.11').last, findsOneWidget);
+    await tester.tap(find.text('Test Mac · 192.168.1.11').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    // The selection is device-local: persisted + surfaced to the parent.
+    expect(applied, isNotNull);
+    expect(applied!.orchestratorKey, 'test-mac');
+    expect(store.value.orchestratorKey, 'test-mac');
+  });
+
+  testWidgets('orchestrator dropdown stays usable (Auto) when the assistant is offline',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    // Offline: fetchSettings/listModels throw, but discovery (listOrchestrators)
+    // is a separate path, so the device-local Orchestrator tile still shows.
+    final client = FakeOrchestratorClient(throwOnFetch: true);
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Assistant offline'), findsOneWidget);
+    // The Orchestrator picker (outside the offline-gated assistant tiles) is present.
+    expect(find.byKey(const Key('settings-orchestrator')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('settings-orchestrator')));
+    await tester.pumpAndSettle();
+    expect(find.text('Auto (first available)').last, findsOneWidget);
+  });
+
   testWidgets('memory tile navigates to the memory screen', (tester) async {
     final store = InMemorySettingsStore();
     final client = FakeOrchestratorClient();
