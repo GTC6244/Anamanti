@@ -4,6 +4,7 @@
 //! mock, and the rest of the pipeline is handed a `dyn LlmBackend` — it never
 //! knows which was chosen.
 
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,6 +18,10 @@ use crate::llm::catalog::ModelCatalog;
 use crate::llm::{
     anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
     LlmBackend,
+};
+use crate::music::{
+    GroupSelector, ManagedProc, MpvControl, MusicDucker, MusicHub, MusicSupervisor, ProcSpec,
+    SnapcastClient,
 };
 use crate::settings::{
     load_persisted, DriveConfig, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
@@ -150,6 +155,8 @@ pub struct Config {
     pub graphrag: GraphRagConfig,
     /// Per-person speaker identification settings (speaker_id_plan.md).
     pub speaker: SpeakerConfig,
+    /// House-wide music routing (Snapcast) control-plane settings.
+    pub music: MusicConfig,
 }
 
 /// Speaker-identification configuration. Off by default (opt-in like `helix`); a
@@ -179,6 +186,63 @@ impl Default for SpeakerConfig {
             new_threshold: 0.40,
             min_speech_ms: 1200,
             embed_dims: 192,
+        }
+    }
+}
+
+/// House-wide music routing (Snapcast) control-plane settings. **Inert unless
+/// `enabled`** (`AMBIENT_MUSIC=on`): the orchestrator only ducks the music group
+/// while it speaks and (later) selects the active stream. It never handles PCM —
+/// see `crate::music` and `plans/snapcast_routing_plan.md`.
+#[derive(Debug, Clone)]
+pub struct MusicConfig {
+    /// Master switch (`AMBIENT_MUSIC`). Off ⇒ the whole feature is dormant.
+    pub enabled: bool,
+    /// snapserver JSON-RPC control endpoint (`AMBIENT_MUSIC_SNAPSERVER`).
+    pub snapserver_addr: SocketAddr,
+    /// Duck the music group's volume while the assistant speaks
+    /// (`AMBIENT_MUSIC_DUCK_ON_SPEECH`, default on).
+    pub duck_on_speech: bool,
+    /// Volume percent to duck to during speech (`AMBIENT_MUSIC_DUCK_PERCENT`).
+    pub duck_percent: u8,
+    /// Which group to duck: `auto`, a group id (`AMBIENT_MUSIC_GROUP`), or the
+    /// group playing a stream id (`AMBIENT_MUSIC_STREAM`, most specific).
+    pub group: GroupSelector,
+    /// mpv JSON IPC socket for the web-URL player (`AMBIENT_MUSIC_WEB_IPC`).
+    pub mpv_ipc: Option<PathBuf>,
+    /// Directory holding the `snapserver`/`librespot`/`mpv` binaries
+    /// (`AMBIENT_MUSIC_BIN_DIR`, default the Homebrew prefix bin).
+    pub bin_dir: PathBuf,
+    /// Directory holding the snapfifos (`AMBIENT_MUSIC_RUN_DIR`).
+    pub run_dir: PathBuf,
+    /// Directory for the supervised processes' log files (`AMBIENT_MUSIC_LOG_DIR`).
+    pub log_dir: PathBuf,
+    /// snapserver config path (`AMBIENT_MUSIC_CONF`).
+    pub snapserver_conf: PathBuf,
+    /// librespot Spotify Connect device name (`AMBIENT_SPOTIFY_DEVICE_NAME`,
+    /// default `Ambient`; the shared instance MusicPlan.md's tool targets).
+    pub spotify_device_name: String,
+    /// Auto-start the managed processes (snapserver/librespot/mpv) when the
+    /// orchestrator boots, and stop them on shutdown (`AMBIENT_MUSIC_AUTOSTART`,
+    /// default on when music is enabled). The Music tab's manual buttons still work.
+    pub autostart: bool,
+}
+
+impl Default for MusicConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            snapserver_addr: "127.0.0.1:1705".parse().unwrap(),
+            duck_on_speech: true,
+            duck_percent: 30,
+            group: GroupSelector::Auto,
+            mpv_ipc: Some(PathBuf::from("/tmp/ambient-mpv.sock")),
+            bin_dir: PathBuf::from("/opt/homebrew/bin"),
+            run_dir: PathBuf::from("/opt/homebrew/var/run/ambient"),
+            log_dir: PathBuf::from("/opt/homebrew/var/log"),
+            snapserver_conf: PathBuf::from("/opt/homebrew/etc/snapserver.conf"),
+            spotify_device_name: "Ambient".to_string(),
+            autostart: true,
         }
     }
 }
@@ -255,8 +319,17 @@ impl Default for Config {
             helix_path: PathBuf::from("ambient_helix"),
             graphrag: GraphRagConfig::default(),
             speaker: SpeakerConfig::default(),
+            music: MusicConfig::default(),
         }
     }
+}
+
+fn env_pathbuf(key: &str, default: PathBuf) -> PathBuf {
+    env::var(key)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(default)
 }
 
 fn env_addr(key: &str, default: SocketAddr) -> Result<SocketAddr> {
@@ -406,6 +479,58 @@ impl Config {
                 .unwrap_or(sd.embed_dims),
         };
 
+        let md = MusicConfig::default();
+        let music = MusicConfig {
+            enabled: matches!(
+                env::var("AMBIENT_MUSIC")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "on" | "1" | "true" | "yes"
+            ),
+            snapserver_addr: env_addr("AMBIENT_MUSIC_SNAPSERVER", md.snapserver_addr)?,
+            duck_on_speech: !matches!(
+                env::var("AMBIENT_MUSIC_DUCK_ON_SPEECH")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+            duck_percent: env::var("AMBIENT_MUSIC_DUCK_PERCENT")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .map(|p| p.min(100))
+                .unwrap_or(md.duck_percent),
+            group: GroupSelector::from_parts(
+                env::var("AMBIENT_MUSIC_GROUP").ok().as_deref(),
+                env::var("AMBIENT_MUSIC_STREAM").ok().as_deref(),
+            ),
+            mpv_ipc: env::var("AMBIENT_MUSIC_WEB_IPC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| md.mpv_ipc.clone()),
+            bin_dir: env_pathbuf("AMBIENT_MUSIC_BIN_DIR", md.bin_dir.clone()),
+            run_dir: env_pathbuf("AMBIENT_MUSIC_RUN_DIR", md.run_dir.clone()),
+            log_dir: env_pathbuf("AMBIENT_MUSIC_LOG_DIR", md.log_dir.clone()),
+            snapserver_conf: env_pathbuf("AMBIENT_MUSIC_CONF", md.snapserver_conf.clone()),
+            spotify_device_name: env::var("AMBIENT_SPOTIFY_DEVICE_NAME")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| md.spotify_device_name.clone()),
+            autostart: !matches!(
+                env::var("AMBIENT_MUSIC_AUTOSTART")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "0" | "false" | "off" | "no"
+            ),
+        };
+
         // The config page: `off`/`none`/empty disables it, otherwise a host:port.
         let config_addr = match env::var("AMBIENT_CONFIG_ADDR") {
             Ok(v) if matches!(v.trim().to_lowercase().as_str(), "off" | "none" | "") => None,
@@ -468,6 +593,109 @@ impl Config {
                 .unwrap_or(d.helix_path),
             graphrag,
             speaker,
+            music,
+        })
+    }
+
+    /// Build the music ducker when music routing **and** duck-on-speech are both
+    /// enabled; otherwise `None` (the whole path stays dormant). Best-effort at
+    /// runtime — a missing/unreachable snapserver never breaks a turn.
+    pub fn build_ducker(&self) -> Option<Arc<MusicDucker>> {
+        if self.music.enabled && self.music.duck_on_speech {
+            Some(Arc::new(MusicDucker::new(
+                self.music.snapserver_addr,
+                self.music.group.clone(),
+                self.music.duck_percent,
+            )))
+        } else {
+            None
+        }
+    }
+
+    /// Build the mpv IPC control for the web-URL player, when music is enabled and
+    /// an IPC socket is configured (`AMBIENT_MUSIC_WEB_IPC`).
+    pub fn mpv_control(&self) -> Option<MpvControl> {
+        if !self.music.enabled {
+            return None;
+        }
+        self.music.mpv_ipc.as_ref().map(MpvControl::new)
+    }
+
+    /// Build the process supervisor for the music sibling processes
+    /// (snapserver / librespot / mpv), or `None` when music is disabled. The
+    /// launch commands mirror `orchestrator/deploy/snapcast/` (the runbook +
+    /// launchd agents).
+    pub fn build_supervisor(&self) -> Option<Arc<MusicSupervisor>> {
+        if !self.music.enabled {
+            return None;
+        }
+        let m = &self.music;
+        let bin = |name: &str| m.bin_dir.join(name);
+        let fifo = |name: &str| m.run_dir.join(name).display().to_string();
+        let log = |name: &str| m.log_dir.join(name);
+        let mpv_ipc = m
+            .mpv_ipc
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/tmp/ambient-mpv.sock"));
+
+        let mut specs = HashMap::new();
+        specs.insert(
+            ManagedProc::Snapserver,
+            ProcSpec {
+                program: bin("snapserver"),
+                args: vec!["-c".into(), m.snapserver_conf.display().to_string()],
+                log_path: log("ambient-snapserver.log"),
+            },
+        );
+        specs.insert(
+            ManagedProc::Librespot,
+            ProcSpec {
+                program: bin("librespot"),
+                args: vec![
+                    "--name".into(),
+                    m.spotify_device_name.clone(),
+                    "--backend".into(),
+                    "pipe".into(),
+                    "--device".into(),
+                    fifo("snap-spotify"),
+                    "--bitrate".into(),
+                    "320".into(),
+                    "--initial-volume".into(),
+                    "100".into(),
+                ],
+                log_path: log("ambient-librespot.log"),
+            },
+        );
+        specs.insert(
+            ManagedProc::MpvWeb,
+            ProcSpec {
+                program: bin("mpv"),
+                args: vec![
+                    "--idle=yes".into(),
+                    "--no-video".into(),
+                    format!("--input-ipc-server={}", mpv_ipc.display()),
+                    "--ao=pcm".into(),
+                    "--ao-pcm-waveheader=no".into(),
+                    format!("--ao-pcm-file={}", fifo("snap-web")),
+                    "--audio-samplerate=48000".into(),
+                    "--audio-channels=stereo".into(),
+                    "--audio-format=s16".into(),
+                ],
+                log_path: log("ambient-mpv-web.log"),
+            },
+        );
+        Some(Arc::new(MusicSupervisor::new(specs)))
+    }
+
+    /// Build the [`MusicHub`] (supervisor + snapserver control + mpv control) the
+    /// config-page Music tab drives, or `None` when music is disabled.
+    pub fn build_hub(&self) -> Option<MusicHub> {
+        let supervisor = self.build_supervisor()?;
+        Some(MusicHub {
+            supervisor,
+            snapcast: SnapcastClient::new(self.music.snapserver_addr),
+            snapserver_addr: self.music.snapserver_addr.to_string(),
+            mpv: self.mpv_control(),
         })
     }
 
@@ -580,7 +808,12 @@ impl Config {
     /// never seeded from env — it's minted by the consent flow. A persisted file
     /// overlays these at boot (see [`Self::shared_settings`]).
     pub fn initial_drive(&self) -> DriveConfig {
-        let env_opt = |k: &str| env::var(k).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let env_opt = |k: &str| {
+            env::var(k)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
         DriveConfig {
             client_id: env_opt("AMBIENT_GOOGLE_DRIVE_CLIENT_ID"),
             client_secret: env_opt("AMBIENT_GOOGLE_DRIVE_CLIENT_SECRET"),
