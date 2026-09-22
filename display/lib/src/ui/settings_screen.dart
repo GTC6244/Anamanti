@@ -513,6 +513,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _section('Idle photos'),
           ..._photoTiles(),
           const Divider(),
+          _section('Display'),
+          ..._displayTiles(),
+          const Divider(),
           _section('Speech & detection'),
           ..._detectionTuningTiles(),
           ..._speechTiles(),
@@ -1020,6 +1023,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
+  }
+
+  /// Idle-screen presentation: how long the display stays fully bright after the
+  /// room goes quiet before dimming to the calm away-mode clock face. Maps to the
+  /// camera proximity release window (device-local; restarts the engine on Save).
+  List<Widget> _displayTiles() {
+    return [
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          'How long the screen stays bright after the room goes quiet before dimming '
+          'to the clock. Approaching the display brightens it again instantly.',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ),
+      _rangeSlider(
+        label: 'Stay bright before dim',
+        value: _settings.dimDelaySecs.toDouble(),
+        min: 5,
+        max: 300,
+        divisions: 59,
+        format: _fmtDuration,
+        sliderKey: const Key('settings-dim-delay'),
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(dimDelaySecs: v.round()),
+        ),
+      ),
+    ];
+  }
+
+  /// Human-readable seconds → "45s" / "2m" / "2m 30s" for the dim-delay slider.
+  String _fmtDuration(double seconds) {
+    final s = seconds.round();
+    if (s < 60) return '${s}s';
+    final m = s ~/ 60;
+    final rem = s % 60;
+    return rem == 0 ? '${m}m' : '${m}m ${rem}s';
   }
 
   List<Widget> _photoTiles() {

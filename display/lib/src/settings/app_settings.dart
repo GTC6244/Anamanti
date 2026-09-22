@@ -42,6 +42,7 @@ class AppSettings {
     this.endpointCueEnabled = true,
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
+    this.dimDelaySecs = 20,
     this.photoSource = PhotoSourceKind.local,
     this.ambientRefreshToken = '',
     this.ambientDeviceId = '',
@@ -98,6 +99,14 @@ class AppSettings {
   /// Mic RMS level (0..1) below which audio counts as silence for the local cue.
   final double endpointRmsThreshold;
 
+  /// How long (seconds) the idle screen stays fully bright after the room goes
+  /// quiet before it dims to the calm "away" clock face. Maps to the camera
+  /// proximity detector's release window (`WakeWordConfig.proximityReleaseSecs`):
+  /// once no motion has been seen for this long, the engine reports the room empty,
+  /// which dims the backlight and shows the large centered clock. The default (20 s)
+  /// matches the engine's built-in release window.
+  final int dimDelaySecs;
+
   /// Idle photo source.
   final PhotoSourceKind photoSource;
 
@@ -149,6 +158,7 @@ class AppSettings {
     bool? endpointCueEnabled,
     int? endpointSilenceMs,
     double? endpointRmsThreshold,
+    int? dimDelaySecs,
     PhotoSourceKind? photoSource,
     String? ambientRefreshToken,
     String? ambientDeviceId,
@@ -171,6 +181,7 @@ class AppSettings {
       endpointCueEnabled: endpointCueEnabled ?? this.endpointCueEnabled,
       endpointSilenceMs: endpointSilenceMs ?? this.endpointSilenceMs,
       endpointRmsThreshold: endpointRmsThreshold ?? this.endpointRmsThreshold,
+      dimDelaySecs: dimDelaySecs ?? this.dimDelaySecs,
       photoSource: photoSource ?? this.photoSource,
       ambientRefreshToken: ambientRefreshToken ?? this.ambientRefreshToken,
       ambientDeviceId: ambientDeviceId ?? this.ambientDeviceId,
@@ -195,6 +206,7 @@ class AppSettings {
     'endpointCueEnabled': endpointCueEnabled,
     'endpointSilenceMs': endpointSilenceMs,
     'endpointRmsThreshold': endpointRmsThreshold,
+    'dimDelaySecs': dimDelaySecs,
     'photoSource': photoSource.name,
     'ambientRefreshToken': ambientRefreshToken,
     'ambientDeviceId': ambientDeviceId,
@@ -256,6 +268,12 @@ class AppSettings {
         json['endpointRmsThreshold'],
         defaults.endpointRmsThreshold,
       ),
+      dimDelaySecs: asInt(
+        json['dimDelaySecs'],
+        defaults.dimDelaySecs,
+        min: 5,
+        max: 600,
+      ),
       photoSource: PhotoSourceKind.values.firstWhere(
         (k) => k.name == json['photoSource'],
         orElse: () => defaults.photoSource,
@@ -302,6 +320,7 @@ class AppSettings {
       endpointCueEnabled == other.endpointCueEnabled &&
       endpointSilenceMs == other.endpointSilenceMs &&
       endpointRmsThreshold == other.endpointRmsThreshold &&
+      dimDelaySecs == other.dimDelaySecs &&
       photoSource == other.photoSource &&
       ambientRefreshToken == other.ambientRefreshToken &&
       ambientDeviceId == other.ambientDeviceId &&
@@ -325,6 +344,7 @@ class AppSettings {
     endpointCueEnabled,
     endpointSilenceMs,
     endpointRmsThreshold,
+    dimDelaySecs,
     photoSource,
     ambientRefreshToken,
     ambientDeviceId,

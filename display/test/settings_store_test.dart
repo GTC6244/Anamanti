@@ -39,6 +39,7 @@ void main() {
       wakeWord: 'hey_jarvis',
       threshold: 0.4,
       activeThreshold: 0.8,
+      dimDelaySecs: 45,
       photoSource: PhotoSourceKind.drive,
       ambientRefreshToken: 'refresh-abc',
       ambientDeviceId: 'dev-77',
@@ -81,6 +82,16 @@ void main() {
     // A pre-feature settings file (no orchestratorKey) defaults to '' = Auto.
     final legacy = AppSettings.fromJson({'wakeWord': 'hey_jarvis'});
     expect(legacy.orchestratorKey, '');
+  });
+
+  test('dimDelaySecs defaults to 20 and clamps out-of-range values', () {
+    expect(const AppSettings().dimDelaySecs, 20);
+    // Below the floor / above the ceiling clamp; a non-numeric value falls back.
+    expect(AppSettings.fromJson({'dimDelaySecs': 1}).dimDelaySecs, 5);
+    expect(AppSettings.fromJson({'dimDelaySecs': 99999}).dimDelaySecs, 600);
+    expect(AppSettings.fromJson({'dimDelaySecs': 'nope'}).dimDelaySecs, 20);
+    // A legacy file with no dim delay keeps the default.
+    expect(AppSettings.fromJson({'wakeWord': 'hey_jarvis'}).dimDelaySecs, 20);
   });
 
   test('copyWith changes only the given fields', () {

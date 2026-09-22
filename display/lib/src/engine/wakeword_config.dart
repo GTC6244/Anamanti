@@ -126,6 +126,9 @@ Future<WakeWordConfig> buildWakeWordConfigFrom(AppSettings settings) {
     fireOnPeak: settings.fireOnPeak,
     playbackBufferSecs: settings.playbackBufferSecs,
     useAudioRecord: settings.useAudioRecord,
+    // How long the screen stays bright after the room goes quiet before dimming to
+    // the away-mode clock — the proximity detector's release window (Plan.MD §5).
+    proximityReleaseSecs: settings.dimDelaySecs,
     orchestratorKey: settings.orchestratorKey,
   );
 }
