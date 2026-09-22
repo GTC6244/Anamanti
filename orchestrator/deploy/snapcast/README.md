@@ -15,6 +15,14 @@ Mac (hub)                                              Speakers
 The orchestrator **never carries music PCM** — it only ducks/selects over
 JSON-RPC and (later) drives mpv over its IPC socket. `*` Echo Show is opt-in (P6).
 
+## 0. Easiest path: the orchestrator's Music tab
+
+After `./setup-mac.sh` (below), start the orchestrator with `AMBIENT_MUSIC=on` and
+open the config page (default `http://127.0.0.1:8730/`) → **Music** tab. From there
+you can **start/stop snapserver, librespot, and mpv**, watch live snapserver status
+(groups/clients/volumes), and **play a web URL** — no terminal needed. The sections
+below are the manual/launchd equivalents.
+
 ## 1. Mac host bring-up (P1–P3)
 
 ```bash

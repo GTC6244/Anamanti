@@ -166,11 +166,16 @@ async fn run() -> Result<()> {
     // same runtime-swappable settings the device controls over Wyoming, so you can
     // change the LLM backend/model/voice live from a browser. Best-effort: a bind
     // failure disables the page but never stops the orchestrator.
+    // The Music tab's control hub (process supervisor + snapserver/mpv control),
+    // shared into the config page. `None` when AMBIENT_MUSIC is off.
+    let music_hub = config.build_hub();
+
     if let Some(config_addr) = config.config_addr {
         let settings = pipeline.settings().clone();
         let catalog = catalog.clone();
         let connector = connector.clone();
         let voices_dir = config.tts_voices_dir.clone();
+        let music = music_hub.clone();
         let debug = DebugSources {
             memory: pipeline.memory().clone(),
             chatlog_path: config.chatlog_path.clone(),
@@ -192,9 +197,10 @@ async fn run() -> Result<()> {
                      (chat log, prompts, SQLite, HelixDB — no auth, keep it on a trusted network)"
                 );
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        webconfig::serve(listener, settings, catalog, connector, voices_dir, debug)
-                            .await
+                    if let Err(e) = webconfig::serve(
+                        listener, settings, catalog, connector, voices_dir, debug, music,
+                    )
+                    .await
                     {
                         log::error!("config page stopped: {e:#}");
                     }

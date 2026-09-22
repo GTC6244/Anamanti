@@ -209,6 +209,21 @@ AMBIENT_MUSIC_WEB_IPC=/tmp/mpv-web.sock   # mpv IPC socket for url_play
 Executed end-to-end as far as is verifiable without live snapserver/librespot/mpv
 hardware and the Linux box:
 
+- **Config-page Music tab + process supervisor: implemented, tested, and
+  smoke-verified live.** The orchestrator's loopback config UI gained a **Music**
+  tab (`webconfig.rs` → `/music`) backed by a `MusicSupervisor`
+  (`orchestrator/src/music/supervisor.rs`) that **starts/stops snapserver,
+  librespot, and mpv** as managed child processes (`kill_on_drop`, per-process log
+  files) and shows **live snapserver status** (groups/streams/clients/volumes via
+  the JSON-RPC client) plus a **play-a-URL** box (mpv IPC). Endpoints:
+  `GET /music/status.json`, `POST /music/{proc,play,stopweb}`. Gated behind
+  `AMBIENT_MUSIC` (the tab reports "disabled" otherwise). Launch commands +
+  fifo/log/bin paths are env-tunable (`AMBIENT_MUSIC_{BIN,RUN,LOG}_DIR`,
+  `AMBIENT_MUSIC_CONF`, `AMBIENT_SPOTIFY_DEVICE_NAME`). Verified with a live
+  binary: the page renders, and starting snapserver from the UI actually launched
+  it and the control client reported `reachable: true`. This is the
+  point-and-click alternative to the P1–P3 runbook / launchd agents.
+
 - **P4 — ducking: implemented & tested.** New `orchestrator/src/music/` module:
   a `SnapcastClient` (JSON-RPC over TCP :1705, ndjson), a `MusicDucker`
   (per-client attenuate-and-restore, idempotent), and an `MpvControl` (mpv JSON

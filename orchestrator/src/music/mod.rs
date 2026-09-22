@@ -18,6 +18,9 @@
 //! `crate::server` for where ducking hooks the turn lifecycle
 //! (`TurnEvent::Speaking` → duck, `TurnEvent::Finished` → restore).
 
+pub mod supervisor;
+pub use supervisor::{ManagedProc, MusicHub, MusicSupervisor, ProcSpec, ProcStatus};
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
