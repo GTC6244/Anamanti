@@ -279,6 +279,25 @@ actions".
 - [x] **Weather context**: inject a configured home location + units
       (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`) into the system prompt so
       "what's the weather" resolves "here" (`orchestrator::location_line`).
+- [x] **Canonical household record**: the orchestrator now holds a persisted
+      `Household` (home location + units + a roster of people with emails/phones,
+      `settings::Household`). Location/units seed from the env at first boot, then are
+      editable — along with the people — from the config page **Household tab**
+      (`/household`); the prompt reads location + roster from the per-turn settings
+      snapshot (`orchestrator::household_line`), so edits apply with no restart.
+- [x] **Directions origin tracks the live household location**: the `directions_lookup`
+      default origin now reads a shared `directions::LiveHomeLocation` handle
+      (`LlmFactory.home_location`) instead of the startup env, so editing the home
+      location on the Household tab changes the route origin with no backend rebuild
+      (`SharedSettings::apply_household` calls `set` on the same cell).
+- [x] **Speaker↔household reconciliation**: when an identified speaker's name matches a
+      household member (case-insensitive, `Household::member_matching`), the prompt's
+      identity line uses the roster's **canonical** name and notes their relationship
+      ("You are speaking with Alice (parent), who lives here.") —
+      `orchestrator::speaker_identity_line`.
+- [ ] Still open: expose the roster **to the device** (a Flutter settings screen +
+      Wyoming control frames) so it can be edited without the config page — larger,
+      cross-crate (FRB codegen + protocol frames in both crates + Flutter UI).
 - [x] Make **rig the default engine** + web search on by default (was opt-in).
 - [ ] Verify on hardware: ask "what's the weather" with `AMBIENT_HOME_LOCATION` set
       and a Tavily key — confirm the model calls `internet_search` and speaks a

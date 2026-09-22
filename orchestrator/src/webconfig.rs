@@ -24,6 +24,9 @@
 //! - `POST /config`  → apply a `{llm_backend?, llm_model?, tts_voice?}` change
 //!   (same JSON shape as the `ambient-set-settings` control frame; a `tts_voice`
 //!   of `null` clears the voice) and return the resulting settings.
+//! - `GET /household`   → the household editor page; `GET /household/status.json`
+//!   → the canonical home location + units + people; `POST /household/save` replaces
+//!   the whole record (location, units, roster).
 //! - `GET /chatlog`     → debug page; `GET /chatlog.json?limit=N` → recent turns.
 //! - `GET /prompts`     → debug page; `GET /prompts.json?limit=N` → recent LLM prompts.
 //! - `GET /sqlite`      → debug page; `GET /sqlite.json`  → the memory store rows.
@@ -42,7 +45,10 @@ use crate::llm::catalog::ModelCatalog;
 use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
 use crate::orchestrator::ServiceConnector;
-use crate::settings::{DriveUpdate, LlmEngine, SettingsUpdate, SharedSettings, SpotifyUpdate};
+use crate::settings::{
+    DriveUpdate, Household, HouseholdMember, LlmEngine, SettingsUpdate, SharedSettings,
+    SpotifyUpdate,
+};
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
 /// HelixDB). Cheaply cloneable — everything is behind an `Arc` or a small `PathBuf`.
@@ -148,6 +154,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <body>
   <nav class="nav">
     <a href="/" class="active">Config</a>
+    <a href="/household">Household</a>
     <a href="/music">Music</a>
     <a href="/drive">Photos</a>
     <a href="/chatlog">Chat log</a>
@@ -445,8 +452,9 @@ const SHELL_SCRIPT: &str = r#"
 
 /// Nav bar markup with `active` highlighted (same links as the config page).
 fn nav_html(active: &str) -> String {
-    const LINKS: [(&str, &str); 8] = [
+    const LINKS: [(&str, &str); 9] = [
         ("/", "Config"),
+        ("/household", "Household"),
         ("/music", "Music"),
         ("/drive", "Photos"),
         ("/chatlog", "Chat log"),
@@ -856,6 +864,90 @@ const DRIVE_BODY: &str = r#"<style>
   }
   $('save').addEventListener('click', save);
   $('link').addEventListener('click', link);
+  load();
+</script>"#;
+
+/// `/household` body — edit the canonical household + home information: the home
+/// location + units (grounds "here" for weather/nearby questions) and the roster of
+/// people who live here with their emails + phone numbers. A full-record save. Uses
+/// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
+const HOUSEHOLD_BODY: &str = r#"<style>
+  label { display:block; margin:1rem 0 0.25rem; font-weight:600; }
+  input, select { width:100%; max-width:36rem; padding:0.5rem; font:inherit; box-sizing:border-box; }
+  .status { margin-top:1rem; padding:0.6rem 0.8rem; border-radius:6px; min-height:1.2rem; max-width:36rem; }
+  .ok { background:rgba(46,160,67,0.15); } .err { background:rgba(248,81,73,0.15); }
+  .hint { opacity:0.6; font-weight:400; font-size:0.85rem; }
+  .member { border:1px solid rgba(128,128,128,0.3); border-radius:8px; padding:0.5rem 0.9rem 1rem; margin-top:1rem; max-width:36rem; }
+  .member .row { display:flex; justify-content:space-between; align-items:center; }
+  .member button { margin-top:0; padding:0.25rem 0.7rem; }
+</style>
+<p class="sub">Canonical context the assistant uses to ground answers: where "here" is (for weather and nearby questions) and who lives in the home, with their emails and phone numbers. Fix spellings, emails, and numbers here — changes apply live, no restart.</p>
+<label>Home location <span class="hint">e.g. "Austin, Texas" or a street address</span>
+  <input id="location" type="text" placeholder="(unset)" autocomplete="off">
+</label>
+<label>Measurement units
+  <select id="weather_units">
+    <option value="">(let the assistant choose)</option>
+    <option value="imperial">imperial (°F, miles)</option>
+    <option value="metric">metric (°C, km)</option>
+  </select>
+</label>
+<h2 style="margin-top:1.5rem;font-size:1.1rem;">People</h2>
+<div id="members"></div>
+<div class="toolbar"><button id="add">Add person</button></div>
+<div class="toolbar"><button id="save">Save</button></div>
+<div id="status" class="status"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function memberRow(m){
+    m = m || {};
+    const div = document.createElement('div');
+    div.className = 'member';
+    div.innerHTML =
+      '<div class="row"><label style="margin-top:0.5rem;">Name</label><button type="button" class="rm">Remove</button></div>' +
+      '<input class="m-name" type="text" placeholder="Name" value="'+esc(m.name)+'">' +
+      '<label>Relationship <span class="hint">optional, e.g. parent, kid, roommate</span></label>' +
+      '<input class="m-rel" type="text" value="'+esc(m.relationship)+'">' +
+      '<label>Emails <span class="hint">comma-separated</span></label>' +
+      '<input class="m-emails" type="text" value="'+esc((m.emails||[]).join(', '))+'">' +
+      '<label>Phone numbers <span class="hint">comma-separated</span></label>' +
+      '<input class="m-phones" type="text" value="'+esc((m.phones||[]).join(', '))+'">';
+    div.querySelector('.rm').addEventListener('click', () => div.remove());
+    return div;
+  }
+  function splitList(v){ return v.split(',').map(s=>s.trim()).filter(Boolean); }
+  async function load(){
+    try{
+      const j = await apiJSON('/household/status.json');
+      $('location').value = j.location || '';
+      $('weather_units').value = j.weather_units || '';
+      const box = $('members'); box.innerHTML = '';
+      (j.members||[]).forEach(m => box.appendChild(memberRow(m)));
+    }catch(e){ show(false, 'Could not load: ' + e); }
+  }
+  async function save(){
+    const members = [...document.querySelectorAll('#members .member')].map(d => ({
+      name: d.querySelector('.m-name').value.trim(),
+      relationship: d.querySelector('.m-rel').value.trim() || null,
+      emails: splitList(d.querySelector('.m-emails').value),
+      phones: splitList(d.querySelector('.m-phones').value),
+    })).filter(m => m.name);
+    const body = {
+      location: $('location').value.trim() || null,
+      weather_units: $('weather_units').value || null,
+      members,
+    };
+    try{
+      const j = await apiJSON('/household/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('add').addEventListener('click', () => $('members').appendChild(memberRow({})));
+  $('save').addEventListener('click', save);
   load();
 </script>"#;
 
@@ -1308,6 +1400,80 @@ fn drive_status_json(settings: &SharedSettings) -> String {
     .to_string()
 }
 
+/// `GET /household/status.json` — the canonical household record (home location +
+/// units + roster). Contact details are shown so they can be edited on the page;
+/// this surface is loopback + unauthenticated by design (same as the rest).
+fn household_status_json(settings: &SharedSettings) -> String {
+    let h = settings.household();
+    let members: Vec<Value> = h
+        .members
+        .iter()
+        .map(|m| {
+            json!({
+                "name": m.name,
+                "emails": m.emails,
+                "phones": m.phones,
+                "relationship": m.relationship,
+            })
+        })
+        .collect();
+    json!({
+        "ok": true,
+        "location": h.location,
+        "weather_units": h.weather_units,
+        "members": members,
+    })
+    .to_string()
+}
+
+/// `POST /household/save` — replace the whole household record (location, units,
+/// roster). The value is sanitized on apply (trim, drop blanks / nameless members).
+fn household_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let opt_str = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let str_list = |v: Option<&Value>| {
+        v.and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let members = data
+        .get("members")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|m| HouseholdMember {
+                    name: opt_str(m.get("name")).unwrap_or_default(),
+                    emails: str_list(m.get("emails")),
+                    phones: str_list(m.get("phones")),
+                    relationship: opt_str(m.get("relationship")),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let household = Household {
+        location: opt_str(data.get("location")),
+        weather_units: opt_str(data.get("weather_units")),
+        members,
+    };
+    settings.apply_household(&household);
+    household_status_json(settings)
+}
+
 /// `POST /music/proc` — body `{ proc, action }` starts/stops a managed process.
 async fn music_proc_json(music: Option<&MusicHub>, body: &[u8]) -> String {
     let Some(hub) = music else {
@@ -1596,6 +1762,21 @@ fn route(
             "200 OK",
             "text/html; charset=utf-8",
             INDEX_HTML.as_bytes().to_vec(),
+        ),
+        ("GET", "/household") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/household", "Household", HOUSEHOLD_BODY).into_bytes(),
+        ),
+        ("GET", "/household/status.json") => (
+            "200 OK",
+            "application/json",
+            household_status_json(settings).into_bytes(),
+        ),
+        ("POST", "/household/save") => (
+            "200 OK",
+            "application/json",
+            household_save_json(settings, body).into_bytes(),
         ),
         ("GET", "/drive") => (
             "200 OK",
@@ -2133,6 +2314,47 @@ mod tests {
     fn invalid_json_is_a_400() {
         let (status, _c, _b) = route("POST", "/config", b"not json", &settings());
         assert_eq!(status, "400 Bad Request");
+    }
+
+    #[test]
+    fn household_page_and_status_are_served() {
+        let s = settings();
+        let (status, ctype, body) = route("GET", "/household", b"", &s);
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        assert!(String::from_utf8_lossy(&body).contains("Household"));
+
+        let v: Value = serde_json::from_str(&household_status_json(&s)).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["members"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn household_save_round_trips_through_the_route() {
+        let s = settings();
+        let body = br#"{"location":"  Austin, TX  ","weather_units":"imperial",
+            "members":[
+              {"name":" Alice ","emails":["alice@example.com"," "],"phones":["+1 555 0001"],"relationship":" parent "},
+              {"name":"   ","emails":["ghost@example.com"]}
+            ]}"#;
+        let (status, ctype, out) = route("POST", "/household/save", body, &s);
+        assert_eq!(status, "200 OK");
+        assert_eq!(ctype, "application/json");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        // Location trimmed, the nameless member dropped, blank email dropped.
+        assert_eq!(v["location"], "Austin, TX");
+        assert_eq!(v["weather_units"], "imperial");
+        let members = v["members"].as_array().unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0]["name"], "Alice");
+        assert_eq!(members[0]["emails"][0], "alice@example.com");
+        assert_eq!(members[0]["emails"].as_array().unwrap().len(), 1);
+        assert_eq!(members[0]["relationship"], "parent");
+
+        // It landed in the live settings, so the per-turn prompt snapshot sees it.
+        let h = s.household();
+        assert_eq!(h.location.as_deref(), Some("Austin, TX"));
+        assert_eq!(h.members.len(), 1);
     }
 
     #[test]

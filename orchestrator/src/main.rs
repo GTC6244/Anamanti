@@ -121,8 +121,10 @@ async fn run() -> Result<()> {
         config.turn_timeout,
     )
     .with_chatlog(chatlog.clone())
-    .with_promptlog(promptlog.clone())
-    .with_location(config.home_location.clone(), config.weather_units.clone());
+    .with_promptlog(promptlog.clone());
+    // Home location + household roster are grounded from the runtime settings
+    // snapshot each turn (seeded from AMBIENT_HOME_LOCATION at boot, then editable
+    // from the config dashboard's Household tab), not fixed onto the pipeline here.
 
     // Read-only handle onto the GraphRAG store for the debug GUI (`/helix`); stays
     // `None` on the SQLite backend or when the graph backend fails to initialize.

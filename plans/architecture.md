@@ -249,6 +249,20 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `memory::GraphView` seam; reports "disabled" on the SQLite backend). Each has a
   `*.json` data endpoint the page fetches. No auth — keep the config address on a
   trusted network.
+- **Household / home context** (`settings::Household`, editable at `GET /household`
+  on the config page): a persisted record of the home **location + units** and a
+  **roster of people** (name, emails, phones, relationship). Location/units seed from
+  `AMBIENT_HOME_LOCATION`/`AMBIENT_WEATHER_UNITS` at first boot, then are editable
+  (with the people) from the Household tab and persisted to `ambient_settings.json`
+  (0600 — PII). It is read from the **per-turn settings snapshot** and injected into
+  the system prompt (`orchestrator::location_line` grounds an unqualified "here";
+  `household_line` lists who lives here so the model can address them and has their
+  contact details), so page edits take effect with no restart. The **directions
+  tool's default origin** reads the same location via a shared `LiveHomeLocation`
+  handle (`directions`), so a location edit re-homes routing without rebuilding the
+  backend. An **identified speaker** (speaker_id_plan.md) whose name matches a roster
+  member is reconciled to it (`Household::member_matching`), so the identity line uses
+  the canonical name + relationship.
 - **Memory management** is dual: the settings list (this control protocol) plus
   voice ("remember…", "forget that") applied on the Mac during a turn (Phase 4).
 - **On-device Google OAuth** for the photo folder is wired as a seam

@@ -13,7 +13,7 @@ use ambient_orchestrator::llm::anthropic_auth::AnthropicAuth;
 use ambient_orchestrator::memory::{MemoryKind, MemorySource, MemoryStore};
 use ambient_orchestrator::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
 use ambient_orchestrator::settings::{
-    DriveConfig, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings, SpotifyConfig,
+    DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings, SpotifyConfig,
     DEFAULT_END_SILENCE_MS, DEFAULT_VOICE_RMS_THRESHOLD,
 };
 use ambient_orchestrator::wyoming::protocol::{read_event, types, write_event, WyomingEvent};
@@ -34,6 +34,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         openai_api_key: None,
         openai_max_tokens: 128,
         anthropic_token: None,
+        home_location: ambient_orchestrator::directions::LiveHomeLocation::default(),
         spotify: None,
     };
     let (llm, backend, model) = factory
@@ -64,6 +65,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             end_silence_ms: DEFAULT_END_SILENCE_MS,
             voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
             drive: DriveConfig::default(),
+            household: Household::default(),
             spotify: SpotifyConfig::default(),
         },
     );

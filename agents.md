@@ -165,7 +165,14 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     instant. `0` disables caching / always re-fetches.)
 #   AMBIENT_HOME_LOCATION="Austin, Texas"  AMBIENT_WEATHER_UNITS=imperial|metric
 #     (grounds "here" for weather/location questions in the system prompt; also the
-#     default origin + distance units for the directions tool below)
+#     default origin + distance units for the directions tool below). These now only
+#     *seed* the canonical Household record at first boot: location + units (and the
+#     people roster) are persisted in ambient_settings.json and edited live from the
+#     config page **Household tab** (`/household`), so a persisted value wins over the
+#     env at the next boot. The prompt reads location + roster from the per-turn
+#     settings snapshot, so edits apply without a restart. The directions tool's
+#     default origin also tracks this live household location (a shared
+#     `LiveHomeLocation` handle), so editing it re-homes routing with no restart.
 #   AMBIENT_DIRECTIONS_PROVIDER=mapbox  MAPBOX_TOKEN=<token>  (enables the rig-engine
 #     `directions_lookup` tool — real distance, travel time, and LIVE TRAFFIC between
 #     two places via Mapbox Geocoding v6 + Directions v5 `driving-traffic`. Unset token
@@ -181,8 +188,8 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     "Ambient") is the librespot device to control — see the AMBIENT_MUSIC_* block.)
 #   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
 #     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
-#   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /chatlog,
-#     /prompts, /sqlite, /helix, /drive — no auth; `off` disables)
+#   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /household,
+#     /chatlog, /prompts, /sqlite, /helix, /drive — no auth; `off` disables)
 #   AMBIENT_GOOGLE_DRIVE_CLIENT_ID / AMBIENT_GOOGLE_DRIVE_CLIENT_SECRET (the Drive
 #     "Desktop app" OAuth client the orchestrator uses to run consent from the config
 #     page Photos tab; the device pulls the resulting token over Wyoming). Optional

@@ -39,7 +39,7 @@ use chrono::Local;
 
 use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, ReplyStream};
 use crate::calendar::CalendarSource;
-use crate::directions::{DirectionsConfig, DirectionsProvider, TravelMode};
+use crate::directions::{DirectionsConfig, DirectionsProvider, LiveHomeLocation, TravelMode};
 use crate::music::{SearchKind, SpotifyCommand, SpotifyController};
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
@@ -702,23 +702,25 @@ impl std::fmt::Display for DirectionsError {
 impl std::error::Error for DirectionsError {}
 
 /// Looks up a route via an injected [`DirectionsProvider`] so the tool is testable
-/// offline, mirroring [`CalendarLookup`]. Holds the default origin (the device's
-/// home location) and the preferred distance units.
+/// offline, mirroring [`CalendarLookup`]. Holds the live home location (read as the
+/// default origin when the user names only a destination) and the preferred distance
+/// units. Because the origin is read from [`LiveHomeLocation`] at call time, editing
+/// the household location takes effect without rebuilding the backend.
 pub struct DirectionsLookup {
     provider: Arc<dyn DirectionsProvider>,
-    default_origin: Option<String>,
+    home_location: LiveHomeLocation,
     imperial: bool,
 }
 
 impl DirectionsLookup {
     pub fn new(
         provider: Arc<dyn DirectionsProvider>,
-        default_origin: Option<String>,
+        home_location: LiveHomeLocation,
         imperial: bool,
     ) -> Self {
         Self {
             provider,
-            default_origin,
+            home_location,
             imperial,
         }
     }
@@ -750,8 +752,8 @@ impl PortableTool for DirectionsLookup {
 
     fn description(&self) -> String {
         let home = self
-            .default_origin
-            .as_deref()
+            .home_location
+            .get()
             .map(|h| format!(" The origin defaults to the device's home ({h}) when omitted."))
             .unwrap_or_default();
         format!(
@@ -792,7 +794,7 @@ impl PortableTool for DirectionsLookup {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .or_else(|| self.default_origin.clone())
+            .or_else(|| self.home_location.get())
             .ok_or_else(|| {
                 DirectionsError(
                     "no starting point given and no home location is configured".to_string(),
@@ -1012,7 +1014,7 @@ impl Tools {
         let directions = directions.map(|cfg| {
             Arc::new(DirectionsLookup::new(
                 cfg.provider,
-                cfg.default_origin,
+                cfg.home_location,
                 cfg.imperial,
             ))
         });
@@ -1101,15 +1103,20 @@ pub fn tools_from_config(
     web_search: bool,
     provider: &str,
     api_key: Option<&str>,
+    home_location: LiveHomeLocation,
     spotify: Option<Arc<dyn SpotifyController>>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
     // Calendar subscriptions are read from `AMBIENT_CALENDARS` (read-only web .ics);
     // absent → the calendar tool simply isn't advertised.
     let calendar = crate::calendar::from_env();
-    // Directions come from a routing provider (`MAPBOX_TOKEN`); absent → the
-    // directions tool simply isn't advertised.
-    let directions = crate::directions::from_env();
+    // directions tool simply isn't advertised. Its default origin reads from the live
+    // household location (`home_location`), so a config-page edit takes effect without
+    // a restart — inject the shared handle into the env-built config.
+    let directions = crate::directions::from_env().map(|mut cfg| {
+        cfg.home_location = home_location;
+        cfg
+    });
     // Spotify control is passed in from the live settings (`SpotifyConfig::controller`),
     // which is seeded from `AMBIENT_SPOTIFY_*` at boot and updated by the config-page
     // consent flow; `None` → the spotify_control tool isn't advertised.
@@ -1117,13 +1124,22 @@ pub fn tools_from_config(
 }
 
 /// Build the tool set from the environment (used by the example / env-driven
-/// default): `AMBIENT_SEARCH_PROVIDER` + `TAVILY_API_KEY`.
+/// default): `AMBIENT_SEARCH_PROVIDER` + `TAVILY_API_KEY`. The directions default
+/// origin is seeded from `AMBIENT_HOME_LOCATION` here (there is no live `Household`
+/// record on this env-only path).
 pub fn tools_from_flag(web_search: bool) -> Option<Arc<Tools>> {
     let provider = std::env::var("AMBIENT_SEARCH_PROVIDER").unwrap_or_default();
     let key = std::env::var("TAVILY_API_KEY").ok();
+    let home_location = LiveHomeLocation::new(std::env::var("AMBIENT_HOME_LOCATION").ok());
     // The env-driven path (example / smoke test) builds Spotify from env directly.
     let spotify = crate::music::spotify::from_env();
-    tools_from_config(web_search, &provider, key.as_deref(), spotify)
+    tools_from_config(
+        web_search,
+        &provider,
+        key.as_deref(),
+        home_location,
+        spotify,
+    )
 }
 
 // ===========================================================================
@@ -1657,7 +1673,7 @@ mod tests {
         });
         let directions = DirectionsConfig {
             provider: provider.clone(),
-            default_origin: Some("Home, Austin".to_string()),
+            home_location: LiveHomeLocation::new(Some("Home, Austin".to_string())),
             imperial: true,
         };
         let tools = Some(Arc::new(Tools::new(None, None, Some(directions), None)));
@@ -1693,7 +1709,7 @@ mod tests {
                 provider: Arc::new(StaticDirections {
                     seen_origin: std::sync::Mutex::new(None),
                 }),
-                default_origin: None,
+                home_location: LiveHomeLocation::default(),
                 imperial: false,
             }),
             None,
@@ -1702,6 +1718,36 @@ mod tests {
             .definitions
             .iter()
             .any(|d| d.name == DirectionsLookup::NAME));
+    }
+
+    /// The directions default origin reads the live household location, so an edit
+    /// (config page Household tab → `LiveHomeLocation::set`) changes the origin the
+    /// tool uses on the very next call — no backend rebuild.
+    #[tokio::test]
+    async fn directions_default_origin_tracks_live_home_location() {
+        let provider = Arc::new(StaticDirections {
+            seen_origin: std::sync::Mutex::new(None),
+        });
+        let home = LiveHomeLocation::new(Some("Austin, TX".to_string()));
+        let tool = DirectionsLookup::new(provider.clone(), home.clone(), true);
+
+        tool.invoke(&json!({ "destination": "the airport" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.seen_origin.lock().unwrap().as_deref(),
+            Some("Austin, TX")
+        );
+
+        // Edit the household location live — the next call uses the new origin.
+        home.set(Some("Boston, MA".to_string()));
+        tool.invoke(&json!({ "destination": "the airport" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.seen_origin.lock().unwrap().as_deref(),
+            Some("Boston, MA")
+        );
     }
 
     #[test]

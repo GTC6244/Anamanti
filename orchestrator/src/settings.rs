@@ -140,6 +140,99 @@ pub struct DriveUpdate {
     pub scope: Option<Option<String>>,
 }
 
+/// A person who lives in the home — the canonical household directory the
+/// orchestrator holds so tools and the LLM prompt have grounded context about who
+/// is here and how to reach them. Contact details are PII; they live in the `0600`
+/// settings file, so keep it on a trusted machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HouseholdMember {
+    /// The person's name as the assistant should address them. Required (an empty
+    /// name drops the member on save).
+    pub name: String,
+    /// Email addresses for this person (any number). Empty = none known.
+    #[serde(default)]
+    pub emails: Vec<String>,
+    /// Phone numbers for this person (any number). Empty = none known.
+    #[serde(default)]
+    pub phones: Vec<String>,
+    /// Optional relationship / role note (e.g. "parent", "kid", "roommate").
+    #[serde(default)]
+    pub relationship: Option<String>,
+}
+
+/// Canonical household + home information the orchestrator provides as context:
+/// **where** the home is (grounds an unqualified "here" for weather / nearby
+/// questions) and **who** lives in it (names + contact details). The location seeds
+/// from `AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS` at boot and then becomes
+/// editable from the config dashboard; the roster is dashboard-only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Household {
+    /// The home's physical location (e.g. "Austin, Texas" or a street address).
+    /// `None`/blank = unset (the prompt omits the location line).
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Preferred measurement units ("imperial" / "metric"). `None` = model's choice.
+    #[serde(default)]
+    pub weather_units: Option<String>,
+    /// The people who live in the home.
+    #[serde(default)]
+    pub members: Vec<HouseholdMember>,
+}
+
+impl Household {
+    /// The roster member whose name matches `name` (case-insensitive, trimmed), or
+    /// `None`. Used to reconcile an identified speaker (speaker_id_plan.md) with the
+    /// canonical household directory so the prompt can note who they are.
+    pub fn member_matching(&self, name: &str) -> Option<&HouseholdMember> {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        self.members
+            .iter()
+            .find(|m| m.name.trim().eq_ignore_ascii_case(needle))
+    }
+
+    /// True when nothing is configured — no location, units, or members.
+    pub fn is_empty(&self) -> bool {
+        self.location.as_deref().is_none_or(str::is_empty)
+            && self.weather_units.as_deref().is_none_or(str::is_empty)
+            && self.members.is_empty()
+    }
+
+    /// A cleaned copy: strings trimmed, blanks dropped, and any member without a
+    /// name removed (so a half-filled form row never becomes a nameless entry).
+    pub fn sanitized(&self) -> Household {
+        let clean_opt = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let clean_list = |v: &[String]| {
+            v.iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        };
+        Household {
+            location: clean_opt(&self.location),
+            weather_units: clean_opt(&self.weather_units),
+            members: self
+                .members
+                .iter()
+                .map(|m| HouseholdMember {
+                    name: m.name.trim().to_string(),
+                    emails: clean_list(&m.emails),
+                    phones: clean_list(&m.phones),
+                    relationship: clean_opt(&m.relationship),
+                })
+                .filter(|m| !m.name.is_empty())
+                .collect(),
+        }
+    }
+}
+
 /// Spotify voice-control credentials + linkage, owned by the orchestrator.
 ///
 /// Drives the rig-engine `spotify_control` tool (`crate::llm::rig`) over the
@@ -253,6 +346,10 @@ pub struct PersistedSettings {
     /// older files.
     #[serde(default)]
     pub drive: DriveConfig,
+    /// Canonical household + home information (location, units, people). Defaulted
+    /// (empty) for older files; seeded from env at boot when absent.
+    #[serde(default)]
+    pub household: Household,
     /// Spotify voice-control credentials + linkage. Defaulted (empty) for older
     /// files.
     #[serde(default)]
@@ -329,6 +426,12 @@ pub struct LlmFactory {
     /// Subscription (OAuth) token source for Anthropic, used when the auth mode is
     /// `Subscription`. Shared with the model catalog so both authenticate the same.
     pub anthropic_token: Option<Arc<AnthropicTokenProvider>>,
+    /// Live home location shared with every rebuilt backend's `directions_lookup`
+    /// tool as its default origin. Held here (not per-backend) so a household-location
+    /// edit — [`SharedSettings::apply_household`] calls `set` on this same cell —
+    /// changes the directions origin without rebuilding the LLM. Seeded from the
+    /// [`Household`] record at boot.
+    pub home_location: crate::directions::LiveHomeLocation,
     /// The live Spotify controller for the `spotify_control` tool, or `None` when
     /// Spotify isn't linked. Set from the current [`SpotifyConfig`] on every
     /// (re)build so the tool reflects the latest consent without re-reading env.
@@ -400,6 +503,7 @@ impl LlmFactory {
                                     web_search,
                                     search_provider,
                                     search_api_key,
+                                    self.home_location.clone(),
                                     self.spotify.clone(),
                                 ),
                             )?),
@@ -443,6 +547,7 @@ impl LlmFactory {
                             web_search,
                             search_provider,
                             search_api_key,
+                            self.home_location.clone(),
                             self.spotify.clone(),
                         ),
                     )?),
@@ -494,6 +599,9 @@ pub struct RuntimeSettings {
     /// Google Drive photo-slideshow credentials + linkage (orchestrator-owned;
     /// pulled by the device over Wyoming). Orthogonal to the LLM rebuild path.
     pub drive: DriveConfig,
+    /// Canonical household + home information (location, units, people) injected
+    /// into the per-turn prompt. Orthogonal to the LLM rebuild path.
+    pub household: Household,
     /// Spotify voice-control credentials + linkage. Unlike Drive, a change here
     /// rebuilds the backend (via [`SpotifyConfig::controller`]) so the
     /// `spotify_control` tool is advertised/withdrawn live.
@@ -599,6 +707,7 @@ impl SharedSettings {
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
             drive: s.drive.clone(),
+            household: s.household.clone(),
             spotify: s.spotify.clone(),
         }
     }
@@ -620,6 +729,7 @@ impl SharedSettings {
             openai_api_key: None,
             openai_max_tokens: 1024,
             anthropic_token: None,
+            home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
         };
         Self::new(
@@ -639,6 +749,7 @@ impl SharedSettings {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                household: Household::default(),
                 spotify: SpotifyConfig::default(),
             },
         )
@@ -819,6 +930,38 @@ impl SharedSettings {
         self.inner.read().unwrap().drive.clone()
     }
 
+    /// A snapshot of the live household + home information (location, units, people).
+    /// Read per-turn when assembling the prompt and by the config dashboard. Cheap
+    /// clone.
+    pub fn household(&self) -> Household {
+        self.inner.read().unwrap().household.clone()
+    }
+
+    /// Replace the whole household record and persist it (best-effort, 0600). The
+    /// dashboard household form is a full-record save (edit location/units + the
+    /// roster together), so this sets rather than field-diffs; the value is
+    /// [`Household::sanitized`] first (trim, drop blanks / nameless members). Never
+    /// rebuilds the LLM — household is orthogonal to the backend. Returns the cleaned
+    /// value that was stored.
+    pub fn apply_household(&self, household: &Household) -> Household {
+        let cleaned = household.sanitized();
+        // Point the directions tool's live default origin at the new home location.
+        // The factory's handle is the same cell every rebuilt backend's tool clones,
+        // so this takes effect immediately without rebuilding the LLM.
+        self.factory.home_location.set(cleaned.location.clone());
+        let mut w = self.inner.write().unwrap();
+        w.household = cleaned.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        cleaned
+    }
+
     /// Apply a Drive config change and persist it (best-effort, 0600). Drive is
     /// orthogonal to the LLM backend, so this never rebuilds anything. Empty-string
     /// sets are treated as clears. Returns the resulting [`DriveConfig`].
@@ -941,6 +1084,7 @@ mod tests {
             openai_api_key: None,
             openai_max_tokens: 256,
             anthropic_token: None,
+            home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
         }
     }
@@ -978,6 +1122,7 @@ mod tests {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                household: Household::default(),
                 spotify: SpotifyConfig::default(),
             },
         )
@@ -1063,6 +1208,7 @@ mod tests {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                household: Household::default(),
                 spotify: SpotifyConfig::default(),
             },
             Some(path.clone()),
@@ -1209,6 +1355,7 @@ mod tests {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                household: Household::default(),
                 spotify: SpotifyConfig::default(),
             },
             Some(path.clone()),
@@ -1264,6 +1411,37 @@ mod tests {
     }
 
     #[test]
+    fn household_sanitize_trims_and_drops_blanks_and_nameless() {
+        let messy = Household {
+            location: Some("  Austin, Texas  ".into()),
+            weather_units: Some("   ".into()), // blank → cleared
+            members: vec![
+                HouseholdMember {
+                    name: "  Alice  ".into(),
+                    emails: vec![" alice@example.com ".into(), "".into()],
+                    phones: vec!["+1 555 0001".into()],
+                    relationship: Some(" parent ".into()),
+                },
+                // No name → dropped entirely.
+                HouseholdMember {
+                    name: "   ".into(),
+                    emails: vec!["ghost@example.com".into()],
+                    ..Default::default()
+                },
+            ],
+        };
+        let clean = messy.sanitized();
+        assert_eq!(clean.location.as_deref(), Some("Austin, Texas"));
+        assert_eq!(clean.weather_units, None);
+        assert_eq!(clean.members.len(), 1);
+        assert_eq!(clean.members[0].name, "Alice");
+        assert_eq!(clean.members[0].emails, vec!["alice@example.com"]);
+        assert_eq!(clean.members[0].relationship.as_deref(), Some("parent"));
+        assert!(!clean.is_empty());
+        assert!(Household::default().is_empty());
+    }
+
+    #[test]
     fn spotify_config_controller_only_builds_when_linked() {
         let mut c = SpotifyConfig::default();
         assert!(!c.configured() && !c.linked() && c.controller().is_none());
@@ -1276,13 +1454,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_spotify_links_and_persists() {
+    fn apply_household_persists_and_reloads() {
         let path = std::env::temp_dir().join(format!(
-            "ambient_spotify_test_{}_{:?}.json",
+            "ambient_household_{}_{:?}.json",
             std::process::id(),
             std::thread::current().id()
         ));
         let _ = std::fs::remove_file(&path);
+
         let factory = factory_with_key(None);
         let (llm, label, model) = factory
             .build(
@@ -1312,6 +1491,73 @@ mod tests {
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 drive: DriveConfig::default(),
+                household: Household::default(),
+                spotify: SpotifyConfig::default(),
+            },
+            Some(path.clone()),
+        );
+
+        let stored = s.apply_household(&Household {
+            location: Some("Boston, MA".into()),
+            weather_units: Some("imperial".into()),
+            members: vec![HouseholdMember {
+                name: "Bob".into(),
+                emails: vec!["bob@example.com".into()],
+                phones: vec!["+1 555 0002".into()],
+                relationship: None,
+            }],
+        });
+        assert_eq!(stored.members.len(), 1);
+        assert_eq!(s.household().location.as_deref(), Some("Boston, MA"));
+
+        // It round-trips through the 0600 file so a restart keeps it.
+        let p = load_persisted(&path).expect("settings file should exist");
+        assert_eq!(p.household.location.as_deref(), Some("Boston, MA"));
+        assert_eq!(p.household.weather_units.as_deref(), Some("imperial"));
+        assert_eq!(p.household.members[0].name, "Bob");
+        assert_eq!(p.household.members[0].emails, vec!["bob@example.com"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_spotify_links_and_persists() {
+        let path = std::env::temp_dir().join(format!(
+            "ambient_spotify_test_{}_{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let factory = factory_with_key(None);
+        let (llm, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+                AnthropicAuth::ApiKey,
+            )
+            .unwrap();
+        let s = SharedSettings::new_persistent(
+            factory,
+            RuntimeSettings {
+                llm,
+                engine: LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
+                llm_backend: label,
+                llm_model: model,
+                anthropic_api_key: None,
+                openai_api_key: None,
+                anthropic_auth: AnthropicAuth::ApiKey,
+                tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                drive: DriveConfig::default(),
+                household: Household::default(),
                 spotify: SpotifyConfig::default(),
             },
             Some(path.clone()),

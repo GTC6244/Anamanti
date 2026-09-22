@@ -24,7 +24,7 @@ use crate::music::{
     SnapcastClient,
 };
 use crate::settings::{
-    load_persisted, DriveConfig, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
+    load_persisted, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
     SpotifyConfig,
 };
 
@@ -761,6 +761,9 @@ impl Config {
             openai_api_key: env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
             openai_max_tokens,
             anthropic_token: Some(Arc::new(AnthropicTokenProvider::new())),
+            // Seeded from the resolved Household in `shared_settings` (env → household
+            // → this handle); starts empty here.
+            home_location: crate::directions::LiveHomeLocation::default(),
             // Seeded per-build from the resolved Spotify config in `shared_settings`
             // (and refreshed by `apply`/`apply_spotify`), never from env here.
             spotify: None,
@@ -837,6 +840,19 @@ impl Config {
         }
     }
 
+    /// The initial household + home information seeded from the environment
+    /// (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`). The member roster has no
+    /// env form — it is dashboard-only — so it starts empty. A persisted file
+    /// overlays these at boot (see [`Self::shared_settings`]), so a location edited
+    /// on the config page wins over the env seed.
+    pub fn initial_household(&self) -> Household {
+        Household {
+            location: self.home_location.clone(),
+            weather_units: self.weather_units.clone(),
+            members: Vec::new(),
+        }
+    }
+
     /// Initial Spotify voice-control config seeded from the environment
     /// (`AMBIENT_SPOTIFY_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` /
     /// `_DEVICE_NAME`). Any of these may instead be set (or overridden) at runtime
@@ -893,6 +909,10 @@ impl Config {
         // Google Drive photo config: env seed (client creds/folders), overlaid by
         // any persisted values below (the refresh token + page-set fields win).
         let mut drive = self.initial_drive();
+        // Household + home info: env seed (location/units from AMBIENT_HOME_LOCATION /
+        // AMBIENT_WEATHER_UNITS), overlaid by any persisted values below so a location
+        // fixed on the config page — and the dashboard-only member roster — win.
+        let mut household = self.initial_household();
         // Spotify voice-control config: same env-seed-then-persist-overlay pattern.
         let mut spotify = self.initial_spotify();
 
@@ -936,6 +956,20 @@ impl Config {
             if p.drive.scope.is_some() {
                 drive.scope = p.drive.scope;
             }
+            // Overlay persisted household onto the env seed: a persisted location /
+            // units wins (fixed on the config page), but keep the env seed for any
+            // field the persisted file leaves empty so AMBIENT_HOME_LOCATION still
+            // applies after an older file (no household) is loaded. The member roster
+            // is dashboard-only, so a persisted list always replaces the empty seed.
+            if p.household.location.is_some() {
+                household.location = p.household.location;
+            }
+            if p.household.weather_units.is_some() {
+                household.weather_units = p.household.weather_units;
+            }
+            if !p.household.members.is_empty() {
+                household.members = p.household.members;
+            }
             // Overlay persisted Spotify fields onto the env seed (same rule as Drive:
             // a persisted value wins; keep the env seed for anything left empty).
             if p.spotify.client_id.is_some() {
@@ -954,6 +988,12 @@ impl Config {
                 spotify.scope = p.spotify.scope;
             }
         }
+
+        // Seed the directions tool's live default origin from the resolved household
+        // location (env → household → this shared handle). The factory clone below
+        // shares the same cell, so the initial backend's tool — and every later
+        // rebuild — reads it; `apply_household` updates it on a config-page edit.
+        factory.home_location.set(household.location.clone());
 
         // Build the initial backend with the resolved live keys (env overlaid by any
         // persisted key), never re-reading the environment during a later swap.
@@ -991,6 +1031,7 @@ impl Config {
                 end_silence_ms,
                 voice_rms_threshold,
                 drive,
+                household,
                 spotify,
             },
             persist_path,
