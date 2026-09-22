@@ -18,7 +18,9 @@
 //! `crate::server` for where ducking hooks the turn lifecycle
 //! (`TurnEvent::Speaking` → duck, `TurnEvent::Finished` → restore).
 
+pub mod spotify;
 pub mod supervisor;
+pub use spotify::{SearchKind, SpotifyCommand, SpotifyController, SpotifyWebApi};
 pub use supervisor::{ManagedProc, MusicHub, MusicSupervisor, ProcSpec, ProcStatus};
 
 use std::net::SocketAddr;

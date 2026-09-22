@@ -47,6 +47,7 @@ use crate::music::{ManagedProc, MusicHub};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     DriveUpdate, Household, HouseholdMember, LlmEngine, SettingsUpdate, SharedSettings,
+    SpotifyUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -674,6 +675,17 @@ const MUSIC_BODY: &str = r#"<p class="sub">Start/stop the local music processes 
   <h2>Snapserver</h2>
   <div id="snap" class="muted">Loading…</div>
 </div>
+<h2 style="margin-top:1.5rem">Spotify (voice control)</h2>
+<div id="sp" class="muted">Loading…</div>
+<div class="toolbar" style="margin-top:0.4rem; flex-wrap:wrap; gap:0.4rem">
+  <input id="sp_cid" type="text" placeholder="Client ID" style="min-width:16rem;padding:0.35rem 0.6rem">
+  <input id="sp_secret" type="password" placeholder="Client secret (blank = keep)" style="min-width:16rem;padding:0.35rem 0.6rem">
+  <input id="sp_dev" type="text" placeholder="Device name (default Ambient)" style="min-width:12rem;padding:0.35rem 0.6rem">
+  <button onclick="spotifySave()">Save</button>
+  <button onclick="spotifyLink()">Connect Spotify</button>
+  <span id="spmsg" class="muted"></span>
+</div>
+<p class="muted" style="margin:0.3rem 0 0">Requires Spotify <b>Premium</b>. First register <code>http://127.0.0.1:8888/callback</code> as a Redirect URI in your Spotify app. "Connect Spotify" opens a browser on the Mac; approve access, then return here. The <code>spotify_control</code> voice tool activates immediately on success.</p>
 <script>
 async function proc(key, action){
   try{
@@ -741,7 +753,43 @@ async function load(){
   }
   snap.innerHTML = s + '</tbody></table>';
 }
+async function spotifyLoad(){
+  try{
+    const j = await getJSON('/spotify/status.json');
+    const el = document.getElementById('sp');
+    const state = j.linked
+      ? '<span class="badge" style="background:rgba(46,160,67,0.2)">linked — tool active</span>'
+      : (j.configured ? '<span class="badge">credentials set, not linked</span>'
+                      : '<span class="badge">no credentials</span>');
+    el.innerHTML = 'Status: ' + state + ' &nbsp; device: <code>' + esc(j.device_name || 'Ambient') + '</code>';
+    if(j.device_name) document.getElementById('sp_dev').placeholder = esc(j.device_name);
+  }catch(e){ document.getElementById('sp').textContent = 'Request failed: ' + e; }
+}
+async function spotifySave(){
+  const msg = document.getElementById('spmsg'); msg.textContent = 'Saving…';
+  const body = {
+    client_id: document.getElementById('sp_cid').value.trim(),
+    client_secret: document.getElementById('sp_secret').value,
+    device_name: document.getElementById('sp_dev').value.trim(),
+  };
+  try{
+    const r = await fetch('/spotify/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const j = await r.json(); msg.textContent = j.ok ? 'Saved.' : (j.message || 'Error');
+    document.getElementById('sp_secret').value = '';
+    spotifyLoad();
+  }catch(e){ msg.textContent = 'Request failed: ' + e; }
+}
+async function spotifyLink(){
+  const msg = document.getElementById('spmsg');
+  msg.textContent = 'Opening a browser on the Mac — approve access, then return here…';
+  try{
+    const r = await fetch('/spotify/link', {method:'POST'});
+    const j = await r.json(); msg.textContent = j.ok ? (j.message || 'Linked.') : (j.message || 'Error');
+    spotifyLoad();
+  }catch(e){ msg.textContent = 'Request failed: ' + e; }
+}
 load();
+spotifyLoad();
 </script>"#;
 
 /// `/drive` body — link a Google Drive folder for the idle photo slideshow. The
@@ -1096,6 +1144,35 @@ async fn handle(
     // times out — fine for a single admin request on the loopback page.
     if method == "POST" && path == "/drive/link" {
         let payload = drive_link_json(&settings).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Spotify voice-control linkage status (booleans + device name; never secrets).
+    if method == "GET" && path == "/spotify/status.json" {
+        let payload = spotify_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the Spotify app credentials + device name (no consent yet).
+    if method == "POST" && path == "/spotify/save" {
+        let payload = spotify_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Run the one-time Spotify OAuth consent (opens a browser on the Mac) and store
+    // the resulting refresh token. Blocks this connection until consent completes or
+    // times out — fine for a single admin request on the loopback page.
+    if method == "POST" && path == "/spotify/link" {
+        let payload = spotify_link_json(&settings).await;
         return write_response(
             &mut stream,
             "200 OK",
@@ -1583,6 +1660,90 @@ async fn drive_link_json(settings: &SharedSettings) -> String {
         "linked": now.linked(),
         "folder_ids": now.folder_ids,
         "verify": verify,
+    })
+    .to_string()
+}
+
+/// `GET /spotify/status.json` — the Spotify voice-control linkage state for the
+/// `/music` page. Reports only booleans + the device name; the client secret and
+/// refresh token are never included.
+fn spotify_status_json(settings: &SharedSettings) -> String {
+    let s = settings.spotify();
+    json!({
+        "ok": true,
+        "configured": s.configured(),
+        "linked": s.linked(),
+        "client_id_set": s.client_id.as_deref().is_some_and(|v| !v.is_empty()),
+        "client_secret_set": s.client_secret.as_deref().is_some_and(|v| !v.is_empty()),
+        "has_refresh_token": s.refresh_token.as_deref().is_some_and(|v| !v.is_empty()),
+        "device_name": s.device_label(),
+    })
+    .to_string()
+}
+
+/// `POST /spotify/save` — set the Spotify app client id/secret and device name. A
+/// blank or absent credential is left unchanged (a page reload never wipes a stored
+/// secret). Applying rebuilds the LLM so the `spotify_control` tool tracks linkage.
+fn spotify_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    // Blank/absent = leave unchanged; a non-empty string sets the value.
+    let opt_set = |key: &str| match data.get(key).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+        _ => None,
+    };
+    settings.apply_spotify(&SpotifyUpdate {
+        client_id: opt_set("client_id"),
+        client_secret: opt_set("client_secret"),
+        device_name: opt_set("device_name"),
+        ..Default::default()
+    });
+    spotify_status_json(settings)
+}
+
+/// `POST /spotify/link` — run the one-time Spotify OAuth consent using the stored
+/// client credentials (opens a browser on the Mac) and store the refresh token.
+/// Requires the redirect `http://127.0.0.1:8888/callback` to be registered in the
+/// Spotify app. On success the `spotify_control` tool activates immediately.
+async fn spotify_link_json(settings: &SharedSettings) -> String {
+    let s = settings.spotify();
+    let (Some(cid), Some(secret)) = (
+        s.client_id.clone().filter(|v| !v.is_empty()),
+        s.client_secret.clone().filter(|v| !v.is_empty()),
+    ) else {
+        return json!({
+            "ok": false,
+            "message": "Set the Spotify client id and secret first (Save), then Connect.",
+        })
+        .to_string();
+    };
+    let outcome = match crate::spotify_consent::run_consent(
+        &cid,
+        &secret,
+        crate::spotify_consent::DEFAULT_CONSENT_PORT,
+        crate::spotify_consent::SPOTIFY_SCOPE,
+        std::time::Duration::from_secs(180),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => return json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    };
+    settings.apply_spotify(&SpotifyUpdate {
+        refresh_token: Some(Some(outcome.refresh_token)),
+        scope: Some(Some(outcome.scope)),
+        ..Default::default()
+    });
+    let now = settings.spotify();
+    json!({
+        "ok": true,
+        "message": "Spotify linked — the voice tool is live. Try \"play some Radiohead\".",
+        "linked": now.linked(),
+        "device_name": now.device_label(),
     })
     .to_string()
 }
@@ -2097,6 +2258,56 @@ mod tests {
         );
         assert_eq!(s.drive().client_secret.as_deref(), Some("keep-me"));
         assert_eq!(s.drive().folder_ids, vec!["1AbC".to_string()]);
+    }
+
+    #[test]
+    fn spotify_status_reports_unconfigured_by_default() {
+        let v: Value = serde_json::from_str(&spotify_status_json(&settings())).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["configured"], false);
+        assert_eq!(v["linked"], false);
+        assert_eq!(v["has_refresh_token"], false);
+        // The device name defaults to the librespot device name.
+        assert_eq!(v["device_name"], "Ambient");
+    }
+
+    #[test]
+    fn spotify_save_sets_creds_and_device_without_leaking_the_secret() {
+        let s = settings();
+        let body = br#"{"client_id":"spcid","client_secret":"sp-secret","device_name":"Kitchen"}"#;
+        let out = spotify_save_json(&s, body);
+        assert!(!out.contains("sp-secret"), "secret leaked: {out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["configured"], true, "client id + secret now set");
+        assert_eq!(v["client_secret_set"], true);
+        assert_eq!(v["linked"], false, "no refresh token yet");
+        assert_eq!(v["device_name"], "Kitchen");
+        // The live settings hold the real secret, but a status read never exposes it.
+        assert_eq!(s.spotify().client_secret.as_deref(), Some("sp-secret"));
+        assert!(!spotify_status_json(&s).contains("sp-secret"));
+    }
+
+    #[test]
+    fn spotify_save_blank_credential_leaves_the_stored_one_intact() {
+        let s = settings();
+        spotify_save_json(&s, br#"{"client_id":"spcid","client_secret":"keep-me"}"#);
+        // A page reload posting a blank secret must not wipe the stored one.
+        spotify_save_json(
+            &s,
+            br#"{"client_id":"spcid","client_secret":"","device_name":"Den"}"#,
+        );
+        assert_eq!(s.spotify().client_secret.as_deref(), Some("keep-me"));
+        assert_eq!(s.spotify().device_label(), "Den");
+    }
+
+    #[tokio::test]
+    async fn spotify_link_without_credentials_is_a_clear_error() {
+        // No client id/secret set → link returns a helpful message, never runs consent.
+        let s = settings();
+        let out = spotify_link_json(&s).await;
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(v["message"].as_str().unwrap().contains("client id"));
     }
 
     #[test]

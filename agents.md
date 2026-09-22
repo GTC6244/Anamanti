@@ -3,6 +3,8 @@
 Build guidance for AI coding agents (and humans) working in this repository.
 Read this together with [`architecture.md`](./plans/architecture.md) (the design) and
 [`Plan.MD`](./plans/Plan.MD) (phases, confirmed decisions, open questions).
+Feature-specific plans branch off these — e.g.
+[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the orchestrator).
 
 ---
 
@@ -79,8 +81,8 @@ orchestrator/  Everything that runs on the Mac. Rust orchestrator (crate
                `ambient_orchestrator`) — Wyoming server to the device + Wyoming
                client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory, mDNS.
 plans/         Design + planning docs: architecture.md (design, source of truth),
-               Plan.MD (phases + decision table), TODO.md, and the *_plan / rollout
-               notes.
+               Plan.MD (phases + decision table), TODO.md, the *_plan / rollout
+               notes, and MusicPlan.md (Spotify playback via the orchestrator).
 agents.md      This file (repo root).
 CLAUDE.md      Harness entry point; points here (repo root).
 README.md      Product overview + setup (repo root).
@@ -176,6 +178,14 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     two places via Mapbox Geocoding v6 + Directions v5 `driving-traffic`. Unset token
 #     → the tool isn't advertised. Origin defaults to AMBIENT_HOME_LOCATION; voice-only
 #     in v1. Only `mapbox` is supported today; MAPBOX_ACCESS_TOKEN is also accepted.)
+#   AMBIENT_SPOTIFY_CLIENT_ID / AMBIENT_SPOTIFY_CLIENT_SECRET / AMBIENT_SPOTIFY_REFRESH_TOKEN
+#     (enables the rig-engine `spotify_control` tool — voice play/pause/skip/queue/volume
+#     over the Spotify Web API, targeting the librespot Connect device. Requires Spotify
+#     PREMIUM. All three unset → the tool isn't advertised. Easiest setup: config page →
+#     Music tab → "Connect Spotify" (loopback OAuth consent; stores the refresh token in
+#     settings and activates the tool live). Env vars are the headless alternative — see
+#     the one-time runbook in plans/MusicPlan.md. AMBIENT_SPOTIFY_DEVICE_NAME (default
+#     "Ambient") is the librespot device to control — see the AMBIENT_MUSIC_* block.)
 #   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
 #     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
 #   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /household,

@@ -25,6 +25,7 @@ use crate::music::{
 };
 use crate::settings::{
     load_persisted, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
+    SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -763,6 +764,9 @@ impl Config {
             // Seeded from the resolved Household in `shared_settings` (env → household
             // → this handle); starts empty here.
             home_location: crate::directions::LiveHomeLocation::default(),
+            // Seeded per-build from the resolved Spotify config in `shared_settings`
+            // (and refreshed by `apply`/`apply_spotify`), never from env here.
+            spotify: None,
         }
     }
 
@@ -849,6 +853,27 @@ impl Config {
         }
     }
 
+    /// Initial Spotify voice-control config seeded from the environment
+    /// (`AMBIENT_SPOTIFY_CLIENT_ID` / `_SECRET` / `_REFRESH_TOKEN` /
+    /// `_DEVICE_NAME`). Any of these may instead be set (or overridden) at runtime
+    /// by the config-page consent flow; a persisted file overlays these at boot
+    /// (see [`Self::shared_settings`]). Requires Spotify Premium to actually play.
+    pub fn initial_spotify(&self) -> SpotifyConfig {
+        let env_opt = |k: &str| {
+            env::var(k)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        SpotifyConfig {
+            client_id: env_opt("AMBIENT_SPOTIFY_CLIENT_ID"),
+            client_secret: env_opt("AMBIENT_SPOTIFY_CLIENT_SECRET"),
+            refresh_token: env_opt("AMBIENT_SPOTIFY_REFRESH_TOKEN"),
+            device_name: env_opt("AMBIENT_SPOTIFY_DEVICE_NAME"),
+            scope: None,
+        }
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
@@ -888,6 +913,8 @@ impl Config {
         // AMBIENT_WEATHER_UNITS), overlaid by any persisted values below so a location
         // fixed on the config page — and the dashboard-only member roster — win.
         let mut household = self.initial_household();
+        // Spotify voice-control config: same env-seed-then-persist-overlay pattern.
+        let mut spotify = self.initial_spotify();
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -943,6 +970,23 @@ impl Config {
             if !p.household.members.is_empty() {
                 household.members = p.household.members;
             }
+            // Overlay persisted Spotify fields onto the env seed (same rule as Drive:
+            // a persisted value wins; keep the env seed for anything left empty).
+            if p.spotify.client_id.is_some() {
+                spotify.client_id = p.spotify.client_id;
+            }
+            if p.spotify.client_secret.is_some() {
+                spotify.client_secret = p.spotify.client_secret;
+            }
+            if p.spotify.refresh_token.is_some() {
+                spotify.refresh_token = p.spotify.refresh_token;
+            }
+            if p.spotify.device_name.is_some() {
+                spotify.device_name = p.spotify.device_name;
+            }
+            if p.spotify.scope.is_some() {
+                spotify.scope = p.spotify.scope;
+            }
         }
 
         // Seed the directions tool's live default origin from the resolved household
@@ -956,6 +1000,9 @@ impl Config {
         let mut build_factory = factory.clone();
         build_factory.anthropic_api_key = anthropic_api_key.clone();
         build_factory.openai_api_key = openai_api_key.clone();
+        // Seed the initial Spotify controller so the `spotify_control` tool is
+        // advertised at boot when the account is already linked (env or persisted).
+        build_factory.spotify = spotify.controller();
         let (llm, llm_backend, llm_model) = build_factory
             .build(
                 engine,
@@ -985,6 +1032,7 @@ impl Config {
                 voice_rms_threshold,
                 drive,
                 household,
+                spotify,
             },
             persist_path,
         ))
