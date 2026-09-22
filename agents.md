@@ -171,6 +171,12 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     two places via Mapbox Geocoding v6 + Directions v5 `driving-traffic`. Unset token
 #     → the tool isn't advertised. Origin defaults to AMBIENT_HOME_LOCATION; voice-only
 #     in v1. Only `mapbox` is supported today; MAPBOX_ACCESS_TOKEN is also accepted.)
+#   AMBIENT_SPOTIFY_CLIENT_ID / AMBIENT_SPOTIFY_CLIENT_SECRET / AMBIENT_SPOTIFY_REFRESH_TOKEN
+#     (enables the rig-engine `spotify_control` tool — voice play/pause/skip/queue/volume
+#     over the Spotify Web API, targeting the librespot Connect device. Requires Spotify
+#     PREMIUM. All three unset → the tool isn't advertised. Get the refresh token via the
+#     one-time consent runbook in plans/MusicPlan.md. AMBIENT_SPOTIFY_DEVICE_NAME (default
+#     "Ambient") is the librespot device to control — see the AMBIENT_MUSIC_* block.)
 #   AMBIENT_MEMORY_BACKEND=helix|sqlite (default helix/GraphRAG; needs OPENAI_API_KEY
 #     for embeddings and falls back to sqlite FTS if absent. sqlite = pure FTS recall)
 #   AMBIENT_CONFIG_ADDR=127.0.0.1:8730 (loopback config + debug pages: /chatlog,

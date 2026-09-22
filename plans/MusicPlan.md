@@ -3,10 +3,12 @@
 **Targets:** M4 Mac Mini (control + audio source) + Snapcast speakers on the LAN
 **Feature:** hands-free Spotify — *"play some Radiohead"* → music on the house speakers.
 
-> **Status:** Planning / pre-implementation (2026-09-22). Scope confirmed as a
-> **control-plane LLM tool on the orchestrator** driving a **librespot** Spotify
-> Connect endpoint, whose raw PCM is routed by **Snapcast** (separate PR). No
-> Spotify audio flows through the Wyoming TTS pipeline or the device.
+> **Status:** Voice control **implemented** (2026-09-22). The `spotify_control`
+> rig tool + Spotify Web API client (`orchestrator/src/music/spotify.rs`) ship on
+> top of PR 38's Snapcast transport + `librespot` supervisor. Remaining: obtain a
+> Premium refresh token (one-time consent, §8) and, optionally, a config-page
+> consent UI (§9). No Spotify audio flows through the Wyoming TTS pipeline or the
+> device — the tool is control-only.
 
 This plan reads together with [`Plan.MD`](./Plan.MD) (the tool-calling / rig
 engine decisions), [`architecture.md`](./architecture.md) (the design), and the
@@ -73,81 +75,99 @@ and be tested (queue a track from a phone onto the "Ambient" Connect device)
 
 ---
 
-## 3. `spotify_control` tool (control plane)
+## 3. `spotify_control` tool (control plane) — **implemented**
 
 A single tool with an `action` enum keeps the LLM surface small and the guidance
-tight (same pattern as `internet_search`):
+tight (same pattern as `internet_search`). Lives in `orchestrator/src/llm/rig.rs`
+(`SpotifyControl`, a real `PortableTool`) over the Web API client in
+`orchestrator/src/music/spotify.rs` (the `SpotifyController` trait — injected, so
+it is unit-tested with a fake, no network).
 
-- **Actions:** `play` (query = track/artist/album/playlist, free-text),
-  `pause`, `resume`, `next`, `previous`, `queue`, `set_volume`.
-- **Resolution:** `play` first hits the Web API **search** endpoint, picks the
-  top match for the requested type, then issues **start/resume playback** on the
-  target `device_id` (the librespot device).
-- **Target device:** resolved once from `AMBIENT_SPOTIFY_DEVICE_NAME` (default
-  `"Ambient"`) via `GET /me/player/devices`; cached, re-resolved on 404 (device
-  asleep/renamed).
-- **Errors surface as speech:** no active device, not Premium, nothing found →
-  a short spoken explanation, never a silent failure.
+- **Args:** `action` ∈ `{play, pause, resume, next, previous, queue, volume}`
+  (aliases accepted: `skip`→next, `back`→previous, `stop`→pause…), optional
+  `query`, optional `kind` ∈ `{track, artist, album, playlist}` (default
+  `track`), optional `volume_percent` (0–100, clamped).
+- **Resolution:** `play`/`queue` hit the Web API **search** endpoint (limit 1),
+  then issue playback — a `track` plays as `uris`, an artist/album/playlist as a
+  `context_uri`. `play` with no `query` resumes.
+- **Target device:** resolved by name from `AMBIENT_SPOTIFY_DEVICE_NAME` (default
+  `"Ambient"`) via `GET /v1/me/player/devices`; every control call passes that
+  `device_id`. The access token is refreshed from the refresh token and cached
+  until ~30 s before expiry.
+- **Errors surface as speech:** device not present ("is it powered on?"), nothing
+  found, or a Web API error become the tool result, so the model apologizes aloud
+  rather than failing silently. The error type implements `std::error::Error`
+  (rig requirement), mirroring `SearchError`.
 - **Guidance text:** a `tool_guidance` clause (like the calendar/search ones)
-  telling the model to use `spotify_control` for any "play / pause / skip / next
-  / put on / queue" music request rather than answering in prose.
-
-Errors implement `std::error::Error` (rig requirement), mirroring `SearchError`.
+  nudges the model to call `spotify_control` for any play/pause/skip/queue/volume
+  request instead of answering in prose.
 
 ---
 
-## 4. Configuration keys (env-driven, per `config.rs` convention)
+## 4. Configuration keys
+
+**Spotify control plane** (this feature; read by `music::spotify::from_env`):
 
 ```bash
-AMBIENT_SPOTIFY=on|off              # master toggle; off → tool not advertised (default off until shipped)
-AMBIENT_SPOTIFY_CLIENT_ID=…         # Spotify developer app
+AMBIENT_SPOTIFY_CLIENT_ID=…         # Spotify developer app (Premium account)
 AMBIENT_SPOTIFY_CLIENT_SECRET=…
-AMBIENT_SPOTIFY_REFRESH_TOKEN=…     # from one-time Authorization-Code consent
-AMBIENT_SPOTIFY_DEVICE_NAME=Ambient # librespot Connect device to target
-AMBIENT_SPOTIFY_INCLUDE_DEVICE=off  # add the Echo Show snapclient to the playback group
-AMBIENT_SPOTIFY_DUCK_ON_SPEECH=on   # lower music volume while the assistant speaks
+AMBIENT_SPOTIFY_REFRESH_TOKEN=…     # from the one-time consent in §8
+AMBIENT_SPOTIFY_DEVICE_NAME=Ambient # librespot Connect device to target (shared with librespot)
 ```
 
-Secrets never leave the Mac. When `AMBIENT_SPOTIFY` is unset/off, the tool is not
-advertised to the model (exactly like `calendar_lookup` when no calendars are set).
+The `spotify_control` tool is advertised **only when all three of ID/secret/
+refresh-token are set** (exactly like `calendar_lookup` needs `AMBIENT_CALENDARS`).
+Secrets never leave the Mac. Requires **Spotify Premium** (the Web API player
+endpoints are Premium-only).
+
+**Music transport + ducking** (PR 38 — `snapcast_routing_plan.md`, `config.rs`):
+
+```bash
+AMBIENT_MUSIC=on                    # master switch for the whole Snapcast/music feature
+AMBIENT_MUSIC_DUCK_ON_SPEECH=on     # lower the music group while the assistant speaks
+AMBIENT_MUSIC_DUCK_PERCENT=30       # duck-to level
+AMBIENT_MUSIC_STREAM=Spotify        # which snapserver stream/group to duck
+AMBIENT_MUSIC_INCLUDE_DEVICE=off    # add the Echo Show snapclient to the playback group
+```
+
+Ducking is already wired to the turn lifecycle in PR 38 and works regardless of
+who started playback — no extra work here.
 
 ---
 
-## 5. Phases (smallest coherent first)
+## 5. Phases / status
 
-1. **P1 — librespot + Snapcast bring-up (depends on Snapcast PR).** Stand up
-   librespot as a Connect device "Ambient" feeding the snapfifo; verify audio on
-   the house speakers by queuing from a phone. No orchestrator changes. Confirms
-   the audio path end-to-end before any code.
-2. **P2 — OAuth consent + token.** One-time Authorization-Code flow (small Mac
-   helper, twin of `tools/google_photo_consent.py`) → refresh token stored for
-   the orchestrator. Verify a raw `play` call against the device with `curl`.
-3. **P3 — `spotify_control` tool.** Implement the `PortableTool` + `definition()`
-   + guidance in `llm/rig.rs`; wire config in `config.rs`; `play`/`pause`/`next`
-   first, then `queue`/`set_volume`. Host tests with a mocked Web API client
-   (inject like `SearchProvider`).
-4. **P4 — Ducking.** On THINKING/SPEAKING, lower Spotify/Snapcast volume; restore
-   on return to IDLE. Behind `AMBIENT_SPOTIFY_DUCK_ON_SPEECH`.
-5. **P5 (optional) — Echo Show as snapclient.** Provision snapclient on the
-   device + group membership behind `AMBIENT_SPOTIFY_INCLUDE_DEVICE`; expose as a
-   settings toggle. No control-plane change.
-6. **P6 (nice-to-have) — Now-playing UI.** Push current track/artist to the
-   device via a state stream and render on the idle/active screen.
+1. **P1 — librespot + Snapcast bring-up.** ✅ **Done (PR 38).** librespot Connect
+   device "Ambient" → snapfifo → snapserver, supervised by the orchestrator.
+2. **P2 — OAuth consent + token.** ⏳ **Manual runbook ready (§8).** One-time
+   Authorization-Code flow → refresh token in `AMBIENT_SPOTIFY_REFRESH_TOKEN`. A
+   config-page consent UI (twin of the Drive flow) is the follow-up in §9.
+3. **P3 — `spotify_control` tool.** ✅ **Done (this change).** `PortableTool` +
+   `definition()` + guidance in `llm/rig.rs` over `music/spotify.rs`; all actions
+   (`play`/`pause`/`resume`/`next`/`previous`/`queue`/`volume`); unit + end-to-end
+   rig tests with a mocked controller (no network).
+4. **P4 — Ducking.** ✅ **Done (PR 38).** Turn lifecycle ducks the music group; no
+   Spotify-specific work needed (the group volume covers the librespot stream).
+5. **P5 (optional) — Echo Show as snapclient.** ⏳ PR 38 gates it behind
+   `AMBIENT_MUSIC_INCLUDE_DEVICE` (default off). No control-plane change.
+6. **P6 (nice-to-have) — Now-playing UI.** Not started. Push current track/artist
+   to the device via a state stream and render on the idle/active screen.
 
 ---
 
 ## 6. Open questions / dependencies
 
-- **Where does the Snapcast PR run snapserver?** Recommended: the Mac (always-on
-  hub). If it runs snapserver *on the Echo Show*, revisit librespot placement —
-  the Mac-hosted source assumes a Mac-hosted (or LAN-reachable) snapfifo.
-- **One librespot instance, shared.** The Snapcast PR and this feature should use
-  the **same** librespot device, not stand up two. Confirm ownership/naming.
-- **Ducking mechanism:** Spotify Web API volume vs. Snapcast group volume — pick
-  whichever the Snapcast setup exposes most reliably (decide in P4).
-- **Token refresh lifetime / launchd:** the orchestrator refreshes the access
-  token from the stored refresh token; confirm this coexists with the "run under
-  launchd" open item in `TODO.md §4`.
+- **One librespot instance, shared.** `spotify_control` targets the device named
+  by `AMBIENT_SPOTIFY_DEVICE_NAME`, which **must equal** the `--name` PR 38's
+  supervisor launches librespot with (default `"Ambient"` on both — keep them in
+  sync if either changes).
+- **Token refresh lifetime / launchd:** the client refreshes the access token
+  from the stored refresh token and caches it; confirm this coexists with the
+  "run under launchd" open item in `TODO.md §4`. The refresh token itself does not
+  expire unless revoked or the app's scopes change.
+- **Search quality:** `kind` defaults to `track`; the model chooses `artist`/
+  `playlist` for vibes via guidance. Watch whether real turns pick the right kind;
+  if not, tighten the tool description.
 
 ---
 
@@ -158,3 +178,65 @@ advertised to the model (exactly like `calendar_lookup` when no calendars are se
 - Playlisting / library management beyond play/pause/skip/queue/volume.
 - Multi-service music (Apple Music, YouTube Music) — design leaves room for a
   second provider tool later, but out of scope now.
+
+---
+
+## 8. One-time consent runbook (get the refresh token)
+
+The `spotify_control` tool needs a long-lived **refresh token** for the Premium
+account. This is a one-time step on the Mac; the token then lives in the
+orchestrator's environment. (A config-page consent UI is the §9 follow-up; until
+then, do this by hand.)
+
+1. **Create a Spotify app** at <https://developer.spotify.com/dashboard> → note
+   the **Client ID** and **Client Secret**. Add a Redirect URI of
+   `http://127.0.0.1:8888/callback` (Settings → Redirect URIs).
+
+2. **Authorize** — open this URL in a browser signed into the Premium account
+   (scopes cover playback control + reading the device list):
+
+   ```
+   https://accounts.spotify.com/authorize?client_id=CLIENT_ID&response_type=code&redirect_uri=http://127.0.0.1:8888/callback&scope=user-modify-playback-state%20user-read-playback-state
+   ```
+
+   Approve; the browser redirects to `http://127.0.0.1:8888/callback?code=CODE`
+   (the page won't load — just copy `CODE` from the address bar).
+
+3. **Exchange the code for a refresh token:**
+
+   ```bash
+   curl -s -X POST https://accounts.spotify.com/api/token \
+     -u "CLIENT_ID:CLIENT_SECRET" \
+     -d grant_type=authorization_code \
+     -d code=CODE \
+     -d redirect_uri=http://127.0.0.1:8888/callback | python3 -m json.tool
+   ```
+
+   Copy the `refresh_token` from the JSON.
+
+4. **Configure the orchestrator** (e.g. in `~/.zshenv` for the local-production
+   install, alongside `AMBIENT_INSTANCE_ID`):
+
+   ```bash
+   export AMBIENT_SPOTIFY_CLIENT_ID="…"
+   export AMBIENT_SPOTIFY_CLIENT_SECRET="…"
+   export AMBIENT_SPOTIFY_REFRESH_TOKEN="…"     # from step 3
+   # AMBIENT_SPOTIFY_DEVICE_NAME defaults to "Ambient" (matches librespot)
+   ```
+
+   Restart the orchestrator. On boot it logs `spotify_control: enabled, targeting
+   Connect device "Ambient"`, and the tool is advertised to the rig LLM engine.
+
+5. **Verify by voice:** with `AMBIENT_MUSIC=on` and librespot running, say
+   *"play some Radiohead"* → music on the speakers + a spoken confirmation.
+
+---
+
+## 9. Follow-up: config-page consent UI (optional polish)
+
+Mirror `orchestrator/src/drive_consent.rs` (the Google Drive loopback
+authorization-code flow driven from the config page's Photos tab) with a Spotify
+equivalent on a **Music** tab: a "Connect Spotify" button runs the loopback
+consent in-process and stores the refresh token in settings, so no manual `curl`.
+Deferred to keep this change focused; the manual runbook (§8) is sufficient to
+ship.
