@@ -1,0 +1,67 @@
+<p class="sub">GraphRAG memory (embedded HelixDB): nodes built from turns &amp; memories. Entity names are editable — fix a spelling mistake with "Edit name".</p>
+<div class="card">
+  <div class="toolbar"><button onclick="load()">Refresh</button><span id="meta" class="muted"></span></div>
+  <div id="out" class="muted">Loading…</div>
+</div>
+<script>
+// esc() handles &<>; also escape quotes for use inside an HTML attribute.
+function attr(s){ return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function nodeTable(label, rows){
+  if(!rows || !rows.length) return '<h2>'+esc(label)+' <span class="muted">(0)</span></h2>';
+  const editable = (label === 'Entity');
+  const cols = Object.keys(rows[0]).filter(k => k !== '$id');
+  let h = '<h2>'+esc(label)+' <span class="muted">('+rows.length+' shown)</span></h2><table><thead><tr><th>id</th>';
+  for(const c of cols) h += '<th>'+esc(c)+'</th>';
+  if(editable) h += '<th></th>';
+  h += '</tr></thead><tbody>';
+  for(const r of rows){
+    h += '<tr><td class="muted">'+esc(r['$id'])+'</td>';
+    for(const c of cols) h += '<td class="pre">'+esc(r[c])+'</td>';
+    if(editable){
+      const name = r['name']==null ? '' : String(r['name']);
+      h += '<td><button data-rename="'+attr(name)+'">Edit name</button></td>';
+    }
+    h += '</tr>';
+  }
+  return h + '</tbody></table>';
+}
+async function renameEntity(oldName){
+  const next = prompt('Correct the entity name:', oldName);
+  if(next === null) return;                 // cancelled
+  const newName = next.trim();
+  if(!newName || newName === oldName) return;
+  try{
+    const res = await fetch('/helix/rename-entity', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ old_name: oldName, new_name: newName }),
+    });
+    const j = await res.json();
+    if(!j.ok){ alert(j.message || 'Rename failed'); return; }
+    alert('Fixed "'+oldName+'" → "'+newName+'": '+(j.entities||0)+' entity, '+(j.turns||0)+' turn, '+(j.memories||0)+' memory node(s).');
+    load();
+  }catch(e){ alert('Request failed: ' + e); }
+}
+async function load(){
+  const out = document.getElementById('out');
+  try{
+    const j = await getJSON('/helix.json');
+    if(!j.ok){ out.textContent = j.message || 'Error'; return; }
+    if(!j.enabled){
+      document.getElementById('meta').textContent = '';
+      out.innerHTML = '<p class="muted">'+esc(j.message||'GraphRAG (HelixDB) is not active.')+'</p>';
+      return;
+    }
+    const s = j.stats || {}; const by = s.by_label || {};
+    document.getElementById('meta').textContent = (s.total||0) + ' nodes · store: ' + esc(j.helix_path);
+    let h = '<p>'+Object.keys(by).map(k => esc(k)+': '+esc(by[k])).join(' · ')+'</p>';
+    const nodes = j.nodes || {};
+    for(const label of Object.keys(nodes)) h += nodeTable(label, nodes[label]);
+    out.innerHTML = h;
+    for(const btn of out.querySelectorAll('button[data-rename]')){
+      btn.addEventListener('click', () => renameEntity(btn.getAttribute('data-rename')));
+    }
+  }catch(e){ out.textContent = 'Request failed: ' + e; }
+}
+load();
+</script>

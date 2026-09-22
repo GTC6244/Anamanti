@@ -90,13 +90,15 @@ fn about_body() -> String {
     };
     format!(
         "<p class=\"sub\">The running orchestrator build — use this to confirm what's deployed.</p>\
+         <div class=\"card\"><h2>Build</h2>\
+         <p class=\"desc\">Version and provenance of the binary currently serving this page.</p>\
          <table><tbody>\
          <tr><th>Version</th><td>{version}</td></tr>\
          <tr><th>Git branch</th><td>{branch}</td></tr>\
          <tr><th>Git commit</th><td><code>{sha}</code></td></tr>\
          <tr><th>Built (UTC)</th><td>{built}</td></tr>\
          <tr><th>Drive support</th><td>yes — Photos tab + <code>ambient-get-drive-token</code></td></tr>\
-         </tbody></table>",
+         </tbody></table></div>",
         version = cell(VERSION),
         branch = cell(GIT_BRANCH),
         sha = cell(GIT_SHA),
@@ -121,688 +123,109 @@ const DEFAULT_LOG_LIMIT: usize = 100;
 /// Hard cap, so a hand-typed `?limit=` can't ask the server to buffer the world.
 const MAX_LOG_LIMIT: usize = 1000;
 
-/// The single static page. Inlined so the module is self-contained and needs no
-/// asset packaging. Plain HTML + a little `fetch` JS — no framework, no build step.
-const INDEX_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ambient Orchestrator — Config</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.3rem; margin-bottom: 0.25rem; }
-  .sub { opacity: 0.7; margin-top: 0; }
-  label { display: block; margin: 1rem 0 0.25rem; font-weight: 600; }
-  input, select { width: 100%; padding: 0.5rem; font: inherit; box-sizing: border-box; }
-  button { margin-top: 1.5rem; padding: 0.6rem 1.2rem; font: inherit; font-weight: 600; cursor: pointer; }
-  .status { margin-top: 1rem; padding: 0.6rem 0.8rem; border-radius: 6px; min-height: 1.2rem; }
-  .ok { background: rgba(46,160,67,0.15); }
-  .err { background: rgba(248,81,73,0.15); }
-  .hint { opacity: 0.6; font-weight: 400; font-size: 0.85rem; }
-  label.check { display: flex; align-items: center; gap: 0.5rem; font-weight: 600; }
-  label.check input { width: auto; }
-  .nav { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1.5rem;
-         border-bottom: 1px solid rgba(128,128,128,0.3); padding-bottom: 0.75rem; }
-  .nav a { text-decoration: none; padding: 0.3rem 0.7rem; border-radius: 6px;
-           color: inherit; opacity: 0.75; }
-  .nav a.active { background: rgba(128,128,128,0.18); opacity: 1; font-weight: 600; }
-  .nav a:hover { opacity: 1; }
-</style>
-</head>
-<body>
-  <nav class="nav">
-    <a href="/" class="active">Config</a>
-    <a href="/household">Household</a>
-    <a href="/music">Music</a>
-    <a href="/drive">Photos</a>
-    <a href="/tools">Tools</a>
-    <a href="/chatlog">Chat log</a>
-    <a href="/prompts">Prompts</a>
-    <a href="/sqlite">SQLite</a>
-    <a href="/helix">HelixDB</a>
-    <a href="/about">About</a>
-  </nav>
-  <h1>Ambient Orchestrator</h1>
-  <p class="sub">Runtime settings — changes apply live, no restart.</p>
+/// The Config page body. Authored as a real HTML file (with proper tooling) and
+/// compiled into the binary via `include_str!` — no runtime asset files, so the
+/// single copied release binary still serves the whole admin UI with nothing beside
+/// it. Same rationale for every asset below.
+const CONFIG_BODY: &str = include_str!("webconfig/config.html");
 
-  <label>Engine
-    <select id="engine">
-      <option value="native">native (HTTP clients)</option>
-      <option value="rig">rig (agent framework + tools)</option>
-    </select>
-  </label>
+/// The shared admin-panel design system (split-pane layout, cards, form controls,
+/// pill toggles, tables, danger zone). Used by every page, Config included.
+const PANEL_CSS: &str = include_str!("webconfig/panel.css");
 
-  <label>LLM backend
-    <select id="llm_backend">
-      <option value="ollama">ollama (local)</option>
-      <option value="anthropic">anthropic (cloud)</option>
-      <option value="openai">openai (cloud)</option>
-      <option value="mock">mock (offline)</option>
-    </select>
-  </label>
+/// Client-side helpers shared by every page (`esc`/`fmtTime`/`getJSON`).
+const SHELL_SCRIPT: &str = include_str!("webconfig/shell.js");
 
-  <label id="anthropic_auth_row">Anthropic auth
-    <select id="anthropic_auth">
-      <option value="apikey">API key (ANTHROPIC_API_KEY)</option>
-      <option value="subscription">Subscription — Claude OAuth (claude setup-token)</option>
-    </select>
-  </label>
-
-  <label id="anthropic_key_row">Anthropic API key <span class="hint" id="anthropic_key_state"></span>
-    <input id="anthropic_api_key" type="password" placeholder="(leave blank to keep current)">
-  </label>
-
-  <label id="anthropic_oauth_row">Anthropic subscription token <span class="hint" id="anthropic_oauth_state"></span>
-    <input id="anthropic_oauth_token" type="password" placeholder="(leave blank to keep current; from `claude setup-token`)">
-  </label>
-
-  <label id="openai_key_row">OpenAI API key <span class="hint" id="openai_key_state"></span>
-    <input id="openai_api_key" type="password" placeholder="(leave blank to keep current)">
-  </label>
-
-  <label class="check">
-    <input id="web_search" type="checkbox">
-    Web search tool <span class="hint">(rig engine only)</span>
-  </label>
-
-  <label>Search provider
-    <select id="search_provider">
-      <option value="duckduckgo">DuckDuckGo (keyless; entity queries only)</option>
-      <option value="tavily">Tavily (real web results; needs a key)</option>
-    </select>
-  </label>
-
-  <label>Search API key <span class="hint" id="key_state"></span>
-    <input id="search_api_key" type="password" placeholder="(leave blank to keep current)">
-  </label>
-
-  <label>Model <span class="hint" id="model_hint">last 12 months, per provider</span>
-    <!-- Cloud backends (anthropic/openai): a dropdown of last-12-months models. -->
-    <select id="llm_model_select"></select>
-    <!-- Local/mock: a free-text model tag (e.g. an Ollama tag like qwen2.5). -->
-    <input id="llm_model_text" type="text" placeholder="(backend default)" style="display:none">
-  </label>
-
-  <label>Piper TTS voice <span class="hint" id="voice_hint">blank = server default</span>
-    <!-- When the orchestrator can list voices: a dropdown of installed Piper voices. -->
-    <select id="tts_voice_select" style="display:none"></select>
-    <!-- Fallback (voices unavailable): a free-text Piper voice name. -->
-    <input id="tts_voice_text" type="text" placeholder="(default)">
-  </label>
-
-  <button id="save">Apply</button>
-  <div id="status" class="status"></div>
-
-<script>
-  const $ = (id) => document.getElementById(id);
-  const status = $('status');
-  let MODELS = [];               // [{provider, id, label}] from /models
-  let VOICES = [];               // [{name, language, label}] from /voices
-  const CLOUD = ['anthropic', 'openai'];
-
-  function show(ok, msg) {
-    status.textContent = msg;
-    status.className = 'status ' + (ok ? 'ok' : 'err');
-  }
-
-  // Show the right model control for the backend, and populate the dropdown with
-  // that provider's last-12-months models (keeping `selected` even if off-list).
-  function renderModel(backend, selected) {
-    const sel = $('llm_model_select');
-    const txt = $('llm_model_text');
-    if (CLOUD.includes(backend)) {
-      sel.style.display = '';
-      txt.style.display = 'none';
-      $('model_hint').textContent = 'last 12 months, per provider';
-      const list = MODELS.filter((m) => m.provider === backend);
-      sel.innerHTML = '<option value="">(backend default)</option>';
-      let matched = !selected;
-      for (const m of list) {
-        const o = document.createElement('option');
-        o.value = m.id; o.textContent = m.label || m.id;
-        if (m.id === selected) { o.selected = true; matched = true; }
-        sel.appendChild(o);
-      }
-      if (!matched) {   // a pinned model not in the fetched list — keep it visible
-        const o = document.createElement('option');
-        o.value = selected; o.textContent = selected + ' (pinned)'; o.selected = true;
-        sel.appendChild(o);
-      }
-    } else {
-      sel.style.display = 'none';
-      txt.style.display = '';
-      txt.value = selected || '';
-      $('model_hint').textContent = 'e.g. qwen2.5, llama3.2';
-    }
-  }
-
-  function currentModel() {
-    const backend = $('llm_backend').value;
-    const raw = CLOUD.includes(backend) ? $('llm_model_select').value : $('llm_model_text').value;
-    return raw.trim() || null;
-  }
-
-  // Show a dropdown of installed voices when we have them, else a free-text field.
-  // Keeps `selected` visible even if it isn't an installed voice.
-  function renderVoice(selected) {
-    const sel = $('tts_voice_select');
-    const txt = $('tts_voice_text');
-    if (VOICES.length) {
-      sel.style.display = '';
-      txt.style.display = 'none';
-      $('voice_hint').textContent = 'installed voices';
-      sel.innerHTML = '<option value="">(server default)</option>';
-      let matched = !selected;
-      for (const v of VOICES) {
-        const o = document.createElement('option');
-        o.value = v.name;
-        o.textContent = v.language ? (v.label || v.name) + ' · ' + v.language : (v.label || v.name);
-        if (v.name === selected) { o.selected = true; matched = true; }
-        sel.appendChild(o);
-      }
-      if (!matched) {   // a voice not in the installed list — keep it visible
-        const o = document.createElement('option');
-        o.value = selected; o.textContent = selected + ' (not installed)'; o.selected = true;
-        sel.appendChild(o);
-      }
-    } else {
-      sel.style.display = 'none';
-      txt.style.display = '';
-      txt.value = selected || '';
-      $('voice_hint').textContent = 'blank = server default';
-    }
-  }
-
-  function currentVoice() {
-    const raw = VOICES.length ? $('tts_voice_select').value : $('tts_voice_text').value;
-    return raw.trim() || null;
-  }
-
-  // The Anthropic auth toggle only applies to the anthropic backend.
-  function renderAuthRow(backend) {
-    $('anthropic_auth_row').style.display = backend === 'anthropic' ? '' : 'none';
-    renderKeyRows(backend);
-  }
-
-  // Show a provider's API-key field only when that backend is selected (and, for
-  // Anthropic, only under API-key auth — subscription auth uses an OAuth token).
-  function renderKeyRows(backend) {
-    const auth = $('anthropic_auth').value;
-    $('anthropic_key_row').style.display =
-      (backend === 'anthropic' && auth === 'apikey') ? '' : 'none';
-    // The subscription token field shows only under Anthropic subscription auth.
-    $('anthropic_oauth_row').style.display =
-      (backend === 'anthropic' && auth === 'subscription') ? '' : 'none';
-    $('openai_key_row').style.display = backend === 'openai' ? '' : 'none';
-  }
-
-  function fill(v) {
-    $('engine').value = v.engine || 'native';
-    $('llm_backend').value = v.llm_backend || 'ollama';
-    $('anthropic_auth').value = v.anthropic_auth || 'apikey';
-    $('anthropic_api_key').value = '';
-    $('openai_api_key').value = '';
-    $('anthropic_oauth_token').value = '';
-    $('anthropic_key_state').textContent = v.anthropic_key_set ? '(a key is set)' : '(no key set)';
-    $('openai_key_state').textContent = v.openai_key_set ? '(a key is set)' : '(no key set)';
-    $('anthropic_oauth_state').textContent = v.anthropic_oauth_token_set ? '(a token is set)' : '(no token set)';
-    renderAuthRow($('llm_backend').value);
-    renderModel($('llm_backend').value, v.llm_model || '');
-    renderVoice(v.tts_voice || '');
-    $('web_search').checked = !!v.web_search;
-    $('search_provider').value = v.search_provider || 'duckduckgo';
-    $('search_api_key').value = '';
-    $('key_state').textContent = v.search_key_set ? '(a key is set)' : '(no key set)';
-  }
-
-  async function loadModels() {
-    try {
-      const r = await fetch('/models');
-      MODELS = (await r.json()).models || [];
-    } catch (e) { MODELS = []; }
-  }
-
-  async function loadVoices() {
-    try {
-      const r = await fetch('/voices');
-      VOICES = (await r.json()).voices || [];
-    } catch (e) { VOICES = []; }
-  }
-
-  async function load() {
-    await Promise.all([loadModels(), loadVoices()]);
-    try {
-      const r = await fetch('/config');
-      fill(await r.json());
-      show(true, 'Loaded current settings.');
-    } catch (e) {
-      show(false, 'Could not load settings: ' + e);
-    }
-  }
-
-  async function save() {
-    const body = {
-      engine: $('engine').value,
-      llm_backend: $('llm_backend').value,
-      anthropic_auth: $('anthropic_auth').value,
-      llm_model: currentModel(),
-      tts_voice: currentVoice(),
-      web_search: $('web_search').checked,
-      search_provider: $('search_provider').value,
-      // Only send a key when the user typed one; blank keeps the current key.
-      search_api_key: $('search_api_key').value.trim() || undefined,
-      anthropic_api_key: $('anthropic_api_key').value.trim() || undefined,
-      openai_api_key: $('openai_api_key').value.trim() || undefined,
-      anthropic_oauth_token: $('anthropic_oauth_token').value.trim() || undefined,
-    };
-    try {
-      const r = await fetch('/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const v = await r.json();
-      if (v.ok) { fill(v); show(true, v.message || 'Applied.'); }
-      else { show(false, v.message || 'Rejected.'); }
-    } catch (e) {
-      show(false, 'Request failed: ' + e);
-    }
-  }
-
-  // Switching backend resets the model to that backend's default + toggles auth row.
-  $('llm_backend').addEventListener('change', () => {
-    renderAuthRow($('llm_backend').value);
-    renderModel($('llm_backend').value, '');
-  });
-  // Switching Anthropic auth toggles whether the API-key field is relevant.
-  $('anthropic_auth').addEventListener('change', () => renderKeyRows($('llm_backend').value));
-  $('save').addEventListener('click', save);
-  load();
-</script>
-</body>
-</html>
-"#;
-
-/// Shared styling for the debug pages (chat log / prompts / SQLite / HelixDB).
-/// Wider than the config form and table-oriented. Inlined, no build step.
-const SHELL_STYLE: &str = r#"
-  :root { color-scheme: light dark; }
-  body { font: 14px/1.55 system-ui, sans-serif; max-width: 64rem; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.3rem; margin: 0 0 0.25rem; }
-  h2 { font-size: 1.05rem; margin: 1.5rem 0 0.25rem; }
-  .sub { opacity: 0.7; margin-top: 0; }
-  .nav { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1.5rem;
-         border-bottom: 1px solid rgba(128,128,128,0.3); padding-bottom: 0.75rem; }
-  .nav a { text-decoration: none; padding: 0.3rem 0.7rem; border-radius: 6px; color: inherit; opacity: 0.75; }
-  .nav a.active { background: rgba(128,128,128,0.18); opacity: 1; font-weight: 600; }
-  .nav a:hover { opacity: 1; }
-  table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
-  th, td { text-align: left; vertical-align: top; padding: 0.4rem 0.6rem;
-           border-bottom: 1px solid rgba(128,128,128,0.25); }
-  th { font-weight: 600; white-space: nowrap; }
-  td.pre { white-space: pre-wrap; word-break: break-word; }
-  .muted { opacity: 0.6; }
-  .toolbar { margin: 1rem 0; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-  button, select { font: inherit; padding: 0.35rem 0.7rem; cursor: pointer; }
-  .badge { display: inline-block; padding: 0.05rem 0.45rem; border-radius: 4px;
-           background: rgba(128,128,128,0.18); font-size: 0.82rem; }
-  details { margin: 0.35rem 0; border-bottom: 1px solid rgba(128,128,128,0.2); padding-bottom: 0.35rem; }
-  details > summary { cursor: pointer; }
-  pre { white-space: pre-wrap; word-break: break-word; margin: 0.25rem 0 0.75rem;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
-"#;
-
-/// Client-side helpers shared by every debug page.
-const SHELL_SCRIPT: &str = r#"
-  function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
-  function fmtTime(ts){ if(!ts) return ''; try { return new Date(ts*1000).toLocaleString(); } catch(e){ return String(ts); } }
-  async function getJSON(url){ const r = await fetch(url); return r.json(); }
-"#;
-
-/// Nav bar markup with `active` highlighted (same links as the config page).
-fn nav_html(active: &str) -> String {
-    const LINKS: [(&str, &str); 10] = [
-        ("/", "Config"),
-        ("/household", "Household"),
-        ("/music", "Music"),
-        ("/drive", "Photos"),
-        ("/tools", "Tools"),
-        ("/chatlog", "Chat log"),
-        ("/prompts", "Prompts"),
-        ("/sqlite", "SQLite"),
-        ("/helix", "HelixDB"),
-        ("/about", "About"),
+/// The left navigation for the split-pane shell: a brand block plus grouped links,
+/// with `active` highlighted. Each item carries a small inline icon. The link
+/// `href`s are kept verbatim (`href="/music"` etc.) — the device/tests rely on them.
+fn sidebar_html(active: &str) -> String {
+    // (href, label, inline-svg-body) for one nav link, grouped under a section title.
+    type Link = (&'static str, &'static str, &'static str);
+    type Group = (&'static str, &'static [Link]);
+    const GROUPS: [Group; 4] = [
+        (
+            "Settings",
+            &[
+                ("/", "Config", r##"<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/>"##),
+                ("/household", "Household", r##"<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>"##),
+                ("/tools", "Tools", r##"<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>"##),
+                ("/music", "Music", r##"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"##),
+                ("/drive", "Photos", r##"<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>"##),
+            ],
+        ),
+        (
+            "Memory",
+            &[
+                ("/sqlite", "SQLite", r##"<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>"##),
+                ("/helix", "HelixDB", r##"<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/>"##),
+            ],
+        ),
+        (
+            "Logs",
+            &[
+                ("/chatlog", "Chat log", r##"<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>"##),
+                ("/prompts", "Prompts", r##"<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/>"##),
+            ],
+        ),
+        (
+            "System",
+            &[("/about", "About", r##"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>"##)],
+        ),
     ];
-    let items: String = LINKS
-        .iter()
-        .map(|(href, label)| {
-            let cls = if *href == active {
-                " class=\"active\""
-            } else {
-                ""
-            };
-            format!("<a href=\"{href}\"{cls}>{label}</a>")
-        })
-        .collect();
-    format!("<nav class=\"nav\">{items}</nav>")
+    let mut out = String::from(
+        "<aside class=\"sidebar\">\
+         <div class=\"brand\"><span class=\"title\">Ambient Orchestrator</span>\
+         <span class=\"tag\">Admin console</span></div><nav class=\"nav\">",
+    );
+    for (group, links) in GROUPS {
+        out.push_str(&format!("<div class=\"group\">{group}</div>"));
+        for (href, label, icon) in links.iter() {
+            let cls = if *href == active { " active" } else { "" };
+            out.push_str(&format!(
+                "<a class=\"navlink{cls}\" href=\"{href}\">\
+                 <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke-width=\"2\" \
+                 stroke-linecap=\"round\" stroke-linejoin=\"round\">{icon}</svg>{label}</a>"
+            ));
+        }
+    }
+    out.push_str("</nav></aside>");
+    out
 }
 
-/// Wrap a page `body` in the shared HTML shell (head, style, nav, shared script).
+/// Wrap a page `body` in the shared HTML shell: `<head>` + design-system CSS, then a
+/// split-pane `<div class="layout">` with the sidebar on the left and a scrolling
+/// content pane on the right (page header + shared helper script + the page body).
 /// The shared helper script (`esc`/`fmtTime`/`getJSON`) is emitted **before** the
-/// body so a body's inline `load()` (which runs as it is parsed) can rely on those
-/// helpers already being defined.
+/// body so a body's inline `load()` (which runs as it is parsed) can rely on it.
 fn page(active: &str, title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Ambient — {title}</title><style>{SHELL_STYLE}</style></head>\
-         <body>{nav}<h1>{title}</h1><script>{SHELL_SCRIPT}</script>{body}</body></html>",
-        nav = nav_html(active),
+         <title>Ambient — {title}</title><style>{PANEL_CSS}</style></head>\
+         <body><div class=\"layout\">{nav}\
+         <main class=\"content\"><div class=\"content-inner\">\
+         <div class=\"page-head\"><h1>{title}</h1></div>\
+         <script>{SHELL_SCRIPT}</script>{body}\
+         </div></main></div></body></html>",
+        nav = sidebar_html(active),
     )
 }
 
 /// `/chatlog` body — every completed turn, newest first.
-const CHATLOG_BODY: &str = r#"<p class="sub">Every completed turn (transcript + reply), newest first.</p>
-<div class="toolbar">
-  <button onclick="load()">Refresh</button>
-  <label>Show <select id="limit" onchange="load()">
-    <option>50</option><option selected>100</option><option>250</option><option>1000</option>
-  </select> records</label>
-  <span id="meta" class="muted"></span>
-</div>
-<div id="out" class="muted">Loading…</div>
-<script>
-async function load(){
-  const n = document.getElementById('limit').value;
-  const out = document.getElementById('out');
-  try{
-    const j = await getJSON('/chatlog.json?limit=' + n);
-    if(!j.ok){ out.textContent = j.message || 'Error'; return; }
-    const recs = j.records || [];
-    document.getElementById('meta').textContent = recs.length + ' shown';
-    if(!recs.length){ out.innerHTML = '<p class="muted">No turns logged yet.</p>'; return; }
-    let h = '<table><thead><tr><th>Time</th><th>Speaker</th><th>Model</th><th>User</th><th>Assistant</th><th>Memories</th></tr></thead><tbody>';
-    for(const r of recs){
-      const who = esc(r.speaker_name || r.speaker_id || '');
-      const model = esc([r.llm_backend, r.model].filter(Boolean).join(' / '));
-      const mems = (r.memories_written||[]).map(m => '<div>'+esc(m)+'</div>').join('') || '<span class="muted">—</span>';
-      h += '<tr><td class="muted">'+esc(fmtTime(r.ts))+'</td><td>'+who+'</td><td><span class="badge">'+model+'</span></td>'
-        +  '<td class="pre">'+esc(r.transcript)+'</td><td class="pre">'+esc(r.reply)+'</td><td>'+mems+'</td></tr>';
-    }
-    out.innerHTML = h + '</tbody></table>';
-  }catch(e){ out.textContent = 'Request failed: ' + e; }
-}
-load();
-</script>"#;
+const CHATLOG_BODY: &str = include_str!("webconfig/chatlog.html");
 
 /// `/prompts` body — the exact assembled LLM prompt per turn, newest first.
-const PROMPTS_BODY: &str = r#"<p class="sub">The exact prompt sent to the LLM each turn (system prompt + user message), newest first.</p>
-<div class="toolbar">
-  <button onclick="load()">Refresh</button>
-  <label>Show <select id="limit" onchange="load()">
-    <option>50</option><option selected>100</option><option>250</option><option>1000</option>
-  </select> records</label>
-  <span id="meta" class="muted"></span>
-</div>
-<div id="out" class="muted">Loading…</div>
-<script>
-async function load(){
-  const n = document.getElementById('limit').value;
-  const out = document.getElementById('out');
-  try{
-    const j = await getJSON('/prompts.json?limit=' + n);
-    if(!j.ok){ out.textContent = j.message || 'Error'; return; }
-    const recs = j.records || [];
-    document.getElementById('meta').textContent = recs.length + ' shown';
-    if(!recs.length){ out.innerHTML = '<p class="muted">No prompts logged yet. Prompts are recorded when the assistant answers a turn.</p>'; return; }
-    let h = '';
-    for(const r of recs){
-      const model = esc([r.llm_backend, r.model].filter(Boolean).join(' / '));
-      const who = esc(r.speaker_name || r.speaker_id || '');
-      const preview = esc((r.user_message||'').slice(0,90));
-      h += '<details><summary>'+esc(fmtTime(r.ts))+' — <span class="badge">'+model+'</span> '+who+' — '+preview+'</summary>'
-        +  '<p class="muted">User message</p><pre>'+esc(r.user_message)+'</pre>'
-        +  '<p class="muted">System prompt</p><pre>'+esc(r.system_prompt)+'</pre></details>';
-    }
-    out.innerHTML = h;
-  }catch(e){ out.textContent = 'Request failed: ' + e; }
-}
-load();
-</script>"#;
+const PROMPTS_BODY: &str = include_str!("webconfig/prompts.html");
 
 /// `/sqlite` body — the persistent memory store rows.
-const SQLITE_BODY: &str = r#"<p class="sub">Persistent memory (SQLite): stored facts &amp; preferences.</p>
-<div class="toolbar"><button onclick="load()">Refresh</button><span id="meta" class="muted"></span></div>
-<div id="out" class="muted">Loading…</div>
-<script>
-async function load(){
-  const out = document.getElementById('out');
-  try{
-    const j = await getJSON('/sqlite.json');
-    if(!j.ok){ out.textContent = j.message || 'Error'; return; }
-    document.getElementById('meta').textContent = j.count + ' rows · db: ' + esc(j.db_path) + ' · recall backend: ' + esc(j.memory_backend);
-    const rows = j.memories || [];
-    if(!rows.length){ out.innerHTML = '<p class="muted">No memories stored yet.</p>'; return; }
-    let h = '<table><thead><tr><th>id</th><th>kind</th><th>source</th><th>speaker</th><th>created</th><th>content</th></tr></thead><tbody>';
-    for(const m of rows){
-      h += '<tr><td class="muted">'+esc(m.id)+'</td><td><span class="badge">'+esc(m.kind)+'</span></td><td>'+esc(m.source)+'</td>'
-        +  '<td>'+esc(m.speaker_id||'household')+'</td><td class="muted">'+esc(fmtTime(m.created_at))+'</td><td class="pre">'+esc(m.content)+'</td></tr>';
-    }
-    out.innerHTML = h + '</tbody></table>';
-  }catch(e){ out.textContent = 'Request failed: ' + e; }
-}
-load();
-</script>"#;
+const SQLITE_BODY: &str = include_str!("webconfig/sqlite.html");
 
 /// `/helix` body — GraphRAG node counts + a sample of nodes per label.
-const HELIX_BODY: &str = r#"<p class="sub">GraphRAG memory (embedded HelixDB): nodes built from turns &amp; memories. Entity names are editable — fix a spelling mistake with "Edit name".</p>
-<div class="toolbar"><button onclick="load()">Refresh</button><span id="meta" class="muted"></span></div>
-<div id="out" class="muted">Loading…</div>
-<script>
-// esc() handles &<>; also escape quotes for use inside an HTML attribute.
-function attr(s){ return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-function nodeTable(label, rows){
-  if(!rows || !rows.length) return '<h2>'+esc(label)+' <span class="muted">(0)</span></h2>';
-  const editable = (label === 'Entity');
-  const cols = Object.keys(rows[0]).filter(k => k !== '$id');
-  let h = '<h2>'+esc(label)+' <span class="muted">('+rows.length+' shown)</span></h2><table><thead><tr><th>id</th>';
-  for(const c of cols) h += '<th>'+esc(c)+'</th>';
-  if(editable) h += '<th></th>';
-  h += '</tr></thead><tbody>';
-  for(const r of rows){
-    h += '<tr><td class="muted">'+esc(r['$id'])+'</td>';
-    for(const c of cols) h += '<td class="pre">'+esc(r[c])+'</td>';
-    if(editable){
-      const name = r['name']==null ? '' : String(r['name']);
-      h += '<td><button data-rename="'+attr(name)+'">Edit name</button></td>';
-    }
-    h += '</tr>';
-  }
-  return h + '</tbody></table>';
-}
-async function renameEntity(oldName){
-  const next = prompt('Correct the entity name:', oldName);
-  if(next === null) return;                 // cancelled
-  const newName = next.trim();
-  if(!newName || newName === oldName) return;
-  try{
-    const res = await fetch('/helix/rename-entity', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ old_name: oldName, new_name: newName }),
-    });
-    const j = await res.json();
-    if(!j.ok){ alert(j.message || 'Rename failed'); return; }
-    alert('Fixed "'+oldName+'" → "'+newName+'": '+(j.entities||0)+' entity, '+(j.turns||0)+' turn, '+(j.memories||0)+' memory node(s).');
-    load();
-  }catch(e){ alert('Request failed: ' + e); }
-}
-async function load(){
-  const out = document.getElementById('out');
-  try{
-    const j = await getJSON('/helix.json');
-    if(!j.ok){ out.textContent = j.message || 'Error'; return; }
-    if(!j.enabled){
-      document.getElementById('meta').textContent = '';
-      out.innerHTML = '<p class="muted">'+esc(j.message||'GraphRAG (HelixDB) is not active.')+'</p>';
-      return;
-    }
-    const s = j.stats || {}; const by = s.by_label || {};
-    document.getElementById('meta').textContent = (s.total||0) + ' nodes · store: ' + esc(j.helix_path);
-    let h = '<p>'+Object.keys(by).map(k => esc(k)+': '+esc(by[k])).join(' · ')+'</p>';
-    const nodes = j.nodes || {};
-    for(const label of Object.keys(nodes)) h += nodeTable(label, nodes[label]);
-    out.innerHTML = h;
-    for(const btn of out.querySelectorAll('button[data-rename]')){
-      btn.addEventListener('click', () => renameEntity(btn.getAttribute('data-rename')));
-    }
-  }catch(e){ out.textContent = 'Request failed: ' + e; }
-}
-load();
-</script>"#;
+const HELIX_BODY: &str = include_str!("webconfig/helix.html");
 
 /// `/music` body — start/stop the music sibling processes and see snapserver status.
-const MUSIC_BODY: &str = r#"<p class="sub">Start/stop the local music processes (snapserver, librespot, mpv) and see snapserver status. The orchestrator launches these; it never handles the audio.</p>
-<div id="disabled" class="muted" style="display:none"></div>
-<div id="panel" style="display:none">
-  <h2>Processes</h2>
-  <div class="toolbar">
-    <button onclick="startall()">Start all</button>
-    <button onclick="stopall()">Stop all</button>
-    <button onclick="load()">Refresh</button>
-    <span id="meta" class="muted"></span>
-  </div>
-  <table><thead><tr><th>Process</th><th>Status</th><th>PID</th><th></th><th>Log</th></tr></thead><tbody id="procs"></tbody></table>
-
-  <h2>Web-URL player</h2>
-  <div class="toolbar">
-    <input id="url" type="text" placeholder="https://stream-url or file path" style="min-width:22rem; padding:0.35rem 0.6rem">
-    <button onclick="play()">Play</button>
-    <button onclick="stopweb()">Stop</button>
-    <span id="webmsg" class="muted"></span>
-  </div>
-
-  <h2>Snapserver</h2>
-  <div id="snap" class="muted">Loading…</div>
-</div>
-<h2 style="margin-top:1.5rem">Spotify (voice control)</h2>
-<div id="sp" class="muted">Loading…</div>
-<div class="toolbar" style="margin-top:0.4rem; flex-wrap:wrap; gap:0.4rem">
-  <input id="sp_cid" type="text" placeholder="Client ID" style="min-width:16rem;padding:0.35rem 0.6rem">
-  <input id="sp_secret" type="password" placeholder="Client secret (blank = keep)" style="min-width:16rem;padding:0.35rem 0.6rem">
-  <input id="sp_dev" type="text" placeholder="Device name (default Ambient)" style="min-width:12rem;padding:0.35rem 0.6rem">
-  <button onclick="spotifySave()">Save</button>
-  <button onclick="spotifyLink()">Connect Spotify</button>
-  <span id="spmsg" class="muted"></span>
-</div>
-<p class="muted" style="margin:0.3rem 0 0">Requires Spotify <b>Premium</b>. First register <code>http://127.0.0.1:8888/callback</code> as a Redirect URI in your Spotify app. "Connect Spotify" opens a browser on the Mac; approve access, then return here. The <code>spotify_control</code> voice tool activates immediately on success.</p>
-<script>
-async function proc(key, action){
-  try{
-    const r = await fetch('/music/proc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proc:key, action})});
-    const j = await r.json();
-    if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
-  }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
-  setTimeout(load, 500);
-}
-async function postAction(url){
-  try{ const r = await fetch(url, {method:'POST'}); const j = await r.json();
-    if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
-  }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
-  setTimeout(load, 700);
-}
-async function startall(){ await postAction('/music/startall'); }
-async function stopall(){ await postAction('/music/stopall'); }
-async function play(){
-  const url = document.getElementById('url').value.trim(); const msg = document.getElementById('webmsg');
-  if(!url){ msg.textContent = 'Enter a URL.'; return; }
-  try{
-    const r = await fetch('/music/play', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
-    const j = await r.json(); msg.textContent = j.ok ? 'Playing.' : (j.message || 'Error');
-  }catch(e){ msg.textContent = 'Request failed: ' + e; }
-  setTimeout(load, 500);
-}
-async function stopweb(){
-  const msg = document.getElementById('webmsg');
-  try{ const r = await fetch('/music/stopweb', {method:'POST'}); const j = await r.json(); msg.textContent = j.ok ? 'Stopped.' : (j.message || 'Error'); }
-  catch(e){ msg.textContent = 'Request failed: ' + e; }
-}
-async function load(){
-  let j;
-  try{ j = await getJSON('/music/status.json'); }
-  catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; return; }
-  const dis = document.getElementById('disabled'), panel = document.getElementById('panel');
-  if(!j.enabled){
-    dis.style.display = ''; panel.style.display = 'none';
-    dis.innerHTML = 'Music routing is disabled. Set <code>"music": {"enabled": true}</code> in ambient.json and restart to enable this panel.';
-    return;
-  }
-  dis.style.display = 'none'; panel.style.display = '';
-  const procs = j.procs || [];
-  document.getElementById('meta').textContent = procs.filter(p => p.running).length + ' of ' + procs.length + ' running';
-  let h = '';
-  for(const p of procs){
-    const badge = p.running
-      ? '<span class="badge" style="background:rgba(46,160,67,0.2)">running</span>'
-      : '<span class="badge">stopped</span>';
-    const btn = p.running ? '<button data-stop="'+esc(p.key)+'">Stop</button>' : '<button data-start="'+esc(p.key)+'">Start</button>';
-    h += '<tr><td>'+esc(p.label)+'</td><td>'+badge+'</td><td class="muted">'+esc(p.pid||'')+'</td><td>'+btn+'</td><td class="muted pre">'+esc(p.log_path)+'</td></tr>';
-  }
-  document.getElementById('procs').innerHTML = h;
-  for(const b of document.querySelectorAll('button[data-start]')) b.addEventListener('click', () => proc(b.getAttribute('data-start'), 'start'));
-  for(const b of document.querySelectorAll('button[data-stop]'))  b.addEventListener('click', () => proc(b.getAttribute('data-stop'), 'stop'));
-  const snap = document.getElementById('snap');
-  const ss = j.snapserver || {};
-  if(!ss.reachable){ snap.innerHTML = '<span class="muted">snapserver not reachable at '+esc(j.snapserver_addr||'')+' — start it above.</span>'; return; }
-  const groups = ss.groups || [];
-  if(!groups.length){ snap.innerHTML = '<span class="muted">Connected at '+esc(j.snapserver_addr||'')+'. No groups yet.</span>'; return; }
-  let s = '<table><thead><tr><th>Group</th><th>Stream</th><th>Muted</th><th>Clients</th></tr></thead><tbody>';
-  for(const g of groups){
-    const clients = (g.clients||[]).map(c => esc(c.name||c.id) + ' (' + esc(c.volume) + '%' + (c.muted?' muted':'') + ')').join(', ');
-    s += '<tr><td>'+esc(g.id)+'</td><td><span class="badge">'+esc(g.stream)+'</span></td><td>'+(g.muted?'yes':'no')+'</td><td class="pre">'+clients+'</td></tr>';
-  }
-  snap.innerHTML = s + '</tbody></table>';
-}
-async function spotifyLoad(){
-  try{
-    const j = await getJSON('/spotify/status.json');
-    const el = document.getElementById('sp');
-    const state = j.linked
-      ? '<span class="badge" style="background:rgba(46,160,67,0.2)">linked — tool active</span>'
-      : (j.configured ? '<span class="badge">credentials set, not linked</span>'
-                      : '<span class="badge">no credentials</span>');
-    el.innerHTML = 'Status: ' + state + ' &nbsp; device: <code>' + esc(j.device_name || 'Ambient') + '</code>';
-    if(j.device_name) document.getElementById('sp_dev').placeholder = esc(j.device_name);
-  }catch(e){ document.getElementById('sp').textContent = 'Request failed: ' + e; }
-}
-async function spotifySave(){
-  const msg = document.getElementById('spmsg'); msg.textContent = 'Saving…';
-  const body = {
-    client_id: document.getElementById('sp_cid').value.trim(),
-    client_secret: document.getElementById('sp_secret').value,
-    device_name: document.getElementById('sp_dev').value.trim(),
-  };
-  try{
-    const r = await fetch('/spotify/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const j = await r.json(); msg.textContent = j.ok ? 'Saved.' : (j.message || 'Error');
-    document.getElementById('sp_secret').value = '';
-    spotifyLoad();
-  }catch(e){ msg.textContent = 'Request failed: ' + e; }
-}
-async function spotifyLink(){
-  const msg = document.getElementById('spmsg');
-  msg.textContent = 'Opening a browser on the Mac — approve access, then return here…';
-  try{
-    const r = await fetch('/spotify/link', {method:'POST'});
-    const j = await r.json(); msg.textContent = j.ok ? (j.message || 'Linked.') : (j.message || 'Error');
-    spotifyLoad();
-  }catch(e){ msg.textContent = 'Request failed: ' + e; }
-}
-load();
-spotifyLoad();
-</script>"#;
+const MUSIC_BODY: &str = include_str!("webconfig/music.html");
 
 /// `/drive` body — link a Google Drive folder for the idle photo slideshow. The
 /// orchestrator runs the one-time OAuth consent here (a browser opens on the Mac);
@@ -810,205 +233,19 @@ spotifyLoad();
 /// NOT the shared `getJSON`, which the page shell redefines (single-arg, GET-only)
 /// in a script appended after this one, so calling it here would silently downgrade
 /// our POSTs to GET.
-const DRIVE_BODY: &str = r#"<style>
-  label { display:block; margin:1rem 0 0.25rem; font-weight:600; }
-  input { width:100%; max-width:36rem; padding:0.5rem; font:inherit; box-sizing:border-box; }
-  .status { margin-top:1rem; padding:0.6rem 0.8rem; border-radius:6px; min-height:1.2rem; max-width:36rem; }
-  .ok { background:rgba(46,160,67,0.15); } .err { background:rgba(248,81,73,0.15); }
-  .hint { opacity:0.6; font-weight:400; font-size:0.85rem; }
-</style>
-<p class="sub">Link a Google Drive folder for the idle photo slideshow. Consent runs once here on the Mac — a browser window opens; the tablet then pulls the token over Wyoming (no adb, no rebuild). Requires a Google Cloud OAuth client of type <b>Desktop app</b>.</p>
-<div id="statusline" class="muted">Loading…</div>
-<label>OAuth client ID <span class="hint" id="cid_state"></span>
-  <input id="client_id" type="text" placeholder="(leave blank to keep current)" autocomplete="off">
-</label>
-<label>OAuth client secret <span class="hint" id="secret_state"></span>
-  <input id="client_secret" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
-</label>
-<label>Folder IDs <span class="hint">comma-separated Drive folder IDs</span>
-  <input id="folder_ids" type="text" placeholder="1AbC...,1XyZ...">
-</label>
-<div class="toolbar">
-  <button id="save">Save credentials</button>
-  <button id="link">Link Google Drive</button>
-</div>
-<div id="status" class="status"></div>
-<script>
-  const $ = (id) => document.getElementById(id);
-  const statusEl = $('status');
-  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
-  async function load(){
-    try{
-      const j = await apiJSON('/drive/status.json');
-      $('cid_state').textContent = j.client_id_set ? '(set)' : '(not set)';
-      $('secret_state').textContent = j.client_secret_set ? '(set)' : '(not set)';
-      $('client_id').value = '';
-      $('client_secret').value = '';
-      $('folder_ids').value = (j.folder_ids||[]).join(', ');
-      const state = j.linked ? 'Linked ✓' : (j.configured ? 'Configured — not linked yet' : 'Not configured — set the client id + secret');
-      $('statusline').textContent = state + ' · scope: ' + (j.scope || '—');
-    }catch(e){ show(false, 'Could not load status: ' + e); }
-  }
-  async function save(){
-    const body = {
-      client_id: $('client_id').value.trim() || undefined,
-      client_secret: $('client_secret').value.trim() || undefined,
-      folder_ids: $('folder_ids').value.split(',').map(s=>s.trim()).filter(Boolean),
-    };
-    try{
-      const j = await apiJSON('/drive/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
-    }catch(e){ show(false, 'Request failed: ' + e); }
-  }
-  async function link(){
-    show(true, 'Opening a browser on this Mac — approve access, then return here…');
-    try{
-      const j = await apiJSON('/drive/link', {method:'POST'});
-      if(j.ok){
-        let m = j.message || 'Linked.';
-        if(j.verify && j.verify.length){
-          m += ' ' + j.verify.map(v => v.error ? ('folder '+v.folder_id+': '+v.error) : ('folder '+v.folder_id+': '+v.images+' image(s)')).join('; ');
-        }
-        show(true, m); load();
-      } else { show(false, j.message || 'Link failed.'); }
-    }catch(e){ show(false, 'Request failed: ' + e); }
-  }
-  $('save').addEventListener('click', save);
-  $('link').addEventListener('click', link);
-  load();
-</script>"#;
+const DRIVE_BODY: &str = include_str!("webconfig/drive.html");
 
 /// `/tools` body — credentials for the LLM tools that need a secret. v1 hosts the
 /// **Mapbox token** for the `directions_lookup` tool; a saved token rebuilds the tool
 /// set live (no restart). Uses a private `apiJSON` helper (not the shell's GET-only
 /// `getJSON`, which is appended after this script).
-const TOOLS_BODY: &str = r#"<style>
-  label { display:block; margin:1rem 0 0.25rem; font-weight:600; }
-  input { width:100%; max-width:36rem; padding:0.5rem; font:inherit; box-sizing:border-box; }
-  .status { margin-top:1rem; padding:0.6rem 0.8rem; border-radius:6px; min-height:1.2rem; max-width:36rem; }
-  .ok { background:rgba(46,160,67,0.15); } .err { background:rgba(248,81,73,0.15); }
-  .hint { opacity:0.6; font-weight:400; font-size:0.85rem; }
-</style>
-<p class="sub">Secrets for the LLM tools. Set once here on the Mac; changes apply live (no restart). Tokens are stored on the orchestrator and never shown back.</p>
-<h2 style="margin-top:1.5rem">Directions (Mapbox)</h2>
-<p class="sub">Enables the <code>directions_lookup</code> tool — distance, travel time, and live traffic. Get a token at account.mapbox.com. Requires <code>directions.provider = "mapbox"</code> in the config file (the default).</p>
-<div id="statusline" class="muted">Loading…</div>
-<label>Mapbox token <span class="hint" id="token_state"></span>
-  <input id="mapbox_token" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
-</label>
-<div class="toolbar">
-  <button id="save">Save token</button>
-</div>
-<div id="status" class="status"></div>
-<script>
-  const $ = (id) => document.getElementById(id);
-  const statusEl = $('status');
-  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
-  async function load(){
-    try{
-      const j = await apiJSON('/tools/status.json');
-      $('token_state').textContent = j.token_set ? '(a token is set)' : '(no token set)';
-      $('mapbox_token').value = '';
-      $('statusline').textContent = 'directions_lookup: ' + (j.tool_active ? 'active ✓' : 'inactive — set a token');
-    }catch(e){ show(false, 'Could not load status: ' + e); }
-  }
-  async function save(){
-    const body = { mapbox_token: $('mapbox_token').value.trim() || undefined };
-    try{
-      const j = await apiJSON('/tools/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); }
-      load();
-    }catch(e){ show(false, 'Request failed: ' + e); }
-  }
-  $('save').addEventListener('click', save);
-  load();
-</script>"#;
+const TOOLS_BODY: &str = include_str!("webconfig/tools.html");
 
 /// `/household` body — edit the canonical household + home information: the home
 /// location + units (grounds "here" for weather/nearby questions) and the roster of
 /// people who live here with their emails + phone numbers. A full-record save. Uses
 /// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
-const HOUSEHOLD_BODY: &str = r#"<style>
-  label { display:block; margin:1rem 0 0.25rem; font-weight:600; }
-  input, select { width:100%; max-width:36rem; padding:0.5rem; font:inherit; box-sizing:border-box; }
-  .status { margin-top:1rem; padding:0.6rem 0.8rem; border-radius:6px; min-height:1.2rem; max-width:36rem; }
-  .ok { background:rgba(46,160,67,0.15); } .err { background:rgba(248,81,73,0.15); }
-  .hint { opacity:0.6; font-weight:400; font-size:0.85rem; }
-  .member { border:1px solid rgba(128,128,128,0.3); border-radius:8px; padding:0.5rem 0.9rem 1rem; margin-top:1rem; max-width:36rem; }
-  .member .row { display:flex; justify-content:space-between; align-items:center; }
-  .member button { margin-top:0; padding:0.25rem 0.7rem; }
-</style>
-<p class="sub">Canonical context the assistant uses to ground answers: where "here" is (for weather and nearby questions) and who lives in the home, with their emails and phone numbers. Fix spellings, emails, and numbers here — changes apply live, no restart.</p>
-<label>Home location <span class="hint">e.g. "Austin, Texas" or a street address</span>
-  <input id="location" type="text" placeholder="(unset)" autocomplete="off">
-</label>
-<label>Measurement units
-  <select id="weather_units">
-    <option value="">(let the assistant choose)</option>
-    <option value="imperial">imperial (°F, miles)</option>
-    <option value="metric">metric (°C, km)</option>
-  </select>
-</label>
-<h2 style="margin-top:1.5rem;font-size:1.1rem;">People</h2>
-<div id="members"></div>
-<div class="toolbar"><button id="add">Add person</button></div>
-<div class="toolbar"><button id="save">Save</button></div>
-<div id="status" class="status"></div>
-<script>
-  const $ = (id) => document.getElementById(id);
-  const statusEl = $('status');
-  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
-  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-  function memberRow(m){
-    m = m || {};
-    const div = document.createElement('div');
-    div.className = 'member';
-    div.innerHTML =
-      '<div class="row"><label style="margin-top:0.5rem;">Name</label><button type="button" class="rm">Remove</button></div>' +
-      '<input class="m-name" type="text" placeholder="Name" value="'+esc(m.name)+'">' +
-      '<label>Relationship <span class="hint">optional, e.g. parent, kid, roommate</span></label>' +
-      '<input class="m-rel" type="text" value="'+esc(m.relationship)+'">' +
-      '<label>Emails <span class="hint">comma-separated</span></label>' +
-      '<input class="m-emails" type="text" value="'+esc((m.emails||[]).join(', '))+'">' +
-      '<label>Phone numbers <span class="hint">comma-separated</span></label>' +
-      '<input class="m-phones" type="text" value="'+esc((m.phones||[]).join(', '))+'">';
-    div.querySelector('.rm').addEventListener('click', () => div.remove());
-    return div;
-  }
-  function splitList(v){ return v.split(',').map(s=>s.trim()).filter(Boolean); }
-  async function load(){
-    try{
-      const j = await apiJSON('/household/status.json');
-      $('location').value = j.location || '';
-      $('weather_units').value = j.weather_units || '';
-      const box = $('members'); box.innerHTML = '';
-      (j.members||[]).forEach(m => box.appendChild(memberRow(m)));
-    }catch(e){ show(false, 'Could not load: ' + e); }
-  }
-  async function save(){
-    const members = [...document.querySelectorAll('#members .member')].map(d => ({
-      name: d.querySelector('.m-name').value.trim(),
-      relationship: d.querySelector('.m-rel').value.trim() || null,
-      emails: splitList(d.querySelector('.m-emails').value),
-      phones: splitList(d.querySelector('.m-phones').value),
-    })).filter(m => m.name);
-    const body = {
-      location: $('location').value.trim() || null,
-      weather_units: $('weather_units').value || null,
-      members,
-    };
-    try{
-      const j = await apiJSON('/household/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
-    }catch(e){ show(false, 'Request failed: ' + e); }
-  }
-  $('add').addEventListener('click', () => $('members').appendChild(memberRow({})));
-  $('save').addEventListener('click', save);
-  load();
-</script>"#;
+const HOUSEHOLD_BODY: &str = include_str!("webconfig/household.html");
 
 /// Cap on request bytes we buffer before the body — a config request is tiny; this
 /// just bounds a misbehaving/hostile client on the (unauthenticated) socket.
@@ -1861,7 +1098,7 @@ fn route(
         ("GET", "/") | ("GET", "/index.html") => (
             "200 OK",
             "text/html; charset=utf-8",
-            INDEX_HTML.as_bytes().to_vec(),
+            page("/", "Ambient Orchestrator", CONFIG_BODY).into_bytes(),
         ),
         ("GET", "/household") => (
             "200 OK",
