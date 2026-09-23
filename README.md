@@ -27,6 +27,10 @@ speaks the reply back through the Echo Show's speakers.
   facts/preferences across sessions (stored on the Mac).
 - 📺 **Ambient display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder.
+- 🔔 **Proactive notifications** — the Mac can push a visual notification to the
+  display *without* you asking (a reminder, an alert), over a persistent connection
+  the device holds open to its pinned orchestrator. Visual-only today (no spoken
+  output); send a test one from the config page's **Notify** tab.
 
 ## Architecture at a glance
 
