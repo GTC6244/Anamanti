@@ -96,8 +96,9 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let notify = Arc::new(ambient_orchestrator::notify::NotificationService::new());
     tokio::spawn(ambient_orchestrator::server::serve(
-        listener, pipeline, connector, catalog, None, None,
+        listener, pipeline, connector, catalog, None, None, notify,
     ));
     (addr, memory, settings)
 }

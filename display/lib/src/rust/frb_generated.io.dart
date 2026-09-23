@@ -23,6 +23,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
+  RustStreamSink<NotifyEvent> dco_decode_StreamSink_notify_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   RustStreamSink<WakeWordEvent> dco_decode_StreamSink_wake_word_event_Sse(
     dynamic raw,
   );
@@ -35,6 +40,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double dco_decode_box_autoadd_f_64(dynamic raw);
+
+  @protected
+  NotifyConfig dco_decode_box_autoadd_notify_config(dynamic raw);
 
   @protected
   SettingsUpdate dco_decode_box_autoadd_settings_update(dynamic raw);
@@ -88,6 +96,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ModelInfo dco_decode_model_info(dynamic raw);
 
   @protected
+  NotifyConfig dco_decode_notify_config(dynamic raw);
+
+  @protected
+  NotifyEvent dco_decode_notify_event(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
@@ -139,6 +153,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
+  RustStreamSink<NotifyEvent> sse_decode_StreamSink_notify_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RustStreamSink<WakeWordEvent> sse_decode_StreamSink_wake_word_event_Sse(
     SseDeserializer deserializer,
   );
@@ -151,6 +170,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double sse_decode_box_autoadd_f_64(SseDeserializer deserializer);
+
+  @protected
+  NotifyConfig sse_decode_box_autoadd_notify_config(
+    SseDeserializer deserializer,
+  );
 
   @protected
   SettingsUpdate sse_decode_box_autoadd_settings_update(
@@ -208,6 +232,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ModelInfo sse_decode_model_info(SseDeserializer deserializer);
+
+  @protected
+  NotifyConfig sse_decode_notify_config(SseDeserializer deserializer);
+
+  @protected
+  NotifyEvent sse_decode_notify_event(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -268,6 +298,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_notify_event_Sse(
+    RustStreamSink<NotifyEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_wake_word_event_Sse(
     RustStreamSink<WakeWordEvent> self,
     SseSerializer serializer,
@@ -281,6 +317,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_f_64(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_notify_config(
+    NotifyConfig self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_settings_update(
@@ -356,6 +398,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_model_info(ModelInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_notify_config(NotifyConfig self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_notify_event(NotifyEvent self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);

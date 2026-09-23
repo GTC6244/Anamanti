@@ -360,6 +360,44 @@ predictable memory use and no GC pauses under the 1 GB limit.
   device opens a fresh socket (same mDNS path a turn uses), outside any voice turn, and
   plays the returned audio through the shared `PlaybackSink` right after the bell.
 
+### Proactive notifications (Approach A — persistent device-dialed channel)
+
+Every frame above rides a socket the **device** opened for a voice turn, so the
+orchestrator can only ever *reply*. Proactive notifications add the one path where the
+Mac reaches the display **unprompted** — a meeting reminder, an alert — without the
+user speaking first. The chosen design keeps the device as the dialer (no reverse
+connection, no device-side listener, nothing new for NAT/firewalls, and the same
+mDNS + `instance_id` pin the voice path uses):
+
+- The device opens a **second, long-lived Wyoming connection** to the pinned
+  orchestrator and holds it open, reconnecting with capped exponential backoff
+  (`rust/src/wyoming/notify.rs`; started by `start_notify_channel` on its own thread,
+  independent of the voice engine). This is a *sidecar* — the per-turn voice socket and
+  its state machine are untouched.
+- **`ambient-hello`** (device → orchestrator): sent right after the notify socket
+  opens (`data.role="notify"`, `data.device_id`). It registers the connection with the
+  orchestrator's `NotificationService`, which parks the read loop and holds the socket
+  to push down.
+- **`ambient-notify`** (orchestrator → device): a proactive notification
+  (`data.id`, `data.priority` = `info`|`reminder`|`alert`, `data.title`, `data.body`).
+  The device decodes it to a `NotifyEvent` on a dedicated FRB stream; Flutter's
+  `NotificationController` shows a banner on the idle screen (top layer, tap or
+  auto-expire to dismiss). **Visual-only in this phase** — no spoken output, no
+  state-machine interaction.
+- **`ambient-notify-ack`** (device → orchestrator): reserved for a later
+  delivery-tracking phase (store-and-forward across reconnects); the constructor exists
+  in both crates but nothing sends it yet.
+
+Producers enqueue via `NotificationService::notify`, which fans a notification out to
+every connected device and prunes dead channels. The first producer is the config
+page's **Notify** tab (`POST /notifications/test`); if no device holds a channel open
+the notification is simply dropped (delivered-count 0). Because the channel is pinned
+to the selected `instance_id`, a pinned display only accepts pushes from its Mac.
+Deferred (see `TODO.md`): spoken notifications + barge-in, ack/store-and-forward/TTL,
+per-device targeting, quiet hours, and a paired/TLS control channel (the LAN hop is
+currently unauthenticated, so this widens the same attack surface the voice/control
+frames already have).
+
 ---
 
 ## 5. Discovery & networking
@@ -441,6 +479,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 | On-device OAuth for photos | Device displays directly; no Mac proxy needed |
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |
 | Idle photo slideshow (Google) | Ambient value when idle; user picks the folder |
+| Proactive notifications via a persistent **device-dialed** channel (Approach A) | Mac reaches the display unprompted while keeping the device the dialer — reuses the existing mDNS + `instance_id` pin and the blessed auto-reconnect model; avoids a reverse connection / device listener / new trust direction. A doorbell (device advertises, Mac nudges) was considered but only wins idle-socket cost, which is free on a mains-powered display, at the price of lossy triggers. Shipped visual-only first (see §4) |
 
 ---
 

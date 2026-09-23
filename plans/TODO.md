@@ -273,6 +273,33 @@ feature:
 - [ ] Persist a last-known copy of orchestrator settings on the device for display
       while the Mac is offline.
 
+## 6a. Proactive notifications (Approach A — shipped visual-only 2026-09-23)
+
+The orchestrator can push visual notifications to the display over a persistent,
+device-dialed Wyoming channel (`ambient-hello` → `ambient-notify`). Device: `start_notify_channel`
++ `rust/src/wyoming/notify.rs` (reconnect/backoff) → `NotifyEvent` FRB stream →
+`NotificationController` + `NotificationBanner`. Orchestrator: `NotificationService`
+registry + server `ambient-hello` arm + config-page **Notify** tab (`POST /notifications/test`).
+Verified: mac `cargo test` + `clippy -D warnings`; device `cargo test` + `clippy -D warnings`;
+`flutter analyze` + `flutter test` (incl. `notification_controller_test.dart`); FRB codegen.
+
+Remaining (next phases, in rough order):
+- [ ] **Verify on hardware**: hold the notify channel open, push from the Notify tab,
+      confirm the banner appears on the Echo Show and reconnects after a Mac restart.
+- [ ] **Spoken notifications + barge-in**: an opt-in `speak` flag that voices a
+      notification via the playback path when idle, integrated with the wake-word
+      state machine (queue while a turn is active; a wake word cancels it) + quiet hours.
+- [ ] **Reliable delivery**: send `ambient-notify-ack` (constructor already exists in
+      both crates), SQLite store-and-forward across reconnects, TTL/dedup — so a
+      notification isn't lost if the device is briefly disconnected (today it's dropped).
+- [ ] **Per-device targeting**: `NotificationService::notify` currently broadcasts to
+      every connected channel; key by `device_id` for multi-display homes.
+- [ ] **Real producers**: wire the first non-test producer (calendar reminders from the
+      existing `calendar.subscriptions` feed; later timers/alerts).
+- [ ] **Security**: the notify channel widens the same unauthenticated-LAN surface the
+      voice/control frames have (a push can render arbitrary text on the display).
+      Gate behind the planned paired/TLS control channel (see §3/§7 secret-handling).
+
 ## 7. Tools & actions (agent capabilities)
 
 Tool calling runs on the **rig** engine, now the default (`orchestrator/src/llm/rig.rs`).

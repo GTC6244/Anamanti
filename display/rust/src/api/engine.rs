@@ -405,3 +405,134 @@ pub fn stop_wake_word_engine() {
 pub fn is_wake_word_engine_running() -> bool {
     crate::engine::is_running()
 }
+
+// ---------------------------------------------------------------------------
+// Proactive notifications (Approach A, visual-only). A persistent channel the
+// device dials to the orchestrator and holds open, receiving pushed
+// `ambient-notify` frames *without* a voice turn (architecture.md §4). Rust owns
+// the socket + reconnect/backoff; Flutter consumes `NotifyEvent`s and renders a
+// banner on the idle screen. This runs alongside — and independently of — the
+// wake-word engine, on its own thread + runtime.
+// ---------------------------------------------------------------------------
+
+/// Config for the persistent notify channel. The orchestrator is discovered over
+/// mDNS at connect time (same as the voice path), so only the pin, the browse
+/// timeout, and this display's id are configured here.
+pub struct NotifyConfig {
+    /// Stable selection key (`instance_id` TXT) of the pinned orchestrator; empty =
+    /// "Auto" (first available). Mirrors [`WakeWordConfig::orchestrator_key`] so the
+    /// notify channel targets the same Mac the voice path does.
+    pub orchestrator_key: String,
+    /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+    /// (0 = built-in default).
+    pub discovery_timeout_secs: u64,
+    /// A stable identifier for this display, sent in the `ambient-hello` frame so the
+    /// orchestrator can key notifications per device (may be empty).
+    pub device_id: String,
+}
+
+/// One proactive notification pushed from the orchestrator, streamed to Flutter.
+/// Modeled as a flat struct (like [`WakeWordEvent`]) so the FRB boundary stays
+/// dependency-free.
+#[derive(Clone)]
+pub struct NotifyEvent {
+    /// Stable notification id (for dedup / dismiss on the UI side).
+    pub id: String,
+    /// `"info"` | `"reminder"` | `"alert"` — drives the banner styling.
+    pub priority: String,
+    /// Short headline.
+    pub title: String,
+    /// Body text.
+    pub body: String,
+}
+
+struct NotifyHandle {
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+static NOTIFY: std::sync::OnceLock<std::sync::Mutex<Option<NotifyHandle>>> =
+    std::sync::OnceLock::new();
+
+fn notify_slot() -> &'static std::sync::Mutex<Option<NotifyHandle>> {
+    NOTIFY.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Open the persistent proactive-notification channel and stream pushed
+/// notifications to Dart. Replaces any channel already running (so it can be
+/// restarted when the pinned orchestrator changes). The channel dials the pinned
+/// orchestrator and reconnects with backoff for the life of the subscription.
+pub fn start_notify_channel(
+    config: NotifyConfig,
+    sink: StreamSink<NotifyEvent>,
+) -> anyhow::Result<()> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    stop_notify_channel();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let loop_running = running.clone();
+    let join = std::thread::Builder::new()
+        .name("notify-channel".to_string())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::error!("notify channel: could not build runtime: {e:#}");
+                    return;
+                }
+            };
+            let timeout = if config.discovery_timeout_secs == 0 {
+                crate::wyoming::DEFAULT_DISCOVERY_TIMEOUT
+            } else {
+                std::time::Duration::from_secs(config.discovery_timeout_secs)
+            };
+            let key = {
+                let k = config.orchestrator_key.trim();
+                if k.is_empty() {
+                    None
+                } else {
+                    Some(k.to_string())
+                }
+            };
+            let cache = crate::wyoming::EndpointCache::new();
+            rt.block_on(crate::wyoming::notify::run(
+                &cache,
+                timeout,
+                key,
+                config.device_id,
+                loop_running,
+                move |note| {
+                    sink.add(NotifyEvent {
+                        id: note.id,
+                        priority: note.priority,
+                        title: note.title,
+                        body: note.body,
+                    })
+                    .is_ok()
+                },
+            ));
+        })?;
+
+    *notify_slot().lock().unwrap() = Some(NotifyHandle {
+        running,
+        join: Some(join),
+    });
+    Ok(())
+}
+
+/// Stop the proactive-notification channel (if any) and join its thread. Idempotent.
+pub fn stop_notify_channel() {
+    use std::sync::atomic::Ordering;
+    let handle = notify_slot().lock().unwrap().take();
+    if let Some(mut h) = handle {
+        h.running.store(false, Ordering::SeqCst);
+        if let Some(join) = h.join.take() {
+            let _ = join.join();
+        }
+    }
+}
