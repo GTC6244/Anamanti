@@ -22,6 +22,7 @@
 pub mod client;
 pub mod control;
 pub mod discovery;
+pub mod notify;
 pub mod protocol;
 pub mod state;
 

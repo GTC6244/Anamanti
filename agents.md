@@ -72,6 +72,16 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   risk section below.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
+- **Proactive notifications (Approach A):** the orchestrator can push **visual**
+  notifications to the display *unprompted* (no voice turn) over a **persistent,
+  device-dialed** Wyoming channel (`ambient-hello` → `ambient-notify`), separate from
+  the per-turn voice socket. The device is still the dialer (reuses mDNS + the
+  `instance_id` pin + auto-reconnect); the Mac only pushes down the open socket. Rust
+  owns the socket + reconnect (`display/rust/src/wyoming/notify.rs`,
+  `start_notify_channel`); Flutter shows a dismissible banner
+  (`NotificationController`); the orchestrator keeps a `NotificationService` registry
+  (config-page **Notify** tab pushes a test). Visual-only for now — no spoken output,
+  no state-machine interaction. Design: architecture.md §4; follow-ups: TODO.md §6a.
 
 If a task seems to require changing one of these, stop and confirm first.
 
@@ -322,6 +332,14 @@ Notes:
   flushes playback immediately + sends `ambient-interrupt` (orchestrator aborts
   LLM+TTS) + starts a new turn. (AEC deferred — raise the wake-word threshold during
   SPEAKING to suppress self-triggers.)
+- Follow-up listen: after **every** reply the orchestrator sends `ambient-listen`
+  (before the final `audio-stop`) carrying a `wait_secs` window (10 s after a `?` reply,
+  5 s otherwise); after its TTS drains the device reopens the mic and starts a fresh turn
+  with **no wake word**, and that turn's prompt is fed recent conversation history. The
+  orchestrator sizes the follow-up turn's no-speech VAD window to `wait_secs` and
+  **sleeps on silence**; the chain continues only while the user keeps talking (optional
+  `follow_up.max_chain`, default unlimited). See `plans/Plan.MD` (Follow-up listening) +
+  §4 of `architecture.md`.
 
 Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
 

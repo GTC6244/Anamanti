@@ -17,8 +17,10 @@
 import 'package:flutter/material.dart';
 
 import 'package:ambient_display/src/engine/assistant_controller.dart';
+import 'package:ambient_display/src/engine/notification_controller.dart';
 import 'package:ambient_display/src/slideshow/photo_source.dart';
 import 'package:ambient_display/src/ui/conversation_view.dart';
+import 'package:ambient_display/src/ui/notification_banner.dart';
 import 'package:ambient_display/src/ui/slideshow_view.dart';
 import 'package:ambient_display/src/ui/status_indicator.dart';
 import 'package:ambient_display/src/ui/timers_overlay.dart';
@@ -28,11 +30,16 @@ class AmbientScreen extends StatelessWidget {
     super.key,
     required this.assistant,
     required this.slideshow,
+    this.notifications,
     this.onOpenSettings,
   });
 
   final AssistantController assistant;
   final SlideshowController slideshow;
+
+  /// Proactive notifications pushed by the orchestrator (Approach A). When null (as
+  /// in widget tests that only exercise the turn UI) no banner is shown.
+  final NotificationController? notifications;
 
   /// Opens the settings screen (Phase 6). When null, no settings control is shown
   /// (e.g. in widget tests that only exercise the reactive turn UI).
@@ -188,6 +195,27 @@ class AmbientScreen extends StatelessWidget {
                       ),
                     ),
                   ),
+                ),
+
+              // Proactive notification banner, top layer so it sits above the
+              // conversation and clock. Rebuilds independently on its own controller,
+              // and shows even in away mode (an alert should draw attention).
+              if (notifications != null)
+                ListenableBuilder(
+                  listenable: notifications!,
+                  builder: (context, _) {
+                    final note = notifications!.current;
+                    return AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      child: note == null
+                          ? const SizedBox.shrink()
+                          : NotificationBanner(
+                              key: ValueKey(note.id),
+                              notification: note,
+                              onDismiss: notifications!.dismiss,
+                            ),
+                    );
+                  },
                 ),
             ],
           );

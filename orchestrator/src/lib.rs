@@ -25,6 +25,7 @@ pub mod drive_consent;
 pub mod llm;
 pub mod memory;
 pub mod music;
+pub mod notify;
 pub mod orchestrator;
 pub mod server;
 pub mod settings;

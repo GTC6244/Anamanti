@@ -50,6 +50,15 @@
     "embed_dims": 192
   },
 
+  "follow_up": {
+    "enabled": true,
+    "max_chain": 0,
+    "question_wait_secs": 10,
+    "reply_wait_secs": 5,
+    "history_turns": 5,
+    "history_window_secs": 600
+  },
+
   "music": {
     "enabled": true,
     "snapserver_addr": "127.0.0.1:1705",

@@ -134,6 +134,9 @@ pub struct Config {
     pub graphrag: GraphRagConfig,
     /// Per-person speaker identification settings (speaker_id_plan.md).
     pub speaker: SpeakerConfig,
+    /// Auto follow-up listening: reopen the mic (no wake word) when a reply is a
+    /// question, and feed recent history into that turn's prompt.
+    pub follow_up: FollowUpConfig,
     /// House-wide music routing (Snapcast) control-plane settings.
     pub music: MusicConfig,
     /// Where the runtime-swappable settings overlay is persisted (`settings_path` in
@@ -205,6 +208,51 @@ impl Default for SpeakerConfig {
             new_threshold: 0.40,
             min_speech_ms: 1200,
             embed_dims: 192,
+        }
+    }
+}
+
+/// Auto follow-up listening (`follow_up` block). After **every** spoken reply the
+/// device reopens the mic and listens for more input with no wake word; that follow-up
+/// turn's prompt is seeded with recent conversation history. The listen window differs
+/// by reply: a **question** (ends with `?`) waits `question_wait_secs`, any other reply
+/// waits `reply_wait_secs`, then the assistant sleeps if nothing was said. The window is
+/// passed to the device in the `ambient-listen` frame and echoed back so the
+/// orchestrator sizes the follow-up turn's no-speech VAD window to match. See
+/// `plans/Plan.MD` (Follow-up listening) and `architecture.md` §4.
+#[derive(Debug, Clone)]
+pub struct FollowUpConfig {
+    /// Master switch (`follow_up.enabled`, default on). Off ⇒ the orchestrator never
+    /// sends an `ambient-listen` frame and every turn stays single-shot.
+    pub enabled: bool,
+    /// Optional safety ceiling on consecutive auto follow-ups (`follow_up.max_chain`).
+    /// **`0` = unlimited** (the default): the loop is instead terminated by silence (an
+    /// empty follow-up transcript sends no new `ambient-listen`). A non-zero value caps
+    /// the chain, requiring a wake word again after that many auto-listens.
+    pub max_chain: u32,
+    /// Listen window (seconds) after a **question** reply — how long the mic stays open
+    /// for the answer before sleeping (`follow_up.question_wait_secs`, default 10).
+    pub question_wait_secs: u32,
+    /// Listen window (seconds) after any **non-question** reply, before sleeping
+    /// (`follow_up.reply_wait_secs`, default 5).
+    pub reply_wait_secs: u32,
+    /// How many recent turns to feed into a follow-up turn's prompt as history
+    /// (`follow_up.history_turns`, default 5).
+    pub history_turns: usize,
+    /// Only include history turns completed within this many seconds of the follow-up
+    /// (`follow_up.history_window_secs`, default 600 = 10 minutes).
+    pub history_window_secs: i64,
+}
+
+impl Default for FollowUpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_chain: 0,
+            question_wait_secs: 10,
+            reply_wait_secs: 5,
+            history_turns: 5,
+            history_window_secs: 600,
         }
     }
 }
@@ -339,6 +387,7 @@ impl Default for Config {
             helix_path: PathBuf::from("ambient_helix"),
             graphrag: GraphRagConfig::default(),
             speaker: SpeakerConfig::default(),
+            follow_up: FollowUpConfig::default(),
             music: MusicConfig::default(),
             settings_path: Some(PathBuf::from("ambient_settings.json")),
             audio_dump_dir: None,
@@ -440,6 +489,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub speaker: FileSpeaker,
     #[serde(default)]
+    pub follow_up: FileFollowUp,
+    #[serde(default)]
     pub music: FileMusic,
     #[serde(default)]
     pub calendar: FileCalendar,
@@ -514,6 +565,17 @@ pub struct FileSpeaker {
     pub new_threshold: Option<f32>,
     pub min_speech_ms: Option<u32>,
     pub embed_dims: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileFollowUp {
+    pub enabled: Option<bool>,
+    pub max_chain: Option<u32>,
+    pub question_wait_secs: Option<u32>,
+    pub reply_wait_secs: Option<u32>,
+    pub history_turns: Option<usize>,
+    pub history_window_secs: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -737,6 +799,22 @@ impl Config {
             embed_dims: fc.speaker.embed_dims.unwrap_or(sd.embed_dims),
         };
 
+        let fud = FollowUpConfig::default();
+        let follow_up = FollowUpConfig {
+            enabled: fc.follow_up.enabled.unwrap_or(fud.enabled),
+            max_chain: fc.follow_up.max_chain.unwrap_or(fud.max_chain),
+            question_wait_secs: fc
+                .follow_up
+                .question_wait_secs
+                .unwrap_or(fud.question_wait_secs),
+            reply_wait_secs: fc.follow_up.reply_wait_secs.unwrap_or(fud.reply_wait_secs),
+            history_turns: fc.follow_up.history_turns.unwrap_or(fud.history_turns),
+            history_window_secs: fc
+                .follow_up
+                .history_window_secs
+                .unwrap_or(fud.history_window_secs),
+        };
+
         let md = MusicConfig::default();
         let music = MusicConfig {
             enabled: fc.music.enabled.unwrap_or(md.enabled),
@@ -870,6 +948,7 @@ impl Config {
             helix_path: fc.helix_path.unwrap_or(d.helix_path),
             graphrag,
             speaker,
+            follow_up,
             music,
             settings_path,
             audio_dump_dir: fc.audio_dump_dir,

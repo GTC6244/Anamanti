@@ -12,6 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::control;
 use crate::llm::catalog::ModelCatalog;
 use crate::music::MusicDucker;
+use crate::notify::NotificationService;
 use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome};
 use crate::wyoming::protocol::{self, types, AudioFormat};
 use crate::wyoming::DynConnection;
@@ -25,6 +26,7 @@ pub async fn serve(
     catalog: Arc<ModelCatalog>,
     voices_dir: Option<PathBuf>,
     ducker: Option<Arc<MusicDucker>>,
+    notify: Arc<NotificationService>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -34,8 +36,12 @@ pub async fn serve(
         let catalog = catalog.clone();
         let voices_dir = voices_dir.clone();
         let ducker = ducker.clone();
+        let notify = notify.clone();
         tokio::spawn(async move {
-            match handle_connection(stream, pipeline, connector, catalog, voices_dir, ducker).await
+            match handle_connection(
+                stream, pipeline, connector, catalog, voices_dir, ducker, notify,
+            )
+            .await
             {
                 Ok(()) => log::info!("device disconnected: {peer}"),
                 Err(e) => log::warn!("connection {peer} ended with error: {e:#}"),
@@ -49,6 +55,7 @@ pub async fn serve(
 /// the memory store / runtime settings; an `audio-start` opens a voice turn. The
 /// Phase-3 device opens a fresh connection per turn, but looping here also supports
 /// a device that reuses one socket for several turns or control requests.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     stream: TcpStream,
     pipeline: Pipeline,
@@ -56,6 +63,7 @@ async fn handle_connection(
     catalog: Arc<ModelCatalog>,
     voices_dir: Option<PathBuf>,
     ducker: Option<Arc<MusicDucker>>,
+    notify: Arc<NotificationService>,
 ) -> Result<()> {
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
@@ -83,6 +91,11 @@ async fn handle_connection(
             }
             Some(ev) if ev.event_type == types::AUDIO_START => {
                 let format = protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO);
+                // A follow-up turn (device auto-opened the mic) stamps its chain depth
+                // and the listen window it was given; an ordinary wake-word turn reads
+                // both back as 0.
+                let followup_depth = protocol::followup_depth(&ev.data);
+                let followup_wait_secs = protocol::followup_wait_secs(&ev.data);
                 // Best-effort music ducking: lower the music group's volume while
                 // the assistant speaks and restore it when the turn ends. Fired on
                 // a spawned task so it never blocks (or fails) the turn; `duck`/
@@ -112,7 +125,14 @@ async fn handle_connection(
                     }
                 };
                 match pipeline
-                    .run_turn_after_start(&mut device, connector.as_ref(), format, &mut on_event)
+                    .run_turn_after_start(
+                        &mut device,
+                        connector.as_ref(),
+                        format,
+                        followup_depth,
+                        followup_wait_secs,
+                        &mut on_event,
+                    )
                     .await?
                 {
                     TurnOutcome::Completed => continue,
@@ -129,6 +149,49 @@ async fn handle_connection(
                         .announce(&mut device, connector.as_ref(), &text)
                         .await?;
                 }
+            }
+            // device → orchestrator: open the persistent proactive-notification
+            // channel (Approach A). We register it and then hold the socket open,
+            // pushing `ambient-notify` frames down it as they are enqueued. This is a
+            // long-lived connection, separate from a per-turn voice socket, so it
+            // takes over this task until the device closes it.
+            Some(ev) if ev.event_type == types::AMBIENT_HELLO => {
+                let device_id = ev.hello_device_id().unwrap_or_default().to_string();
+                log::info!(
+                    "[{}] notify channel opened (device_id={device_id:?})",
+                    peer_str(peer.as_ref())
+                );
+                let (conn_id, mut rx) = notify.register(&device_id);
+                let (reader, writer) = device.split_mut();
+                // Pump enqueued pushes out to the device while watching the read half
+                // for the device closing the socket. In this visual-only phase the
+                // device sends no frames on this channel, so the read side only ever
+                // resolves to EOF/close; a future ack phase that expects inbound
+                // frames must move the write pump to a spawned task, because
+                // `read_event` is not cancellation-safe mid-frame.
+                loop {
+                    tokio::select! {
+                        incoming = protocol::read_event(&mut *reader) => {
+                            match incoming {
+                                Ok(Some(_)) => {} // no acks handled yet — ignore
+                                Ok(None) | Err(_) => break, // device closed / errored
+                            }
+                        }
+                        outgoing = rx.recv() => {
+                            match outgoing {
+                                Some(frame) => {
+                                    if protocol::write_event(&mut *writer, &frame).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                None => break, // notification service dropped
+                            }
+                        }
+                    }
+                }
+                notify.deregister(conn_id);
+                log::info!("[{}] notify channel closed", peer_str(peer.as_ref()));
+                return Ok(());
             }
             Some(_) => continue, // ignore stray pre-turn frames
         }

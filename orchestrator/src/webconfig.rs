@@ -44,6 +44,7 @@ use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
+use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine,
@@ -161,6 +162,11 @@ fn sidebar_html(active: &str) -> String {
                     "/tools",
                     "Tools",
                     r##"<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>"##,
+                ),
+                (
+                    "/notifications",
+                    "Notify",
+                    r##"<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>"##,
                 ),
                 (
                     "/music",
@@ -281,6 +287,11 @@ const DRIVE_BODY: &str = include_str!("webconfig/drive.html");
 /// `getJSON`, which is appended after this script).
 const TOOLS_BODY: &str = include_str!("webconfig/tools.html");
 
+/// `/notifications` body — push a proactive (visual-only) notification to the
+/// display for testing, and see how many device notify channels are connected. Uses
+/// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
+const NOTIFY_BODY: &str = include_str!("webconfig/notifications.html");
+
 /// `/household` body — edit the canonical household + home information: the home
 /// location + units (grounds "here" for weather/nearby questions) and the roster of
 /// people who live here with their emails + phone numbers. A full-record save. Uses
@@ -302,6 +313,7 @@ pub async fn serve(
     voices_dir: Option<PathBuf>,
     debug: DebugSources,
     music: Option<MusicHub>,
+    notify: Arc<NotificationService>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -311,9 +323,10 @@ pub async fn serve(
         let voices_dir = voices_dir.clone();
         let debug = debug.clone();
         let music = music.clone();
+        let notify = notify.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(
-                stream, settings, catalog, connector, voices_dir, debug, music,
+                stream, settings, catalog, connector, voices_dir, debug, music, notify,
             )
             .await
             {
@@ -334,6 +347,7 @@ async fn handle(
     voices_dir: Option<PathBuf>,
     debug: DebugSources,
     music: Option<MusicHub>,
+    notify: Arc<NotificationService>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
@@ -416,6 +430,29 @@ async fn handle(
     // Save the Mapbox token for the directions tool (rebuilds the tool set live).
     if method == "POST" && path == "/tools/save" {
         let payload = directions_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+
+    // Proactive notifications: how many device notify channels are connected, and a
+    // button to push a test notification down them (Approach A, visual-only).
+    if method == "GET" && path == "/notifications/status.json" {
+        let payload = json!({ "connected": notify.connected() }).to_string();
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    if method == "POST" && path == "/notifications/test" {
+        let payload = notifications_test_json(&notify, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -928,6 +965,29 @@ async fn music_proc_json(music: Option<&MusicHub>, body: &[u8]) -> String {
     }
 }
 
+/// `POST /notifications/test` — push a proactive notification to every connected
+/// device notify channel. Body: `{ title?, body?, priority? }` (all optional; sane
+/// defaults). Returns `{ ok, delivered }` — the number of channels it reached (0 if
+/// the device isn't currently holding a notify channel open).
+fn notifications_test_json(notify: &NotificationService, body: &[u8]) -> String {
+    let data: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let field = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let note = Notification {
+        id: notify.new_id(),
+        priority: field("priority").unwrap_or_else(|| "info".to_string()),
+        title: field("title").unwrap_or_else(|| "Test notification".to_string()),
+        body: field("body").unwrap_or_else(|| "Hello from the orchestrator.".to_string()),
+    };
+    let delivered = notify.notify(&note);
+    json!({ "ok": true, "delivered": delivered }).to_string()
+}
+
 /// `POST /music/play` — body `{ url }` loads a URL in the mpv web player.
 async fn music_play_json(music: Option<&MusicHub>, body: &[u8]) -> String {
     let Some(hub) = music else {
@@ -1314,6 +1374,11 @@ fn route(
             "text/html; charset=utf-8",
             page("/tools", "Tools", TOOLS_BODY).into_bytes(),
         ),
+        ("GET", "/notifications") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/notifications", "Notify", NOTIFY_BODY).into_bytes(),
+        ),
         ("GET", "/chatlog") => (
             "200 OK",
             "text/html; charset=utf-8",
@@ -1541,6 +1606,10 @@ mod tests {
             "http://unused",
             None,
         ))
+    }
+
+    fn notify() -> Arc<NotificationService> {
+        Arc::new(NotificationService::new())
     }
 
     fn debug() -> DebugSources {
@@ -2006,9 +2075,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug(), None)
-                .await
-                .unwrap();
+            handle(
+                stream,
+                s,
+                catalog(),
+                connector(),
+                None,
+                debug(),
+                None,
+                notify(),
+            )
+            .await
+            .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -2127,9 +2205,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug(), None)
-                .await
-                .unwrap();
+            handle(
+                stream,
+                s,
+                catalog(),
+                connector(),
+                None,
+                debug(),
+                None,
+                notify(),
+            )
+            .await
+            .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -2157,9 +2244,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(stream, s, catalog(), connector(), None, debug(), None)
-                .await
-                .unwrap();
+            handle(
+                stream,
+                s,
+                catalog(),
+                connector(),
+                None,
+                debug(),
+                None,
+                notify(),
+            )
+            .await
+            .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -2204,6 +2300,7 @@ mod tests {
                 Some(dir_for_task),
                 debug(),
                 None,
+                notify(),
             )
             .await
             .unwrap();
