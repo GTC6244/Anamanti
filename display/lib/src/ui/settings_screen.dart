@@ -38,6 +38,11 @@ const Map<String, String> _kBackends = {
 /// (a dropdown); other backends keep a free-text model field (e.g. an Ollama tag).
 const Set<String> _kCloudBackends = {'anthropic', 'openai'};
 
+/// The fixed set of "dim the screen after" durations (seconds) offered by the
+/// Display picker: 30s, 1m, 2m, 5m, 10m, 15m, 30m, 1h. The slider snaps between
+/// these presets rather than sweeping a continuous range. Kept in ascending order.
+const List<int> _kDimDelayPresets = <int>[30, 60, 120, 300, 600, 900, 1800, 3600];
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
@@ -1029,6 +1034,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// room goes quiet before dimming to the calm away-mode clock face. Maps to the
   /// camera proximity release window (device-local; restarts the engine on Save).
   List<Widget> _displayTiles() {
+    // The slider snaps across the fixed presets: map the stored seconds to the
+    // nearest preset index so an out-of-band persisted value still lands on a
+    // valid stop, and store back the exact preset the user lands on.
+    final index = _nearestDimPresetIndex(_settings.dimDelaySecs);
     return [
       const Padding(
         padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -1039,24 +1048,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
       _rangeSlider(
-        label: 'Stay bright before dim',
-        value: _settings.dimDelaySecs.toDouble(),
-        min: 5,
-        max: 300,
-        divisions: 59,
-        format: _fmtDuration,
+        label: 'Dim screen after',
+        value: index.toDouble(),
+        min: 0,
+        max: (_kDimDelayPresets.length - 1).toDouble(),
+        divisions: _kDimDelayPresets.length - 1,
+        format: (v) => _fmtDuration(
+          _kDimDelayPresets[v.round().clamp(0, _kDimDelayPresets.length - 1)]
+              .toDouble(),
+        ),
         sliderKey: const Key('settings-dim-delay'),
         onChanged: (v) => setState(
-          () => _settings = _settings.copyWith(dimDelaySecs: v.round()),
+          () => _settings = _settings.copyWith(
+            dimDelaySecs: _kDimDelayPresets[v
+                .round()
+                .clamp(0, _kDimDelayPresets.length - 1)],
+          ),
         ),
       ),
     ];
   }
 
-  /// Human-readable seconds → "45s" / "2m" / "2m 30s" for the dim-delay slider.
+  /// The index of the dim-delay preset closest to [seconds], so a persisted value
+  /// that predates the preset list (or an out-of-range one) still shows a valid stop.
+  int _nearestDimPresetIndex(int seconds) {
+    var best = 0;
+    var bestDelta = (_kDimDelayPresets[0] - seconds).abs();
+    for (var i = 1; i < _kDimDelayPresets.length; i++) {
+      final delta = (_kDimDelayPresets[i] - seconds).abs();
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /// Human-readable seconds → "45s" / "2m" / "1h" for the dim-delay picker.
   String _fmtDuration(double seconds) {
     final s = seconds.round();
     if (s < 60) return '${s}s';
+    if (s % 3600 == 0) return '${s ~/ 3600}h';
     final m = s ~/ 60;
     final rem = s % 60;
     return rem == 0 ? '${m}m' : '${m}m ${rem}s';

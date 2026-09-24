@@ -34,6 +34,14 @@ Future<void> stopWakeWordEngine() =>
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
 
+/// Register user activity that isn't camera motion — a voice turn or a screen touch
+/// — so it resets the screen-dim countdown (and brightens the screen if it had
+/// already dimmed). Flutter calls this on each voice-turn transition and on screen
+/// touches. Safe to call any time: it's a no-op when camera proximity isn't running,
+/// and a harmless no-op off Android (host tests, no camera).
+void noteUserActivity() =>
+    RustLib.instance.api.crateApiEngineNoteUserActivity();
+
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
 /// restarted when the pinned orchestrator changes). The channel dials the pinned

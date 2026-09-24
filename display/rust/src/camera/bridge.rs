@@ -133,6 +133,27 @@ pub fn stop() {
     clear();
 }
 
+/// Register external user activity (a voice turn or a screen touch) with the
+/// presence detector, resetting the dim countdown exactly as camera motion does.
+/// Emits a single `Presence(true)` event if this brought the screen back out of the
+/// dimmed state. A no-op when proximity isn't running (detector/sink absent), so it
+/// is safe to call unconditionally from the voice path and from Flutter.
+pub fn note_activity() {
+    let transition = DETECTOR
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|d| d.note_activity(Instant::now()));
+
+    if let Some(present) = transition {
+        log::info!("user activity: user present (screen brighten)");
+        debug_assert!(present);
+        if let Some(sink) = SINK.lock().unwrap().as_ref() {
+            let _ = sink.add(WakeWordEvent::presence(present));
+        }
+    }
+}
+
 /// Drop the sink + detector so any in-flight frame push becomes a no-op.
 fn clear() {
     *SINK.lock().unwrap() = None;

@@ -99,6 +99,22 @@ impl PresenceDetector {
         None
     }
 
+    /// Register **externally-observed** user activity — a voice turn or a screen
+    /// touch — as if it were motion at `now`. This refreshes the release deadline
+    /// (so the screen won't dim for another full window) and, when the screen had
+    /// already dimmed (absent), flips back to present. Returns `Some(true)` **only**
+    /// on that absent→present transition, so the caller emits a single `Presence(true)`
+    /// event to brighten the screen; otherwise `None`. It never dims — dimming stays
+    /// the release-window's job in [`observe`], driven purely by a lack of activity.
+    pub fn note_activity(&mut self, now: Instant) -> Option<bool> {
+        self.last_activity = Some(now);
+        if !self.present {
+            self.present = true;
+            return Some(true);
+        }
+        None
+    }
+
     /// Mean absolute per-pixel luma delta versus the previous frame, or `None` when
     /// there's no comparable previous frame (the first frame, or a resolution change
     /// mid-stream) — in which case we can't judge motion and just seed the baseline.
@@ -197,6 +213,38 @@ mod tests {
         d.observe(&flat(40, 64), t);
         // A differently-sized frame can't be diffed; just reseeds, no event.
         assert_eq!(d.observe(&flat(200, 100), t), None);
+        assert!(!d.present());
+    }
+
+    #[test]
+    fn note_activity_from_absent_marks_present_once() {
+        let mut d = PresenceDetector::new(2.5, REL);
+        // Starts absent (no motion seen yet): external activity brightens.
+        let t = Instant::now();
+        assert_eq!(d.note_activity(t), Some(true));
+        assert!(d.present());
+        // Already present: a further activity ping refreshes the deadline silently.
+        assert_eq!(d.note_activity(t + Duration::from_secs(1)), None);
+        assert!(d.present());
+    }
+
+    #[test]
+    fn note_activity_pushes_back_the_dim_deadline() {
+        let mut d = PresenceDetector::new(2.5, REL);
+        let t0 = Instant::now();
+        d.observe(&flat(40, 64), t0);
+        assert_eq!(d.observe(&flat(90, 64), t0), Some(true)); // present via motion
+        let quiet = flat(90, 64);
+        // A voice turn / touch just before the window elapses resets the countdown…
+        assert_eq!(d.note_activity(t0 + Duration::from_secs(19)), None);
+        // …so at the original deadline we're still present (no dim).
+        assert_eq!(d.observe(&quiet, t0 + Duration::from_secs(20)), None);
+        assert!(d.present());
+        // Only after a full release window with no activity of any kind does it dim.
+        assert_eq!(
+            d.observe(&quiet, t0 + Duration::from_secs(39)),
+            Some(false)
+        );
         assert!(!d.present());
     }
 

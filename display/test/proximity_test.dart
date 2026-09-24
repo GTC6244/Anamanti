@@ -54,6 +54,25 @@ WakeWordEvent _presence(bool present) => WakeWordEvent(
       recipeJson: '',
     );
 
+/// A neutral engine event of a given [kind], for exercising the activity dispatch.
+WakeWordEvent _event(WakeWordEventKind kind) => WakeWordEvent(
+      kind: kind,
+      message: '',
+      device: '',
+      deviceSampleRate: 0,
+      channels: 0,
+      rms: 0,
+      score: 0,
+      model: '',
+      transcript: '',
+      reply: '',
+      timerId: 0,
+      timerLabel: '',
+      timerRemainingSecs: 0,
+      present: false,
+      recipeJson: '',
+    );
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -105,5 +124,54 @@ void main() {
 
     await c.reset(); // hands brightness back to the system default
     expect(calls.last, -1.0);
+  });
+
+  test('voice-turn events report user activity; mic level/presence do not',
+      () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    var activityPings = 0;
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+      onUserActivity: () => activityPings++,
+    )..start();
+    addTearDown(controller.dispose);
+
+    Future<void> pump(WakeWordEvent e) async {
+      engine.add(e);
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    // Each turn stage counts as activity (so a hands-free conversation keeps the
+    // screen awake even when the user is too still for the camera).
+    await pump(_event(WakeWordEventKind.detected));
+    await pump(_event(WakeWordEventKind.streaming));
+    await pump(_event(WakeWordEventKind.transcript));
+    await pump(_event(WakeWordEventKind.speaking));
+    await pump(_event(WakeWordEventKind.listeningFollowup));
+    expect(activityPings, 5);
+
+    // High-frequency mic level + camera presence transitions must NOT ping (they
+    // aren't user-initiated turns; presence is the camera's own signal).
+    await pump(_event(WakeWordEventKind.level));
+    await pump(_presence(false));
+    await pump(_presence(true));
+    await pump(_event(WakeWordEventKind.status));
+    expect(activityPings, 5);
+  });
+
+  test('noteUserActivity() forwards to the injected activity sink', () {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    var pings = 0;
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+      onUserActivity: () => pings++,
+    );
+    addTearDown(controller.dispose);
+
+    controller.noteUserActivity(); // e.g. a screen touch routed from the UI
+    controller.noteUserActivity();
+    expect(pings, 2);
   });
 }
