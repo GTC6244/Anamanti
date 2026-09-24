@@ -19,6 +19,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::cadora::{
+    CadoraVoiceApi, GroceryController, DEFAULT_BASE_URL as CADORA_DEFAULT_BASE_URL,
+};
 use crate::calendar::CalendarSource;
 use crate::directions::DirectionsProvider;
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
@@ -305,6 +308,58 @@ impl SpotifyConfig {
     }
 }
 
+/// Cadora shared-household **shopping list** linkage, owned by the orchestrator.
+///
+/// Drives the rig-engine `shopping_list_add` tool (`crate::llm::rig`) over Cadora's
+/// voice API (`crate::cadora`). The orchestrator holds the durable `vl_…` voice-link
+/// token minted by redeeming a spoken 6-digit pairing code (config page → Household
+/// tab). Like Spotify, this is used by the LLM tool set, so a change rebuilds the
+/// backend so the tool is advertised/withdrawn live.
+///
+/// Plaintext token (0600 settings file); keep on a trusted machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CadoraConfig {
+    /// Cadora app-server base URL. `None`/empty ⇒ the built-in default.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Long-lived `vl_…` voice-link token from the pairing redeem. `None` = not linked.
+    #[serde(default)]
+    pub link_token: Option<String>,
+}
+
+impl CadoraConfig {
+    fn non_empty(v: &Option<String>) -> bool {
+        v.as_deref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// The base URL to target, defaulting to the built-in Cadora server when unset.
+    pub fn base_url_or_default(&self) -> String {
+        self.base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(CADORA_DEFAULT_BASE_URL)
+            .to_string()
+    }
+
+    /// True once a voice-link token exists — the tool can be built.
+    pub fn linked(&self) -> bool {
+        Self::non_empty(&self.link_token)
+    }
+
+    /// Build the live controller when linked, else `None` (so the `shopping_list_add`
+    /// tool simply isn't advertised).
+    pub fn controller(&self) -> Option<Arc<dyn GroceryController>> {
+        if !self.linked() {
+            return None;
+        }
+        Some(Arc::new(CadoraVoiceApi::new(
+            self.base_url_or_default(),
+            self.link_token.clone().unwrap_or_default(),
+        )))
+    }
+}
+
 /// A requested change to the Spotify config (tri-state per field, like `DriveUpdate`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpotifyUpdate {
@@ -313,6 +368,15 @@ pub struct SpotifyUpdate {
     pub refresh_token: Option<Option<String>>,
     pub device_name: Option<Option<String>>,
     pub scope: Option<Option<String>>,
+}
+
+/// A requested change to the Cadora shopping-list config (tri-state per field, like
+/// [`SpotifyUpdate`]). Applied by [`SharedSettings::apply_cadora`], which rebuilds the
+/// backend so the `shopping_list_add` tool is advertised/withdrawn live.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CadoraUpdate {
+    pub base_url: Option<Option<String>>,
+    pub link_token: Option<Option<String>>,
 }
 
 /// A requested change to the directions tool config. `mapbox_token` is tri-state:
@@ -373,6 +437,10 @@ pub struct PersistedSettings {
     /// files.
     #[serde(default)]
     pub spotify: SpotifyConfig,
+    /// Cadora shopping-list linkage (voice-link token). Defaulted (empty) for older
+    /// files.
+    #[serde(default)]
+    pub cadora: CadoraConfig,
 }
 
 /// Load persisted settings, or `None` if the file is absent/unreadable.
@@ -455,6 +523,10 @@ pub struct LlmFactory {
     /// Spotify isn't linked. Set from the current [`SpotifyConfig`] on every
     /// (re)build so the tool reflects the latest consent without re-reading env.
     pub spotify: Option<Arc<dyn SpotifyController>>,
+    /// The live Cadora controller for the `shopping_list_add` tool, or `None` when the
+    /// shopping list isn't linked. Set from the current [`CadoraConfig`] on every
+    /// (re)build so the tool reflects the latest linkage.
+    pub cadora: Option<Arc<dyn GroceryController>>,
     /// The web-calendar source for the `calendar_lookup` tool, or `None` when no
     /// subscriptions are configured. Prebuilt once from the config file's `calendar`
     /// block so a rebuild never re-parses config; shared into every rebuilt backend.
@@ -541,6 +613,7 @@ impl LlmFactory {
                                     self.spotify.clone(),
                                     self.calendar.clone(),
                                     self.directions.clone(),
+                                    self.cadora.clone(),
                                 ),
                             )?),
                             _ => Arc::new(AnthropicBackend::new(
@@ -587,6 +660,7 @@ impl LlmFactory {
                             self.spotify.clone(),
                             self.calendar.clone(),
                             self.directions.clone(),
+                            self.cadora.clone(),
                         ),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
@@ -652,6 +726,10 @@ pub struct RuntimeSettings {
     /// rebuilds the backend (via [`SpotifyConfig::controller`]) so the
     /// `spotify_control` tool is advertised/withdrawn live.
     pub spotify: SpotifyConfig,
+    /// Cadora shopping-list linkage. Like Spotify, a change here rebuilds the backend
+    /// (via [`CadoraConfig::controller`]) so the `shopping_list_add` tool is
+    /// advertised/withdrawn live.
+    pub cadora: CadoraConfig,
 }
 
 /// A description of the settings currently in effect, for reporting back to the
@@ -764,6 +842,7 @@ impl SharedSettings {
             drive: s.drive.clone(),
             household: s.household.clone(),
             spotify: s.spotify.clone(),
+            cadora: s.cadora.clone(),
         }
     }
 
@@ -786,6 +865,7 @@ impl SharedSettings {
             anthropic_token: None,
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
+            cadora: None,
             calendar: None,
             directions: None,
             directions_provider: String::new(),
@@ -812,6 +892,7 @@ impl SharedSettings {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
         )
     }
@@ -908,6 +989,9 @@ impl SharedSettings {
             // Spotify isn't changed by a normal settings update, but the rebuilt tool
             // set must still carry the live controller — source it from current config.
             factory.spotify = current.spotify.controller();
+            // Same for the Cadora shopping-list tool: keep the live controller so a
+            // normal settings change never drops `shopping_list_add`.
+            factory.cadora = current.cadora.controller();
             // Same for the directions tool: rebuild it from the live Mapbox token so a
             // normal settings change never drops `directions_lookup`.
             factory.directions = crate::directions::from_token(
@@ -1126,6 +1210,8 @@ impl SharedSettings {
         factory.anthropic_api_key = current.anthropic_api_key.clone();
         factory.openai_api_key = current.openai_api_key.clone();
         factory.spotify = target.controller();
+        // Keep the Cadora shopping-list tool live across this rebuild.
+        factory.cadora = current.cadora.controller();
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1146,6 +1232,68 @@ impl SharedSettings {
             w.llm_model = model;
         }
         w.spotify = target.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        target
+    }
+
+    /// A snapshot of the live Cadora shopping-list config (base URL + link presence).
+    /// Read by the config-page status endpoint and the pairing flow.
+    pub fn cadora(&self) -> CadoraConfig {
+        self.inner.read().unwrap().cadora.clone()
+    }
+
+    /// Apply a Cadora shopping-list config change, rebuild the LLM so the
+    /// `shopping_list_add` tool is advertised/withdrawn to match, and persist
+    /// (best-effort, 0600). Empty-string sets are treated as clears. Returns the
+    /// resulting [`CadoraConfig`].
+    ///
+    /// Like [`Self::apply_spotify`], the rebuild is best-effort: if it fails the new
+    /// config is still stored and persisted, so the tool activates on the next
+    /// successful rebuild or restart — linkage is never lost to a transient error.
+    pub fn apply_cadora(&self, update: &CadoraUpdate) -> CadoraConfig {
+        let current = self.inner.read().unwrap().clone();
+        let mut target = current.cadora.clone();
+        if let Some(v) = &update.base_url {
+            target.base_url = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.link_token {
+            target.link_token = v.clone().filter(|s| !s.is_empty());
+        }
+
+        // Rebuild the backend so the tool set reflects the new linkage. Build before
+        // taking the write lock; on failure, fall through and still store the config.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.cadora = target.controller();
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("cadora: applied config but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.cadora = target.clone();
         let snapshot = self
             .persist_path
             .is_some()
@@ -1187,6 +1335,7 @@ impl SharedSettings {
         factory.anthropic_api_key = current.anthropic_api_key.clone();
         factory.openai_api_key = current.openai_api_key.clone();
         factory.spotify = current.spotify.controller();
+        factory.cadora = current.cadora.controller();
         factory.directions = crate::directions::from_token(
             &factory.directions_provider,
             target_token.as_deref(),
@@ -1241,6 +1390,7 @@ mod tests {
             anthropic_token: None,
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
+            cadora: None,
             calendar: None,
             directions: None,
             directions_provider: String::new(),
@@ -1285,6 +1435,7 @@ mod tests {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
         )
     }
@@ -1373,6 +1524,7 @@ mod tests {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1522,6 +1674,7 @@ mod tests {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1660,6 +1813,7 @@ mod tests {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1728,6 +1882,7 @@ mod tests {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1804,6 +1959,7 @@ mod tests {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1871,6 +2027,7 @@ mod tests {
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
             },
             Some(path.clone()),
         );
@@ -1884,7 +2041,10 @@ mod tests {
             })
             .unwrap();
         assert!(view.anthropic_oauth_token_set);
-        assert!(provider.has_override(), "the shared provider got the override");
+        assert!(
+            provider.has_override(),
+            "the shared provider got the override"
+        );
 
         // Persisted (plaintext, 0600) so a restart re-applies it; never leaked in view.
         let p = load_persisted(&path).expect("settings file written");

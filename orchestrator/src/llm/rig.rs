@@ -38,6 +38,7 @@ use rig_core::tool::PortableTool;
 use chrono::Local;
 
 use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, ReplyStream};
+use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsConfig, DirectionsProvider, LiveHomeLocation, TravelMode};
 use crate::music::{SearchKind, SpotifyCommand, SpotifyController};
@@ -97,6 +98,16 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              or a song/artist/album/playlist, you MUST call `spotify_control` — never say you \
              cannot play music. For \"play some <artist>\" or a mood/genre use action=play with \
              kind=artist or kind=playlist; for one named song use kind=track.",
+        );
+    }
+    if has(ShoppingListControl::NAME) {
+        parts.push(
+            "You can add items to the household's shared shopping list with the \
+             `shopping_list_add` tool. Whenever the user asks to add, put, or write \
+             something on the shopping/grocery/store list (e.g. \"add milk\", \"put eggs \
+             on the shopping list\", \"we need paper towels\"), you MUST call \
+             `shopping_list_add`, one call per distinct item, with the item name and a \
+             quantity when they say one. Relay the tool's spoken confirmation.",
         );
     }
     parts.join(" ")
@@ -972,6 +983,110 @@ impl PortableTool for SpotifyControl {
 }
 
 // ===========================================================================
+// Shopping-list tool (Cadora shared household via the voice API)
+// ===========================================================================
+
+/// Typed arguments for [`ShoppingListControl`].
+#[derive(Debug, Deserialize)]
+pub struct GroceryArgs {
+    /// The item to add (e.g. "milk", "paper towels"). One item per call.
+    pub item: String,
+    /// How many, when the user says a number (1–99). Omit for a plain add.
+    #[serde(default)]
+    pub quantity: Option<u32>,
+}
+
+/// A concrete, `std::error::Error` failure for the shopping tool (rig requires the
+/// tool's error type to implement `std::error::Error`, which `anyhow::Error` does not).
+#[derive(Debug)]
+pub struct GroceryToolError(pub String);
+
+impl std::fmt::Display for GroceryToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "shopping list add failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for GroceryToolError {}
+
+/// Adds items to the household's shared shopping list through an injected
+/// [`GroceryController`] (Cadora's voice API), so the tool is testable offline —
+/// mirroring [`SpotifyControl`]. The list lives on the Cadora server; this only
+/// issues the add and relays the server's spoken confirmation.
+pub struct ShoppingListControl {
+    controller: Arc<dyn GroceryController>,
+}
+
+impl ShoppingListControl {
+    pub fn new(controller: Arc<dyn GroceryController>) -> Self {
+        Self { controller }
+    }
+
+    /// The rig tool definition to advertise on a completion request.
+    pub fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: self.description(),
+            parameters: self.parameters(),
+        }
+    }
+
+    /// Execute the tool from the model's raw JSON arguments (the runtime path).
+    pub async fn invoke(&self, arguments: &Value) -> Result<String> {
+        let args: GroceryArgs = serde_json::from_value(arguments.clone())
+            .context("parsing shopping_list_add arguments")?;
+        self.call(args)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+impl PortableTool for ShoppingListControl {
+    const NAME: &'static str = "shopping_list_add";
+    type Args = GroceryArgs;
+    type Output = String;
+    type Error = GroceryToolError;
+
+    fn description(&self) -> String {
+        "Add an item to the household's shared shopping/grocery list. Use this for ANY \
+         request to add, put, or write something on the shopping list, grocery list, or \
+         store list (\"add milk\", \"put eggs on the list\", \"we need paper towels\"). \
+         Call it once per distinct item; include a quantity only when the user says one. \
+         Returns a short spoken confirmation to relay."
+            .to_string()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "string",
+                    "description": "The single item to add, e.g. \"milk\" or \"paper towels\"."
+                },
+                "quantity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 99,
+                    "description": "How many, when the user states a number. Omit otherwise."
+                }
+            },
+            "required": ["item"]
+        })
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.controller
+            .command(GroceryCommand::AddItem {
+                item: args.item,
+                quantity: args.quantity,
+            })
+            .await
+            .map_err(|e| GroceryToolError(format!("{e:#}")))
+    }
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -989,6 +1104,7 @@ pub struct Tools {
     calendar: Option<Arc<CalendarLookup>>,
     directions: Option<Arc<DirectionsLookup>>,
     spotify: Option<Arc<SpotifyControl>>,
+    grocery: Option<Arc<ShoppingListControl>>,
 }
 
 impl Tools {
@@ -1001,6 +1117,7 @@ impl Tools {
         calendar: Option<Arc<dyn CalendarSource>>,
         directions: Option<DirectionsConfig>,
         spotify: Option<Arc<dyn SpotifyController>>,
+        grocery: Option<Arc<dyn GroceryController>>,
     ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
@@ -1025,12 +1142,17 @@ impl Tools {
         if let Some(s) = &spotify {
             definitions.push(s.definition());
         }
+        let grocery = grocery.map(|c| Arc::new(ShoppingListControl::new(c)));
+        if let Some(g) = &grocery {
+            definitions.push(g.definition());
+        }
         Self {
             definitions,
             search,
             calendar,
             directions,
             spotify,
+            grocery,
         }
     }
 
@@ -1061,6 +1183,10 @@ impl Tools {
             SpotifyControl::NAME => match &self.spotify {
                 Some(spotify) => spotify.invoke(arguments).await,
                 None => anyhow::bail!("spotify control is not enabled"),
+            },
+            ShoppingListControl::NAME => match &self.grocery {
+                Some(grocery) => grocery.invoke(arguments).await,
+                None => anyhow::bail!("the shopping list tool is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
@@ -1108,6 +1234,7 @@ pub fn tools_from_config(
     spotify: Option<Arc<dyn SpotifyController>>,
     calendar: Option<Arc<dyn CalendarSource>>,
     directions: Option<(Arc<dyn DirectionsProvider>, bool)>,
+    grocery: Option<Arc<dyn GroceryController>>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
     // Calendar + directions are prebuilt once on the `LlmFactory` from the JSON
@@ -1123,7 +1250,11 @@ pub fn tools_from_config(
     // Spotify control is passed in from the live settings (`SpotifyConfig::controller`),
     // seeded from the config file's `spotify` block at boot and updated by the
     // config-page consent flow; `None` → the spotify_control tool isn't advertised.
-    Some(Arc::new(Tools::new(search, calendar, directions, spotify)))
+    // Grocery (Cadora shopping list) is likewise passed in from the live settings
+    // (`CadoraConfig::controller`); `None` → the shopping_list_add tool isn't advertised.
+    Some(Arc::new(Tools::new(
+        search, calendar, directions, spotify, grocery,
+    )))
 }
 
 // ===========================================================================
@@ -1497,6 +1628,30 @@ mod tests {
         }
     }
 
+    /// A canned grocery controller so shopping-tool tests never touch the network.
+    /// Records the last command so tests can assert the arg mapping.
+    struct StaticGrocery {
+        last: std::sync::Mutex<Option<GroceryCommand>>,
+    }
+
+    #[async_trait]
+    impl GroceryController for StaticGrocery {
+        async fn command(&self, cmd: GroceryCommand) -> Result<String> {
+            let reply = match &cmd {
+                GroceryCommand::AddItem {
+                    item,
+                    quantity: Some(q),
+                } => format!("Added {q} {item} to your shopping list."),
+                GroceryCommand::AddItem {
+                    item,
+                    quantity: None,
+                } => format!("Added {item} to your shopping list."),
+            };
+            *self.last.lock().unwrap() = Some(cmd);
+            Ok(reply)
+        }
+    }
+
     /// Serve a fixed sequence of raw HTTP responses, one per inbound connection.
     fn serve_sequence(bodies: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1601,6 +1756,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1643,6 +1799,7 @@ mod tests {
             Some(Arc::new(StaticCalendar(vec![event]))),
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1675,7 +1832,13 @@ mod tests {
             home_location: LiveHomeLocation::new(Some("Home, Austin".to_string())),
             imperial: true,
         };
-        let tools = Some(Arc::new(Tools::new(None, None, Some(directions), None)));
+        let tools = Some(Arc::new(Tools::new(
+            None,
+            None,
+            Some(directions),
+            None,
+            None,
+        )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "how long to the airport?"))
@@ -1695,7 +1858,7 @@ mod tests {
 
     #[test]
     fn directions_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None);
+        let none = Tools::new(None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -1711,6 +1874,7 @@ mod tests {
                 home_location: LiveHomeLocation::default(),
                 imperial: false,
             }),
+            None,
             None,
         );
         assert!(with
@@ -1751,7 +1915,7 @@ mod tests {
 
     #[test]
     fn spotify_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None);
+        let none = Tools::new(None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -1764,11 +1928,35 @@ mod tests {
             Some(Arc::new(StaticSpotify {
                 last: std::sync::Mutex::new(None),
             })),
+            None,
         );
         assert!(with
             .definitions
             .iter()
             .any(|d| d.name == SpotifyControl::NAME));
+    }
+
+    #[test]
+    fn shopping_tool_advertised_only_when_configured() {
+        let none = Tools::new(None, None, None, None, None);
+        assert!(!none
+            .definitions
+            .iter()
+            .any(|d| d.name == ShoppingListControl::NAME));
+
+        let with = Tools::new(
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::new(StaticGrocery {
+                last: std::sync::Mutex::new(None),
+            })),
+        );
+        assert!(with
+            .definitions
+            .iter()
+            .any(|d| d.name == ShoppingListControl::NAME));
     }
 
     #[test]
@@ -1849,6 +2037,7 @@ mod tests {
             None,
             None,
             Some(controller.clone()),
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1865,6 +2054,46 @@ mod tests {
             Some(SpotifyCommand::Play {
                 query: Some("Radiohead".into()),
                 kind: SearchKind::Artist
+            })
+        );
+        server.await.unwrap();
+    }
+
+    /// End-to-end tool loop for the shopping tool: round 0 the fake Ollama asks for
+    /// `shopping_list_add` (2 milk); round 1 (after the confirmation is threaded back)
+    /// it streams the reply. Proves the tool is advertised, dispatched with the parsed
+    /// args, and its result reaches the model — using a canned controller.
+    #[tokio::test]
+    async fn rig_ollama_runs_shopping_tool_then_streams_answer() {
+        let tool_call = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"shopping_list_add\",\"arguments\":{\"item\":\"milk\",\"quantity\":2}}}]},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"Done — 2 milk are on the list.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
+
+        let controller = Arc::new(StaticGrocery {
+            last: std::sync::Mutex::new(None),
+        });
+        let tools = Some(Arc::new(Tools::new(
+            None,
+            None,
+            None,
+            None,
+            Some(controller.clone()),
+        )));
+        let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
+        let stream = backend
+            .respond(LlmTurn::new("sys", "add two milk to the shopping list"))
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_reply(stream).await.unwrap(),
+            "Done — 2 milk are on the list."
+        );
+        // The controller received the parsed command.
+        assert_eq!(
+            controller.last.lock().unwrap().clone(),
+            Some(GroceryCommand::AddItem {
+                item: "milk".into(),
+                quantity: Some(2),
             })
         );
         server.await.unwrap();
@@ -1932,7 +2161,7 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None, None, None);
+        let tools = Tools::new(None, None, None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -1949,7 +2178,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
-        let tools = Some(Arc::new(Tools::new(None, None, None, None)));
+        let tools = Some(Arc::new(Tools::new(None, None, None, None, None)));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "set a 5 minute pasta timer").with_actions(tx))

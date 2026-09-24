@@ -546,7 +546,17 @@ There are **two flavors** of tool:
   TTL cache to dedupe fetches inside one tool-negotiation loop), expands recurring
   events (`RRULE`) within the requested window, and filters by time / person
   (fuzzy name match) / free text. A CalDAV or macOS-EventKit source can drop in
-  later behind the same `CalendarSource` trait.
+  later behind the same `CalendarSource` trait. The **`shopping_list_add`** tool has
+  the same shape but acts on an external service: it holds an injected
+  `Arc<dyn GroceryController>` (`orchestrator/src/cadora/`) and, when the household
+  shopping list is linked, POSTs the add to **Cadora's voice API** (the shared family
+  backend behind NextHaul et al.) and speaks back its confirmation — mirroring how
+  `spotify_control` holds a `SpotifyController`. Linking: NextHaul (Settings → Voice
+  & Integrations) mints a one-time **6-digit code** (`/voice/links/pair`); enter it on
+  the config page (Household tab) and the orchestrator redeems it
+  (`/voice/links/redeem`) for a durable voice-link token stored in the 0600 settings
+  file. It never touches Supabase directly — Cadora owns list creation, member
+  attribution, and dedupe.
 - **Action tool** — additionally causes an effect on the Echo Show (e.g.
   `set_timer`). The tool cannot reach the device directly (it runs inside the LLM
   loop, which has no socket), so it emits a **`DeviceAction`** onto a per-turn

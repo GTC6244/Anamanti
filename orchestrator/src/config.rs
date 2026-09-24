@@ -32,8 +32,8 @@ use crate::music::{
     SnapcastClient,
 };
 use crate::settings::{
-    load_persisted, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
-    SpotifyConfig,
+    load_persisted, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
+    SharedSettings, SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -176,6 +176,9 @@ pub struct Config {
     /// Spotify voice-control seed (client creds + refresh token + device name).
     /// Overlaid by the persisted settings file.
     pub spotify: SpotifyConfig,
+    /// Cadora shopping-list seed (base URL + voice-link token). The token is normally
+    /// minted by the config-page pairing flow. Overlaid by the persisted settings file.
+    pub cadora: CadoraConfig,
 }
 
 /// Speaker-identification configuration. Off by default (`speaker.enabled`); a
@@ -404,6 +407,7 @@ impl Default for Config {
                 ..DriveConfig::default()
             },
             spotify: SpotifyConfig::default(),
+            cadora: CadoraConfig::default(),
         }
     }
 }
@@ -496,6 +500,8 @@ pub struct FileConfig {
     pub drive: FileDrive,
     #[serde(default)]
     pub spotify: FileSpotify,
+    #[serde(default)]
+    pub cadora: FileCadora,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -629,6 +635,16 @@ pub struct FileSpotify {
     pub client_secret: Option<String>,
     pub refresh_token: Option<String>,
     pub device_name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileCadora {
+    /// Cadora app-server base URL (default `https://cadora-server.fly.dev`).
+    pub base_url: Option<String>,
+    /// A `vl_…` voice-link token, if seeded directly (normally minted via the
+    /// config-page pairing flow instead).
+    pub link_token: Option<String>,
 }
 
 /// Trim a config string and drop it when empty.
@@ -881,6 +897,11 @@ impl Config {
             scope: None,
         };
 
+        let cadora = CadoraConfig {
+            base_url: nonempty(fc.cadora.base_url),
+            link_token: nonempty(fc.cadora.link_token),
+        };
+
         let ollama_url = match &llm {
             LlmChoice::Ollama { url, .. } => url.clone(),
             _ => fc
@@ -958,6 +979,7 @@ impl Config {
                 .unwrap_or(d.directions_provider),
             drive,
             spotify,
+            cadora,
         })
     }
 
@@ -1118,6 +1140,9 @@ impl Config {
             // Seeded per-build from the resolved Spotify config in `shared_settings`
             // (and refreshed by `apply`/`apply_spotify`).
             spotify: None,
+            // Seeded per-build from the resolved Cadora config in `shared_settings`
+            // (and refreshed by `apply`/`apply_cadora`).
+            cadora: None,
             // Prebuilt from the config: the calendar source (web .ics) and the
             // directions provider (Mapbox). The Mapbox token is seeded from the env
             // secret here but is runtime-settable (Tools tab) — `shared_settings`
@@ -1218,6 +1243,14 @@ impl Config {
         self.spotify.clone()
     }
 
+    /// Initial Cadora shopping-list config seeded from the config file's `cadora`
+    /// block. The voice-link token is normally minted at runtime by the config-page
+    /// pairing flow; a persisted file overlays these at boot (see
+    /// [`Self::shared_settings`]).
+    pub fn initial_cadora(&self) -> CadoraConfig {
+        self.cadora.clone()
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
@@ -1263,6 +1296,8 @@ impl Config {
         let mut household = self.initial_household();
         // Spotify voice-control config: same seed-then-persist-overlay pattern.
         let mut spotify = self.initial_spotify();
+        // Cadora shopping-list config: same seed-then-persist-overlay pattern.
+        let mut cadora = self.initial_cadora();
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -1344,6 +1379,13 @@ impl Config {
             if p.spotify.scope.is_some() {
                 spotify.scope = p.spotify.scope;
             }
+            // Overlay persisted Cadora fields onto the config-file seed (same rule).
+            if p.cadora.base_url.is_some() {
+                cadora.base_url = p.cadora.base_url;
+            }
+            if p.cadora.link_token.is_some() {
+                cadora.link_token = p.cadora.link_token;
+            }
         }
 
         // Seed the directions tool's live default origin from the resolved household
@@ -1366,6 +1408,9 @@ impl Config {
         // Seed the initial Spotify controller so the `spotify_control` tool is
         // advertised at boot when the account is already linked (env or persisted).
         build_factory.spotify = spotify.controller();
+        // Seed the initial Cadora controller so the `shopping_list_add` tool is
+        // advertised at boot when the shopping list is already linked.
+        build_factory.cadora = cadora.controller();
         // Seed the initial directions provider from the resolved Mapbox token so the
         // `directions_lookup` tool is advertised at boot when a token is present.
         build_factory.directions = crate::directions::from_token(
@@ -1405,6 +1450,7 @@ impl Config {
                 drive,
                 household,
                 spotify,
+                cadora,
             },
             persist_path,
         ))

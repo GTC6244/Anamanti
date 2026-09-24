@@ -96,5 +96,10 @@
     "client_secret": null,
     "refresh_token": null,
     "device_name": "Ambient"
+  },
+
+  "cadora": {
+    "base_url": "https://cadora-server.fly.dev",
+    "link_token": null
   }
 }

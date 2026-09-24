@@ -22,6 +22,28 @@
   <div class="toolbar"><button id="add">+ Add person</button></div>
 </div>
 
+<div class="card">
+  <h2>Shopping list (Cadora)</h2>
+  <p class="desc">Enables the <code>shopping_list_add</code> voice tool, so "add milk to the shopping list" writes to the household's shared Cadora list (used by NextHaul and the family apps).</p>
+  <div id="cad" class="muted">Loading…</div>
+  <div class="toolbar" style="margin-top:0.6rem;">
+    <input id="cad_code" type="text" inputmode="numeric" placeholder="6-digit code" style="min-width:12rem">
+    <button class="primary" onclick="cadoraLink()">Link</button>
+    <span id="cadmsg" class="muted"></span>
+  </div>
+  <details style="margin-top:0.5rem">
+    <summary class="hint">Advanced: paste a full token &amp; app-server URL</summary>
+    <div class="toolbar" style="margin-top:0.4rem">
+      <input id="cad_token" type="text" placeholder="Paste a vl_… token instead" style="min-width:22rem">
+    </div>
+    <div class="toolbar" style="margin-top:0.4rem">
+      <input id="cad_base" type="text" placeholder="https://cadora-server.fly.dev" style="min-width:20rem">
+      <button onclick="cadoraSave()">Save URL</button>
+    </div>
+  </details>
+  <p class="hint" style="margin:0.5rem 0 0">In the <b>NextHaul</b> app, open <b>Settings → Voice &amp; Integrations</b>, add a voice assistant to get a <b>6-digit code</b>, and enter it here. It's single-use and expires in a few minutes; the tool activates the moment the code is redeemed.</p>
+</div>
+
 <div class="card danger-zone">
   <h2>Danger zone</h2>
   <div class="callout">
@@ -87,4 +109,40 @@
   $('add').addEventListener('click', () => $('members').appendChild(memberRow({})));
   $('save').addEventListener('click', save);
   load();
+
+  // --- Shopping list (Cadora) linkage -------------------------------------
+  async function cadoraLoad(){
+    try{
+      const j = await apiJSON('/cadora/status.json');
+      const el = $('cad');
+      const state = j.linked
+        ? '<span class="badge good">linked — tool active</span>'
+        : '<span class="badge">not linked</span>';
+      el.innerHTML = 'Status: ' + state + ' &nbsp; server: <code>' + esc(j.base_url||'') + '</code>';
+      if(j.base_url) $('cad_base').placeholder = esc(j.base_url);
+    }catch(e){ $('cad').textContent = 'Request failed: ' + e; }
+  }
+  window.cadoraSave = async function(){
+    const msg = $('cadmsg'); msg.textContent = 'Saving…';
+    try{
+      const r = await fetch('/cadora/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({base_url: $('cad_base').value.trim()})});
+      const j = await r.json(); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
+      cadoraLoad();
+    }catch(e){ msg.textContent = 'Request failed: ' + e; }
+  };
+  window.cadoraLink = async function(){
+    const msg = $('cadmsg'); msg.textContent = 'Linking…';
+    const body = {
+      token: $('cad_token').value.trim(),
+      code: $('cad_code').value.trim(),
+      base_url: $('cad_base').value.trim(),
+    };
+    try{
+      const r = await fetch('/cadora/link', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const j = await r.json(); msg.textContent = j.ok ? (j.message||'Linked.') : (j.message||'Error');
+      $('cad_token').value = ''; $('cad_code').value = '';
+      cadoraLoad();
+    }catch(e){ msg.textContent = 'Request failed: ' + e; }
+  };
+  cadoraLoad();
 </script>
