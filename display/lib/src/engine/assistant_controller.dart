@@ -220,7 +220,9 @@ class AssistantController extends ChangeNotifier {
     Duration endpointSilence = const Duration(milliseconds: 600),
     double endpointRmsThreshold = 0.012,
     DateTime Function()? clock,
+    VoidCallback? onUserActivity,
   })  : _config = config,
+        _onUserActivity = onUserActivity,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -253,6 +255,13 @@ class AssistantController extends ChangeNotifier {
   final Duration _endpointSilence;
   final double _endpointRmsThreshold;
   final DateTime Function() _clock;
+
+  /// Notifies the engine that the user is actively engaged — by voice or, via
+  /// [noteUserActivity] from the UI layer, by touching the screen — so the
+  /// screen-dim countdown resets (and a dimmed screen brightens). Production wires
+  /// this to the native `noteUserActivity`; null (the default) disables it, so
+  /// unit/widget tests run with no native library loaded.
+  final VoidCallback? _onUserActivity;
 
   /// True once we've seen speech-level audio in the current turn (so trailing
   /// silence means "done speaking" rather than "hasn't started yet").
@@ -320,9 +329,31 @@ class AssistantController extends ChangeNotifier {
     return next > _maxBackoff ? _maxBackoff : next;
   }
 
+  /// Report user activity that should keep the screen awake — a screen touch from
+  /// the UI layer, or (internally) a voice-turn transition. Resets the native
+  /// screen-dim countdown and brightens the screen if it had already dimmed. Safe to
+  /// call any time; a no-op when no activity sink is wired (tests).
+  void noteUserActivity() => _onUserActivity?.call();
+
   void _onEvent(WakeWordEvent e) {
     // A healthy event stream resets the backoff.
     _backoff = _minBackoff;
+
+    // A voice turn counts as user activity: reset the screen-dim countdown at each
+    // stage of the turn (wake, mic streaming, transcript, TTS, follow-up listen) so
+    // a hands-free conversation keeps the screen bright even if the user is too
+    // still for the camera to register motion. Excludes the high-frequency `level`
+    // (mic RMS) and camera `presence` events, which aren't user-initiated turns.
+    switch (e.kind) {
+      case WakeWordEventKind.detected:
+      case WakeWordEventKind.streaming:
+      case WakeWordEventKind.transcript:
+      case WakeWordEventKind.speaking:
+      case WakeWordEventKind.listeningFollowup:
+        noteUserActivity();
+      default:
+        break;
+    }
 
     switch (e.kind) {
       case WakeWordEventKind.started:

@@ -416,6 +416,17 @@ pub fn is_wake_word_engine_running() -> bool {
     crate::engine::is_running()
 }
 
+/// Register user activity that isn't camera motion — a voice turn or a screen touch
+/// — so it resets the screen-dim countdown (and brightens the screen if it had
+/// already dimmed). Flutter calls this on each voice-turn transition and on screen
+/// touches. Safe to call any time: it's a no-op when camera proximity isn't running,
+/// and a harmless no-op off Android (host tests, no camera).
+#[frb(sync)]
+pub fn note_user_activity() {
+    #[cfg(target_os = "android")]
+    crate::camera::bridge::note_activity();
+}
+
 // ---------------------------------------------------------------------------
 // Proactive notifications (Approach A, visual-only). A persistent channel the
 // device dials to the orchestrator and holds open, receiving pushed
