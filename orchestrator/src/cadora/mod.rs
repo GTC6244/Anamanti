@@ -111,17 +111,31 @@ impl CadoraVoiceApi {
             bail!("Cadora voice API error ({status}): {msg}");
         }
 
+        // A 200 doesn't mean the command succeeded: Cadora returns `{ok:true}` even
+        // for no-ops (e.g. an empty item → `{ok:true,"speech":"I didn't catch what
+        // to add"}`), and reports failures in-band as `{ok:false, ...}`. Treat
+        // anything but `ok == true` as an error and surface the server's own message.
+        if body.get("ok").and_then(Value::as_bool) != Some(true) {
+            let msg = body
+                .get("speech")
+                .or_else(|| body.get("error"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("the Cadora voice API could not add that item");
+            bail!("{msg}");
+        }
+
         // Success is `{ ok: true, speech: "Added 2 milk to your shopping list." }`.
+        // Relay Cadora's spoken confirmation verbatim — never fabricate one, or we'd
+        // risk claiming success the server never confirmed.
         let speech = body
             .get("speech")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| match quantity {
-                Some(q) if q > 1 => format!("Added {q} {item} to your shopping list."),
-                _ => format!("Added {item} to your shopping list."),
-            });
+            .context("the Cadora voice API returned success without a spoken confirmation")?;
         Ok(speech)
     }
 }
@@ -272,6 +286,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no item"));
+    }
+
+    #[tokio::test]
+    async fn ok_false_on_200_is_an_error_not_a_fake_success() {
+        // Cadora replies 200 with `ok:false` for a no-op (e.g. it couldn't parse an
+        // item). We must relay its `speech` as an error, never fabricate a success.
+        let (base, _h) = fake_server(
+            "200 OK",
+            r#"{"ok":false,"speech":"I didn't catch what to add"}"#,
+        )
+        .await;
+        let api = CadoraVoiceApi::new(base, "vl_test");
+        let err = api
+            .command(GroceryCommand::AddItem {
+                item: "milk".into(),
+                quantity: None,
+            })
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert_eq!(
+            msg, "I didn't catch what to add",
+            "relays the server's speech as the error: {msg}"
+        );
+        assert!(
+            !msg.contains("Added"),
+            "does not fabricate an 'Added …' confirmation: {msg}"
+        );
     }
 
     #[tokio::test]
