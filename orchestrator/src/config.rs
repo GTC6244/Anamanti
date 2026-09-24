@@ -32,8 +32,8 @@ use crate::music::{
     SnapcastClient,
 };
 use crate::settings::{
-    load_persisted, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
-    SpotifyConfig,
+    load_persisted, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
+    SharedSettings, SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -173,6 +173,9 @@ pub struct Config {
     /// Spotify voice-control seed (client creds + refresh token + device name).
     /// Overlaid by the persisted settings file.
     pub spotify: SpotifyConfig,
+    /// Cadora shopping-list seed (base URL + voice-link token). The token is normally
+    /// minted by the config-page pairing flow. Overlaid by the persisted settings file.
+    pub cadora: CadoraConfig,
 }
 
 /// Speaker-identification configuration. Off by default (`speaker.enabled`); a
@@ -355,6 +358,7 @@ impl Default for Config {
                 ..DriveConfig::default()
             },
             spotify: SpotifyConfig::default(),
+            cadora: CadoraConfig::default(),
         }
     }
 }
@@ -445,6 +449,8 @@ pub struct FileConfig {
     pub drive: FileDrive,
     #[serde(default)]
     pub spotify: FileSpotify,
+    #[serde(default)]
+    pub cadora: FileCadora,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -569,6 +575,16 @@ pub struct FileSpotify {
     pub device_name: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileCadora {
+    /// Cadora app-server base URL (default `https://cadora-server.fly.dev`).
+    pub base_url: Option<String>,
+    /// A `vl_…` voice-link token, if seeded directly (normally minted via the
+    /// config-page pairing flow instead).
+    pub link_token: Option<String>,
+}
+
 /// Trim a config string and drop it when empty.
 fn nonempty(v: Option<String>) -> Option<String> {
     v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -646,7 +662,11 @@ impl Config {
                     .model
                     .clone()
                     .unwrap_or_else(|| "claude-opus-5".to_string()),
-                max_tokens: fc.llm.anthropic.max_tokens.unwrap_or(d.anthropic_max_tokens),
+                max_tokens: fc
+                    .llm
+                    .anthropic
+                    .max_tokens
+                    .unwrap_or(d.anthropic_max_tokens),
             },
             "openai" | "gpt" => LlmChoice::OpenAI {
                 model: fc
@@ -786,7 +806,9 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            scope: Some(nonempty(fc.drive.scope).unwrap_or_else(|| DEFAULT_DRIVE_SCOPE.to_string())),
+            scope: Some(
+                nonempty(fc.drive.scope).unwrap_or_else(|| DEFAULT_DRIVE_SCOPE.to_string()),
+            ),
         };
 
         let spotify = SpotifyConfig {
@@ -797,13 +819,27 @@ impl Config {
             scope: None,
         };
 
+        let cadora = CadoraConfig {
+            base_url: nonempty(fc.cadora.base_url),
+            link_token: nonempty(fc.cadora.link_token),
+        };
+
         let ollama_url = match &llm {
             LlmChoice::Ollama { url, .. } => url.clone(),
-            _ => fc.llm.ollama.url.clone().unwrap_or_else(|| d.ollama_url.clone()),
+            _ => fc
+                .llm
+                .ollama
+                .url
+                .clone()
+                .unwrap_or_else(|| d.ollama_url.clone()),
         };
         let anthropic_max_tokens = match &llm {
             LlmChoice::Anthropic { max_tokens, .. } => *max_tokens,
-            _ => fc.llm.anthropic.max_tokens.unwrap_or(d.anthropic_max_tokens),
+            _ => fc
+                .llm
+                .anthropic
+                .max_tokens
+                .unwrap_or(d.anthropic_max_tokens),
         };
         let openai_max_tokens = match &llm {
             LlmChoice::OpenAI { max_tokens, .. } => *max_tokens,
@@ -864,6 +900,7 @@ impl Config {
                 .unwrap_or(d.directions_provider),
             drive,
             spotify,
+            cadora,
         })
     }
 
@@ -1024,6 +1061,9 @@ impl Config {
             // Seeded per-build from the resolved Spotify config in `shared_settings`
             // (and refreshed by `apply`/`apply_spotify`).
             spotify: None,
+            // Seeded per-build from the resolved Cadora config in `shared_settings`
+            // (and refreshed by `apply`/`apply_cadora`).
+            cadora: None,
             // Prebuilt from the config: the calendar source (web .ics) and the
             // directions provider (Mapbox). The Mapbox token is seeded from the env
             // secret here but is runtime-settable (Tools tab) — `shared_settings`
@@ -1124,6 +1164,14 @@ impl Config {
         self.spotify.clone()
     }
 
+    /// Initial Cadora shopping-list config seeded from the config file's `cadora`
+    /// block. The voice-link token is normally minted at runtime by the config-page
+    /// pairing flow; a persisted file overlays these at boot (see
+    /// [`Self::shared_settings`]).
+    pub fn initial_cadora(&self) -> CadoraConfig {
+        self.cadora.clone()
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
@@ -1169,6 +1217,8 @@ impl Config {
         let mut household = self.initial_household();
         // Spotify voice-control config: same seed-then-persist-overlay pattern.
         let mut spotify = self.initial_spotify();
+        // Cadora shopping-list config: same seed-then-persist-overlay pattern.
+        let mut cadora = self.initial_cadora();
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -1250,6 +1300,13 @@ impl Config {
             if p.spotify.scope.is_some() {
                 spotify.scope = p.spotify.scope;
             }
+            // Overlay persisted Cadora fields onto the config-file seed (same rule).
+            if p.cadora.base_url.is_some() {
+                cadora.base_url = p.cadora.base_url;
+            }
+            if p.cadora.link_token.is_some() {
+                cadora.link_token = p.cadora.link_token;
+            }
         }
 
         // Seed the directions tool's live default origin from the resolved household
@@ -1272,6 +1329,9 @@ impl Config {
         // Seed the initial Spotify controller so the `spotify_control` tool is
         // advertised at boot when the account is already linked (env or persisted).
         build_factory.spotify = spotify.controller();
+        // Seed the initial Cadora controller so the `shopping_list_add` tool is
+        // advertised at boot when the shopping list is already linked.
+        build_factory.cadora = cadora.controller();
         // Seed the initial directions provider from the resolved Mapbox token so the
         // `directions_lookup` tool is advertised at boot when a token is present.
         build_factory.directions = crate::directions::from_token(
@@ -1311,6 +1371,7 @@ impl Config {
                 drive,
                 household,
                 spotify,
+                cadora,
             },
             persist_path,
         ))
@@ -1473,15 +1534,24 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(c.bind_addr.to_string(), "0.0.0.0:10701");
-        assert_eq!(c.config_addr.map(|a| a.to_string()).as_deref(), Some("127.0.0.1:8731"));
+        assert_eq!(
+            c.config_addr.map(|a| a.to_string()).as_deref(),
+            Some("127.0.0.1:8731")
+        );
         assert_eq!(c.service_name, "Test Mac");
         assert_eq!(c.instance_id, "test-key");
         assert_eq!(c.home_location.as_deref(), Some("Austin, Texas")); // trimmed
         assert_eq!(c.weather_units.as_deref(), Some("imperial"));
         assert_eq!(c.turn_timeout, Duration::from_secs(45));
         assert_eq!(c.memory_backend, MemoryBackendChoice::Sqlite);
-        assert_eq!(c.audio_dump_dir.as_deref(), Some(std::path::Path::new("/tmp/dump")));
-        assert_eq!(c.settings_path.as_deref(), Some(std::path::Path::new("custom_settings.json")));
+        assert_eq!(
+            c.audio_dump_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/dump"))
+        );
+        assert_eq!(
+            c.settings_path.as_deref(),
+            Some(std::path::Path::new("custom_settings.json"))
+        );
         assert_eq!(c.llm_label(), "anthropic");
         assert_eq!(c.engine, LlmEngine::Native);
         assert_eq!(c.anthropic_auth, AnthropicAuth::Subscription);
@@ -1499,7 +1569,7 @@ mod tests {
         assert_eq!(c.speaker.match_threshold, 0.7);
         assert!(c.music.enabled);
         assert_eq!(c.music.duck_percent, 100); // capped at 100
-        // Calendar: bare URL auto-named, explicit name kept.
+                                               // Calendar: bare URL auto-named, explicit name kept.
         assert_eq!(c.calendar_specs.len(), 2);
         assert_eq!(c.calendar_specs[0].name, "Calendar 1");
         assert_eq!(c.calendar_specs[1].name, "Work");

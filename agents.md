@@ -189,8 +189,14 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
 #   spotify{client_id,client_secret,refresh_token,device_name} (spotify_control tool;
 #     Premium; easiest setup is config page → Music tab → "Connect Spotify")
+#   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
+#     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
+#     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
+#     Voice & Integrations, enter it on the config page → Household tab → "Shopping list
+#     (Cadora)"; the orchestrator redeems it for a vl_ token, stored 0600, never seeded.
+#     A pasted vl_ token is also accepted)
 #
-# home_location/weather_units, drive, spotify, the tts_voice, and the llm engine/
+# home_location/weather_units, drive, spotify, cadora, the tts_voice, and the llm engine/
 # backend/model/web_search/search_provider fields only SEED the live settings at boot:
 # they are then editable from the config page and persisted to settings_path
 # (ambient_settings.json), and a PERSISTED value wins over the JSON seed at the next boot.

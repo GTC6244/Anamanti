@@ -454,6 +454,7 @@ mod tests {
                 anthropic_token: None,
                 home_location: crate::directions::LiveHomeLocation::default(),
                 spotify: None,
+                cadora: None,
                 calendar: None,
                 directions: None,
                 directions_provider: String::new(),
@@ -478,6 +479,7 @@ mod tests {
                 drive: crate::settings::DriveConfig::default(),
                 household: crate::settings::Household::default(),
                 spotify: crate::settings::SpotifyConfig::default(),
+                cadora: crate::settings::CadoraConfig::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();

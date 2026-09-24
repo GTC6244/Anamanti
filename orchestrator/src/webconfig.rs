@@ -46,8 +46,8 @@ use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
-    DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine, SettingsUpdate,
-    SharedSettings, SpotifyUpdate,
+    CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine,
+    SettingsUpdate, SharedSettings, SpotifyUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -147,30 +147,70 @@ fn sidebar_html(active: &str) -> String {
         (
             "Settings",
             &[
-                ("/", "Config", r##"<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/>"##),
-                ("/household", "Household", r##"<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>"##),
-                ("/tools", "Tools", r##"<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>"##),
-                ("/music", "Music", r##"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"##),
-                ("/drive", "Photos", r##"<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>"##),
+                (
+                    "/",
+                    "Config",
+                    r##"<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/>"##,
+                ),
+                (
+                    "/household",
+                    "Household",
+                    r##"<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>"##,
+                ),
+                (
+                    "/tools",
+                    "Tools",
+                    r##"<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>"##,
+                ),
+                (
+                    "/music",
+                    "Music",
+                    r##"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"##,
+                ),
+                (
+                    "/drive",
+                    "Photos",
+                    r##"<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>"##,
+                ),
             ],
         ),
         (
             "Memory",
             &[
-                ("/sqlite", "SQLite", r##"<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>"##),
-                ("/helix", "HelixDB", r##"<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/>"##),
+                (
+                    "/sqlite",
+                    "SQLite",
+                    r##"<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>"##,
+                ),
+                (
+                    "/helix",
+                    "HelixDB",
+                    r##"<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/>"##,
+                ),
             ],
         ),
         (
             "Logs",
             &[
-                ("/chatlog", "Chat log", r##"<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>"##),
-                ("/prompts", "Prompts", r##"<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/>"##),
+                (
+                    "/chatlog",
+                    "Chat log",
+                    r##"<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>"##,
+                ),
+                (
+                    "/prompts",
+                    "Prompts",
+                    r##"<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/>"##,
+                ),
             ],
         ),
         (
             "System",
-            &[("/about", "About", r##"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>"##)],
+            &[(
+                "/about",
+                "About",
+                r##"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>"##,
+            )],
         ),
     ];
     let mut out = String::from(
@@ -376,7 +416,13 @@ async fn handle(
     // Save the Mapbox token for the directions tool (rebuilds the tool set live).
     if method == "POST" && path == "/tools/save" {
         let payload = directions_save_json(&settings, &body);
-        return write_response(&mut stream, "200 OK", "application/json", payload.as_bytes()).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
     }
 
     // Debug/inspection data endpoints — need I/O and the debug sources, so they're
@@ -479,6 +525,35 @@ async fn handle(
     // times out — fine for a single admin request on the loopback page.
     if method == "POST" && path == "/spotify/link" {
         let payload = spotify_link_json(&settings).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Cadora shopping-list linkage status (booleans + base URL; never the token).
+    if method == "GET" && path == "/cadora/status.json" {
+        let payload = cadora_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Set the Cadora app-server base URL (no linking yet).
+    if method == "POST" && path == "/cadora/save" {
+        let payload = cadora_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Redeem a spoken 6-digit pairing code for a durable voice-link token. Makes a
+    // network call to the Cadora server; blocks this loopback connection until it
+    // returns — fine for a single admin request.
+    if method == "POST" && path == "/cadora/link" {
+        let payload = cadora_link_json(&settings, &body).await;
         return write_response(
             &mut stream,
             "200 OK",
@@ -1097,6 +1172,108 @@ async fn spotify_link_json(settings: &SharedSettings) -> String {
     .to_string()
 }
 
+/// `GET /cadora/status.json` — the Cadora shopping-list linkage state for the
+/// `/household` page. Reports only booleans + the base URL; the voice-link token is
+/// never included.
+fn cadora_status_json(settings: &SharedSettings) -> String {
+    let c = settings.cadora();
+    json!({
+        "ok": true,
+        "linked": c.linked(),
+        "base_url": c.base_url_or_default(),
+    })
+    .to_string()
+}
+
+/// `POST /cadora/save` — set the Cadora app-server base URL (a blank value resets it
+/// to the default). Does not link. Applying rebuilds the LLM so the tool tracks state.
+fn cadora_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    // A present `base_url` (even blank → clear to default) updates it; absent leaves it.
+    let base_url = data.get("base_url").and_then(Value::as_str).map(|s| {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    });
+    settings.apply_cadora(&CadoraUpdate {
+        base_url,
+        ..Default::default()
+    });
+    cadora_status_json(settings)
+}
+
+/// `POST /cadora/link` — link the shopping list. Two inputs are accepted: a **6-digit
+/// pairing `code`** (the primary path — NextHaul → Settings → Voice & Integrations
+/// mints one via `/voice/links/pair`; we redeem it here via `/voice/links/redeem` for
+/// a durable token, exactly as the "speaker" is meant to), or a directly-pasted
+/// **`vl_…` token** as a fallback. On success the `shopping_list_add` tool activates
+/// immediately.
+async fn cadora_link_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let str_field = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+    };
+    let token = str_field("token");
+    let code = str_field("code");
+
+    // An optional base_url in the same request lets the user point at a non-default
+    // server before linking; persist it first so a redeem is minted against it.
+    let base = str_field("base_url");
+    if !base.is_empty() {
+        settings.apply_cadora(&CadoraUpdate {
+            base_url: Some(Some(base.to_string())),
+            ..Default::default()
+        });
+    }
+
+    // Resolve the durable token: redeem a 6-digit code (the NextHaul flow), else
+    // accept a directly-pasted `vl_…` token (fallback / older app builds).
+    let resolved = if !code.is_empty() {
+        let base_url = settings.cadora().base_url_or_default();
+        match crate::cadora::redeem_pairing_code(&base_url, code).await {
+            Ok(t) => t,
+            Err(e) => return json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+        }
+    } else if !token.is_empty() {
+        token.to_string()
+    } else {
+        return json!({
+            "ok": false,
+            "message": "Enter the 6-digit code from NextHaul (Settings → Voice & Integrations), or paste a vl_… token.",
+        })
+        .to_string();
+    };
+
+    settings.apply_cadora(&CadoraUpdate {
+        link_token: Some(Some(resolved)),
+        ..Default::default()
+    });
+    let now = settings.cadora();
+    json!({
+        "ok": true,
+        "message": "Shopping list linked — try \"add milk to the shopping list\".",
+        "linked": now.linked(),
+        "base_url": now.base_url_or_default(),
+    })
+    .to_string()
+}
+
 /// Pure request router: maps `(method, target, body)` to a response. Kept free of
 /// I/O so it is unit-testable against a [`SharedSettings`].
 fn route(
@@ -1703,6 +1880,52 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["ok"], false);
         assert!(v["message"].as_str().unwrap().contains("client id"));
+    }
+
+    #[test]
+    fn cadora_status_reports_unlinked_by_default() {
+        let v: Value = serde_json::from_str(&cadora_status_json(&settings())).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["linked"], false);
+        // Falls back to the built-in Cadora server URL when unset.
+        assert_eq!(v["base_url"], "https://cadora-server.fly.dev");
+    }
+
+    #[test]
+    fn cadora_save_sets_base_url() {
+        let s = settings();
+        cadora_save_json(&s, br#"{"base_url":"http://localhost:8080"}"#);
+        assert_eq!(s.cadora().base_url_or_default(), "http://localhost:8080");
+        // A blank base_url resets to the default.
+        cadora_save_json(&s, br#"{"base_url":""}"#);
+        assert_eq!(
+            s.cadora().base_url_or_default(),
+            "https://cadora-server.fly.dev"
+        );
+    }
+
+    #[tokio::test]
+    async fn cadora_link_without_input_is_a_clear_error() {
+        let s = settings();
+        let out = cadora_link_json(&s, br#"{}"#).await;
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(v["message"].as_str().unwrap().contains("6-digit code"));
+        assert!(!s.cadora().linked());
+    }
+
+    #[tokio::test]
+    async fn cadora_link_with_a_pasted_token_links_without_network() {
+        // The primary path: the Cadora app mints a full `vl_…` token to copy/paste, so
+        // linking stores it directly with no server round-trip.
+        let s = settings();
+        let out = cadora_link_json(&s, br#"{"token":"vl_pasted"}"#).await;
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["linked"], true);
+        assert!(s.cadora().linked());
+        // The token must never appear in the response.
+        assert!(!out.contains("vl_pasted"));
     }
 
     #[test]

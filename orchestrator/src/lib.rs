@@ -15,6 +15,7 @@
 #[cfg(feature = "aec")]
 pub mod aec;
 pub mod audio_dump;
+pub mod cadora;
 pub mod calendar;
 pub mod config;
 pub mod control;

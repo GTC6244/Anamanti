@@ -13,8 +13,8 @@ use ambient_orchestrator::llm::anthropic_auth::AnthropicAuth;
 use ambient_orchestrator::memory::{MemoryKind, MemorySource, MemoryStore};
 use ambient_orchestrator::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
 use ambient_orchestrator::settings::{
-    DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings, SpotifyConfig,
-    DEFAULT_END_SILENCE_MS, DEFAULT_VOICE_RMS_THRESHOLD,
+    CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
+    SpotifyConfig, DEFAULT_END_SILENCE_MS, DEFAULT_VOICE_RMS_THRESHOLD,
 };
 use ambient_orchestrator::wyoming::protocol::{read_event, types, write_event, WyomingEvent};
 use serde_json::json;
@@ -36,6 +36,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         anthropic_token: None,
         home_location: ambient_orchestrator::directions::LiveHomeLocation::default(),
         spotify: None,
+        cadora: None,
         calendar: None,
         directions: None,
         directions_provider: String::new(),
@@ -73,6 +74,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             drive: DriveConfig::default(),
             household: Household::default(),
             spotify: SpotifyConfig::default(),
+            cadora: CadoraConfig::default(),
         },
     );
     let pipeline = Pipeline::with_settings(

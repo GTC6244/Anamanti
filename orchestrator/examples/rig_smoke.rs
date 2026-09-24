@@ -40,6 +40,7 @@ fn smoke_tools(web_search: bool) -> Option<Arc<Tools>> {
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -102,11 +103,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
             let model = std::env::var("AMBIENT_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5".into());
             eprintln!("[rig_smoke] ollama={url} model={model} web_search={web_search}");
-            Arc::new(RigBackend::ollama(
-                &url,
-                &model,
-                smoke_tools(web_search),
-            )?)
+            Arc::new(RigBackend::ollama(&url, &model, smoke_tools(web_search))?)
         }
     };
 
