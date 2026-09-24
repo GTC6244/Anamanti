@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `presence`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `listening_followup`, `presence`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
@@ -353,6 +353,13 @@ enum WakeWordEventKind {
   /// stopped. Fires *after* the turn has already returned to idle, because the
   /// device relays audio faster than real-time (see `engine/net.rs`).
   speakingDone,
+
+  /// Follow-up listening: the assistant's reply was a question, so the device
+  /// reopened the mic and is listening for the answer **without a wake word** (a
+  /// fresh turn is starting). UI-only cue so the screen can show a "listening for
+  /// your reply" affordance. Followed by the usual `Streaming`/`Transcript`/… of
+  /// the follow-up turn. See `plans/Plan.MD` (Follow-up listening).
+  listeningFollowup,
 
   /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
   /// The engine returns to idle wake-word listening.

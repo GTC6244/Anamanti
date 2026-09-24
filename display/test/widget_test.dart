@@ -200,7 +200,9 @@ void main() {
     expect(h.assistant.state.displayActive, isTrue);
     expect(h.assistant.state.reply, 'It is noon');
     expect(find.text('It is noon'), findsOneWidget);
-    expect(find.text('Speaking…'), findsOneWidget);
+    // The centered phase header ("Speaking…") was removed — the conversation panel
+    // now shows only the transcript + reply; phase lives in the top-right indicator.
+    expect(find.text('Speaking…'), findsNothing);
 
     // Audio finishes playing: only now is the text removed and the panel closed.
     h.add(_event(WakeWordEventKind.speakingDone));

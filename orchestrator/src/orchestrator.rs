@@ -24,6 +24,7 @@ use futures_util::StreamExt;
 use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
+use crate::config::FollowUpConfig;
 use crate::llm::{DeviceAction, LlmBackend, LlmTurn};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
@@ -37,6 +38,12 @@ use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::stt::SttSession;
 use crate::wyoming::tts::TtsSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
+
+/// Default no-speech window for an ordinary (wake-word) turn: if the user never
+/// speaks, finalize (an empty transcript) after this long rather than hanging to the
+/// turn timeout. A follow-up turn overrides this with its `follow_up.*_wait_secs`
+/// listen window (see [`Pipeline::run_turn_after_start`]).
+const DEFAULT_NO_SPEECH_FINALIZE: Duration = Duration::from_secs(6);
 
 /// Progress events surfaced as a turn runs (logging, tests, and — via the device
 /// relay — the Phase-5 UI).
@@ -121,6 +128,10 @@ pub struct Pipeline {
     audio_dump_dir: Option<PathBuf>,
     system_prompt: String,
     turn_timeout: Duration,
+    /// Auto follow-up listening: when a reply is a question, tell the device to
+    /// reopen the mic (no wake word) and feed recent history into that turn's prompt.
+    /// Defaults to [`FollowUpConfig::default`] (enabled) until `with_follow_up` sets it.
+    follow_up: FollowUpConfig,
 }
 
 impl Pipeline {
@@ -144,6 +155,7 @@ impl Pipeline {
             audio_dump_dir: None,
             system_prompt: system_prompt.into(),
             turn_timeout,
+            follow_up: FollowUpConfig::default(),
         }
     }
 
@@ -179,6 +191,13 @@ impl Pipeline {
     /// shared-household behavior (all turns → `household`).
     pub fn with_speaker(mut self, speaker: Arc<SpeakerService>) -> Self {
         self.speaker = Some(speaker);
+        self
+    }
+
+    /// Configure auto follow-up listening (question → reopen mic + history). Without
+    /// this the pipeline uses [`FollowUpConfig::default`] (enabled).
+    pub fn with_follow_up(mut self, follow_up: FollowUpConfig) -> Self {
+        self.follow_up = follow_up;
         self
     }
 
@@ -223,28 +242,42 @@ impl Pipeline {
     ) -> Result<TurnOutcome> {
         // 1. Wait for the device's `audio-start`; a clean close before that just
         //    ends the connection.
-        let format = loop {
+        let (format, followup_depth, followup_wait_secs) = loop {
             match device.read().await? {
                 Some(ev) if ev.event_type == types::AUDIO_START => {
-                    break protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO);
+                    break (
+                        protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO),
+                        protocol::followup_depth(&ev.data),
+                        protocol::followup_wait_secs(&ev.data),
+                    );
                 }
                 Some(_) => continue, // ignore stray pre-turn frames
                 None => return Ok(TurnOutcome::Disconnected),
             }
         };
-        self.run_turn_after_start(device, connector, format, on_event)
-            .await
+        self.run_turn_after_start(
+            device,
+            connector,
+            format,
+            followup_depth,
+            followup_wait_secs,
+            on_event,
+        )
+        .await
     }
 
     /// Drive a turn whose opening `audio-start` has already been read (the server
     /// consumes it to distinguish a turn from a Phase-6 control frame). Splitting
     /// this out lets one accept loop serve both turns and control on the same
     /// socket.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_turn_after_start(
         &self,
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
         format: AudioFormat,
+        followup_depth: u32,
+        followup_wait_secs: u32,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<TurnOutcome> {
         // Take one settings snapshot for the whole turn so a concurrent control
@@ -262,11 +295,22 @@ impl Pipeline {
 
         let end_silence = Duration::from_millis(runtime.end_silence_ms);
         let voice_rms_threshold = runtime.voice_rms_threshold;
+        // How long to wait for the user to *start* speaking before finalizing (and, on
+        // silence, sleeping). A follow-up turn (the device auto-opened the mic, no wake
+        // word) uses the window the reply that triggered it chose — 10 s after a
+        // question, 5 s otherwise — echoed here on the `audio-start`. An ordinary turn
+        // keeps the default.
+        let no_speech_finalize = if followup_depth > 0 && followup_wait_secs > 0 {
+            Duration::from_secs(followup_wait_secs as u64)
+        } else {
+            DEFAULT_NO_SPEECH_FINALIZE
+        };
         let Some((transcript, voiced_pcm)) = self
             .stream_to_transcript(
                 device,
                 &mut stt,
                 end_silence,
+                no_speech_finalize,
                 voice_rms_threshold,
                 format.rate,
                 dump.as_ref(),
@@ -290,6 +334,12 @@ impl Pipeline {
             .ok();
 
         if transcript.trim().is_empty() {
+            // No speech within the listen window: sleep. Send an `audio-stop` so the
+            // device leaves SPEAKING and returns to idle immediately (it flips to
+            // SPEAKING on the transcript above and would otherwise wait out its idle
+            // watchdog for TTS that never comes). We do NOT send `ambient-listen`, so
+            // the follow-up chain ends here — silence is the terminator.
+            device.send(&WyomingEvent::audio_stop(0)).await.ok();
             on_event(TurnEvent::Finished);
             return Ok(TurnOutcome::Completed);
         }
@@ -310,6 +360,7 @@ impl Pipeline {
                 &speaker,
                 device,
                 connector,
+                followup_depth,
                 on_event,
                 dump.as_ref(),
             )
@@ -340,11 +391,13 @@ impl Pipeline {
     /// Returns the transcript together with the utterance's **voiced** PCM (the
     /// chunks that passed the energy gate), so the caller can compute a speaker
     /// embedding without re-reading the socket. `None` on disconnect/timeout.
+    #[allow(clippy::too_many_arguments)]
     async fn stream_to_transcript(
         &self,
         device: &mut DynConnection,
         stt: &mut SttSession<crate::wyoming::DynRead, crate::wyoming::DynWrite>,
         end_silence: std::time::Duration,
+        no_speech_finalize: std::time::Duration,
         voice_rms_threshold: f64,
         mic_rate: u32,
         dump: Option<&TurnAudioDump>,
@@ -355,10 +408,12 @@ impl Pipeline {
         // speech that marks end-of-utterance. Both come from the per-turn settings
         // snapshot so they are A/B-tunable from the device without a restart.
         //
-        // If no speech is ever detected, still finalize after this long so a silent
-        // or too-quiet utterance ends the turn instead of hanging to `turn_timeout`.
-        const NO_SPEECH_FINALIZE: std::time::Duration = std::time::Duration::from_secs(6);
-
+        // If no speech is ever detected, still finalize after `no_speech_finalize` so a
+        // silent or too-quiet utterance ends the turn instead of hanging to
+        // `turn_timeout`. For a follow-up turn this is the caller's listen window
+        // (`follow_up.*_wait_secs`), so "wait 10 s after a question / 5 s otherwise,
+        // then sleep" is enforced here — the only place that can tell silence from a
+        // user who is mid-sentence (the device runs no VAD).
         let turn_start = Instant::now();
         let mut last_voice = turn_start;
         let mut speech_started = false;
@@ -378,7 +433,17 @@ impl Pipeline {
                     return Ok(None);
                 }
 
-                dev = device.read() => {
+                // Only read the device *before* we've finalized STT. `device.read()`
+                // (read_line + read_exact) is NOT cancellation-safe, so if it were
+                // still enabled once the STT transcript can arrive, the `sev` arm
+                // winning the race would drop this future mid-PCM-payload and desync
+                // the reader — the next `read_event` (barge-in watcher / next turn)
+                // then reads binary as a header line ("stream did not contain valid
+                // UTF-8"), spuriously aborting the reply. After `finalized` we ignore
+                // device chunks anyway, so simply stop reading them: nothing is ever
+                // mid-frame when the transcript lands. Leftover buffered chunks are
+                // complete frames, harmlessly drained later.
+                dev = device.read(), if !finalized => {
                     deadline = Instant::now() + self.turn_timeout;
                     match dev? {
                         Some(ev) if ev.event_type == types::AUDIO_CHUNK => {
@@ -404,7 +469,7 @@ impl Pipeline {
                                     let ended = if speech_started {
                                         now.duration_since(last_voice) >= end_silence
                                     } else {
-                                        now.duration_since(turn_start) >= NO_SPEECH_FINALIZE
+                                        now.duration_since(turn_start) >= no_speech_finalize
                                     };
                                     if ended {
                                         log::info!(
@@ -461,6 +526,7 @@ impl Pipeline {
         speaker: &SpeakerContext,
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
+        followup_depth: u32,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
     ) -> Result<(String, Vec<String>)> {
@@ -553,9 +619,23 @@ impl Pipeline {
         // a logging failure must never break a turn.
         self.log_prompt(runtime, speaker, &system_prompt, transcript);
 
+        // A follow-up turn (the device auto-opened the mic after a question reply, so
+        // `followup_depth > 0`) is fed the recent conversation so the answer has
+        // context; an ordinary single-shot turn carries no history (locked "single-turn
+        // v1" decision). See plans/Plan.MD (Follow-up listening).
+        let history = if followup_depth > 0 {
+            self.recent_history()
+        } else {
+            Vec::new()
+        };
+
         let mut stream = runtime
             .llm
-            .respond(LlmTurn::new(system_prompt, transcript).with_actions(action_tx))
+            .respond(
+                LlmTurn::new(system_prompt, transcript)
+                    .with_actions(action_tx)
+                    .with_history(history),
+            )
             .await
             .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?;
 
@@ -630,6 +710,33 @@ impl Pipeline {
                     }
                     self.speak_chunk(writer, runtime, connector, &rest, &mut audio_started, dump)
                         .await?;
+                }
+                // Follow-up listen: after EVERY reply, ask the device to reopen the mic
+                // (no wake word) for more input, then sleep if none comes. The listen
+                // window is longer after a question (`question_wait_secs`) than after a
+                // plain reply (`reply_wait_secs`); the device echoes it back so this
+                // orchestrator sizes the follow-up turn's no-speech window to match.
+                // This MUST be sent before the final `audio-stop` — the device ends its
+                // turn on the first `audio-stop`, so a frame after it would arrive on a
+                // closing socket. `max_chain` (0 = unlimited) is an optional safety
+                // ceiling; the loop normally ends on silence. Reaching here means the
+                // reply completed (a barge-in would have dropped this whole future), so
+                // we never reopen over an interruption.
+                let within_cap =
+                    self.follow_up.max_chain == 0 || followup_depth < self.follow_up.max_chain;
+                if self.follow_up.enabled && audio_started && within_cap {
+                    let next_depth = followup_depth + 1;
+                    let wait_secs = if reply_is_question(&reply) {
+                        self.follow_up.question_wait_secs
+                    } else {
+                        self.follow_up.reply_wait_secs
+                    };
+                    log::info!(
+                        "follow-up: asking device to listen for {wait_secs}s (depth {next_depth})"
+                    );
+                    protocol::write_event(writer, &WyomingEvent::listen(next_depth, wait_secs))
+                        .await
+                        .ok();
                 }
                 // Close the single coalesced device-facing audio stream.
                 if audio_started {
@@ -780,6 +887,38 @@ impl Pipeline {
             .map(|c| format!("- {c}"))
             .collect::<Vec<_>>()
             .join("\n"))
+    }
+
+    /// The recent conversation, as `(user, assistant)` pairs oldest-first, for a
+    /// **follow-up** turn's prompt: the last `follow_up.history_turns` chat-log turns
+    /// that completed within `follow_up.history_window_secs`. Empty when no chat log is
+    /// attached, the feature is off, or nothing recent qualifies. Recency-scoped rather
+    /// than device-scoped (the chat log has no device id), so back-to-back conversations
+    /// on one display thread correctly; two displays talking at once could interleave
+    /// (an accepted v1 limitation — see plans/Plan.MD). A read failure yields no history
+    /// rather than breaking the turn.
+    fn recent_history(&self) -> Vec<(String, String)> {
+        let Some(log) = &self.chatlog else {
+            return Vec::new();
+        };
+        if self.follow_up.history_turns == 0 {
+            return Vec::new();
+        }
+        let cutoff = now_secs() - self.follow_up.history_window_secs;
+        let recent = crate::memory::chatlog::read_tail(log.path(), self.follow_up.history_turns)
+            .unwrap_or_else(|e| {
+                log::warn!("follow-up: reading recent chat history failed: {e:#}");
+                Vec::new()
+            });
+        // `read_tail` is newest-first: keep only in-window turns with real content, then
+        // reverse to chronological (oldest-first) order for the replayed message list.
+        recent
+            .into_iter()
+            .filter(|r| r.ts >= cutoff)
+            .filter(|r| !r.transcript.trim().is_empty() && !r.reply.trim().is_empty())
+            .map(|r| (r.transcript, r.reply))
+            .rev()
+            .collect()
     }
 
     /// Identify the turn's speaker via the [`SpeakerService`], degrading gracefully
@@ -1137,6 +1276,18 @@ async fn drain_device_actions<W>(
             break;
         }
     }
+}
+
+/// Whether a fully-assembled reply should trigger a follow-up listen: its last
+/// meaningful character is a question mark. Trailing whitespace and a closing quote
+/// or bracket are ignored (so `... right?"` still counts). A deliberately simple v1
+/// heuristic — see plans/Plan.MD (Follow-up listening) for the rationale and known
+/// misfires (e.g. rhetorical questions).
+fn reply_is_question(reply: &str) -> bool {
+    let trimmed = reply.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '}' | '”' | '’' | '»')
+    });
+    trimmed.ends_with('?') || trimmed.ends_with('？')
 }
 
 /// Root-mean-square amplitude (in `i16` units) of a little-endian PCM16 buffer,

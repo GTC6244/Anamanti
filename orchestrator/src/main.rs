@@ -127,6 +127,7 @@ async fn run() -> Result<()> {
     )
     .with_chatlog(chatlog.clone())
     .with_promptlog(promptlog.clone())
+    .with_follow_up(config.follow_up.clone())
     .with_audio_dump(config.audio_dump_dir.clone());
     // Home location + household roster are grounded from the runtime settings
     // snapshot each turn (seeded from the config file's home_location at boot, then

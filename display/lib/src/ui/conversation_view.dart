@@ -26,8 +26,10 @@ class ConversationView extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                _PhaseHeader(phase: state.phase, audioPlaying: state.audioPlaying),
-                const SizedBox(height: 18),
+                // The phase text ("Listening…", "Thinking…", "Speaking…", etc.) is
+                // deliberately NOT shown here — the same information lives in the
+                // top-right status indicator. This panel keeps only the spoken
+                // transcript and the assistant's reply.
                 if (state.transcript.isNotEmpty)
                   _Bubble(
                     text: state.transcript,
@@ -51,43 +53,6 @@ class ConversationView extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _PhaseHeader extends StatelessWidget {
-  const _PhaseHeader({required this.phase, this.audioPlaying = false});
-
-  final TurnPhase phase;
-
-  /// Whether the reply audio is still playing. The turn returns to idle while the
-  /// audio keeps draining, so keep showing "Speaking…" for that window rather than
-  /// blanking the header mid-utterance.
-  final bool audioPlaying;
-
-  @override
-  Widget build(BuildContext context) {
-    // Once the turn has ended but the reply is still audible, treat it as speaking.
-    final effectivePhase =
-        (phase == TurnPhase.idle && audioPlaying) ? TurnPhase.speaking : phase;
-    final label = switch (effectivePhase) {
-      TurnPhase.listening => 'Listening…',
-      TurnPhase.processing => 'Processing…',
-      TurnPhase.connecting => 'Connecting…',
-      TurnPhase.thinking => 'Thinking…',
-      TurnPhase.speaking => 'Speaking…',
-      TurnPhase.idle => '',
-      TurnPhase.error => '',
-    };
-    if (label.isEmpty) return const SizedBox.shrink();
-    return Text(
-      label,
-      style: TextStyle(
-        color: Colors.white.withValues(alpha: 0.7),
-        fontSize: 16,
-        fontWeight: FontWeight.w500,
-        letterSpacing: 0.4,
-      ),
     );
   }
 }

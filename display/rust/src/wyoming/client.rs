@@ -55,6 +55,14 @@ pub struct WyomingConnection<R, W> {
     writer: W,
     format: AudioFormat,
     timestamp_ms: u64,
+    /// Follow-up chain depth to stamp on this turn's `audio-start` (0 = an ordinary
+    /// wake-word turn; >0 = the device auto-opened this turn after a reply, so the
+    /// orchestrator includes recent history and bounds the chain).
+    followup_depth: u32,
+    /// Listen window (seconds) echoed on a follow-up turn's `audio-start`, so the
+    /// orchestrator sizes that turn's no-speech VAD window to match. 0 on an ordinary
+    /// turn.
+    followup_wait_secs: u32,
 }
 
 impl WyomingConnection<BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf> {
@@ -87,16 +95,31 @@ where
             writer,
             format,
             timestamp_ms: 0,
+            followup_depth: 0,
+            followup_wait_secs: 0,
         }
     }
 
-    /// Send the `audio-start` header that opens the outbound audio stream.
+    /// Mark this turn as a **follow-up** (the device auto-opened the mic after a reply,
+    /// no wake word) so its `audio-start` carries `followup_depth` + the `wait_secs`
+    /// listen window to echo back. `depth == 0` leaves it an ordinary turn. Call before
+    /// [`Self::send_audio_start`].
+    pub fn set_followup(&mut self, depth: u32, wait_secs: u32) {
+        self.followup_depth = depth;
+        self.followup_wait_secs = wait_secs;
+    }
+
+    /// Send the `audio-start` header that opens the outbound audio stream. On a
+    /// follow-up turn it also stamps the chain depth + listen window so the orchestrator
+    /// includes recent history, bounds the chain, and sizes its no-speech window.
     pub async fn send_audio_start(&mut self) -> Result<()> {
-        let ev = WyomingEvent::audio_start(
+        let ev = WyomingEvent::audio_start_followup(
             self.format.rate,
             self.format.width_bytes,
             self.format.channels,
             self.timestamp_ms,
+            self.followup_depth,
+            self.followup_wait_secs,
         );
         protocol::write_event(&mut self.writer, &ev)
             .await
@@ -169,6 +192,12 @@ pub enum TurnUpdate {
     /// start or cancel a countdown. Handled by the engine's on-device timer manager,
     /// which owns the countdown + alarm and outlives the turn's socket.
     Timer(protocol::TimerCommand),
+    /// The orchestrator asked the device to **listen for a follow-up** after its reply.
+    /// The payload is `(depth, wait_secs)`: the chain depth the follow-up turn should
+    /// carry, and how long to keep the mic open for input before sleeping (longer after
+    /// a question). Does not change this turn's state machine — the engine reopens the
+    /// mic (no wake word) once the reply audio finishes draining. See `plans/Plan.MD`.
+    ListenFollowup(u32, u32),
     /// The turn ended cleanly and the client is back to idle.
     Finished,
 }
@@ -357,6 +386,14 @@ where
                 on_update(TurnUpdate::Timer(cmd));
             }
         }
+        // Follow-up-listen request (the reply was a question). Surface it without
+        // touching the turn state — it arrives mid-SPEAKING, and the engine reopens
+        // the mic only once the reply audio has drained (see engine/net.rs).
+        types::LISTEN => {
+            if let Some((depth, wait_secs)) = event.listen_params() {
+                on_update(TurnUpdate::ListenFollowup(depth, wait_secs));
+            }
+        }
         // voice-started / info / etc. don't change the turn.
         _ => {}
     }
@@ -521,6 +558,106 @@ mod tests {
         assert_eq!(updates.last(), Some(&TurnUpdate::Finished));
         assert_eq!(played, vec![100, -100, 200, -200]);
         assert_eq!(played_rate, 22_050);
+    }
+
+    #[tokio::test]
+    async fn follow_up_listen_frame_surfaces_before_the_turn_ends() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = tokio::io::split(client_io);
+        let mut conn =
+            WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default());
+
+        // Mock orchestrator: transcript → reply → TTS audio, then an `ambient-listen`
+        // (question reply) BEFORE the final audio-stop — the device ends its turn on
+        // the first audio-stop, so the listen frame must arrive first.
+        let server = tokio::spawn(async move {
+            let (sr, sw) = tokio::io::split(server_io);
+            let mut reader = TokioBufReader::new(sr);
+            let mut writer = sw;
+
+            let _ = read_event(&mut reader).await.unwrap().unwrap(); // audio-start
+            protocol::write_event(
+                &mut writer,
+                &WyomingEvent::with_data(types::TRANSCRIPT, json!({ "text": "what time is it" })),
+            )
+            .await
+            .unwrap();
+            let _ = read_event(&mut reader).await.unwrap().unwrap(); // device audio-stop
+
+            protocol::write_event(
+                &mut writer,
+                &WyomingEvent::reply_token("Morning or evening?"),
+            )
+            .await
+            .unwrap();
+            protocol::write_event(&mut writer, &WyomingEvent::audio_start(22_050, 2, 1, 0))
+                .await
+                .unwrap();
+            // The follow-up signal (depth 2, 10 s window), then the terminating audio-stop.
+            protocol::write_event(&mut writer, &WyomingEvent::listen(2, 10))
+                .await
+                .unwrap();
+            protocol::write_event(&mut writer, &WyomingEvent::audio_stop(0))
+                .await
+                .unwrap();
+        });
+
+        let (_pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(8);
+        let (_int_tx, int_rx) = mpsc::channel::<()>(1);
+        let mut updates = Vec::new();
+        run_turn(
+            &mut conn,
+            pcm_rx,
+            |u| updates.push(u),
+            |_, _| {},
+            int_rx,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        // The follow-up-listen request surfaced with its depth + window, and the turn
+        // still ended cleanly on the audio-stop that followed it.
+        assert!(updates.contains(&TurnUpdate::ListenFollowup(2, 10)));
+        assert_eq!(updates.last(), Some(&TurnUpdate::Finished));
+        let listen_pos = updates
+            .iter()
+            .position(|u| matches!(u, TurnUpdate::ListenFollowup(..)))
+            .unwrap();
+        let finish_pos = updates.len() - 1;
+        assert!(listen_pos < finish_pos, "listen must precede the turn end");
+    }
+
+    #[tokio::test]
+    async fn follow_up_turn_stamps_the_audio_start_depth_and_window() {
+        // A follow-up turn's `audio-start` carries `followup: true` + `followup_depth`
+        // + `wait_secs` so the orchestrator includes history, bounds the chain, and
+        // sizes its no-speech window.
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = tokio::io::split(client_io);
+        let mut conn =
+            WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default());
+        conn.set_followup(3, 5);
+        conn.send_audio_start().await.unwrap();
+        drop(conn);
+
+        let (sr, _sw) = tokio::io::split(server_io);
+        let mut server = TokioBufReader::new(sr);
+        let start = read_event(&mut server).await.unwrap().unwrap();
+        assert_eq!(start.event_type, types::AUDIO_START);
+        assert_eq!(
+            start.data.get("followup").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            start.data.get("followup_depth").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            start.data.get("wait_secs").and_then(|v| v.as_u64()),
+            Some(5)
+        );
     }
 
     #[tokio::test]

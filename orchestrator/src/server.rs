@@ -83,6 +83,11 @@ async fn handle_connection(
             }
             Some(ev) if ev.event_type == types::AUDIO_START => {
                 let format = protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO);
+                // A follow-up turn (device auto-opened the mic) stamps its chain depth
+                // and the listen window it was given; an ordinary wake-word turn reads
+                // both back as 0.
+                let followup_depth = protocol::followup_depth(&ev.data);
+                let followup_wait_secs = protocol::followup_wait_secs(&ev.data);
                 // Best-effort music ducking: lower the music group's volume while
                 // the assistant speaks and restore it when the turn ends. Fired on
                 // a spawned task so it never blocks (or fails) the turn; `duck`/
@@ -112,7 +117,14 @@ async fn handle_connection(
                     }
                 };
                 match pipeline
-                    .run_turn_after_start(&mut device, connector.as_ref(), format, &mut on_event)
+                    .run_turn_after_start(
+                        &mut device,
+                        connector.as_ref(),
+                        format,
+                        followup_depth,
+                        followup_wait_secs,
+                        &mut on_event,
+                    )
                     .await?
                 {
                     TurnOutcome::Completed => continue,
