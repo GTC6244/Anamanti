@@ -27,6 +27,7 @@ pub mod memory;
 pub mod music;
 pub mod notify;
 pub mod orchestrator;
+pub mod recipe;
 pub mod server;
 pub mod settings;
 pub mod speaker;

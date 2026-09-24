@@ -210,6 +210,13 @@ pub enum WakeWordEventKind {
     TimerFinished,
     /// Phase 2: a running timer was cancelled. `timer_id` identifies it.
     TimerCancelled,
+    /// Recipe mode: the orchestrator pushed a parsed recipe to show on the display's
+    /// 3-tab recipe screen. `recipe_json` carries the recipe as a JSON string (title,
+    /// summary, source_url, image_url, servings, total_time, ingredients[], steps[])
+    /// which the UI parses into the Overview / Ingredients / Steps tabs.
+    ShowRecipe,
+    /// Recipe mode: dismiss the recipe screen and return to the idle/ambient display.
+    DismissRecipe,
     /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
     /// is `true` when someone has approached the display (brighten) and `false` when
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
@@ -254,6 +261,9 @@ pub struct WakeWordEvent {
     /// Camera proximity state (`Presence`): `true` = someone approached (brighten),
     /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
     pub present: bool,
+    /// The parsed recipe as a JSON string (`ShowRecipe`); empty for every other kind.
+    /// The UI decodes it into the recipe-mode tabs.
+    pub recipe_json: String,
 }
 
 impl WakeWordEvent {
@@ -273,6 +283,7 @@ impl WakeWordEvent {
             timer_label: String::new(),
             timer_remaining_secs: 0,
             present: false,
+            recipe_json: String::new(),
         }
     }
 
@@ -386,6 +397,17 @@ impl WakeWordEvent {
         }
     }
 
+    pub(crate) fn show_recipe(recipe_json: String) -> Self {
+        Self {
+            recipe_json,
+            ..Self::base(WakeWordEventKind::ShowRecipe)
+        }
+    }
+
+    pub(crate) fn dismiss_recipe() -> Self {
+        Self::base(WakeWordEventKind::DismissRecipe)
+    }
+
     // Constructed only by the Android camera bridge; on host builds it's unused.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn presence(present: bool) -> Self {
@@ -414,6 +436,17 @@ pub fn stop_wake_word_engine() {
 #[frb(sync)]
 pub fn is_wake_word_engine_running() -> bool {
     crate::engine::is_running()
+}
+
+/// Register user activity that isn't camera motion — a voice turn or a screen touch
+/// — so it resets the screen-dim countdown (and brightens the screen if it had
+/// already dimmed). Flutter calls this on each voice-turn transition and on screen
+/// touches. Safe to call any time: it's a no-op when camera proximity isn't running,
+/// and a harmless no-op off Android (host tests, no camera).
+#[frb(sync)]
+pub fn note_user_activity() {
+    #[cfg(target_os = "android")]
+    crate::camera::bridge::note_activity();
 }
 
 // ---------------------------------------------------------------------------

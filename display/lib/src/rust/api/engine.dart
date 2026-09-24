@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_recipe`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `reply_token`, `show_recipe`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
 
@@ -33,6 +33,14 @@ Future<void> stopWakeWordEngine() =>
 /// Whether the wake-word engine is currently running.
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
+
+/// Register user activity that isn't camera motion — a voice turn or a screen touch
+/// — so it resets the screen-dim countdown (and brightens the screen if it had
+/// already dimmed). Flutter calls this on each voice-turn transition and on screen
+/// touches. Safe to call any time: it's a no-op when camera proximity isn't running,
+/// and a harmless no-op off Android (host tests, no camera).
+void noteUserActivity() =>
+    RustLib.instance.api.crateApiEngineNoteUserActivity();
 
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
@@ -346,6 +354,10 @@ class WakeWordEvent {
   /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
   final bool present;
 
+  /// The parsed recipe as a JSON string (`ShowRecipe`); empty for every other kind.
+  /// The UI decodes it into the recipe-mode tabs.
+  final String recipeJson;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -361,6 +373,7 @@ class WakeWordEvent {
     required this.timerLabel,
     required this.timerRemainingSecs,
     required this.present,
+    required this.recipeJson,
   });
 
   @override
@@ -378,7 +391,8 @@ class WakeWordEvent {
       timerId.hashCode ^
       timerLabel.hashCode ^
       timerRemainingSecs.hashCode ^
-      present.hashCode;
+      present.hashCode ^
+      recipeJson.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -398,7 +412,8 @@ class WakeWordEvent {
           timerId == other.timerId &&
           timerLabel == other.timerLabel &&
           timerRemainingSecs == other.timerRemainingSecs &&
-          present == other.present;
+          present == other.present &&
+          recipeJson == other.recipeJson;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -471,6 +486,15 @@ enum WakeWordEventKind {
 
   /// Phase 2: a running timer was cancelled. `timer_id` identifies it.
   timerCancelled,
+
+  /// Recipe mode: the orchestrator pushed a parsed recipe to show on the display's
+  /// 3-tab recipe screen. `recipe_json` carries the recipe as a JSON string (title,
+  /// summary, source_url, image_url, servings, total_time, ingredients[], steps[])
+  /// which the UI parses into the Overview / Ingredients / Steps tabs.
+  showRecipe,
+
+  /// Recipe mode: dismiss the recipe screen and return to the idle/ambient display.
+  dismissRecipe,
 
   /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
   /// is `true` when someone has approached the display (brighten) and `false` when

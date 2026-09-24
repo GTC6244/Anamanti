@@ -348,6 +348,57 @@ void main() {
     expect(store.value.dimDelaySecs, 120);
   });
 
+  testWidgets('dim-delay picker snaps to a fixed preset when dragged',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+    AppSettings? applied;
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        // The default (5 minutes) should render as one of the presets.
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (s) => applied = s,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final scrollable = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-dim-delay')),
+      200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-dim-delay')));
+    await tester.pumpAndSettle();
+    // Default of 300s renders as "5m".
+    expect(find.text('5m'), findsOneWidget);
+
+    // Drag the slider fully to the right; it must snap to the top preset (1 hour),
+    // never a raw in-between value.
+    await tester.drag(
+      find.byKey(const Key('settings-dim-delay')),
+      const Offset(600, 0),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-save')),
+      -200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-save')));
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    // 1 hour = 3600s, exactly the top preset.
+    expect(applied, isNotNull);
+    expect(applied!.dimDelaySecs, 3600);
+    expect(store.value.dimDelaySecs, 3600);
+  });
+
   testWidgets('memory tile navigates to the memory screen', (tester) async {
     final store = InMemorySettingsStore();
     final client = FakeOrchestratorClient();
