@@ -51,6 +51,7 @@ WakeWordEvent _presence(bool present) => WakeWordEvent(
       timerLabel: '',
       timerRemainingSecs: 0,
       present: present,
+      recipeJson: '',
     );
 
 /// A neutral engine event of a given [kind], for exercising the activity dispatch.

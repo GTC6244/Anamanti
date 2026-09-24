@@ -22,6 +22,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:ambient_display/src/engine/recipe_data.dart';
 import 'package:ambient_display/src/rust/api/engine.dart';
 
 /// Opens the native engine event stream for a given config. Production passes
@@ -117,6 +118,7 @@ class AssistantState {
     this.audioPlaying = false,
     this.userPresent = true,
     this.followUp = false,
+    this.recipe,
   });
 
   final TurnPhase phase;
@@ -167,6 +169,16 @@ class AssistantState {
   /// word starts an ordinary turn or the turn ends. See `plans/Plan.MD`.
   final bool followUp;
 
+  /// The recipe currently shown on the recipe-mode screen, or `null` when the
+  /// screen is closed. Pushed by the orchestrator's `recipe_lookup` tool and
+  /// dismissed by voice ("done cooking") or a touch of the close control. Outlives
+  /// the voice turn — it stays up while the user cooks, through follow-up turns and
+  /// idle — so it lives on the state snapshot, not tied to [phase].
+  final RecipeData? recipe;
+
+  /// Whether recipe mode is currently on screen.
+  bool get recipeActive => recipe != null;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -189,6 +201,8 @@ class AssistantState {
     bool? audioPlaying,
     bool? userPresent,
     bool? followUp,
+    RecipeData? recipe,
+    bool clearRecipe = false,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -203,6 +217,7 @@ class AssistantState {
       audioPlaying: audioPlaying ?? this.audioPlaying,
       userPresent: userPresent ?? this.userPresent,
       followUp: followUp ?? this.followUp,
+      recipe: clearRecipe ? null : (recipe ?? this.recipe),
     );
   }
 }
@@ -462,6 +477,23 @@ class AssistantController extends ChangeNotifier {
         // Camera proximity transition (brighten on approach / dim when quiet). The
         // brightness actuation lives in the UI layer, which reads `userPresent`.
         _emit(_state.copyWith(userPresent: e.present));
+      case WakeWordEventKind.showRecipe:
+        // The orchestrator pushed a parsed recipe; open recipe mode. A payload that
+        // fails to parse is ignored (recipe stays as it was) rather than crashing.
+        final recipe = RecipeData.tryParse(e.recipeJson);
+        if (recipe != null) {
+          _emit(_state.copyWith(recipe: recipe));
+        }
+      case WakeWordEventKind.dismissRecipe:
+        _emit(_state.copyWith(clearRecipe: true));
+    }
+  }
+
+  /// Dismiss recipe mode from the UI (the user taps the close control). Voice
+  /// dismissal ("done cooking") arrives instead as a `dismissRecipe` event.
+  void dismissRecipe() {
+    if (_state.recipe != null) {
+      _emit(_state.copyWith(clearRecipe: true));
     }
   }
 

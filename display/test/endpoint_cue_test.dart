@@ -48,6 +48,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       timerLabel: '',
       timerRemainingSecs: 0,
       present: false,
+      recipeJson: '',
     );
 
 void main() {

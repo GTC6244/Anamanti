@@ -1338,6 +1338,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_timerLabel = <String>::sse_decode(deserializer);
         let mut var_timerRemainingSecs = <u32>::sse_decode(deserializer);
         let mut var_present = <bool>::sse_decode(deserializer);
+        let mut var_recipeJson = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
             message: var_message,
@@ -1353,6 +1354,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             timer_label: var_timerLabel,
             timer_remaining_secs: var_timerRemainingSecs,
             present: var_present,
+            recipe_json: var_recipeJson,
         };
     }
 }
@@ -1379,7 +1381,9 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             14 => crate::api::engine::WakeWordEventKind::TimerStarted,
             15 => crate::api::engine::WakeWordEventKind::TimerFinished,
             16 => crate::api::engine::WakeWordEventKind::TimerCancelled,
-            17 => crate::api::engine::WakeWordEventKind::Presence,
+            17 => crate::api::engine::WakeWordEventKind::ShowRecipe,
+            18 => crate::api::engine::WakeWordEventKind::DismissRecipe,
+            19 => crate::api::engine::WakeWordEventKind::Presence,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -1750,6 +1754,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.timer_label.into_into_dart().into_dart(),
             self.timer_remaining_secs.into_into_dart().into_dart(),
             self.present.into_into_dart().into_dart(),
+            self.recipe_json.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1786,7 +1791,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::TimerStarted => 14.into_dart(),
             Self::TimerFinished => 15.into_dart(),
             Self::TimerCancelled => 16.into_dart(),
-            Self::Presence => 17.into_dart(),
+            Self::ShowRecipe => 17.into_dart(),
+            Self::DismissRecipe => 18.into_dart(),
+            Self::Presence => 19.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -2155,6 +2162,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <String>::sse_encode(self.timer_label, serializer);
         <u32>::sse_encode(self.timer_remaining_secs, serializer);
         <bool>::sse_encode(self.present, serializer);
+        <String>::sse_encode(self.recipe_json, serializer);
     }
 }
 
@@ -2180,7 +2188,9 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::TimerStarted => 14,
                 crate::api::engine::WakeWordEventKind::TimerFinished => 15,
                 crate::api::engine::WakeWordEventKind::TimerCancelled => 16,
-                crate::api::engine::WakeWordEventKind::Presence => 17,
+                crate::api::engine::WakeWordEventKind::ShowRecipe => 17,
+                crate::api::engine::WakeWordEventKind::DismissRecipe => 18,
+                crate::api::engine::WakeWordEventKind::Presence => 19,
                 _ => {
                     unimplemented!("");
                 }
