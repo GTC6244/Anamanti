@@ -154,6 +154,26 @@ pub mod types {
     /// device ends its turn on the first `audio-stop`). Byte-identical to the device
     /// crate's `types::LISTEN`. See `plans/Plan.MD` (Follow-up listening).
     pub const LISTEN: &str = "ambient-listen";
+
+    // ---- Proactive notifications (Approach A: persistent device-dialed channel) ----
+    //
+    // A NEW long-lived connection the device dials and holds open so the
+    // orchestrator can PUSH unsolicited notifications to the display *without* the
+    // device starting a voice turn. Distinct from the per-turn voice socket, but
+    // rides the same Wyoming framing and the same discovered endpoint. Byte-identical
+    // to the device crate's `types` (guarded by the round-trip tests in both crates).
+
+    /// device → orchestrator: open + register the persistent notify channel (data:
+    /// `role` = "notify", `device_id`, optional `instance_id`). The orchestrator
+    /// keeps this connection open and pushes `ambient-notify` frames down it.
+    pub const AMBIENT_HELLO: &str = "ambient-hello";
+    /// orchestrator → device: a proactive notification to display (data: `id`,
+    /// `priority` = "info" | "reminder" | "alert", `title`, `body`). Visual-only in
+    /// this phase — no spoken output.
+    pub const AMBIENT_NOTIFY: &str = "ambient-notify";
+    /// device → orchestrator: acknowledge a notification by `id` (data: `id`,
+    /// `result`). Reserved for delivery tracking; unused in the visual-only phase.
+    pub const AMBIENT_NOTIFY_ACK: &str = "ambient-notify-ack";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -365,6 +385,56 @@ impl WyomingEvent {
         } else {
             None
         }
+    }
+
+    /// An `ambient-hello` channel-open frame (device → orchestrator): register the
+    /// persistent notify channel. Mirror of the device crate's `hello` constructor.
+    pub fn hello(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+        Self::with_data(
+            types::AMBIENT_HELLO,
+            json!({
+                "role": "notify",
+                "device_id": device_id.into(),
+                "instance_id": instance_id.into(),
+            }),
+        )
+    }
+
+    /// The `device_id` from an `ambient-hello` frame's `data.device_id`.
+    pub fn hello_device_id(&self) -> Option<&str> {
+        if self.event_type == types::AMBIENT_HELLO {
+            self.data.get("device_id").and_then(Value::as_str)
+        } else {
+            None
+        }
+    }
+
+    /// An `ambient-notify` push (orchestrator → device): a proactive notification to
+    /// display. Byte-identical to the device crate's `notify` constructor.
+    pub fn notify(
+        id: impl Into<String>,
+        priority: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self::with_data(
+            types::AMBIENT_NOTIFY,
+            json!({
+                "id": id.into(),
+                "priority": priority.into(),
+                "title": title.into(),
+                "body": body.into(),
+            }),
+        )
+    }
+
+    /// An `ambient-notify-ack` frame (device → orchestrator). Reserved for a later
+    /// delivery-tracking phase; provided now so both crates share the constructor.
+    pub fn notify_ack(id: impl Into<String>, result: impl Into<String>) -> Self {
+        Self::with_data(
+            types::AMBIENT_NOTIFY_ACK,
+            json!({ "id": id.into(), "result": result.into() }),
+        )
     }
 
     /// Serialize to on-the-wire bytes: header line, then the length-prefixed
@@ -611,6 +681,35 @@ mod tests {
         assert_eq!(followup_depth(&disabled), 0);
         // No `wait_secs` on a plain turn → 0 (caller uses its default window).
         assert_eq!(followup_wait_secs(&plain.data), 0);
+    }
+
+    #[tokio::test]
+    async fn notify_frames_roundtrip() {
+        // hello (device → orchestrator)
+        let hello = WyomingEvent::hello("echo-show-8", "Paul Family");
+        let back = roundtrip(&hello).await;
+        assert_eq!(back, hello);
+        assert_eq!(back.event_type, types::AMBIENT_HELLO);
+        assert_eq!(back.hello_device_id(), Some("echo-show-8"));
+        assert_eq!(back.data["role"], json!("notify"));
+        // A non-hello frame yields no device id.
+        assert_eq!(WyomingEvent::audio_stop(0).hello_device_id(), None);
+
+        // notify (orchestrator → device)
+        let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");
+        let back = roundtrip(&note).await;
+        assert_eq!(back, note);
+        assert_eq!(back.event_type, types::AMBIENT_NOTIFY);
+        assert_eq!(back.data["id"], json!("42-0"));
+        assert_eq!(back.data["priority"], json!("info"));
+        assert_eq!(back.data["title"], json!("Reminder"));
+        assert_eq!(back.data["body"], json!("Meeting in 5 minutes"));
+
+        // ack (device → orchestrator), reserved for a later phase
+        let ack = WyomingEvent::notify_ack("42-0", "shown");
+        let back = roundtrip(&ack).await;
+        assert_eq!(back, ack);
+        assert_eq!(back.event_type, types::AMBIENT_NOTIFY_ACK);
     }
 
     #[tokio::test]

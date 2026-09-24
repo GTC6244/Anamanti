@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1761208582;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -926112597;
 
 // Section: executor
 
@@ -645,6 +645,46 @@ fn wire__crate__api__settings__name_speaker_impl(
         },
     )
 }
+fn wire__crate__api__engine__start_notify_channel_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "start_notify_channel",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_config = <crate::api::engine::NotifyConfig>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                crate::api::engine::NotifyEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok =
+                            crate::api::engine::start_notify_channel(api_config, api_sink)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__engine__start_wake_word_engine_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -681,6 +721,40 @@ fn wire__crate__api__engine__start_wake_word_engine_impl(
                         Ok(output_ok)
                     })(),
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__engine__stop_notify_channel_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "stop_notify_channel",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::engine::stop_notify_channel();
+                    })?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -768,6 +842,16 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <String>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<crate::api::engine::NotifyEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
     }
 }
 
@@ -964,6 +1048,36 @@ impl SseDecode for crate::api::settings::ModelInfo {
             provider: var_provider,
             id: var_id,
             label: var_label,
+        };
+    }
+}
+
+impl SseDecode for crate::api::engine::NotifyConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_orchestratorKey = <String>::sse_decode(deserializer);
+        let mut var_discoveryTimeoutSecs = <u64>::sse_decode(deserializer);
+        let mut var_deviceId = <String>::sse_decode(deserializer);
+        return crate::api::engine::NotifyConfig {
+            orchestrator_key: var_orchestratorKey,
+            discovery_timeout_secs: var_discoveryTimeoutSecs,
+            device_id: var_deviceId,
+        };
+    }
+}
+
+impl SseDecode for crate::api::engine::NotifyEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_priority = <String>::sse_decode(deserializer);
+        let mut var_title = <String>::sse_decode(deserializer);
+        let mut var_body = <String>::sse_decode(deserializer);
+        return crate::api::engine::NotifyEvent {
+            id: var_id,
+            priority: var_priority,
+            title: var_title,
+            body: var_body,
         };
     }
 }
@@ -1270,12 +1384,16 @@ fn pde_ffi_dispatcher_primary_impl(
         15 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
         16 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
         17 => {
-            wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
+            wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
         18 => {
+            wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
+        }
+        19 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        20 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        19 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        21 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -1373,6 +1491,51 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::settings::ModelInfo>
     for crate::api::settings::ModelInfo
 {
     fn into_into_dart(self) -> crate::api::settings::ModelInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::engine::NotifyConfig {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.orchestrator_key.into_into_dart().into_dart(),
+            self.discovery_timeout_secs.into_into_dart().into_dart(),
+            self.device_id.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::engine::NotifyConfig
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::engine::NotifyConfig>
+    for crate::api::engine::NotifyConfig
+{
+    fn into_into_dart(self) -> crate::api::engine::NotifyConfig {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::engine::NotifyEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.priority.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.body.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::engine::NotifyEvent
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::engine::NotifyEvent>
+    for crate::api::engine::NotifyEvent
+{
+    fn into_into_dart(self) -> crate::api::engine::NotifyEvent {
         self
     }
 }
@@ -1616,6 +1779,15 @@ impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
 }
 
 impl SseEncode
+    for StreamSink<crate::api::engine::NotifyEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
+impl SseEncode
     for StreamSink<crate::api::engine::WakeWordEvent, flutter_rust_bridge::for_generated::SseCodec>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1766,6 +1938,25 @@ impl SseEncode for crate::api::settings::ModelInfo {
         <String>::sse_encode(self.provider, serializer);
         <String>::sse_encode(self.id, serializer);
         <String>::sse_encode(self.label, serializer);
+    }
+}
+
+impl SseEncode for crate::api::engine::NotifyConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.orchestrator_key, serializer);
+        <u64>::sse_encode(self.discovery_timeout_secs, serializer);
+        <String>::sse_encode(self.device_id, serializer);
+    }
+}
+
+impl SseEncode for crate::api::engine::NotifyEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.priority, serializer);
+        <String>::sse_encode(self.title, serializer);
+        <String>::sse_encode(self.body, serializer);
     }
 }
 

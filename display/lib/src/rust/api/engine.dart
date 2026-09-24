@@ -6,8 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `listening_followup`, `presence`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `reply_token`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
 ///
@@ -32,6 +33,94 @@ Future<void> stopWakeWordEngine() =>
 /// Whether the wake-word engine is currently running.
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
+
+/// Open the persistent proactive-notification channel and stream pushed
+/// notifications to Dart. Replaces any channel already running (so it can be
+/// restarted when the pinned orchestrator changes). The channel dials the pinned
+/// orchestrator and reconnects with backoff for the life of the subscription.
+Stream<NotifyEvent> startNotifyChannel({required NotifyConfig config}) =>
+    RustLib.instance.api.crateApiEngineStartNotifyChannel(config: config);
+
+/// Stop the proactive-notification channel (if any) and join its thread. Idempotent.
+Future<void> stopNotifyChannel() =>
+    RustLib.instance.api.crateApiEngineStopNotifyChannel();
+
+/// Config for the persistent notify channel. The orchestrator is discovered over
+/// mDNS at connect time (same as the voice path), so only the pin, the browse
+/// timeout, and this display's id are configured here.
+class NotifyConfig {
+  /// Stable selection key (`instance_id` TXT) of the pinned orchestrator; empty =
+  /// "Auto" (first available). Mirrors [`WakeWordConfig::orchestrator_key`] so the
+  /// notify channel targets the same Mac the voice path does.
+  final String orchestratorKey;
+
+  /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+  /// (0 = built-in default).
+  final BigInt discoveryTimeoutSecs;
+
+  /// A stable identifier for this display, sent in the `ambient-hello` frame so the
+  /// orchestrator can key notifications per device (may be empty).
+  final String deviceId;
+
+  const NotifyConfig({
+    required this.orchestratorKey,
+    required this.discoveryTimeoutSecs,
+    required this.deviceId,
+  });
+
+  @override
+  int get hashCode =>
+      orchestratorKey.hashCode ^
+      discoveryTimeoutSecs.hashCode ^
+      deviceId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is NotifyConfig &&
+          runtimeType == other.runtimeType &&
+          orchestratorKey == other.orchestratorKey &&
+          discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
+          deviceId == other.deviceId;
+}
+
+/// One proactive notification pushed from the orchestrator, streamed to Flutter.
+/// Modeled as a flat struct (like [`WakeWordEvent`]) so the FRB boundary stays
+/// dependency-free.
+class NotifyEvent {
+  /// Stable notification id (for dedup / dismiss on the UI side).
+  final String id;
+
+  /// `"info"` | `"reminder"` | `"alert"` — drives the banner styling.
+  final String priority;
+
+  /// Short headline.
+  final String title;
+
+  /// Body text.
+  final String body;
+
+  const NotifyEvent({
+    required this.id,
+    required this.priority,
+    required this.title,
+    required this.body,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ priority.hashCode ^ title.hashCode ^ body.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is NotifyEvent &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          priority == other.priority &&
+          title == other.title &&
+          body == other.body;
+}
 
 /// Paths and tuning for the openWakeWord three-model chain plus the Phase-3
 /// Wyoming turn. The Flutter layer resolves the model paths from bundled assets

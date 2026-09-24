@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 
 import 'package:ambient_display/src/engine/assistant_controller.dart';
 import 'package:ambient_display/src/engine/model_assets.dart';
+import 'package:ambient_display/src/engine/notification_controller.dart';
 import 'package:ambient_display/src/engine/screen_brightness.dart';
 import 'package:ambient_display/src/engine/wakeword_config.dart';
 import 'package:ambient_display/src/settings/app_settings.dart';
@@ -27,6 +28,7 @@ import 'package:ambient_display/src/slideshow/photo_source.dart';
 import 'package:ambient_display/src/ui/ambient_screen.dart';
 import 'package:ambient_display/src/ui/settings_screen.dart';
 import 'package:ambient_display/src/ui/slideshow_view.dart';
+import 'package:ambient_display/src/rust/api/engine.dart' show NotifyConfig;
 import 'package:ambient_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -78,6 +80,10 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   AppSettings _settings = const AppSettings();
   AssistantController? _assistant;
+
+  /// Proactive-notification channel (Approach A). Rebuilt alongside the assistant so
+  /// it re-pins to the selected orchestrator when that changes.
+  NotificationController? _notifications;
 
   /// Live access tokens for each Google backend (minted from the persisted refresh
   /// tokens on boot / after a re-link). Null when unlinked/offline → local gradients.
@@ -268,7 +274,24 @@ class _AmbientHomeState extends State<AmbientHome> {
     // Actuate the screen backlight whenever the proximity sensor's presence flips.
     // The old controller (if any) was just disposed, dropping its listeners.
     assistant.addListener(() => _brightness.apply(assistant.state.userPresent));
-    setState(() => _assistant = assistant);
+
+    // Proactive-notification channel: a persistent, device-dialed connection to the
+    // pinned orchestrator that receives pushed visual notifications (Approach A).
+    // Independent of the voice engine, but re-pinned here when the orchestrator
+    // selection changes (which already triggers an engine restart).
+    _notifications?.dispose();
+    final notifications = NotificationController(
+      config: NotifyConfig(
+        orchestratorKey: _settings.orchestratorKey,
+        discoveryTimeoutSecs: BigInt.zero,
+        deviceId: 'ambient-display',
+      ),
+    )..start();
+
+    setState(() {
+      _assistant = assistant;
+      _notifications = notifications;
+    });
   }
 
   /// Apply settings changed on the [SettingsScreen] (already persisted there):
@@ -325,6 +348,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   void dispose() {
     _photoRefreshTimer?.cancel();
     _assistant?.dispose();
+    _notifications?.dispose();
     _slideshow.dispose();
     _brightness.reset();
     super.dispose();
@@ -344,6 +368,7 @@ class _AmbientHomeState extends State<AmbientHome> {
     return AmbientScreen(
       assistant: assistant,
       slideshow: _slideshow,
+      notifications: _notifications,
       onOpenSettings: _openSettings,
     );
   }

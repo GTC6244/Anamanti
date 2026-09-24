@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1761208582;
+  int get rustContentHash => -926112597;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -151,9 +151,15 @@ abstract class RustLibApi extends BaseApi {
     required BigInt discoveryTimeoutSecs,
   });
 
+  Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
+    required NotifyConfig config,
+  });
+
   Stream<WakeWordEvent> crateApiEngineStartWakeWordEngine({
     required WakeWordConfig config,
   });
+
+  Future<void> crateApiEngineStopNotifyChannel();
 
   Future<void> crateApiEngineStopWakeWordEngine();
 
@@ -698,6 +704,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
+    required NotifyConfig config,
+  }) {
+    final sink = RustStreamSink<NotifyEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_box_autoadd_notify_config(config, serializer);
+            sse_encode_StreamSink_notify_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 17,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_AnyhowException,
+          ),
+          constMeta: kCrateApiEngineStartNotifyChannelConstMeta,
+          argValues: [config, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiEngineStartNotifyChannelConstMeta =>
+      const TaskConstMeta(
+        debugName: "start_notify_channel",
+        argNames: ["config", "sink"],
+      );
+
+  @override
   Stream<WakeWordEvent> crateApiEngineStartWakeWordEngine({
     required WakeWordConfig config,
   }) {
@@ -712,7 +756,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 17,
+              funcId: 18,
               port: port_,
             );
           },
@@ -736,6 +780,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiEngineStopNotifyChannel() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineStopNotifyChannelConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineStopNotifyChannelConstMeta =>
+      const TaskConstMeta(debugName: "stop_notify_channel", argNames: []);
+
+  @override
   Future<void> crateApiEngineStopWakeWordEngine() {
     return handler.executeNormal(
       NormalTask(
@@ -744,7 +815,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 20,
             port: port_,
           );
         },
@@ -778,7 +849,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 21,
             port: port_,
           );
         },
@@ -806,6 +877,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RustStreamSink<NotifyEvent> dco_decode_StreamSink_notify_event_Sse(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
   RustStreamSink<WakeWordEvent> dco_decode_StreamSink_wake_word_event_Sse(
     dynamic raw,
   ) {
@@ -829,6 +908,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   double dco_decode_box_autoadd_f_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as double;
+  }
+
+  @protected
+  NotifyConfig dco_decode_box_autoadd_notify_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_notify_config(raw);
   }
 
   @protected
@@ -957,6 +1042,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       provider: dco_decode_String(arr[0]),
       id: dco_decode_String(arr[1]),
       label: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  NotifyConfig dco_decode_notify_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return NotifyConfig(
+      orchestratorKey: dco_decode_String(arr[0]),
+      discoveryTimeoutSecs: dco_decode_u_64(arr[1]),
+      deviceId: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  NotifyEvent dco_decode_notify_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return NotifyEvent(
+      id: dco_decode_String(arr[0]),
+      priority: dco_decode_String(arr[1]),
+      title: dco_decode_String(arr[2]),
+      body: dco_decode_String(arr[3]),
     );
   }
 
@@ -1153,6 +1265,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RustStreamSink<NotifyEvent> sse_decode_StreamSink_notify_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   RustStreamSink<WakeWordEvent> sse_decode_StreamSink_wake_word_event_Sse(
     SseDeserializer deserializer,
   ) {
@@ -1177,6 +1297,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   double sse_decode_box_autoadd_f_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_f_64(deserializer));
+  }
+
+  @protected
+  NotifyConfig sse_decode_box_autoadd_notify_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_notify_config(deserializer));
   }
 
   @protected
@@ -1351,6 +1479,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_id = sse_decode_String(deserializer);
     var var_label = sse_decode_String(deserializer);
     return ModelInfo(provider: var_provider, id: var_id, label: var_label);
+  }
+
+  @protected
+  NotifyConfig sse_decode_notify_config(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_orchestratorKey = sse_decode_String(deserializer);
+    var var_discoveryTimeoutSecs = sse_decode_u_64(deserializer);
+    var var_deviceId = sse_decode_String(deserializer);
+    return NotifyConfig(
+      orchestratorKey: var_orchestratorKey,
+      discoveryTimeoutSecs: var_discoveryTimeoutSecs,
+      deviceId: var_deviceId,
+    );
+  }
+
+  @protected
+  NotifyEvent sse_decode_notify_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_priority = sse_decode_String(deserializer);
+    var var_title = sse_decode_String(deserializer);
+    var var_body = sse_decode_String(deserializer);
+    return NotifyEvent(
+      id: var_id,
+      priority: var_priority,
+      title: var_title,
+      body: var_body,
+    );
   }
 
   @protected
@@ -1603,6 +1759,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_StreamSink_notify_event_Sse(
+    RustStreamSink<NotifyEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_notify_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
   void sse_encode_StreamSink_wake_word_event_Sse(
     RustStreamSink<WakeWordEvent> self,
     SseSerializer serializer,
@@ -1635,6 +1808,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_box_autoadd_f_64(double self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_f_64(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_notify_config(
+    NotifyConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_notify_config(self, serializer);
   }
 
   @protected
@@ -1792,6 +1974,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.provider, serializer);
     sse_encode_String(self.id, serializer);
     sse_encode_String(self.label, serializer);
+  }
+
+  @protected
+  void sse_encode_notify_config(NotifyConfig self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.orchestratorKey, serializer);
+    sse_encode_u_64(self.discoveryTimeoutSecs, serializer);
+    sse_encode_String(self.deviceId, serializer);
+  }
+
+  @protected
+  void sse_encode_notify_event(NotifyEvent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.priority, serializer);
+    sse_encode_String(self.title, serializer);
+    sse_encode_String(self.body, serializer);
   }
 
   @protected

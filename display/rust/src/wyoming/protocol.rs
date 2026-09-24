@@ -149,6 +149,23 @@ pub mod types {
     /// the orchestrator crate's `types::LISTEN`. See `plans/Plan.MD` (Follow-up
     /// listening).
     pub const LISTEN: &str = "ambient-listen";
+
+    // ---- Proactive notifications (Approach A: persistent device-dialed channel) ----
+    //
+    // A long-lived connection the device dials and holds open so the orchestrator can
+    // PUSH unsolicited notifications to the display without a voice turn. Distinct
+    // from the per-turn voice socket, but rides the same Wyoming framing on the
+    // device↔orchestrator hop. Byte-identical to the orchestrator crate's `types`.
+
+    /// device → orchestrator: open + register the persistent notify channel (data:
+    /// `role` = "notify", `device_id`, optional `instance_id`).
+    pub const AMBIENT_HELLO: &str = "ambient-hello";
+    /// orchestrator → device: a proactive notification to display (data: `id`,
+    /// `priority` = "info" | "reminder" | "alert", `title`, `body`).
+    pub const AMBIENT_NOTIFY: &str = "ambient-notify";
+    /// device → orchestrator: acknowledge a notification by `id` (data: `id`,
+    /// `result`). Reserved for a later delivery-tracking phase.
+    pub const AMBIENT_NOTIFY_ACK: &str = "ambient-notify-ack";
 }
 
 /// A device-action timer command decoded from an `ambient-timer` frame (Phase 2).
@@ -343,6 +360,48 @@ impl WyomingEvent {
         } else {
             None
         }
+    }
+
+    /// An `ambient-hello` channel-open frame (device → orchestrator): register the
+    /// persistent notify channel. Byte-identical to the orchestrator's `hello`.
+    pub fn hello(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+        Self::with_data(
+            types::AMBIENT_HELLO,
+            json!({
+                "role": "notify",
+                "device_id": device_id.into(),
+                "instance_id": instance_id.into(),
+            }),
+        )
+    }
+
+    /// An `ambient-notify` push (orchestrator → device). Byte-identical to the
+    /// orchestrator's `notify` (used by tests + the mock server; the orchestrator
+    /// emits the wire form directly).
+    pub fn notify(
+        id: impl Into<String>,
+        priority: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self::with_data(
+            types::AMBIENT_NOTIFY,
+            json!({
+                "id": id.into(),
+                "priority": priority.into(),
+                "title": title.into(),
+                "body": body.into(),
+            }),
+        )
+    }
+
+    /// An `ambient-notify-ack` frame (device → orchestrator). Reserved for a later
+    /// delivery-tracking phase; provided now so both crates share the constructor.
+    pub fn notify_ack(id: impl Into<String>, result: impl Into<String>) -> Self {
+        Self::with_data(
+            types::AMBIENT_NOTIFY_ACK,
+            json!({ "id": id.into(), "result": result.into() }),
+        )
     }
 
     /// An `ambient-timer` **start** action (used by tests + the mock server; the
@@ -611,6 +670,28 @@ mod tests {
             back.data.get("text").and_then(Value::as_str),
             Some("Time's up for pasta")
         );
+    }
+
+    #[tokio::test]
+    async fn notify_frames_roundtrip() {
+        let hello = WyomingEvent::hello("echo-show-8", "Paul Family");
+        let back = roundtrip(&hello).await;
+        assert_eq!(back, hello);
+        assert_eq!(back.event_type, types::AMBIENT_HELLO);
+        assert_eq!(back.data["role"], json!("notify"));
+        assert_eq!(back.data["device_id"], json!("echo-show-8"));
+
+        let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");
+        let back = roundtrip(&note).await;
+        assert_eq!(back, note);
+        assert_eq!(back.event_type, types::AMBIENT_NOTIFY);
+        assert_eq!(back.data["title"], json!("Reminder"));
+        assert_eq!(back.data["body"], json!("Meeting in 5 minutes"));
+
+        let ack = WyomingEvent::notify_ack("42-0", "shown");
+        let back = roundtrip(&ack).await;
+        assert_eq!(back, ack);
+        assert_eq!(back.event_type, types::AMBIENT_NOTIFY_ACK);
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ use tokio::net::TcpListener;
 use ambient_orchestrator::config::{Config, MemoryBackendChoice};
 use ambient_orchestrator::discovery::MdnsAdvertiser;
 use ambient_orchestrator::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
+use ambient_orchestrator::notify::NotificationService;
 use ambient_orchestrator::orchestrator::{self, Pipeline, TcpConnector};
 use ambient_orchestrator::server;
 use ambient_orchestrator::webconfig::{self, DebugSources};
@@ -179,12 +180,18 @@ async fn run() -> Result<()> {
     // shared into the config page. `None` when music is disabled in the config file.
     let music_hub = config.build_hub();
 
+    // Proactive-notification registry (Approach A): shared by the device-facing
+    // server (which registers each device's persistent notify channel) and the
+    // config page (whose "Notify" tab can push a test notification).
+    let notify = Arc::new(NotificationService::new());
+
     if let Some(config_addr) = config.config_addr {
         let settings = pipeline.settings().clone();
         let catalog = catalog.clone();
         let connector = connector.clone();
         let voices_dir = config.tts_voices_dir.clone();
         let music = music_hub.clone();
+        let notify = notify.clone();
         let debug = DebugSources {
             memory: pipeline.memory().clone(),
             chatlog_path: config.chatlog_path.clone(),
@@ -207,7 +214,7 @@ async fn run() -> Result<()> {
                 );
                 tokio::spawn(async move {
                     if let Err(e) = webconfig::serve(
-                        listener, settings, catalog, connector, voices_dir, debug, music,
+                        listener, settings, catalog, connector, voices_dir, debug, music, notify,
                     )
                     .await
                     {
@@ -258,7 +265,7 @@ async fn run() -> Result<()> {
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     let outcome = tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker) => {
+        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker, notify) => {
             res.context("device-facing server stopped")
         }
         _ = tokio::signal::ctrl_c() => {

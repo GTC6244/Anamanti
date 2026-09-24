@@ -1,0 +1,56 @@
+<p class="sub">Push a proactive notification to the display. The device holds a persistent "notify" channel open to the orchestrator; anything sent here appears on the idle screen without the user speaking. Visual-only for now — no spoken output.</p>
+
+<div class="card">
+  <h2>Send a test notification</h2>
+  <p class="desc" id="statusline">Loading…</p>
+
+  <label>Title
+    <input id="title" type="text" placeholder="Test notification" autocomplete="off">
+  </label>
+  <label>Body
+    <input id="body" type="text" placeholder="Hello from the orchestrator." autocomplete="off">
+  </label>
+  <label>Priority
+    <select id="priority">
+      <option value="info" selected>info</option>
+      <option value="reminder">reminder</option>
+      <option value="alert">alert</option>
+    </select>
+  </label>
+
+  <div class="card-actions">
+    <div id="status" class="status"></div>
+    <button id="send" class="primary">Send</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  async function load(){
+    try{
+      const j = await apiJSON('/notifications/status.json');
+      const n = j.connected || 0;
+      $('statusline').textContent = n === 1
+        ? '1 device notify channel connected ✓'
+        : n + ' device notify channels connected' + (n === 0 ? ' — a test will be dropped until a device connects' : '');
+    }catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+  async function send(){
+    const payload = {
+      title: $('title').value.trim() || undefined,
+      body: $('body').value.trim() || undefined,
+      priority: $('priority').value,
+    };
+    try{
+      const j = await apiJSON('/notifications/test', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); }
+      else { show(true, 'Sent to ' + (j.delivered || 0) + ' device(s).'); }
+      load();
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('send').addEventListener('click', send);
+  load();
+</script>

@@ -72,6 +72,16 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   risk section below.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
+- **Proactive notifications (Approach A):** the orchestrator can push **visual**
+  notifications to the display *unprompted* (no voice turn) over a **persistent,
+  device-dialed** Wyoming channel (`ambient-hello` → `ambient-notify`), separate from
+  the per-turn voice socket. The device is still the dialer (reuses mDNS + the
+  `instance_id` pin + auto-reconnect); the Mac only pushes down the open socket. Rust
+  owns the socket + reconnect (`display/rust/src/wyoming/notify.rs`,
+  `start_notify_channel`); Flutter shows a dismissible banner
+  (`NotificationController`); the orchestrator keeps a `NotificationService` registry
+  (config-page **Notify** tab pushes a test). Visual-only for now — no spoken output,
+  no state-machine interaction. Design: architecture.md §4; follow-ups: TODO.md §6a.
 
 If a task seems to require changing one of these, stop and confirm first.
 
