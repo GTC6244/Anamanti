@@ -49,6 +49,7 @@ WakeWordEvent _event(
   String timerLabel = '',
   int timerRemainingSecs = 0,
   bool present = false,
+  String recipeJson = '',
 }) {
   return WakeWordEvent(
     kind: kind,
@@ -65,6 +66,7 @@ WakeWordEvent _event(
     timerLabel: timerLabel,
     timerRemainingSecs: timerRemainingSecs,
     present: present,
+    recipeJson: recipeJson,
   );
 }
 

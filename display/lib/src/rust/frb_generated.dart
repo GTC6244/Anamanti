@@ -1231,8 +1231,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 14)
-      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
+    if (arr.length != 15)
+      throw Exception('unexpected arr length: expect 15 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -1248,6 +1248,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerLabel: dco_decode_String(arr[11]),
       timerRemainingSecs: dco_decode_u_32(arr[12]),
       present: dco_decode_bool(arr[13]),
+      recipeJson: dco_decode_String(arr[14]),
     );
   }
 
@@ -1722,6 +1723,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_timerLabel = sse_decode_String(deserializer);
     var var_timerRemainingSecs = sse_decode_u_32(deserializer);
     var var_present = sse_decode_bool(deserializer);
+    var var_recipeJson = sse_decode_String(deserializer);
     return WakeWordEvent(
       kind: var_kind,
       message: var_message,
@@ -1737,6 +1739,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerLabel: var_timerLabel,
       timerRemainingSecs: var_timerRemainingSecs,
       present: var_present,
+      recipeJson: var_recipeJson,
     );
   }
 
@@ -2161,6 +2164,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.timerLabel, serializer);
     sse_encode_u_32(self.timerRemainingSecs, serializer);
     sse_encode_bool(self.present, serializer);
+    sse_encode_String(self.recipeJson, serializer);
   }
 
   @protected
