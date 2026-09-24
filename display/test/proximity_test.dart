@@ -70,6 +70,7 @@ WakeWordEvent _event(WakeWordEventKind kind) => WakeWordEvent(
       timerLabel: '',
       timerRemainingSecs: 0,
       present: false,
+      recipeJson: '',
     );
 
 void main() {
