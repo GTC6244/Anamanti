@@ -116,6 +116,7 @@ class AssistantState {
     this.timers = const [],
     this.audioPlaying = false,
     this.userPresent = true,
+    this.followUp = false,
   });
 
   final TurnPhase phase;
@@ -160,6 +161,12 @@ class AssistantState {
   /// rather than sitting dim (Plan.MD §5).
   final bool userPresent;
 
+  /// Whether the current turn was auto-opened as a **follow-up** to a question the
+  /// assistant just asked (no wake word). Lets the UI show a "listening for your
+  /// reply" cue. Set when the engine reports `ListeningFollowup`, cleared when a wake
+  /// word starts an ordinary turn or the turn ends. See `plans/Plan.MD`.
+  final bool followUp;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -181,6 +188,7 @@ class AssistantState {
     List<TimerModel>? timers,
     bool? audioPlaying,
     bool? userPresent,
+    bool? followUp,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -194,6 +202,7 @@ class AssistantState {
       timers: timers ?? this.timers,
       audioPlaying: audioPlaying ?? this.audioPlaying,
       userPresent: userPresent ?? this.userPresent,
+      followUp: followUp ?? this.followUp,
     );
   }
 }
@@ -338,6 +347,7 @@ class AssistantController extends ChangeNotifier {
           transcript: '',
           reply: '',
           audioPlaying: false,
+          followUp: false,
         ));
       case WakeWordEventKind.connecting:
         _emit(_state.copyWith(
@@ -369,6 +379,23 @@ class AssistantController extends ChangeNotifier {
         ));
       case WakeWordEventKind.speakingDone:
         _onSpeakingDone();
+      case WakeWordEventKind.listeningFollowup:
+        // The assistant asked a question and reopened the mic with no wake word.
+        // Treat it like the start of a fresh turn (clear the previous exchange, reset
+        // the local end-of-speech tracker), but flag it as a follow-up so the UI can
+        // show a distinct "listening for your reply" cue. The reply audio has already
+        // drained by the time this fires (the engine gates it on drain), so it is safe
+        // to clear the text now.
+        _speechSeen = false;
+        _lastVoiceAt = _clock();
+        _emit(_state.copyWith(
+          phase: TurnPhase.listening,
+          online: true,
+          transcript: '',
+          reply: '',
+          audioPlaying: false,
+          followUp: true,
+        ));
       case WakeWordEventKind.disconnected:
         _onDisconnected(e.message);
       case WakeWordEventKind.stopped:
@@ -448,6 +475,9 @@ class AssistantController extends ChangeNotifier {
       online: normalEnd,
       statusMessage: normalEnd ? 'Ready' : message,
       audioPlaying: normalEnd ? null : false,
+      // The turn ended; the follow-up cue belongs to a live turn only. If a chained
+      // follow-up is coming, the engine's next `listeningFollowup` re-sets it.
+      followUp: false,
     ));
   }
 

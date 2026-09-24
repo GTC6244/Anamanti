@@ -142,6 +142,14 @@ pub mod types {
     /// `types::SPEAK`.
     pub const SPEAK: &str = "ambient-speak";
 
+    /// orchestrator → device: **follow-up listen**. The assistant's reply was a
+    /// question, so reopen the mic and start a fresh turn with no wake word once the
+    /// reply audio finishes (data: `depth` = the chain depth the follow-up turn will
+    /// carry). Arrives mid-turn, before the final TTS `audio-stop`. Byte-identical to
+    /// the orchestrator crate's `types::LISTEN`. See `plans/Plan.MD` (Follow-up
+    /// listening).
+    pub const LISTEN: &str = "ambient-listen";
+
     // ---- Proactive notifications (Approach A: persistent device-dialed channel) ----
     //
     // A long-lived connection the device dials and holds open so the orchestrator can
@@ -228,6 +236,32 @@ impl WyomingEvent {
         )
     }
 
+    /// An `audio-start` for a **follow-up** turn — one the device auto-opened after a
+    /// question reply, with no wake word. It is the ordinary PCM header plus
+    /// `followup: true` + `followup_depth`, which the orchestrator reads to seed the
+    /// prompt with recent history and to bound the follow-up chain. `depth == 0` emits
+    /// a plain `audio-start` (an ordinary wake-word turn, no marker).
+    pub fn audio_start_followup(
+        rate: u32,
+        width_bytes: u16,
+        channels: u16,
+        timestamp_ms: u64,
+        depth: u32,
+        wait_secs: u32,
+    ) -> Self {
+        let mut ev = Self::audio_start(rate, width_bytes, channels, timestamp_ms);
+        if depth > 0 {
+            if let Value::Object(map) = &mut ev.data {
+                map.insert("followup".into(), Value::Bool(true));
+                map.insert("followup_depth".into(), json!(depth));
+                // Echo the listen window the orchestrator gave us so it sizes this
+                // turn's no-speech VAD window to match.
+                map.insert("wait_secs".into(), json!(wait_secs));
+            }
+        }
+        ev
+    }
+
     /// An `audio-chunk` carrying `pcm` (little-endian `i16` bytes) as its payload.
     pub fn audio_chunk(
         rate: u32,
@@ -298,6 +332,34 @@ impl WyomingEvent {
     /// and stream its audio back. Mirror of the orchestrator crate's `speak`.
     pub fn speak(text: impl Into<String>) -> Self {
         Self::with_data(types::SPEAK, json!({ "text": text.into() }))
+    }
+
+    /// An `ambient-listen` follow-up-listen frame (used by tests + the mock server; the
+    /// orchestrator emits the wire form directly). `depth` is the chain depth the
+    /// follow-up turn will carry; `wait_secs` is how long to keep the mic open for input
+    /// before sleeping.
+    pub fn listen(depth: u32, wait_secs: u32) -> Self {
+        Self::with_data(
+            types::LISTEN,
+            json!({ "depth": depth, "wait_secs": wait_secs }),
+        )
+    }
+
+    /// Decode an `ambient-listen` frame as `(depth, wait_secs)` — `depth` defaults to 1
+    /// and `wait_secs` to 0 (caller falls back to its own window) if absent. `None` if
+    /// this is not a follow-up-listen frame.
+    pub fn listen_params(&self) -> Option<(u32, u32)> {
+        if self.event_type == types::LISTEN {
+            let depth = self.data.get("depth").and_then(Value::as_u64).unwrap_or(1) as u32;
+            let wait_secs = self
+                .data
+                .get("wait_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            Some((depth, wait_secs))
+        } else {
+            None
+        }
     }
 
     /// An `ambient-hello` channel-open frame (device → orchestrator): register the
@@ -560,6 +622,42 @@ mod tests {
         assert_eq!(WyomingEvent::interrupt().timer_command(), None);
         let bad = WyomingEvent::with_data(types::TIMER, json!({ "action": "start" }));
         assert_eq!(bad.timer_command(), None);
+    }
+
+    #[tokio::test]
+    async fn listen_frame_roundtrips_and_decodes_params() {
+        let ev = WyomingEvent::listen(2, 10);
+        let back = roundtrip(&ev).await;
+        assert_eq!(back, ev);
+        assert_eq!(back.event_type, types::LISTEN);
+        assert_eq!(back.listen_params(), Some((2, 10)));
+        // A non-listen frame yields nothing; a listen missing fields defaults (1, 0).
+        assert_eq!(WyomingEvent::interrupt().listen_params(), None);
+        let no_field = WyomingEvent::with_data(types::LISTEN, json!({}));
+        assert_eq!(no_field.listen_params(), Some((1, 0)));
+    }
+
+    #[tokio::test]
+    async fn followup_audio_start_marks_depth_and_roundtrips() {
+        // depth 0 → a plain audio-start with no follow-up marker.
+        let plain = WyomingEvent::audio_start_followup(16_000, 2, 1, 0, 0, 0);
+        assert_eq!(plain, WyomingEvent::audio_start(16_000, 2, 1, 0));
+        assert!(plain.data.get("followup").is_none());
+
+        // depth > 0 → the PCM header plus followup: true + followup_depth + wait_secs.
+        let marked = WyomingEvent::audio_start_followup(16_000, 2, 1, 0, 3, 5);
+        let back = roundtrip(&marked).await;
+        assert_eq!(back, marked);
+        assert_eq!(audio_format(&back.data), Some((16_000, 2, 1)));
+        assert_eq!(
+            back.data.get("followup").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            back.data.get("followup_depth").and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(back.data.get("wait_secs").and_then(Value::as_u64), Some(5));
     }
 
     #[tokio::test]

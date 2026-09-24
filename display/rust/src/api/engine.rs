@@ -188,6 +188,12 @@ pub enum WakeWordEventKind {
     /// stopped. Fires *after* the turn has already returned to idle, because the
     /// device relays audio faster than real-time (see `engine/net.rs`).
     SpeakingDone,
+    /// Follow-up listening: the assistant's reply was a question, so the device
+    /// reopened the mic and is listening for the answer **without a wake word** (a
+    /// fresh turn is starting). UI-only cue so the screen can show a "listening for
+    /// your reply" affordance. Followed by the usual `Streaming`/`Transcript`/… of
+    /// the follow-up turn. See `plans/Plan.MD` (Follow-up listening).
+    ListeningFollowup,
     /// Phase 3: the turn ended / the socket dropped; `message` gives the reason.
     /// The engine returns to idle wake-word listening.
     Disconnected,
@@ -332,6 +338,10 @@ impl WakeWordEvent {
 
     pub(crate) fn speaking_done() -> Self {
         Self::base(WakeWordEventKind::SpeakingDone)
+    }
+
+    pub(crate) fn listening_followup() -> Self {
+        Self::base(WakeWordEventKind::ListeningFollowup)
     }
 
     pub(crate) fn disconnected(message: String) -> Self {

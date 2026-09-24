@@ -50,12 +50,19 @@ pub enum DeviceAction {
 pub type ActionSink = tokio::sync::mpsc::UnboundedSender<DeviceAction>;
 
 /// One request to a backend: a system prompt (which carries the persistent-memory
-/// context) plus the user's transcript for this turn. Kept single-turn for v1;
-/// cross-session continuity comes from the memory store, not a message history.
+/// context) plus the user's transcript for this turn. Ordinary turns are **single-turn**
+/// (cross-session continuity comes from the memory store, not a message history); the
+/// only exception is a **follow-up** turn — one the device auto-opened after a question
+/// reply with no wake word — whose `history` carries the recent conversation so the
+/// answer has context (see `plans/Plan.MD`, Follow-up listening).
 #[derive(Debug, Clone)]
 pub struct LlmTurn {
     pub system_prompt: String,
     pub user_message: String,
+    /// Prior `(user, assistant)` turn pairs, oldest first, prepended to the message
+    /// history for a follow-up turn. Empty for an ordinary single-shot turn. Only the
+    /// rig engine replays it; the plain-text backends ignore it.
+    pub history: Vec<(String, String)>,
     /// Where action tools emit [`DeviceAction`]s for the pipeline to relay to the
     /// device. `None` disables device actions for this turn. Only the rig engine
     /// reads it; the plain-text backends ignore it.
@@ -67,6 +74,7 @@ impl LlmTurn {
         Self {
             system_prompt: system_prompt.into(),
             user_message: user_message.into(),
+            history: Vec::new(),
             actions: None,
         }
     }
@@ -75,6 +83,13 @@ impl LlmTurn {
     /// the device.
     pub fn with_actions(mut self, actions: ActionSink) -> Self {
         self.actions = Some(actions);
+        self
+    }
+
+    /// Seed the conversation history replayed before the current user message (a
+    /// follow-up turn). Each entry is a `(user, assistant)` pair, oldest first.
+    pub fn with_history(mut self, history: Vec<(String, String)>) -> Self {
+        self.history = history;
         self
     }
 }

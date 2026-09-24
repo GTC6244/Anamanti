@@ -326,6 +326,14 @@ Notes:
   flushes playback immediately + sends `ambient-interrupt` (orchestrator aborts
   LLM+TTS) + starts a new turn. (AEC deferred — raise the wake-word threshold during
   SPEAKING to suppress self-triggers.)
+- Follow-up listen: after **every** reply the orchestrator sends `ambient-listen`
+  (before the final `audio-stop`) carrying a `wait_secs` window (10 s after a `?` reply,
+  5 s otherwise); after its TTS drains the device reopens the mic and starts a fresh turn
+  with **no wake word**, and that turn's prompt is fed recent conversation history. The
+  orchestrator sizes the follow-up turn's no-speech VAD window to `wait_secs` and
+  **sleeps on silence**; the chain continues only while the user keeps talking (optional
+  `follow_up.max_chain`, default unlimited). See `plans/Plan.MD` (Follow-up listening) +
+  §4 of `architecture.md`.
 
 Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
 

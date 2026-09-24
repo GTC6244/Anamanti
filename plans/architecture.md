@@ -316,6 +316,19 @@ predictable memory use and no GC pauses under the 1 GB limit.
   real-time, so the turn reaches IDLE while audio is still draining from the buffer),
   sends an `ambient-interrupt` frame so the orchestrator **aborts the in-flight LLM +
   TTS**, and starts a fresh turn.
+- **Follow-up listen (reopen the mic after every reply):** after each reply the
+  orchestrator sends an `ambient-listen` frame (above) before the final `audio-stop`,
+  with a `wait_secs` window (10 s after a question, 5 s otherwise). The device records
+  it during SPEAKING, ends the turn normally, and — once the reply audio has drained
+  from the playback ring (the same `pending()==0` signal that emits `speakingDone`, so
+  the mic never records the tail of the TTS) — **spawns a fresh turn with no wake word**,
+  reusing the barge-in restart machinery. The follow-up turn keeps the raised in-turn
+  wake-word threshold and stamps its chain depth + `wait_secs` on its `audio-start`; the
+  orchestrator feeds recent conversation history into that turn's prompt and sizes its
+  no-speech window to `wait_secs`. If the user says nothing in that window the
+  orchestrator ends the turn (empty transcript + `audio-stop`) and the device **sleeps**;
+  the chain continues only while the user keeps responding (bounded by the optional
+  `follow_up.max_chain`, default unlimited). See `Plan.MD` (Follow-up listening).
 - **In-app AEC:** not shipped. Investigated on real hardware (Echo Show 8): the platform
   `VOICE_COMMUNICATION` AEC preset is reachable but doesn't actually cancel on this
   device, and a software NLMS canceller is net-negative for this flush-on-wake barge-in
@@ -359,6 +372,25 @@ predictable memory use and no GC pauses under the 1 GB limit.
   fired timer uses it to voice "Time's up for {name}" in the real assistant voice; the
   device opens a fresh socket (same mDNS path a turn uses), outside any voice turn, and
   plays the returned audio through the shared `PlaybackSink` right after the bell.
+- **`ambient-listen`** (orchestrator → device): a project-local **follow-up-listen**
+  frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
+  `follow_up.enabled`) the orchestrator sends this frame **just before** the turn's
+  final `audio-stop` — it must precede that stop because the device ends its turn on the
+  first `audio-stop`. It tells the device to **reopen the mic and start a fresh turn
+  with no wake word** once the reply audio drains (see the follow-up bullet in §4's
+  state machine). `wait_secs` is how long to keep the mic open for input before
+  sleeping — **10 s after a question (`?`), 5 s otherwise** (`follow_up.question_wait_secs`
+  / `reply_wait_secs`). The device **echoes `depth` + `wait_secs`** on the follow-up
+  turn's `audio-start` (`followup: true`, `followup_depth`, `wait_secs`); the
+  orchestrator uses `wait_secs` to size that turn's **no-speech VAD window** (the only
+  place silence can be told from a user mid-sentence — the device runs no VAD), and
+  `depth` against the optional `follow_up.max_chain` ceiling (**default 0 = unlimited**;
+  the loop is normally ended by silence). On silence the orchestrator relays an empty
+  transcript **and** an `audio-stop` so the device sleeps promptly, and sends no new
+  `ambient-listen`. A follow-up turn's LLM prompt is seeded with the **recent
+  conversation history** (the last `follow_up.history_turns` turns within
+  `follow_up.history_window_secs`, from the chat log); ordinary wake-word turns stay
+  single-turn.
 
 ### Proactive notifications (Approach A — persistent device-dialed channel)
 

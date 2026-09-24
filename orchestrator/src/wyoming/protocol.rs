@@ -147,6 +147,14 @@ pub mod types {
     /// reachable. Byte-identical to the device crate's `types::SPEAK`.
     pub const SPEAK: &str = "ambient-speak";
 
+    /// orchestrator → device: **follow-up listen**. The assistant's reply was a
+    /// question, so the device should reopen the mic and start a fresh turn with no
+    /// wake word once the reply audio finishes (data: `depth` = the chain depth the
+    /// follow-up turn will carry). Sent *before* the turn's final `audio-stop` (the
+    /// device ends its turn on the first `audio-stop`). Byte-identical to the device
+    /// crate's `types::LISTEN`. See `plans/Plan.MD` (Follow-up listening).
+    pub const LISTEN: &str = "ambient-listen";
+
     // ---- Proactive notifications (Approach A: persistent device-dialed channel) ----
     //
     // A NEW long-lived connection the device dials and holds open so the
@@ -340,6 +348,20 @@ impl WyomingEvent {
         }
     }
 
+    /// An `ambient-listen` follow-up-listen frame (orchestrator → device): after a
+    /// reply, ask the device to reopen the mic (no wake word) for a fresh turn once the
+    /// reply audio drains. `depth` is the chain depth the follow-up turn will carry
+    /// (bounded by `follow_up.max_chain`). `wait_secs` is how long the mic should stay
+    /// open for input before the assistant sleeps — longer after a question — which the
+    /// device echoes back on the follow-up `audio-start` so this orchestrator sizes that
+    /// turn's no-speech window to match.
+    pub fn listen(depth: u32, wait_secs: u32) -> Self {
+        Self::with_data(
+            types::LISTEN,
+            json!({ "depth": depth, "wait_secs": wait_secs }),
+        )
+    }
+
     /// A `synthesize` request for the Piper TTS server. `voice` pins a named voice
     /// when the config asks for one; otherwise the server default is used.
     pub fn synthesize(text: impl Into<String>, voice: Option<&str>) -> Self {
@@ -512,6 +534,38 @@ pub async fn decode(bytes: &[u8]) -> io::Result<Option<WyomingEvent>> {
     read_event(&mut &bytes[..]).await
 }
 
+/// Pull the follow-up chain depth out of an `audio-start` data block. The device
+/// stamps `followup: true` + `followup_depth: <n>` on a turn it opened in response
+/// to an `ambient-listen` frame (no wake word); an ordinary wake-word turn omits
+/// both and reads back as `0`. See `plans/Plan.MD` (Follow-up listening).
+pub fn followup_depth(data: &Value) -> u32 {
+    let obj = match data.as_object() {
+        Some(o) => o,
+        None => return 0,
+    };
+    if !obj
+        .get("followup")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return 0;
+    }
+    obj.get("followup_depth")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32
+}
+
+/// Pull the follow-up listen window (seconds) the device echoed on an `audio-start`
+/// (the `wait_secs` it received in the triggering `ambient-listen`). `0` when absent —
+/// an ordinary wake-word turn, or a device that didn't stamp it — so the caller falls
+/// back to its default no-speech window. See `plans/Plan.MD` (Follow-up listening).
+pub fn followup_wait_secs(data: &Value) -> u32 {
+    data.as_object()
+        .and_then(|o| o.get("wait_secs"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32
+}
+
 /// Pull the `(rate, width, channels)` PCM format out of an `audio-*` data block.
 pub fn audio_format(data: &Value) -> Option<AudioFormat> {
     let obj: &Map<String, Value> = data.as_object()?;
@@ -596,6 +650,37 @@ mod tests {
         assert_eq!(back.speak_text(), Some("Time's up for pasta"));
         // A non-speak frame yields no text.
         assert_eq!(WyomingEvent::audio_stop(0).speak_text(), None);
+    }
+
+    #[tokio::test]
+    async fn listen_frame_roundtrips_and_carries_depth_and_wait() {
+        let ev = WyomingEvent::listen(2, 10);
+        let back = roundtrip(&ev).await;
+        assert_eq!(back, ev);
+        assert_eq!(back.event_type, types::LISTEN);
+        assert_eq!(back.data["depth"], json!(2));
+        assert_eq!(back.data["wait_secs"], json!(10));
+    }
+
+    #[test]
+    fn followup_depth_reads_marked_audio_start_only() {
+        // A plain wake-word audio-start has no follow-up marker → depth 0.
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        assert_eq!(followup_depth(&plain.data), 0);
+
+        // A device follow-up turn stamps `followup: true` + `followup_depth` + `wait_secs`.
+        let marked = json!({
+            "rate": 16_000, "width": 2, "channels": 1, "timestamp": 0,
+            "followup": true, "followup_depth": 3, "wait_secs": 5,
+        });
+        assert_eq!(followup_depth(&marked), 3);
+        assert_eq!(followup_wait_secs(&marked), 5);
+
+        // `followup: false` (or absent) ignores any stray depth.
+        let disabled = json!({ "followup": false, "followup_depth": 3 });
+        assert_eq!(followup_depth(&disabled), 0);
+        // No `wait_secs` on a plain turn → 0 (caller uses its default window).
+        assert_eq!(followup_wait_secs(&plain.data), 0);
     }
 
     #[tokio::test]

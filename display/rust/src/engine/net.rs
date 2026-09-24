@@ -24,7 +24,7 @@
 //! throughout a turn (the engine raises the confidence threshold while
 //! `is_active()` — the AEC-interim mitigation).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -188,7 +188,8 @@ impl Network {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            Shared::spawn_turn(self.shared.clone(), self.runtime.handle().clone());
+            // A wake word always starts an ordinary turn (depth 0), never a follow-up.
+            Shared::spawn_turn(self.shared.clone(), self.runtime.handle().clone(), 0, 0);
         } else {
             self.shared.pending_restart.store(true, Ordering::SeqCst);
             if let Some(tx) = self.shared.interrupt_tx.lock().unwrap().as_ref() {
@@ -226,8 +227,10 @@ impl Drop for Network {
 impl Shared {
     /// Spawn one turn task on `handle`, wiring up its PCM + interrupt channels. On
     /// completion it clears the per-turn state and, if a barge-in requested a
-    /// restart, immediately spawns the next turn.
-    fn spawn_turn(shared: Arc<Self>, handle: Handle) {
+    /// restart, immediately spawns the next turn. `followup_depth` is 0 for an
+    /// ordinary turn and >0 for a follow-up turn the device auto-opened after a reply
+    /// (stamped, with `followup_wait_secs`, on the turn's `audio-start`).
+    fn spawn_turn(shared: Arc<Self>, handle: Handle, followup_depth: u32, followup_wait_secs: u32) {
         let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(PCM_CHANNEL_DEPTH);
         let (int_tx, int_rx) = mpsc::channel::<()>(1);
         *shared.pcm_tx.lock().unwrap() = Some(pcm_tx);
@@ -235,20 +238,27 @@ impl Shared {
 
         let shared_task = shared.clone();
         handle.spawn(async move {
-            run_turn_task(&shared_task, pcm_rx, int_rx).await;
+            run_turn_task(
+                &shared_task,
+                pcm_rx,
+                int_rx,
+                followup_depth,
+                followup_wait_secs,
+            )
+            .await;
             *shared_task.pcm_tx.lock().unwrap() = None;
             *shared_task.interrupt_tx.lock().unwrap() = None;
             shared_task.active.store(false, Ordering::SeqCst);
 
-            // Barge-in restart: a wake word fired mid-turn → begin a fresh turn,
-            // unless the engine is shutting down (Drop cleared `pending_restart`).
+            // Barge-in restart: a wake word fired mid-turn → begin a fresh (ordinary)
+            // turn, unless the engine is shutting down (Drop cleared `pending_restart`).
             if shared_task.pending_restart.swap(false, Ordering::SeqCst)
                 && shared_task
                     .active
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
             {
-                Shared::spawn_turn(shared_task.clone(), Handle::current());
+                Shared::spawn_turn(shared_task.clone(), Handle::current(), 0, 0);
             }
         });
     }
@@ -262,8 +272,19 @@ async fn run_turn_task(
     shared: &Arc<Shared>,
     pcm_rx: mpsc::Receiver<Vec<i16>>,
     interrupt: mpsc::Receiver<()>,
+    followup_depth: u32,
+    followup_wait_secs: u32,
 ) {
     let sink = &shared.sink;
+
+    // A follow-up turn (the device reopened the mic after a reply, no wake word) tells
+    // the UI so it can show a "listening for your reply" affordance.
+    if followup_depth > 0 {
+        log::info!(
+            "follow-up turn: listening for input for {followup_wait_secs}s (depth {followup_depth})"
+        );
+        let _ = sink.add(WakeWordEvent::listening_followup());
+    }
 
     let endpoint = match wyoming::resolve(
         &shared.cache,
@@ -295,12 +316,30 @@ async fn run_turn_task(
             return;
         }
     };
+    // On a follow-up turn, stamp the chain depth + echo the listen window so the
+    // orchestrator seeds the prompt with recent history, bounds the chain, and sizes
+    // its no-speech window (no-op when depth is 0).
+    conn.set_followup(followup_depth, followup_wait_secs);
+
+    // Idle watchdog for this turn: a follow-up turn keeps the mic open for the listen
+    // window; give the device a small margin past it so the orchestrator's no-speech
+    // finalize (at `followup_wait_secs`) ends the turn first, with this as a backstop.
+    let turn_timeout = if followup_depth > 0 && followup_wait_secs > 0 {
+        Duration::from_secs(followup_wait_secs as u64) + shared.turn_timeout
+    } else {
+        shared.turn_timeout
+    };
 
     let playback = shared.playback.clone();
     let timers = shared.timers.clone();
     // Set when this turn reaches SPEAKING, so we only watch for playback drain on a
     // turn that actually produced audio (see the drain watcher below).
     let spoke = AtomicBool::new(false);
+    // Set when the orchestrator asks (mid-turn) to listen for a follow-up after its
+    // reply: the chain depth and the listen window the follow-up turn should use. The
+    // mic is reopened only after the reply audio drains (see the drain watcher below).
+    let pending_followup_depth = AtomicU32::new(0);
+    let pending_followup_wait = AtomicU32::new(0);
     let on_update = |update: TurnUpdate| {
         let event = match update {
             TurnUpdate::Streaming => {
@@ -324,6 +363,15 @@ async fn run_turn_task(
                 timers.apply(cmd);
                 return;
             }
+            // Record the request to reopen the mic after this reply. Acted on only after
+            // this turn's reply audio drains (drain watcher below), so the follow-up mic
+            // never records the tail of the TTS. Nothing to add here.
+            TurnUpdate::ListenFollowup(depth, wait_secs) => {
+                log::info!("turn: follow-up listen requested (depth {depth}, {wait_secs}s)");
+                pending_followup_depth.store(depth, Ordering::SeqCst);
+                pending_followup_wait.store(wait_secs, Ordering::SeqCst);
+                return;
+            }
             TurnUpdate::Finished => {
                 log::info!("turn: finished cleanly");
                 WakeWordEvent::disconnected("turn complete".to_string())
@@ -343,7 +391,7 @@ async fn run_turn_task(
         on_update,
         on_audio,
         interrupt,
-        shared.turn_timeout,
+        turn_timeout,
     )
     .await
     {
@@ -358,16 +406,49 @@ async fn run_turn_task(
     // flush) and then emit `SpeakingDone` so the UI can remove the text. Runs
     // detached, holding no turn state, so a barge-in during drain still sees an
     // inactive turn and simply flushes.
-    if spoke.load(Ordering::SeqCst) {
-        if let Some(pb) = shared.playback.clone() {
-            let watch_shared = shared.clone();
-            tokio::spawn(async move {
+    //
+    // The same drain point gates a **follow-up listen**: if the orchestrator asked to
+    // reopen the mic (`pending_followup_depth > 0`), do so with no wake word — but only
+    // once the reply audio has drained, so the follow-up turn's mic never records the
+    // tail of our own TTS.
+    let followup = pending_followup_depth.load(Ordering::SeqCst);
+    let followup_wait = pending_followup_wait.load(Ordering::SeqCst);
+    let did_speak = spoke.load(Ordering::SeqCst);
+    if did_speak || followup > 0 {
+        let watch_shared = shared.clone();
+        let playback = shared.playback.clone();
+        tokio::spawn(async move {
+            if let Some(pb) = &playback {
                 let deadline = tokio::time::Instant::now() + PLAYBACK_DRAIN_CAP;
                 while pb.pending() > 0 && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(PLAYBACK_DRAIN_POLL).await;
                 }
-                let _ = watch_shared.sink.add(WakeWordEvent::speaking_done());
-            });
-        }
+                if did_speak {
+                    let _ = watch_shared.sink.add(WakeWordEvent::speaking_done());
+                }
+            }
+
+            // Reopen the mic for the follow-up. The `active` compare-exchange makes
+            // this lose to a barge-in restart (which already spawned a fresh turn),
+            // so we never double-start; `!pending_restart` skips it outright when a
+            // barge-in is pending.
+            if followup > 0
+                && !watch_shared.pending_restart.load(Ordering::SeqCst)
+                && watch_shared
+                    .active
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                log::info!(
+                    "follow-up: reopening mic for input ({followup_wait}s, depth {followup})"
+                );
+                Shared::spawn_turn(
+                    watch_shared.clone(),
+                    Handle::current(),
+                    followup,
+                    followup_wait,
+                );
+            }
+        });
     }
 }

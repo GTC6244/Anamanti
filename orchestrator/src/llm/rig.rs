@@ -1187,6 +1187,21 @@ impl RigBackend {
     }
 }
 
+/// Build the initial message list for a turn: replay any prior conversation
+/// `history` (`(user, assistant)` pairs, oldest first) followed by this turn's
+/// user message. History is non-empty only for a **follow-up** turn (the device
+/// auto-opened it after a question reply); ordinary turns start with just the user
+/// message. See `plans/Plan.MD` (Follow-up listening).
+fn seed_messages(history: Vec<(String, String)>, user_message: String) -> Vec<Message> {
+    let mut messages = Vec::with_capacity(history.len() * 2 + 1);
+    for (user, assistant) in history {
+        messages.push(Message::user(user));
+        messages.push(Message::assistant(assistant));
+    }
+    messages.push(Message::user(user_message));
+    messages
+}
+
 /// Open a streamed completion for the running conversation. Generic over the
 /// provider model so both variants share one path.
 async fn build_and_stream<M>(
@@ -1322,7 +1337,7 @@ impl LlmBackend for RigBackend {
         // No tools → pure streaming (token-by-token) in a single pass.
         if tool_defs.is_empty() {
             let stream = async_stream::try_stream! {
-                let messages = vec![Message::user(turn.user_message)];
+                let messages = seed_messages(turn.history, turn.user_message);
                 let response =
                     open_stream(&model, &system_prompt, &messages, &tool_defs, max_tokens).await?;
                 futures_util::pin_mut!(response);
@@ -1345,7 +1360,7 @@ impl LlmBackend for RigBackend {
         // give up token-by-token streaming for tool turns, which is fine: the reply
         // is spoken via TTS (and rendered) from the full text regardless.
         let stream = async_stream::try_stream! {
-            let mut messages: Vec<Message> = vec![Message::user(turn.user_message)];
+            let mut messages: Vec<Message> = seed_messages(turn.history, turn.user_message);
 
             for _round in 0..MAX_TOOL_ROUNDS {
                 let (text, calls) =

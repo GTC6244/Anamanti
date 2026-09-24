@@ -13,8 +13,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{split, BufReader, DuplexStream};
 
+use ambient_orchestrator::config::FollowUpConfig;
 use ambient_orchestrator::llm::mock::MockLlm;
-use ambient_orchestrator::memory::{MemoryKind, MemoryStore};
+use ambient_orchestrator::llm::{LlmBackend, LlmTurn, ReplyStream};
+use ambient_orchestrator::memory::chatlog::now_secs;
+use ambient_orchestrator::memory::{ChatLog, ChatLogRecord, MemoryKind, MemoryStore};
 use ambient_orchestrator::orchestrator::{Pipeline, ServiceConnector, TurnEvent};
 use ambient_orchestrator::speaker::{
     MockSpeakerEmbedder, SpeakerContext, SpeakerRegistry, SpeakerService, SpeakerThresholds,
@@ -23,6 +26,7 @@ use ambient_orchestrator::wyoming::protocol::{
     read_event, types, write_event, AudioFormat, WyomingEvent,
 };
 use ambient_orchestrator::wyoming::DynConnection;
+use serde_json::json;
 
 /// A connector backed by in-process mock STT/TTS servers over duplex pipes.
 struct MockConnector {
@@ -145,6 +149,11 @@ async fn drive_device(io: DuplexStream) -> (String, String, Vec<String>) {
     while let Some(ev) = read_event(&mut reader).await.unwrap() {
         if let Some(tok) = ev.reply_token_text() {
             reply.push_str(tok);
+            continue;
+        }
+        // Every reply now ends with a follow-up-listen frame (before the audio-stop);
+        // it isn't part of the TTS stream this helper reports on, so skip it.
+        if ev.event_type == types::LISTEN {
             continue;
         }
         let t = ev.event_type.clone();
@@ -669,6 +678,319 @@ async fn per_person_identification_scopes_memory_and_context() {
     assert!(!dana_hits.iter().any(|c| c.contains("jazz")));
 
     assert_eq!(speaker.registry().count().unwrap(), 2, "exactly two people");
+}
+
+// ---- Follow-up listening (question → reopen mic + history) ------------------
+
+/// Drive the device side of a turn whose opening `audio-start` carries the given
+/// follow-up `depth` (0 = an ordinary wake-word turn). Returns `(frame types in order
+/// with reply-tokens filtered out, the `wait_secs` of the first `ambient-listen` seen)`.
+async fn drive_device_collect_kinds(
+    io: DuplexStream,
+    followup_depth: u32,
+) -> (Vec<String>, Option<u32>) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+
+    let mut start = WyomingEvent::audio_start(fmt, 0);
+    if followup_depth > 0 {
+        if let serde_json::Value::Object(map) = &mut start.data {
+            map.insert("followup".into(), json!(true));
+            map.insert("followup_depth".into(), json!(followup_depth));
+        }
+    }
+    write_event(&mut writer, &start).await.unwrap();
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+    )
+    .await
+    .unwrap();
+
+    let ev = read_event(&mut reader).await.unwrap().unwrap();
+    assert!(ev.is_transcript());
+    write_event(&mut writer, &WyomingEvent::audio_stop(40))
+        .await
+        .unwrap();
+
+    let mut kinds = Vec::new();
+    let mut listen_wait: Option<u32> = None;
+    while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if ev.reply_token_text().is_some() {
+            continue;
+        }
+        if ev.event_type == types::LISTEN && listen_wait.is_none() {
+            listen_wait = Some(
+                ev.data
+                    .get("wait_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+            );
+        }
+        kinds.push(ev.event_type.clone());
+    }
+    (kinds, listen_wait)
+}
+
+#[tokio::test]
+async fn question_reply_reopens_the_mic_with_the_long_window() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    // A reply that ends in a question mark gets the longer (10 s) listen window.
+    let pipeline = Pipeline::new(
+        Arc::new(MockLlm::new("Which one?")),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    );
+    let connector = MockConnector::new("play some music");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_collect_kinds(dev_test, 0));
+
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    drop(device);
+    let (kinds, listen_wait) = device_task.await.unwrap();
+
+    // The device got an `ambient-listen` frame, before the final audio-stop (the
+    // device ends its turn on the first audio-stop), with the 10 s question window.
+    let listen = kinds
+        .iter()
+        .position(|k| k == types::LISTEN)
+        .unwrap_or_else(|| panic!("expected an ambient-listen frame; saw {kinds:?}"));
+    let stop = kinds
+        .iter()
+        .rposition(|k| k == types::AUDIO_STOP)
+        .expect("audio-stop sent");
+    assert!(
+        listen < stop,
+        "listen must precede audio-stop; saw {kinds:?}"
+    );
+    assert_eq!(listen_wait, Some(10), "question → 10 s window");
+}
+
+#[tokio::test]
+async fn statement_reply_reopens_the_mic_with_the_short_window() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    // Every reply now reopens the mic; a non-question reply gets the shorter (5 s) window.
+    let pipeline = build_pipeline(memory);
+    let connector = MockConnector::new("turn on the lights");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_collect_kinds(dev_test, 0));
+
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    drop(device);
+    let (kinds, listen_wait) = device_task.await.unwrap();
+
+    assert!(
+        kinds.iter().any(|k| k == types::LISTEN),
+        "every reply reopens the mic; saw {kinds:?}"
+    );
+    assert_eq!(listen_wait, Some(5), "non-question → 5 s window");
+}
+
+#[tokio::test]
+async fn followup_chain_stops_at_max_chain_when_capped() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    // With an explicit non-zero cap, an incoming turn already at the cap must NOT
+    // reopen the mic again (the default cap is 0 = unlimited; here we set 2).
+    let pipeline = Pipeline::new(
+        Arc::new(MockLlm::new("Which one?")),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_follow_up(FollowUpConfig {
+        enabled: true,
+        max_chain: 2,
+        question_wait_secs: 10,
+        reply_wait_secs: 5,
+        history_turns: 5,
+        history_window_secs: 600,
+    });
+    let connector = MockConnector::new("play some music");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    // Incoming depth already at the cap (2).
+    let device_task = tokio::spawn(drive_device_collect_kinds(dev_test, 2));
+
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    drop(device);
+    let (kinds, _) = device_task.await.unwrap();
+
+    assert!(
+        !kinds.iter().any(|k| k == types::LISTEN),
+        "the chain must stop at max_chain; saw {kinds:?}"
+    );
+}
+
+/// An LLM backend that records the [`LlmTurn`] it was handed (so a test can assert
+/// what history the pipeline fed it) and replies with a fixed, non-question phrase.
+struct CapturingLlm {
+    seen: Arc<Mutex<Option<LlmTurn>>>,
+}
+
+#[async_trait]
+impl LlmBackend for CapturingLlm {
+    fn name(&self) -> &str {
+        "capturing"
+    }
+    async fn respond(&self, turn: LlmTurn) -> Result<ReplyStream> {
+        *self.seen.lock().unwrap() = Some(turn);
+        use futures_util::stream::{self};
+        Ok(Box::pin(stream::once(async { Ok("Got it.".to_string()) })))
+    }
+}
+
+#[tokio::test]
+async fn follow_up_turn_includes_recent_history_in_the_prompt() {
+    // Pre-populate a chat log with a recent turn, then drive a FOLLOW-UP turn and
+    // assert the pipeline replayed that turn as conversation history to the LLM.
+    let dir = std::env::temp_dir().join(format!("ambient_followup_hist_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("chatlog.jsonl");
+    let _ = std::fs::remove_file(&path);
+    let log = Arc::new(ChatLog::open(&path).unwrap());
+    log.append(&ChatLogRecord {
+        id: log.next_id(),
+        ts: now_secs(),
+        session_id: "s-prev".to_string(),
+        transcript: "what's the weather".to_string(),
+        reply: "Where are you?".to_string(),
+        memories_written: vec![],
+        llm_backend: "mock".to_string(),
+        model: None,
+        speaker_id: "household".to_string(),
+        speaker_name: None,
+    })
+    .unwrap();
+
+    let seen = Arc::new(Mutex::new(None));
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(CapturingLlm { seen: seen.clone() }),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_chatlog(log.clone());
+    let connector = MockConnector::new("in Austin");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    // depth 1 → this is a follow-up turn, so history should be included.
+    let device_task = tokio::spawn(drive_device_collect_kinds(dev_test, 1));
+
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    drop(device);
+    device_task.await.unwrap();
+
+    let turn = seen.lock().unwrap().take().expect("LLM was called");
+    assert_eq!(
+        turn.history,
+        vec![(
+            "what's the weather".to_string(),
+            "Where are you?".to_string()
+        )],
+        "the follow-up turn replays the recent turn as history"
+    );
+    assert_eq!(turn.user_message, "in Austin");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn ordinary_turn_carries_no_history() {
+    // The same chat log, but an ORDINARY turn (depth 0) must stay single-turn.
+    let dir = std::env::temp_dir().join(format!("ambient_nohist_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("chatlog.jsonl");
+    let _ = std::fs::remove_file(&path);
+    let log = Arc::new(ChatLog::open(&path).unwrap());
+    log.append(&ChatLogRecord {
+        id: log.next_id(),
+        ts: now_secs(),
+        session_id: "s-prev".to_string(),
+        transcript: "hello".to_string(),
+        reply: "Hi there.".to_string(),
+        memories_written: vec![],
+        llm_backend: "mock".to_string(),
+        model: None,
+        speaker_id: "household".to_string(),
+        speaker_name: None,
+    })
+    .unwrap();
+
+    let seen = Arc::new(Mutex::new(None));
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(CapturingLlm { seen: seen.clone() }),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_chatlog(log.clone());
+    let connector = MockConnector::new("what's up");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_collect_kinds(dev_test, 0));
+
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    drop(device);
+    device_task.await.unwrap();
+
+    let turn = seen.lock().unwrap().take().expect("LLM was called");
+    assert!(
+        turn.history.is_empty(),
+        "an ordinary turn stays single-turn (no history)"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]
