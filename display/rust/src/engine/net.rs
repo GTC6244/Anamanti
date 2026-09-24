@@ -363,6 +363,19 @@ async fn run_turn_task(
                 timers.apply(cmd);
                 return;
             }
+            // A recipe command: surface it to the UI (which owns the recipe screen).
+            // `Show` carries the recipe object, serialized to a JSON string for the
+            // FRB boundary; `Dismiss` closes the screen.
+            TurnUpdate::Recipe(cmd) => match cmd {
+                wyoming::protocol::RecipeCommand::Show(recipe) => {
+                    log::info!("turn: show recipe");
+                    WakeWordEvent::show_recipe(recipe.to_string())
+                }
+                wyoming::protocol::RecipeCommand::Dismiss => {
+                    log::info!("turn: dismiss recipe");
+                    WakeWordEvent::dismiss_recipe()
+                }
+            },
             // Record the request to reopen the mic after this reply. Acted on only after
             // this turn's reply audio drains (drain watcher below), so the follow-up mic
             // never records the tail of the TTS. Nothing to add here.

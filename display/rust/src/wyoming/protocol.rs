@@ -166,6 +166,13 @@ pub mod types {
     /// device → orchestrator: acknowledge a notification by `id` (data: `id`,
     /// `result`). Reserved for a later delivery-tracking phase.
     pub const AMBIENT_NOTIFY_ACK: &str = "ambient-notify-ack";
+
+    /// orchestrator → device: show or dismiss the recipe-mode screen (data: `action`
+    /// = `"show"`/`"dismiss"`; for `show`, `recipe` is the structured recipe object).
+    /// A device action driven by the orchestrator's `recipe_lookup` tool; the device
+    /// owns the screen state until dismissed. Byte-identical to the orchestrator
+    /// crate's `types::RECIPE`.
+    pub const RECIPE: &str = "ambient-recipe";
 }
 
 /// A device-action timer command decoded from an `ambient-timer` frame (Phase 2).
@@ -178,6 +185,17 @@ pub enum TimerCommand {
     },
     /// Cancel timers matching `label`, or *all* timers when `label` is `None`.
     Cancel { label: Option<String> },
+}
+
+/// A recipe-mode command decoded from an `ambient-recipe` frame. `Show` carries the
+/// recipe object (surfaced to Flutter as a JSON string it parses into the tabs);
+/// `Dismiss` closes the screen.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecipeCommand {
+    /// Show this recipe (the raw `schema.org`-shaped object) on the recipe screen.
+    Show(Value),
+    /// Dismiss the recipe screen and return to the idle/ambient display.
+    Dismiss,
 }
 
 /// A decoded Wyoming event: a `type` tag, an optional structured `data` object,
@@ -444,6 +462,36 @@ impl WyomingEvent {
         }
     }
 
+    /// An `ambient-recipe` **show** action (used by tests + the mock server; the
+    /// orchestrator emits the wire form directly).
+    pub fn recipe(recipe: Value) -> Self {
+        Self::with_data(types::RECIPE, json!({ "action": "show", "recipe": recipe }))
+    }
+
+    /// An `ambient-recipe` **dismiss** action.
+    pub fn recipe_dismiss() -> Self {
+        Self::with_data(types::RECIPE, json!({ "action": "dismiss" }))
+    }
+
+    /// Decode an `ambient-recipe` frame into a [`RecipeCommand`], or `None` if this is
+    /// not a recipe frame or its `action` is unrecognized. A `show` with no `recipe`
+    /// object is rejected (returns `None`).
+    pub fn recipe_command(&self) -> Option<RecipeCommand> {
+        if self.event_type != types::RECIPE {
+            return None;
+        }
+        match self.data.get("action").and_then(Value::as_str)? {
+            "show" => self
+                .data
+                .get("recipe")
+                .filter(|v| v.is_object())
+                .cloned()
+                .map(RecipeCommand::Show),
+            "dismiss" => Some(RecipeCommand::Dismiss),
+            _ => None,
+        }
+    }
+
     /// Serialize this event to its on-the-wire bytes: header line, then the
     /// length-prefixed `data` block, then the binary payload.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -622,6 +670,27 @@ mod tests {
         assert_eq!(WyomingEvent::interrupt().timer_command(), None);
         let bad = WyomingEvent::with_data(types::TIMER, json!({ "action": "start" }));
         assert_eq!(bad.timer_command(), None);
+    }
+
+    #[tokio::test]
+    async fn recipe_frame_roundtrips_and_decodes_command() {
+        let recipe = json!({
+            "title": "Carbonara",
+            "ingredients": ["spaghetti", "eggs"],
+            "steps": ["boil", "toss"],
+        });
+        let show = WyomingEvent::recipe(recipe.clone());
+        let back = roundtrip(&show).await;
+        assert_eq!(back, show);
+        assert_eq!(back.recipe_command(), Some(RecipeCommand::Show(recipe)));
+
+        let dismiss = roundtrip(&WyomingEvent::recipe_dismiss()).await;
+        assert_eq!(dismiss.recipe_command(), Some(RecipeCommand::Dismiss));
+
+        // A non-recipe frame yields nothing; a show missing the recipe object is rejected.
+        assert_eq!(WyomingEvent::interrupt().recipe_command(), None);
+        let bad = WyomingEvent::with_data(types::RECIPE, json!({ "action": "show" }));
+        assert_eq!(bad.recipe_command(), None);
     }
 
     #[tokio::test]

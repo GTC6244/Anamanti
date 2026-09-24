@@ -1270,6 +1270,10 @@ async fn drain_device_actions<W>(
                 duration_secs,
             } => WyomingEvent::timer_start(duration_secs, label.as_deref()),
             DeviceAction::CancelTimer { label } => WyomingEvent::timer_cancel(label.as_deref()),
+            DeviceAction::ShowRecipe(recipe) => WyomingEvent::recipe(
+                serde_json::to_value(&recipe).unwrap_or(serde_json::Value::Null),
+            ),
+            DeviceAction::DismissRecipe => WyomingEvent::recipe_dismiss(),
         };
         if let Err(e) = protocol::write_event(writer, &event).await {
             log::warn!("failed to relay device action to the device: {e:#}");
