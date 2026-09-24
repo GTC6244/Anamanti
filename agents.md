@@ -262,10 +262,21 @@ PROD="/Volumes/External/DeveloperSupport/Ambient Orchestrator"
 # 1. Build the release binary from the branch you want to ship.
 cargo build --release --manifest-path orchestrator/Cargo.toml
 
-# 2. Stop the running production copy. Match on the PROD binary path so ONLY
-#    production is killed — never a test copy (which runs from cargo-target/…).
-pkill -f "$PROD/ambient-orchestrator"    # no-op if it isn't running
-# Wait for the socket to free up before rebinding :10700.
+# 2. Stop the running production copy — the process LISTENING on :10700. Do NOT
+#    `pkill -f "$PROD/ambient-orchestrator"`: production is launched as
+#    `./ambient-orchestrator` (relative argv, see step 4), so its command line never
+#    contains that absolute path and the pkill silently matches nothing. Target the
+#    port instead — a worktree/test copy binds 10701+, so :10700 is production alone.
+PROD_PID="$(lsof -nP -iTCP:10700 -sTCP:LISTEN -t)"    # empty if it isn't running
+if [ -n "$PROD_PID" ]; then
+  kill $PROD_PID
+  # Wait for the socket to free up before rebinding :10700; escalate if it lingers.
+  for _ in $(seq 1 20); do
+    lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1 || break
+    sleep 0.3
+  done
+  lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1 && kill -9 $PROD_PID
+fi
 while lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1; do sleep 0.3; done
 
 # 3. Copy the freshly built binary into the production folder (overwrites).
@@ -283,9 +294,11 @@ sleep 2; tail -5 "$PROD/orchestrator.log"
 ```
 
 Notes:
-- **Only production is stopped.** `pkill -f "$PROD/ambient-orchestrator"` matches the
-  absolute production path, so a worktree/test orchestrator (launched from
-  `…/cargo-target/release/ambient-orchestrator` on ports 10701+) keeps running.
+- **Only production is stopped.** Step 2 kills whatever process is *listening on
+  :10700*, which is production by definition — a worktree/test orchestrator binds
+  10701+, so it keeps running. (Do not match on the binary path: production runs as
+  the relative `./ambient-orchestrator`, so a `pkill -f "$PROD/ambient-orchestrator"`
+  matches nothing and leaves the old copy up — the bug this runbook step avoids.)
 - The binary is machine-local; do **not** commit it or the `Ambient Orchestrator/`
   folder.
 - Persistence: the process is detached but does **not** survive a reboot — running
