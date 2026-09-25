@@ -530,6 +530,32 @@ impl Pipeline {
                     match sev? {
                         Some(ev) if ev.is_transcript() => {
                             let text = ev.transcript_text().unwrap_or_default().to_string();
+                            // Guard against STT hallucinations on silence. If our energy
+                            // VAD never latched `speech_started`, this turn finalized on
+                            // the no-speech timeout: everything we forwarded to Whisper
+                            // was silence/room noise. faster-whisper does NOT return an
+                            // empty string on non-speech — it emits short training-set
+                            // filler ("Thank you.", "I'm sorry.", "Thank you for
+                            // watching.") — so any text here is not a real utterance,
+                            // especially on a follow-up window (mic reopened with no wake
+                            // word). Collapse it to an empty transcript, which the caller
+                            // already treats as "no speech": sleep, send `audio-stop`,
+                            // and end the follow-up chain (no `ambient-listen`). This
+                            // stops the self-perpetuating phantom-reply loop in a quiet
+                            // room. The trade-off is that a genuine utterance too quiet
+                            // to clear `voice_rms_threshold` for `MIN_SPEECH_ONSET` is
+                            // also dropped — consistent with the existing no-speech
+                            // finalize, which already treats too-quiet audio as silence.
+                            if !speech_started {
+                                if !text.trim().is_empty() {
+                                    log::info!(
+                                        "VAD: discarding STT transcript {text:?} from a \
+                                         no-speech finalize (no speech detected; likely \
+                                         Whisper hallucination on silence)"
+                                    );
+                                }
+                                return Ok(Some((String::new(), Vec::new())));
+                            }
                             return Ok(Some((text, std::mem::take(&mut voiced_pcm))));
                         }
                         Some(_) => {} // voice-started / voice-stopped etc.
