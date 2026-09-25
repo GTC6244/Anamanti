@@ -1,0 +1,166 @@
+<p class="sub">Link a Google Drive folder for the idle photo slideshow. Consent runs once here on the Mac — a browser window opens; the tablet then pulls the token over Wyoming (no adb, no rebuild). Requires a Google Cloud OAuth client of type <b>Desktop app</b>.</p>
+
+<style>
+  /* Folder picker — scoped to the Photos page (fp- prefix). Plain CSS, admin tokens. */
+  .fp-panel { display:none; margin-top:.6rem; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--card); overflow:hidden; }
+  .fp-head { display:flex; gap:.5rem; align-items:center; padding:.55rem .65rem; border-bottom:1px solid var(--border); }
+  .fp-head input { flex:1; }
+  .fp-count { color:var(--muted); font-size:13px; white-space:nowrap; }
+  .fp-list { max-height:320px; overflow-y:auto; padding:.25rem; }
+  .fp-row { display:flex; align-items:center; gap:.6rem; padding:.4rem .5rem; border-radius:8px; cursor:pointer; }
+  .fp-row:hover { background:var(--accent-soft); }
+  .fp-row input { width:auto; margin:0; }
+  .fp-row .fp-name { flex:1; }
+  .fp-badge { font-size:11px; color:var(--muted); border:1px solid var(--border-strong); border-radius:999px; padding:.05rem .45rem; }
+  .fp-empty { color:var(--muted); padding:.8rem .6rem; }
+  .fp-foot { display:flex; justify-content:flex-end; gap:.5rem; padding:.55rem .65rem; border-top:1px solid var(--border); }
+  #folder_names { display:block; margin-top:.35rem; color:var(--muted); font-size:13px; }
+</style>
+
+<div class="card">
+  <h2>Google Drive slideshow</h2>
+  <p class="desc" id="statusline">Loading…</p>
+
+  <label>OAuth client ID <span class="hint" id="cid_state"></span>
+    <input id="client_id" type="text" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+  <label>OAuth client secret <span class="hint" id="secret_state"></span>
+    <input id="client_secret" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+  <label>Folder IDs <span class="hint">pick below, or paste comma-separated Drive folder IDs</span>
+    <input id="folder_ids" type="text" placeholder="1AbC...,1XyZ...">
+  </label>
+  <span id="folder_names"></span>
+
+  <div class="fp-panel" id="folderpanel">
+    <div class="fp-head">
+      <input id="folderfilter" type="text" placeholder="Filter folders…" autocomplete="off">
+      <span class="fp-count" id="foldercount"></span>
+    </div>
+    <div class="fp-list" id="folderlist"></div>
+    <div class="fp-foot">
+      <button id="foldercancel">Cancel</button>
+      <button id="folderapply" class="primary">Use selected</button>
+    </div>
+  </div>
+
+  <div class="card-actions">
+    <div id="status" class="status"></div>
+    <button id="browse">Browse folders…</button>
+    <button id="link">Link Google Drive</button>
+    <button id="save" class="primary">Save</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+
+  // Folder picker state: the full listing from the last Browse, keyed by id → name.
+  let ALL_FOLDERS = [];
+  const FOLDER_NAMES = new Map();
+  function selectedIds(){ return $('folder_ids').value.split(',').map(s=>s.trim()).filter(Boolean); }
+  function updateNames(){
+    const ids = selectedIds();
+    if(!ids.length){ $('folder_names').textContent = ''; return; }
+    const named = ids.map(id => FOLDER_NAMES.has(id) ? FOLDER_NAMES.get(id) : id);
+    $('folder_names').textContent = 'Selected: ' + named.join(', ');
+  }
+  function renderList(filter){
+    const sel = new Set(selectedIds());
+    const f = (filter||'').trim().toLowerCase();
+    const list = $('folderlist');
+    list.innerHTML = '';
+    const shown = ALL_FOLDERS.filter(x => !f || x.name.toLowerCase().includes(f));
+    $('foldercount').textContent = shown.length + ' of ' + ALL_FOLDERS.length;
+    if(!shown.length){ list.innerHTML = '<div class="fp-empty">No folders match.</div>'; return; }
+    for(const folder of shown){
+      const row = document.createElement('label');
+      row.className = 'fp-row';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.value = folder.id; cb.checked = sel.has(folder.id);
+      const name = document.createElement('span');
+      name.className = 'fp-name'; name.textContent = folder.name;
+      row.appendChild(cb); row.appendChild(name);
+      if(folder.shared){
+        const badge = document.createElement('span');
+        badge.className = 'fp-badge'; badge.textContent = 'shared';
+        row.appendChild(badge);
+      }
+      list.appendChild(row);
+    }
+  }
+  async function browse(){
+    show(true, 'Loading your Drive folders…');
+    let j;
+    try{ j = await apiJSON('/drive/folders.json'); }
+    catch(e){ show(false, 'Request failed: ' + e); return; }
+    if(!j.ok){ show(false, j.message || 'Could not list folders.'); return; }
+    ALL_FOLDERS = j.folders || [];
+    for(const f of ALL_FOLDERS) FOLDER_NAMES.set(f.id, f.name);
+    show(true, ALL_FOLDERS.length + ' folder(s) found — tick the ones to show.');
+    $('folderfilter').value = '';
+    renderList('');
+    $('folderpanel').style.display = 'block';
+    $('folderfilter').focus();
+  }
+  function applyPick(){
+    const picked = [...$('folderlist').querySelectorAll('input:checked')].map(c=>c.value);
+    // Keep any hand-typed ids that weren't in the listing (e.g. an id from a link).
+    const known = new Set(ALL_FOLDERS.map(f=>f.id));
+    const manual = selectedIds().filter(id => !known.has(id));
+    $('folder_ids').value = [...new Set([...picked, ...manual])].join(', ');
+    $('folderpanel').style.display = 'none';
+    updateNames();
+    show(true, picked.length + ' folder(s) selected. Tap Save to apply.');
+  }
+
+  async function load(){
+    try{
+      const j = await apiJSON('/drive/status.json');
+      $('cid_state').textContent = j.client_id_set ? '(set)' : '(not set)';
+      $('secret_state').textContent = j.client_secret_set ? '(set)' : '(not set)';
+      $('client_id').value = '';
+      $('client_secret').value = '';
+      $('folder_ids').value = (j.folder_ids||[]).join(', ');
+      updateNames();
+      $('browse').disabled = !j.linked;
+      const state = j.linked ? 'Linked ✓' : (j.configured ? 'Configured — not linked yet' : 'Not configured — set the client id + secret');
+      $('statusline').textContent = state + ' · scope: ' + (j.scope || '—');
+    }catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+  async function save(){
+    const body = {
+      client_id: $('client_id').value.trim() || undefined,
+      client_secret: $('client_secret').value.trim() || undefined,
+      folder_ids: selectedIds(),
+    };
+    try{
+      const j = await apiJSON('/drive/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved. The tablet picks this up on its next refresh (or reboot).'); load(); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  async function link(){
+    show(true, 'Opening a browser on this Mac — approve access, then return here…');
+    try{
+      const j = await apiJSON('/drive/link', {method:'POST'});
+      if(j.ok){
+        let m = j.message || 'Linked.';
+        if(j.verify && j.verify.length){
+          m += ' ' + j.verify.map(v => v.error ? ('folder '+v.folder_id+': '+v.error) : ('folder '+v.folder_id+': '+v.images+' image(s)')).join('; ');
+        }
+        show(true, m); load();
+      } else { show(false, j.message || 'Link failed.'); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('save').addEventListener('click', save);
+  $('link').addEventListener('click', link);
+  $('browse').addEventListener('click', browse);
+  $('folderapply').addEventListener('click', applyPick);
+  $('foldercancel').addEventListener('click', () => { $('folderpanel').style.display = 'none'; });
+  $('folderfilter').addEventListener('input', (e) => renderList(e.target.value));
+  $('folder_ids').addEventListener('input', updateNames);
+  load();
+</script>

@@ -24,7 +24,7 @@ devices around the house via **Obtainium**.
 | File | Purpose |
 |------|---------|
 | `.github/workflows/release.yml` | Builds signed APK on `v*` tag, publishes the Release |
-| `android/app/build.gradle.kts`  | Release signing config (env vars in CI, `key.properties` locally, debug fallback) |
+| `display/android/app/build.gradle.kts`  | Release signing config (env vars in CI, `key.properties` locally, debug fallback) |
 | `.gitignore`                    | Blocks keystores / `key.properties` from being committed |
 
 ---
@@ -56,7 +56,7 @@ rm keystore.b64
 
 ### Step 3 (optional) — Local signed release builds
 
-To build signed release APKs on your Mac (not just in CI), create `android/key.properties`
+To build signed release APKs on your Mac (not just in CI), create `display/android/key.properties`
 (git-ignored):
 
 ```properties
@@ -94,7 +94,7 @@ All future updates are then seamless. Do this while the fleet is small.
 
 ## Shipping a release (every time)
 
-1. **Bump the version** in `pubspec.yaml`. The `+N` build number is the Android
+1. **Bump the version** in `display/pubspec.yaml`. The `+N` build number is the Android
    `versionCode` and **must increase every release**, or Android/Obtainium won't see an
    update:
    ```yaml

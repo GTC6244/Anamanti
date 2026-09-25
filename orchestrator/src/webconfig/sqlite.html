@@ -1,0 +1,24 @@
+<p class="sub">Persistent memory (SQLite): stored facts &amp; preferences.</p>
+<div class="card">
+  <div class="toolbar"><button onclick="load()">Refresh</button><span id="meta" class="muted"></span></div>
+  <div id="out" class="muted">Loading…</div>
+</div>
+<script>
+async function load(){
+  const out = document.getElementById('out');
+  try{
+    const j = await getJSON('/sqlite.json');
+    if(!j.ok){ out.textContent = j.message || 'Error'; return; }
+    document.getElementById('meta').textContent = j.count + ' rows · db: ' + esc(j.db_path) + ' · recall backend: ' + esc(j.memory_backend);
+    const rows = j.memories || [];
+    if(!rows.length){ out.innerHTML = '<p class="muted">No memories stored yet.</p>'; return; }
+    let h = '<table><thead><tr><th>id</th><th>kind</th><th>source</th><th>speaker</th><th>created</th><th>content</th></tr></thead><tbody>';
+    for(const m of rows){
+      h += '<tr><td class="muted">'+esc(m.id)+'</td><td><span class="badge">'+esc(m.kind)+'</span></td><td>'+esc(m.source)+'</td>'
+        +  '<td>'+esc(m.speaker_id||'household')+'</td><td class="muted">'+esc(fmtTime(m.created_at))+'</td><td class="pre">'+esc(m.content)+'</td></tr>';
+    }
+    out.innerHTML = h + '</tbody></table>';
+  }catch(e){ out.textContent = 'Request failed: ' + e; }
+}
+load();
+</script>

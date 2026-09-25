@@ -1,0 +1,35 @@
+<p class="sub">The exact prompt sent to the LLM each turn (system prompt + user message), newest first.</p>
+<div class="card">
+  <div class="toolbar">
+    <button onclick="load()">Refresh</button>
+    <label style="margin:0;display:flex;align-items:center;gap:0.4rem;font-weight:500;">Show <select id="limit" onchange="load()" style="width:auto;">
+      <option>50</option><option selected>100</option><option>250</option><option>1000</option>
+    </select> records</label>
+    <span id="meta" class="muted"></span>
+  </div>
+  <div id="out" class="muted">Loading…</div>
+</div>
+<script>
+async function load(){
+  const n = document.getElementById('limit').value;
+  const out = document.getElementById('out');
+  try{
+    const j = await getJSON('/prompts.json?limit=' + n);
+    if(!j.ok){ out.textContent = j.message || 'Error'; return; }
+    const recs = j.records || [];
+    document.getElementById('meta').textContent = recs.length + ' shown';
+    if(!recs.length){ out.innerHTML = '<p class="muted">No prompts logged yet. Prompts are recorded when the assistant answers a turn.</p>'; return; }
+    let h = '';
+    for(const r of recs){
+      const model = esc([r.llm_backend, r.model].filter(Boolean).join(' / '));
+      const who = esc(r.speaker_name || r.speaker_id || '');
+      const preview = esc((r.user_message||'').slice(0,90));
+      h += '<details><summary>'+esc(fmtTime(r.ts))+' — <span class="badge">'+model+'</span> '+who+' — '+preview+'</summary>'
+        +  '<p class="muted">User message</p><pre>'+esc(r.user_message)+'</pre>'
+        +  '<p class="muted">System prompt</p><pre>'+esc(r.system_prompt)+'</pre></details>';
+    }
+    out.innerHTML = h;
+  }catch(e){ out.textContent = 'Request failed: ' + e; }
+}
+load();
+</script>

@@ -1,0 +1,41 @@
+<p class="sub">Secrets for the LLM tools. Set once here on the Mac; changes apply live (no restart). Tokens are stored on the orchestrator and never shown back.</p>
+
+<div class="card">
+  <h2>Directions (Mapbox)</h2>
+  <p class="desc">Enables the <code>directions_lookup</code> tool — distance, travel time, and live traffic. Get a token at account.mapbox.com. Requires <code>directions.provider = "mapbox"</code> in the config file (the default).</p>
+  <p class="desc" id="statusline">Loading…</p>
+
+  <label>Mapbox token <span class="hint" id="token_state"></span>
+    <input id="mapbox_token" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+
+  <div class="card-actions">
+    <div id="status" class="status"></div>
+    <button id="save" class="primary">Save token</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  async function load(){
+    try{
+      const j = await apiJSON('/tools/status.json');
+      $('token_state').textContent = j.token_set ? '(a token is set)' : '(no token set)';
+      $('mapbox_token').value = '';
+      $('statusline').textContent = 'directions_lookup: ' + (j.tool_active ? 'active ✓' : 'inactive — set a token');
+    }catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+  async function save(){
+    const body = { mapbox_token: $('mapbox_token').value.trim() || undefined };
+    try{
+      const j = await apiJSON('/tools/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); }
+      load();
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+  $('save').addEventListener('click', save);
+  load();
+</script>

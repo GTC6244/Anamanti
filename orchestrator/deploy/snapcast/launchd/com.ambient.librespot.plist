@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ambient librespot: a Spotify Connect device named "Ambient" whose PCM feeds
+     the snap-spotify FIFO. Zeroconf (Spotify Connect) discovery — no credentials
+     here; select "Ambient" from the Spotify app on the same LAN. THIS is the one
+     shared librespot instance MusicPlan.md's spotify_control tool targets (device
+     name "Ambient" == music.spotify_device_name). Do not run a second one.
+     Install: cp to ~/Library/LaunchAgents/ and launchctl load. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ambient.librespot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/librespot</string>
+    <string>--name</string>
+    <string>Ambient</string>
+    <string>--backend</string>
+    <string>pipe</string>
+    <string>--device</string>
+    <string>/opt/homebrew/var/run/ambient/snap-spotify</string>
+    <string>--bitrate</string>
+    <string>320</string>
+    <string>--initial-volume</string>
+    <string>100</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/opt/homebrew/var/log/ambient-librespot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/opt/homebrew/var/log/ambient-librespot.log</string>
+</dict>
+</plist>

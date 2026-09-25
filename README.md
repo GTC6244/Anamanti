@@ -18,12 +18,19 @@ speaks the reply back through the Echo Show's speakers.
   to a Whisper/CoreML server on the Mac; transcripts render as you speak.
 - 🧠 **Pluggable LLM brain** — swap between a local model (Ollama / llama.cpp) and
   a cloud API (Claude / OpenAI) behind one interface.
-- 🔊 **Spoken replies** — Piper (Wyoming TTS) synthesizes the answer; the Echo
-  Show plays it back through the same Rust audio engine that captured you.
-- 💬 **Full-duplex + memory** — interrupt mid-reply with the wake word, and the
-  assistant remembers facts/preferences across sessions (stored on the Mac).
+- 🔊 **Streaming spoken replies** — Piper (Wyoming TTS) synthesizes the answer
+  sentence-by-sentence *as the LLM generates it*, so the Echo Show starts speaking
+  after the first sentence (~2 s on-device) instead of waiting for the whole reply.
+- 💬 **Barge-in + memory** — say the wake word again mid-reply to interrupt: playback
+  stops instantly and a fresh turn begins (the orchestrator also aborts the in-flight
+  LLM + TTS via an `ambient-interrupt` frame). The assistant remembers
+  facts/preferences across sessions (stored on the Mac).
 - 📺 **Ambient display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder.
+- 🔔 **Proactive notifications** — the Mac can push a visual notification to the
+  display *without* you asking (a reminder, an alert), over a persistent connection
+  the device holds open to its pinned orchestrator. Visual-only today (no spoken
+  output); send a test one from the config page's **Notify** tab.
 
 ## Architecture at a glance
 
@@ -41,7 +48,7 @@ Echo Show 8 (LineageOS)                     M4 Mac Mini
    mDNS: discovers _wyoming._tcp on the LAN
 ```
 
-See [`architecture.md`](./architecture.md) for the full design and
+See [`architecture.md`](./plans/architecture.md) for the full design and
 [`agents.md`](./agents.md) for AI-agent / contributor build guidance.
 
 ## Tech stack
@@ -118,13 +125,65 @@ persistent memory, and streams a Piper (TTS) reply back — advertising
 AMBIENT_LLM_BACKEND=ollama \
 AMBIENT_STT_ADDR=127.0.0.1:10300 \
 AMBIENT_TTS_ADDR=127.0.0.1:10200 \
-cargo run --manifest-path mac/Cargo.toml --release
+cargo run --manifest-path orchestrator/Cargo.toml --release
 ```
 
 - `AMBIENT_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
-  `ANTHROPIC_API_KEY`), or `mock` (offline echo, no servers needed).
+  `ANTHROPIC_API_KEY`), `openai` (GPT / o-series; needs `OPENAI_API_KEY`), or
+  `mock` (offline echo, no servers needed).
+- **Provider API keys at runtime:** you don't have to set the cloud key before
+  launch. The config page (`http://127.0.0.1:8730/`) has Anthropic / OpenAI API-key
+  fields — paste a key, pick the backend, and it applies **without a restart** (the
+  key is saved 0600 in `ambient_settings.json`, so it survives reboots too). The env
+  vars are just the boot seed. For safety the key fields live only on the loopback
+  config page, not on the device settings screen.
+- **Model selection:** the settings screen and the config page
+  (`http://127.0.0.1:8730/`) show a **drop-down of specific Anthropic / OpenAI
+  models from the last 12 months** (fetched live from each provider's `/v1/models`,
+  with a curated built-in fallback). Picking one is saved on the orchestrator
+  (`ambient_settings.json`) and used for every subsequent chat turn. Pin an initial
+  model with `AMBIENT_ANTHROPIC_MODEL` / `AMBIENT_OPENAI_MODEL`.
+- **Anthropic auth — API key or subscription:** a per-provider toggle chooses how
+  Claude authenticates. `AMBIENT_ANTHROPIC_AUTH=apikey` (default) uses
+  `ANTHROPIC_API_KEY` (`x-api-key`). `AMBIENT_ANTHROPIC_AUTH=subscription` uses a
+  Claude **subscription OAuth** token (`Authorization: Bearer` + the
+  `anthropic-beta: oauth-2025-04-20` header) — provide it via `ANTHROPIC_OAUTH_TOKEN`
+  (run **`claude setup-token`** once), or via `AMBIENT_ANTHROPIC_TOKEN_CMD` (a command
+  that prints a fresh token, default `ant auth print-credentials --access-token`).
+  OpenAI is API-key-only (`OPENAI_API_KEY`) — its ChatGPT subscription does not grant
+  API access.
 - Whisper and Piper are off-the-shelf Wyoming servers; the orchestrator is a
-  client to them. See `mac/src/config.rs` for all environment variables.
+  client to them. See `orchestrator/src/config.rs` for all environment variables.
+- **Multiple displays, one orchestrator:** N Echo Shows can share a single
+  orchestrator — each connection is handled independently and every reply is
+  routed back to the display that asked. Memory + settings are one shared
+  household pool (speaker ID scopes per person, not per device).
+- **Multiple orchestrators (prod + test):** each orchestrator advertises a
+  friendly `name` and a stable `instance_id` over mDNS. The device settings screen
+  has an **Orchestrator** dropdown to pick one; `"Auto"` uses the first available.
+  The pick is **strict** — a display pinned to one orchestrator stays offline if
+  it's unreachable rather than silently connecting to another.
+  - **Local production** is a copied release binary installed at
+    `/Volumes/External/DeveloperSupport/Ambient Orchestrator/`. It runs outside any
+    git checkout and pins its identity via `AMBIENT_INSTANCE_ID` (set in
+    `~/.zshenv`), using the default ports (10700 / config 8730) and the shared
+    runtime data under `.../ambient-orchestrator/`.
+  - **Test copies** run straight from a git branch/worktree. `AMBIENT_INSTANCE_ID`
+    is resolved from that env → the working dir's **git branch code** → the
+    sanitized service name, so a worktree copy is auto-named by its branch with no
+    extra config. Run one alongside production with distinct ports (and a distinct
+    service name to avoid an mDNS name clash); sharing production's memory means
+    `AMBIENT_MEMORY_BACKEND=sqlite` (two processes can't share one embedded HelixDB
+    graph; SQLite is shared safely via WAL):
+
+    ```bash
+    # AMBIENT_INSTANCE_ID is intentionally unset here → defaults to the branch code.
+    env -u AMBIENT_INSTANCE_ID \
+      AMBIENT_SERVICE_NAME="Ambient Orchestrator (test)" \
+      AMBIENT_BIND_ADDR=0.0.0.0:10701 AMBIENT_CONFIG_ADDR=127.0.0.1:8731 \
+      AMBIENT_MEMORY_BACKEND=sqlite \
+      cargo run --manifest-path orchestrator/Cargo.toml --release
+    ```
 
 > **Android toolchain note:** the project pins **AGP 8.7.3 / Kotlin 2.1.0 /
 > Gradle 8.11.1** because the bundled cargokit Gradle plugin does not yet support
