@@ -395,3 +395,22 @@ actions".
       TTL cache, `ANAMANTI_CALENDAR_CACHE_TTL`, default 300 s.)
 - [ ] **Reminders** (deferred): pick a backend — macOS EventKit (local, no OAuth),
       Google Tasks/Calendar (OAuth), or generic CalDAV.
+- [x] **Recipe voice navigation + screen context (2026-09-25)** — the guided-recipe
+      screen ([`RecipePlan.md`](./RecipePlan.md)) is drivable by voice: switch tabs and
+      scroll the panes (and close it) via a new **`recipe_control`** rig tool →
+      `navigate`/`scroll` sub-actions on the `anamanti-recipe` frame (both `protocol.rs`
+      files, round-trip tested). The device sends **display context** to the Core — a
+      **general, extensible** channel (`protocol::display_context` → a `DisplayContext`
+      enum, recipe being the first screen): each turn's `audio-start` carries a `screen`
+      block discriminated by `kind` (today `recipe`: title, tab, scroll at-top/at-bottom,
+      counts), injected into the turn's system prompt via `display_context_line` (one arm
+      per screen). First device→Core context channel; piggybacks on `audio-start`. A new
+      voice-controllable screen (music/weather/photos) = a `DisplayContext` variant + a
+      prompt-line arm + a device `set_<screen>_context` setter. New
+      `RecipeNavigate`/`RecipeScroll` FRB events + a `set_recipe_context` FRB call; touch
+      stays in sync via `RecipeController`/`AssistantState`.
+- [ ] **Verify recipe voice control on hardware**: with a recipe up, say "show the
+      ingredients" / "go to the steps" / "scroll down" / "back to the top" / "close the
+      recipe" and confirm the screen reacts and the model reliably calls
+      `recipe_control` / `close_recipe` (needs the Mac Anamanti Core + a spoken turn;
+      not drivable headlessly).

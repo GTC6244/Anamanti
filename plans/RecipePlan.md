@@ -10,7 +10,20 @@ appears on the display with **Overview / Ingredients / Steps** tabs to cook alon
 > tested in both crates), the FRB `ShowRecipe`/`DismissRecipe` events, and the
 > 3-tab `RecipeView` + `RecipeController` wiring (6 new Dart tests). Full suites
 > green: Anamanti Core 257, device-rust 85, Flutter 82; clippy + `dart analyze`
-> clean. **Deferred:** the LLM parse **fallback** (JSON-LD is the shipping parser —
+> clean.
+>
+> **Update (2026-09-25): voice navigation + screen context.** You can now switch
+> tabs and scroll the ingredients/steps panes (and close the screen) **by voice**,
+> and the device sends the current screen state to the Core so the model can drive
+> it: a new `recipe_control` rig tool, `navigate`/`scroll` sub-actions on the
+> `anamanti-recipe` frame (both `protocol.rs` files, round-trip tested), a general
+> **display-context** channel — a `screen` block on `audio-start` parsed by
+> `protocol::display_context` (a `DisplayContext` enum, recipe being the first screen)
+> into the turn's system prompt, new `RecipeNavigate`/`RecipeScroll` FRB events + a
+> `set_recipe_context` FRB call,
+> and `RecipeView` scroll controllers driven by controller state. Suites green:
+> Anamanti Core 264, device-rust 88, Flutter 87; clippy + `dart analyze` clean.
+> **Deferred:** the LLM parse **fallback** (JSON-LD is the shipping parser —
 > see §3/§6) and **P5 on-device validation** (real dish → tabs on the Echo Show,
 > needs the Mac services + a Tavily key). This plan reads together with
 > [`Plan.MD`](./Plan.MD) (the tool-calling / rig engine decisions),
@@ -40,7 +53,9 @@ boundary, not one skill:
 | **Transport** | A **new `anamanti-recipe` Wyoming frame** (mirrored byte-for-byte in both `protocol.rs` files, `anamanti-timer` as the template). The notify path's `{id,priority,title,body}` banner stays untouched. |
 | **Display surface** | A **new top-level "recipe mode"** on the device — a 3-tab view (**Overview / Ingredients / Steps**), bottom tab bar. Built new (there is no `TabBar`/mode-registry today); a `RecipeController extends ChangeNotifier` + immutable `RecipeState`, mirroring `NotificationController`. |
 | **Mode lifecycle** | **Voice in; voice or touch out.** Voice opens it and it stays up indefinitely (you cook for 30+ min); dismiss by voice (*"done cooking" / "close the recipe"*) or an on-screen close control. No auto-timeout. |
-| **Audio path** | None. Recipe mode is **visual only** in v1 — no step-by-step spoken read-out, no timers auto-created from step durations (both are future adds). The model still speaks a short confirmation ("Here's a carbonara recipe") via the normal Piper path. |
+| **Voice navigation (added 2026-09-25)** | **Yes.** While a recipe is up you can switch tabs (*"show the ingredients", "go to the steps"*) and scroll the current pane (*"scroll down", "back to the top"*) by voice, as well as close it — a new `recipe_control` rig tool → `anamanti-recipe` `navigate`/`scroll` sub-actions → the `RecipeView`. Touch (tab bar taps, drag-scroll) still works and stays in sync. |
+| **Display context (added 2026-09-25)** | The device now tells the Core **what is on screen** so the model can drive it — a **general, extensible** mechanism (`protocol::display_context` → a `DisplayContext` enum), not recipe-specific. Each turn's `audio-start` carries a `screen` block discriminated by `kind` (today `kind:"recipe"` with title, active tab, scroll at-top/at-bottom, ingredient/step counts); the orchestrator injects a one-line description into the turn's system prompt (`display_context_line`, one arm per screen). Device→Core context (previously nonexistent) piggybacks on `audio-start` — no new persistent uplink. A future music/weather/photo screen adds a `DisplayContext` variant + a prompt-line arm + a device `set_<screen>_context` setter; the recipe screen uses `set_recipe_context`. |
+| **Audio path** | Recipe mode is **visual only** in v1 — no step-by-step **spoken read-out**, no timers auto-created from step durations (both are future adds). Voice *navigation* (tabs/scroll/close) is supported (see above); the model still speaks a short confirmation ("Here's a carbonara recipe" / "Showing the ingredients") via the normal Piper path. |
 
 If a task seems to require changing one of these, stop and confirm first.
 
@@ -220,7 +235,9 @@ LLM-tool-driven, Anamanti Core→device structured push):
 
 ## 7. Non-goals (v1)
 
-- Spoken step-by-step read-out or "next step" voice navigation (visual only for now).
+- Spoken step-by-step **read-out** (the model reading each step aloud). Voice
+  *navigation* (switch tabs, scroll, close) shipped 2026-09-25 — see §0 — but the
+  screen stays visual-only otherwise.
 - Auto-creating timers from step durations ("bake 20 min" → a timer) — natural P2.
 - Phone/config-page "push this URL to the display" trigger — natural P2.
 - Per-ingredient structured quantities/units, scaling servings, unit conversion.

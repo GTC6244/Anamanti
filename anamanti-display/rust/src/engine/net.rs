@@ -320,6 +320,10 @@ async fn run_turn_task(
     // orchestrator seeds the prompt with recent history, bounds the chain, and sizes
     // its no-speech window (no-op when depth is 0).
     conn.set_followup(followup_depth, followup_wait_secs);
+    // Stamp the current display context (e.g. recipe tab/scroll state) on this turn's
+    // `audio-start`, so the orchestrator's LLM knows what the display is showing and can
+    // drive it (switch tabs / scroll / close). `None` on an idle screen.
+    conn.set_display_context(crate::engine::display_context());
 
     // Idle watchdog for this turn: a follow-up turn keeps the mic open for the listen
     // window; give the device a small margin past it so the orchestrator's no-speech
@@ -374,6 +378,14 @@ async fn run_turn_task(
                 wyoming::protocol::RecipeCommand::Dismiss => {
                     log::info!("turn: dismiss recipe");
                     WakeWordEvent::dismiss_recipe()
+                }
+                wyoming::protocol::RecipeCommand::Navigate(target) => {
+                    log::info!("turn: recipe navigate to {target}");
+                    WakeWordEvent::recipe_navigate(target)
+                }
+                wyoming::protocol::RecipeCommand::Scroll(direction) => {
+                    log::info!("turn: recipe scroll {direction}");
+                    WakeWordEvent::recipe_scroll(direction)
                 }
             },
             // Record the request to reopen the mic after this reply. Acted on only after

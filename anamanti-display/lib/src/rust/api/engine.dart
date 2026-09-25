@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_recipe`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `reply_token`, `show_recipe`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_recipe`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_recipe`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
 
@@ -41,6 +41,37 @@ bool isWakeWordEngineRunning() =>
 /// and a harmless no-op off Android (host tests, no camera).
 void noteUserActivity() =>
     RustLib.instance.api.crateApiEngineNoteUserActivity();
+
+/// Report the recipe screen's state as the device's **display context** so the next
+/// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know a
+/// recipe is up (and which tab / scroll position) so it can drive the screen by voice
+/// (switch tabs, scroll, close).
+///
+/// This is the recipe screen's setter for the general display-context mechanism (see
+/// [`crate::engine::set_display_context`]); other voice-controllable screens — music,
+/// weather, photos — would add their own `set_<screen>_context` entry that builds the
+/// matching `screen` block (`{kind, <kind>:{...}}`).
+///
+/// Flutter calls this when recipe mode opens or closes and whenever the active tab or a
+/// pane's scroll position changes. `active == false` clears the context (idle screen);
+/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`.
+void setRecipeContext({
+  required bool active,
+  required String title,
+  required String tab,
+  required bool atTop,
+  required bool atBottom,
+  required int ingredientCount,
+  required int stepCount,
+}) => RustLib.instance.api.crateApiEngineSetRecipeContext(
+  active: active,
+  title: title,
+  tab: tab,
+  atTop: atTop,
+  atBottom: atBottom,
+  ingredientCount: ingredientCount,
+  stepCount: stepCount,
+);
 
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
@@ -358,6 +389,10 @@ class WakeWordEvent {
   /// The UI decodes it into the recipe-mode tabs.
   final String recipeJson;
 
+  /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
+  /// scroll direction (`RecipeScroll`). Empty for every other kind.
+  final String recipeAction;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -374,6 +409,7 @@ class WakeWordEvent {
     required this.timerRemainingSecs,
     required this.present,
     required this.recipeJson,
+    required this.recipeAction,
   });
 
   @override
@@ -392,7 +428,8 @@ class WakeWordEvent {
       timerLabel.hashCode ^
       timerRemainingSecs.hashCode ^
       present.hashCode ^
-      recipeJson.hashCode;
+      recipeJson.hashCode ^
+      recipeAction.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -413,7 +450,8 @@ class WakeWordEvent {
           timerLabel == other.timerLabel &&
           timerRemainingSecs == other.timerRemainingSecs &&
           present == other.present &&
-          recipeJson == other.recipeJson;
+          recipeJson == other.recipeJson &&
+          recipeAction == other.recipeAction;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -495,6 +533,14 @@ enum WakeWordEventKind {
 
   /// Recipe mode: dismiss the recipe screen and return to the idle/ambient display.
   dismissRecipe,
+
+  /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
+  /// (`"overview"` / `"ingredients"` / `"steps"`).
+  recipeNavigate,
+
+  /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
+  /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
+  recipeScroll,
 
   /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
   /// is `true` when someone has approached the display (brighten) and `false` when

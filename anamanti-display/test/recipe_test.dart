@@ -41,24 +41,28 @@ WakeWordConfig _cfg() => WakeWordConfig(
   proximityReleaseSecs: 0,
 );
 
-WakeWordEvent _ev(WakeWordEventKind kind, {String recipeJson = ''}) =>
-    WakeWordEvent(
-      kind: kind,
-      message: '',
-      device: '',
-      deviceSampleRate: 0,
-      channels: 0,
-      rms: 0,
-      score: 0,
-      model: '',
-      transcript: '',
-      reply: '',
-      timerId: 0,
-      timerLabel: '',
-      timerRemainingSecs: 0,
-      present: false,
-      recipeJson: recipeJson,
-    );
+WakeWordEvent _ev(
+  WakeWordEventKind kind, {
+  String recipeJson = '',
+  String recipeAction = '',
+}) => WakeWordEvent(
+  kind: kind,
+  message: '',
+  device: '',
+  deviceSampleRate: 0,
+  channels: 0,
+  rms: 0,
+  score: 0,
+  model: '',
+  transcript: '',
+  reply: '',
+  timerId: 0,
+  timerLabel: '',
+  timerRemainingSecs: 0,
+  present: false,
+  recipeJson: recipeJson,
+  recipeAction: recipeAction,
+);
 
 void main() {
   group('RecipeData.tryParse', () {
@@ -115,6 +119,75 @@ void main() {
     expect(controller.state.recipeActive, isFalse);
   });
 
+  test(
+    'controller drives recipe tabs + scroll and pushes screen context',
+    () async {
+      final engine = StreamController<WakeWordEvent>.broadcast();
+      final ctxCalls = <Map<String, Object?>>[];
+      final controller = AssistantController(
+        config: _cfg(),
+        startEngine: (_) => engine.stream,
+        setRecipeContext:
+            ({
+              required bool active,
+              required String title,
+              required String tab,
+              required bool atTop,
+              required bool atBottom,
+              required int ingredientCount,
+              required int stepCount,
+            }) => ctxCalls.add({
+              'active': active,
+              'tab': tab,
+              'atTop': atTop,
+              'atBottom': atBottom,
+              'ingredientCount': ingredientCount,
+              'stepCount': stepCount,
+            }),
+      )..start();
+      addTearDown(controller.dispose);
+
+      // Opening pushes active context on the Overview tab with the right counts.
+      engine.add(_ev(WakeWordEventKind.showRecipe, recipeJson: _recipeJson));
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.recipeTab, 0);
+      expect(ctxCalls.last['active'], isTrue);
+      expect(ctxCalls.last['tab'], 'overview');
+      expect(ctxCalls.last['ingredientCount'], 3);
+      expect(ctxCalls.last['stepCount'], 3);
+
+      // Voice "show the ingredients" switches the tab and re-pushes context.
+      engine.add(
+        _ev(WakeWordEventKind.recipeNavigate, recipeAction: 'ingredients'),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.recipeTab, 1);
+      expect(ctxCalls.last['tab'], 'ingredients');
+
+      // Voice "scroll down" bumps the scroll command counter + direction.
+      final seqBefore = controller.state.recipeScrollSeq;
+      engine.add(_ev(WakeWordEventKind.recipeScroll, recipeAction: 'down'));
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.recipeScrollSeq, seqBefore + 1);
+      expect(controller.state.recipeScrollDir, 'down');
+
+      // The view reporting its position refreshes the pushed context.
+      controller.reportRecipeScrollPosition(false, true);
+      expect(ctxCalls.last['atTop'], isFalse);
+      expect(ctxCalls.last['atBottom'], isTrue);
+
+      // A touch of the tab bar routes through the controller too.
+      controller.setRecipeTab(2);
+      expect(controller.state.recipeTab, 2);
+      expect(ctxCalls.last['tab'], 'steps');
+
+      // Closing pushes an inactive context.
+      controller.dismissRecipe();
+      expect(controller.state.recipeActive, isFalse);
+      expect(ctxCalls.last['active'], isFalse);
+    },
+  );
+
   test('controller ignores an unparseable recipe payload', () async {
     final engine = StreamController<WakeWordEvent>.broadcast();
     final controller = AssistantController(
@@ -158,5 +231,42 @@ void main() {
     // Close control invokes onClose.
     await tester.tap(find.byKey(const Key('recipe-close')));
     expect(closed, isTrue);
+  });
+
+  testWidgets('RecipeView is tab-controlled and reports scroll position', (
+    tester,
+  ) async {
+    final recipe = RecipeData.tryParse(_recipeJson)!;
+    var tab = 0;
+    int? tappedTab;
+    bool? lastAtTop;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: StatefulBuilder(
+          builder: (context, setState) => RecipeView(
+            recipe: recipe,
+            onClose: () {},
+            tab: tab,
+            onTabSelected: (i) {
+              tappedTab = i;
+              setState(() => tab = i);
+            },
+            onScrollPositionChanged: (t, _) => lastAtTop = t,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The view reports its initial pane position after layout.
+    expect(lastAtTop, isNotNull);
+
+    // A tab tap routes through onTabSelected; feeding the new `tab` back switches
+    // the visible pane.
+    await tester.tap(find.byKey(const Key('recipe-tab-2')));
+    await tester.pumpAndSettle();
+    expect(tappedTab, 2);
+    expect(find.text('Boil the pasta.'), findsOneWidget);
   });
 }

@@ -37,7 +37,7 @@ use rig_core::tool::PortableTool;
 
 use chrono::Local;
 
-use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, ReplyStream};
+use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
 use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsConfig, DirectionsProvider, LiveHomeLocation, TravelMode};
@@ -106,8 +106,14 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
             "You can pull up cooking recipes on the display with the `recipe_lookup` tool. \
              Whenever the user asks for a recipe, how to make or cook a dish, or to show a \
              recipe for something, you MUST call `recipe_lookup` with the dish name — never \
-             recite a full recipe as prose. Use `close_recipe` when they say they're done \
-             cooking or ask to close the recipe. Relay the tool's short spoken confirmation.",
+             recite a full recipe as prose. When a recipe is already on screen (the turn \
+             context will tell you, including which tab and scroll position), use \
+             `recipe_control` to navigate it — switching to the Overview / Ingredients / \
+             Steps tab or scrolling the current tab — whenever the user says things like \
+             \"show the ingredients\", \"go to the steps\", \"next\", \"scroll down\", \
+             \"scroll back up\", or \"start over\". Use `close_recipe` when they say they're \
+             done cooking or ask to close the recipe. Relay each tool's short spoken \
+             confirmation.",
         );
     }
     if has(ShoppingListControl::NAME) {
@@ -1104,6 +1110,8 @@ impl PortableTool for ShoppingListControl {
 pub const RECIPE_LOOKUP: &str = "recipe_lookup";
 /// Tool name for dismissing the recipe screen.
 pub const CLOSE_RECIPE: &str = "close_recipe";
+/// Tool name for navigating the already-open recipe screen (switch tab / scroll).
+pub const RECIPE_CONTROL: &str = "recipe_control";
 
 /// Typed arguments for [`RecipeLookup`].
 #[derive(Debug, Deserialize)]
@@ -1197,6 +1205,66 @@ fn close_recipe_invoke(actions: Option<&ActionSink>) -> Result<String> {
     Ok("Okay, closing the recipe.".to_string())
 }
 
+/// Typed arguments for [`recipe_control_invoke`].
+#[derive(Debug, Deserialize)]
+struct RecipeControlArgs {
+    /// One of the fixed navigation actions (see [`recipe_control_definition`]).
+    action: String,
+}
+
+fn recipe_control_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: RECIPE_CONTROL.to_string(),
+        description: "Navigate the recipe screen that is already open on the display: switch \
+                      which tab is showing, or scroll the current tab. Use ONLY when a recipe \
+                      is currently on screen (the turn context says so). To close it, use \
+                      close_recipe instead."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "show_overview",
+                        "show_ingredients",
+                        "show_steps",
+                        "scroll_up",
+                        "scroll_down",
+                        "scroll_top",
+                        "scroll_bottom"
+                    ],
+                    "description": "The navigation action: switch to the Overview / Ingredients / \
+                                    Steps tab, or scroll the current tab up/down a page or to the \
+                                    top/bottom."
+                }
+            },
+            "required": ["action"]
+        }),
+    }
+}
+
+/// Execute `recipe_control`: map the action to a [`DeviceAction::RecipeControl`] and emit
+/// it on the per-turn sink.
+fn recipe_control_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+    let args: RecipeControlArgs =
+        serde_json::from_value(arguments.clone()).context("parsing recipe_control arguments")?;
+    let (nav, confirmation) = match args.action.as_str() {
+        "show_overview" => (RecipeNav::TabOverview, "Showing the overview."),
+        "show_ingredients" => (RecipeNav::TabIngredients, "Showing the ingredients."),
+        "show_steps" => (RecipeNav::TabSteps, "Showing the steps."),
+        "scroll_up" => (RecipeNav::ScrollUp, "Scrolling up."),
+        "scroll_down" => (RecipeNav::ScrollDown, "Scrolling down."),
+        "scroll_top" => (RecipeNav::ScrollTop, "Back to the top."),
+        "scroll_bottom" => (RecipeNav::ScrollBottom, "Jumping to the bottom."),
+        other => anyhow::bail!("unknown recipe_control action `{other}`"),
+    };
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::RecipeControl(nav))
+        .map_err(|_| anyhow::anyhow!("the display disconnected before the recipe could update"))?;
+    Ok(confirmation.to_string())
+}
+
 // ===========================================================================
 // Tool set
 // ===========================================================================
@@ -1263,6 +1331,7 @@ impl Tools {
         if let Some(r) = &recipe {
             definitions.push(r.definition());
             definitions.push(close_recipe_definition());
+            definitions.push(recipe_control_definition());
         }
         Self {
             definitions,
@@ -1313,6 +1382,10 @@ impl Tools {
             },
             CLOSE_RECIPE => match &self.recipe {
                 Some(_) => close_recipe_invoke(actions),
+                None => anyhow::bail!("recipe lookup is not enabled"),
+            },
+            RECIPE_CONTROL => match &self.recipe {
+                Some(_) => recipe_control_invoke(arguments, actions),
                 None => anyhow::bail!("recipe lookup is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),

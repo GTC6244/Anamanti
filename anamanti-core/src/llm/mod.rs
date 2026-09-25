@@ -46,6 +46,29 @@ pub enum DeviceAction {
     ShowRecipe(crate::recipe::Recipe),
     /// Dismiss the recipe screen and return to the idle/ambient display.
     DismissRecipe,
+    /// Drive the already-open recipe screen by voice — switch tab or scroll a pane.
+    /// Fire-and-forget: the device owns the screen state.
+    RecipeControl(RecipeNav),
+}
+
+/// A voice navigation command for the open recipe screen (relayed as an
+/// `anamanti-recipe` `navigate`/`scroll` frame). Emitted by the `recipe_control` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipeNav {
+    /// Switch to the Overview tab.
+    TabOverview,
+    /// Switch to the Ingredients tab.
+    TabIngredients,
+    /// Switch to the Steps tab.
+    TabSteps,
+    /// Scroll the active pane up one page.
+    ScrollUp,
+    /// Scroll the active pane down one page.
+    ScrollDown,
+    /// Jump to the top of the active pane.
+    ScrollTop,
+    /// Jump to the bottom of the active pane.
+    ScrollBottom,
 }
 
 /// The per-turn channel a tool pushes [`DeviceAction`]s onto. Unbounded so a tool's
