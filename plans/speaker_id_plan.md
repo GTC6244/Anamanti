@@ -1,11 +1,11 @@
-# Speaker ID Plan — Per-Person Identification in the Orchestrator
+# Speaker ID Plan — Per-Person Identification in the Anamanti Core
 
 Status: **IMPLEMENTED (Phases A–D + device "People" UI; Phase E code-complete
 pending the real ONNX model + on-hardware calibration)** as of 2026-09-17. Picks
 up `memory_plan.md` Deferred #2
 ("Speaker identification: real per-user attribution + populating `KNOWS` per
 speaker"). Layers passive, local speaker recognition onto the Mac-side brain
-(`ambient_orchestrator`, `/mac`) so every turn is attributed to a person and the
+(`anamanti_core`, `/mac`) so every turn is attributed to a person and the
 LLM answers with per-person context ("you're talking to Sam; here's what you know
 about Sam") instead of one undifferentiated `household` blob.
 
@@ -20,24 +20,24 @@ ID is turned on in config (`speaker.enabled`). The real ECAPA-TDNN ONNX embedder
 
 **Built & tested (lean SQLite and default `helix` builds both green, clippy clean):**
 
-- **Phase A — recognizer core** (`orchestrator/src/speaker/{mod,embed,registry}.rs`):
+- **Phase A — recognizer core** (`anamanti-core/src/speaker/{mod,embed,registry}.rs`):
   `SpeakerEmbedder` trait + deterministic `MockSpeakerEmbedder` (band-energy
   fingerprint), SQLite `SpeakerRegistry` (voiceprint centroids, identify /
   auto-cluster / rename / merge / delete), and the `SpeakerService` façade with
   dual-threshold match/new + min-speech floor. 14 unit tests.
 - **Phase B — per-person SQLite path**: `memories.speaker_id` column + idempotent
   migration; `add_scoped` / `search_scoped` (own + shared); `Recall` trait takes a
-  speaker scope; orchestrator buffers voiced PCM, identifies the speaker, threads
+  speaker scope; Anamanti Core buffers voiced PCM, identifies the speaker, threads
   it through writes/recall, injects the identity line into the system prompt, and
   logs it. End-to-end pipeline test drives two voices → separate memory + a named
   reply.
 - **Phase C — naming + control**: voice `NameSpeaker` ("my name is …" / "call
-  me …") renames the current profile and records the name fact; new `ambient-*`
+  me …") renames the current profile and records the name fact; new `anamanti-*`
   control frames (`list-speakers`, `name-speaker`, `merge-speakers`,
   `delete-speaker`) handled in `control.rs` (merge also reassigns memory rows).
   Unit + control tests. **Device side done**: byte-identical frame types +
-  `control.rs` client + FRB functions in `display/rust/src/api/settings.rs` (regenerated
-  bindings), and a Flutter **"People"** settings screen (`display/lib/src/ui/people_screen.dart`)
+  `control.rs` client + FRB functions in `anamanti-display/rust/src/api/settings.rs` (regenerated
+  bindings), and a Flutter **"People"** settings screen (`anamanti-display/lib/src/ui/people_screen.dart`)
   that lists recognized voices (named or anonymous "Speaker N") and names / merges /
   forgets them — 5 widget tests, `flutter analyze` clean.
 - **Phase D — GraphRAG per-User**: `helix.rs` mints a `User` node per `speaker_id`
@@ -50,11 +50,11 @@ ID is turned on in config (`speaker.enabled`). The real ECAPA-TDNN ONNX embedder
   **Remaining (hardware/model-gated):** drop in a real ECAPA-TDNN `.onnx`, confirm
   its input tensor layout + fbank params, and calibrate `MATCH`/`NEW`/
   `MIN_SPEECH_MS` against real Echo Show far-field captures. Until then, enabling
-  `AMBIENT_SPEAKER_ID=on` uses the mock embedder (dev only, logged loudly).
+  `ANAMANTI_SPEAKER_ID=on` uses the mock embedder (dev only, logged loudly).
 
-**Config:** `AMBIENT_SPEAKER_ID=on|off` (default off) · `AMBIENT_SPEAKER_MODEL_PATH`
-· `AMBIENT_SPEAKER_MATCH_THRESHOLD` · `AMBIENT_SPEAKER_NEW_THRESHOLD` ·
-`AMBIENT_SPEAKER_MIN_SPEECH_MS` · `AMBIENT_SPEAKER_EMBED_DIMS` (default 192).
+**Config:** `ANAMANTI_SPEAKER_ID=on|off` (default off) · `ANAMANTI_SPEAKER_MODEL_PATH`
+· `ANAMANTI_SPEAKER_MATCH_THRESHOLD` · `ANAMANTI_SPEAKER_NEW_THRESHOLD` ·
+`ANAMANTI_SPEAKER_MIN_SPEECH_MS` · `ANAMANTI_SPEAKER_EMBED_DIMS` (default 192).
 
 ---
 
@@ -72,12 +72,12 @@ turn.
 **Chosen approach (owner-selected): passive + auto-cluster, local model.**
 
 - *Passive* — a speaker embedding is computed from the utterance PCM the
-  orchestrator already buffers; no "say your name first" friction.
+  Anamanti Core already buffers; no "say your name first" friction.
 - *Auto-cluster* — an utterance that matches no known profile mints a new
   anonymous persona (`Speaker 2`) on the spot. Personas are named later by voice
   ("my name is Dana") or from the settings screen.
 - *Local model* — a small ECAPA-TDNN ONNX speaker-embedding model runs
-  in-orchestrator. **Accuracy note:** locality is not the accuracy lever — open
+  in-Anamanti Core. **Accuracy note:** locality is not the accuracy lever — open
   models (ECAPA-TDNN / WeSpeaker) match or beat commercial cloud speaker-ID APIs
   on VoxCeleb (EER ~1%); the real limiter is the Echo Show's noisy far-field
   audio, which degrades cloud and local equally. Local wins on privacy (raw voice
@@ -88,7 +88,7 @@ turn.
 
 ## 2. Design overview
 
-One new subsystem (`orchestrator/src/speaker/`) plus a `speaker_id` threaded through the
+One new subsystem (`anamanti-core/src/speaker/`) plus a `speaker_id` threaded through the
 existing turn path:
 
 ```
@@ -140,7 +140,7 @@ far-field captures.
 
 ### 3.1 Speaker registry (SQLite)
 
-New table in the existing memory DB (`AMBIENT_DB_PATH`) so profiles and memories
+New table in the existing memory DB (`ANAMANTI_DB_PATH`) so profiles and memories
 share one file and one `Mutex<Connection>` discipline:
 
 ```sql
@@ -202,7 +202,7 @@ parse):
 
 ## 4. Component-by-component build
 
-### 4.1 New module `orchestrator/src/speaker/` (Phase A)
+### 4.1 New module `anamanti-core/src/speaker/` (Phase A)
 
 - **`mod.rs`** — `SpeakerContext { speaker_id: String, name: Option<String>,
   is_new: bool, confidence: f32 }`, re-exports, and an `Arc`-shareable
@@ -230,7 +230,7 @@ Unit tests (Phase A): centroid online-mean stays L2-normed; two separable mock
 voices identify distinctly and cluster stably across repeated turns; a third
 voice mints a new persona; sub-`MIN_SPEECH_MS` input yields no cluster.
 
-### 4.2 `orchestrator/src/memory/` — scope by speaker (Phase B)
+### 4.2 `anamanti-core/src/memory/` — scope by speaker (Phase B)
 
 - **`mod.rs`** — schema migration (§3.2); `add(kind, content, source,
   speaker_id: Option<&str>)`; `search(query, speaker_id: Option<&str>, limit)`
@@ -246,7 +246,7 @@ voice mints a new persona; sub-`MIN_SPEECH_MS` input yields no cluster.
 Tests: Sam-scoped recall returns Sam's "likes jazz" and shared facts but not
 Dana's "hates jazz"; NULL/`household` scope preserves today's behavior.
 
-### 4.3 `orchestrator/src/orchestrator.rs` — thread identity through the turn (Phase B)
+### 4.3 `anamanti-core/src/orchestrator.rs` — thread identity through the turn (Phase B)
 
 - **Buffer the utterance.** In `stream_to_transcript`, accumulate the voiced PCM
   (chunks already RMS-gated as `speech`) into a `Vec<i16>` and track voiced-ms.
@@ -274,7 +274,7 @@ Dana's "hates jazz"; NULL/`household` scope preserves today's behavior.
 Tests: a two-voice mock turn sequence attributes each turn correctly; the system
 prompt names a known speaker; a too-short turn falls back to `household`.
 
-### 4.4 `orchestrator/src/memory/helix.rs` + `ingester.rs` — per-User graph (Phase D)
+### 4.4 `anamanti-core/src/memory/helix.rs` + `ingester.rs` — per-User graph (Phase D)
 
 - `helix.rs`: drop the single `household_id`; add `ensure_user(speaker_id,
   name)` (get-or-create by `speaker_id`, set/refresh `name`). `ingest_turn` and
@@ -294,7 +294,7 @@ two `User` nodes; speaker-scoped recall prefers the right person's subgraph.
 **Voice** (`memory/extract.rs`): add `MemoryCommand::NameSpeaker(String)` parsed
 from lead phrases already adjacent to the existing rules — `"my name is "`,
 `"i'm "`, `"i am "`, `"call me "`, `"this is "` (guard `this is` against
-non-name tails). The orchestrator applies it by renaming the *current* turn's
+non-name tails). The Anamanti Core applies it by renaming the *current* turn's
 `speaker_id` (and, if that speaker was `household`/anon, promotes the cluster to
 `labeled`), replying "Nice to meet you, {name}." Also handle "who am I?" →
 answer from the profile. Keep the existing `infer_memories` "my name is …" fact
@@ -302,14 +302,14 @@ capture — it still records the fact; the new command additionally sets the
 profile name.
 
 **Control frames** (`wyoming/protocol.rs` `types`, byte-identical in the device
-crate `display/rust/src/wyoming/protocol.rs` — the round-trip tests in both crates are
+crate `anamanti-display/rust/src/wyoming/protocol.rs` — the round-trip tests in both crates are
 the guardrail):
 
-- `ambient-list-speakers` → `ambient-speakers` (`{ ok, speakers: [{ id, name,
+- `anamanti-list-speakers` → `anamanti-speakers` (`{ ok, speakers: [{ id, name,
   labeled, samples, created_at }] }`)
-- `ambient-name-speaker` (`{ id, name }`) → reuse `ambient-memory-result`-style
+- `anamanti-name-speaker` (`{ id, name }`) → reuse `anamanti-memory-result`-style
   `{ ok, message }`
-- `ambient-merge-speakers` (`{ keep, drop }`) and `ambient-delete-speaker`
+- `anamanti-merge-speakers` (`{ keep, drop }`) and `anamanti-delete-speaker`
   (`{ id }`) → same result shape
 
 `control.rs`: extend `is_control_request` + `respond` with these arms, taking the
@@ -318,7 +318,7 @@ the guardrail):
 unit-testable.
 
 **Device UI** (Phase C tail, `/rust` + Flutter): FRB functions in
-`display/rust/src/api/settings.rs` (`list_speakers`, `name_speaker`, `merge_speakers`,
+`anamanti-display/rust/src/api/settings.rs` (`list_speakers`, `name_speaker`, `merge_speakers`,
 `delete_speaker`) mirroring the existing memory settings calls, and a "People"
 section in the Flutter settings screen showing named people + anonymous
 `Speaker N` chips the user can rename or merge. This is the only cross-device
@@ -328,11 +328,11 @@ piece; it can land after the Mac-side A–D are green.
 
 `config.rs` + `main.rs`:
 
-- `AMBIENT_SPEAKER_ID=on|off` (default `off`) — gates building the
+- `ANAMANTI_SPEAKER_ID=on|off` (default `off`) — gates building the
   `SpeakerService` and calling `Pipeline::with_speaker`.
-- `AMBIENT_SPEAKER_MODEL_PATH` — path to the ECAPA `.onnx`.
-- `AMBIENT_SPEAKER_MATCH_THRESHOLD`, `AMBIENT_SPEAKER_NEW_THRESHOLD`,
-  `AMBIENT_SPEAKER_MIN_SPEECH_MS` — the §2 thresholds.
+- `ANAMANTI_SPEAKER_MODEL_PATH` — path to the ECAPA `.onnx`.
+- `ANAMANTI_SPEAKER_MATCH_THRESHOLD`, `ANAMANTI_SPEAKER_NEW_THRESHOLD`,
+  `ANAMANTI_SPEAKER_MIN_SPEECH_MS` — the §2 thresholds.
 - `main.rs` builds `OnnxSpeakerEmbedder` (or logs and stays household if the model
   is missing — graceful degrade, mirroring the SQLite fallback when
   `OPENAI_API_KEY` is absent), opens the registry on the shared DB, and injects
@@ -346,14 +346,14 @@ piece; it can land after the Mac-side A–D are green.
   `MockSpeakerEmbedder` + SQLite registry. No pipeline changes. *Fully testable
   offline.*
 - **Phase B — per-person SQLite path.** Memory schema + scoped `add`/`search`,
-  `Recall` signature, orchestrator threading, system-prompt identity line,
+  `Recall` signature, Anamanti Core threading, system-prompt identity line,
   config gate. End-to-end with the mock embedder: two voices get separate memory
   + named replies. **This is the MVP that delivers "better context around
   answers."**
 - **Phase C — naming.** Voice `NameSpeaker` + `who am I` + the speaker control
   frames (Mac side); then FRB + Flutter "People" UI.
 - **Phase D — GraphRAG per-User.** Helix `ensure_user` + speaker-scoped
-  ingest/recall + chat-log fields. Only affects `AMBIENT_MEMORY_BACKEND=helix`.
+  ingest/recall + chat-log fields. Only affects `ANAMANTI_MEMORY_BACKEND=helix`.
 - **Phase E — real model + calibration.** Ship the ECAPA `.onnx`, wire
   `OnnxSpeakerEmbedder`, calibrate `MATCH`/`NEW`/`MIN_SPEECH_MS` against real
   Echo Show far-field captures; document EER at the chosen operating point.
@@ -368,13 +368,13 @@ piece; it can land after the Mac-side A–D are green.
 - **Registry unit tests** — identify/cluster/rename/merge/threshold behavior,
   online-mean invariants.
 - **Memory scope tests** — per-speaker vs shared recall; legacy NULL rows.
-- **Orchestrator integration** — scripted two-voice turn sequences through the
+- **Anamanti Core integration** — scripted two-voice turn sequences through the
   in-memory mock STT/TTS (`ServiceConnector`) asserting attribution, prompt
   identity line, and per-person recall.
-- **Protocol round-trip** — new `ambient-*speaker*` frames encode/decode
+- **Protocol round-trip** — new `anamanti-*speaker*` frames encode/decode
   identically in the Mac and device crates (the existing drift guardrail).
 - **Helix integration** — real embedded engine, two `User` nodes, scoped recall.
-- **Graceful-degrade** — `AMBIENT_SPEAKER_ID=off` and "model missing" both
+- **Graceful-degrade** — `ANAMANTI_SPEAKER_ID=off` and "model missing" both
   reproduce exact pre-change household behavior (regression floor).
 
 ---
@@ -395,7 +395,7 @@ piece; it can land after the Mac-side A–D are green.
   it can run concurrently with the LLM's first token.
 - **Privacy.** Voiceprints (centroids) never leave the Mac; they're derived
   vectors, not audio, and are user-deletable via the People UI and
-  `ambient-delete-speaker`. Raw utterance PCM is not persisted for speaker ID.
+  `anamanti-delete-speaker`. Raw utterance PCM is not persisted for speaker ID.
 - **Barge-in / TTS self-trigger.** Short/low-SNR self-triggers fall under
   `MIN_SPEECH_MS` → `household`, so they don't pollute clusters.
 
@@ -415,8 +415,8 @@ piece; it can land after the Mac-side A–D are green.
 
 ## 9. Files touched (summary)
 
-**New:** `orchestrator/src/speaker/mod.rs`, `orchestrator/src/speaker/embed.rs`,
-`orchestrator/src/speaker/registry.rs`, an ECAPA `.onnx` asset (Phase E).
+**New:** `anamanti-core/src/speaker/mod.rs`, `anamanti-core/src/speaker/embed.rs`,
+`anamanti-core/src/speaker/registry.rs`, an ECAPA `.onnx` asset (Phase E).
 
 **Changed (Mac):** `orchestrator.rs` (buffer PCM, identify, prompt, thread id),
 `memory/mod.rs` (schema + scoped add/search), `memory/backend.rs` (`Recall`
@@ -426,8 +426,8 @@ through), `memory/helix.rs` (per-`User` nodes + scoped recall),
 (speaker control frames), `config.rs` + `main.rs` (env vars + wiring + graceful
 degrade), `lib.rs` (module export).
 
-**Changed (device, Phase C):** `display/rust/src/wyoming/protocol.rs` (byte-identical
-frame types), `display/rust/src/api/settings.rs` (FRB speaker functions), Flutter
+**Changed (device, Phase C):** `anamanti-display/rust/src/wyoming/protocol.rs` (byte-identical
+frame types), `anamanti-display/rust/src/api/settings.rs` (FRB speaker functions), Flutter
 settings screen ("People" section).
 
 **Docs:** `architecture.md` (§2.3 memory, §7 decisions), `memory_plan.md`

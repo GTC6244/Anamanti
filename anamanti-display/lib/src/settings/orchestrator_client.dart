@@ -1,0 +1,414 @@
+// Client for the orchestrator-managed settings + memory (Plan.MD §3, Phase 6).
+//
+// The LLM backend, model, and TTS voice live on the Mac orchestrator, as does the
+// persistent memory list. The settings screen reads/changes them through this
+// interface, which is expressed in plain domain types (not the generated FRB
+// types) so the UI and its widget tests never need the native library loaded — the
+// production [FrbOrchestratorClient] is the only place that talks to FRB.
+
+import 'package:anamanti_display/src/rust/api/settings.dart' as frb;
+
+/// The orchestrator's current runtime settings.
+class OrchestratorSettingsView {
+  const OrchestratorSettingsView({
+    required this.ok,
+    required this.message,
+    required this.llmBackend,
+    this.llmModel,
+    this.anthropicAuth = 'apikey',
+    this.ttsVoice,
+    this.endSilenceMs = 0,
+    this.voiceRmsThreshold = 0,
+  });
+
+  final bool ok;
+  final String message;
+  final String llmBackend;
+  final String? llmModel;
+
+  /// Anthropic auth mode: `apikey` or `subscription` (Claude OAuth).
+  final String anthropicAuth;
+  final String? ttsVoice;
+
+  /// Orchestrator VAD: end-of-speech trailing silence in ms (0 if unknown).
+  final int endSilenceMs;
+
+  /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
+  final double voiceRmsThreshold;
+}
+
+/// One selectable LLM model for the settings model dropdown (last 12 months).
+class ModelOption {
+  const ModelOption({
+    required this.provider,
+    required this.id,
+    required this.label,
+  });
+
+  /// `anthropic` or `openai`.
+  final String provider;
+
+  /// The model id sent as `llmModel` (e.g. `claude-opus-5`, `gpt-4o-mini`).
+  final String id;
+
+  /// A human-friendly label for the dropdown (falls back to `id`).
+  final String label;
+}
+
+/// One selectable Piper voice for the settings TTS voice dropdown, as reported by
+/// the orchestrator (its installed-voice list).
+class VoiceOption {
+  const VoiceOption({
+    required this.name,
+    required this.label,
+    this.language,
+  });
+
+  /// The voice id sent as `ttsVoice` (e.g. `en_US-amy-medium`).
+  final String name;
+
+  /// A human-friendly label for the dropdown (falls back to `name`).
+  final String label;
+
+  /// Primary locale (e.g. `en_US`), or `null` if the server didn't report one.
+  final String? language;
+}
+
+/// The Google Drive photo-slideshow bundle the orchestrator owns, pulled by the
+/// device to drive the idle slideshow. The device mints Drive access tokens
+/// on-device from these, so the APK ships credential-free.
+class DriveTokenView {
+  const DriveTokenView({
+    required this.linked,
+    required this.configured,
+    required this.clientId,
+    required this.clientSecret,
+    required this.refreshToken,
+    required this.folderIds,
+    required this.scope,
+  });
+
+  /// True when a refresh token is present (Drive is fully linked and usable).
+  final bool linked;
+
+  /// True when the OAuth client id + secret are present (access tokens can be
+  /// minted). Runtime replacement for the old build-time `kGoogleDriveConfigured`.
+  final bool configured;
+
+  final String clientId;
+  final String clientSecret;
+  final String refreshToken;
+  final List<String> folderIds;
+  final String scope;
+}
+
+/// One discovered orchestrator, for the settings "Orchestrator" dropdown.
+class OrchestratorOption {
+  const OrchestratorOption({
+    required this.key,
+    required this.name,
+    required this.host,
+    required this.port,
+  });
+
+  /// Stable selection key (TXT `instance_id`) persisted device-locally to pin
+  /// this orchestrator across restarts / IP changes.
+  final String key;
+
+  /// Human-friendly label shown in the dropdown.
+  final String name;
+
+  /// Resolved LAN address (for display / diagnostics).
+  final String host;
+
+  /// Resolved Wyoming port.
+  final int port;
+}
+
+/// One persistent memory entry.
+class MemoryView {
+  const MemoryView({
+    required this.id,
+    required this.kind,
+    required this.content,
+    required this.source,
+    required this.createdAt,
+  });
+
+  final int id;
+
+  /// `fact` or `preference`.
+  final String kind;
+  final String content;
+
+  /// `explicit` (user asked) or `inferred` (auto-extracted).
+  final String source;
+
+  /// Unix seconds when the entry was stored.
+  final int createdAt;
+}
+
+/// One identified speaker, for the settings "People" list.
+class SpeakerView {
+  const SpeakerView({
+    required this.id,
+    required this.labeled,
+    required this.samples,
+    required this.createdAt,
+    this.name,
+  });
+
+  /// Stable id (`spk-…`).
+  final String id;
+
+  /// User-given name, or `null` while the cluster is still anonymous.
+  final String? name;
+
+  /// Whether a person has named this cluster (vs. auto-created).
+  final bool labeled;
+
+  /// How many utterances back this voiceprint.
+  final int samples;
+
+  /// Unix seconds when the cluster was first heard.
+  final int createdAt;
+}
+
+/// Reads and changes orchestrator-side settings and persistent memory. All calls
+/// hit the network (mDNS discovery + a short Wyoming control connection) and may
+/// throw if the Mac is unreachable; callers surface that as an offline state.
+abstract class OrchestratorClient {
+  /// Discover every orchestrator on the LAN for the "Orchestrator" dropdown.
+  /// Unfiltered by the current selection (pure mDNS), so the picker always shows
+  /// all choices. May be empty if none are reachable.
+  Future<List<OrchestratorOption>> listOrchestrators();
+
+  Future<OrchestratorSettingsView> fetchSettings();
+
+  Future<OrchestratorSettingsView> applySettings({
+    String? llmBackend,
+    String? llmModel,
+    String? anthropicAuth,
+    bool setTtsVoice = false,
+    String? ttsVoice,
+    int? endSilenceMs,
+    double? voiceRmsThreshold,
+  });
+
+  /// The selectable LLM models for the model dropdown (Anthropic + OpenAI, each
+  /// scoped to the last 12 months). May be empty if the Mac is unreachable.
+  Future<List<ModelOption>> listModels();
+
+  /// The installed Piper voices for the TTS voice dropdown. May be empty if the
+  /// Mac is unreachable or Piper reports no voices.
+  Future<List<VoiceOption>> listVoices();
+
+  /// Fetch the Google Drive photo bundle (client creds + refresh token + folder
+  /// ids) for the idle slideshow. Throws if the Mac is unreachable; callers fall
+  /// back to the last-synced values persisted in app settings.
+  Future<DriveTokenView> fetchDriveToken();
+
+  Future<List<MemoryView>> listMemories();
+
+  Future<bool> deleteMemory(int id);
+
+  Future<int> clearMemories();
+
+  /// List the identified speakers (the "People" view).
+  Future<List<SpeakerView>> listSpeakers();
+
+  /// Name (or rename) a speaker; returns whether it was applied.
+  Future<bool> nameSpeaker(String id, String name);
+
+  /// Merge the `drop` speaker into `keep` (same person, two clusters).
+  Future<bool> mergeSpeakers({required String keep, required String drop});
+
+  /// Delete a speaker profile; returns whether one was removed.
+  Future<bool> deleteSpeaker(String id);
+}
+
+/// Production client backed by the generated FRB control functions.
+class FrbOrchestratorClient implements OrchestratorClient {
+  const FrbOrchestratorClient({
+    this.discoveryTimeoutSecs = 4,
+    this.orchestratorKey = '',
+  });
+
+  /// Seconds to browse mDNS for the orchestrator before falling back to the cache.
+  final int discoveryTimeoutSecs;
+
+  /// Stable selection key of the pinned orchestrator; empty = Auto (first
+  /// available). Threaded into every control call so the settings path hits the
+  /// same Mac the voice-turn path does (strict: errors if it's unreachable).
+  final String orchestratorKey;
+
+  BigInt get _timeout => BigInt.from(discoveryTimeoutSecs);
+
+  @override
+  Future<List<OrchestratorOption>> listOrchestrators() async {
+    final list = await frb.listOrchestrators(discoveryTimeoutSecs: _timeout);
+    return list
+        .map((o) => OrchestratorOption(
+              key: o.key,
+              name: o.name,
+              host: o.host,
+              port: o.port,
+            ))
+        .toList();
+  }
+
+  @override
+  Future<OrchestratorSettingsView> fetchSettings() async {
+    return _view(await frb.fetchOrchestratorSettings(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    ));
+  }
+
+  @override
+  Future<OrchestratorSettingsView> applySettings({
+    String? llmBackend,
+    String? llmModel,
+    String? anthropicAuth,
+    bool setTtsVoice = false,
+    String? ttsVoice,
+    int? endSilenceMs,
+    double? voiceRmsThreshold,
+  }) async {
+    final result = await frb.updateOrchestratorSettings(
+      orchestratorKey: orchestratorKey,
+      update: frb.SettingsUpdate(
+        llmBackend: llmBackend,
+        llmModel: llmModel,
+        anthropicAuth: anthropicAuth,
+        setTtsVoice: setTtsVoice,
+        ttsVoice: ttsVoice,
+        endSilenceMs: endSilenceMs,
+        voiceRmsThreshold: voiceRmsThreshold,
+      ),
+      discoveryTimeoutSecs: _timeout,
+    );
+    return _view(result);
+  }
+
+  @override
+  Future<List<ModelOption>> listModels() async {
+    final models = await frb.listModels(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return models
+        .map((m) => ModelOption(provider: m.provider, id: m.id, label: m.label))
+        .toList();
+  }
+
+  @override
+  Future<List<VoiceOption>> listVoices() async {
+    final voices = await frb.listVoices(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return voices
+        .map((v) => VoiceOption(name: v.name, label: v.label, language: v.language))
+        .toList();
+  }
+
+  @override
+  Future<DriveTokenView> fetchDriveToken() async {
+    final t = await frb.getDriveToken(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return DriveTokenView(
+      linked: t.linked,
+      configured: t.configured,
+      clientId: t.clientId,
+      clientSecret: t.clientSecret,
+      refreshToken: t.refreshToken,
+      folderIds: t.folderIds,
+      scope: t.scope,
+    );
+  }
+
+  @override
+  Future<List<MemoryView>> listMemories() async {
+    final entries = await frb.listMemories(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return entries
+        .map((e) => MemoryView(
+              id: e.id.toInt(),
+              kind: e.kind,
+              content: e.content,
+              source: e.source,
+              createdAt: e.createdAt.toInt(),
+            ))
+        .toList();
+  }
+
+  @override
+  Future<bool> deleteMemory(int id) => frb.deleteMemory(
+        orchestratorKey: orchestratorKey,
+        id: id,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<int> clearMemories() => frb.clearMemories(
+        orchestratorKey: orchestratorKey,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<List<SpeakerView>> listSpeakers() async {
+    final people = await frb.listSpeakers(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return people
+        .map((s) => SpeakerView(
+              id: s.id,
+              name: s.name,
+              labeled: s.labeled,
+              samples: s.samples.toInt(),
+              createdAt: s.createdAt.toInt(),
+            ))
+        .toList();
+  }
+
+  @override
+  Future<bool> nameSpeaker(String id, String name) => frb.nameSpeaker(
+        orchestratorKey: orchestratorKey,
+        id: id,
+        name: name,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<bool> mergeSpeakers({required String keep, required String drop}) =>
+      frb.mergeSpeakers(
+        orchestratorKey: orchestratorKey,
+        keep: keep,
+        drop: drop,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<bool> deleteSpeaker(String id) => frb.deleteSpeaker(
+        orchestratorKey: orchestratorKey,
+        id: id,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  OrchestratorSettingsView _view(frb.OrchestratorSettings s) => OrchestratorSettingsView(
+        ok: s.ok,
+        message: s.message,
+        llmBackend: s.llmBackend,
+        llmModel: s.llmModel,
+        anthropicAuth: s.anthropicAuth,
+        ttsVoice: s.ttsVoice,
+        endSilenceMs: s.endSilenceMs,
+        voiceRmsThreshold: s.voiceRmsThreshold,
+      );
+}

@@ -5,7 +5,7 @@ on-device wake-word detection versus our current **Phase 2** Rust engine, and a
 concrete list of improvements we should pull across.
 
 VACA is a partial reference for us: its "brain" is Home Assistant, not our custom
-Mac Mini orchestrator, and its device is any Android 8+ phone/tablet rather than
+Mac Mini Anamanti Core, and its device is any Android 8+ phone/tablet rather than
 the 32-bit Echo Show specifically. But the *device-side* audio + wake-word code is
 directly comparable and battle-tested on LineageOS-class hardware, so it is the
 best cross-reference we have.
@@ -19,8 +19,8 @@ best cross-reference we have.
 - **Standalone openWakeWord-for-Android reference** (Java/ONNX, fork of
   `hasanatlodhi/OpenwakewordforAndroid`):
   `github.com/msp1974/OpenwakewordforAndroid`
-- **Our engine:** `display/rust/src/wakeword/detector.rs`, `display/rust/src/engine/mod.rs`,
-  `display/rust/src/audio/{capture,resample,ring_buffer}.rs`, `display/rust/src/api/engine.rs`
+- **Our engine:** `anamanti-display/rust/src/wakeword/detector.rs`, `anamanti-display/rust/src/engine/mod.rs`,
+  `anamanti-display/rust/src/audio/{capture,resample,ring_buffer}.rs`, `anamanti-display/rust/src/api/engine.rs`
 
 > License note: VACA ships `LICENSE` + `NOTICE` (Apache-2.0 family). We can
 > reference the design freely; verify the license before copying code verbatim.
@@ -132,7 +132,7 @@ equivalent of our capture → Wyoming handoff). Muting is reactive via
 Our Phase 2 engine lives in Rust and is functionally the same openWakeWord chain,
 built independently.
 
-### 2.1 Detector (`display/rust/src/wakeword/detector.rs`)
+### 2.1 Detector (`anamanti-display/rust/src/wakeword/detector.rs`)
 
 `tract-onnx` runs all three models. Constants match VACA exactly:
 
@@ -150,7 +150,7 @@ const MEL_SCALE: f32 = 10.0;  const MEL_BIAS: f32 = 2.0;  // mel/10 + 2
 through mel → embedding → classifier, and returns the **max** score seen in the
 block. Rolling state (`audio_accum`, `mel`, `embeddings`) is carried across calls.
 
-### 2.2 Engine loop (`display/rust/src/engine/mod.rs`)
+### 2.2 Engine loop (`anamanti-display/rust/src/engine/mod.rs`)
 
 One background thread owns the `!Send` `cpal` stream and runs
 drain → resample → score. Trigger logic is a **single-frame threshold**:
@@ -164,14 +164,14 @@ Ok(Some(score)) if score >= config.threshold => {
 There is **no moving-average smoothing, no cooldown, and only one model at a
 time.** If models are absent it degrades to capture-only RMS levels.
 
-### 2.3 Capture + resample (`display/rust/src/audio/{capture,resample}.rs`)
+### 2.3 Capture + resample (`anamanti-display/rust/src/audio/{capture,resample}.rs`)
 
 - `capture.rs`: `cpal` (AAudio on device) opens the default input, downmixes
   interleaved frames to mono `i16` in the RT callback, `try_push` into the ring.
   **No AEC/AGC/NS, no mic-source selection, no gain, no self-trigger suppression.**
 - `resample.rs`: linear interpolator, device-native rate → 16 kHz, off the RT path.
 
-### 2.4 FRB surface (`display/rust/src/api/engine.rs`)
+### 2.4 FRB surface (`anamanti-display/rust/src/api/engine.rs`)
 
 `WakeWordConfig { melspec/embedding/wakeword paths, model_name, threshold }` and a
 flat `WakeWordEvent { kind, message, device, device_sample_rate, channels, rms,
@@ -190,7 +190,7 @@ present · ⚠️ partial or a different-but-working approach · ❌ not impleme
 | --- | --- | --- |
 | openWakeWord chain + constants | ✅ mel→embed→classifier, 1280/76/8/32/16 | ✅ identical (`wakeword/detector.rs`) |
 | Inference runtime | TFLite (front-end) + ONNX/TFLite (classifier) | ✅ tract-onnx (all three, pure-Rust, offline) |
-| End-to-end voice turn on device | ✅ (Home Assistant brain) | ✅ wake→STT→LLM→TTS→playback via Wyoming to the Mac orchestrator |
+| End-to-end voice turn on device | ✅ (Home Assistant brain) | ✅ wake→STT→LLM→TTS→playback via Wyoming to the Mac Anamanti Core |
 | Detection smoothing | ✅ 3-frame moving average | ✅ 3-frame moving average (`engine/gate.rs`, unit-tested) |
 | Repeat-fire cooldown | ✅ 1500 ms | ✅ 1500 ms (same `DetectionGate`) |
 | Streams raw audio onward | ✅ when `isStreaming` | ✅ streams 16 kHz PCM to STT during a turn |

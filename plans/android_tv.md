@@ -5,13 +5,13 @@ running on an Echo Show 8 under LineageOS) to an Android smart TV.
 
 **Bottom line:** mechanically portable — the client is a standard Flutter + Rust
 Android app and Android TV is just Android — but it is more than a recompile, and
-the microphone is a likely hardware showstopper. The Mac orchestrator
+the microphone is a likely hardware showstopper. The Mac Anamanti Core
 (STT/LLM/TTS/memory) is untouched by any of this.
 
 ## What ports for free
 
 - **LAN architecture is client-agnostic.** The device only discovers
-  `_wyoming._tcp` via mDNS and streams to the Mac orchestrator. Nothing on the Mac
+  `_wyoming._tcp` via mDNS and streams to the Mac Anamanti Core. Nothing on the Mac
   side changes.
 - **The stack is portable.** Flutter UI + the Rust engine (`cpal`/`oboe` audio,
   `tract-onnx` wake word, `tokio` Wyoming client, mDNS) all run on Android TV's

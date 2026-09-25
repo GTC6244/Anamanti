@@ -12,10 +12,10 @@ Status: **design / options** (not yet built). Read alongside
 ## Problem
 
 Today a conversation ends only when the **follow-up listen** window times out on
-silence. After every reply the orchestrator sends `ambient-listen` with a
+silence. After every reply the Anamanti Core sends `anamanti-listen` with a
 `wait_secs` window (10 s after a `?` reply, 5 s otherwise); the device reopens the
 mic with **no wake word** and the chain continues as long as the user keeps
-talking. The orchestrator sleeps the chain only on silence.
+talking. The Anamanti Core sleeps the chain only on silence.
 
 That breaks down when there is **a second human in the room**: the user is still
 talking (to the person, not the device), so the chain never sees silence and never
@@ -68,8 +68,8 @@ aside}"*. Uses the existing pluggable LLM trait / rig.
 ### 4. Main LLM emits an end-of-conversation control token / tool
 Give the LLM an `end_conversation` tool (or a `<end/>` sentinel) plus a
 system-prompt instruction: "If the user signals they're finished, give a short
-sign-off and call `end_conversation`." The orchestrator watches the stream; if the
-tool fires, it suppresses the follow-up `ambient-listen` so the chain sleeps after
+sign-off and call `end_conversation`." The Anamanti Core watches the stream; if the
+tool fires, it suppresses the follow-up `anamanti-listen` so the chain sleeps after
 the goodbye.
 - **Pro:** **no extra model call** — reuses the turn already running; full
   conversation context, so it handles subtle/implicit endings and gives a natural
@@ -120,8 +120,8 @@ Add a tool the LLM can call during its normal turn, plus a system-prompt line:
 > "If the user indicates they're finished (e.g. 'that's all', 'I'm done',
 > 'goodbye', 'thanks Jarvis'), give a brief sign-off and call `end_conversation`."
 
-The orchestrator watches the reply stream; when the tool fires it **suppresses the
-follow-up `ambient-listen`** for that turn so the chain sleeps after the goodbye.
+The Anamanti Core watches the reply stream; when the tool fires it **suppresses the
+follow-up `anamanti-listen`** for that turn so the chain sleeps after the goodbye.
 No extra model call. Inherent caveat (accepted): it ends only *after* the assistant
 answers — "Jarvis, I'm done" yields a short "Goodbye" then closes; it can't
 silently swallow the utterance. A spoken sign-off is good Jarvis UX anyway.
@@ -136,10 +136,10 @@ Instant, zero-cost, deterministic exit for common phrasings; the LLM tool (#4)
 catches everything else. The matcher must require the utterance to be **short and
 mostly the phrase** so "thanks, now what's the weather" routes to a normal turn.
 
-**Where it lives.** Both hooks sit in the orchestrator's **follow-up path** — the
-code that decides whether to send `ambient-listen` with a `wait_secs` window after
+**Where it lives.** Both hooks sit in the Anamanti Core's **follow-up path** — the
+code that decides whether to send `anamanti-listen` with a `wait_secs` window after
 a reply. The device side needs **no changes**: it already just obeys whether
-`ambient-listen` arrives or not.
+`anamanti-listen` arrives or not.
 
 ---
 
@@ -153,8 +153,8 @@ a reply. The device side needs **no changes**: it already just obeys whether
 ## Next steps
 
 1. Read `architecture.md` §4 + the follow-up-listen implementation to pin the exact
-   insertion point in the orchestrator.
+   insertion point in the Anamanti Core.
 2. Record the decisions above in `Plan.MD` (decision table) since this changes the
    locked follow-up-listen behavior.
 3. Implement: the `end_conversation` tool (#4) + the deterministic matcher (#1/#2)
-   in the follow-up path; suppress `ambient-listen` on end.
+   in the follow-up path; suppress `anamanti-listen` on end.

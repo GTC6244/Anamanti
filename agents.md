@@ -3,10 +3,30 @@
 Build guidance for AI coding agents (and humans) working in this repository.
 Read this together with [`architecture.md`](./plans/architecture.md) (the design) and
 [`Plan.MD`](./plans/Plan.MD) (phases, confirmed decisions, open questions).
+
+> **Naming.** The project is **Anamanti** (from the Irish *anam an tí*, "soul of
+> the home"; pronounced **"AN-um un TEE"** — formerly "Easy Home"/"Ambient"). It
+> has two halves: **Anamanti Core**, the Mac-side brain (formerly "the
+> orchestrator"), in the **`anamanti-core/`** directory — crate `anamanti_core`,
+> binary `anamanti-core` — and **Anamanti Display**, the app on the Echo Show, in
+> **`anamanti-display/`** (Dart package `anamanti_display`, Android id
+> `com.anamanti.anamanti_display`). The per-instance config file is `anamanti.json`,
+> env vars are `ANAMANTI_*`, the mDNS TXT role is `role=core`, runtime data files
+> are `anamanti_*` (`anamanti_memory.sqlite`, `anamanti_settings.json`,
+> `anamanti_chatlog.jsonl`), and Wyoming wire frames use the `anamanti-*` prefix
+> (`anamanti-listen`, `anamanti-notify`, …). Device and Core must be rebuilt/
+> redeployed together (the frame names, mDNS role, config filename, env vars, and
+> data-file names all changed).
+> **Deliberately NOT renamed (leave as-is):** the internal turn-pipeline module/
+> file `orchestrator.rs` / `orchestrator::…`; the FRB native lib crate
+> `rust_lib_ambient_display` (kept so cargokit/gradle/podspecs keep building); and
+> the Snapcast/music-routing infra ids (`ambient-mpv`, `ambient-snapserver`,
+> `ambient-librespot`, `ambient-snapclient`, launchd `com.ambient.*`) — these are
+> deployment identifiers, not Wyoming frames.
 Feature-specific plans branch off these — e.g.
-[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the orchestrator) and
+[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the Anamanti Core) and
 [`RecipePlan.md`](./plans/RecipePlan.md) (recipe mode: the `recipe_lookup` tool +
-the `ambient-recipe` frame + the display's 3-tab recipe screen).
+the `anamanti-recipe` frame + the display's 3-tab recipe screen).
 
 ---
 
@@ -23,47 +43,47 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 
 - **Scope:** full voice assistant (STT → LLM → TTS), not transcript-only.
 - **Discovery:** mDNS / Zeroconf (`_wyoming._tcp`). No hardcoded IPs. The device
-  filters browse results by TXT `role=orchestrator` (so raw Whisper/Piper Wyoming
-  servers are never picked) and can **pin a specific orchestrator** by its stable
-  TXT `instance_id` (settings screen "Orchestrator" dropdown; strict — stays
+  filters browse results by TXT `role=core` (so raw Whisper/Piper Wyoming
+  servers are never picked) and can **pin a specific Anamanti Core** by its stable
+  TXT `instance_id` (settings screen "Anamanti Core" dropdown; strict — stays
   offline rather than switching Macs; `"Auto"` = first responder).
-  **Deployment:** the orchestrator is configured by a **per-instance JSON file**
-  (`ambient.json` in the working directory by default; `--config <path>` overrides).
+  **Deployment:** the Anamanti Core is configured by a **per-instance JSON file**
+  (`anamanti.json` in the working directory by default; `--config <path>` overrides).
   Only provider API keys/tokens remain environment variables (secrets); everything
   else — identity, endpoints, feature toggles — lives in the JSON file. The "local
-  production" orchestrator is installed at
-  `/Volumes/External/DeveloperSupport/Ambient Orchestrator/` (a copied release
+  production" Anamanti Core is installed at
+  `/Volumes/External/DeveloperSupport/Anamanti Core/` (a copied release
   binary, run outside any git checkout) and pins its identity via `instance_id` in
-  that folder's `ambient.json`; its provider keys still come from `~/.zshenv`. Test
+  that folder's `anamanti.json`; its provider keys still come from `~/.zshenv`. Test
   copies run from their git branch/worktree, where `instance_id` is left unset so it
   defaults to the branch code; give each a distinct `bind_addr` + `config_addr` (and
-  `service_name`) in its own `ambient.json` to run alongside production.
+  `service_name`) in its own `anamanti.json` to run alongside production.
 - **Wake word:** openWakeWord `.onnx` via `tract-onnx`. No custom training in v1.
 - **LLM:** pluggable behind a trait (local Ollama/llama.cpp **or** cloud API).
 - **TTS:** Piper via Wyoming.
 - **Playback:** Rust (`cpal`/`oboe`), symmetric with capture.
 - **Barge-in:** wake word stays active during playback; saying it again flushes
-  playback immediately and starts a fresh turn, and sends an `ambient-interrupt`
-  frame so the orchestrator aborts the in-flight LLM + TTS. **AEC is not shipped**
+  playback immediately and starts a fresh turn, and sends an `anamanti-interrupt`
+  frame so the Anamanti Core aborts the in-flight LLM + TTS. **AEC is not shipped**
   (investigated on hardware — see below; self-triggering during loud playback is a
   known, accepted limitation).
-- **VAD:** off-device — the **orchestrator** decides end-of-speech (energy VAD;
+- **VAD:** off-device — the **Anamanti Core** decides end-of-speech (energy VAD;
   faster-whisper has no streaming VAD, so the Mac sends `audio-stop`). The device
   never runs its own VAD.
 - **Memory:** persistent **SQLite** on the Mac is the store of record for
   **explicit + inferred** facts (writes + the settings list + voice
   "remember…"/"forget that"). **Retrieval/recall defaults to the embedded HelixDB
   GraphRAG backend** (in-process, no server/Docker) — every completed turn is
-  appended to `ambient_chatlog.jsonl` and a background ingester embeds it into the
+  appended to `anamanti_chatlog.jsonl` and a background ingester embeds it into the
   graph. GraphRAG needs `OPENAI_API_KEY` (embeddings); if it's absent or init
   fails, recall **falls back to SQLite FTS** (writes are unaffected). Override with
-  `memory_backend: "sqlite"` in `ambient.json` for pure FTS recall. The HelixDB
+  `memory_backend: "sqlite"` in `anamanti.json` for pure FTS recall. The HelixDB
   engine, the rig agent framework, and the ECAPA-TDNN speaker embedder are **always
   compiled in** (no longer feature-gated); speaker ID is selected purely at runtime
   via `speaker.enabled` / `speaker.model_path`.
 - **Idle screen:** photo slideshow from a Google Photos/Drive folder; keeps running
   when disconnected. Google Photos (Ambient) links via **on-device OAuth**
-  (device-code/QR); **Google Drive links on the orchestrator** (consent on the Mac,
+  (device-code/QR); **Google Drive links on the Anamanti Core** (consent on the Mac,
   config page → Photos tab) and the device pulls the token over Wyoming.
 - **Resilience:** **auto-reconnect** with backoff via mDNS + a subtle
   disconnected indicator; wake words queue until reconnected.
@@ -74,14 +94,14 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   risk section below.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
-- **Proactive notifications (Approach A):** the orchestrator can push **visual**
+- **Proactive notifications (Approach A):** the Anamanti Core can push **visual**
   notifications to the display *unprompted* (no voice turn) over a **persistent,
-  device-dialed** Wyoming channel (`ambient-hello` → `ambient-notify`), separate from
+  device-dialed** Wyoming channel (`anamanti-hello` → `anamanti-notify`), separate from
   the per-turn voice socket. The device is still the dialer (reuses mDNS + the
   `instance_id` pin + auto-reconnect); the Mac only pushes down the open socket. Rust
-  owns the socket + reconnect (`display/rust/src/wyoming/notify.rs`,
+  owns the socket + reconnect (`anamanti-display/rust/src/wyoming/notify.rs`,
   `start_notify_channel`); Flutter shows a dismissible banner
-  (`NotificationController`); the orchestrator keeps a `NotificationService` registry
+  (`NotificationController`); the Anamanti Core keeps a `NotificationService` registry
   (config-page **Notify** tab pushes a test). Visual-only for now — no spoken output,
   no state-machine interaction. Design: architecture.md §4; follow-ups: TODO.md §6a.
 
@@ -90,20 +110,22 @@ If a task seems to require changing one of these, stop and confirm first.
 ## Repository layout
 
 ```
-display/       Everything installed on the Android device (the Echo Show). The
-               Flutter project root: Dart UI in `lib/`, the Rust engine (audio
-               capture/playback, ring buffer, wake word, Wyoming client, mDNS) in
-               `rust/`, `android/`, cargokit `rust_builder/`, bundled openWakeWord
-               models in `assets/`, and the Flutter `test/` + `integration_test/`.
-orchestrator/  Everything that runs on the Mac. Rust orchestrator (crate
-               `ambient_orchestrator`) — Wyoming server to the device + Wyoming
-               client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory, mDNS.
-plans/         Design + planning docs: architecture.md (design, source of truth),
-               Plan.MD (phases + decision table), TODO.md, the *_plan / rollout
-               notes, and MusicPlan.md (Spotify playback via the orchestrator).
-agents.md      This file (repo root).
-CLAUDE.md      Harness entry point; points here (repo root).
-README.md      Product overview + setup (repo root).
+anamanti-display/   Anamanti Display — everything installed on the Android device
+                    (the Echo Show). The Flutter project root: Dart UI in `lib/`,
+                    the Rust engine (audio capture/playback, ring buffer, wake
+                    word, Wyoming client, mDNS) in `rust/`, `android/`, cargokit
+                    `rust_builder/`, bundled openWakeWord models in `assets/`, and
+                    the Flutter `test/` + `integration_test/`.
+anamanti-core/      Anamanti Core — everything that runs on the Mac (crate
+                    `anamanti_core`) — Wyoming server to the device + Wyoming
+                    client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory,
+                    mDNS.
+plans/              Design + planning docs: architecture.md (design, source of
+                    truth), Plan.MD (phases + decision table), TODO.md, the
+                    *_plan / rollout notes, and MusicPlan.md.
+agents.md           This file (repo root).
+CLAUDE.md           Harness entry point; points here (repo root).
+README.md           Product overview + setup (repo root).
 ```
 
 ## Boundaries & ownership (respect these)
@@ -126,10 +148,10 @@ README.md      Product overview + setup (repo root).
 # Rust Android target (one-time). Echo Show 8 (crown) LineageOS is 32-bit:
 rustup target add armv7-linux-androideabi
 
-# All Flutter / FRB commands run from the display/ project root:
+# All Flutter / FRB commands run from the anamanti-display/ project root:
 cd display
 
-# Generate the Dart/JNI bindings from Rust signatures (reads display/flutter_rust_bridge.yaml)
+# Generate the Dart/JNI bindings from Rust signatures (reads anamanti-display/flutter_rust_bridge.yaml)
 flutter_rust_bridge_codegen generate
 
 # Build a device APK (cargokit cross-compiles the Rust engine into it).
@@ -137,7 +159,7 @@ flutter_rust_bridge_codegen generate
 # (arm64 fails with INSTALL_FAILED_NO_MATCHING_ABIS on this device).
 flutter build apk --release --target-platform android-arm
 
-# Run the app on the Echo Show (LineageOS) via adb (path relative to display/)
+# Run the app on the Echo Show (LineageOS) via adb (path relative to anamanti-display/)
 adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d <echo-show-device>
 ```
 
@@ -145,18 +167,18 @@ adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d
 - Mac side: a Wyoming STT server (Whisper/CoreML) and Piper TTS on the LAN.
 
 ```bash
-# Mac Mini orchestrator (the "brain"). Runs on the Mac, not the device.
-cargo test  --manifest-path orchestrator/Cargo.toml           # unit + pipeline integration tests
-cargo clippy --manifest-path orchestrator/Cargo.toml --all-targets -- -D warnings
-cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyoming._tcp, serves turns
+# Mac Mini Anamanti Core (the "brain"). Runs on the Mac, not the device.
+cargo test  --manifest-path anamanti-core/Cargo.toml           # unit + pipeline integration tests
+cargo clippy --manifest-path anamanti-core/Cargo.toml --all-targets -- -D warnings
+cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyoming._tcp, serves turns
 
-# Configuration lives in a PER-INSTANCE JSON FILE (see orchestrator/src/config.rs and
-# the committed orchestrator/ambient.example.json). Default path: `ambient.json` in the
+# Configuration lives in a PER-INSTANCE JSON FILE (see anamanti-core/src/config.rs and
+# the committed anamanti-core/anamanti.example.json). Default path: `anamanti.json` in the
 # working directory; override with `--config <path>`. A missing convention file → built-in
 # defaults; a missing/malformed --config file (or an unknown key — deny_unknown_fields)
 # → a hard error at boot. Every key is optional and falls back to its default.
 #
-#   cargo run --manifest-path orchestrator/Cargo.toml --release -- --config ./ambient.json
+#   cargo run --manifest-path anamanti-core/Cargo.toml --release -- --config ./anamanti.json
 #
 # ONLY SECRETS remain environment variables (never put these in the JSON file). Each
 # is a BOOT SEED: it is also settable at runtime from the loopback config page (masked,
@@ -173,11 +195,11 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
 #     process start, so it has no config-page control)
 #
-# The JSON file holds everything else. Key fields (defaults in ambient.example.json):
+# The JSON file holds everything else. Key fields (defaults in anamanti.example.json):
 #   bind_addr / config_addr / stt_addr / tts_addr / service_name / instance_id
 #     (instance_id resolution: the JSON value → the working dir's git BRANCH CODE → the
 #     sanitized service_name; must be stable across restarts. config_addr "off"/"none"
-#     disables the loopback config+debug pages. A second/test orchestrator on the same
+#     disables the loopback config+debug pages. A second/test Anamanti Core on the same
 #     Mac needs distinct bind_addr + config_addr + service_name; sharing prod's data
 #     files means memory_backend="sqlite" — two processes can't share an embedded Helix graph.)
 #   db_path / chatlog_path / promptlog_path / helix_path / settings_path / audio_dump_dir
@@ -190,9 +212,9 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     the TAVILY_API_KEY secret; duckduckgo is keyless), and the per-provider
 #     sub-blocks llm.ollama{url,model} / llm.anthropic{model,max_tokens} / llm.openai{…}
 #   graphrag{…}, speaker{…}, music{…} (music.enabled defaults to true, so the
-#     orchestrator ducks the music group while it speaks and — with music.autostart,
+#     Anamanti Core ducks the music group while it speaks and — with music.autostart,
 #     also default on — supervises snapserver/librespot/mpv at boot; see
-#     ambient.example.json for the full shape)
+#     anamanti.example.json for the full shape)
 #   calendar.subscriptions=[{name,url}], calendar.cache_ttl_secs (read-only web .ics;
 #     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised)
 #   directions.provider="mapbox" (+ the MAPBOX_TOKEN secret, set via env or the Tools
@@ -205,17 +227,17 @@ cargo run   --manifest-path orchestrator/Cargo.toml --release # advertises _wyom
 #     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
 #     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
 #     Voice & Integrations, enter it on the config page → Household tab → "Shopping list
-#     (Cadora)"; the orchestrator redeems it for a vl_ token, stored 0600, never seeded.
+#     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)
 #
 # home_location/weather_units, drive, spotify, cadora, the tts_voice, and the llm engine/
 # backend/model/web_search/search_provider fields only SEED the live settings at boot:
 # they are then editable from the config page and persisted to settings_path
-# (ambient_settings.json), and a PERSISTED value wins over the JSON seed at the next boot.
+# (anamanti_settings.json), and a PERSISTED value wins over the JSON seed at the next boot.
 # Provider API keys must never appear in either JSON file — they stay in the environment.
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled
-  cargokit plugin (`display/rust_builder/cargokit`) uses the legacy AGP variant API and
+  cargokit plugin (`anamanti-display/rust_builder/cargokit`) uses the legacy AGP variant API and
   `project.exec`, which Gradle 9 / AGP 9 removed. Pinned in
   `android/settings.gradle.kts` (AGP 8.7.3, Kotlin 2.1.0) and the Gradle wrapper
   (8.11.1). Revisit only when cargokit ships AGP-9 support. NDK: `28.2.13676358`.
@@ -228,7 +250,7 @@ external drive** at `/Volumes/External/DeveloperSupport`, which has plenty of
 space. Set these for every Cargo / Flutter / Gradle build in this repo:
 
 ```bash
-# Host-side Cargo builds/tests (both display/rust host tests and orchestrator):
+# Host-side Cargo builds/tests (both anamanti-display/rust host tests and Anamanti Core):
 export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
 
 # Gradle caches + a scratch TMPDIR for the APK build:
@@ -246,27 +268,27 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 - Do **not** commit the `build` symlink (it's git-ignored) or these paths — they
   are machine-local.
 
-### Deploying / updating the local production orchestrator
+### Deploying / updating the local production Anamanti Core
 
 "Local production" is a **copied release binary** at
-`/Volumes/External/DeveloperSupport/Ambient Orchestrator/ambient-orchestrator`,
+`/Volumes/External/DeveloperSupport/Anamanti Core/anamanti-core`,
 run **outside any git checkout**. Its identity, data paths, and ports (10700 /
-config 8730) come from `ambient.json` in that folder (`instance_id="Paul Family"`
+config 8730) come from `anamanti.json` in that folder (`instance_id="Paul Family"`
 etc.; `chmod 0600` it — it may hold OAuth client secrets). Only the provider API
 keys/tokens still come from `~/.zshenv` (they're secrets). To push the current
-branch's orchestrator to production, follow this runbook exactly (it does **not**
+branch's Anamanti Core to production, follow this runbook exactly (it does **not**
 touch any test copy running from a worktree):
 
 ```bash
 export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
-PROD="/Volumes/External/DeveloperSupport/Ambient Orchestrator"
+PROD="/Volumes/External/DeveloperSupport/Anamanti Core"
 
 # 1. Build the release binary from the branch you want to ship.
-cargo build --release --manifest-path orchestrator/Cargo.toml
+cargo build --release --manifest-path anamanti-core/Cargo.toml
 
 # 2. Stop the running production copy — the process LISTENING on :10700. Do NOT
-#    `pkill -f "$PROD/ambient-orchestrator"`: production is launched as
-#    `./ambient-orchestrator` (relative argv, see step 4), so its command line never
+#    `pkill -f "$PROD/anamanti-core"`: production is launched as
+#    `./anamanti-core` (relative argv, see step 4), so its command line never
 #    contains that absolute path and the pkill silently matches nothing. Target the
 #    port instead — a worktree/test copy binds 10701+, so :10700 is production alone.
 PROD_PID="$(lsof -nP -iTCP:10700 -sTCP:LISTEN -t)"    # empty if it isn't running
@@ -282,29 +304,53 @@ fi
 while lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1; do sleep 0.3; done
 
 # 3. Copy the freshly built binary into the production folder (overwrites).
-cp "$CARGO_TARGET_DIR/release/ambient-orchestrator" "$PROD/ambient-orchestrator"
-chmod +x "$PROD/ambient-orchestrator"
+cp "$CARGO_TARGET_DIR/release/anamanti-core" "$PROD/anamanti-core"
+chmod +x "$PROD/anamanti-core"
 
 # 4. Restart from the production folder, sourcing ~/.zshenv for the provider API
-#    keys (secrets). Identity/ports/paths come from "$PROD/ambient.json" (cwd is $PROD,
-#    so its convention ambient.json is picked up). Detached, logging to the folder.
+#    keys (secrets). Identity/ports/paths come from "$PROD/anamanti.json" (cwd is $PROD,
+#    so its convention anamanti.json is picked up). Detached, logging to the folder.
 ( source ~/.zshenv 2>/dev/null; cd "$PROD"; \
-  ./ambient-orchestrator > "$PROD/orchestrator.log" 2>&1 & )
+  ./anamanti-core > "$PROD/anamanti-core.log" 2>&1 & )
 
 # 5. Verify: bound on :10700 and advertising instance_id=`Paul Family`.
-sleep 2; tail -5 "$PROD/orchestrator.log"
+sleep 2; tail -5 "$PROD/anamanti-core.log"
 ```
 
 Notes:
 - **Only production is stopped.** Step 2 kills whatever process is *listening on
-  :10700*, which is production by definition — a worktree/test orchestrator binds
+  :10700*, which is production by definition — a worktree/test Anamanti Core binds
   10701+, so it keeps running. (Do not match on the binary path: production runs as
-  the relative `./ambient-orchestrator`, so a `pkill -f "$PROD/ambient-orchestrator"`
+  the relative `./anamanti-core`, so a `pkill -f "$PROD/anamanti-core"`
   matches nothing and leaves the old copy up — the bug this runbook step avoids.)
-- The binary is machine-local; do **not** commit it or the `Ambient Orchestrator/`
+- The binary is machine-local; do **not** commit it or the `Anamanti Core/`
   folder.
 - Persistence: the process is detached but does **not** survive a reboot — running
   it under launchd is the open item in `TODO.md §4`.
+- **⚠️ One-time migration for an existing (pre-rename) production install.** The
+  Anamanti rename changed the on-disk names the binary looks for, so migrate the
+  existing prod install **once** or it will start with fresh, empty state:
+  ```bash
+  cd /Volumes/External/DeveloperSupport
+  mv "Ambient Orchestrator" "Anamanti Core"          # folder (skip if already renamed)
+  cd "Anamanti Core"
+  mv ambient.json          anamanti.json             # per-instance config
+  mv ambient_memory.sqlite anamanti_memory.sqlite    # SQLite memory (store of record)
+  mv ambient_settings.json anamanti_settings.json    # persisted settings + keys (0600)
+  mv ambient_chatlog.jsonl anamanti_chatlog.jsonl    # GraphRAG chat log
+  mv ambient_promptlog.jsonl anamanti_promptlog.jsonl 2>/dev/null || true
+  mv ambient_helix         anamanti_helix            # embedded HelixDB store
+  # also rename the sidecar files if present: anamanti_chatlog.jsonl.offset / -* etc.
+  ```
+  Then in `~/.zshenv` rename the provider/secret env vars from `AMBIENT_*` to
+  `ANAMANTI_*` (e.g. `AMBIENT_INSTANCE_ID`→`ANAMANTI_INSTANCE_ID`,
+  `AMBIENT_SPOTIFY_*`→`ANAMANTI_SPOTIFY_*`). Skipping any of these silently loses the
+  corresponding state (memory/settings) because the renamed binary creates new empty
+  files at the new default paths.
+- **Redeploy Core and Display together.** The Wyoming frame names (`anamanti-*`), the
+  mDNS TXT role (`role=core`), the config filename, env vars, and data-file names all
+  changed, so a new Core will not interoperate with an old Display build (or vice
+  versa) — rebuild and reflash both.
 
 ## Conventions
 
@@ -337,21 +383,21 @@ Notes:
 
 - IDLE: wake-word scoring only; socket dormant; photo slideshow on screen.
 - TRIGGERED: open TCP, send `audio-start`.
-- STREAMING: send PCM frames; read `transcript` events; the **orchestrator's energy
+- STREAMING: send PCM frames; read `transcript` events; the **Anamanti Core's energy
   VAD** detects end-of-speech and sends `audio-stop` to STT (device runs no VAD).
 - THINKING: LLM (with persistent memory) streams reply tokens (render live).
-- THINKING→SPEAKING: the orchestrator segments the LLM stream into sentences and
+- THINKING→SPEAKING: the Anamanti Core segments the LLM stream into sentences and
   synthesizes each with Piper as it forms (streaming TTS), coalesced into one
   device-facing audio stream; the device plays it via `cpal`/`oboe`.
 - Barge-in: wake-word scoring keeps running through THINKING/SPEAKING; a wake word
-  flushes playback immediately + sends `ambient-interrupt` (orchestrator aborts
+  flushes playback immediately + sends `anamanti-interrupt` (Anamanti Core aborts
   LLM+TTS) + starts a new turn. (AEC deferred — raise the wake-word threshold during
   SPEAKING to suppress self-triggers.)
-- Follow-up listen: after **every** reply the orchestrator sends `ambient-listen`
+- Follow-up listen: after **every** reply the Anamanti Core sends `anamanti-listen`
   (before the final `audio-stop`) carrying a `wait_secs` window (10 s after a `?` reply,
   5 s otherwise); after its TTS drains the device reopens the mic and starts a fresh turn
   with **no wake word**, and that turn's prompt is fed recent conversation history. The
-  orchestrator sizes the follow-up turn's no-speech VAD window to `wait_secs` and
+  Anamanti Core sizes the follow-up turn's no-speech VAD window to `wait_secs` and
   **sleeps on silence**; the chain continues only while the user keeps talking (optional
   `follow_up.max_chain`, default unlimited). See `plans/Plan.MD` (Follow-up listening) +
   §4 of `architecture.md`.
@@ -396,17 +442,17 @@ Implementation note: photos have **two selectable backends** (see TODO §3):
 scope `photosambient.mediaitems`) — the ideal path, but **gated behind the Google
 Photos Partner Program** (`createDevice` → 403 until accepted); and (2) **Google
 Drive** (`drive_photos.dart`; `drive.readonly`) as the interim. **Drive is
-orchestrator-owned:** the Mac runs the one-time OAuth consent itself
-(`orchestrator/src/drive_consent.rs`, a "Desktop app" client, loopback + PKCE),
-driven from the config page **Photos tab** (`/drive` on `AMBIENT_CONFIG_ADDR`).
-The orchestrator holds the Drive client id/secret + refresh token + folder ids (in
-its `0600` `ambient_settings.json`), and the device **pulls the whole bundle over
-Wyoming** (`ambient-get-drive-token`) and mints Drive access tokens on-device — so
+Anamanti Core-owned:** the Mac runs the one-time OAuth consent itself
+(`anamanti-core/src/drive_consent.rs`, a "Desktop app" client, loopback + PKCE),
+driven from the config page **Photos tab** (`/drive` on `ANAMANTI_CONFIG_ADDR`).
+The Anamanti Core holds the Drive client id/secret + refresh token + folder ids (in
+its `0600` `anamanti_settings.json`), and the device **pulls the whole bundle over
+Wyoming** (`anamanti-get-drive-token`) and mints Drive access tokens on-device — so
 the tablet APK ships **credential-free** for Drive (there is no build-time
 `GOOGLE_DRIVE_*` any more; `AppSettings.driveConfigured` is a runtime check). Set the
-Mac's Drive client via `AMBIENT_GOOGLE_DRIVE_CLIENT_ID` / `_SECRET` (optional
+Mac's Drive client via `ANAMANTI_GOOGLE_DRIVE_CLIENT_ID` / `_SECRET` (optional
 `_FOLDER_IDS`). Only the **Ambient** (TV) client is still built into the APK, via
 `--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*`. Dead
 ends: Photos Library API (no library read since 2025); Drive scopes via
 device-code/QR (rejected); the old standalone `tools/google_photo_consent.py` +
-adb-push (replaced by the orchestrator consent + Wyoming delivery).
+adb-push (replaced by the Anamanti Core consent + Wyoming delivery).
