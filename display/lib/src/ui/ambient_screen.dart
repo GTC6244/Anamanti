@@ -21,6 +21,7 @@ import 'package:ambient_display/src/engine/notification_controller.dart';
 import 'package:ambient_display/src/slideshow/photo_source.dart';
 import 'package:ambient_display/src/ui/conversation_view.dart';
 import 'package:ambient_display/src/ui/notification_banner.dart';
+import 'package:ambient_display/src/ui/recipe_view.dart';
 import 'package:ambient_display/src/ui/slideshow_view.dart';
 import 'package:ambient_display/src/ui/status_indicator.dart';
 import 'package:ambient_display/src/ui/timers_overlay.dart';
@@ -57,11 +58,16 @@ class AmbientScreen extends StatelessWidget {
           // but for as long as the reply audio is still playing, so the text stays
           // on screen until it stops being read aloud.
           final active = state.displayActive;
+          // Recipe mode: a parsed recipe is on screen (persists across turns while
+          // cooking). It takes the screen over the idle presentation but yields to an
+          // active voice turn (the conversation panel draws above it).
+          final recipeActive = state.recipeActive;
           // Away / "off" mode: nobody in front of the display and no active turn.
           // Only the big centered clock shows; everything else fades away. A turn
           // always wins (saying the wake word implies you're here), so off mode is
-          // strictly the idle-and-absent case.
-          final offMode = !state.userPresent && !active;
+          // strictly the idle-and-absent case. Recipe mode also implies engagement,
+          // so it suppresses the away face.
+          final offMode = !state.userPresent && !active && !recipeActive;
           return Stack(
             fit: StackFit.expand,
             children: [
@@ -90,14 +96,35 @@ class AmbientScreen extends StatelessWidget {
               // (only the clock shows); survives as the compact badge below. Ignores
               // pointers when hidden so it never steals taps meant for the conversation.
               AnimatedOpacity(
-                opacity: (active || offMode) ? 0 : 1,
+                opacity: (active || offMode || recipeActive) ? 0 : 1,
                 duration: const Duration(milliseconds: 300),
                 child: IgnorePointer(
-                  ignoring: active || offMode,
+                  ignoring: active || offMode || recipeActive,
                   child: TimersOverlay(
                     timers: state.timers,
                     onDismiss: assistant.dismissTimer,
                   ),
+                ),
+              ),
+
+              // Recipe mode: a full-screen 3-tab cooking view. Sits above the idle
+              // presentation but below the conversation panel, so a voice turn mid-cook
+              // ("next step", a follow-up) still overlays it. Dismissed by voice
+              // ("done cooking") or the view's own close control.
+              AnimatedOpacity(
+                opacity: recipeActive ? 1 : 0,
+                duration: const Duration(milliseconds: 250),
+                child: IgnorePointer(
+                  ignoring: !recipeActive,
+                  child: recipeActive
+                      ? RecipeView(
+                          key: ValueKey(state.recipe!.sourceUrl.isNotEmpty
+                              ? state.recipe!.sourceUrl
+                              : state.recipe!.title),
+                          recipe: state.recipe!,
+                          onClose: assistant.dismissRecipe,
+                        )
+                      : const SizedBox.shrink(),
                 ),
               ),
 
@@ -121,8 +148,12 @@ class AmbientScreen extends StatelessWidget {
                 bottom: 24,
                 child: AnimatedOpacity(
                   key: const Key('idle-clock'),
-                  opacity:
-                      (active || offMode || state.timers.isNotEmpty) ? 0 : 1,
+                  opacity: (active ||
+                          offMode ||
+                          recipeActive ||
+                          state.timers.isNotEmpty)
+                      ? 0
+                      : 1,
                   duration: const Duration(milliseconds: 300),
                   child: const _AmbientClock(),
                 ),

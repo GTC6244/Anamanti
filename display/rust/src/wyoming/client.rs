@@ -192,6 +192,11 @@ pub enum TurnUpdate {
     /// start or cancel a countdown. Handled by the engine's on-device timer manager,
     /// which owns the countdown + alarm and outlives the turn's socket.
     Timer(protocol::TimerCommand),
+    /// A device-action **recipe** command relayed from the orchestrator: show a
+    /// parsed recipe on the recipe-mode screen, or dismiss it. Handled by the UI
+    /// (the recipe screen outlives the turn's socket), so it does not change the
+    /// turn's state machine.
+    Recipe(protocol::RecipeCommand),
     /// The orchestrator asked the device to **listen for a follow-up** after its reply.
     /// The payload is `(depth, wait_secs)`: the chain depth the follow-up turn should
     /// carry, and how long to keep the mic open for input before sleeping (longer after
@@ -384,6 +389,14 @@ where
         types::TIMER => {
             if let Some(cmd) = event.timer_command() {
                 on_update(TurnUpdate::Timer(cmd));
+            }
+        }
+        // A device action (recipe show/dismiss) relayed from the orchestrator. The
+        // recipe screen is owned by the UI and outlives the turn, so just surface it
+        // and keep going.
+        types::RECIPE => {
+            if let Some(cmd) = event.recipe_command() {
+                on_update(TurnUpdate::Recipe(cmd));
             }
         }
         // Follow-up-listen request (the reply was a question). Surface it without

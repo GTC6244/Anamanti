@@ -174,6 +174,14 @@ pub mod types {
     /// device → orchestrator: acknowledge a notification by `id` (data: `id`,
     /// `result`). Reserved for delivery tracking; unused in the visual-only phase.
     pub const AMBIENT_NOTIFY_ACK: &str = "ambient-notify-ack";
+
+    /// orchestrator → device: show or dismiss the recipe-mode screen (data: `action`
+    /// = `"show"`/`"dismiss"`; for `show`, `recipe` is the structured recipe object —
+    /// `title`, `summary`, `source_url`, `image_url`, `servings`, `total_time`,
+    /// `ingredients[]`, `steps[]`). A device action driven by the `recipe_lookup`
+    /// tool; the device owns the screen state until dismissed. Byte-identical to the
+    /// device crate's `types::RECIPE`.
+    pub const RECIPE: &str = "ambient-recipe";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -331,6 +339,23 @@ impl WyomingEvent {
     /// True if this is an `ambient-timer` device-action frame.
     pub fn is_timer(&self) -> bool {
         self.event_type == types::TIMER
+    }
+
+    /// An `ambient-recipe` **show** action (orchestrator → device): render `recipe`
+    /// (a serialized [`crate::recipe::Recipe`]) on the recipe-mode screen.
+    pub fn recipe(recipe: Value) -> Self {
+        Self::with_data(types::RECIPE, json!({ "action": "show", "recipe": recipe }))
+    }
+
+    /// An `ambient-recipe` **dismiss** action (orchestrator → device): close the
+    /// recipe screen and return to the idle/ambient display.
+    pub fn recipe_dismiss() -> Self {
+        Self::with_data(types::RECIPE, json!({ "action": "dismiss" }))
+    }
+
+    /// True if this is an `ambient-recipe` device-action frame.
+    pub fn is_recipe(&self) -> bool {
+        self.event_type == types::RECIPE
     }
 
     /// An `ambient-speak` request (device → orchestrator): please synthesize `text`
@@ -639,6 +664,26 @@ mod tests {
         let back = roundtrip(&cancel_all).await;
         assert_eq!(back.data["action"], json!("cancel"));
         assert_eq!(back.data["label"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn recipe_show_and_dismiss_roundtrip() {
+        let recipe = json!({
+            "title": "Carbonara",
+            "ingredients": ["spaghetti", "eggs"],
+            "steps": ["boil", "toss"],
+        });
+        let show = WyomingEvent::recipe(recipe.clone());
+        let back = roundtrip(&show).await;
+        assert_eq!(back, show);
+        assert!(back.is_recipe());
+        assert_eq!(back.data["action"], json!("show"));
+        assert_eq!(back.data["recipe"], recipe);
+
+        let dismiss = WyomingEvent::recipe_dismiss();
+        let back = roundtrip(&dismiss).await;
+        assert_eq!(back, dismiss);
+        assert_eq!(back.data["action"], json!("dismiss"));
     }
 
     #[tokio::test]

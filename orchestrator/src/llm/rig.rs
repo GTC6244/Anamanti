@@ -42,6 +42,7 @@ use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsConfig, DirectionsProvider, LiveHomeLocation, TravelMode};
 use crate::music::{SearchKind, SpotifyCommand, SpotifyController};
+use crate::recipe::{render_confirmation, RecipeProvider};
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
 /// calls can never spin forever. Each round is one streamed completion pass.
@@ -98,6 +99,15 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              or a song/artist/album/playlist, you MUST call `spotify_control` — never say you \
              cannot play music. For \"play some <artist>\" or a mood/genre use action=play with \
              kind=artist or kind=playlist; for one named song use kind=track.",
+        );
+    }
+    if has(RECIPE_LOOKUP) {
+        parts.push(
+            "You can pull up cooking recipes on the display with the `recipe_lookup` tool. \
+             Whenever the user asks for a recipe, how to make or cook a dish, or to show a \
+             recipe for something, you MUST call `recipe_lookup` with the dish name — never \
+             recite a full recipe as prose. Use `close_recipe` when they say they're done \
+             cooking or ask to close the recipe. Relay the tool's short spoken confirmation.",
         );
     }
     if has(ShoppingListControl::NAME) {
@@ -1087,6 +1097,107 @@ impl PortableTool for ShoppingListControl {
 }
 
 // ===========================================================================
+// Recipe tool (fetch + parse a recipe, show it on the display)
+// ===========================================================================
+
+/// Tool name for showing a recipe on the display.
+pub const RECIPE_LOOKUP: &str = "recipe_lookup";
+/// Tool name for dismissing the recipe screen.
+pub const CLOSE_RECIPE: &str = "close_recipe";
+
+/// Typed arguments for [`RecipeLookup`].
+#[derive(Debug, Deserialize)]
+struct RecipeArgs {
+    /// The dish to find a recipe for (e.g. "carbonara"). Required.
+    dish: String,
+    /// A specific recipe URL to use instead of searching (optional; the model
+    /// usually only has a dish name).
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// The recipe tool: finds a source page for a dish, parses it, pushes the structured
+/// recipe to the display (a [`DeviceAction::ShowRecipe`]), and returns a short spoken
+/// confirmation. Like the timer tools it emits a device action, so it takes the
+/// per-turn [`ActionSink`] directly (rather than implementing rig's `PortableTool`,
+/// whose `call` has no action channel). The provider is injected so it's testable
+/// offline (see `crate::recipe`).
+pub struct RecipeLookup {
+    provider: Arc<dyn RecipeProvider>,
+}
+
+impl RecipeLookup {
+    pub fn new(provider: Arc<dyn RecipeProvider>) -> Self {
+        Self { provider }
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: RECIPE_LOOKUP.to_string(),
+            description: "Find a cooking recipe for a dish and show it on the display's \
+                          recipe screen (Overview / Ingredients / Steps tabs). Use whenever \
+                          the user asks for a recipe, how to make/cook a dish, or to pull up \
+                          a recipe. Returns a short spoken confirmation to relay."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dish": {
+                        "type": "string",
+                        "description": "The dish to find a recipe for, e.g. \"carbonara\" or \
+                                        \"chocolate chip cookies\"."
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "A specific recipe page URL to use instead of searching \
+                                        (optional)."
+                    }
+                },
+                "required": ["dish"]
+            }),
+        }
+    }
+
+    /// Execute the tool: fetch + parse the recipe, push it to the device, and return
+    /// a speakable confirmation. Fetch/parse failures and a missing device surface as
+    /// the tool result so the model apologizes aloud.
+    async fn invoke(&self, arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+        let args: RecipeArgs =
+            serde_json::from_value(arguments.clone()).context("parsing recipe_lookup arguments")?;
+        let sink = actions.context("no display is connected to show a recipe on right now")?;
+        let recipe = self
+            .provider
+            .lookup(&args.dish, args.url.as_deref())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        let confirmation = render_confirmation(&recipe);
+        sink.send(DeviceAction::ShowRecipe(recipe)).map_err(|_| {
+            anyhow::anyhow!("the display disconnected before the recipe could show")
+        })?;
+        Ok(confirmation)
+    }
+}
+
+fn close_recipe_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CLOSE_RECIPE.to_string(),
+        description: "Close the recipe screen on the display and return to the idle screen. \
+                      Use when the user says they're done cooking or asks to close/dismiss the \
+                      recipe."
+            .to_string(),
+        parameters: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// Execute `close_recipe`: emit a [`DeviceAction::DismissRecipe`] on the per-turn sink.
+fn close_recipe_invoke(actions: Option<&ActionSink>) -> Result<String> {
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::DismissRecipe)
+        .map_err(|_| anyhow::anyhow!("the display disconnected before the recipe could close"))?;
+    Ok("Okay, closing the recipe.".to_string())
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -1105,6 +1216,7 @@ pub struct Tools {
     directions: Option<Arc<DirectionsLookup>>,
     spotify: Option<Arc<SpotifyControl>>,
     grocery: Option<Arc<ShoppingListControl>>,
+    recipe: Option<Arc<RecipeLookup>>,
 }
 
 impl Tools {
@@ -1118,6 +1230,7 @@ impl Tools {
         directions: Option<DirectionsConfig>,
         spotify: Option<Arc<dyn SpotifyController>>,
         grocery: Option<Arc<dyn GroceryController>>,
+        recipe: Option<Arc<dyn RecipeProvider>>,
     ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
@@ -1146,6 +1259,11 @@ impl Tools {
         if let Some(g) = &grocery {
             definitions.push(g.definition());
         }
+        let recipe = recipe.map(|p| Arc::new(RecipeLookup::new(p)));
+        if let Some(r) = &recipe {
+            definitions.push(r.definition());
+            definitions.push(close_recipe_definition());
+        }
         Self {
             definitions,
             search,
@@ -1153,6 +1271,7 @@ impl Tools {
             directions,
             spotify,
             grocery,
+            recipe,
         }
     }
 
@@ -1187,6 +1306,14 @@ impl Tools {
             ShoppingListControl::NAME => match &self.grocery {
                 Some(grocery) => grocery.invoke(arguments).await,
                 None => anyhow::bail!("the shopping list tool is not enabled"),
+            },
+            RECIPE_LOOKUP => match &self.recipe {
+                Some(recipe) => recipe.invoke(arguments, actions).await,
+                None => anyhow::bail!("recipe lookup is not enabled"),
+            },
+            CLOSE_RECIPE => match &self.recipe {
+                Some(_) => close_recipe_invoke(actions),
+                None => anyhow::bail!("recipe lookup is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
@@ -1237,6 +1364,10 @@ pub fn tools_from_config(
     grocery: Option<Arc<dyn GroceryController>>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
+    // The recipe tool needs real web search to find a source page, so it rides the
+    // same Tavily key as the web-search tool (regardless of the web_search toggle).
+    // `None` when no Tavily key is configured → recipe_lookup isn't advertised.
+    let recipe = crate::recipe::from_search(provider, api_key);
     // Calendar + directions are prebuilt once on the `LlmFactory` from the JSON
     // config (read-only web .ics subscriptions / the Mapbox provider); absent → the
     // corresponding tool simply isn't advertised. The directions default origin reads
@@ -1253,7 +1384,7 @@ pub fn tools_from_config(
     // Grocery (Cadora shopping list) is likewise passed in from the live settings
     // (`CadoraConfig::controller`); `None` → the shopping_list_add tool isn't advertised.
     Some(Arc::new(Tools::new(
-        search, calendar, directions, spotify, grocery,
+        search, calendar, directions, spotify, grocery, recipe,
     )))
 }
 
@@ -1757,6 +1888,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1800,6 +1932,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1838,6 +1971,7 @@ mod tests {
             Some(directions),
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1858,7 +1992,7 @@ mod tests {
 
     #[test]
     fn directions_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -1874,6 +2008,7 @@ mod tests {
                 home_location: LiveHomeLocation::default(),
                 imperial: false,
             }),
+            None,
             None,
             None,
         );
@@ -1915,7 +2050,7 @@ mod tests {
 
     #[test]
     fn spotify_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -1929,6 +2064,7 @@ mod tests {
                 last: std::sync::Mutex::new(None),
             })),
             None,
+            None,
         );
         assert!(with
             .definitions
@@ -1938,7 +2074,7 @@ mod tests {
 
     #[test]
     fn shopping_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -1952,6 +2088,7 @@ mod tests {
             Some(Arc::new(StaticGrocery {
                 last: std::sync::Mutex::new(None),
             })),
+            None,
         );
         assert!(with
             .definitions
@@ -2038,6 +2175,7 @@ mod tests {
             None,
             Some(controller.clone()),
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2078,6 +2216,7 @@ mod tests {
             None,
             None,
             Some(controller.clone()),
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2161,7 +2300,7 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None, None, None, None);
+        let tools = Tools::new(None, None, None, None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -2178,7 +2317,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
-        let tools = Some(Arc::new(Tools::new(None, None, None, None, None)));
+        let tools = Some(Arc::new(Tools::new(None, None, None, None, None, None)));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "set a 5 minute pasta timer").with_actions(tx))

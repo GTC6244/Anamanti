@@ -325,7 +325,15 @@ predictable memory use and no GC pauses under the 1 GB limit.
   reusing the barge-in restart machinery. The follow-up turn keeps the raised in-turn
   wake-word threshold and stamps its chain depth + `wait_secs` on its `audio-start`; the
   orchestrator feeds recent conversation history into that turn's prompt and sizes its
-  no-speech window to `wait_secs`. If the user says nothing in that window the
+  no-speech window to `wait_secs`. The no-speech window only counts down while `speech_started`
+  is false; because the drain gate frees when the *software* playback ring empties (not the
+  OS/hardware output buffer), the reopened mic can still catch a brief residual TTS tail or
+  room echo, so the orchestrator **debounces the speech onset** — `speech_started` latches
+  only after `MIN_SPEECH_ONSET` (250 ms) of *consecutive* voiced audio (`voiced_onset_step`),
+  and any non-voiced chunk resets the run. This stops a lone transient from collapsing the
+  full `wait_secs` window into the short `end_silence` finalize and cutting the user off
+  (observed in production as a follow-up that closed after ~1 s with an empty transcript).
+  If the user says nothing in that window the
   orchestrator ends the turn (empty transcript + `audio-stop`) and the device **sleeps**;
   the chain continues only while the user keeps responding (bounded by the optional
   `follow_up.max_chain`, default unlimited). See `Plan.MD` (Follow-up listening).

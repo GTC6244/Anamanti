@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -926112597;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1276122572;
 
 // Section: executor
 
@@ -642,6 +642,37 @@ fn wire__crate__api__settings__name_speaker_impl(
                     })(),
                 )
             }
+        },
+    )
+}
+fn wire__crate__api__engine__note_user_activity_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "note_user_activity",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::note_user_activity();
+                })?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -1307,6 +1338,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_timerLabel = <String>::sse_decode(deserializer);
         let mut var_timerRemainingSecs = <u32>::sse_decode(deserializer);
         let mut var_present = <bool>::sse_decode(deserializer);
+        let mut var_recipeJson = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
             message: var_message,
@@ -1322,6 +1354,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             timer_label: var_timerLabel,
             timer_remaining_secs: var_timerRemainingSecs,
             present: var_present,
+            recipe_json: var_recipeJson,
         };
     }
 }
@@ -1348,7 +1381,9 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             14 => crate::api::engine::WakeWordEventKind::TimerStarted,
             15 => crate::api::engine::WakeWordEventKind::TimerFinished,
             16 => crate::api::engine::WakeWordEventKind::TimerCancelled,
-            17 => crate::api::engine::WakeWordEventKind::Presence,
+            17 => crate::api::engine::WakeWordEventKind::ShowRecipe,
+            18 => crate::api::engine::WakeWordEventKind::DismissRecipe,
+            19 => crate::api::engine::WakeWordEventKind::Presence,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -1383,17 +1418,17 @@ fn pde_ffi_dispatcher_primary_impl(
         14 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
         15 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
         16 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        17 => {
+        18 => {
             wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        18 => {
+        19 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        19 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
-        20 => {
+        20 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        21 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        21 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        22 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -1416,6 +1451,7 @@ fn pde_ffi_dispatcher_sync_impl(
         9 => {
             wire__crate__api__engine__is_wake_word_engine_running_impl(ptr, rust_vec_len, data_len)
         }
+        17 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1718,6 +1754,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.timer_label.into_into_dart().into_dart(),
             self.timer_remaining_secs.into_into_dart().into_dart(),
             self.present.into_into_dart().into_dart(),
+            self.recipe_json.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1754,7 +1791,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::TimerStarted => 14.into_dart(),
             Self::TimerFinished => 15.into_dart(),
             Self::TimerCancelled => 16.into_dart(),
-            Self::Presence => 17.into_dart(),
+            Self::ShowRecipe => 17.into_dart(),
+            Self::DismissRecipe => 18.into_dart(),
+            Self::Presence => 19.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -2123,6 +2162,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <String>::sse_encode(self.timer_label, serializer);
         <u32>::sse_encode(self.timer_remaining_secs, serializer);
         <bool>::sse_encode(self.present, serializer);
+        <String>::sse_encode(self.recipe_json, serializer);
     }
 }
 
@@ -2148,7 +2188,9 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::TimerStarted => 14,
                 crate::api::engine::WakeWordEventKind::TimerFinished => 15,
                 crate::api::engine::WakeWordEventKind::TimerCancelled => 16,
-                crate::api::engine::WakeWordEventKind::Presence => 17,
+                crate::api::engine::WakeWordEventKind::ShowRecipe => 17,
+                crate::api::engine::WakeWordEventKind::DismissRecipe => 18,
+                crate::api::engine::WakeWordEventKind::Presence => 19,
                 _ => {
                     unimplemented!("");
                 }

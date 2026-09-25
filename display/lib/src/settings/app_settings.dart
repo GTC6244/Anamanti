@@ -42,7 +42,7 @@ class AppSettings {
     this.endpointCueEnabled = true,
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
-    this.dimDelaySecs = 20,
+    this.dimDelaySecs = 300,
     this.photoSource = PhotoSourceKind.local,
     this.ambientRefreshToken = '',
     this.ambientDeviceId = '',
@@ -103,8 +103,8 @@ class AppSettings {
   /// quiet before it dims to the calm "away" clock face. Maps to the camera
   /// proximity detector's release window (`WakeWordConfig.proximityReleaseSecs`):
   /// once no motion has been seen for this long, the engine reports the room empty,
-  /// which dims the backlight and shows the large centered clock. The default (20 s)
-  /// matches the engine's built-in release window.
+  /// which dims the backlight and shows the large centered clock. Defaults to 5
+  /// minutes; the settings screen offers a fixed set of presets from 30 s to 1 hour.
   final int dimDelaySecs;
 
   /// Idle photo source.
@@ -271,8 +271,8 @@ class AppSettings {
       dimDelaySecs: asInt(
         json['dimDelaySecs'],
         defaults.dimDelaySecs,
-        min: 5,
-        max: 600,
+        min: 30,
+        max: 3600,
       ),
       photoSource: PhotoSourceKind.values.firstWhere(
         (k) => k.name == json['photoSource'],

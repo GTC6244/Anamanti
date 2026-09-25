@@ -4,7 +4,9 @@ Build guidance for AI coding agents (and humans) working in this repository.
 Read this together with [`architecture.md`](./plans/architecture.md) (the design) and
 [`Plan.MD`](./plans/Plan.MD) (phases, confirmed decisions, open questions).
 Feature-specific plans branch off these — e.g.
-[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the orchestrator).
+[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the orchestrator) and
+[`RecipePlan.md`](./plans/RecipePlan.md) (recipe mode: the `recipe_lookup` tool +
+the `ambient-recipe` frame + the display's 3-tab recipe screen).
 
 ---
 

@@ -28,7 +28,8 @@ import 'package:ambient_display/src/slideshow/photo_source.dart';
 import 'package:ambient_display/src/ui/ambient_screen.dart';
 import 'package:ambient_display/src/ui/settings_screen.dart';
 import 'package:ambient_display/src/ui/slideshow_view.dart';
-import 'package:ambient_display/src/rust/api/engine.dart' show NotifyConfig;
+import 'package:ambient_display/src/rust/api/engine.dart'
+    show NotifyConfig, noteUserActivity;
 import 'package:ambient_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -247,6 +248,9 @@ class _AmbientHomeState extends State<AmbientHome> {
     _assistant?.dispose();
     final assistant = AssistantController(
       config: config,
+      // A voice turn counts as activity: reset the screen-dim countdown (and
+      // brighten a dimmed screen) so a hands-free conversation keeps the display awake.
+      onUserActivity: noteUserActivity,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
       // flip to a "processing" indicator the instant the user stops talking.
       endpointCueEnabled: _settings.endpointCueEnabled,
@@ -357,19 +361,29 @@ class _AmbientHomeState extends State<AmbientHome> {
   @override
   Widget build(BuildContext context) {
     final assistant = _assistant;
+    final Widget content;
     if (assistant == null) {
       // Before the engine config resolves, still show the ambient slideshow so the
       // screen is never blank on startup.
-      return Scaffold(
+      content = Scaffold(
         backgroundColor: Colors.black,
         body: SlideshowView(controller: _slideshow),
       );
+    } else {
+      content = AmbientScreen(
+        assistant: assistant,
+        slideshow: _slideshow,
+        notifications: _notifications,
+        onOpenSettings: _openSettings,
+      );
     }
-    return AmbientScreen(
-      assistant: assistant,
-      slideshow: _slideshow,
-      notifications: _notifications,
-      onOpenSettings: _openSettings,
+    // A screen touch counts as user activity: reset the dim countdown (and brighten
+    // a dimmed screen). Translucent so it observes every touch without stealing it
+    // from the widgets below (settings control, timer chips, notification banner).
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) => noteUserActivity(),
+      child: content,
     );
   }
 }

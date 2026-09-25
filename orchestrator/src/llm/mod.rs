@@ -40,6 +40,12 @@ pub enum DeviceAction {
     },
     /// Cancel timers matching `label`, or *all* timers when `label` is `None`.
     CancelTimer { label: Option<String> },
+    /// Show a parsed recipe on the display's "recipe mode" screen (Overview /
+    /// Ingredients / Steps tabs). The device owns the resulting screen state until
+    /// dismissed, so this is fire-and-forget like the timer actions.
+    ShowRecipe(crate::recipe::Recipe),
+    /// Dismiss the recipe screen and return to the idle/ambient display.
+    DismissRecipe,
 }
 
 /// The per-turn channel a tool pushes [`DeviceAction`]s onto. Unbounded so a tool's
