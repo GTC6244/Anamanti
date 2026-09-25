@@ -605,12 +605,15 @@ class AssistantController extends ChangeNotifier {
       case WakeWordEventKind.showRecipe:
         // The orchestrator pushed a parsed recipe; open recipe mode on the Overview
         // tab. A payload that fails to parse is ignored (recipe stays as it was)
-        // rather than crashing.
+        // rather than crashing. Loading a full-screen widget unloads the previous one
+        // (here: the weather screen) so they never stack — the ambient clock chip
+        // (weatherCurrent) is not a full-screen widget and stays.
         final recipe = RecipeData.tryParse(e.recipeJson);
         if (recipe != null) {
+          _weatherAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
-          _emit(_state.copyWith(recipe: recipe, recipeTab: 0));
+          _emit(_state.copyWith(recipe: recipe, recipeTab: 0, clearWeather: true));
           _pushRecipeContext();
         }
       case WakeWordEventKind.dismissRecipe:
@@ -621,7 +624,18 @@ class AssistantController extends ChangeNotifier {
         // parse is ignored rather than crashing.
         final weather = WeatherData.tryParse(e.weatherJson);
         if (weather != null) {
-          _emit(_state.copyWith(weather: weather, weatherCurrent: weather));
+          // Loading a full-screen widget unloads the previous one (here: the recipe
+          // screen) so they never stack.
+          _recipeAtTop = true;
+          _recipeAtBottom = false;
+          _emit(
+            _state.copyWith(
+              weather: weather,
+              weatherCurrent: weather,
+              clearRecipe: true,
+              recipeTab: 0,
+            ),
+          );
           _scheduleWeatherAutoClose();
           _pushWeatherContext();
         }
