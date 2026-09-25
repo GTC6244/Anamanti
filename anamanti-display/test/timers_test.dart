@@ -54,6 +54,7 @@ WakeWordEvent _ev(
       timerRemainingSecs: timerRemainingSecs,
       present: false,
       recipeJson: '',
+      recipeAction: '',
     );
 
 void main() {

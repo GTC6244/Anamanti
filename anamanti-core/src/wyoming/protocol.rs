@@ -353,6 +353,26 @@ impl WyomingEvent {
         Self::with_data(types::RECIPE, json!({ "action": "dismiss" }))
     }
 
+    /// An `anamanti-recipe` **navigate** action (orchestrator → device): switch the
+    /// recipe screen to the `target` tab (`"overview"` / `"ingredients"` / `"steps"`)
+    /// by voice, mirroring a touch of the bottom tab bar.
+    pub fn recipe_navigate(target: &str) -> Self {
+        Self::with_data(
+            types::RECIPE,
+            json!({ "action": "navigate", "target": target }),
+        )
+    }
+
+    /// An `anamanti-recipe` **scroll** action (orchestrator → device): scroll the
+    /// active recipe pane in `direction` (`"up"` / `"down"` a page, or `"top"` /
+    /// `"bottom"`) by voice.
+    pub fn recipe_scroll(direction: &str) -> Self {
+        Self::with_data(
+            types::RECIPE,
+            json!({ "action": "scroll", "direction": direction }),
+        )
+    }
+
     /// True if this is an `anamanti-recipe` device-action frame.
     pub fn is_recipe(&self) -> bool {
         self.event_type == types::RECIPE
@@ -591,6 +611,75 @@ pub fn followup_wait_secs(data: &Value) -> u32 {
         .unwrap_or(0) as u32
 }
 
+/// What the display is currently showing, as the device stamps it in the `screen`
+/// block of each `audio-start`. It lets the model know what is on screen so it can
+/// **drive it by voice** with the matching tool. This is a **general, extensible**
+/// concept: each device screen that wants voice control reports its own context here,
+/// discriminated by the `screen.kind` string on the wire. Today only the recipe screen
+/// is implemented; music / weather / photo screens would add their own variants (and a
+/// device-side setter + a Core-side prompt line) without touching the transport.
+///
+/// See `plans/architecture.md` §4 ("Display context") and `plans/RecipePlan.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayContext {
+    /// The guided-recipe screen is up (`kind: "recipe"`).
+    Recipe(RecipeScreen),
+}
+
+/// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
+/// model which tab is showing and whether the pane is scrolled to the top/bottom, so it
+/// can drive the screen with `recipe_control` (switch tab / scroll) or `close_recipe`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecipeScreen {
+    pub title: String,
+    /// Active tab: `"overview"` / `"ingredients"` / `"steps"`.
+    pub tab: String,
+    pub at_top: bool,
+    pub at_bottom: bool,
+    pub ingredient_count: u32,
+    pub step_count: u32,
+}
+
+/// Pull the display context out of an `audio-start` data block's `screen` object, or
+/// `None` when the display reports nothing (an idle screen, or a device that doesn't
+/// stamp context). Dispatches on `screen.kind`; an unknown kind (e.g. a newer device
+/// reporting a screen this Core doesn't understand yet) yields `None`.
+pub fn display_context(data: &Value) -> Option<DisplayContext> {
+    let screen = data.as_object()?.get("screen")?.as_object()?;
+    match screen.get("kind").and_then(Value::as_str)? {
+        "recipe" => {
+            parse_recipe_screen(screen.get("recipe")?.as_object()?).map(DisplayContext::Recipe)
+        }
+        _ => None,
+    }
+}
+
+/// Parse the `recipe` sub-object of a `screen` block into a [`RecipeScreen`].
+fn parse_recipe_screen(recipe: &Map<String, Value>) -> Option<RecipeScreen> {
+    let s = |k: &str| {
+        recipe
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let b = |k: &str, dflt: bool| recipe.get(k).and_then(Value::as_bool).unwrap_or(dflt);
+    let n = |k: &str| recipe.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let tab = recipe
+        .get("tab")
+        .and_then(Value::as_str)
+        .unwrap_or("overview")
+        .to_string();
+    Some(RecipeScreen {
+        title: s("title"),
+        tab,
+        at_top: b("at_top", true),
+        at_bottom: b("at_bottom", false),
+        ingredient_count: n("ingredient_count"),
+        step_count: n("step_count"),
+    })
+}
+
 /// Pull the `(rate, width, channels)` PCM format out of an `audio-*` data block.
 pub fn audio_format(data: &Value) -> Option<AudioFormat> {
     let obj: &Map<String, Value> = data.as_object()?;
@@ -684,6 +773,60 @@ mod tests {
         let back = roundtrip(&dismiss).await;
         assert_eq!(back, dismiss);
         assert_eq!(back.data["action"], json!("dismiss"));
+    }
+
+    #[tokio::test]
+    async fn recipe_navigate_and_scroll_roundtrip() {
+        let nav = WyomingEvent::recipe_navigate("ingredients");
+        let back = roundtrip(&nav).await;
+        assert_eq!(back, nav);
+        assert!(back.is_recipe());
+        assert_eq!(back.data["action"], json!("navigate"));
+        assert_eq!(back.data["target"], json!("ingredients"));
+
+        let scroll = WyomingEvent::recipe_scroll("down");
+        let back = roundtrip(&scroll).await;
+        assert_eq!(back, scroll);
+        assert_eq!(back.data["action"], json!("scroll"));
+        assert_eq!(back.data["direction"], json!("down"));
+    }
+
+    #[test]
+    fn display_context_reads_audio_start_screen_block_only() {
+        // A plain audio-start (no `screen` block) → no display context.
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        assert_eq!(display_context(&plain.data), None);
+
+        // A device with the recipe screen up stamps the `screen` block.
+        let marked = json!({
+            "rate": 16_000, "width": 2, "channels": 1, "timestamp": 0,
+            "screen": {
+                "kind": "recipe",
+                "recipe": {
+                    "title": "Carbonara",
+                    "tab": "steps",
+                    "at_top": false,
+                    "at_bottom": true,
+                    "ingredient_count": 6,
+                    "step_count": 4,
+                },
+            },
+        });
+        assert_eq!(
+            display_context(&marked),
+            Some(DisplayContext::Recipe(RecipeScreen {
+                title: "Carbonara".to_string(),
+                tab: "steps".to_string(),
+                at_top: false,
+                at_bottom: true,
+                ingredient_count: 6,
+                step_count: 4,
+            }))
+        );
+
+        // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
+        let other = json!({ "screen": { "kind": "weather" } });
+        assert_eq!(display_context(&other), None);
     }
 
     #[tokio::test]

@@ -196,6 +196,10 @@ pub enum RecipeCommand {
     Show(Value),
     /// Dismiss the recipe screen and return to the idle/ambient display.
     Dismiss,
+    /// Switch to a tab by voice: `"overview"` / `"ingredients"` / `"steps"`.
+    Navigate(String),
+    /// Scroll the active pane by voice: `"up"` / `"down"` (a page) or `"top"` / `"bottom"`.
+    Scroll(String),
 }
 
 /// A decoded Wyoming event: a `type` tag, an optional structured `data` object,
@@ -473,9 +477,28 @@ impl WyomingEvent {
         Self::with_data(types::RECIPE, json!({ "action": "dismiss" }))
     }
 
+    /// An `anamanti-recipe` **navigate** action (used by tests + the mock server; the
+    /// orchestrator emits the wire form directly). Switches to the `target` tab.
+    pub fn recipe_navigate(target: &str) -> Self {
+        Self::with_data(
+            types::RECIPE,
+            json!({ "action": "navigate", "target": target }),
+        )
+    }
+
+    /// An `anamanti-recipe` **scroll** action (used by tests + the mock server).
+    /// Scrolls the active pane in `direction`.
+    pub fn recipe_scroll(direction: &str) -> Self {
+        Self::with_data(
+            types::RECIPE,
+            json!({ "action": "scroll", "direction": direction }),
+        )
+    }
+
     /// Decode an `anamanti-recipe` frame into a [`RecipeCommand`], or `None` if this is
-    /// not a recipe frame or its `action` is unrecognized. A `show` with no `recipe`
-    /// object is rejected (returns `None`).
+    /// not a recipe frame or its `action`/params are unrecognized. A `show` with no
+    /// `recipe` object, a `navigate` with no `target`, or a `scroll` with no
+    /// `direction` are all rejected (return `None`).
     pub fn recipe_command(&self) -> Option<RecipeCommand> {
         if self.event_type != types::RECIPE {
             return None;
@@ -488,6 +511,16 @@ impl WyomingEvent {
                 .cloned()
                 .map(RecipeCommand::Show),
             "dismiss" => Some(RecipeCommand::Dismiss),
+            "navigate" => self
+                .data
+                .get("target")
+                .and_then(Value::as_str)
+                .map(|t| RecipeCommand::Navigate(t.to_string())),
+            "scroll" => self
+                .data
+                .get("direction")
+                .and_then(Value::as_str)
+                .map(|d| RecipeCommand::Scroll(d.to_string())),
             _ => None,
         }
     }
@@ -691,6 +724,26 @@ mod tests {
         assert_eq!(WyomingEvent::interrupt().recipe_command(), None);
         let bad = WyomingEvent::with_data(types::RECIPE, json!({ "action": "show" }));
         assert_eq!(bad.recipe_command(), None);
+    }
+
+    #[tokio::test]
+    async fn recipe_navigate_and_scroll_roundtrip_and_decode() {
+        let nav = roundtrip(&WyomingEvent::recipe_navigate("ingredients")).await;
+        assert_eq!(
+            nav.recipe_command(),
+            Some(RecipeCommand::Navigate("ingredients".to_string()))
+        );
+        let scroll = roundtrip(&WyomingEvent::recipe_scroll("down")).await;
+        assert_eq!(
+            scroll.recipe_command(),
+            Some(RecipeCommand::Scroll("down".to_string()))
+        );
+
+        // Missing params are rejected.
+        let bad_nav = WyomingEvent::with_data(types::RECIPE, json!({ "action": "navigate" }));
+        assert_eq!(bad_nav.recipe_command(), None);
+        let bad_scroll = WyomingEvent::with_data(types::RECIPE, json!({ "action": "scroll" }));
+        assert_eq!(bad_scroll.recipe_command(), None);
     }
 
     #[tokio::test]

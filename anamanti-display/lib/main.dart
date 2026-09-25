@@ -29,7 +29,7 @@ import 'package:anamanti_display/src/ui/ambient_screen.dart';
 import 'package:anamanti_display/src/ui/settings_screen.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart'
-    show NotifyConfig, noteUserActivity;
+    show NotifyConfig, noteUserActivity, setRecipeContext;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -251,6 +251,9 @@ class _AmbientHomeState extends State<AmbientHome> {
       // A voice turn counts as activity: reset the screen-dim countdown (and
       // brighten a dimmed screen) so a hands-free conversation keeps the display awake.
       onUserActivity: noteUserActivity,
+      // Tell the orchestrator what the recipe screen is showing (tab + scroll) so it
+      // can drive it by voice — switch tabs, scroll, close.
+      setRecipeContext: setRecipeContext,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
       // flip to a "processing" indicator the instant the user stops talking.
       endpointCueEnabled: _settings.endpointCueEnabled,

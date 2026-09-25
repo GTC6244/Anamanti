@@ -11,10 +11,40 @@ import 'package:flutter/material.dart';
 import 'package:anamanti_display/src/engine/recipe_data.dart';
 
 class RecipeView extends StatefulWidget {
-  const RecipeView({super.key, required this.recipe, required this.onClose});
+  const RecipeView({
+    super.key,
+    required this.recipe,
+    required this.onClose,
+    this.tab = 0,
+    this.onTabSelected,
+    this.scrollSeq = 0,
+    this.scrollDir = '',
+    this.onScrollPositionChanged,
+  });
 
   final RecipeData recipe;
   final VoidCallback onClose;
+
+  /// The active tab: 0 = Overview, 1 = Ingredients, 2 = Steps. Driven externally (by
+  /// voice via the controller); a touch of the bottom bar reports through
+  /// [onTabSelected] and comes back as a new [tab].
+  final int tab;
+
+  /// Called when the user taps a bottom-bar tab, so the controller can update its
+  /// state (and push the new tab to the orchestrator as screen context).
+  final ValueChanged<int>? onTabSelected;
+
+  /// Bumped on each voice scroll command (paired with [scrollDir]); the view scrolls
+  /// the active pane whenever it changes. 0 = no command yet.
+  final int scrollSeq;
+
+  /// Direction of the latest voice scroll command: `'up'` / `'down'` / `'top'` /
+  /// `'bottom'`.
+  final String scrollDir;
+
+  /// Reports the active pane's scroll position (at top / at bottom) so the controller
+  /// can tell the orchestrator whether a scroll command would do anything.
+  final void Function(bool atTop, bool atBottom)? onScrollPositionChanged;
 
   @override
   State<RecipeView> createState() => _RecipeViewState();
@@ -22,18 +52,104 @@ class RecipeView extends StatefulWidget {
 
 class _RecipeViewState extends State<RecipeView> {
   int _tab = 0;
+  late final List<ScrollController> _controllers;
 
   static const _bg = Color(0xFF14120E);
   static const _accent = Color(0xFFE8A33D);
 
   @override
+  void initState() {
+    super.initState();
+    _tab = widget.tab;
+    _controllers = List.generate(3, (_) => ScrollController());
+    for (var i = 0; i < 3; i++) {
+      final idx = i;
+      _controllers[idx].addListener(() {
+        if (idx == _tab) _reportPosition();
+      });
+    }
+    // Report the initial pane position once it has been laid out (e.g. a short
+    // Overview that fits fully → at top *and* bottom).
+    WidgetsBinding.instance.addPostFrameCallback((_) => _reportPosition());
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(RecipeView old) {
     super.didUpdateWidget(old);
     // A newly pushed recipe (different dish) resets to the Overview tab.
-    if (old.recipe.title != widget.recipe.title ||
-        old.recipe.sourceUrl != widget.recipe.sourceUrl) {
+    final newDish =
+        old.recipe.title != widget.recipe.title ||
+        old.recipe.sourceUrl != widget.recipe.sourceUrl;
+    if (newDish) {
       _tab = 0;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _reportPosition());
+    } else if (widget.tab != old.tab && widget.tab != _tab) {
+      // A voice/controller-driven tab switch.
+      _tab = widget.tab;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _reportPosition());
     }
+    // A new voice scroll command (the counter changed).
+    if (widget.scrollSeq != old.scrollSeq && widget.scrollSeq > 0) {
+      _applyScroll(widget.scrollDir);
+    }
+  }
+
+  /// Scroll the active pane in response to a voice command. A page is ~85% of the
+  /// viewport so a little context carries over; `top`/`bottom` jump to the ends.
+  void _applyScroll(String dir) {
+    final c = _controllers[_tab];
+    if (!c.hasClients) return;
+    final pos = c.position;
+    final page = pos.viewportDimension * 0.85;
+    final double target;
+    switch (dir) {
+      case 'up':
+        target = pos.pixels - page;
+      case 'down':
+        target = pos.pixels + page;
+      case 'top':
+        target = pos.minScrollExtent;
+      case 'bottom':
+        target = pos.maxScrollExtent;
+      default:
+        return;
+    }
+    c.animateTo(
+      target.clamp(pos.minScrollExtent, pos.maxScrollExtent),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  /// Report the active pane's top/bottom position to the controller.
+  void _reportPosition() {
+    final cb = widget.onScrollPositionChanged;
+    if (cb == null || !mounted) return;
+    final c = _controllers[_tab];
+    if (!c.hasClients) {
+      cb(true, false);
+      return;
+    }
+    final pos = c.position;
+    final atTop = pos.pixels <= pos.minScrollExtent + 1.0;
+    final atBottom = pos.pixels >= pos.maxScrollExtent - 1.0;
+    cb(atTop, atBottom);
+  }
+
+  void _selectTab(int i) {
+    if (i != _tab) {
+      setState(() => _tab = i);
+      WidgetsBinding.instance.addPostFrameCallback((_) => _reportPosition());
+    }
+    widget.onTabSelected?.call(i);
   }
 
   @override
@@ -50,13 +166,18 @@ class _RecipeViewState extends State<RecipeView> {
                 index: _tab,
                 sizing: StackFit.expand,
                 children: [
-                  _OverviewTab(recipe: r, accent: _accent),
+                  _OverviewTab(
+                    recipe: r,
+                    accent: _accent,
+                    controller: _controllers[0],
+                  ),
                   _ListTab(
                     key: const Key('recipe-ingredients'),
                     items: r.ingredients,
                     accent: _accent,
                     numbered: false,
                     emptyLabel: 'No ingredients listed.',
+                    controller: _controllers[1],
                   ),
                   _ListTab(
                     key: const Key('recipe-steps'),
@@ -64,6 +185,7 @@ class _RecipeViewState extends State<RecipeView> {
                     accent: _accent,
                     numbered: true,
                     emptyLabel: 'No steps listed.',
+                    controller: _controllers[2],
                   ),
                 ],
               ),
@@ -150,7 +272,7 @@ class _RecipeViewState extends State<RecipeView> {
           return Expanded(
             child: InkWell(
               key: Key('recipe-tab-$i'),
-              onTap: () => setState(() => _tab = i),
+              onTap: () => _selectTab(i),
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 child: Column(
@@ -188,15 +310,21 @@ class _RecipeViewState extends State<RecipeView> {
 }
 
 class _OverviewTab extends StatelessWidget {
-  const _OverviewTab({required this.recipe, required this.accent});
+  const _OverviewTab({
+    required this.recipe,
+    required this.accent,
+    this.controller,
+  });
 
   final RecipeData recipe;
   final Color accent;
+  final ScrollController? controller;
 
   @override
   Widget build(BuildContext context) {
     final r = recipe;
     return ListView(
+      controller: controller,
       padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
       children: [
         if (r.imageUrl.isNotEmpty)
@@ -288,12 +416,14 @@ class _ListTab extends StatelessWidget {
     required this.accent,
     required this.numbered,
     required this.emptyLabel,
+    this.controller,
   });
 
   final List<String> items;
   final Color accent;
   final bool numbered;
   final String emptyLabel;
+  final ScrollController? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -309,6 +439,7 @@ class _ListTab extends StatelessWidget {
       );
     }
     return ListView.separated(
+      controller: controller,
       padding: const EdgeInsets.fromLTRB(28, 12, 28, 24),
       itemCount: items.length,
       separatorBuilder: (_, _) => const SizedBox(height: 14),
