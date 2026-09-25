@@ -334,7 +334,10 @@ pub async fn list_folders(access_token: &str, max: usize) -> Result<Vec<DriveFol
     loop {
         let mut params: Vec<(&str, String)> = vec![
             ("q", q.to_string()),
-            ("fields", "nextPageToken,files(id,name,shared,ownedByMe)".to_string()),
+            (
+                "fields",
+                "nextPageToken,files(id,name,shared,ownedByMe)".to_string(),
+            ),
             ("pageSize", "100".to_string()),
             ("orderBy", "name".to_string()),
             ("corpora", "user".to_string()),
@@ -363,7 +366,8 @@ pub async fn list_folders(access_token: &str, max: usize) -> Result<Vec<DriveFol
             for f in arr {
                 let Some(id) = f["id"].as_str() else { continue };
                 let name = f["name"].as_str().unwrap_or(id);
-                let shared = f["ownedByMe"].as_bool() == Some(false) || f["shared"].as_bool() == Some(true);
+                let shared =
+                    f["ownedByMe"].as_bool() == Some(false) || f["shared"].as_bool() == Some(true);
                 folders.push(DriveFolderInfo {
                     id: id.to_string(),
                     name: name.to_string(),

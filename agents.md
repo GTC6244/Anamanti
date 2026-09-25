@@ -24,9 +24,12 @@ Read this together with [`architecture.md`](./plans/architecture.md) (the design
 > `ambient-librespot`, `ambient-snapclient`, launchd `com.ambient.*`) — these are
 > deployment identifiers, not Wyoming frames.
 Feature-specific plans branch off these — e.g.
-[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the Anamanti Core) and
+[`MusicPlan.md`](./plans/MusicPlan.md) (Spotify playback via the Anamanti Core),
 [`RecipePlan.md`](./plans/RecipePlan.md) (recipe mode: the `recipe_lookup` tool +
-the `anamanti-recipe` frame + the display's 3-tab recipe screen).
+the `anamanti-recipe` frame + the display's 3-tab recipe screen), and
+[`WeatherPlan.md`](./plans/WeatherPlan.md) (weather: the `weather_lookup` tool +
+the `anamanti-weather` frame + the display's full-screen forecast and the ambient
+icon/temperature beside the clock).
 
 ---
 

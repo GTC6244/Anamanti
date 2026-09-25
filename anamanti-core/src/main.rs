@@ -26,6 +26,7 @@ use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
 use anamanti_core::notify::NotificationService;
 use anamanti_core::orchestrator::{self, Pipeline, TcpConnector};
 use anamanti_core::server;
+use anamanti_core::weather::WeatherService;
 use anamanti_core::webconfig::{self, DebugSources};
 
 /// Worker-thread stack size. The embedded HelixDB engine builds deep async state
@@ -185,6 +186,27 @@ async fn run() -> Result<()> {
     // config page (whose "Notify" tab can push a test notification).
     let notify = Arc::new(NotificationService::new());
 
+    // Ambient weather push (keyless Open-Meteo): the registry of persistent weather
+    // channels the device dials, plus a periodic task that fetches current conditions
+    // for the household location and fans them out so the icon + temperature beside the
+    // idle clock stay fresh. Dormant (no task) when weather is disabled in the config.
+    let weather_svc = Arc::new(WeatherService::new());
+    if let Some(provider) = anamanti_core::weather::from_config(config.weather.enabled) {
+        let imperial =
+            anamanti_core::directions::units_are_imperial(config.weather_units.as_deref());
+        anamanti_core::weather::service::spawn_periodic(
+            weather_svc.clone(),
+            provider,
+            pipeline.settings().home_location(),
+            imperial,
+            config.weather.refresh_interval(),
+        );
+        log::info!(
+            "weather push: every {}s (imperial={imperial})",
+            config.weather.refresh_interval().as_secs()
+        );
+    }
+
     if let Some(config_addr) = config.config_addr {
         let settings = pipeline.settings().clone();
         let catalog = catalog.clone();
@@ -265,7 +287,7 @@ async fn run() -> Result<()> {
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     let outcome = tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker, notify) => {
+        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker, notify, weather_svc) => {
             res.context("device-facing server stopped")
         }
         _ = tokio::signal::ctrl_c() => {
@@ -359,10 +381,7 @@ async fn ensure_ollama_model(config: &mut Config) {
 async fn build_graphrag_recall(
     config: &Config,
     chatlog: &Arc<ChatLog>,
-) -> Result<(
-    Arc<dyn anamanti_core::memory::Recall>,
-    Arc<dyn GraphView>,
-)> {
+) -> Result<(Arc<dyn anamanti_core::memory::Recall>, Arc<dyn GraphView>)> {
     use anamanti_core::memory::embed::{Embedder, OpenAiEmbedder};
     use anamanti_core::memory::entity::{
         AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor,

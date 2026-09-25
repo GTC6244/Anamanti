@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/model_assets.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
+import 'package:anamanti_display/src/engine/weather_channel_controller.dart';
 import 'package:anamanti_display/src/engine/screen_brightness.dart';
 import 'package:anamanti_display/src/engine/wakeword_config.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
@@ -29,7 +30,7 @@ import 'package:anamanti_display/src/ui/ambient_screen.dart';
 import 'package:anamanti_display/src/ui/settings_screen.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart'
-    show NotifyConfig, noteUserActivity;
+    show NotifyConfig, WeatherConfig, noteUserActivity;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -85,6 +86,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// Proactive-notification channel (Approach A). Rebuilt alongside the assistant so
   /// it re-pins to the selected orchestrator when that changes.
   NotificationController? _notifications;
+  WeatherChannelController? _weather;
 
   /// Live access tokens for each Google backend (minted from the persisted refresh
   /// tokens on boot / after a re-link). Null when unlinked/offline → local gradients.
@@ -292,9 +294,25 @@ class _AmbientHomeState extends State<AmbientHome> {
       ),
     )..start();
 
+    // Ambient weather channel: a persistent, device-dialed connection to the pinned
+    // orchestrator that receives periodic current-conditions pushes (independent of
+    // the voice engine). Each push refreshes the small icon + temperature beside the
+    // idle clock via the assistant's ambient weather state. Re-pinned here on an
+    // orchestrator change, like the notify channel.
+    _weather?.dispose();
+    final weather = WeatherChannelController(
+      config: WeatherConfig(
+        orchestratorKey: _settings.orchestratorKey,
+        discoveryTimeoutSecs: BigInt.zero,
+        deviceId: 'anamanti-display',
+      ),
+      onReport: assistant.applyWeatherPush,
+    )..start();
+
     setState(() {
       _assistant = assistant;
       _notifications = notifications;
+      _weather = weather;
     });
   }
 
@@ -353,6 +371,7 @@ class _AmbientHomeState extends State<AmbientHome> {
     _photoRefreshTimer?.cancel();
     _assistant?.dispose();
     _notifications?.dispose();
+    _weather?.dispose();
     _slideshow.dispose();
     _brightness.reset();
     super.dispose();

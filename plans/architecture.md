@@ -384,6 +384,20 @@ predictable memory use and no GC pauses under the 1 GB limit.
   fired timer uses it to voice "Time's up for {name}" in the real assistant voice; the
   device opens a fresh socket (same mDNS path a turn uses), outside any voice turn, and
   plays the returned audio through the shared `PlaybackSink` right after the bell.
+- **`anamanti-recipe`** (Anamanti Core → device): a project-local **device-action** frame
+  (`data.action` = `show`/`dismiss`; for `show`, `data.recipe` is the structured recipe).
+  Emitted by the `recipe_lookup` tool; the device owns the 3-tab recipe screen until
+  dismissed by voice (`close_recipe`) or touch. See `RecipePlan.md`.
+- **`anamanti-weather`** (Anamanti Core → device): a project-local **device-action** frame
+  (`data.action` = `show`/`current`/`dismiss`; for `show`/`current`, `data.weather` is the
+  structured `WeatherReport` — `location_label`, `units`, `current{…}`, `daily[7]`). It
+  rides **two transports**: `show`/`dismiss` on the per-turn voice socket, emitted by the
+  `weather_lookup` / `close_weather` tools (`DeviceAction::{ShowWeather,DismissWeather}`),
+  drive the **full-screen forecast** (today's conditions + a 7-day row); `current` is
+  broadcast periodically on the persistent channel (below) by the Anamanti Core's
+  `WeatherService` to refresh the **small icon + temperature beside the idle clock**
+  without a voice turn. Data comes from the keyless **Open-Meteo** API behind a
+  `WeatherProvider` trait. See `WeatherPlan.md`.
 - **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
   `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's
@@ -431,6 +445,13 @@ mDNS + `instance_id` pin the voice path uses):
 - **`anamanti-notify-ack`** (device → Anamanti Core): reserved for a later
   delivery-tracking phase (store-and-forward across reconnects); the constructor exists
   in both crates but nothing sends it yet.
+- The **ambient weather push** reuses this same persistent-channel design: the device
+  opens a *third* long-lived connection (`rust/src/wyoming/weather.rs`, started by
+  `start_weather_channel`) with an `anamanti-hello` carrying `data.role="weather"`, which
+  the server registers with the `WeatherService` instead of the notify registry. The Core
+  then pushes `anamanti-weather` `current` frames down it on a timer; the device surfaces
+  them as a `WeatherPush` FRB stream that refreshes the clock's weather indicator. Same
+  dialer/backoff/pin model as notify — see `WeatherPlan.md`.
 
 Producers enqueue via `NotificationService::notify`, which fans a notification out to
 every connected device and prunes dead channels. The first producer is the config

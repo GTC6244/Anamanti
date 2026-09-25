@@ -146,10 +146,7 @@ mod tests {
 
     #[test]
     fn sanitizes_instance_names_into_dns_labels() {
-        assert_eq!(
-            sanitize_label("Anamanti Core"),
-            "anamanti-core"
-        );
+        assert_eq!(sanitize_label("Anamanti Core"), "anamanti-core");
         assert_eq!(sanitize_label("Mac Mini!"), "mac-mini");
         assert_eq!(sanitize_label("***"), "anamanti-core");
     }

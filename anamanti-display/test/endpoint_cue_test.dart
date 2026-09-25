@@ -49,6 +49,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       timerRemainingSecs: 0,
       present: false,
       recipeJson: '',
+      weatherJson: '',
     );
 
 void main() {

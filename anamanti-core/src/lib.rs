@@ -32,5 +32,6 @@ pub mod server;
 pub mod settings;
 pub mod speaker;
 pub mod spotify_consent;
+pub mod weather;
 pub mod webconfig;
 pub mod wyoming;

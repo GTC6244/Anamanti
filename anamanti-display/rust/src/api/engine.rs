@@ -217,6 +217,17 @@ pub enum WakeWordEventKind {
     ShowRecipe,
     /// Recipe mode: dismiss the recipe screen and return to the idle/ambient display.
     DismissRecipe,
+    /// Weather mode: the orchestrator pushed a forecast to show full-screen on the
+    /// weather screen. `weather_json` carries the report as a JSON string
+    /// (location_label, units, current{…}, daily[]) which the UI parses into the big
+    /// today panel + the 7-day row.
+    ShowWeather,
+    /// Weather mode: an ambient current-conditions refresh (from the persistent
+    /// channel, or riding a `show`). `weather_json` carries the report; the UI updates
+    /// the small icon + temperature beside the clock but does not open the full screen.
+    WeatherCurrent,
+    /// Weather mode: dismiss the full-screen weather view and return to idle/ambient.
+    DismissWeather,
     /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
     /// is `true` when someone has approached the display (brighten) and `false` when
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
@@ -264,6 +275,10 @@ pub struct WakeWordEvent {
     /// The parsed recipe as a JSON string (`ShowRecipe`); empty for every other kind.
     /// The UI decodes it into the recipe-mode tabs.
     pub recipe_json: String,
+    /// The weather report as a JSON string (`ShowWeather` / `WeatherCurrent`); empty
+    /// for every other kind. The UI decodes it into the weather screen + the ambient
+    /// clock indicator.
+    pub weather_json: String,
 }
 
 impl WakeWordEvent {
@@ -284,6 +299,7 @@ impl WakeWordEvent {
             timer_remaining_secs: 0,
             present: false,
             recipe_json: String::new(),
+            weather_json: String::new(),
         }
     }
 
@@ -406,6 +422,24 @@ impl WakeWordEvent {
 
     pub(crate) fn dismiss_recipe() -> Self {
         Self::base(WakeWordEventKind::DismissRecipe)
+    }
+
+    pub(crate) fn show_weather(weather_json: String) -> Self {
+        Self {
+            weather_json,
+            ..Self::base(WakeWordEventKind::ShowWeather)
+        }
+    }
+
+    pub(crate) fn weather_current(weather_json: String) -> Self {
+        Self {
+            weather_json,
+            ..Self::base(WakeWordEventKind::WeatherCurrent)
+        }
+    }
+
+    pub(crate) fn dismiss_weather() -> Self {
+        Self::base(WakeWordEventKind::DismissWeather)
     }
 
     // Constructed only by the Android camera bridge; on host builds it's unused.
@@ -572,6 +606,120 @@ pub fn start_notify_channel(
 pub fn stop_notify_channel() {
     use std::sync::atomic::Ordering;
     let handle = notify_slot().lock().unwrap().take();
+    if let Some(mut h) = handle {
+        h.running.store(false, Ordering::SeqCst);
+        if let Some(join) = h.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ambient weather channel. A persistent channel the device dials to the
+// orchestrator (twin of the notify channel), receiving periodic
+// `anamanti-weather` current-conditions pushes *without* a voice turn, so the
+// small icon + temperature beside the idle clock stay fresh. Rust owns the
+// socket + reconnect/backoff; Flutter consumes `WeatherPush`es. Runs on its own
+// thread + runtime, alongside the wake-word engine and notify channel.
+// ---------------------------------------------------------------------------
+
+/// Config for the persistent weather channel. Mirrors [`NotifyConfig`]; the
+/// orchestrator is discovered over mDNS at connect time.
+pub struct WeatherConfig {
+    /// Stable selection key (`instance_id` TXT) of the pinned orchestrator; empty =
+    /// "Auto". Mirrors [`WakeWordConfig::orchestrator_key`].
+    pub orchestrator_key: String,
+    /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+    /// (0 = built-in default).
+    pub discovery_timeout_secs: u64,
+    /// A stable identifier for this display, sent in the `anamanti-hello` frame.
+    pub device_id: String,
+}
+
+/// One ambient current-conditions push from the orchestrator, streamed to Flutter.
+/// `report_json` is the serialized weather report (location_label, units, current{…},
+/// daily[]); the UI decodes it for the clock indicator (and refreshes the full screen
+/// if it's open). Flat struct so the FRB boundary stays dependency-free.
+#[derive(Clone)]
+pub struct WeatherPush {
+    pub report_json: String,
+}
+
+struct WeatherHandle {
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+static WEATHER: std::sync::OnceLock<std::sync::Mutex<Option<WeatherHandle>>> =
+    std::sync::OnceLock::new();
+
+fn weather_slot() -> &'static std::sync::Mutex<Option<WeatherHandle>> {
+    WEATHER.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Open the persistent ambient-weather channel and stream pushed reports to Dart.
+/// Replaces any channel already running (so it can be restarted when the pinned
+/// orchestrator changes). Dials the pinned orchestrator and reconnects with backoff
+/// for the life of the subscription.
+pub fn start_weather_channel(
+    config: WeatherConfig,
+    sink: StreamSink<WeatherPush>,
+) -> anyhow::Result<()> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    stop_weather_channel();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let loop_running = running.clone();
+    let join = std::thread::Builder::new()
+        .name("weather-channel".to_string())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::error!("weather channel: could not build runtime: {e:#}");
+                    return;
+                }
+            };
+            let timeout = if config.discovery_timeout_secs == 0 {
+                crate::wyoming::DEFAULT_DISCOVERY_TIMEOUT
+            } else {
+                std::time::Duration::from_secs(config.discovery_timeout_secs)
+            };
+            let key = {
+                let k = config.orchestrator_key.trim();
+                if k.is_empty() {
+                    None
+                } else {
+                    Some(k.to_string())
+                }
+            };
+            let cache = crate::wyoming::EndpointCache::new();
+            rt.block_on(crate::wyoming::weather::run(
+                &cache,
+                timeout,
+                key,
+                config.device_id,
+                loop_running,
+                move |report_json| sink.add(WeatherPush { report_json }).is_ok(),
+            ));
+        })?;
+
+    *weather_slot().lock().unwrap() = Some(WeatherHandle {
+        running,
+        join: Some(join),
+    });
+    Ok(())
+}
+
+/// Stop the ambient-weather channel (if any) and join its thread. Idempotent.
+pub fn stop_weather_channel() {
+    use std::sync::atomic::Ordering;
+    let handle = weather_slot().lock().unwrap().take();
     if let Some(mut h) = handle {
         h.running.store(false, Ordering::SeqCst);
         if let Some(join) = h.join.take() {

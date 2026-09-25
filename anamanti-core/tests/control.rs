@@ -41,6 +41,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         directions: None,
         directions_provider: String::new(),
         directions_imperial: false,
+        weather: None,
+        weather_imperial: false,
     };
     let (llm, backend, model) = factory
         .build(
@@ -99,8 +101,9 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let notify = Arc::new(anamanti_core::notify::NotificationService::new());
+    let weather = Arc::new(anamanti_core::weather::WeatherService::new());
     tokio::spawn(anamanti_core::server::serve(
-        listener, pipeline, connector, catalog, None, None, notify,
+        listener, pipeline, connector, catalog, None, None, notify, weather,
     ));
     (addr, memory, settings)
 }

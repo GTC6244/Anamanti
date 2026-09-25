@@ -23,6 +23,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:anamanti_display/src/engine/recipe_data.dart';
+import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 
 /// Opens the native engine event stream for a given config. Production passes
@@ -119,6 +120,8 @@ class AssistantState {
     this.userPresent = true,
     this.followUp = false,
     this.recipe,
+    this.weather,
+    this.weatherCurrent,
   });
 
   final TurnPhase phase;
@@ -179,6 +182,19 @@ class AssistantState {
   /// Whether recipe mode is currently on screen.
   bool get recipeActive => recipe != null;
 
+  /// The forecast currently shown full-screen on the weather screen, or `null` when
+  /// the screen is closed. Pushed by the `weather_lookup` tool ("show" action) and
+  /// dismissed by voice or the close control. Outlives the voice turn.
+  final WeatherData? weather;
+
+  /// Whether the full-screen weather view is currently on screen.
+  bool get weatherActive => weather != null;
+
+  /// The latest ambient current conditions for the small indicator beside the clock,
+  /// kept fresh by the orchestrator's periodic push (independent of [weather]). `null`
+  /// until the first push arrives (or weather is disabled / no home location).
+  final WeatherData? weatherCurrent;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -203,6 +219,9 @@ class AssistantState {
     bool? followUp,
     RecipeData? recipe,
     bool clearRecipe = false,
+    WeatherData? weather,
+    bool clearWeather = false,
+    WeatherData? weatherCurrent,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -218,6 +237,8 @@ class AssistantState {
       userPresent: userPresent ?? this.userPresent,
       followUp: followUp ?? this.followUp,
       recipe: clearRecipe ? null : (recipe ?? this.recipe),
+      weather: clearWeather ? null : (weather ?? this.weather),
+      weatherCurrent: weatherCurrent ?? this.weatherCurrent,
     );
   }
 }
@@ -236,8 +257,10 @@ class AssistantController extends ChangeNotifier {
     double endpointRmsThreshold = 0.012,
     DateTime Function()? clock,
     VoidCallback? onUserActivity,
+    Duration weatherAutoClose = const Duration(seconds: 60),
   })  : _config = config,
         _onUserActivity = onUserActivity,
+        _weatherAutoClose = weatherAutoClose,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -277,6 +300,12 @@ class AssistantController extends ChangeNotifier {
   /// this to the native `noteUserActivity`; null (the default) disables it, so
   /// unit/widget tests run with no native library loaded.
   final VoidCallback? _onUserActivity;
+
+  /// How long the full-screen weather view stays up before it auto-dismisses back to
+  /// the idle screen (the ambient clock chip is unaffected). Reset each time a new
+  /// forecast is shown; cancelled on an early voice/touch dismiss.
+  final Duration _weatherAutoClose;
+  Timer? _weatherAutoCloseTimer;
 
   /// True once we've seen speech-level audio in the current turn (so trailing
   /// silence means "done speaking" rather than "hasn't started yet").
@@ -486,7 +515,38 @@ class AssistantController extends ChangeNotifier {
         }
       case WakeWordEventKind.dismissRecipe:
         _emit(_state.copyWith(clearRecipe: true));
+      case WakeWordEventKind.showWeather:
+        // The orchestrator pushed a forecast; open the full-screen weather view and
+        // refresh the ambient indicator from the same payload. A payload that fails to
+        // parse is ignored rather than crashing.
+        final weather = WeatherData.tryParse(e.weatherJson);
+        if (weather != null) {
+          _emit(_state.copyWith(weather: weather, weatherCurrent: weather));
+          _scheduleWeatherAutoClose();
+        }
+      case WakeWordEventKind.weatherCurrent:
+        // An ambient refresh (from the persistent channel or riding a show): update the
+        // small clock indicator only; never opens or closes the full screen.
+        final weather = WeatherData.tryParse(e.weatherJson);
+        if (weather != null) {
+          _emit(_state.copyWith(weatherCurrent: weather));
+        }
+      case WakeWordEventKind.dismissWeather:
+        _weatherAutoCloseTimer?.cancel();
+        _emit(_state.copyWith(clearWeather: true));
     }
+  }
+
+  /// (Re)arm the full-screen weather auto-dismiss. A new forecast restarts the clock;
+  /// firing clears only the full screen (the ambient chip stays).
+  void _scheduleWeatherAutoClose() {
+    _weatherAutoCloseTimer?.cancel();
+    if (_weatherAutoClose <= Duration.zero) return;
+    _weatherAutoCloseTimer = Timer(_weatherAutoClose, () {
+      if (_state.weather != null) {
+        _emit(_state.copyWith(clearWeather: true));
+      }
+    });
   }
 
   /// Dismiss recipe mode from the UI (the user taps the close control). Voice
@@ -494,6 +554,26 @@ class AssistantController extends ChangeNotifier {
   void dismissRecipe() {
     if (_state.recipe != null) {
       _emit(_state.copyWith(clearRecipe: true));
+    }
+  }
+
+  /// Dismiss the full-screen weather view from the UI (the user taps the close
+  /// control). Voice dismissal arrives instead as a `dismissWeather` event. The ambient
+  /// indicator ([weatherCurrent]) is left untouched — only the full screen closes.
+  void dismissWeather() {
+    _weatherAutoCloseTimer?.cancel();
+    if (_state.weather != null) {
+      _emit(_state.copyWith(clearWeather: true));
+    }
+  }
+
+  /// Fold an ambient weather push (from the weather channel) into the indicator state.
+  /// Called by the app shell's weather-channel subscription. Never opens the full
+  /// screen — that's `showWeather` on the engine stream.
+  void applyWeatherPush(String reportJson) {
+    final weather = WeatherData.tryParse(reportJson);
+    if (weather != null) {
+      _emit(_state.copyWith(weatherCurrent: weather));
     }
   }
 
@@ -610,6 +690,7 @@ class AssistantController extends ChangeNotifier {
     _disposed = true;
     _reconnectTimer?.cancel();
     _offlinePollTimer?.cancel();
+    _weatherAutoCloseTimer?.cancel();
     _sub?.cancel();
     super.dispose();
   }

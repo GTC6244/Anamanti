@@ -376,6 +376,24 @@ async fn run_turn_task(
                     WakeWordEvent::dismiss_recipe()
                 }
             },
+            // A weather command on the voice-turn socket: surface it to the UI (which
+            // owns the weather screen). `Show` opens the full screen; `Current` (also
+            // pushed on the persistent channel) only refreshes the ambient indicator;
+            // `Dismiss` closes the full screen.
+            TurnUpdate::Weather(cmd) => match cmd {
+                wyoming::protocol::WeatherCommand::Show(report) => {
+                    log::info!("turn: show weather");
+                    WakeWordEvent::show_weather(report.to_string())
+                }
+                wyoming::protocol::WeatherCommand::Current(report) => {
+                    log::info!("turn: weather current refresh");
+                    WakeWordEvent::weather_current(report.to_string())
+                }
+                wyoming::protocol::WeatherCommand::Dismiss => {
+                    log::info!("turn: dismiss weather");
+                    WakeWordEvent::dismiss_weather()
+                }
+            },
             // Record the request to reopen the mic after this reply. Acted on only after
             // this turn's reply audio drains (drain watcher below), so the follow-up mic
             // never records the tail of the TTS. Nothing to add here.

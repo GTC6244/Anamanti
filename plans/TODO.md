@@ -358,8 +358,14 @@ actions".
       pasta timer" / "cancel all timers"; two concurrent timers; a timer keeps running (and
       still bells) after the Mac disconnects mid-countdown. (Needs a spoken turn to set the
       timer + the Mac Anamanti Core + Piper running; not drivable headlessly.)
-- [ ] Consider a dedicated **weather tool** if web-search summaries prove too coarse
-      (structured forecast vs. a search snippet).
+- [x] **Dedicated weather tool + display** (2026-09-25, see `WeatherPlan.md`): the
+      `weather_lookup` / `close_weather` rig tools fetch a structured current + 7-day
+      forecast from the keyless **Open-Meteo** API (behind a `WeatherProvider` trait) and
+      push it over a new **`anamanti-weather`** frame. The device renders a full-screen
+      **weather screen** (today's conditions with big imagery + a 7-day row) on a voice
+      ask, and shows a **small icon + current temperature beside the idle clock** kept
+      fresh by an always-on periodic push (`WeatherService` → the persistent
+      `role=weather` channel). Suites green; **pending on-device QA** (§4 of the plan).
 - [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
       tool returns real distance, travel time, and **live traffic** between two places
       (`driving`/`walking`/`cycling`). Lives in `anamanti-core/src/directions/` behind a

@@ -46,6 +46,12 @@ pub enum DeviceAction {
     ShowRecipe(crate::recipe::Recipe),
     /// Dismiss the recipe screen and return to the idle/ambient display.
     DismissRecipe,
+    /// Show the full-screen weather forecast on the display (today's conditions with
+    /// big imagery + a 7-day row). The device owns the resulting screen state until
+    /// dismissed, so this is fire-and-forget like the recipe/timer actions.
+    ShowWeather(crate::weather::WeatherReport),
+    /// Dismiss the weather screen and return to the idle/ambient display.
+    DismissWeather,
 }
 
 /// The per-turn channel a tool pushes [`DeviceAction`]s onto. Unbounded so a tool's

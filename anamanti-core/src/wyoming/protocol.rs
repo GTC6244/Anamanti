@@ -182,6 +182,13 @@ pub mod types {
     /// tool; the device owns the screen state until dismissed. Byte-identical to the
     /// device crate's `types::RECIPE`.
     pub const RECIPE: &str = "anamanti-recipe";
+
+    /// orchestrator → device: show/refresh/dismiss the weather screen (data: `action`
+    /// = `"show"` (full-screen forecast, voice-triggered) / `"current"` (ambient
+    /// indicator refresh over the persistent channel) / `"dismiss"`; for `show`/`current`,
+    /// `weather` is the structured report — `location_label`, `units`, `current{…}`,
+    /// `daily[]`). Byte-identical to the device crate's `types::WEATHER`.
+    pub const WEATHER: &str = "anamanti-weather";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -358,6 +365,37 @@ impl WyomingEvent {
         self.event_type == types::RECIPE
     }
 
+    /// An `anamanti-weather` **show** action (orchestrator → device): render `weather`
+    /// (a serialized [`crate::weather::WeatherReport`]) full-screen on the weather
+    /// screen. Voice-triggered by the `weather_lookup` tool.
+    pub fn weather_show(weather: Value) -> Self {
+        Self::with_data(
+            types::WEATHER,
+            json!({ "action": "show", "weather": weather }),
+        )
+    }
+
+    /// An `anamanti-weather` **current** refresh (orchestrator → device): update the
+    /// ambient indicator (icon + temperature beside the clock) without opening the
+    /// full screen. Pushed periodically over the persistent channel.
+    pub fn weather_current(weather: Value) -> Self {
+        Self::with_data(
+            types::WEATHER,
+            json!({ "action": "current", "weather": weather }),
+        )
+    }
+
+    /// An `anamanti-weather` **dismiss** action (orchestrator → device): close the
+    /// full-screen weather view and return to the idle/ambient display.
+    pub fn weather_dismiss() -> Self {
+        Self::with_data(types::WEATHER, json!({ "action": "dismiss" }))
+    }
+
+    /// True if this is an `anamanti-weather` frame.
+    pub fn is_weather(&self) -> bool {
+        self.event_type == types::WEATHER
+    }
+
     /// An `anamanti-speak` request (device → orchestrator): please synthesize `text`
     /// and stream its audio back. Mirror of the device crate's `speak` constructor.
     pub fn speak(text: impl Into<String>) -> Self {
@@ -425,12 +463,40 @@ impl WyomingEvent {
         )
     }
 
+    /// An `anamanti-hello` frame opening the persistent **weather** channel (device →
+    /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
+    /// so the server registers it with the weather push service rather than the notify
+    /// service. Byte-identical to the device crate's `hello_weather`.
+    pub fn hello_weather(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+        Self::with_data(
+            types::ANAMANTI_HELLO,
+            json!({
+                "role": "weather",
+                "device_id": device_id.into(),
+                "instance_id": instance_id.into(),
+            }),
+        )
+    }
+
     /// The `device_id` from an `anamanti-hello` frame's `data.device_id`.
     pub fn hello_device_id(&self) -> Option<&str> {
         if self.event_type == types::ANAMANTI_HELLO {
             self.data.get("device_id").and_then(Value::as_str)
         } else {
             None
+        }
+    }
+
+    /// The `role` from an `anamanti-hello` frame's `data.role` (`"notify"` /
+    /// `"weather"`); defaults to `"notify"` when absent, for back-compatibility.
+    pub fn hello_role(&self) -> &str {
+        if self.event_type == types::ANAMANTI_HELLO {
+            self.data
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("notify")
+        } else {
+            "notify"
         }
     }
 
@@ -684,6 +750,43 @@ mod tests {
         let back = roundtrip(&dismiss).await;
         assert_eq!(back, dismiss);
         assert_eq!(back.data["action"], json!("dismiss"));
+    }
+
+    #[tokio::test]
+    async fn weather_show_current_and_dismiss_roundtrip() {
+        let weather = json!({
+            "location_label": "Austin, Texas",
+            "units": "imperial",
+            "current": { "temp": 72, "weather_code": 2, "is_day": true },
+            "daily": [{ "date": "2026-09-25", "high": 80, "low": 60 }],
+        });
+        let show = WyomingEvent::weather_show(weather.clone());
+        let back = roundtrip(&show).await;
+        assert_eq!(back, show);
+        assert!(back.is_weather());
+        assert_eq!(back.data["action"], json!("show"));
+        assert_eq!(back.data["weather"], weather);
+
+        let current = WyomingEvent::weather_current(weather.clone());
+        let back = roundtrip(&current).await;
+        assert_eq!(back, current);
+        assert_eq!(back.data["action"], json!("current"));
+
+        let dismiss = WyomingEvent::weather_dismiss();
+        let back = roundtrip(&dismiss).await;
+        assert_eq!(back, dismiss);
+        assert_eq!(back.data["action"], json!("dismiss"));
+    }
+
+    #[tokio::test]
+    async fn weather_hello_carries_role() {
+        let hello = WyomingEvent::hello_weather("dev-1", "core-1");
+        let back = roundtrip(&hello).await;
+        assert_eq!(back, hello);
+        assert_eq!(back.hello_role(), "weather");
+        assert_eq!(back.hello_device_id(), Some("dev-1"));
+        // The default notify hello reports the notify role.
+        assert_eq!(WyomingEvent::hello("d", "c").hello_role(), "notify");
     }
 
     #[tokio::test]

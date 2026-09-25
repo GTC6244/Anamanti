@@ -173,6 +173,12 @@ pub mod types {
     /// owns the screen state until dismissed. Byte-identical to the orchestrator
     /// crate's `types::RECIPE`.
     pub const RECIPE: &str = "anamanti-recipe";
+
+    /// orchestrator → device: show/refresh/dismiss the weather screen (data: `action`
+    /// = `"show"` (full-screen forecast) / `"current"` (ambient indicator refresh) /
+    /// `"dismiss"`; for `show`/`current`, `weather` is the structured report). Byte-
+    /// identical to the orchestrator crate's `types::WEATHER`.
+    pub const WEATHER: &str = "anamanti-weather";
 }
 
 /// A device-action timer command decoded from an `anamanti-timer` frame (Phase 2).
@@ -195,6 +201,20 @@ pub enum RecipeCommand {
     /// Show this recipe (the raw `schema.org`-shaped object) on the recipe screen.
     Show(Value),
     /// Dismiss the recipe screen and return to the idle/ambient display.
+    Dismiss,
+}
+
+/// A weather command decoded from an `anamanti-weather` frame. `Show`/`Current` carry
+/// the report object (surfaced to Flutter as a JSON string it parses); `Dismiss`
+/// closes the full-screen view. `Show` opens the full screen; `Current` only refreshes
+/// the ambient indicator beside the clock.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WeatherCommand {
+    /// Show this report full-screen on the weather screen (voice-triggered).
+    Show(Value),
+    /// Refresh the ambient indicator (icon + temperature) from this report.
+    Current(Value),
+    /// Dismiss the full-screen weather view and return to the idle/ambient display.
     Dismiss,
 }
 
@@ -393,6 +413,21 @@ impl WyomingEvent {
         )
     }
 
+    /// An `anamanti-hello` frame opening the persistent **weather** channel (device →
+    /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
+    /// so the orchestrator registers it with the weather push service. Byte-identical
+    /// to the orchestrator's `hello_weather`.
+    pub fn hello_weather(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+        Self::with_data(
+            types::ANAMANTI_HELLO,
+            json!({
+                "role": "weather",
+                "device_id": device_id.into(),
+                "instance_id": instance_id.into(),
+            }),
+        )
+    }
+
     /// An `anamanti-notify` push (orchestrator → device). Byte-identical to the
     /// orchestrator's `notify` (used by tests + the mock server; the orchestrator
     /// emits the wire form directly).
@@ -488,6 +523,44 @@ impl WyomingEvent {
                 .cloned()
                 .map(RecipeCommand::Show),
             "dismiss" => Some(RecipeCommand::Dismiss),
+            _ => None,
+        }
+    }
+
+    /// An `anamanti-weather` **show** action (used by tests + the mock server; the
+    /// orchestrator emits the wire form directly).
+    pub fn weather_show(weather: Value) -> Self {
+        Self::with_data(
+            types::WEATHER,
+            json!({ "action": "show", "weather": weather }),
+        )
+    }
+
+    /// An `anamanti-weather` **current** ambient-refresh action.
+    pub fn weather_current(weather: Value) -> Self {
+        Self::with_data(
+            types::WEATHER,
+            json!({ "action": "current", "weather": weather }),
+        )
+    }
+
+    /// An `anamanti-weather` **dismiss** action.
+    pub fn weather_dismiss() -> Self {
+        Self::with_data(types::WEATHER, json!({ "action": "dismiss" }))
+    }
+
+    /// Decode an `anamanti-weather` frame into a [`WeatherCommand`], or `None` if this
+    /// is not a weather frame or its `action` is unrecognized. A `show`/`current` with
+    /// no `weather` object is rejected (returns `None`).
+    pub fn weather_command(&self) -> Option<WeatherCommand> {
+        if self.event_type != types::WEATHER {
+            return None;
+        }
+        let report = || self.data.get("weather").filter(|v| v.is_object()).cloned();
+        match self.data.get("action").and_then(Value::as_str)? {
+            "show" => report().map(WeatherCommand::Show),
+            "current" => report().map(WeatherCommand::Current),
+            "dismiss" => Some(WeatherCommand::Dismiss),
             _ => None,
         }
     }
@@ -691,6 +764,41 @@ mod tests {
         assert_eq!(WyomingEvent::interrupt().recipe_command(), None);
         let bad = WyomingEvent::with_data(types::RECIPE, json!({ "action": "show" }));
         assert_eq!(bad.recipe_command(), None);
+    }
+
+    #[tokio::test]
+    async fn weather_frame_roundtrips_and_decodes_command() {
+        let report = json!({
+            "location_label": "Austin, Texas",
+            "units": "imperial",
+            "current": { "temp": 72, "weather_code": 2, "is_day": true },
+            "daily": [{ "date": "2026-09-25", "high": 80, "low": 60 }],
+        });
+        let show = WyomingEvent::weather_show(report.clone());
+        let back = roundtrip(&show).await;
+        assert_eq!(back, show);
+        assert_eq!(
+            back.weather_command(),
+            Some(WeatherCommand::Show(report.clone()))
+        );
+
+        let current = roundtrip(&WyomingEvent::weather_current(report.clone())).await;
+        assert_eq!(
+            current.weather_command(),
+            Some(WeatherCommand::Current(report))
+        );
+
+        let dismiss = roundtrip(&WyomingEvent::weather_dismiss()).await;
+        assert_eq!(dismiss.weather_command(), Some(WeatherCommand::Dismiss));
+
+        // A non-weather frame yields nothing; a show missing the report is rejected.
+        assert_eq!(WyomingEvent::interrupt().weather_command(), None);
+        let bad = WyomingEvent::with_data(types::WEATHER, json!({ "action": "show" }));
+        assert_eq!(bad.weather_command(), None);
+
+        // The weather hello carries role=weather.
+        let hello = roundtrip(&WyomingEvent::hello_weather("dev", "")).await;
+        assert_eq!(hello.data["role"], json!("weather"));
     }
 
     #[tokio::test]

@@ -1334,6 +1334,10 @@ async fn drain_device_actions<W>(
                 serde_json::to_value(&recipe).unwrap_or(serde_json::Value::Null),
             ),
             DeviceAction::DismissRecipe => WyomingEvent::recipe_dismiss(),
+            DeviceAction::ShowWeather(report) => WyomingEvent::weather_show(
+                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+            ),
+            DeviceAction::DismissWeather => WyomingEvent::weather_dismiss(),
         };
         if let Err(e) = protocol::write_event(writer, &event).await {
             log::warn!("failed to relay device action to the device: {e:#}");

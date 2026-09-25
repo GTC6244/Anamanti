@@ -110,6 +110,16 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              cooking or ask to close the recipe. Relay the tool's short spoken confirmation.",
         );
     }
+    if has(WEATHER_LOOKUP) {
+        parts.push(
+            "You can pull up the weather on the display with the `weather_lookup` tool. \
+             Whenever the user asks about the weather, the temperature, the forecast, or \
+             whether it will rain/snow/be hot or cold, you MUST call `weather_lookup` (omit \
+             `location` to use home) and relay its short spoken confirmation — never guess at \
+             conditions or say you can't check the weather. Use `close_weather` when they ask \
+             to close/dismiss the weather.",
+        );
+    }
     if has(ShoppingListControl::NAME) {
         parts.push(
             "You can add items to the household's shared shopping list with the \
@@ -1198,6 +1208,115 @@ fn close_recipe_invoke(actions: Option<&ActionSink>) -> Result<String> {
 }
 
 // ===========================================================================
+// Weather tool (fetch a forecast, show it on the display)
+// ===========================================================================
+
+/// Tool name for showing the weather forecast on the display.
+pub const WEATHER_LOOKUP: &str = "weather_lookup";
+/// Tool name for dismissing the weather screen.
+pub const CLOSE_WEATHER: &str = "close_weather";
+
+/// Typed arguments for [`WeatherLookup`].
+#[derive(Debug, Deserialize)]
+struct WeatherArgs {
+    /// A place to get the weather for (optional; defaults to the household home
+    /// location when omitted, so "what's the weather" works with no place named).
+    #[serde(default)]
+    location: Option<String>,
+}
+
+/// The weather tool: fetches current conditions + a 7-day forecast for a place
+/// (defaulting to the household home location), pushes it to the display as a
+/// [`DeviceAction::ShowWeather`], and returns a short spoken confirmation. Like the
+/// recipe/timer tools it emits a device action, so it takes the per-turn
+/// [`ActionSink`] directly. The provider is injected so it's testable offline (see
+/// `crate::weather`).
+pub struct WeatherLookup {
+    provider: Arc<dyn crate::weather::WeatherProvider>,
+    home_location: LiveHomeLocation,
+    imperial: bool,
+}
+
+impl WeatherLookup {
+    pub fn new(
+        provider: Arc<dyn crate::weather::WeatherProvider>,
+        home_location: LiveHomeLocation,
+        imperial: bool,
+    ) -> Self {
+        Self {
+            provider,
+            home_location,
+            imperial,
+        }
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: WEATHER_LOOKUP.to_string(),
+            description: "Get the current weather and a 7-day forecast and show it on the \
+                          display's weather screen. Use whenever the user asks about the \
+                          weather, temperature, forecast, or how hot/cold/rainy it is. If the \
+                          user names no place, omit `location` — it defaults to home. Returns a \
+                          short spoken confirmation to relay."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The place to get the weather for, e.g. \"Paris\" or \
+                                        \"Denver, Colorado\". Omit for the user's home location."
+                    }
+                }
+            }),
+        }
+    }
+
+    /// Execute the tool: resolve the location, fetch the forecast, push it to the
+    /// device, and return a speakable confirmation. Fetch failures, a missing location,
+    /// and a missing device surface as the tool result so the model apologizes aloud.
+    async fn invoke(&self, arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+        let args: WeatherArgs = serde_json::from_value(arguments.clone())
+            .context("parsing weather_lookup arguments")?;
+        let sink = actions.context("no display is connected to show the weather on right now")?;
+        let location = args
+            .location
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.home_location.get())
+            .context("no location was given and no home location is set")?;
+        let report = self
+            .provider
+            .fetch(&location, self.imperial)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        let confirmation = crate::weather::render_confirmation(&report);
+        sink.send(DeviceAction::ShowWeather(report)).map_err(|_| {
+            anyhow::anyhow!("the display disconnected before the weather could show")
+        })?;
+        Ok(confirmation)
+    }
+}
+
+fn close_weather_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CLOSE_WEATHER.to_string(),
+        description: "Close the weather screen on the display and return to the idle screen. \
+                      Use when the user asks to close/dismiss the weather."
+            .to_string(),
+        parameters: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// Execute `close_weather`: emit a [`DeviceAction::DismissWeather`] on the per-turn sink.
+fn close_weather_invoke(actions: Option<&ActionSink>) -> Result<String> {
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::DismissWeather)
+        .map_err(|_| anyhow::anyhow!("the display disconnected before the weather could close"))?;
+    Ok("Okay, closing the weather.".to_string())
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -1217,6 +1336,7 @@ pub struct Tools {
     spotify: Option<Arc<SpotifyControl>>,
     grocery: Option<Arc<ShoppingListControl>>,
     recipe: Option<Arc<RecipeLookup>>,
+    weather: Option<Arc<WeatherLookup>>,
 }
 
 impl Tools {
@@ -1231,6 +1351,7 @@ impl Tools {
         spotify: Option<Arc<dyn SpotifyController>>,
         grocery: Option<Arc<dyn GroceryController>>,
         recipe: Option<Arc<dyn RecipeProvider>>,
+        weather: Option<crate::weather::WeatherConfig>,
     ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
@@ -1264,6 +1385,17 @@ impl Tools {
             definitions.push(r.definition());
             definitions.push(close_recipe_definition());
         }
+        let weather = weather.map(|cfg| {
+            Arc::new(WeatherLookup::new(
+                cfg.provider,
+                cfg.home_location,
+                cfg.imperial,
+            ))
+        });
+        if let Some(w) = &weather {
+            definitions.push(w.definition());
+            definitions.push(close_weather_definition());
+        }
         Self {
             definitions,
             search,
@@ -1272,6 +1404,7 @@ impl Tools {
             spotify,
             grocery,
             recipe,
+            weather,
         }
     }
 
@@ -1314,6 +1447,14 @@ impl Tools {
             CLOSE_RECIPE => match &self.recipe {
                 Some(_) => close_recipe_invoke(actions),
                 None => anyhow::bail!("recipe lookup is not enabled"),
+            },
+            WEATHER_LOOKUP => match &self.weather {
+                Some(weather) => weather.invoke(arguments, actions).await,
+                None => anyhow::bail!("weather lookup is not enabled"),
+            },
+            CLOSE_WEATHER => match &self.weather {
+                Some(_) => close_weather_invoke(actions),
+                None => anyhow::bail!("weather lookup is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
@@ -1362,6 +1503,8 @@ pub fn tools_from_config(
     calendar: Option<Arc<dyn CalendarSource>>,
     directions: Option<(Arc<dyn DirectionsProvider>, bool)>,
     grocery: Option<Arc<dyn GroceryController>>,
+    weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
+    weather_imperial: bool,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
     // The recipe tool needs real web search to find a source page, so it rides the
@@ -1373,6 +1516,13 @@ pub fn tools_from_config(
     // corresponding tool simply isn't advertised. The directions default origin reads
     // from the live household location (`home_location`), so a config-page edit takes
     // effect without a restart — inject the shared handle into the config here.
+    // Weather rides the live home location too (so "what's the weather" uses home);
+    // clone the shared handle before it's moved into the directions config below.
+    let weather = weather.map(|provider| crate::weather::WeatherConfig {
+        provider,
+        home_location: home_location.clone(),
+        imperial: weather_imperial,
+    });
     let directions = directions.map(|(provider, imperial)| DirectionsConfig {
         provider,
         home_location,
@@ -1384,7 +1534,7 @@ pub fn tools_from_config(
     // Grocery (Cadora shopping list) is likewise passed in from the live settings
     // (`CadoraConfig::controller`); `None` → the shopping_list_add tool isn't advertised.
     Some(Arc::new(Tools::new(
-        search, calendar, directions, spotify, grocery, recipe,
+        search, calendar, directions, spotify, grocery, recipe, weather,
     )))
 }
 
@@ -1889,6 +2039,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1933,6 +2084,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1972,6 +2124,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -1992,7 +2145,7 @@ mod tests {
 
     #[test]
     fn directions_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2008,6 +2161,7 @@ mod tests {
                 home_location: LiveHomeLocation::default(),
                 imperial: false,
             }),
+            None,
             None,
             None,
             None,
@@ -2050,7 +2204,7 @@ mod tests {
 
     #[test]
     fn spotify_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2065,6 +2219,7 @@ mod tests {
             })),
             None,
             None,
+            None,
         );
         assert!(with
             .definitions
@@ -2074,7 +2229,7 @@ mod tests {
 
     #[test]
     fn shopping_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2088,6 +2243,7 @@ mod tests {
             Some(Arc::new(StaticGrocery {
                 last: std::sync::Mutex::new(None),
             })),
+            None,
             None,
         );
         assert!(with
@@ -2176,6 +2332,7 @@ mod tests {
             Some(controller.clone()),
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2216,6 +2373,7 @@ mod tests {
             None,
             None,
             Some(controller.clone()),
+            None,
             None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
@@ -2300,7 +2458,7 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None, None, None, None, None);
+        let tools = Tools::new(None, None, None, None, None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -2317,7 +2475,9 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
-        let tools = Some(Arc::new(Tools::new(None, None, None, None, None, None)));
+        let tools = Some(Arc::new(Tools::new(
+            None, None, None, None, None, None, None,
+        )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
             .respond(LlmTurn::new("sys", "set a 5 minute pasta timer").with_actions(tx))

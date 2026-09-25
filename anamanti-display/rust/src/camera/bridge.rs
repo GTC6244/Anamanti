@@ -43,9 +43,7 @@ static CAMERA_BRIDGE_CLASS: Mutex<Option<Global<JClass<'static>>>> = Mutex::new(
 /// second JNI argument is the `CameraBridge` class itself, resolved through the app
 /// class loader. Called once from `MainActivity.onCreate` (an app thread).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_anamanti_anamanti_1display_CameraBridge_nativeCacheClass<
-    'local,
->(
+pub extern "system" fn Java_com_anamanti_anamanti_1display_CameraBridge_nativeCacheClass<'local>(
     mut env: jni::EnvUnowned<'local>,
     class: JClass<'local>,
 ) {
@@ -164,9 +162,7 @@ fn clear() {
 /// Folds one packed luma frame into the presence detector and, on a present/absent
 /// transition, emits a `Presence` event. Runs on the Kotlin camera reader thread.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_anamanti_anamanti_1display_CameraBridge_nativePushLuma<
-    'local,
->(
+pub extern "system" fn Java_com_anamanti_anamanti_1display_CameraBridge_nativePushLuma<'local>(
     mut env: jni::EnvUnowned<'local>,
     _class: JObject<'local>,
     data: JByteArray<'local>,

@@ -189,8 +189,12 @@ fn alarm_pcm() -> (Vec<i16>, u32) {
     const BASE_FREQ: f32 = 660.0;
     // (frequency multiplier, relative amplitude, decay rate in 1/s). Inharmonic
     // ratios + faster decay on the higher partials = a struck-bell timbre.
-    const PARTIALS: [(f32, f32, f32); 4] =
-        [(1.0, 1.0, 2.8), (2.0, 0.6, 3.8), (2.76, 0.4, 5.0), (5.4, 0.25, 7.0)];
+    const PARTIALS: [(f32, f32, f32); 4] = [
+        (1.0, 1.0, 2.8),
+        (2.0, 0.6, 3.8),
+        (2.76, 0.4, 5.0),
+        (5.4, 0.25, 7.0),
+    ];
 
     let strike_len = (RATE * STRIKE_MS / 1000) as usize;
     let gap_len = (RATE * GAP_MS / 1000) as usize;
@@ -201,7 +205,9 @@ fn alarm_pcm() -> (Vec<i16>, u32) {
             let t = n as f32 / RATE as f32;
             let mut s = 0.0f32;
             for (mult, amp, decay) in PARTIALS {
-                s += amp * (2.0 * std::f32::consts::PI * BASE_FREQ * mult * t).sin() * (-t * decay).exp();
+                s += amp
+                    * (2.0 * std::f32::consts::PI * BASE_FREQ * mult * t).sin()
+                    * (-t * decay).exp();
             }
             let atk = (n as f32 / attack as f32).clamp(0.0, 1.0); // soft attack
             let s = (s * 0.22 * atk).clamp(-1.0, 1.0);
@@ -286,7 +292,10 @@ mod tests {
             (4u32, Some("laundry".to_string())),
         ];
         // Label-scoped: both "pasta" timers, nothing else.
-        let mut got = ids_matching(entries.iter().map(|(id, l)| (*id, l)), &Some("pasta".into()));
+        let mut got = ids_matching(
+            entries.iter().map(|(id, l)| (*id, l)),
+            &Some("pasta".into()),
+        );
         got.sort_unstable();
         assert_eq!(got, [1, 3]);
         // No label: every timer.
@@ -294,7 +303,9 @@ mod tests {
         all.sort_unstable();
         assert_eq!(all, [1, 2, 3, 4]);
         // Unknown label: none.
-        assert!(ids_matching(entries.iter().map(|(id, l)| (*id, l)), &Some("nope".into())).is_empty());
+        assert!(
+            ids_matching(entries.iter().map(|(id, l)| (*id, l)), &Some("nope".into())).is_empty()
+        );
     }
 
     #[test]
