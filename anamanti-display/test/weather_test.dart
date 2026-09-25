@@ -21,6 +21,9 @@ const _weatherJson = '''
  ]}
 ''';
 
+const _recipeJson =
+    '{"title":"Spaghetti","ingredients":["pasta"],"steps":["boil","serve"]}';
+
 WakeWordConfig _cfg() => WakeWordConfig(
   melspecModelPath: '',
   embeddingModelPath: '',
@@ -44,26 +47,29 @@ WakeWordConfig _cfg() => WakeWordConfig(
   proximityReleaseSecs: 0,
 );
 
-WakeWordEvent _ev(WakeWordEventKind kind, {String weatherJson = ''}) =>
-    WakeWordEvent(
-      kind: kind,
-      message: '',
-      device: '',
-      deviceSampleRate: 0,
-      channels: 0,
-      rms: 0,
-      score: 0,
-      model: '',
-      transcript: '',
-      reply: '',
-      timerId: 0,
-      timerLabel: '',
-      timerRemainingSecs: 0,
-      present: false,
-      recipeJson: '',
-      weatherJson: weatherJson,
-      recipeAction: '',
-    );
+WakeWordEvent _ev(
+  WakeWordEventKind kind, {
+  String weatherJson = '',
+  String recipeJson = '',
+}) => WakeWordEvent(
+  kind: kind,
+  message: '',
+  device: '',
+  deviceSampleRate: 0,
+  channels: 0,
+  rms: 0,
+  score: 0,
+  model: '',
+  transcript: '',
+  reply: '',
+  timerId: 0,
+  timerLabel: '',
+  timerRemainingSecs: 0,
+  present: false,
+  recipeJson: recipeJson,
+  weatherJson: weatherJson,
+  recipeAction: '',
+);
 
 void main() {
   group('WeatherData.tryParse', () {
@@ -218,6 +224,36 @@ void main() {
 
     controller.dismissWeather();
     expect(pushes.last['active'], isFalse);
+  });
+
+  test('a full-screen widget unloads the previously-loaded one', () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+    )..start();
+    addTearDown(controller.dispose);
+
+    // Weather up first.
+    engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.weatherActive, isTrue);
+
+    // Asking for a recipe must unload the weather screen (not stack behind it),
+    // while the ambient clock chip (weatherCurrent) is preserved.
+    engine.add(
+      _ev(WakeWordEventKind.showRecipe, recipeJson: _recipeJson),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.recipeActive, isTrue);
+    expect(controller.state.weatherActive, isFalse);
+    expect(controller.state.weatherCurrent, isNotNull);
+
+    // And the reverse: showing weather unloads the recipe.
+    engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.weatherActive, isTrue);
+    expect(controller.state.recipeActive, isFalse);
   });
 
   test('controller ignores an unparseable weather payload', () async {
