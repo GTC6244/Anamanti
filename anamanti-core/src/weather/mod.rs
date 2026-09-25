@@ -125,8 +125,23 @@ impl OpenMeteoWeather {
     }
 
     /// Forward-geocode a free-text place into `(latitude, longitude, label)` using the
-    /// Open-Meteo geocoding API. Returns the best (first) match.
+    /// Open-Meteo geocoding API (which matches on a place *name*, not a postal address).
+    /// Tries the whole string first, then falls back to its locality-ish comma segments
+    /// (see [`geocode_candidates`]) so a full household address like
+    /// "183 Pine Valley Drive, Kitchener, Ontario, Canada, N2P2V8" still resolves to
+    /// "Kitchener". Returns the first candidate that matches.
     async fn geocode(&self, query: &str) -> Result<(f64, f64, String)> {
+        for candidate in geocode_candidates(query) {
+            if let Some(hit) = self.geocode_one(&candidate).await? {
+                return Ok(hit);
+            }
+        }
+        anyhow::bail!("no location found for \"{query}\"")
+    }
+
+    /// One geocoding query. `Ok(None)` when the API returns no results (so the caller
+    /// can try the next candidate); `Err` only on a transport/parse failure.
+    async fn geocode_one(&self, query: &str) -> Result<Option<(f64, f64, String)>> {
         let value: Value = self
             .client
             .get(format!("{}/v1/search", self.geo_base))
@@ -140,11 +155,13 @@ impl OpenMeteoWeather {
             .await
             .context("parsing Open-Meteo geocoding JSON")?;
 
-        let first = value
+        let Some(first) = value
             .get("results")
             .and_then(Value::as_array)
             .and_then(|r| r.first())
-            .with_context(|| format!("no location found for \"{query}\""))?;
+        else {
+            return Ok(None);
+        };
         let lat = first
             .get("latitude")
             .and_then(Value::as_f64)
@@ -153,8 +170,33 @@ impl OpenMeteoWeather {
             .get("longitude")
             .and_then(Value::as_f64)
             .context("geocoding result had no longitude")?;
-        Ok((lat, lon, geocode_label(first, query)))
+        Ok(Some((lat, lon, geocode_label(first, query))))
     }
+}
+
+/// Build the ordered list of geocoding queries to try for a free-text location: the
+/// whole string first, then each comma-separated segment that looks like a place name —
+/// i.e. contains a letter and **no digits**, so a street number ("183 Pine Valley Drive")
+/// or a postal code ("N2P2V8") is skipped while the city / region / country
+/// ("Kitchener", "Ontario", "Canada") are tried in order. De-duplicated; the full
+/// string is always first so a clean "City, Region" still resolves exactly.
+fn geocode_candidates(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let full = query.trim().to_string();
+    if !full.is_empty() {
+        out.push(full.clone());
+    }
+    if full.contains(',') {
+        for seg in query.split(',') {
+            let seg = seg.trim();
+            let usable =
+                seg.chars().any(|c| c.is_alphabetic()) && !seg.chars().any(|c| c.is_ascii_digit());
+            if usable && !out.iter().any(|q| q == seg) {
+                out.push(seg.to_string());
+            }
+        }
+    }
+    out
 }
 
 impl Default for OpenMeteoWeather {
@@ -381,6 +423,32 @@ mod tests {
             "precipitation_probability_max":[10,20,80,60,0,5,90]
         }
     }"#;
+
+    #[test]
+    fn geocode_candidates_fall_back_to_locality_segments() {
+        // A full household address: the street number and postal code (digit-bearing)
+        // are skipped; the city/region/country are tried in order after the whole string.
+        assert_eq!(
+            geocode_candidates("183 Pine Valley Drive, Kitchener, Ontario, Canada, N2P2V8"),
+            vec![
+                "183 Pine Valley Drive, Kitchener, Ontario, Canada, N2P2V8".to_string(),
+                "Kitchener".to_string(),
+                "Ontario".to_string(),
+                "Canada".to_string(),
+            ]
+        );
+        // A clean "City, Region" still tries the exact string first.
+        assert_eq!(
+            geocode_candidates("Kitchener, Ontario"),
+            vec![
+                "Kitchener, Ontario".to_string(),
+                "Kitchener".to_string(),
+                "Ontario".to_string()
+            ]
+        );
+        // A bare city has a single candidate.
+        assert_eq!(geocode_candidates("Paris"), vec!["Paris".to_string()]);
+    }
 
     #[test]
     fn weekday_labels() {
