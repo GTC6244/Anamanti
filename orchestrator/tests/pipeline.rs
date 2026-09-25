@@ -123,7 +123,11 @@ async fn drive_device(io: DuplexStream) -> (String, String, Vec<String>) {
         .unwrap();
     write_event(
         &mut writer,
-        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+        // Voiced audio (clears the energy gate for MIN_SPEECH_ONSET) so the
+        // orchestrator latches `speech_started` and accepts the transcript. A
+        // sub-threshold chunk would now be treated as a no-speech finalize and the
+        // transcript discarded as a likely STT hallucination (see stream_to_transcript).
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
     )
     .await
     .unwrap();
@@ -181,7 +185,11 @@ async fn drive_device_until_close(io: DuplexStream) -> (String, String, usize, u
         .unwrap();
     write_event(
         &mut writer,
-        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+        // Voiced audio (clears the energy gate for MIN_SPEECH_ONSET) so the
+        // orchestrator latches `speech_started` and accepts the transcript. A
+        // sub-threshold chunk would now be treated as a no-speech finalize and the
+        // transcript discarded as a likely STT hallucination (see stream_to_transcript).
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
     )
     .await
     .unwrap();
@@ -205,6 +213,52 @@ async fn drive_device_until_close(io: DuplexStream) -> (String, String, usize, u
         }
     }
     (transcript, reply, audio_starts, audio_stops)
+}
+
+/// Drive the device side of a *silent* turn: stream room-noise-level audio that
+/// never clears the energy gate, then drain the relayed frames until the socket
+/// closes. Returns `(relayed_transcript, reply_text, saw_listen)`.
+async fn drive_device_silent(io: DuplexStream) -> (String, String, bool) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+
+    write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0))
+        .await
+        .unwrap();
+    // Sub-threshold audio: below `voice_rms_threshold`, so the orchestrator's VAD
+    // never latches speech and this finalizes as a no-speech turn — even though the
+    // mock STT still "hears" (hallucinates) a transcript from it.
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+    )
+    .await
+    .unwrap();
+
+    let mut transcript = String::new();
+    let mut reply = String::new();
+    let mut saw_listen = false;
+    while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if ev.is_transcript() {
+            transcript = ev.transcript_text().unwrap_or_default().to_string();
+            continue;
+        }
+        if let Some(tok) = ev.reply_token_text() {
+            reply.push_str(tok);
+            continue;
+        }
+        if ev.event_type == types::LISTEN {
+            saw_listen = true;
+        }
+        // The orchestrator ends a silent turn with an `audio-stop` (and no
+        // `ambient-listen`); that's our cue that the turn is over.
+        if ev.event_type == types::AUDIO_STOP {
+            break;
+        }
+    }
+    (transcript, reply, saw_listen)
 }
 
 fn build_pipeline(memory: Arc<MemoryStore>) -> Pipeline {
@@ -328,6 +382,50 @@ async fn full_turn_streams_transcript_reply_and_tts_audio() {
     );
 }
 
+/// A silent room must not produce a phantom turn. The STT server hallucinates
+/// "Thank you." on the forwarded silence (as faster-whisper does on non-speech
+/// audio), but because the orchestrator's energy VAD never detected speech, that
+/// transcript is discarded: no reply, no TTS, and — crucially — no `ambient-listen`,
+/// so the follow-up chain terminates instead of looping on its own hallucinations.
+#[tokio::test]
+async fn silent_turn_discards_stt_hallucination_and_ends_the_chain() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = build_pipeline(memory);
+    // The canonical Whisper-on-silence hallucination.
+    let connector = MockConnector::new("Thank you.");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_silent(dev_test));
+
+    let mut events = Vec::new();
+    {
+        let mut on_event = |e: TurnEvent| events.push(e);
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    let (transcript, reply, saw_listen) = device_task.await.unwrap();
+
+    // The hallucinated text never reaches the device as a real transcript…
+    assert_eq!(transcript, "", "hallucinated transcript must be discarded");
+    // …no reply is generated or spoken…
+    assert_eq!(reply, "", "no reply for a discarded no-speech turn");
+    assert!(
+        connector.synthesized.lock().unwrap().is_empty(),
+        "TTS must not run for a discarded no-speech turn"
+    );
+    // …and no follow-up listen is issued, so a quiet room can't self-perpetuate.
+    assert!(
+        !saw_listen,
+        "no ambient-listen after a discarded no-speech turn"
+    );
+    // The pipeline still completes cleanly (sleeps on silence).
+    assert_eq!(events.last(), Some(&TurnEvent::Finished));
+}
+
 #[tokio::test]
 async fn two_devices_share_one_pipeline_and_each_reply_goes_to_its_own_socket() {
     // Multiple displays attach to a single orchestrator. The shared `Pipeline`
@@ -400,7 +498,11 @@ async fn drive_device_and_barge_in(io: DuplexStream) {
         .unwrap();
     write_event(
         &mut writer,
-        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+        // Voiced audio (clears the energy gate for MIN_SPEECH_ONSET) so the
+        // orchestrator latches `speech_started` and accepts the transcript. A
+        // sub-threshold chunk would now be treated as a no-speech finalize and the
+        // transcript discarded as a likely STT hallucination (see stream_to_transcript).
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
     )
     .await
     .unwrap();
@@ -704,7 +806,11 @@ async fn drive_device_collect_kinds(
     write_event(&mut writer, &start).await.unwrap();
     write_event(
         &mut writer,
-        &WyomingEvent::audio_chunk(fmt, 0, vec![1, 0, 2, 0]),
+        // Voiced audio (clears the energy gate for MIN_SPEECH_ONSET) so the
+        // orchestrator latches `speech_started` and accepts the transcript. A
+        // sub-threshold chunk would now be treated as a no-speech finalize and the
+        // transcript discarded as a likely STT hallucination (see stream_to_transcript).
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
     )
     .await
     .unwrap();
