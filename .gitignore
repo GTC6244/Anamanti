@@ -48,3 +48,10 @@ app.*.map.json
 # Orchestrator runtime memory DB (created at run time)
 ambient_memory.sqlite
 ambient_memory.sqlite-*
+
+# Android release signing — NEVER commit these
+/android/key.properties
+/android/app/*.jks
+/android/app/*.keystore
+*.jks
+*.keystore
