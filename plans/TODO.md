@@ -60,6 +60,31 @@ far end — transparent to `AudioRecord`/AudioFlinger.
 - Full install/revert state and knowledge are recorded in the plan file
       (`~/.claude/plans/snazzy-hopping-gadget.md`, "ON-DEVICE AEC SHIM" section).
 
+### Reinstalled on the production Echo Show (2026-09-25) + mic-gain tuning
+
+- [x] **Installed the shim on the production device** from the version-controlled
+      [EchoShow8gen1-aec-shim](https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim)
+      repo via `scripts/install.sh --pga 40 --log 1` (prebuilt armv7 `.so`, no build).
+      Verified loaded: `LD_PRELOAD=libamznaec_shim.so` in the live
+      `android.hardware.audio.service`, the `.so` mapped in, and the `amznaec 5s:
+      ref/mic in/out (speex linear)` telemetry ticking once capture opens. Persists
+      across reboot (on-disk `/vendor` `.so` + init-rc `setenv` + `persist.*` props;
+      `.orig` backups kept, revert via `scripts/uninstall.sh`).
+- [x] **Mic-gain tuning — important.** The doc-recommended **PGA 80→40 (by design)**
+      dropped the *streamed* mic level ~15 dB (idle wake-word-diag rms ~0.003 → ~0.0005;
+      the shim's default `gain_db=20` makeup didn't fully offset the ~20 dB analog cut).
+      The wake word still fired, but the **Core's energy VAD intermittently missed
+      speech onset** (`speech_started=false` → empty transcript → the device shows
+      "processing" then no reply; a retry works). Seen live on a "show me the steps"
+      recipe command. **Fix:** raised the shim's makeup gain
+      `setprop persist.vendor.amznaec.gain_db 34` (from 20), which restores idle rms
+      ~0.003 **without touching the by-design PGA**; since `gain_db` is applied *after*
+      cancellation, the echo-suppression ratio is unchanged. Persists (`persist.` prop).
+      If very close/loud near speech ever clips, dial to ~30; alternatively lower the
+      Core's `voice_rms_threshold` instead of raising device gain.
+- [ ] **Set `persist.vendor.amznaec.log 0`** on this device for daily use — telemetry
+      is currently on (`log 1`) from the install. (Same as follow-up #1 below.)
+
 **Remaining AEC follow-ups (device-side; not in this repo's build):**
 
 1. [ ] **Quiet the shim's debug logging** in daily use: `setprop
