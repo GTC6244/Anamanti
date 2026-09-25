@@ -130,18 +130,43 @@
   .section-head h2 { font-size: clamp(2rem, 4vw, 2.9rem); margin: 0 0 14px; }
   .section-head p { color: var(--muted); font-size: 1.08rem; margin: 0; }
 
-  /* feature grid */
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
-  @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
-  .card {
+  /* feature pillars (Memory / Tools / Communication) */
+  .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+  @media (max-width: 900px) { .pillars { grid-template-columns: 1fr; max-width: 520px; margin: 0 auto; } }
+  .fcard {
     background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 28px; transition: .25s;
+    overflow: hidden; transition: .25s;
   }
-  .card:hover { border-color: var(--border-2); transform: translateY(-3px); background: var(--panel-2); }
-  .card .ic { font-size: 1.7rem; margin-bottom: 14px; display: block; }
-  .card h3 { font-size: 1.22rem; margin: 0 0 8px; font-family: 'Inter', sans-serif; font-weight: 600; letter-spacing: 0; }
-  .card p { color: var(--muted); font-size: 0.96rem; margin: 0; }
+  .fcard:hover { border-color: var(--border-2); transform: translateY(-4px); }
+  .fcard .media {
+    height: 156px; position: relative; display: grid; place-items: center;
+    border-bottom: 1px solid var(--border);
+    background: radial-gradient(circle at 50% 38%, rgba(255,255,255,0.045), transparent 70%);
+  }
+  .fcard .body { padding: 26px 28px 30px; }
+  .fcard h3 { font-family: 'Fraunces', serif; font-weight: 500; font-size: 1.55rem; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .fcard .kicker { color: var(--faint); font-size: 0.94rem; margin: 0 0 16px; }
+  .fcard ul { margin: 0; padding: 0; list-style: none; }
+  .fcard li { color: var(--muted); font-size: 0.95rem; line-height: 1.5; padding: 11px 0 11px 24px; position: relative; border-top: 1px solid var(--border); }
+  .fcard li:first-child { border-top: none; }
+  .fcard li::before { content: ""; position: absolute; left: 2px; top: 17px; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
+  .fcard li b { color: var(--text); font-weight: 600; }
+
+  /* card graphics — larger, no small icons */
+  .g-rings { width: 96px; height: 96px; position: relative; }
+  .g-rings i { position: absolute; inset: 0; margin: auto; border-radius: 50%; border: 2px solid var(--accent-2); }
+  .g-rings i:nth-child(1) { width: 96px; height: 96px; opacity: .16; }
+  .g-rings i:nth-child(2) { width: 62px; height: 62px; opacity: .38; }
+  .g-rings i:nth-child(3) { width: 28px; height: 28px; border: none; background: var(--accent-2); box-shadow: 0 0 26px var(--accent-2); }
+  .g-grid { display: grid; grid-template-columns: repeat(3, 27px); grid-auto-rows: 27px; gap: 10px; }
+  .g-grid i { border-radius: 7px; background: rgba(232,163,92,0.20); border: 1px solid rgba(232,163,92,0.38); }
+  .g-grid i:nth-child(2), .g-grid i:nth-child(4), .g-grid i:nth-child(6), .g-grid i:nth-child(8) { background: rgba(232,163,92,0.42); }
+  .g-grid i:nth-child(5) { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 20px var(--glow); }
+  .g-wave { display: flex; align-items: center; gap: 7px; height: 86px; }
+  .g-wave i { width: 9px; border-radius: 5px; background: linear-gradient(180deg, var(--accent-2), var(--accent)); animation: eq 1.15s ease-in-out infinite; }
+  .g-wave i:nth-child(1){height:34px;animation-delay:0s}.g-wave i:nth-child(2){height:64px;animation-delay:.12s}
+  .g-wave i:nth-child(3){height:22px;animation-delay:.24s}.g-wave i:nth-child(4){height:80px;animation-delay:.36s}
+  .g-wave i:nth-child(5){height:46px;animation-delay:.48s}.g-wave i:nth-child(6){height:30px;animation-delay:.6s}
 
   /* tools */
   .tools-band { background: var(--bg-soft); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
@@ -268,46 +293,54 @@
       <div class="section-head">
         <p class="eyebrow">What it does</p>
         <h2>An assistant that lives in the room, not the cloud.</h2>
-        <p>Wake it with your voice, then just talk. Anamanti listens on-device, streams to your own
-          Mac for the heavy thinking, and speaks the answer back — all on the local network.</p>
+        <p>Wake it with your voice, then just talk. Anamanti listens on-device, streams to your home
+          server for the heavy thinking, and speaks the answer back — all on the local network. Three
+          things set it apart.</p>
       </div>
-      <div class="grid">
-        <div class="card">
-          <span class="ic">🗣️</span>
-          <h3>Multi-turn voice control</h3>
-          <p>Hold a natural conversation. After each reply Anamanti keeps listening for a beat, so
-            follow-ups need no repeated wake word — it remembers the thread of the chat.</p>
+      <div class="pillars">
+
+        <div class="fcard">
+          <div class="media"><div class="g-rings"><i></i><i></i><i></i></div></div>
+          <div class="body">
+            <h3>Memory</h3>
+            <p class="kicker">It remembers you, not just this sentence.</p>
+            <ul>
+              <li>Holds onto <b>facts and preferences</b> across every conversation, for days and weeks</li>
+              <li>Recall powered by an <b>on-device knowledge graph</b>, scoped per person</li>
+              <li>Just say <b>“remember…”</b> or <b>“forget that”</b> — you stay in control</li>
+              <li>Memory lives on <b>your home server</b>: inspect it, edit it, or delete it anytime</li>
+            </ul>
+          </div>
         </div>
-        <div class="card">
-          <span class="ic">🔧</span>
-          <h3>Custom tools</h3>
-          <p>Beyond chat, it acts: check the weather, search the web, read your calendar, get
-            directions, pull up recipes, add to the shopping list, set timers, and play music.</p>
+
+        <div class="fcard">
+          <div class="media"><div class="g-grid"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="body">
+            <h3>Tools</h3>
+            <p class="kicker">It doesn't just answer — it acts.</p>
+            <ul>
+              <li><b>Weather, web search, calendar,</b> directions and recipes, on demand</li>
+              <li>Manages your <b>household shopping list, timers</b> and reminders</li>
+              <li>Controls <b>music and Spotify</b> playback around the home</li>
+              <li>Runs on <b>your own accounts</b> — and the toolkit is extensible as you add more</li>
+            </ul>
+          </div>
         </div>
-        <div class="card">
-          <span class="ic">📺</span>
-          <h3>Live on the display</h3>
-          <p>Your words appear as you speak; the reply streams in token-by-token and is spoken aloud
-            sentence-by-sentence — talking starts before the full answer is even written.</p>
+
+        <div class="fcard">
+          <div class="media"><div class="g-wave"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="body">
+            <h3>Communication</h3>
+            <p class="kicker">A real back-and-forth, not one-shot commands.</p>
+            <ul>
+              <li><b>Natural multi-turn voice</b> — follow-ups need no repeated wake word</li>
+              <li>Answers appear <b>live on screen</b> and are spoken aloud as they form</li>
+              <li><b>Barge in any time</b> to interrupt, correct, or change direction</li>
+              <li><b>Proactive nudges:</b> it reaches out first when something matters</li>
+            </ul>
+          </div>
         </div>
-        <div class="card">
-          <span class="ic">🧠</span>
-          <h3>Remembers you</h3>
-          <p>Persistent memory across sessions — say “remember…” or just mention a preference. Recall
-            is powered by an on-Mac knowledge graph, scoped per person by speaker ID.</p>
-        </div>
-        <div class="card">
-          <span class="ic">✋</span>
-          <h3>Barge-in, any time</h3>
-          <p>Cut it off mid-sentence by saying the wake word again. Playback stops instantly and a
-            fresh turn begins — no waiting for it to finish.</p>
-        </div>
-        <div class="card">
-          <span class="ic">🔔</span>
-          <h3>Proactive notifications</h3>
-          <p>Anamanti can reach out first — a reminder, an alert — pushed straight to the display over
-            a connection your home holds open. It speaks when spoken to, and nudges when it matters.</p>
-        </div>
+
       </div>
     </div>
   </section>
@@ -350,7 +383,7 @@
           <p class="tag">Fully local</p>
           <h3>Ollama · llama.cpp</h3>
           <ul>
-            <li>Runs entirely on your Mac</li>
+            <li>Runs entirely on your home server</li>
             <li>Zero data leaves the network</li>
             <li>No API keys, no per-token cost</li>
             <li>Your pick of open models</li>
@@ -386,12 +419,13 @@
       <div class="section-head">
         <p class="eyebrow">How it works</p>
         <h2>Wake. Stream. Think. Speak.</h2>
-        <p>A jailbroken Echo Show 8 is the ears, eyes, and voice in the room; an M4 Mac Mini is the
-          brain. They find each other automatically over your LAN.</p>
+        <p>A tablet or custom smart speaker is the ears, eyes, and voice in the room — we like
+          repurposed Amazon Show 8 devices; your home server is the brain. They find each other
+          automatically over your LAN.</p>
       </div>
       <div class="flow">
         <div class="step"><div class="n">1</div><h4>Wake word</h4><p>Detected fully offline on the device — no audio leaves until you summon it.</p></div>
-        <div class="step"><div class="n">2</div><h4>Stream</h4><p>Your speech streams to the Mac; a Whisper server transcribes it live.</p></div>
+        <div class="step"><div class="n">2</div><h4>Stream</h4><p>Your speech streams to the home server; a Whisper server transcribes it live.</p></div>
         <div class="step"><div class="n">3</div><h4>Think</h4><p>The LLM reasons with memory &amp; tools, streaming its reply token-by-token.</p></div>
         <div class="step"><div class="n">4</div><h4>Speak</h4><p>Piper voices each sentence as it forms and plays it back on the display.</p></div>
       </div>
@@ -408,9 +442,9 @@
           no always-open mic to the cloud, and no mystery about where your voice goes.</p>
         <ul class="checklist">
           <li>Wake word runs on-device — audio only leaves after you summon it</li>
-          <li>Speech, memory, and tools run on your own Mac on the local network</li>
+          <li>Speech, memory, and tools run on your own home server on the local network</li>
           <li>Choose a fully-local LLM for a 100% offline brain</li>
-          <li>Memory is a file on your machine — inspect it, edit it, delete it</li>
+          <li>Memory is a file on your home server — inspect it, edit it, delete it</li>
           <li>Auto-discovery over mDNS — no hardcoded servers, no accounts</li>
         </ul>
       </div>
@@ -425,7 +459,8 @@
           <div class="stack-row"><span class="k">Text-to-speech</span><span class="v">Piper (Wyoming)</span></div>
           <div class="stack-row"><span class="k">Memory</span><span class="v">HelixDB GraphRAG · SQLite</span></div>
           <div class="stack-row"><span class="k">Transport</span><span class="v">Wyoming over TCP · mDNS discovery</span></div>
-          <div class="stack-row"><span class="k">Hardware</span><span class="v">Echo Show 8 (LineageOS) + M4 Mac Mini</span></div>
+          <div class="stack-row"><span class="k">Room device</span><span class="v">Tablet / smart speaker · e.g. repurposed Show 8</span></div>
+          <div class="stack-row"><span class="k">Home server</span><span class="v">Any always-on Mac / mini PC on your LAN</span></div>
         </div>
       </div>
     </div>
@@ -437,8 +472,9 @@
       <div class="final-box">
         <p class="eyebrow">Get started</p>
         <h2>Give your home its voice.</h2>
-        <p>Anamanti is an open build — bring an Echo Show, a Mac, and the AI brain of your choice.
-          The soul of your home is waiting to speak.</p>
+        <p>Anamanti is an open build — bring a tablet or smart speaker (we like repurposed Amazon
+          Show 8 devices), a home server, and the AI brain of your choice. The soul of your home is
+          waiting to speak.</p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com">Read the docs</a>
           <a class="btn btn-ghost" href="#top">Back to top</a>
