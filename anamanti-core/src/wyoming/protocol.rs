@@ -690,6 +690,8 @@ pub fn followup_wait_secs(data: &Value) -> u32 {
 pub enum DisplayContext {
     /// The guided-recipe screen is up (`kind: "recipe"`).
     Recipe(RecipeScreen),
+    /// The weather forecast screen is up (`kind: "weather"`).
+    Weather(WeatherScreen),
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
@@ -706,6 +708,21 @@ pub struct RecipeScreen {
     pub step_count: u32,
 }
 
+/// The weather screen's state, as carried in a [`DisplayContext::Weather`]. Tells the
+/// model the forecast is on screen (and what it currently shows), so it can answer
+/// follow-ups ("what about tomorrow" → `weather_lookup`) or `close_weather` on "close it".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WeatherScreen {
+    /// The place the forecast is for (e.g. "Kitchener, Ontario").
+    pub location: String,
+    /// `"imperial"` (°F) or `"metric"` (°C).
+    pub units: String,
+    /// The current temperature shown, whole degrees.
+    pub temp: i32,
+    /// A short plain-language description ("partly cloudy").
+    pub description: String,
+}
+
 /// Pull the display context out of an `audio-start` data block's `screen` object, or
 /// `None` when the display reports nothing (an idle screen, or a device that doesn't
 /// stamp context). Dispatches on `screen.kind`; an unknown kind (e.g. a newer device
@@ -716,8 +733,33 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         "recipe" => {
             parse_recipe_screen(screen.get("recipe")?.as_object()?).map(DisplayContext::Recipe)
         }
+        "weather" => {
+            parse_weather_screen(screen.get("weather")?.as_object()?).map(DisplayContext::Weather)
+        }
         _ => None,
     }
+}
+
+/// Parse the `weather` sub-object of a `screen` block into a [`WeatherScreen`].
+fn parse_weather_screen(weather: &Map<String, Value>) -> Option<WeatherScreen> {
+    Some(WeatherScreen {
+        location: weather
+            .get("location")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        units: weather
+            .get("units")
+            .and_then(Value::as_str)
+            .unwrap_or("metric")
+            .to_string(),
+        temp: weather.get("temp").and_then(Value::as_i64).unwrap_or(0) as i32,
+        description: weather
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
 /// Parse the `recipe` sub-object of a `screen` block into a [`RecipeScreen`].
@@ -927,8 +969,30 @@ mod tests {
             }))
         );
 
+        // A device with the weather screen up stamps a `weather` block.
+        let weather = json!({
+            "screen": {
+                "kind": "weather",
+                "weather": {
+                    "location": "Kitchener, Ontario",
+                    "units": "metric",
+                    "temp": 18,
+                    "description": "partly cloudy",
+                },
+            },
+        });
+        assert_eq!(
+            display_context(&weather),
+            Some(DisplayContext::Weather(WeatherScreen {
+                location: "Kitchener, Ontario".to_string(),
+                units: "metric".to_string(),
+                temp: 18,
+                description: "partly cloudy".to_string(),
+            }))
+        );
+
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
-        let other = json!({ "screen": { "kind": "weather" } });
+        let other = json!({ "screen": { "kind": "music" } });
         assert_eq!(display_context(&other), None);
     }
 

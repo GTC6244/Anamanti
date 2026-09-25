@@ -186,6 +186,40 @@ void main() {
     expect(controller.state.weatherActive, isFalse);
   });
 
+  test('pushes weather display-context on show and clears it on dismiss', () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final pushes = <Map<String, Object?>>[];
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+      setWeatherContext: ({
+        required bool active,
+        required String location,
+        required String units,
+        required int temp,
+        required String description,
+      }) => pushes.add({
+        'active': active,
+        'location': location,
+        'units': units,
+        'temp': temp,
+        'description': description,
+      }),
+    )..start();
+    addTearDown(controller.dispose);
+
+    engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
+    await Future<void>.delayed(Duration.zero);
+    expect(pushes.last['active'], isTrue);
+    expect(pushes.last['location'], 'Austin, Texas');
+    expect(pushes.last['units'], 'imperial');
+    expect(pushes.last['temp'], 72);
+    expect(pushes.last['description'], 'partly cloudy');
+
+    controller.dismissWeather();
+    expect(pushes.last['active'], isFalse);
+  });
+
   test('controller ignores an unparseable weather payload', () async {
     final engine = StreamController<WakeWordEvent>.broadcast();
     final controller = AssistantController(

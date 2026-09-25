@@ -46,6 +46,19 @@ typedef RecipeContextSink =
       required int stepCount,
     });
 
+/// Pushes the current weather-screen state down to the native engine, so the next voice
+/// turn's `audio-start` tells the orchestrator the forecast is up (and what it shows) —
+/// letting the LLM answer follow-ups in context or close it. Production wires the native
+/// [setWeatherContext]; null (the default, for tests) disables it.
+typedef WeatherContextSink =
+    void Function({
+      required bool active,
+      required String location,
+      required String units,
+      required int temp,
+      required String description,
+    });
+
 /// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
 /// connection/handshake succeeded. Production wires this to a control-protocol
 /// round-trip (mDNS discover + connect); tests inject a fake. When left null the
@@ -299,10 +312,12 @@ class AssistantController extends ChangeNotifier {
     VoidCallback? onUserActivity,
     Duration weatherAutoClose = const Duration(seconds: 60),
     RecipeContextSink? setRecipeContext,
+    WeatherContextSink? setWeatherContext,
   })  : _config = config,
         _onUserActivity = onUserActivity,
         _weatherAutoClose = weatherAutoClose,
         _setRecipeContext = setRecipeContext,
+        _setWeatherContext = setWeatherContext,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -352,6 +367,10 @@ class AssistantController extends ChangeNotifier {
   /// Sink for pushing recipe-screen context to the native engine (see
   /// [RecipeContextSink]); null disables it (tests with no native library).
   final RecipeContextSink? _setRecipeContext;
+
+  /// Sink for pushing weather-screen context to the native engine (see
+  /// [WeatherContextSink]); null disables it (tests with no native library).
+  final WeatherContextSink? _setWeatherContext;
 
   /// The active recipe pane's latest scroll position, tracked so recipe context
   /// pushes carry it. `_recipeAtTop` starts true (a freshly opened tab is at the top);
@@ -604,6 +623,7 @@ class AssistantController extends ChangeNotifier {
         if (weather != null) {
           _emit(_state.copyWith(weather: weather, weatherCurrent: weather));
           _scheduleWeatherAutoClose();
+          _pushWeatherContext();
         }
       case WakeWordEventKind.weatherCurrent:
         // An ambient refresh (from the persistent channel or riding a show): update the
@@ -615,6 +635,7 @@ class AssistantController extends ChangeNotifier {
       case WakeWordEventKind.dismissWeather:
         _weatherAutoCloseTimer?.cancel();
         _emit(_state.copyWith(clearWeather: true));
+        _pushWeatherContext();
       case WakeWordEventKind.recipeNavigate:
         // Voice tab switch ("show the ingredients" / "go to the steps").
         if (_state.recipe != null) {
@@ -656,8 +677,30 @@ class AssistantController extends ChangeNotifier {
     _weatherAutoCloseTimer = Timer(_weatherAutoClose, () {
       if (_state.weather != null) {
         _emit(_state.copyWith(clearWeather: true));
+        _pushWeatherContext();
       }
     });
+  }
+
+  /// Push the current weather-screen state (active + what it shows) down to the native
+  /// engine so the next voice turn carries it to the orchestrator. A no-op when no sink
+  /// is wired (tests). Only the full screen counts as display context — the ambient chip
+  /// does not.
+  void _pushWeatherContext() {
+    final sink = _setWeatherContext;
+    if (sink == null) return;
+    final w = _state.weather;
+    if (w == null) {
+      sink(active: false, location: '', units: '', temp: 0, description: '');
+      return;
+    }
+    sink(
+      active: true,
+      location: w.locationLabel,
+      units: w.units,
+      temp: w.current.temp,
+      description: w.current.description,
+    );
   }
 
   /// Dismiss recipe mode from the UI (the user taps the close control). Voice
@@ -675,6 +718,7 @@ class AssistantController extends ChangeNotifier {
     _weatherAutoCloseTimer?.cancel();
     if (_state.weather != null) {
       _emit(_state.copyWith(clearWeather: true));
+      _pushWeatherContext();
     }
   }
 

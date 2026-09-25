@@ -548,6 +548,39 @@ pub fn set_recipe_context(
     crate::engine::set_display_context(screen);
 }
 
+/// Report the weather screen's state as the device's **display context** so the next
+/// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know the
+/// forecast is up (and what it shows) so it can answer follow-ups in context or close it
+/// on request. The weather screen's setter for the general display-context mechanism (see
+/// [`set_recipe_context`] / [`crate::engine::set_display_context`]).
+///
+/// Flutter calls this when the full-screen weather view opens or closes. `active == false`
+/// clears the context (idle screen); the other fields are ignored. The small clock chip
+/// (the ambient indicator) is **not** a screen and never sets display context.
+#[frb(sync)]
+pub fn set_weather_context(
+    active: bool,
+    location: String,
+    units: String,
+    temp: i32,
+    description: String,
+) {
+    let screen = if active {
+        Some(serde_json::json!({
+            "kind": "weather",
+            "weather": {
+                "location": location,
+                "units": units,
+                "temp": temp,
+                "description": description,
+            },
+        }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(screen);
+}
+
 // ---------------------------------------------------------------------------
 // Proactive notifications (Approach A, visual-only). A persistent channel the
 // device dials to the orchestrator and holds open, receiving pushed

@@ -428,21 +428,37 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Display context on `audio-start`** (device → Anamanti Core): a **general,
   extensible** mechanism that tells the Core **what the display is currently showing**, so
   the model can *drive that screen by voice*. The device stamps a `data.screen` block on
-  every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload —
-  today the recipe screen: `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
-  ingredient_count, step_count}}`; absent on an idle screen. The orchestrator parses it
+  every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload.
+  Two kinds ship today:
+  - **recipe:** `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
+    ingredient_count, step_count}}` — the model can `recipe_control` (switch tab / scroll)
+    or `close_recipe`.
+  - **weather:** `{kind:"weather", weather:{location, units, temp, description}}` — the
+    model knows the forecast is up and for where, so it answers follow-ups in context
+    ("what about tomorrow" → `weather_lookup` for the same place) and closes it on "close
+    it" (`close_weather`).
+
+  Absent on an idle screen (and the small weather clock chip is **not** a screen — only
+  the full-screen forecast sets weather context). The orchestrator parses the block
   (`protocol::display_context` → a `DisplayContext` enum) and injects a one-line
   description into that turn's system prompt (`orchestrator::display_context_line`, one
-  arm per screen), so the model knows what is on screen and can call the matching tool
-  (for a recipe, `recipe_control` / `close_recipe`). **Adding a new voice-controllable
-  screen** (music, weather, photos) is a `DisplayContext` variant + a prompt-line arm +
-  a device-side `set_<screen>_context` setter — the transport is unchanged. This is the
-  **only device→Core context channel**; it piggybacks on `audio-start` (like the
-  follow-up `depth`/`wait_secs` markers) rather than adding a persistent uplink, so the
-  context is always fresh for the turn that needs it. On the device, Rust holds the
-  current block in a global slot (`engine::display_context` / `set_display_context`) set
-  by the FRB layer whenever a screen opens/closes or changes, and stamps it in
-  `WyomingConnection::send_audio_start`.
+  arm per screen). **Adding a new voice-controllable screen** (music, photos) is a
+  `DisplayContext` variant + a prompt-line arm + a device-side `set_<screen>_context`
+  setter — the transport is unchanged; an unknown `kind` is ignored, so a newer device
+  never breaks an older Core.
+
+  **How context rides with spoken input.** This is the **only device→Core context
+  channel** and it *piggybacks on the turn's own `audio-start`* — the first frame the
+  device sends when the user speaks — alongside the follow-up `depth`/`wait_secs` markers.
+  There is no separate context uplink and no conversation "context window" pushed ahead of
+  time: what the user is looking at travels *with* their utterance, so the model always
+  sees the exact on-screen state for the turn it is answering, and nothing goes stale
+  between turns. (The other half of a turn's context — long-term memory recall and, for a
+  follow-up turn, recent chat history — is assembled **Core-side** into the same system
+  prompt; the display-context line is appended to it.) On the device, Rust holds the
+  current block in a global slot (`engine::display_context` / `set_display_context`) set by
+  the FRB layer (`set_recipe_context` / `set_weather_context`) whenever a screen opens,
+  closes, or changes, and stamps it in `WyomingConnection::send_audio_start`.
 
 ### Proactive notifications (Approach A — persistent device-dialed channel)
 

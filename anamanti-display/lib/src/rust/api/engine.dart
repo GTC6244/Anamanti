@@ -73,6 +73,29 @@ void setRecipeContext({
   stepCount: stepCount,
 );
 
+/// Report the weather screen's state as the device's **display context** so the next
+/// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know the
+/// forecast is up (and what it shows) so it can answer follow-ups in context or close it
+/// on request. The weather screen's setter for the general display-context mechanism (see
+/// [`set_recipe_context`] / [`crate::engine::set_display_context`]).
+///
+/// Flutter calls this when the full-screen weather view opens or closes. `active == false`
+/// clears the context (idle screen); the other fields are ignored. The small clock chip
+/// (the ambient indicator) is **not** a screen and never sets display context.
+void setWeatherContext({
+  required bool active,
+  required String location,
+  required String units,
+  required int temp,
+  required String description,
+}) => RustLib.instance.api.crateApiEngineSetWeatherContext(
+  active: active,
+  location: location,
+  units: units,
+  temp: temp,
+  description: description,
+);
+
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
 /// restarted when the pinned orchestrator changes). The channel dials the pinned

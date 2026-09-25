@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -463852732;
+  int get rustContentHash => 518702162;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -161,6 +161,14 @@ abstract class RustLibApi extends BaseApi {
     required bool atBottom,
     required int ingredientCount,
     required int stepCount,
+  });
+
+  void crateApiEngineSetWeatherContext({
+    required bool active,
+    required String location,
+    required String units,
+    required int temp,
+    required String description,
   });
 
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
@@ -800,6 +808,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiEngineSetWeatherContext({
+    required bool active,
+    required String location,
+    required String units,
+    required int temp,
+    required String description,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(active, serializer);
+          sse_encode_String(location, serializer);
+          sse_encode_String(units, serializer);
+          sse_encode_i_32(temp, serializer);
+          sse_encode_String(description, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineSetWeatherContextConstMeta,
+        argValues: [active, location, units, temp, description],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineSetWeatherContextConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_weather_context",
+        argNames: ["active", "location", "units", "temp", "description"],
+      );
+
+  @override
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
     required NotifyConfig config,
   }) {
@@ -814,7 +858,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 19,
+              funcId: 20,
               port: port_,
             );
           },
@@ -852,7 +896,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 20,
+              funcId: 21,
               port: port_,
             );
           },
@@ -890,7 +934,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 21,
+              funcId: 22,
               port: port_,
             );
           },
@@ -922,7 +966,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -949,7 +993,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 24,
             port: port_,
           );
         },
@@ -976,7 +1020,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 25,
             port: port_,
           );
         },
@@ -1010,7 +1054,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 26,
             port: port_,
           );
         },

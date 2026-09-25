@@ -1331,7 +1331,32 @@ fn household_line(members: &[HouseholdMember]) -> Option<String> {
 fn display_context_line(ctx: &protocol::DisplayContext) -> String {
     match ctx {
         protocol::DisplayContext::Recipe(screen) => recipe_screen_line(screen),
+        protocol::DisplayContext::Weather(screen) => weather_screen_line(screen),
     }
+}
+
+/// The prompt line for the weather screen: names what the forecast currently shows, so
+/// the model can answer follow-ups in context ("what about tomorrow" → `weather_lookup`
+/// for the same place) or `close_weather` when the user says to close it.
+fn weather_screen_line(screen: &protocol::WeatherScreen) -> String {
+    let unit = if screen.units == "imperial" { "F" } else { "C" };
+    let place = screen.location.trim();
+    let at = if place.is_empty() {
+        String::new()
+    } else {
+        format!(" for {place}")
+    };
+    let desc = screen.description.trim();
+    let conditions = if desc.is_empty() {
+        String::new()
+    } else {
+        format!(", currently {desc} at {}°{unit}", screen.temp)
+    };
+    format!(
+        "The weather screen is currently open on the display, showing the forecast{at}{conditions}. \
+         Use the `weather_lookup` tool to update it (e.g. another day or place) and \
+         `close_weather` to close it."
+    )
 }
 
 /// The prompt line for the recipe screen: names the active tab and whether the pane is
