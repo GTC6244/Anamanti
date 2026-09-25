@@ -53,6 +53,7 @@ WakeWordEvent _presence(bool present) => WakeWordEvent(
       present: present,
       recipeJson: '',
       weatherJson: '',
+      recipeAction: '',
     );
 
 /// A neutral engine event of a given [kind], for exercising the activity dispatch.
@@ -73,6 +74,7 @@ WakeWordEvent _event(WakeWordEventKind kind) => WakeWordEvent(
       present: false,
       recipeJson: '',
       weatherJson: '',
+      recipeAction: '',
     );
 
 void main() {

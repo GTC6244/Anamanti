@@ -62,6 +62,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {String weatherJson = ''}) =>
       present: false,
       recipeJson: '',
       weatherJson: weatherJson,
+      recipeAction: '',
     );
 
 void main() {

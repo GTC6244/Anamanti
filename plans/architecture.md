@@ -417,6 +417,32 @@ predictable memory use and no GC pauses under the 1 GB limit.
   conversation history** (the last `follow_up.history_turns` turns within
   `follow_up.history_window_secs`, from the chat log); ordinary wake-word turns stay
   single-turn.
+- **`anamanti-recipe`** (Anamanti Core → device): a project-local **device-action** frame
+  driving the guided-recipe screen (`data.action` = `show` + `recipe` object /
+  `dismiss` / `navigate` + `target` tab / `scroll` + `direction`). Emitted by the LLM
+  **tools** the model calls on the Mac — `recipe_lookup` (fetch + parse → `show`),
+  `close_recipe` (`dismiss`), and `recipe_control` (`navigate` to Overview/Ingredients/
+  Steps, or `scroll` up/down/top/bottom). The device owns the resulting screen state —
+  it persists across turns and idle while you cook — so, like timers, this is
+  fire-and-forget from the Mac. See `plans/RecipePlan.md`.
+- **Display context on `audio-start`** (device → Anamanti Core): a **general,
+  extensible** mechanism that tells the Core **what the display is currently showing**, so
+  the model can *drive that screen by voice*. The device stamps a `data.screen` block on
+  every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload —
+  today the recipe screen: `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
+  ingredient_count, step_count}}`; absent on an idle screen. The orchestrator parses it
+  (`protocol::display_context` → a `DisplayContext` enum) and injects a one-line
+  description into that turn's system prompt (`orchestrator::display_context_line`, one
+  arm per screen), so the model knows what is on screen and can call the matching tool
+  (for a recipe, `recipe_control` / `close_recipe`). **Adding a new voice-controllable
+  screen** (music, weather, photos) is a `DisplayContext` variant + a prompt-line arm +
+  a device-side `set_<screen>_context` setter — the transport is unchanged. This is the
+  **only device→Core context channel**; it piggybacks on `audio-start` (like the
+  follow-up `depth`/`wait_secs` markers) rather than adding a persistent uplink, so the
+  context is always fresh for the turn that needs it. On the device, Rust holds the
+  current block in a global slot (`engine::display_context` / `set_display_context`) set
+  by the FRB layer whenever a screen opens/closes or changes, and stamps it in
+  `WyomingConnection::send_audio_start`.
 
 ### Proactive notifications (Approach A — persistent device-dialed channel)
 

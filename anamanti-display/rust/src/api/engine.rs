@@ -228,6 +228,12 @@ pub enum WakeWordEventKind {
     WeatherCurrent,
     /// Weather mode: dismiss the full-screen weather view and return to idle/ambient.
     DismissWeather,
+    /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
+    /// (`"overview"` / `"ingredients"` / `"steps"`).
+    RecipeNavigate,
+    /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
+    /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
+    RecipeScroll,
     /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
     /// is `true` when someone has approached the display (brighten) and `false` when
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
@@ -279,6 +285,9 @@ pub struct WakeWordEvent {
     /// for every other kind. The UI decodes it into the weather screen + the ambient
     /// clock indicator.
     pub weather_json: String,
+    /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
+    /// scroll direction (`RecipeScroll`). Empty for every other kind.
+    pub recipe_action: String,
 }
 
 impl WakeWordEvent {
@@ -300,6 +309,7 @@ impl WakeWordEvent {
             present: false,
             recipe_json: String::new(),
             weather_json: String::new(),
+            recipe_action: String::new(),
         }
     }
 
@@ -442,6 +452,20 @@ impl WakeWordEvent {
         Self::base(WakeWordEventKind::DismissWeather)
     }
 
+    pub(crate) fn recipe_navigate(target: String) -> Self {
+        Self {
+            recipe_action: target,
+            ..Self::base(WakeWordEventKind::RecipeNavigate)
+        }
+    }
+
+    pub(crate) fn recipe_scroll(direction: String) -> Self {
+        Self {
+            recipe_action: direction,
+            ..Self::base(WakeWordEventKind::RecipeScroll)
+        }
+    }
+
     // Constructed only by the Android camera bridge; on host builds it's unused.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn presence(present: bool) -> Self {
@@ -481,6 +505,47 @@ pub fn is_wake_word_engine_running() -> bool {
 pub fn note_user_activity() {
     #[cfg(target_os = "android")]
     crate::camera::bridge::note_activity();
+}
+
+/// Report the recipe screen's state as the device's **display context** so the next
+/// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know a
+/// recipe is up (and which tab / scroll position) so it can drive the screen by voice
+/// (switch tabs, scroll, close).
+///
+/// This is the recipe screen's setter for the general display-context mechanism (see
+/// [`crate::engine::set_display_context`]); other voice-controllable screens — music,
+/// weather, photos — would add their own `set_<screen>_context` entry that builds the
+/// matching `screen` block (`{kind, <kind>:{...}}`).
+///
+/// Flutter calls this when recipe mode opens or closes and whenever the active tab or a
+/// pane's scroll position changes. `active == false` clears the context (idle screen);
+/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`.
+#[frb(sync)]
+pub fn set_recipe_context(
+    active: bool,
+    title: String,
+    tab: String,
+    at_top: bool,
+    at_bottom: bool,
+    ingredient_count: u32,
+    step_count: u32,
+) {
+    let screen = if active {
+        Some(serde_json::json!({
+            "kind": "recipe",
+            "recipe": {
+                "title": title,
+                "tab": tab,
+                "at_top": at_top,
+                "at_bottom": at_bottom,
+                "ingredient_count": ingredient_count,
+                "step_count": step_count,
+            },
+        }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(screen);
 }
 
 // ---------------------------------------------------------------------------

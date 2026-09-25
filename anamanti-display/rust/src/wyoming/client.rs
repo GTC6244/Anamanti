@@ -63,6 +63,12 @@ pub struct WyomingConnection<R, W> {
     /// orchestrator sizes that turn's no-speech VAD window to match. 0 on an ordinary
     /// turn.
     followup_wait_secs: u32,
+    /// The display context — what the device is currently showing (e.g. the recipe
+    /// screen's tab + scroll state) — stamped in the `screen` block of this turn's
+    /// `audio-start` so the orchestrator's LLM knows what the display is showing and can
+    /// drive it (switch tabs / scroll / close). `None` on an idle screen. A general,
+    /// per-screen concept — see `plans/architecture.md` §4 ("Display context").
+    display_context: Option<serde_json::Value>,
 }
 
 impl WyomingConnection<BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf> {
@@ -97,7 +103,15 @@ where
             timestamp_ms: 0,
             followup_depth: 0,
             followup_wait_secs: 0,
+            display_context: None,
         }
+    }
+
+    /// Set the display context stamped on this turn's `audio-start` (in the `screen`
+    /// block) so the orchestrator's LLM knows what the display is showing. `None`
+    /// clears it (idle screen). Call before [`Self::send_audio_start`].
+    pub fn set_display_context(&mut self, screen: Option<serde_json::Value>) {
+        self.display_context = screen;
     }
 
     /// Mark this turn as a **follow-up** (the device auto-opened the mic after a reply,
@@ -113,7 +127,7 @@ where
     /// follow-up turn it also stamps the chain depth + listen window so the orchestrator
     /// includes recent history, bounds the chain, and sizes its no-speech window.
     pub async fn send_audio_start(&mut self) -> Result<()> {
-        let ev = WyomingEvent::audio_start_followup(
+        let mut ev = WyomingEvent::audio_start_followup(
             self.format.rate,
             self.format.width_bytes,
             self.format.channels,
@@ -121,6 +135,13 @@ where
             self.followup_depth,
             self.followup_wait_secs,
         );
+        // Stamp the current display context (e.g. recipe tab/scroll state) so the
+        // orchestrator's LLM can drive the display this turn. No-op on an idle screen.
+        if let Some(screen) = &self.display_context {
+            if let serde_json::Value::Object(map) = &mut ev.data {
+                map.insert("screen".into(), screen.clone());
+            }
+        }
         protocol::write_event(&mut self.writer, &ev)
             .await
             .context("sending audio-start")

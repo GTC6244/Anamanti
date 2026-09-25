@@ -25,7 +25,7 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
-use crate::llm::{DeviceAction, LlmBackend, LlmTurn};
+use crate::llm::{DeviceAction, LlmBackend, LlmTurn, RecipeNav};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
@@ -252,13 +252,14 @@ impl Pipeline {
     ) -> Result<TurnOutcome> {
         // 1. Wait for the device's `audio-start`; a clean close before that just
         //    ends the connection.
-        let (format, followup_depth, followup_wait_secs) = loop {
+        let (format, followup_depth, followup_wait_secs, screen) = loop {
             match device.read().await? {
                 Some(ev) if ev.event_type == types::AUDIO_START => {
                     break (
                         protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO),
                         protocol::followup_depth(&ev.data),
                         protocol::followup_wait_secs(&ev.data),
+                        protocol::display_context(&ev.data),
                     );
                 }
                 Some(_) => continue, // ignore stray pre-turn frames
@@ -271,6 +272,7 @@ impl Pipeline {
             format,
             followup_depth,
             followup_wait_secs,
+            screen,
             on_event,
         )
         .await
@@ -288,6 +290,7 @@ impl Pipeline {
         format: AudioFormat,
         followup_depth: u32,
         followup_wait_secs: u32,
+        screen: Option<protocol::DisplayContext>,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<TurnOutcome> {
         // Take one settings snapshot for the whole turn so a concurrent control
@@ -371,6 +374,7 @@ impl Pipeline {
                 device,
                 connector,
                 followup_depth,
+                screen.as_ref(),
                 on_event,
                 dump.as_ref(),
             )
@@ -587,6 +591,7 @@ impl Pipeline {
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
         followup_depth: u32,
+        screen: Option<&protocol::DisplayContext>,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
     ) -> Result<(String, Vec<String>)> {
@@ -669,6 +674,13 @@ impl Pipeline {
         if !context.is_empty() {
             system_prompt.push_str("\n\nWhat you remember about this person:\n");
             system_prompt.push_str(&context);
+        }
+        // Tell the model what the display is currently showing (its "display context"),
+        // so it can drive that screen by voice with the matching tool. Absent on an idle
+        // display. Extensible per screen kind — see `display_context_line`.
+        if let Some(screen) = screen {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&display_context_line(screen));
         }
 
         // Per-turn device-action channel: action tools (timers) push `DeviceAction`s
@@ -1312,6 +1324,49 @@ fn household_line(members: &[HouseholdMember]) -> Option<String> {
     Some(block)
 }
 
+/// A prompt line describing what the display is currently showing (its "display
+/// context"), so the model can drive that screen by voice. Dispatches per screen kind;
+/// add an arm here (plus a device-side setter and a `DisplayContext` variant) when a new
+/// screen — music, weather, photos — wants voice control.
+fn display_context_line(ctx: &protocol::DisplayContext) -> String {
+    match ctx {
+        protocol::DisplayContext::Recipe(screen) => recipe_screen_line(screen),
+    }
+}
+
+/// The prompt line for the recipe screen: names the active tab and whether the pane is
+/// scrolled to the top/bottom, so the model can decide whether a `recipe_control`
+/// (switch tab / scroll) or `close_recipe` call is useful.
+fn recipe_screen_line(screen: &protocol::RecipeScreen) -> String {
+    let tab = match screen.tab.as_str() {
+        "ingredients" => "Ingredients",
+        "steps" => "Steps",
+        _ => "Overview",
+    };
+    let title = screen.title.trim();
+    let dish = if title.is_empty() {
+        "a recipe".to_string()
+    } else {
+        format!("the recipe for \"{title}\"")
+    };
+    let position = if screen.at_top && screen.at_bottom {
+        " The whole tab fits on screen."
+    } else if screen.at_top {
+        " It is scrolled to the top."
+    } else if screen.at_bottom {
+        " It is scrolled to the bottom."
+    } else {
+        " It is scrolled partway."
+    };
+    format!(
+        "The recipe screen is currently open on the display, showing {dish} \
+         ({ing} ingredients, {steps} steps) on the {tab} tab.{position} Use the \
+         `recipe_control` tool to switch tabs or scroll it, or `close_recipe` to close it.",
+        ing = screen.ingredient_count,
+        steps = screen.step_count,
+    )
+}
+
 /// Drain every currently-pending [`DeviceAction`] from the per-turn channel and
 /// relay it to the device as an `ambient-timer` frame on `writer`. Non-blocking: it
 /// only takes actions already queued (a tool's `invoke` runs synchronously during
@@ -1338,6 +1393,15 @@ async fn drain_device_actions<W>(
                 serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
             ),
             DeviceAction::DismissWeather => WyomingEvent::weather_dismiss(),
+            DeviceAction::RecipeControl(nav) => match nav {
+                RecipeNav::TabOverview => WyomingEvent::recipe_navigate("overview"),
+                RecipeNav::TabIngredients => WyomingEvent::recipe_navigate("ingredients"),
+                RecipeNav::TabSteps => WyomingEvent::recipe_navigate("steps"),
+                RecipeNav::ScrollUp => WyomingEvent::recipe_scroll("up"),
+                RecipeNav::ScrollDown => WyomingEvent::recipe_scroll("down"),
+                RecipeNav::ScrollTop => WyomingEvent::recipe_scroll("top"),
+                RecipeNav::ScrollBottom => WyomingEvent::recipe_scroll("bottom"),
+            },
         };
         if let Err(e) = protocol::write_event(writer, &event).await {
             log::warn!("failed to relay device action to the device: {e:#}");

@@ -96,6 +96,34 @@ fn slot() -> &'static Mutex<Option<EngineHandle>> {
     ENGINE.get_or_init(|| Mutex::new(None))
 }
 
+/// The display context — what the device is currently showing (e.g. the recipe screen's
+/// tab + scroll state) — that each turn stamps in the `screen` block of its
+/// `audio-start`. A general, per-screen concept: any screen wanting voice control sets
+/// its own context here (recipe today; music / weather / photos later), the value being
+/// the JSON `screen` block (`{kind, <kind>:{...}}`). The UI layer sets it via a
+/// screen-specific FRB call (e.g. `api::engine::set_recipe_context`); a starting turn
+/// reads it in `net::run_turn_task`. `None` when the display is idle. Held globally (not
+/// on the engine handle) so it survives across turns and engine restarts while a screen
+/// stays up.
+static DISPLAY_CONTEXT: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+
+fn display_slot() -> &'static Mutex<Option<serde_json::Value>> {
+    DISPLAY_CONTEXT.get_or_init(|| Mutex::new(None))
+}
+
+/// Set (or clear, with `None`) the display context stamped on subsequent turns'
+/// `audio-start` frames. Called from the FRB layer whenever a screen with voice control
+/// opens/closes or its state changes.
+pub fn set_display_context(screen: Option<serde_json::Value>) {
+    *display_slot().lock().unwrap() = screen;
+}
+
+/// The current display context to stamp on a starting turn's `audio-start`, or `None`
+/// when the display is idle.
+pub fn display_context() -> Option<serde_json::Value> {
+    display_slot().lock().unwrap().clone()
+}
+
 /// True while a wake-word engine thread is active.
 pub fn is_running() -> bool {
     slot()

@@ -126,11 +126,19 @@ class AmbientScreen extends StatelessWidget {
                   ignoring: !recipeActive,
                   child: recipeActive
                       ? RecipeView(
-                          key: ValueKey(state.recipe!.sourceUrl.isNotEmpty
-                              ? state.recipe!.sourceUrl
-                              : state.recipe!.title),
+                          key: ValueKey(
+                            state.recipe!.sourceUrl.isNotEmpty
+                                ? state.recipe!.sourceUrl
+                                : state.recipe!.title,
+                          ),
                           recipe: state.recipe!,
                           onClose: assistant.dismissRecipe,
+                          tab: state.recipeTab,
+                          onTabSelected: assistant.setRecipeTab,
+                          scrollSeq: state.recipeScrollSeq,
+                          scrollDir: state.recipeScrollDir,
+                          onScrollPositionChanged:
+                              assistant.reportRecipeScrollPosition,
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -175,7 +183,8 @@ class AmbientScreen extends StatelessWidget {
                 bottom: 24,
                 child: AnimatedOpacity(
                   key: const Key('idle-clock'),
-                  opacity: (active ||
+                  opacity:
+                      (active ||
                           offMode ||
                           modeActive ||
                           state.timers.isNotEmpty)

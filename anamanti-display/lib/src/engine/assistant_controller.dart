@@ -28,7 +28,23 @@ import 'package:anamanti_display/src/rust/api/engine.dart';
 
 /// Opens the native engine event stream for a given config. Production passes
 /// `startWakeWordEngine`; tests pass a fake.
-typedef EngineStreamFactory = Stream<WakeWordEvent> Function(WakeWordConfig config);
+typedef EngineStreamFactory =
+    Stream<WakeWordEvent> Function(WakeWordConfig config);
+
+/// Pushes the current recipe-screen state down to the native engine, so the next
+/// voice turn's `audio-start` tells the orchestrator what the display is showing (and
+/// which tab / scroll position) and it can drive the screen by voice. Production wires
+/// the native [setRecipeContext]; null (the default, for tests) disables it.
+typedef RecipeContextSink =
+    void Function({
+      required bool active,
+      required String title,
+      required String tab,
+      required bool atTop,
+      required bool atBottom,
+      required int ingredientCount,
+      required int stepCount,
+    });
 
 /// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
 /// connection/handshake succeeded. Production wires this to a control-protocol
@@ -95,12 +111,12 @@ class TimerModel {
   final bool finished;
 
   TimerModel copyWith({bool? finished}) => TimerModel(
-        id: id,
-        label: label,
-        deadline: deadline,
-        total: total,
-        finished: finished ?? this.finished,
-      );
+    id: id,
+    label: label,
+    deadline: deadline,
+    total: total,
+    finished: finished ?? this.finished,
+  );
 }
 
 /// An immutable snapshot of everything the UI needs to render one frame.
@@ -122,6 +138,9 @@ class AssistantState {
     this.recipe,
     this.weather,
     this.weatherCurrent,
+    this.recipeTab = 0,
+    this.recipeScrollSeq = 0,
+    this.recipeScrollDir = '',
   });
 
   final TurnPhase phase;
@@ -179,6 +198,21 @@ class AssistantState {
   /// idle — so it lives on the state snapshot, not tied to [phase].
   final RecipeData? recipe;
 
+  /// The active recipe tab: 0 = Overview, 1 = Ingredients, 2 = Steps. Driven by voice
+  /// (`recipe_control`) and by touch of the bottom tab bar. Only meaningful while
+  /// [recipeActive].
+  final int recipeTab;
+
+  /// A monotonically increasing counter bumped on each voice scroll command, paired
+  /// with [recipeScrollDir]. The [RecipeView] scrolls the active pane whenever this
+  /// changes (a counter, so repeating the same direction still fires). 0 = no command
+  /// yet.
+  final int recipeScrollSeq;
+
+  /// The direction of the most recent voice scroll command: `'up'` / `'down'` (a page)
+  /// or `'top'` / `'bottom'`. Read together with [recipeScrollSeq].
+  final String recipeScrollDir;
+
   /// Whether recipe mode is currently on screen.
   bool get recipeActive => recipe != null;
 
@@ -222,6 +256,9 @@ class AssistantState {
     WeatherData? weather,
     bool clearWeather = false,
     WeatherData? weatherCurrent,
+    int? recipeTab,
+    int? recipeScrollSeq,
+    String? recipeScrollDir,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -239,6 +276,9 @@ class AssistantState {
       recipe: clearRecipe ? null : (recipe ?? this.recipe),
       weather: clearWeather ? null : (weather ?? this.weather),
       weatherCurrent: weatherCurrent ?? this.weatherCurrent,
+      recipeTab: recipeTab ?? this.recipeTab,
+      recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
+      recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
     );
   }
 }
@@ -258,9 +298,11 @@ class AssistantController extends ChangeNotifier {
     DateTime Function()? clock,
     VoidCallback? onUserActivity,
     Duration weatherAutoClose = const Duration(seconds: 60),
+    RecipeContextSink? setRecipeContext,
   })  : _config = config,
         _onUserActivity = onUserActivity,
         _weatherAutoClose = weatherAutoClose,
+        _setRecipeContext = setRecipeContext,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -307,6 +349,16 @@ class AssistantController extends ChangeNotifier {
   final Duration _weatherAutoClose;
   Timer? _weatherAutoCloseTimer;
 
+  /// Sink for pushing recipe-screen context to the native engine (see
+  /// [RecipeContextSink]); null disables it (tests with no native library).
+  final RecipeContextSink? _setRecipeContext;
+
+  /// The active recipe pane's latest scroll position, tracked so recipe context
+  /// pushes carry it. `_recipeAtTop` starts true (a freshly opened tab is at the top);
+  /// the [RecipeView] corrects both once it measures the pane.
+  bool _recipeAtTop = true;
+  bool _recipeAtBottom = false;
+
   /// True once we've seen speech-level audio in the current turn (so trailing
   /// silence means "done speaking" rather than "hasn't started yet").
   bool _speechSeen = false;
@@ -339,7 +391,8 @@ class AssistantController extends ChangeNotifier {
     try {
       _sub = _startEngine(_config).listen(
         _onEvent,
-        onError: (Object e, StackTrace _) => _scheduleReconnect('engine error: $e'),
+        onError: (Object e, StackTrace _) =>
+            _scheduleReconnect('engine error: $e'),
         onDone: () => _scheduleReconnect('engine stream ended'),
         cancelOnError: true,
       );
@@ -355,12 +408,14 @@ class AssistantController extends ChangeNotifier {
     if (_disposed) return;
     _sub?.cancel();
     _sub = null;
-    _emit(_state.copyWith(
-      phase: TurnPhase.error,
-      online: false,
-      statusMessage: '$reason — reconnecting…',
-      audioPlaying: false,
-    ));
+    _emit(
+      _state.copyWith(
+        phase: TurnPhase.error,
+        online: false,
+        statusMessage: '$reason — reconnecting…',
+        audioPlaying: false,
+      ),
+    );
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(_backoff, () {
       _backoff = _nextBackoff(_backoff);
@@ -401,10 +456,12 @@ class AssistantController extends ChangeNotifier {
 
     switch (e.kind) {
       case WakeWordEventKind.started:
-        _emit(_state.copyWith(
-          captureReady: true,
-          statusMessage: 'Listening on ${e.device}',
-        ));
+        _emit(
+          _state.copyWith(
+            captureReady: true,
+            statusMessage: 'Listening on ${e.device}',
+          ),
+        );
       case WakeWordEventKind.status:
         _emit(_state.copyWith(statusMessage: e.message));
       case WakeWordEventKind.level:
@@ -416,42 +473,52 @@ class AssistantController extends ChangeNotifier {
         // can't wipe this new turn's text.
         _speechSeen = false;
         _lastVoiceAt = _clock();
-        _emit(_state.copyWith(
-          phase: TurnPhase.listening,
-          wakeWord: e.model,
-          transcript: '',
-          reply: '',
-          audioPlaying: false,
-          followUp: false,
-        ));
+        _emit(
+          _state.copyWith(
+            phase: TurnPhase.listening,
+            wakeWord: e.model,
+            transcript: '',
+            reply: '',
+            audioPlaying: false,
+            followUp: false,
+          ),
+        );
       case WakeWordEventKind.connecting:
-        _emit(_state.copyWith(
-          phase: TurnPhase.connecting,
-          online: true,
-          statusMessage: e.message,
-        ));
+        _emit(
+          _state.copyWith(
+            phase: TurnPhase.connecting,
+            online: true,
+            statusMessage: e.message,
+          ),
+        );
       case WakeWordEventKind.streaming:
         _emit(_state.copyWith(phase: TurnPhase.listening, online: true));
       case WakeWordEventKind.transcript:
-        _emit(_state.copyWith(
-          phase: TurnPhase.thinking,
-          online: true,
-          transcript: e.transcript,
-        ));
+        _emit(
+          _state.copyWith(
+            phase: TurnPhase.thinking,
+            online: true,
+            transcript: e.transcript,
+          ),
+        );
       case WakeWordEventKind.replyToken:
-        _emit(_state.copyWith(
-          phase: TurnPhase.thinking,
-          online: true,
-          reply: _state.reply + e.reply,
-        ));
+        _emit(
+          _state.copyWith(
+            phase: TurnPhase.thinking,
+            online: true,
+            reply: _state.reply + e.reply,
+          ),
+        );
       case WakeWordEventKind.speaking:
         // TTS playback started: mark audio as playing so the reply text stays on
         // screen through the whole utterance, even after the turn returns to idle.
-        _emit(_state.copyWith(
-          phase: TurnPhase.speaking,
-          online: true,
-          audioPlaying: true,
-        ));
+        _emit(
+          _state.copyWith(
+            phase: TurnPhase.speaking,
+            online: true,
+            audioPlaying: true,
+          ),
+        );
       case WakeWordEventKind.speakingDone:
         _onSpeakingDone();
       case WakeWordEventKind.listeningFollowup:
@@ -463,14 +530,16 @@ class AssistantController extends ChangeNotifier {
         // to clear the text now.
         _speechSeen = false;
         _lastVoiceAt = _clock();
-        _emit(_state.copyWith(
-          phase: TurnPhase.listening,
-          online: true,
-          transcript: '',
-          reply: '',
-          audioPlaying: false,
-          followUp: true,
-        ));
+        _emit(
+          _state.copyWith(
+            phase: TurnPhase.listening,
+            online: true,
+            transcript: '',
+            reply: '',
+            audioPlaying: false,
+            followUp: true,
+          ),
+        );
       case WakeWordEventKind.disconnected:
         _onDisconnected(e.message);
       case WakeWordEventKind.stopped:
@@ -482,39 +551,51 @@ class AssistantController extends ChangeNotifier {
         // no per-second events from Rust. Replace any existing timer with this id.
         final total = Duration(seconds: e.timerRemainingSecs);
         final deadline = _clock().add(total);
-        _emit(_state.copyWith(timers: [
-          ..._state.timers.where((t) => t.id != e.timerId),
-          TimerModel(
-            id: e.timerId,
-            label: e.timerLabel,
-            deadline: deadline,
-            total: total,
+        _emit(
+          _state.copyWith(
+            timers: [
+              ..._state.timers.where((t) => t.id != e.timerId),
+              TimerModel(
+                id: e.timerId,
+                label: e.timerLabel,
+                deadline: deadline,
+                total: total,
+              ),
+            ],
           ),
-        ]));
+        );
       case WakeWordEventKind.timerFinished:
         // Mark it finished (its alarm is sounding); the chip stays until dismissed.
-        _emit(_state.copyWith(
-          timers: _state.timers
-              .map((t) => t.id == e.timerId ? t.copyWith(finished: true) : t)
-              .toList(),
-        ));
+        _emit(
+          _state.copyWith(
+            timers: _state.timers
+                .map((t) => t.id == e.timerId ? t.copyWith(finished: true) : t)
+                .toList(),
+          ),
+        );
       case WakeWordEventKind.timerCancelled:
-        _emit(_state.copyWith(
-          timers: _state.timers.where((t) => t.id != e.timerId).toList(),
-        ));
+        _emit(
+          _state.copyWith(
+            timers: _state.timers.where((t) => t.id != e.timerId).toList(),
+          ),
+        );
       case WakeWordEventKind.presence:
         // Camera proximity transition (brighten on approach / dim when quiet). The
         // brightness actuation lives in the UI layer, which reads `userPresent`.
         _emit(_state.copyWith(userPresent: e.present));
       case WakeWordEventKind.showRecipe:
-        // The orchestrator pushed a parsed recipe; open recipe mode. A payload that
-        // fails to parse is ignored (recipe stays as it was) rather than crashing.
+        // The orchestrator pushed a parsed recipe; open recipe mode on the Overview
+        // tab. A payload that fails to parse is ignored (recipe stays as it was)
+        // rather than crashing.
         final recipe = RecipeData.tryParse(e.recipeJson);
         if (recipe != null) {
-          _emit(_state.copyWith(recipe: recipe));
+          _recipeAtTop = true;
+          _recipeAtBottom = false;
+          _emit(_state.copyWith(recipe: recipe, recipeTab: 0));
+          _pushRecipeContext();
         }
       case WakeWordEventKind.dismissRecipe:
-        _emit(_state.copyWith(clearRecipe: true));
+        _clearRecipe();
       case WakeWordEventKind.showWeather:
         // The orchestrator pushed a forecast; open the full-screen weather view and
         // refresh the ambient indicator from the same payload. A payload that fails to
@@ -534,6 +615,36 @@ class AssistantController extends ChangeNotifier {
       case WakeWordEventKind.dismissWeather:
         _weatherAutoCloseTimer?.cancel();
         _emit(_state.copyWith(clearWeather: true));
+      case WakeWordEventKind.recipeNavigate:
+        // Voice tab switch ("show the ingredients" / "go to the steps").
+        if (_state.recipe != null) {
+          _setRecipeTab(_tabIndexForTarget(e.recipeAction));
+        }
+      case WakeWordEventKind.recipeScroll:
+        // Voice scroll ("scroll down" / "back to the top"). Bump the seq so the view
+        // scrolls the active pane even when the direction repeats; it reports the new
+        // position back via [reportRecipeScrollPosition], which refreshes the context.
+        if (_state.recipe != null) {
+          _emit(
+            _state.copyWith(
+              recipeScrollSeq: _state.recipeScrollSeq + 1,
+              recipeScrollDir: e.recipeAction,
+            ),
+          );
+        }
+    }
+  }
+
+  /// Map a voice tab target (`"overview"` / `"ingredients"` / `"steps"`) to its tab
+  /// index; an unknown target falls back to Overview.
+  int _tabIndexForTarget(String target) {
+    switch (target) {
+      case 'ingredients':
+        return 1;
+      case 'steps':
+        return 2;
+      default:
+        return 0;
     }
   }
 
@@ -553,7 +664,7 @@ class AssistantController extends ChangeNotifier {
   /// dismissal ("done cooking") arrives instead as a `dismissRecipe` event.
   void dismissRecipe() {
     if (_state.recipe != null) {
-      _emit(_state.copyWith(clearRecipe: true));
+      _clearRecipe();
     }
   }
 
@@ -577,12 +688,81 @@ class AssistantController extends ChangeNotifier {
     }
   }
 
+  /// Switch the recipe tab from the UI (a tap of the bottom tab bar). Voice tab
+  /// switches arrive instead as a `recipeNavigate` event; both route here.
+  void setRecipeTab(int index) {
+    if (_state.recipe != null) {
+      _setRecipeTab(index);
+    }
+  }
+
+  /// Report the active recipe pane's scroll position from the [RecipeView], so the
+  /// next voice turn's context tells the orchestrator whether a scroll would do
+  /// anything. Only pushes context when the position actually changed.
+  void reportRecipeScrollPosition(bool atTop, bool atBottom) {
+    if (_state.recipe == null) return;
+    if (atTop == _recipeAtTop && atBottom == _recipeAtBottom) return;
+    _recipeAtTop = atTop;
+    _recipeAtBottom = atBottom;
+    _pushRecipeContext();
+  }
+
+  void _setRecipeTab(int index) {
+    final clamped = index.clamp(0, 2);
+    if (clamped == _state.recipeTab) return;
+    // A freshly shown tab starts at the top until the view measures it.
+    _recipeAtTop = true;
+    _recipeAtBottom = false;
+    _emit(_state.copyWith(recipeTab: clamped));
+    _pushRecipeContext();
+  }
+
+  void _clearRecipe() {
+    _emit(_state.copyWith(clearRecipe: true, recipeTab: 0));
+    _pushRecipeContext();
+  }
+
+  /// Push the current recipe-screen state (active/tab/scroll/counts) down to the
+  /// native engine so the next voice turn carries it to the orchestrator. A no-op
+  /// when no sink is wired (tests).
+  void _pushRecipeContext() {
+    final sink = _setRecipeContext;
+    if (sink == null) return;
+    final r = _state.recipe;
+    if (r == null) {
+      sink(
+        active: false,
+        title: '',
+        tab: 'overview',
+        atTop: true,
+        atBottom: false,
+        ingredientCount: 0,
+        stepCount: 0,
+      );
+      return;
+    }
+    const tabs = ['overview', 'ingredients', 'steps'];
+    sink(
+      active: true,
+      title: r.title,
+      tab: tabs[_state.recipeTab.clamp(0, 2)],
+      atTop: _recipeAtTop,
+      atBottom: _recipeAtBottom,
+      ingredientCount: r.ingredients.length,
+      stepCount: r.steps.length,
+    );
+  }
+
   /// Dismiss a timer from the UI (e.g. the user taps a finished/ringing chip).
   /// Device-side the timer has already fired or been cancelled; this only clears the
   /// chip.
   void dismissTimer(int id) {
     if (_state.timers.any((t) => t.id == id)) {
-      _emit(_state.copyWith(timers: _state.timers.where((t) => t.id != id).toList()));
+      _emit(
+        _state.copyWith(
+          timers: _state.timers.where((t) => t.id != id).toList(),
+        ),
+      );
     }
   }
 
@@ -613,15 +793,17 @@ class AssistantController extends ChangeNotifier {
     // On a clean end the reply audio is usually still playing out of the ring, so
     // leave `audioPlaying` untouched — it keeps the reply text on screen until the
     // engine's `speakingDone` fires. On a failed turn nothing is playing, so drop it.
-    _emit(_state.copyWith(
-      phase: TurnPhase.idle,
-      online: normalEnd,
-      statusMessage: normalEnd ? 'Ready' : message,
-      audioPlaying: normalEnd ? null : false,
-      // The turn ended; the follow-up cue belongs to a live turn only. If a chained
-      // follow-up is coming, the engine's next `listeningFollowup` re-sets it.
-      followUp: false,
-    ));
+    _emit(
+      _state.copyWith(
+        phase: TurnPhase.idle,
+        online: normalEnd,
+        statusMessage: normalEnd ? 'Ready' : message,
+        audioPlaying: normalEnd ? null : false,
+        // The turn ended; the follow-up cue belongs to a live turn only. If a chained
+        // follow-up is coming, the engine's next `listeningFollowup` re-sets it.
+        followUp: false,
+      ),
+    );
   }
 
   /// The reply's TTS audio has finished playing (drained naturally, or was flushed
@@ -633,7 +815,8 @@ class AssistantController extends ChangeNotifier {
   /// moved us on (listening/connecting/thinking), just drop the flag and keep the
   /// new turn's text.
   void _onSpeakingDone() {
-    final endingReply = _state.phase == TurnPhase.speaking ||
+    final endingReply =
+        _state.phase == TurnPhase.speaking ||
         (_state.phase == TurnPhase.idle && _state.audioPlaying);
     if (endingReply) {
       _emit(_state.copyWith(audioPlaying: false, transcript: '', reply: ''));
@@ -658,8 +841,10 @@ class AssistantController extends ChangeNotifier {
     if (_probe == null) return; // feature disabled (no probe injected)
     final shouldPoll = !_disposed && !_state.online && !_state.turnActive;
     if (shouldPoll) {
-      _offlinePollTimer ??=
-          Timer.periodic(_offlinePollInterval, (_) => _probeOnce());
+      _offlinePollTimer ??= Timer.periodic(
+        _offlinePollInterval,
+        (_) => _probeOnce(),
+      );
     } else {
       _offlinePollTimer?.cancel();
       _offlinePollTimer = null;

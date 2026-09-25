@@ -68,6 +68,7 @@ WakeWordEvent _event(
     present: present,
     recipeJson: recipeJson,
     weatherJson: '',
+    recipeAction: '',
   );
 }
 

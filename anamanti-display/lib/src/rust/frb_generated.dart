@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1091323550;
+  int get rustContentHash => -463852732;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -152,6 +152,16 @@ abstract class RustLibApi extends BaseApi {
   });
 
   void crateApiEngineNoteUserActivity();
+
+  void crateApiEngineSetRecipeContext({
+    required bool active,
+    required String title,
+    required String tab,
+    required bool atTop,
+    required bool atBottom,
+    required int ingredientCount,
+    required int stepCount,
+  });
 
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
     required NotifyConfig config,
@@ -734,6 +744,62 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "note_user_activity", argNames: []);
 
   @override
+  void crateApiEngineSetRecipeContext({
+    required bool active,
+    required String title,
+    required String tab,
+    required bool atTop,
+    required bool atBottom,
+    required int ingredientCount,
+    required int stepCount,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(active, serializer);
+          sse_encode_String(title, serializer);
+          sse_encode_String(tab, serializer);
+          sse_encode_bool(atTop, serializer);
+          sse_encode_bool(atBottom, serializer);
+          sse_encode_u_32(ingredientCount, serializer);
+          sse_encode_u_32(stepCount, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineSetRecipeContextConstMeta,
+        argValues: [
+          active,
+          title,
+          tab,
+          atTop,
+          atBottom,
+          ingredientCount,
+          stepCount,
+        ],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineSetRecipeContextConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_recipe_context",
+        argNames: [
+          "active",
+          "title",
+          "tab",
+          "atTop",
+          "atBottom",
+          "ingredientCount",
+          "stepCount",
+        ],
+      );
+
+  @override
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
     required NotifyConfig config,
   }) {
@@ -748,7 +814,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 18,
+              funcId: 19,
               port: port_,
             );
           },
@@ -786,7 +852,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 19,
+              funcId: 20,
               port: port_,
             );
           },
@@ -824,7 +890,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 20,
+              funcId: 21,
               port: port_,
             );
           },
@@ -856,7 +922,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 22,
             port: port_,
           );
         },
@@ -883,7 +949,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -910,7 +976,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 24,
             port: port_,
           );
         },
@@ -944,7 +1010,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 25,
             port: port_,
           );
         },
@@ -1340,8 +1406,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 16)
-      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
+    if (arr.length != 17)
+      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -1359,6 +1425,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       present: dco_decode_bool(arr[13]),
       recipeJson: dco_decode_String(arr[14]),
       weatherJson: dco_decode_String(arr[15]),
+      recipeAction: dco_decode_String(arr[16]),
     );
   }
 
@@ -1873,6 +1940,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_present = sse_decode_bool(deserializer);
     var var_recipeJson = sse_decode_String(deserializer);
     var var_weatherJson = sse_decode_String(deserializer);
+    var var_recipeAction = sse_decode_String(deserializer);
     return WakeWordEvent(
       kind: var_kind,
       message: var_message,
@@ -1890,6 +1958,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       present: var_present,
       recipeJson: var_recipeJson,
       weatherJson: var_weatherJson,
+      recipeAction: var_recipeAction,
     );
   }
 
@@ -2362,6 +2431,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.present, serializer);
     sse_encode_String(self.recipeJson, serializer);
     sse_encode_String(self.weatherJson, serializer);
+    sse_encode_String(self.recipeAction, serializer);
   }
 
   @protected
