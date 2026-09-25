@@ -384,6 +384,20 @@ predictable memory use and no GC pauses under the 1 GB limit.
   fired timer uses it to voice "Time's up for {name}" in the real assistant voice; the
   device opens a fresh socket (same mDNS path a turn uses), outside any voice turn, and
   plays the returned audio through the shared `PlaybackSink` right after the bell.
+- **`anamanti-recipe`** (Anamanti Core → device): a project-local **device-action** frame
+  (`data.action` = `show`/`dismiss`; for `show`, `data.recipe` is the structured recipe).
+  Emitted by the `recipe_lookup` tool; the device owns the 3-tab recipe screen until
+  dismissed by voice (`close_recipe`) or touch. See `RecipePlan.md`.
+- **`anamanti-weather`** (Anamanti Core → device): a project-local **device-action** frame
+  (`data.action` = `show`/`current`/`dismiss`; for `show`/`current`, `data.weather` is the
+  structured `WeatherReport` — `location_label`, `units`, `current{…}`, `daily[7]`). It
+  rides **two transports**: `show`/`dismiss` on the per-turn voice socket, emitted by the
+  `weather_lookup` / `close_weather` tools (`DeviceAction::{ShowWeather,DismissWeather}`),
+  drive the **full-screen forecast** (today's conditions + a 7-day row); `current` is
+  broadcast periodically on the persistent channel (below) by the Anamanti Core's
+  `WeatherService` to refresh the **small icon + temperature beside the idle clock**
+  without a voice turn. Data comes from the keyless **Open-Meteo** API behind a
+  `WeatherProvider` trait. See `WeatherPlan.md`.
 - **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
   `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's
@@ -414,21 +428,37 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Display context on `audio-start`** (device → Anamanti Core): a **general,
   extensible** mechanism that tells the Core **what the display is currently showing**, so
   the model can *drive that screen by voice*. The device stamps a `data.screen` block on
-  every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload —
-  today the recipe screen: `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
-  ingredient_count, step_count}}`; absent on an idle screen. The orchestrator parses it
+  every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload.
+  Two kinds ship today:
+  - **recipe:** `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
+    ingredient_count, step_count}}` — the model can `recipe_control` (switch tab / scroll)
+    or `close_recipe`.
+  - **weather:** `{kind:"weather", weather:{location, units, temp, description}}` — the
+    model knows the forecast is up and for where, so it answers follow-ups in context
+    ("what about tomorrow" → `weather_lookup` for the same place) and closes it on "close
+    it" (`close_weather`).
+
+  Absent on an idle screen (and the small weather clock chip is **not** a screen — only
+  the full-screen forecast sets weather context). The orchestrator parses the block
   (`protocol::display_context` → a `DisplayContext` enum) and injects a one-line
   description into that turn's system prompt (`orchestrator::display_context_line`, one
-  arm per screen), so the model knows what is on screen and can call the matching tool
-  (for a recipe, `recipe_control` / `close_recipe`). **Adding a new voice-controllable
-  screen** (music, weather, photos) is a `DisplayContext` variant + a prompt-line arm +
-  a device-side `set_<screen>_context` setter — the transport is unchanged. This is the
-  **only device→Core context channel**; it piggybacks on `audio-start` (like the
-  follow-up `depth`/`wait_secs` markers) rather than adding a persistent uplink, so the
-  context is always fresh for the turn that needs it. On the device, Rust holds the
-  current block in a global slot (`engine::display_context` / `set_display_context`) set
-  by the FRB layer whenever a screen opens/closes or changes, and stamps it in
-  `WyomingConnection::send_audio_start`.
+  arm per screen). **Adding a new voice-controllable screen** (music, photos) is a
+  `DisplayContext` variant + a prompt-line arm + a device-side `set_<screen>_context`
+  setter — the transport is unchanged; an unknown `kind` is ignored, so a newer device
+  never breaks an older Core.
+
+  **How context rides with spoken input.** This is the **only device→Core context
+  channel** and it *piggybacks on the turn's own `audio-start`* — the first frame the
+  device sends when the user speaks — alongside the follow-up `depth`/`wait_secs` markers.
+  There is no separate context uplink and no conversation "context window" pushed ahead of
+  time: what the user is looking at travels *with* their utterance, so the model always
+  sees the exact on-screen state for the turn it is answering, and nothing goes stale
+  between turns. (The other half of a turn's context — long-term memory recall and, for a
+  follow-up turn, recent chat history — is assembled **Core-side** into the same system
+  prompt; the display-context line is appended to it.) On the device, Rust holds the
+  current block in a global slot (`engine::display_context` / `set_display_context`) set by
+  the FRB layer (`set_recipe_context` / `set_weather_context`) whenever a screen opens,
+  closes, or changes, and stamps it in `WyomingConnection::send_audio_start`.
 
 ### Proactive notifications (Approach A — persistent device-dialed channel)
 
@@ -457,6 +487,13 @@ mDNS + `instance_id` pin the voice path uses):
 - **`anamanti-notify-ack`** (device → Anamanti Core): reserved for a later
   delivery-tracking phase (store-and-forward across reconnects); the constructor exists
   in both crates but nothing sends it yet.
+- The **ambient weather push** reuses this same persistent-channel design: the device
+  opens a *third* long-lived connection (`rust/src/wyoming/weather.rs`, started by
+  `start_weather_channel`) with an `anamanti-hello` carrying `data.role="weather"`, which
+  the server registers with the `WeatherService` instead of the notify registry. The Core
+  then pushes `anamanti-weather` `current` frames down it on a timer; the device surfaces
+  them as a `WeatherPush` FRB stream that refreshes the clock's weather indicator. Same
+  dialer/backoff/pin model as notify — see `WeatherPlan.md`.
 
 Producers enqueue via `NotificationService::notify`, which fans a notification out to
 every connected device and prunes dead channels. The first producer is the config

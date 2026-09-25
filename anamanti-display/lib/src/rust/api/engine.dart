@@ -6,9 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_recipe`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_recipe`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`, `WeatherHandle`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
 ///
@@ -73,6 +73,29 @@ void setRecipeContext({
   stepCount: stepCount,
 );
 
+/// Report the weather screen's state as the device's **display context** so the next
+/// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know the
+/// forecast is up (and what it shows) so it can answer follow-ups in context or close it
+/// on request. The weather screen's setter for the general display-context mechanism (see
+/// [`set_recipe_context`] / [`crate::engine::set_display_context`]).
+///
+/// Flutter calls this when the full-screen weather view opens or closes. `active == false`
+/// clears the context (idle screen); the other fields are ignored. The small clock chip
+/// (the ambient indicator) is **not** a screen and never sets display context.
+void setWeatherContext({
+  required bool active,
+  required String location,
+  required String units,
+  required int temp,
+  required String description,
+}) => RustLib.instance.api.crateApiEngineSetWeatherContext(
+  active: active,
+  location: location,
+  units: units,
+  temp: temp,
+  description: description,
+);
+
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
 /// restarted when the pinned orchestrator changes). The channel dials the pinned
@@ -83,6 +106,17 @@ Stream<NotifyEvent> startNotifyChannel({required NotifyConfig config}) =>
 /// Stop the proactive-notification channel (if any) and join its thread. Idempotent.
 Future<void> stopNotifyChannel() =>
     RustLib.instance.api.crateApiEngineStopNotifyChannel();
+
+/// Open the persistent ambient-weather channel and stream pushed reports to Dart.
+/// Replaces any channel already running (so it can be restarted when the pinned
+/// orchestrator changes). Dials the pinned orchestrator and reconnects with backoff
+/// for the life of the subscription.
+Stream<WeatherPush> startWeatherChannel({required WeatherConfig config}) =>
+    RustLib.instance.api.crateApiEngineStartWeatherChannel(config: config);
+
+/// Stop the ambient-weather channel (if any) and join its thread. Idempotent.
+Future<void> stopWeatherChannel() =>
+    RustLib.instance.api.crateApiEngineStopWeatherChannel();
 
 /// Config for the persistent notify channel. The orchestrator is discovered over
 /// mDNS at connect time (same as the voice path), so only the pin, the browse
@@ -389,6 +423,11 @@ class WakeWordEvent {
   /// The UI decodes it into the recipe-mode tabs.
   final String recipeJson;
 
+  /// The weather report as a JSON string (`ShowWeather` / `WeatherCurrent`); empty
+  /// for every other kind. The UI decodes it into the weather screen + the ambient
+  /// clock indicator.
+  final String weatherJson;
+
   /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
   /// scroll direction (`RecipeScroll`). Empty for every other kind.
   final String recipeAction;
@@ -409,6 +448,7 @@ class WakeWordEvent {
     required this.timerRemainingSecs,
     required this.present,
     required this.recipeJson,
+    required this.weatherJson,
     required this.recipeAction,
   });
 
@@ -429,6 +469,7 @@ class WakeWordEvent {
       timerRemainingSecs.hashCode ^
       present.hashCode ^
       recipeJson.hashCode ^
+      weatherJson.hashCode ^
       recipeAction.hashCode;
 
   @override
@@ -451,6 +492,7 @@ class WakeWordEvent {
           timerRemainingSecs == other.timerRemainingSecs &&
           present == other.present &&
           recipeJson == other.recipeJson &&
+          weatherJson == other.weatherJson &&
           recipeAction == other.recipeAction;
 }
 
@@ -534,6 +576,20 @@ enum WakeWordEventKind {
   /// Recipe mode: dismiss the recipe screen and return to the idle/ambient display.
   dismissRecipe,
 
+  /// Weather mode: the orchestrator pushed a forecast to show full-screen on the
+  /// weather screen. `weather_json` carries the report as a JSON string
+  /// (location_label, units, current{…}, daily[]) which the UI parses into the big
+  /// today panel + the 7-day row.
+  showWeather,
+
+  /// Weather mode: an ambient current-conditions refresh (from the persistent
+  /// channel, or riding a `show`). `weather_json` carries the report; the UI updates
+  /// the small icon + temperature beside the clock but does not open the full screen.
+  weatherCurrent,
+
+  /// Weather mode: dismiss the full-screen weather view and return to idle/ambient.
+  dismissWeather,
+
   /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
   /// (`"overview"` / `"ingredients"` / `"steps"`).
   recipeNavigate,
@@ -547,4 +603,60 @@ enum WakeWordEventKind {
   /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
   /// transitions, never per frame.
   presence,
+}
+
+/// Config for the persistent weather channel. Mirrors [`NotifyConfig`]; the
+/// orchestrator is discovered over mDNS at connect time.
+class WeatherConfig {
+  /// Stable selection key (`instance_id` TXT) of the pinned orchestrator; empty =
+  /// "Auto". Mirrors [`WakeWordConfig::orchestrator_key`].
+  final String orchestratorKey;
+
+  /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+  /// (0 = built-in default).
+  final BigInt discoveryTimeoutSecs;
+
+  /// A stable identifier for this display, sent in the `anamanti-hello` frame.
+  final String deviceId;
+
+  const WeatherConfig({
+    required this.orchestratorKey,
+    required this.discoveryTimeoutSecs,
+    required this.deviceId,
+  });
+
+  @override
+  int get hashCode =>
+      orchestratorKey.hashCode ^
+      discoveryTimeoutSecs.hashCode ^
+      deviceId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WeatherConfig &&
+          runtimeType == other.runtimeType &&
+          orchestratorKey == other.orchestratorKey &&
+          discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
+          deviceId == other.deviceId;
+}
+
+/// One ambient current-conditions push from the orchestrator, streamed to Flutter.
+/// `report_json` is the serialized weather report (location_label, units, current{…},
+/// daily[]); the UI decodes it for the clock indicator (and refreshes the full screen
+/// if it's open). Flat struct so the FRB boundary stays dependency-free.
+class WeatherPush {
+  final String reportJson;
+
+  const WeatherPush({required this.reportJson});
+
+  @override
+  int get hashCode => reportJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WeatherPush &&
+          runtimeType == other.runtimeType &&
+          reportJson == other.reportJson;
 }

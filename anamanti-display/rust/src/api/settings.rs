@@ -192,8 +192,8 @@ fn preferred(key: &str) -> Option<&str> {
 /// always show all choices (including ones the device isn't currently pinned to).
 pub fn list_orchestrators(discovery_timeout_secs: u64) -> Result<Vec<OrchestratorInfo>> {
     block_on(async move {
-        let endpoints = crate::wyoming::discovery::discover_all(timeout(discovery_timeout_secs))
-            .await?;
+        let endpoints =
+            crate::wyoming::discovery::discover_all(timeout(discovery_timeout_secs)).await?;
         Ok(endpoints
             .into_iter()
             .map(|e| OrchestratorInfo {

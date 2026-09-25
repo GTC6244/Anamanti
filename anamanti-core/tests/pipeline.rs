@@ -22,9 +22,7 @@ use anamanti_core::orchestrator::{Pipeline, ServiceConnector, TurnEvent};
 use anamanti_core::speaker::{
     MockSpeakerEmbedder, SpeakerContext, SpeakerRegistry, SpeakerService, SpeakerThresholds,
 };
-use anamanti_core::wyoming::protocol::{
-    read_event, types, write_event, AudioFormat, WyomingEvent,
-};
+use anamanti_core::wyoming::protocol::{read_event, types, write_event, AudioFormat, WyomingEvent};
 use anamanti_core::wyoming::DynConnection;
 use serde_json::json;
 

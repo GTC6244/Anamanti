@@ -35,6 +35,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<WeatherPush> dco_decode_StreamSink_weather_push_Sse(
+    dynamic raw,
+  );
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
@@ -54,6 +59,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WakeWordConfig dco_decode_box_autoadd_wake_word_config(dynamic raw);
+
+  @protected
+  WeatherConfig dco_decode_box_autoadd_weather_config(dynamic raw);
 
   @protected
   DriveToken dco_decode_drive_token(dynamic raw);
@@ -152,6 +160,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WakeWordEventKind dco_decode_wake_word_event_kind(dynamic raw);
 
   @protected
+  WeatherConfig dco_decode_weather_config(dynamic raw);
+
+  @protected
+  WeatherPush dco_decode_weather_push(dynamic raw);
+
+  @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
@@ -161,6 +175,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RustStreamSink<WakeWordEvent> sse_decode_StreamSink_wake_word_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RustStreamSink<WeatherPush> sse_decode_StreamSink_weather_push_Sse(
     SseDeserializer deserializer,
   );
 
@@ -188,6 +207,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WakeWordConfig sse_decode_box_autoadd_wake_word_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WeatherConfig sse_decode_box_autoadd_weather_config(
     SseDeserializer deserializer,
   );
 
@@ -294,6 +318,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  WeatherConfig sse_decode_weather_config(SseDeserializer deserializer);
+
+  @protected
+  WeatherPush sse_decode_weather_push(SseDeserializer deserializer);
+
+  @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
     SseSerializer serializer,
@@ -308,6 +338,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_StreamSink_wake_word_event_Sse(
     RustStreamSink<WakeWordEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_weather_push_Sse(
+    RustStreamSink<WeatherPush> self,
     SseSerializer serializer,
   );
 
@@ -338,6 +374,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_wake_word_config(
     WakeWordConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_weather_config(
+    WeatherConfig self,
     SseSerializer serializer,
   );
 
@@ -469,6 +511,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     WakeWordEventKind self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_weather_config(WeatherConfig self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_weather_push(WeatherPush self, SseSerializer serializer);
 }
 
 // Section: wire_class

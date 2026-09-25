@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
+import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
 import 'package:anamanti_display/src/ui/notification_banner.dart';
@@ -25,6 +26,8 @@ import 'package:anamanti_display/src/ui/recipe_view.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/ui/status_indicator.dart';
 import 'package:anamanti_display/src/ui/timers_overlay.dart';
+import 'package:anamanti_display/src/ui/weather_icons.dart';
+import 'package:anamanti_display/src/ui/weather_view.dart';
 
 class AmbientScreen extends StatelessWidget {
   const AmbientScreen({
@@ -62,12 +65,17 @@ class AmbientScreen extends StatelessWidget {
           // cooking). It takes the screen over the idle presentation but yields to an
           // active voice turn (the conversation panel draws above it).
           final recipeActive = state.recipeActive;
+          // Weather mode: the full-screen forecast is on screen. Like recipe mode it
+          // takes over the idle presentation but yields to an active voice turn.
+          final weatherActive = state.weatherActive;
+          // Any full-screen mode that overlays the idle presentation.
+          final modeActive = recipeActive || weatherActive;
           // Away / "off" mode: nobody in front of the display and no active turn.
           // Only the big centered clock shows; everything else fades away. A turn
           // always wins (saying the wake word implies you're here), so off mode is
-          // strictly the idle-and-absent case. Recipe mode also implies engagement,
-          // so it suppresses the away face.
-          final offMode = !state.userPresent && !active && !recipeActive;
+          // strictly the idle-and-absent case. Recipe/weather mode also imply
+          // engagement, so they suppress the away face.
+          final offMode = !state.userPresent && !active && !modeActive;
           return Stack(
             fit: StackFit.expand,
             children: [
@@ -96,10 +104,10 @@ class AmbientScreen extends StatelessWidget {
               // (only the clock shows); survives as the compact badge below. Ignores
               // pointers when hidden so it never steals taps meant for the conversation.
               AnimatedOpacity(
-                opacity: (active || offMode || recipeActive) ? 0 : 1,
+                opacity: (active || offMode || modeActive) ? 0 : 1,
                 duration: const Duration(milliseconds: 300),
                 child: IgnorePointer(
-                  ignoring: active || offMode || recipeActive,
+                  ignoring: active || offMode || modeActive,
                   child: TimersOverlay(
                     timers: state.timers,
                     onDismiss: assistant.dismissTimer,
@@ -136,6 +144,25 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
+              // Weather mode: a full-screen forecast (today + 7-day row). Same
+              // precedence as recipe mode — above the idle presentation, below the
+              // conversation panel, so a voice turn still overlays it. Dismissed by
+              // voice or the view's own close control.
+              AnimatedOpacity(
+                opacity: weatherActive ? 1 : 0,
+                duration: const Duration(milliseconds: 250),
+                child: IgnorePointer(
+                  ignoring: !weatherActive,
+                  child: weatherActive
+                      ? WeatherView(
+                          key: ValueKey(state.weather!.locationLabel),
+                          weather: state.weather!,
+                          onClose: assistant.dismissWeather,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+
               // The live conversation panel fades in for the duration of a turn.
               AnimatedOpacity(
                 opacity: active ? 1 : 0,
@@ -159,12 +186,12 @@ class AmbientScreen extends StatelessWidget {
                   opacity:
                       (active ||
                           offMode ||
-                          recipeActive ||
+                          modeActive ||
                           state.timers.isNotEmpty)
                       ? 0
                       : 1,
                   duration: const Duration(milliseconds: 300),
-                  child: const _AmbientClock(),
+                  child: _AmbientClock(weather: state.weatherCurrent),
                 ),
               ),
 
@@ -269,10 +296,14 @@ class AmbientScreen extends StatelessWidget {
 /// big, dimmed, centered away-mode face (time only); otherwise it's the small
 /// bottom-left idle clock with the wake-word hint.
 class _AmbientClock extends StatefulWidget {
-  const _AmbientClock({this.large = false});
+  const _AmbientClock({this.large = false, this.weather});
 
   /// Render the large centered away-mode variant (dimmed, time only).
   final bool large;
+
+  /// Current ambient conditions for the small icon + temperature beside the time
+  /// (idle variant only). `null` hides the indicator (weather off / not yet fetched).
+  final WeatherData? weather;
 
   @override
   State<_AmbientClock> createState() => _AmbientClockState();
@@ -316,17 +347,25 @@ class _AmbientClockState extends State<_AmbientClock> {
             ),
           );
         }
+        final weather = widget.weather;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              _fmt(now),
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.92),
-                fontSize: 44,
-                fontWeight: FontWeight.w300,
-                letterSpacing: 1.0,
-              ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Text(
+                  _fmt(now),
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.92),
+                    fontSize: 44,
+                    fontWeight: FontWeight.w300,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+                if (weather != null) _weatherChip(weather),
+              ],
             ),
             Text(
               'Say the wake word to begin',
@@ -338,6 +377,35 @@ class _AmbientClockState extends State<_AmbientClock> {
           ],
         );
       },
+    );
+  }
+
+  /// The small weather indicator beside the time: a condition icon + current
+  /// temperature, sourced from the periodic ambient push.
+  Widget _weatherChip(WeatherData weather) {
+    final c = weather.current;
+    return Padding(
+      padding: const EdgeInsets.only(left: 16),
+      child: Row(
+        key: const Key('idle-weather'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            weatherIcon(c.weatherCode, isDay: c.isDay),
+            size: 30,
+            color: weatherIconColor(c.weatherCode, isDay: c.isDay),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '${c.temp}${weather.unitSuffix}',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.92),
+              fontSize: 28,
+              fontWeight: FontWeight.w400,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

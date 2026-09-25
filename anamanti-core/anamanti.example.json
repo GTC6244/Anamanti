@@ -84,6 +84,11 @@
     "provider": "mapbox"
   },
 
+  "weather": {
+    "enabled": true,
+    "refresh_interval_secs": 1800
+  },
+
   "drive": {
     "client_id": null,
     "client_secret": null,

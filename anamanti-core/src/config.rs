@@ -139,6 +139,8 @@ pub struct Config {
     pub follow_up: FollowUpConfig,
     /// House-wide music routing (Snapcast) control-plane settings.
     pub music: MusicConfig,
+    /// Weather feature settings (the `weather_lookup` tool + the ambient push).
+    pub weather: WeatherSettings,
     /// Where the runtime-swappable settings overlay is persisted (`settings_path` in
     /// the config file), or `None` to keep runtime settings in memory only. Defaults
     /// to `anamanti_settings.json`. This is a **separate** file from the boot config:
@@ -314,6 +316,36 @@ impl Default for MusicConfig {
     }
 }
 
+/// Weather feature settings. Weather uses the keyless Open-Meteo API, so there is no
+/// key to configure — just the master switch and how often the ambient indicator (the
+/// icon + temperature beside the idle clock) is refreshed by the background push.
+#[derive(Debug, Clone)]
+pub struct WeatherSettings {
+    /// Master switch (`weather.enabled`, default on). Off ⇒ the `weather_lookup` tool
+    /// is not advertised and the ambient push does not run.
+    pub enabled: bool,
+    /// How often (seconds) the ambient current-conditions push refreshes
+    /// (`weather.refresh_interval_secs`, default 1800 = 30 minutes). Clamped to a sane
+    /// floor so a misconfiguration can't hammer the API.
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for WeatherSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_interval_secs: 1800,
+        }
+    }
+}
+
+impl WeatherSettings {
+    /// The refresh interval as a `Duration`, clamped to at least 5 minutes.
+    pub fn refresh_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.refresh_interval_secs.max(300))
+    }
+}
+
 /// Which memory retrieval backend the pipeline uses for prompt context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryBackendChoice {
@@ -389,6 +421,7 @@ impl Default for Config {
             speaker: SpeakerConfig::default(),
             follow_up: FollowUpConfig::default(),
             music: MusicConfig::default(),
+            weather: WeatherSettings::default(),
             settings_path: Some(PathBuf::from("anamanti_settings.json")),
             audio_dump_dir: None,
             anthropic_auth: AnthropicAuth::ApiKey,
@@ -493,6 +526,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub music: FileMusic,
     #[serde(default)]
+    pub weather: FileWeather,
+    #[serde(default)]
     pub calendar: FileCalendar,
     #[serde(default)]
     pub directions: FileDirections,
@@ -595,6 +630,13 @@ pub struct FileMusic {
     pub conf: Option<PathBuf>,
     pub spotify_device_name: Option<String>,
     pub autostart: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileWeather {
+    pub enabled: Option<bool>,
+    pub refresh_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -839,6 +881,15 @@ impl Config {
             autostart: fc.music.autostart.unwrap_or(md.autostart),
         };
 
+        let wd = WeatherSettings::default();
+        let weather = WeatherSettings {
+            enabled: fc.weather.enabled.unwrap_or(wd.enabled),
+            refresh_interval_secs: fc
+                .weather
+                .refresh_interval_secs
+                .unwrap_or(wd.refresh_interval_secs),
+        };
+
         // The config page: `off`/`none`/empty disables it, otherwise a host:port.
         let config_addr = match fc.config_addr {
             None => d.config_addr,
@@ -950,6 +1001,7 @@ impl Config {
             speaker,
             follow_up,
             music,
+            weather,
             settings_path,
             audio_dump_dir: fc.audio_dump_dir,
             anthropic_auth: fc
@@ -1156,6 +1208,10 @@ impl Config {
             ),
             directions_provider: self.directions_provider.clone(),
             directions_imperial: imperial,
+            // Weather is keyless (Open-Meteo), so it's present whenever enabled; the
+            // tool/push still no-op gracefully until a home location is set.
+            weather: crate::weather::from_config(self.weather.enabled),
+            weather_imperial: imperial,
         }
     }
 

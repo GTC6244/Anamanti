@@ -157,7 +157,11 @@ fn parse_drive_token(ev: &WyomingEvent) -> DriveToken {
         })
         .unwrap_or_default();
     DriveToken {
-        linked: ev.data.get("linked").and_then(Value::as_bool).unwrap_or(false),
+        linked: ev
+            .data
+            .get("linked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         configured: ev
             .data
             .get("configured")
@@ -390,7 +394,11 @@ fn parse_speaker(v: &Value) -> SpeakerInfo {
 /// The `ok` flag from a `SPEAKER_RESULT`, surfacing the in-band `message` as an
 /// error when the orchestrator rejected the request.
 fn speaker_ok(resp: &WyomingEvent) -> Result<bool> {
-    let ok = resp.data.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if !ok {
         if let Some(msg) = resp.data.get("message").and_then(Value::as_str) {
             if !msg.is_empty() {
@@ -537,7 +545,10 @@ mod tests {
         assert_eq!(token.client_id, "cid.apps");
         assert_eq!(token.client_secret, "gocspx-secret");
         assert_eq!(token.refresh_token, "1//refresh");
-        assert_eq!(token.folder_ids, vec!["1AbC".to_string(), "1XyZ".to_string()]);
+        assert_eq!(
+            token.folder_ids,
+            vec!["1AbC".to_string(), "1XyZ".to_string()]
+        );
         assert_eq!(token.scope, "scope-x");
 
         let request = server.await.unwrap();
@@ -737,7 +748,9 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let models = list_models(&cache, Duration::from_millis(0), None).await.unwrap();
+        let models = list_models(&cache, Duration::from_millis(0), None)
+            .await
+            .unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].provider, "anthropic");
         assert_eq!(models[0].id, "claude-opus-5");
@@ -763,7 +776,9 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let voices = list_voices(&cache, Duration::from_millis(0), None).await.unwrap();
+        let voices = list_voices(&cache, Duration::from_millis(0), None)
+            .await
+            .unwrap();
         assert_eq!(voices.len(), 3);
         assert_eq!(voices[0].name, "en_US-amy-medium");
         assert_eq!(voices[0].language.as_deref(), Some("en_US"));
@@ -787,7 +802,9 @@ mod tests {
         serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let err = list_voices(&cache, Duration::from_millis(0), None).await.unwrap_err();
+        let err = list_voices(&cache, Duration::from_millis(0), None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("piper unreachable"));
     }
 
@@ -824,7 +841,9 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let people = list_speakers(&cache, Duration::from_millis(0), None).await.unwrap();
+        let people = list_speakers(&cache, Duration::from_millis(0), None)
+            .await
+            .unwrap();
         assert_eq!(people.len(), 2);
         assert_eq!(people[0].id, "spk-1");
         assert_eq!(people[0].name.as_deref(), Some("Sam"));
@@ -839,8 +858,10 @@ mod tests {
     async fn name_speaker_sends_id_and_name() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let response =
-            WyomingEvent::with_data(types::SPEAKER_RESULT, json!({ "ok": true, "message": "named" }));
+        let response = WyomingEvent::with_data(
+            types::SPEAKER_RESULT,
+            json!({ "ok": true, "message": "named" }),
+        );
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);

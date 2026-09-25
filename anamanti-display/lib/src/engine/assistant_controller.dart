@@ -23,6 +23,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:anamanti_display/src/engine/recipe_data.dart';
+import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 
 /// Opens the native engine event stream for a given config. Production passes
@@ -43,6 +44,19 @@ typedef RecipeContextSink =
       required bool atBottom,
       required int ingredientCount,
       required int stepCount,
+    });
+
+/// Pushes the current weather-screen state down to the native engine, so the next voice
+/// turn's `audio-start` tells the orchestrator the forecast is up (and what it shows) —
+/// letting the LLM answer follow-ups in context or close it. Production wires the native
+/// [setWeatherContext]; null (the default, for tests) disables it.
+typedef WeatherContextSink =
+    void Function({
+      required bool active,
+      required String location,
+      required String units,
+      required int temp,
+      required String description,
     });
 
 /// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
@@ -135,6 +149,8 @@ class AssistantState {
     this.userPresent = true,
     this.followUp = false,
     this.recipe,
+    this.weather,
+    this.weatherCurrent,
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
@@ -213,6 +229,19 @@ class AssistantState {
   /// Whether recipe mode is currently on screen.
   bool get recipeActive => recipe != null;
 
+  /// The forecast currently shown full-screen on the weather screen, or `null` when
+  /// the screen is closed. Pushed by the `weather_lookup` tool ("show" action) and
+  /// dismissed by voice or the close control. Outlives the voice turn.
+  final WeatherData? weather;
+
+  /// Whether the full-screen weather view is currently on screen.
+  bool get weatherActive => weather != null;
+
+  /// The latest ambient current conditions for the small indicator beside the clock,
+  /// kept fresh by the orchestrator's periodic push (independent of [weather]). `null`
+  /// until the first push arrives (or weather is disabled / no home location).
+  final WeatherData? weatherCurrent;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -237,6 +266,9 @@ class AssistantState {
     bool? followUp,
     RecipeData? recipe,
     bool clearRecipe = false,
+    WeatherData? weather,
+    bool clearWeather = false,
+    WeatherData? weatherCurrent,
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
@@ -255,6 +287,8 @@ class AssistantState {
       userPresent: userPresent ?? this.userPresent,
       followUp: followUp ?? this.followUp,
       recipe: clearRecipe ? null : (recipe ?? this.recipe),
+      weather: clearWeather ? null : (weather ?? this.weather),
+      weatherCurrent: weatherCurrent ?? this.weatherCurrent,
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
@@ -276,21 +310,25 @@ class AssistantController extends ChangeNotifier {
     double endpointRmsThreshold = 0.012,
     DateTime Function()? clock,
     VoidCallback? onUserActivity,
+    Duration weatherAutoClose = const Duration(seconds: 60),
     RecipeContextSink? setRecipeContext,
-  }) : _config = config,
-       _onUserActivity = onUserActivity,
-       _setRecipeContext = setRecipeContext,
-       // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
-       // [EngineStreamFactory] shape (tests inject their own factory).
-       _startEngine = startEngine ?? _defaultEngineStream,
-       _probe = probeOrchestrator,
-       _minBackoff = minBackoff,
-       _maxBackoff = maxBackoff,
-       _offlinePollInterval = offlinePollInterval,
-       _endpointCueEnabled = endpointCueEnabled,
-       _endpointSilence = endpointSilence,
-       _endpointRmsThreshold = endpointRmsThreshold,
-       _clock = clock ?? DateTime.now;
+    WeatherContextSink? setWeatherContext,
+  })  : _config = config,
+        _onUserActivity = onUserActivity,
+        _weatherAutoClose = weatherAutoClose,
+        _setRecipeContext = setRecipeContext,
+        _setWeatherContext = setWeatherContext,
+        // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
+        // [EngineStreamFactory] shape (tests inject their own factory).
+        _startEngine = startEngine ?? _defaultEngineStream,
+        _probe = probeOrchestrator,
+        _minBackoff = minBackoff,
+        _maxBackoff = maxBackoff,
+        _offlinePollInterval = offlinePollInterval,
+        _endpointCueEnabled = endpointCueEnabled,
+        _endpointSilence = endpointSilence,
+        _endpointRmsThreshold = endpointRmsThreshold,
+        _clock = clock ?? DateTime.now;
 
   static Stream<WakeWordEvent> _defaultEngineStream(WakeWordConfig config) =>
       startWakeWordEngine(config: config);
@@ -320,9 +358,19 @@ class AssistantController extends ChangeNotifier {
   /// unit/widget tests run with no native library loaded.
   final VoidCallback? _onUserActivity;
 
+  /// How long the full-screen weather view stays up before it auto-dismisses back to
+  /// the idle screen (the ambient clock chip is unaffected). Reset each time a new
+  /// forecast is shown; cancelled on an early voice/touch dismiss.
+  final Duration _weatherAutoClose;
+  Timer? _weatherAutoCloseTimer;
+
   /// Sink for pushing recipe-screen context to the native engine (see
   /// [RecipeContextSink]); null disables it (tests with no native library).
   final RecipeContextSink? _setRecipeContext;
+
+  /// Sink for pushing weather-screen context to the native engine (see
+  /// [WeatherContextSink]); null disables it (tests with no native library).
+  final WeatherContextSink? _setWeatherContext;
 
   /// The active recipe pane's latest scroll position, tracked so recipe context
   /// pushes carry it. `_recipeAtTop` starts true (a freshly opened tab is at the top);
@@ -567,6 +615,27 @@ class AssistantController extends ChangeNotifier {
         }
       case WakeWordEventKind.dismissRecipe:
         _clearRecipe();
+      case WakeWordEventKind.showWeather:
+        // The orchestrator pushed a forecast; open the full-screen weather view and
+        // refresh the ambient indicator from the same payload. A payload that fails to
+        // parse is ignored rather than crashing.
+        final weather = WeatherData.tryParse(e.weatherJson);
+        if (weather != null) {
+          _emit(_state.copyWith(weather: weather, weatherCurrent: weather));
+          _scheduleWeatherAutoClose();
+          _pushWeatherContext();
+        }
+      case WakeWordEventKind.weatherCurrent:
+        // An ambient refresh (from the persistent channel or riding a show): update the
+        // small clock indicator only; never opens or closes the full screen.
+        final weather = WeatherData.tryParse(e.weatherJson);
+        if (weather != null) {
+          _emit(_state.copyWith(weatherCurrent: weather));
+        }
+      case WakeWordEventKind.dismissWeather:
+        _weatherAutoCloseTimer?.cancel();
+        _emit(_state.copyWith(clearWeather: true));
+        _pushWeatherContext();
       case WakeWordEventKind.recipeNavigate:
         // Voice tab switch ("show the ingredients" / "go to the steps").
         if (_state.recipe != null) {
@@ -600,11 +669,66 @@ class AssistantController extends ChangeNotifier {
     }
   }
 
+  /// (Re)arm the full-screen weather auto-dismiss. A new forecast restarts the clock;
+  /// firing clears only the full screen (the ambient chip stays).
+  void _scheduleWeatherAutoClose() {
+    _weatherAutoCloseTimer?.cancel();
+    if (_weatherAutoClose <= Duration.zero) return;
+    _weatherAutoCloseTimer = Timer(_weatherAutoClose, () {
+      if (_state.weather != null) {
+        _emit(_state.copyWith(clearWeather: true));
+        _pushWeatherContext();
+      }
+    });
+  }
+
+  /// Push the current weather-screen state (active + what it shows) down to the native
+  /// engine so the next voice turn carries it to the orchestrator. A no-op when no sink
+  /// is wired (tests). Only the full screen counts as display context — the ambient chip
+  /// does not.
+  void _pushWeatherContext() {
+    final sink = _setWeatherContext;
+    if (sink == null) return;
+    final w = _state.weather;
+    if (w == null) {
+      sink(active: false, location: '', units: '', temp: 0, description: '');
+      return;
+    }
+    sink(
+      active: true,
+      location: w.locationLabel,
+      units: w.units,
+      temp: w.current.temp,
+      description: w.current.description,
+    );
+  }
+
   /// Dismiss recipe mode from the UI (the user taps the close control). Voice
   /// dismissal ("done cooking") arrives instead as a `dismissRecipe` event.
   void dismissRecipe() {
     if (_state.recipe != null) {
       _clearRecipe();
+    }
+  }
+
+  /// Dismiss the full-screen weather view from the UI (the user taps the close
+  /// control). Voice dismissal arrives instead as a `dismissWeather` event. The ambient
+  /// indicator ([weatherCurrent]) is left untouched — only the full screen closes.
+  void dismissWeather() {
+    _weatherAutoCloseTimer?.cancel();
+    if (_state.weather != null) {
+      _emit(_state.copyWith(clearWeather: true));
+      _pushWeatherContext();
+    }
+  }
+
+  /// Fold an ambient weather push (from the weather channel) into the indicator state.
+  /// Called by the app shell's weather-channel subscription. Never opens the full
+  /// screen — that's `showWeather` on the engine stream.
+  void applyWeatherPush(String reportJson) {
+    final weather = WeatherData.tryParse(reportJson);
+    if (weather != null) {
+      _emit(_state.copyWith(weatherCurrent: weather));
     }
   }
 
@@ -795,6 +919,7 @@ class AssistantController extends ChangeNotifier {
     _disposed = true;
     _reconnectTimer?.cancel();
     _offlinePollTimer?.cancel();
+    _weatherAutoCloseTimer?.cancel();
     _sub?.cancel();
     super.dispose();
   }

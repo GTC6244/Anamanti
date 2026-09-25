@@ -155,7 +155,7 @@ mod tests {
         let mut d = PresenceDetector::new(2.5, REL);
         let t = Instant::now();
         d.observe(&flat(40, 64), t); // baseline
-        // Whole frame jumps 40 -> 90 (delta 50/pixel ≫ threshold): motion.
+                                     // Whole frame jumps 40 -> 90 (delta 50/pixel ≫ threshold): motion.
         assert_eq!(d.observe(&flat(90, 64), t), Some(true));
         assert!(d.present());
     }
@@ -241,10 +241,7 @@ mod tests {
         assert_eq!(d.observe(&quiet, t0 + Duration::from_secs(20)), None);
         assert!(d.present());
         // Only after a full release window with no activity of any kind does it dim.
-        assert_eq!(
-            d.observe(&quiet, t0 + Duration::from_secs(39)),
-            Some(false)
-        );
+        assert_eq!(d.observe(&quiet, t0 + Duration::from_secs(39)), Some(false));
         assert!(!d.present());
     }
 

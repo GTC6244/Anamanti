@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1631658749;
+  int get rustContentHash => 518702162;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -163,6 +163,14 @@ abstract class RustLibApi extends BaseApi {
     required int stepCount,
   });
 
+  void crateApiEngineSetWeatherContext({
+    required bool active,
+    required String location,
+    required String units,
+    required int temp,
+    required String description,
+  });
+
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
     required NotifyConfig config,
   });
@@ -171,9 +179,15 @@ abstract class RustLibApi extends BaseApi {
     required WakeWordConfig config,
   });
 
+  Stream<WeatherPush> crateApiEngineStartWeatherChannel({
+    required WeatherConfig config,
+  });
+
   Future<void> crateApiEngineStopNotifyChannel();
 
   Future<void> crateApiEngineStopWakeWordEngine();
+
+  Future<void> crateApiEngineStopWeatherChannel();
 
   Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
     required String orchestratorKey,
@@ -794,6 +808,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiEngineSetWeatherContext({
+    required bool active,
+    required String location,
+    required String units,
+    required int temp,
+    required String description,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(active, serializer);
+          sse_encode_String(location, serializer);
+          sse_encode_String(units, serializer);
+          sse_encode_i_32(temp, serializer);
+          sse_encode_String(description, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineSetWeatherContextConstMeta,
+        argValues: [active, location, units, temp, description],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineSetWeatherContextConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_weather_context",
+        argNames: ["active", "location", "units", "temp", "description"],
+      );
+
+  @override
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
     required NotifyConfig config,
   }) {
@@ -808,7 +858,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 19,
+              funcId: 20,
               port: port_,
             );
           },
@@ -846,7 +896,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 20,
+              funcId: 21,
               port: port_,
             );
           },
@@ -870,6 +920,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Stream<WeatherPush> crateApiEngineStartWeatherChannel({
+    required WeatherConfig config,
+  }) {
+    final sink = RustStreamSink<WeatherPush>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_box_autoadd_weather_config(config, serializer);
+            sse_encode_StreamSink_weather_push_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 22,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_AnyhowException,
+          ),
+          constMeta: kCrateApiEngineStartWeatherChannelConstMeta,
+          argValues: [config, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiEngineStartWeatherChannelConstMeta =>
+      const TaskConstMeta(
+        debugName: "start_weather_channel",
+        argNames: ["config", "sink"],
+      );
+
+  @override
   Future<void> crateApiEngineStopNotifyChannel() {
     return handler.executeNormal(
       NormalTask(
@@ -878,7 +966,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 23,
             port: port_,
           );
         },
@@ -905,7 +993,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 24,
             port: port_,
           );
         },
@@ -924,6 +1012,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "stop_wake_word_engine", argNames: []);
 
   @override
+  Future<void> crateApiEngineStopWeatherChannel() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 25,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineStopWeatherChannelConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineStopWeatherChannelConstMeta =>
+      const TaskConstMeta(debugName: "stop_weather_channel", argNames: []);
+
+  @override
   Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
     required String orchestratorKey,
     required SettingsUpdate update,
@@ -939,7 +1054,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 26,
             port: port_,
           );
         },
@@ -976,6 +1091,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   RustStreamSink<WakeWordEvent> dco_decode_StreamSink_wake_word_event_Sse(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
+  RustStreamSink<WeatherPush> dco_decode_StreamSink_weather_push_Sse(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -1022,6 +1145,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordConfig dco_decode_box_autoadd_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_wake_word_config(raw);
+  }
+
+  @protected
+  WeatherConfig dco_decode_box_autoadd_weather_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_weather_config(raw);
   }
 
   @protected
@@ -1321,8 +1450,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 16)
-      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
+    if (arr.length != 17)
+      throw Exception('unexpected arr length: expect 17 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -1339,7 +1468,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerRemainingSecs: dco_decode_u_32(arr[12]),
       present: dco_decode_bool(arr[13]),
       recipeJson: dco_decode_String(arr[14]),
-      recipeAction: dco_decode_String(arr[15]),
+      weatherJson: dco_decode_String(arr[15]),
+      recipeAction: dco_decode_String(arr[16]),
     );
   }
 
@@ -1347,6 +1477,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEventKind dco_decode_wake_word_event_kind(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return WakeWordEventKind.values[raw as int];
+  }
+
+  @protected
+  WeatherConfig dco_decode_weather_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return WeatherConfig(
+      orchestratorKey: dco_decode_String(arr[0]),
+      discoveryTimeoutSecs: dco_decode_u_64(arr[1]),
+      deviceId: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  WeatherPush dco_decode_weather_push(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return WeatherPush(reportJson: dco_decode_String(arr[0]));
   }
 
   @protected
@@ -1366,6 +1518,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   RustStreamSink<WakeWordEvent> sse_decode_StreamSink_wake_word_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
+  RustStreamSink<WeatherPush> sse_decode_StreamSink_weather_push_Sse(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1419,6 +1579,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_wake_word_config(deserializer));
+  }
+
+  @protected
+  WeatherConfig sse_decode_box_autoadd_weather_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_weather_config(deserializer));
   }
 
   @protected
@@ -1815,6 +1983,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_timerRemainingSecs = sse_decode_u_32(deserializer);
     var var_present = sse_decode_bool(deserializer);
     var var_recipeJson = sse_decode_String(deserializer);
+    var var_weatherJson = sse_decode_String(deserializer);
     var var_recipeAction = sse_decode_String(deserializer);
     return WakeWordEvent(
       kind: var_kind,
@@ -1832,6 +2001,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerRemainingSecs: var_timerRemainingSecs,
       present: var_present,
       recipeJson: var_recipeJson,
+      weatherJson: var_weatherJson,
       recipeAction: var_recipeAction,
     );
   }
@@ -1843,6 +2013,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return WakeWordEventKind.values[inner];
+  }
+
+  @protected
+  WeatherConfig sse_decode_weather_config(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_orchestratorKey = sse_decode_String(deserializer);
+    var var_discoveryTimeoutSecs = sse_decode_u_64(deserializer);
+    var var_deviceId = sse_decode_String(deserializer);
+    return WeatherConfig(
+      orchestratorKey: var_orchestratorKey,
+      discoveryTimeoutSecs: var_discoveryTimeoutSecs,
+      deviceId: var_deviceId,
+    );
+  }
+
+  @protected
+  WeatherPush sse_decode_weather_push(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_reportJson = sse_decode_String(deserializer);
+    return WeatherPush(reportJson: var_reportJson);
   }
 
   @protected
@@ -1881,6 +2071,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       self.setupAndSerialize(
         codec: SseCodec(
           decodeSuccessData: sse_decode_wake_word_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
+  void sse_encode_StreamSink_weather_push_Sse(
+    RustStreamSink<WeatherPush> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_weather_push,
           decodeErrorData: sse_decode_AnyhowException,
         ),
       ),
@@ -1937,6 +2144,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_wake_word_config(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_weather_config(
+    WeatherConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_weather_config(self, serializer);
   }
 
   @protected
@@ -2258,6 +2474,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.timerRemainingSecs, serializer);
     sse_encode_bool(self.present, serializer);
     sse_encode_String(self.recipeJson, serializer);
+    sse_encode_String(self.weatherJson, serializer);
     sse_encode_String(self.recipeAction, serializer);
   }
 
@@ -2268,5 +2485,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_weather_config(WeatherConfig self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.orchestratorKey, serializer);
+    sse_encode_u_64(self.discoveryTimeoutSecs, serializer);
+    sse_encode_String(self.deviceId, serializer);
+  }
+
+  @protected
+  void sse_encode_weather_push(WeatherPush self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.reportJson, serializer);
   }
 }

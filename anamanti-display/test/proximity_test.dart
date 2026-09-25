@@ -52,6 +52,7 @@ WakeWordEvent _presence(bool present) => WakeWordEvent(
       timerRemainingSecs: 0,
       present: present,
       recipeJson: '',
+      weatherJson: '',
       recipeAction: '',
     );
 
@@ -72,6 +73,7 @@ WakeWordEvent _event(WakeWordEventKind kind) => WakeWordEvent(
       timerRemainingSecs: 0,
       present: false,
       recipeJson: '',
+      weatherJson: '',
       recipeAction: '',
     );
 

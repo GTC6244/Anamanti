@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1631658749;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 518702162;
 
 // Section: executor
 
@@ -722,6 +722,48 @@ fn wire__crate__api__engine__set_recipe_context_impl(
         },
     )
 }
+fn wire__crate__api__engine__set_weather_context_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_weather_context",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_active = <bool>::sse_decode(&mut deserializer);
+            let api_location = <String>::sse_decode(&mut deserializer);
+            let api_units = <String>::sse_decode(&mut deserializer);
+            let api_temp = <i32>::sse_decode(&mut deserializer);
+            let api_description = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::set_weather_context(
+                        api_active,
+                        api_location,
+                        api_units,
+                        api_temp,
+                        api_description,
+                    );
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__engine__start_notify_channel_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -802,6 +844,46 @@ fn wire__crate__api__engine__start_wake_word_engine_impl(
         },
     )
 }
+fn wire__crate__api__engine__start_weather_channel_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "start_weather_channel",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_config = <crate::api::engine::WeatherConfig>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                crate::api::engine::WeatherPush,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok =
+                            crate::api::engine::start_weather_channel(api_config, api_sink)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__engine__stop_notify_channel_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -863,6 +945,40 @@ fn wire__crate__api__engine__stop_wake_word_engine_impl(
                 transform_result_sse::<_, ()>((move || {
                     let output_ok = Result::<_, ()>::Ok({
                         crate::api::engine::stop_wake_word_engine();
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__engine__stop_weather_channel_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "stop_weather_channel",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::engine::stop_weather_channel();
                     })?;
                     Ok(output_ok)
                 })())
@@ -934,6 +1050,16 @@ impl SseDecode
 
 impl SseDecode
     for StreamSink<crate::api::engine::WakeWordEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<crate::api::engine::WeatherPush, flutter_rust_bridge::for_generated::SseCodec>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1385,6 +1511,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_timerRemainingSecs = <u32>::sse_decode(deserializer);
         let mut var_present = <bool>::sse_decode(deserializer);
         let mut var_recipeJson = <String>::sse_decode(deserializer);
+        let mut var_weatherJson = <String>::sse_decode(deserializer);
         let mut var_recipeAction = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
@@ -1402,6 +1529,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             timer_remaining_secs: var_timerRemainingSecs,
             present: var_present,
             recipe_json: var_recipeJson,
+            weather_json: var_weatherJson,
             recipe_action: var_recipeAction,
         };
     }
@@ -1431,10 +1559,37 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             16 => crate::api::engine::WakeWordEventKind::TimerCancelled,
             17 => crate::api::engine::WakeWordEventKind::ShowRecipe,
             18 => crate::api::engine::WakeWordEventKind::DismissRecipe,
-            19 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
-            20 => crate::api::engine::WakeWordEventKind::RecipeScroll,
-            21 => crate::api::engine::WakeWordEventKind::Presence,
+            19 => crate::api::engine::WakeWordEventKind::ShowWeather,
+            20 => crate::api::engine::WakeWordEventKind::WeatherCurrent,
+            21 => crate::api::engine::WakeWordEventKind::DismissWeather,
+            22 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
+            23 => crate::api::engine::WakeWordEventKind::RecipeScroll,
+            24 => crate::api::engine::WakeWordEventKind::Presence,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::engine::WeatherConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_orchestratorKey = <String>::sse_decode(deserializer);
+        let mut var_discoveryTimeoutSecs = <u64>::sse_decode(deserializer);
+        let mut var_deviceId = <String>::sse_decode(deserializer);
+        return crate::api::engine::WeatherConfig {
+            orchestrator_key: var_orchestratorKey,
+            discovery_timeout_secs: var_discoveryTimeoutSecs,
+            device_id: var_deviceId,
+        };
+    }
+}
+
+impl SseDecode for crate::api::engine::WeatherPush {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_reportJson = <String>::sse_decode(deserializer);
+        return crate::api::engine::WeatherPush {
+            report_json: var_reportJson,
         };
     }
 }
@@ -1468,17 +1623,23 @@ fn pde_ffi_dispatcher_primary_impl(
         14 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
         15 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
         16 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        19 => {
+        20 => {
             wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        20 => {
+        21 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        21 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
         22 => {
+            wire__crate__api__engine__start_weather_channel_impl(port, ptr, rust_vec_len, data_len)
+        }
+        23 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        24 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        25 => {
+            wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
+        }
+        26 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -1503,6 +1664,7 @@ fn pde_ffi_dispatcher_sync_impl(
         }
         17 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
         18 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1806,6 +1968,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.timer_remaining_secs.into_into_dart().into_dart(),
             self.present.into_into_dart().into_dart(),
             self.recipe_json.into_into_dart().into_dart(),
+            self.weather_json.into_into_dart().into_dart(),
             self.recipe_action.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -1845,9 +2008,12 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::TimerCancelled => 16.into_dart(),
             Self::ShowRecipe => 17.into_dart(),
             Self::DismissRecipe => 18.into_dart(),
-            Self::RecipeNavigate => 19.into_dart(),
-            Self::RecipeScroll => 20.into_dart(),
-            Self::Presence => 21.into_dart(),
+            Self::ShowWeather => 19.into_dart(),
+            Self::WeatherCurrent => 20.into_dart(),
+            Self::DismissWeather => 21.into_dart(),
+            Self::RecipeNavigate => 22.into_dart(),
+            Self::RecipeScroll => 23.into_dart(),
+            Self::Presence => 24.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -1860,6 +2026,45 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::engine::WakeWordEventKind>
     for crate::api::engine::WakeWordEventKind
 {
     fn into_into_dart(self) -> crate::api::engine::WakeWordEventKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::engine::WeatherConfig {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.orchestrator_key.into_into_dart().into_dart(),
+            self.discovery_timeout_secs.into_into_dart().into_dart(),
+            self.device_id.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::engine::WeatherConfig
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::engine::WeatherConfig>
+    for crate::api::engine::WeatherConfig
+{
+    fn into_into_dart(self) -> crate::api::engine::WeatherConfig {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::engine::WeatherPush {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [self.report_json.into_into_dart().into_dart()].into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::engine::WeatherPush
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::engine::WeatherPush>
+    for crate::api::engine::WeatherPush
+{
+    fn into_into_dart(self) -> crate::api::engine::WeatherPush {
         self
     }
 }
@@ -1882,6 +2087,15 @@ impl SseEncode
 
 impl SseEncode
     for StreamSink<crate::api::engine::WakeWordEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
+impl SseEncode
+    for StreamSink<crate::api::engine::WeatherPush, flutter_rust_bridge::for_generated::SseCodec>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2217,6 +2431,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <u32>::sse_encode(self.timer_remaining_secs, serializer);
         <bool>::sse_encode(self.present, serializer);
         <String>::sse_encode(self.recipe_json, serializer);
+        <String>::sse_encode(self.weather_json, serializer);
         <String>::sse_encode(self.recipe_action, serializer);
     }
 }
@@ -2245,15 +2460,34 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::TimerCancelled => 16,
                 crate::api::engine::WakeWordEventKind::ShowRecipe => 17,
                 crate::api::engine::WakeWordEventKind::DismissRecipe => 18,
-                crate::api::engine::WakeWordEventKind::RecipeNavigate => 19,
-                crate::api::engine::WakeWordEventKind::RecipeScroll => 20,
-                crate::api::engine::WakeWordEventKind::Presence => 21,
+                crate::api::engine::WakeWordEventKind::ShowWeather => 19,
+                crate::api::engine::WakeWordEventKind::WeatherCurrent => 20,
+                crate::api::engine::WakeWordEventKind::DismissWeather => 21,
+                crate::api::engine::WakeWordEventKind::RecipeNavigate => 22,
+                crate::api::engine::WakeWordEventKind::RecipeScroll => 23,
+                crate::api::engine::WakeWordEventKind::Presence => 24,
                 _ => {
                     unimplemented!("");
                 }
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::engine::WeatherConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.orchestrator_key, serializer);
+        <u64>::sse_encode(self.discovery_timeout_secs, serializer);
+        <String>::sse_encode(self.device_id, serializer);
+    }
+}
+
+impl SseEncode for crate::api::engine::WeatherPush {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.report_json, serializer);
     }
 }
 

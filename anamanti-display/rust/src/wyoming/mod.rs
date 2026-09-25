@@ -25,11 +25,12 @@ pub mod discovery;
 pub mod notify;
 pub mod protocol;
 pub mod state;
+pub mod weather;
 
 pub use client::{run_turn, AudioFormat, TurnUpdate, WyomingConnection, DEFAULT_TURN_TIMEOUT};
 pub use discovery::{
-    discover, discover_all, discover_preferred, resolve, EndpointCache, WyomingEndpoint,
-    DEFAULT_DISCOVERY_TIMEOUT, CORE_ROLE, WYOMING_SERVICE_TYPE,
+    discover, discover_all, discover_preferred, resolve, EndpointCache, WyomingEndpoint, CORE_ROLE,
+    DEFAULT_DISCOVERY_TIMEOUT, WYOMING_SERVICE_TYPE,
 };
 pub use protocol::{read_event, write_event, WyomingEvent};
 pub use state::{Action, ControlInput, Session, SessionState};

@@ -268,15 +268,12 @@ pub async fn resolve(
                 cache.set(endpoint.clone());
                 Ok(endpoint)
             }
-            Err(browse_err) => cache
-                .get()
-                .filter(|c| c.key == key)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "selected orchestrator `{key}` is unreachable and no matching cached \
+            Err(browse_err) => cache.get().filter(|c| c.key == key).ok_or_else(|| {
+                anyhow!(
+                    "selected orchestrator `{key}` is unreachable and no matching cached \
                          endpoint is available: {browse_err}"
-                    )
-                }),
+                )
+            }),
         },
         None => match discover(timeout).await {
             Ok(endpoint) => {

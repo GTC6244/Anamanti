@@ -218,6 +218,11 @@ pub enum TurnUpdate {
     /// (the recipe screen outlives the turn's socket), so it does not change the
     /// turn's state machine.
     Recipe(protocol::RecipeCommand),
+    /// A device-action **weather** command relayed from the orchestrator: show the
+    /// forecast full-screen, refresh the ambient indicator, or dismiss. Handled by the
+    /// UI (the weather screen outlives the turn's socket), so it does not change the
+    /// turn's state machine.
+    Weather(protocol::WeatherCommand),
     /// The orchestrator asked the device to **listen for a follow-up** after its reply.
     /// The payload is `(depth, wait_secs)`: the chain depth the follow-up turn should
     /// carry, and how long to keep the mic open for input before sleeping (longer after
@@ -418,6 +423,14 @@ where
         types::RECIPE => {
             if let Some(cmd) = event.recipe_command() {
                 on_update(TurnUpdate::Recipe(cmd));
+            }
+        }
+        // A device action (weather show/dismiss) relayed on the voice-turn socket. The
+        // weather screen is owned by the UI and outlives the turn, so just surface it
+        // and keep going. (Ambient `current` refreshes ride the persistent channel.)
+        types::WEATHER => {
+            if let Some(cmd) = event.weather_command() {
+                on_update(TurnUpdate::Weather(cmd));
             }
         }
         // Follow-up-listen request (the reply was a question). Surface it without

@@ -542,6 +542,13 @@ pub struct LlmFactory {
     /// Whether directions distances are spoken in imperial units (from the household
     /// `weather_units` at boot). Kept alongside `directions_provider` for rebuilds.
     pub directions_imperial: bool,
+    /// The forecast provider for the `weather_lookup` tool, or `None` when weather is
+    /// disabled. Keyless (Open-Meteo), so present whenever `weather.enabled`; shared
+    /// into every rebuilt backend. The same provider also feeds the ambient push.
+    pub weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
+    /// Whether weather temperatures are reported in imperial units (°F), from the
+    /// household `weather_units` at boot. Mirrors `directions_imperial`.
+    pub weather_imperial: bool,
 }
 
 impl LlmFactory {
@@ -614,6 +621,8 @@ impl LlmFactory {
                                     self.calendar.clone(),
                                     self.directions.clone(),
                                     self.cadora.clone(),
+                                    self.weather.clone(),
+                                    self.weather_imperial,
                                 ),
                             )?),
                             _ => Arc::new(AnthropicBackend::new(
@@ -661,6 +670,8 @@ impl LlmFactory {
                             self.calendar.clone(),
                             self.directions.clone(),
                             self.cadora.clone(),
+                            self.weather.clone(),
+                            self.weather_imperial,
                         ),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
@@ -870,6 +881,8 @@ impl SharedSettings {
             directions: None,
             directions_provider: String::new(),
             directions_imperial: false,
+            weather: None,
+            weather_imperial: false,
         };
         Self::new(
             factory,
@@ -1107,6 +1120,13 @@ impl SharedSettings {
     /// clone.
     pub fn household(&self) -> Household {
         self.inner.read().unwrap().household.clone()
+    }
+
+    /// The live home-location handle (the factory's shared cell, updated by
+    /// [`apply_household`](Self::apply_household)). Handed to the ambient weather push
+    /// so it tracks a config-page location edit without a restart.
+    pub fn home_location(&self) -> crate::directions::LiveHomeLocation {
+        self.factory.home_location.clone()
     }
 
     /// Replace the whole household record and persist it (best-effort, 0600). The
@@ -1395,6 +1415,8 @@ mod tests {
             directions: None,
             directions_provider: String::new(),
             directions_imperial: false,
+            weather: None,
+            weather_imperial: false,
         }
     }
 

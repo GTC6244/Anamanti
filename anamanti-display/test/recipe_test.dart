@@ -61,6 +61,7 @@ WakeWordEvent _ev(
   timerRemainingSecs: 0,
   present: false,
   recipeJson: recipeJson,
+  weatherJson: '',
   recipeAction: recipeAction,
 );
 

@@ -459,6 +459,8 @@ mod tests {
                 directions: None,
                 directions_provider: String::new(),
                 directions_imperial: false,
+                weather: None,
+                weather_imperial: false,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),

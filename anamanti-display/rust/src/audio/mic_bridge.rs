@@ -106,8 +106,13 @@ pub fn stop() {
         return;
     };
     let res = vm.attach_current_thread(|env: &mut jni::Env<'_>| -> jni::errors::Result<()> {
-        env.call_static_method(class, jni::jni_str!("stopRecording"), jni::jni_sig!("()V"), &[])
-            .map(|_| ())
+        env.call_static_method(
+            class,
+            jni::jni_str!("stopRecording"),
+            jni::jni_sig!("()V"),
+            &[],
+        )
+        .map(|_| ())
     });
     if let Err(e) = res {
         log::warn!("mic_bridge stop up-call failed: {e}");
