@@ -45,6 +45,16 @@ use crate::wyoming::{DynConnection, DynRead, DynWrite};
 /// listen window (see [`Pipeline::run_turn_after_start`]).
 const DEFAULT_NO_SPEECH_FINALIZE: Duration = Duration::from_secs(6);
 
+/// Minimum span of *consecutive* voiced audio (chunks above `voice_rms_threshold`)
+/// required before we latch `speech_started` and switch a turn's finalize clock from
+/// the `no_speech_finalize` window to the much shorter `end_silence` window. This
+/// debounces the speech onset: a lone transient above the energy gate — the residual
+/// TTS tail heard right after a follow-up mic reopens, room echo, or a brief noise —
+/// would otherwise collapse a 10 s "wait for the user to answer" window into ~1 s and
+/// cut the user off (observed in production as a follow-up turn that finalized with an
+/// empty transcript). Real speech clears this in a single word; a blip does not.
+const MIN_SPEECH_ONSET: Duration = Duration::from_millis(250);
+
 /// Progress events surfaced as a turn runs (logging, tests, and — via the device
 /// relay — the Phase-5 UI).
 #[derive(Debug, Clone, PartialEq)]
@@ -417,6 +427,10 @@ impl Pipeline {
         let turn_start = Instant::now();
         let mut last_voice = turn_start;
         let mut speech_started = false;
+        // Consecutive voiced audio accumulated since the last non-voiced chunk, used to
+        // debounce the speech onset (see `MIN_SPEECH_ONSET`). Reset by any non-voiced
+        // chunk so only *sustained* voice latches `speech_started`.
+        let mut voiced_run = Duration::ZERO;
         // True once we've sent `audio-stop` to STT and are just awaiting the result.
         let mut finalized = false;
         // Accumulated voiced PCM (samples from chunks above the energy gate), used
@@ -455,14 +469,34 @@ impl Pipeline {
                                 }
                                 if !finalized {
                                     let now = Instant::now();
-                                    if rms_i16_le(&pcm) > voice_rms_threshold {
-                                        if !speech_started {
-                                            log::debug!("VAD: speech started");
-                                        }
-                                        speech_started = true;
+                                    let voiced = rms_i16_le(&pcm) > voice_rms_threshold;
+                                    if voiced {
                                         last_voice = now;
                                         // Keep the voiced samples for speaker ID.
                                         append_pcm_i16_le(&mut voiced_pcm, &pcm);
+                                    }
+                                    // Debounce the onset: only latch `speech_started` after
+                                    // MIN_SPEECH_ONSET of *consecutive* voiced audio, so a
+                                    // lone transient (TTS tail, echo, noise) can't collapse
+                                    // the no-speech window into the short end-silence one.
+                                    if !speech_started {
+                                        let prev_run = voiced_run;
+                                        let latched;
+                                        (voiced_run, latched) = voiced_onset_step(
+                                            voiced,
+                                            chunk_duration(pcm.len(), mic_rate),
+                                            voiced_run,
+                                        );
+                                        if latched {
+                                            speech_started = true;
+                                            log::debug!("VAD: speech started");
+                                        } else if !voiced && prev_run > Duration::ZERO {
+                                            log::debug!(
+                                                "VAD: discarded {:?} voiced transient below \
+                                                 {:?} onset; no-speech window still open",
+                                                prev_run, MIN_SPEECH_ONSET
+                                            );
+                                        }
                                     }
                                     stt.forward_pcm(pcm).await?;
 
@@ -1312,6 +1346,34 @@ fn rms_i16_le(pcm: &[u8]) -> f64 {
     }
 }
 
+/// Wall-clock duration of one i16-LE mono PCM chunk of `byte_len` bytes at
+/// `sample_rate` Hz. Zero when the rate is unknown so it never contributes to the
+/// onset debounce (see [`voiced_onset_step`]).
+fn chunk_duration(byte_len: usize, sample_rate: u32) -> Duration {
+    if sample_rate == 0 {
+        return Duration::ZERO;
+    }
+    // 2 bytes per i16 sample.
+    Duration::from_secs_f64((byte_len / 2) as f64 / sample_rate as f64)
+}
+
+/// One step of the speech-onset debounce. Folds the current chunk into the running
+/// span of *consecutive* voiced audio and reports whether that span has now reached
+/// [`MIN_SPEECH_ONSET`] (i.e. `speech_started` should latch). A non-voiced chunk
+/// resets the run to zero, so only sustained voice — not a lone transient like the
+/// residual TTS tail after a follow-up mic reopens — flips the turn out of its
+/// no-speech window. Pure (takes no clock) so the debounce is unit-testable.
+///
+/// Returns `(updated_run, latched_now)`. Callers only invoke this while
+/// `speech_started` is still false; once latched it stays latched.
+fn voiced_onset_step(voiced: bool, chunk_dur: Duration, voiced_run: Duration) -> (Duration, bool) {
+    if !voiced {
+        return (Duration::ZERO, false);
+    }
+    let run = voiced_run.saturating_add(chunk_dur);
+    (run, run >= MIN_SPEECH_ONSET)
+}
+
 #[cfg(test)]
 mod location_tests {
     use super::location_line;
@@ -1428,7 +1490,8 @@ mod household_tests {
 
 #[cfg(test)]
 mod vad_tests {
-    use super::rms_i16_le;
+    use super::{chunk_duration, rms_i16_le, voiced_onset_step, MIN_SPEECH_ONSET};
+    use std::time::Duration;
 
     fn pcm(samples: &[i16]) -> Vec<u8> {
         samples.iter().flat_map(|s| s.to_le_bytes()).collect()
@@ -1447,6 +1510,61 @@ mod vad_tests {
         assert!((rms_i16_le(&pcm(&[1000, -1000, 1000, -1000])) - 1000.0).abs() < 1e-6);
         assert!(rms_i16_le(&pcm(&[30, -30, 25, -20])) < 120.0);
         assert!(rms_i16_le(&pcm(&[800, -600, 700, -900])) > 120.0);
+    }
+
+    #[test]
+    fn chunk_duration_is_bytes_over_rate() {
+        // 640 bytes = 320 i16 samples; at 16 kHz that is 20 ms.
+        assert_eq!(chunk_duration(640, 16_000), Duration::from_millis(20));
+        // Unknown rate contributes nothing to the onset (avoids div-by-zero).
+        assert_eq!(chunk_duration(640, 0), Duration::ZERO);
+    }
+
+    #[test]
+    fn onset_needs_sustained_voice_to_latch() {
+        // Feed 20 ms voiced chunks; the onset must not latch until the accumulated
+        // run reaches MIN_SPEECH_ONSET.
+        let chunk = Duration::from_millis(20);
+        let mut run = Duration::ZERO;
+        let mut latched = false;
+        let mut chunks = 0;
+        while !latched {
+            (run, latched) = voiced_onset_step(true, chunk, run);
+            chunks += 1;
+            assert!(chunks < 1000, "onset never latched");
+        }
+        // 250 ms / 20 ms = 13 chunks (12 chunks = 240 ms is still below threshold).
+        assert_eq!(chunks, (MIN_SPEECH_ONSET.as_millis() as u64).div_ceil(20));
+        assert!(run >= MIN_SPEECH_ONSET);
+    }
+
+    #[test]
+    fn lone_transient_does_not_latch_and_resets() {
+        // The production failure: one short voiced blip (the residual TTS tail after a
+        // follow-up mic reopens) followed by silence. It must never latch speech, and
+        // the run must reset so the no-speech window stays open.
+        let (run, latched) = voiced_onset_step(true, Duration::from_millis(20), Duration::ZERO);
+        assert!(!latched, "a single 20 ms blip must not count as speech");
+        assert!(run < MIN_SPEECH_ONSET);
+
+        // The following non-voiced chunk clears the run entirely.
+        let (run, latched) = voiced_onset_step(false, Duration::from_millis(20), run);
+        assert!(!latched);
+        assert_eq!(run, Duration::ZERO, "non-voiced chunk resets the onset run");
+    }
+
+    #[test]
+    fn gap_before_threshold_resets_progress() {
+        // Voiced runs that are broken by silence before reaching the threshold must
+        // restart from zero, so intermittent transients can't accumulate into a latch.
+        let chunk = Duration::from_millis(100);
+        let (run, latched) = voiced_onset_step(true, chunk, Duration::ZERO); // 100 ms
+        assert!(!latched);
+        let (run, _) = voiced_onset_step(false, chunk, run); // reset
+        assert_eq!(run, Duration::ZERO);
+        let (run, latched) = voiced_onset_step(true, chunk, run); // 100 ms again, not 200
+        assert!(!latched);
+        assert_eq!(run, Duration::from_millis(100));
     }
 }
 
