@@ -1,7 +1,0 @@
-{
-  "_comment": "Copy to google_oauth.json (gitignored) and fill in. Build with: flutter build apk --release --target-platform android-arm --dart-define-from-file=google_oauth.json",
-  "_ambient": "OAuth client type 'TVs and Limited Input devices' — for the Google Photos Ambient API (device-code/QR).",
-  "GOOGLE_OAUTH_CLIENT_ID": "YOUR_TV_CLIENT_ID.apps.googleusercontent.com",
-  "GOOGLE_OAUTH_CLIENT_SECRET": "GOCSPX-your-tv-client-secret",
-  "_drive": "Google Drive credentials are NO LONGER built into the APK. The orchestrator owns the Drive 'Desktop app' OAuth client and runs consent from its config page (Photos tab); set AMBIENT_GOOGLE_DRIVE_CLIENT_ID / AMBIENT_GOOGLE_DRIVE_CLIENT_SECRET on the Mac. The device pulls the token over Wyoming."
-}

@@ -1,8 +1,12 @@
 # Architecture
 
-Detailed technical design for the Ambient Smart Display Voice Assistant. This
-document is the source of truth for how the system is structured; `Plan.MD`
-tracks phased delivery and open questions.
+Detailed technical design for **Anamanti** (the ambient smart-display voice
+assistant). This document is the source of truth for how the system is
+structured; `Plan.MD` tracks phased delivery and open questions.
+
+The two components: **Anamanti Core** (the Mac-side brain — STT ↔ LLM + memory ↔
+TTS; crate `anamanti_core`, binary `anamanti-core`) and **Anamanti Display** (the
+Echo Show app; package `com.anamanti.anamanti_display`).
 
 ---
 
@@ -13,8 +17,8 @@ Two cooperating nodes on a trusted LAN:
 - **Echo Show 8 (LineageOS)** — the *edge* device. Captures audio, detects the
   wake word offline, streams audio to the Mac, renders the conversation, and
   plays back the spoken reply. Constrained: ~1 GB RAM, mobile-class CPU.
-- **M4 Mac Mini** — the *brain*. Runs the Wyoming STT server, a pluggable LLM
-  orchestrator, and the Wyoming TTS (Piper) server.
+- **M4 Mac Mini** — the *brain* (**Anamanti Core**). Runs the Wyoming STT server,
+  a pluggable LLM, and the Wyoming TTS (Piper) server.
 
 They communicate over a single Wyoming Protocol TCP connection. The Mac's
 service is located via mDNS, so neither node hardcodes an IP.
@@ -41,10 +45,10 @@ service is located via mDNS, so neither node hardcodes an IP.
                                │ TCP · Wyoming Protocol · newline JSON + PCM
                                ▼
 ┌─────────────────────────── M4 Mac Mini ───────────────────────────┐
-│  Wyoming STT (Whisper / CoreML)  · orchestrator energy VAD         │
+│  Wyoming STT (Whisper / CoreML)  · Anamanti Core energy VAD        │
 │        │ final transcript                                          │
 │        ▼                                                           │
-│  LLM Orchestrator  (trait-based, pluggable)  ◄─► Persistent Memory │
+│  LLM backend  (trait-based, pluggable)  ◄─► Persistent Memory      │
 │   ├─ Local backend  (Ollama / llama.cpp)          (local DB:       │
 │   └─ Cloud backend  (Claude / OpenAI)              facts + prefs)  │
 │        │ streamed reply tokens                                     │
@@ -113,7 +117,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 - **Wyoming STT** — Whisper (CoreML-accelerated on the M4) exposed via the
   Wyoming Protocol; emits partial and final transcripts.
-- **LLM Orchestrator** — a trait/interface with a streaming
+- **LLM backend** — a trait/interface with a streaming
   `respond(transcript) -> token stream`. Two interchangeable implementations:
   local (Ollama/llama.cpp) and cloud (Claude/OpenAI). Selection is config-driven.
   Reads/writes the persistent memory store to build context and record new facts.
@@ -123,33 +127,33 @@ predictable memory use and no GC pauses under the 1 GB limit.
   conversation turns. Managed via a settings list (view/delete) and voice
   ("forget that"); kept until cleared. Private to the LAN; survives device
   reflashes. **Retrieval/recall runs behind a `memory::Recall` seam and defaults
-  to the embedded HelixDB GraphRAG backend** (`orchestrator/src/memory/helix.rs`;
+  to the embedded HelixDB GraphRAG backend** (`anamanti-core/src/memory/helix.rs`;
   in-process, no server/Docker): each completed turn is appended to
-  `ambient_chatlog.jsonl` and a background ingester (`memory/ingester.rs`) embeds
+  `anamanti_chatlog.jsonl` and a background ingester (`memory/ingester.rs`) embeds
   it (OpenAI `text-embedding-3-small`, `OPENAI_API_KEY`) into a graph of
   `User/Turn/Memory/Entity` nodes, so recall does vector KNN + a graph hop rather
   than keyword FTS. If `OPENAI_API_KEY` is absent or the graph fails to open,
-  recall **falls back to SQLite FTS** (writes are unaffected); `AMBIENT_MEMORY_BACKEND=sqlite`
+  recall **falls back to SQLite FTS** (writes are unaffected); `ANAMANTI_MEMORY_BACKEND=sqlite`
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
-  (`orchestrator/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
+  (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
   memory writes/recall and the prompt to that person (a shared "household" scope is
   the floor); see `speaker_id_plan.md`.
-- **End-of-speech / VAD** — runs in the **orchestrator**, not the STT server:
+- **End-of-speech / VAD** — runs in the **Anamanti Core**, not the STT server:
   `wyoming-faster-whisper` has no streaming VAD and only transcribes once it
-  receives `audio-stop`, so the orchestrator scores per-chunk RMS energy over the
+  receives `audio-stop`, so the Anamanti Core scores per-chunk RMS energy over the
   incoming PCM and, after speech followed by ~900 ms of trailing silence (or a 6 s
-  no-speech fallback), sends `audio-stop` to STT to finalize (`orchestrator/src/orchestrator.rs`,
+  no-speech fallback), sends `audio-stop` to STT to finalize (`anamanti-core/src/orchestrator.rs`,
   `stream_to_transcript`). The Echo Show device still runs **no VAD of its own** —
   it streams continuously and waits for the transcript.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
   to the device.
 
 > **Implementation (Phase 4, `/mac`):** the STT, LLM, memory, and TTS pieces above
-> are wired by a standalone Rust crate `ambient_orchestrator` (`/mac`). It is a
+> are wired by a standalone Rust crate `anamanti_core` (`/mac`). It is a
 > Wyoming **server** to the Echo Show and a Wyoming **client** to the off-the-shelf
 > Whisper (STT) and Piper (TTS) Wyoming servers, with the pluggable `LlmBackend`
 > trait (Ollama / Claude / mock) and the SQLite+FTS5 memory store in the middle
-> (`orchestrator/src/{orchestrator,server,discovery,llm,memory,wyoming}.rs`). It advertises
+> (`anamanti-core/src/{Anamanti Core,server,discovery,llm,memory,wyoming}.rs`). It advertises
 > `_wyoming._tcp` over mDNS, symmetric with the device's Phase-3 browse. The
 > Wyoming wire codec is re-implemented there (byte-identical to the device's) since
 > the device crate is an Android `cdylib` and can't be shared as a Mac library.
@@ -171,7 +175,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
     (payload fields carry neutral defaults when not relevant), so the boundary needs
     no `freezed` codegen and there is exactly one stream to manage.
   - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
-    boundary. `AssistantController` (`display/lib/src/engine/assistant_controller.dart`)
+    boundary. `AssistantController` (`anamanti-display/lib/src/engine/assistant_controller.dart`)
     folds this single event stream into an observable `AssistantState` / `TurnPhase`
     (`idle → listening → connecting → thinking → speaking`, plus `error`) that
     widgets watch. There are no separate `transcript_stream` / `reply_token_stream`
@@ -179,7 +183,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - Control flows **Dart → Rust** via generated function calls: `start_wake_word_engine`
   / `stop_wake_word_engine` (Phase 2–3) plus the Phase-6 settings functions
   (`fetch_orchestrator_settings`, `update_orchestrator_settings`, `list_memories`,
-  `delete_memory`, `clear_memories` in `display/rust/src/api/settings.rs`). The settings
+  `delete_memory`, `clear_memories` in `anamanti-display/rust/src/api/settings.rs`). The settings
   functions are async: each stands up a small current-thread `tokio` runtime and
   drives one Wyoming control round trip, so FRB returns a `Future` off the UI
   isolate.
@@ -193,10 +197,10 @@ predictable memory use and no GC pauses under the 1 GB limit.
   rebuilding the `WakeWordConfig` and restarting the engine / refreshing the
   slideshow.
 - The **LLM backend + model and TTS voice** live on the Mac and are read/changed
-  over a **project-local control protocol** on the device↔orchestrator hop —
-  `ambient-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
+  over a **project-local control protocol** on the device↔Anamanti Core hop —
+  `anamanti-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
   memories; `list-models`; `list-voices`) that ride the existing framing (byte-identical `types`
-  in both crates, no off-the-shelf server sees them). The orchestrator's `Pipeline`
+  in both crates, no off-the-shelf server sees them). The Anamanti Core's `Pipeline`
   reads a per-turn snapshot of runtime-swappable `SharedSettings`, so a
   backend/voice change takes effect on the next turn with no restart; the accept
   loop routes control frames to `control::handle_control` and audio-start frames to
@@ -208,7 +212,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `anthropic_api_key` / `openai_api_key` fields (same tri-state as the search key —
   absent = keep, `null` = clear, value = set), so a cloud backend can be enabled
   without a restart. Runtime keys live in `SharedSettings` (env is only the boot
-  seed) and persist to `ambient_settings.json` (0600). Key **entry** is deliberately
+  seed) and persist to `anamanti_settings.json` (0600). Key **entry** is deliberately
   config-page-only — the Wyoming/device control path never accepts a provider key, so
   cloud secrets never live on the shared Echo Show screen; the device is told only
   whether a key is set (`anthropic_key_set` / `openai_key_set`), never its value.
@@ -217,17 +221,17 @@ predictable memory use and no GC pauses under the 1 GB limit.
   each provider's `GET /v1/models` (Anthropic `created_at`, OpenAI `created`),
   filters to the trailing 12 months (and OpenAI to chat models), caches the result,
   and falls back to a curated built-in list when a key is missing/offline. The list
-  is exposed to the device via `ambient-list-models` → `ambient-models` and to the
+  is exposed to the device via `anamanti-list-models` → `anamanti-models` and to the
   browser via `GET /models` on the config page. The chosen `llm_model` flows through
   the same `SharedSettings::apply` → `LlmFactory::build` path into the concrete
-  backend's request, and persists to `ambient_settings.json`.
-- **TTS voice selection** is likewise a drop-down. On `ambient-list-voices`, the
-  orchestrator asks Piper for its advertised catalog (a downstream Wyoming
-  `describe` → `info`) and, when `AMBIENT_TTS_VOICES_DIR` points at Piper's model
+  backend's request, and persists to `anamanti_settings.json`.
+- **TTS voice selection** is likewise a drop-down. On `anamanti-list-voices`, the
+  Anamanti Core asks Piper for its advertised catalog (a downstream Wyoming
+  `describe` → `info`) and, when `ANAMANTI_TTS_VOICES_DIR` points at Piper's model
   dir (Piper co-located on the Mac), intersects it with the `<name>.onnx` files
   actually on disk so only installed voices are offered; with no dir set it returns
-  the full advertised list. Exposed to the device via `ambient-list-voices` →
-  `ambient-voices` (FRB `list_voices` → `listVoices`) and to the browser via
+  the full advertised list. Exposed to the device via `anamanti-list-voices` →
+  `anamanti-voices` (FRB `list_voices` → `listVoices`) and to the browser via
   `GET /voices` on the config page. Both the settings screen and the config page
   render a dropdown (with a "Server default" entry) and fall back to a free-text
   field when the list is unavailable; a hand-set voice not in the list stays
@@ -236,7 +240,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   **API key** (`x-api-key` from `ANTHROPIC_API_KEY`) or **subscription OAuth**
   (`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`). Subscription tokens
   come from `AnthropicTokenProvider` — `ANTHROPIC_OAUTH_TOKEN` (from
-  `claude setup-token`) or a token-printing command (`AMBIENT_ANTHROPIC_TOKEN_CMD`,
+  `claude setup-token`) or a token-printing command (`ANAMANTI_ANTHROPIC_TOKEN_CMD`,
   default the `ant` CLI), cached with a short TTL and refreshed on a 401. Both the
   chat backend and the catalog share the provider so listing + turns authenticate
   identically. The mode rides the settings protocol (`anthropic_auth` field) and the
@@ -244,7 +248,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Debug/inspection pages** (`webconfig.rs`, same loopback HTTP server as the
   config page, strictly read-only): `GET /chatlog`, `/prompts`, `/sqlite`, `/helix`
   render the recent chat log, the exact assembled LLM prompt per turn (captured to
-  a separate `ambient_promptlog.jsonl` via `PromptLog`), the SQLite memory rows, and
+  a separate `anamanti_promptlog.jsonl` via `PromptLog`), the SQLite memory rows, and
   the HelixDB GraphRAG node stats + a sample of nodes (behind the read-only
   `memory::GraphView` seam; reports "disabled" on the SQLite backend). Each has a
   `*.json` data endpoint the page fetches. No auth — keep the config address on a
@@ -252,8 +256,8 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Household / home context** (`settings::Household`, editable at `GET /household`
   on the config page): a persisted record of the home **location + units** and a
   **roster of people** (name, emails, phones, relationship). Location/units seed from
-  `AMBIENT_HOME_LOCATION`/`AMBIENT_WEATHER_UNITS` at first boot, then are editable
-  (with the people) from the Household tab and persisted to `ambient_settings.json`
+  `ANAMANTI_HOME_LOCATION`/`ANAMANTI_WEATHER_UNITS` at first boot, then are editable
+  (with the people) from the Household tab and persisted to `anamanti_settings.json`
   (0600 — PII). It is read from the **per-turn settings snapshot** and injected into
   the system prompt (`orchestrator::location_line` grounds an unqualified "here";
   `household_line` lists who lives here so the model can address them and has their
@@ -293,11 +297,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **TRIGGERED** — wake word fires; open TCP, send Wyoming `audio-start` header.
 - **STREAMING** — send raw PCM chunks in Wyoming frames; concurrently read
   `transcript` events on the same socket. The device streams continuously and runs
-  no VAD; **the orchestrator detects end-of-speech** (energy VAD over the PCM) and
+  no VAD; **the Anamanti Core detects end-of-speech** (energy VAD over the PCM) and
   sends `audio-stop` to the STT server, which then returns the final transcript.
-- **THINKING** — STT final transcript handed to the LLM orchestrator (which
+- **THINKING** — STT final transcript handed to the LLM backend (which
   consults persistent memory); reply tokens stream back and render.
-- **THINKING → SPEAKING (streaming TTS):** the orchestrator does **not** buffer the
+- **THINKING → SPEAKING (streaming TTS):** the Anamanti Core does **not** buffer the
   whole reply before speaking. It segments the LLM token stream into sentences and
   synthesizes each with Piper as soon as it forms, so the first audio reaches the
   device ~first-sentence latency (~2 s) instead of full-reply latency (~8 s). The
@@ -312,29 +316,29 @@ predictable memory use and no GC pauses under the 1 GB limit.
   the audio actually stops (a barge-in flush zeroes the ring and triggers it too).
 - **Barge-in:** wake-word scoring keeps running during THINKING and SPEAKING. A wake
   word mid-reply **always flushes the playback ring immediately** (silencing the reply
-  even after the turn has technically ended — the orchestrator relays audio faster than
+  even after the turn has technically ended — the Anamanti Core relays audio faster than
   real-time, so the turn reaches IDLE while audio is still draining from the buffer),
-  sends an `ambient-interrupt` frame so the orchestrator **aborts the in-flight LLM +
+  sends an `anamanti-interrupt` frame so the Anamanti Core **aborts the in-flight LLM +
   TTS**, and starts a fresh turn.
 - **Follow-up listen (reopen the mic after every reply):** after each reply the
-  orchestrator sends an `ambient-listen` frame (above) before the final `audio-stop`,
+  Anamanti Core sends an `anamanti-listen` frame (above) before the final `audio-stop`,
   with a `wait_secs` window (10 s after a question, 5 s otherwise). The device records
   it during SPEAKING, ends the turn normally, and — once the reply audio has drained
   from the playback ring (the same `pending()==0` signal that emits `speakingDone`, so
   the mic never records the tail of the TTS) — **spawns a fresh turn with no wake word**,
   reusing the barge-in restart machinery. The follow-up turn keeps the raised in-turn
   wake-word threshold and stamps its chain depth + `wait_secs` on its `audio-start`; the
-  orchestrator feeds recent conversation history into that turn's prompt and sizes its
+  Anamanti Core feeds recent conversation history into that turn's prompt and sizes its
   no-speech window to `wait_secs`. The no-speech window only counts down while `speech_started`
   is false; because the drain gate frees when the *software* playback ring empties (not the
   OS/hardware output buffer), the reopened mic can still catch a brief residual TTS tail or
-  room echo, so the orchestrator **debounces the speech onset** — `speech_started` latches
+  room echo, so the Anamanti Core **debounces the speech onset** — `speech_started` latches
   only after `MIN_SPEECH_ONSET` (250 ms) of *consecutive* voiced audio (`voiced_onset_step`),
   and any non-voiced chunk resets the run. This stops a lone transient from collapsing the
   full `wait_secs` window into the short `end_silence` finalize and cutting the user off
   (observed in production as a follow-up that closed after ~1 s with an empty transcript).
   If the user says nothing in that window the
-  orchestrator ends the turn (empty transcript + `audio-stop`) and the device **sleeps**;
+  Anamanti Core ends the turn (empty transcript + `audio-stop`) and the device **sleeps**;
   the chain continues only while the user keeps responding (bounded by the optional
   `follow_up.max_chain`, default unlimited). See `Plan.MD` (Follow-up listening).
 - **In-app AEC:** not shipped. Investigated on real hardware (Echo Show 8): the platform
@@ -363,26 +367,26 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - The same socket carries outbound audio and inbound `transcript`, streamed
   `reply-token` (per-LLM-token text for on-screen rendering), and synthesized audio
   frames.
-- **`ambient-interrupt`** (device → orchestrator): a project-local barge-in frame that
-  tells the orchestrator to abort the in-flight LLM generation + TTS at once, rather
+- **`anamanti-interrupt`** (device → Anamanti Core): a project-local barge-in frame that
+  tells the Anamanti Core to abort the in-flight LLM generation + TTS at once, rather
   than only learning of the interruption when the socket drops.
-- **`ambient-timer`** (orchestrator → device): a project-local **device-action** frame
+- **`anamanti-timer`** (Anamanti Core → device): a project-local **device-action** frame
   (`data.action` = `start`/`cancel`; `duration_secs` + optional `label`). Emitted when
   an LLM **tool** the model called on the Mac (`set_timer` / `cancel_timer`) asks to
   act on the device. The device owns the resulting state — unlimited concurrent
   countdowns, the on-screen UI, and the alarm — so a timer keeps running after the
   turn's socket closes and even if the Mac disconnects. When a timer fires it rings a
   two-strike **bell** locally, then (if the Mac is reachable) requests the spoken
-  announcement over **`ambient-speak`**; bell-only when offline. See §8.
-- **`ambient-speak`** (device → orchestrator): a project-local frame (`data.text`)
-  asking the orchestrator to synthesize the text with Piper and stream the audio
+  announcement over **`anamanti-speak`**; bell-only when offline. See §8.
+- **`anamanti-speak`** (device → Anamanti Core): a project-local frame (`data.text`)
+  asking the Anamanti Core to synthesize the text with Piper and stream the audio
   (`audio-start`/`audio-chunk`…/`audio-stop`) straight back on the same socket. A
   fired timer uses it to voice "Time's up for {name}" in the real assistant voice; the
   device opens a fresh socket (same mDNS path a turn uses), outside any voice turn, and
   plays the returned audio through the shared `PlaybackSink` right after the bell.
-- **`ambient-listen`** (orchestrator → device): a project-local **follow-up-listen**
+- **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
-  `follow_up.enabled`) the orchestrator sends this frame **just before** the turn's
+  `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's
   final `audio-stop` — it must precede that stop because the device ends its turn on the
   first `audio-stop`. It tells the device to **reopen the mic and start a fresh turn
   with no wake word** once the reply audio drains (see the follow-up bullet in §4's
@@ -390,12 +394,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   sleeping — **10 s after a question (`?`), 5 s otherwise** (`follow_up.question_wait_secs`
   / `reply_wait_secs`). The device **echoes `depth` + `wait_secs`** on the follow-up
   turn's `audio-start` (`followup: true`, `followup_depth`, `wait_secs`); the
-  orchestrator uses `wait_secs` to size that turn's **no-speech VAD window** (the only
+  Anamanti Core uses `wait_secs` to size that turn's **no-speech VAD window** (the only
   place silence can be told from a user mid-sentence — the device runs no VAD), and
   `depth` against the optional `follow_up.max_chain` ceiling (**default 0 = unlimited**;
-  the loop is normally ended by silence). On silence the orchestrator relays an empty
+  the loop is normally ended by silence). On silence the Anamanti Core relays an empty
   transcript **and** an `audio-stop` so the device sleeps promptly, and sends no new
-  `ambient-listen`. A follow-up turn's LLM prompt is seeded with the **recent
+  `anamanti-listen`. A follow-up turn's LLM prompt is seeded with the **recent
   conversation history** (the last `follow_up.history_turns` turns within
   `follow_up.history_window_secs`, from the chat log); ordinary wake-word turns stay
   single-turn.
@@ -403,28 +407,28 @@ predictable memory use and no GC pauses under the 1 GB limit.
 ### Proactive notifications (Approach A — persistent device-dialed channel)
 
 Every frame above rides a socket the **device** opened for a voice turn, so the
-orchestrator can only ever *reply*. Proactive notifications add the one path where the
+Anamanti Core can only ever *reply*. Proactive notifications add the one path where the
 Mac reaches the display **unprompted** — a meeting reminder, an alert — without the
 user speaking first. The chosen design keeps the device as the dialer (no reverse
 connection, no device-side listener, nothing new for NAT/firewalls, and the same
 mDNS + `instance_id` pin the voice path uses):
 
 - The device opens a **second, long-lived Wyoming connection** to the pinned
-  orchestrator and holds it open, reconnecting with capped exponential backoff
+  Anamanti Core and holds it open, reconnecting with capped exponential backoff
   (`rust/src/wyoming/notify.rs`; started by `start_notify_channel` on its own thread,
   independent of the voice engine). This is a *sidecar* — the per-turn voice socket and
   its state machine are untouched.
-- **`ambient-hello`** (device → orchestrator): sent right after the notify socket
+- **`anamanti-hello`** (device → Anamanti Core): sent right after the notify socket
   opens (`data.role="notify"`, `data.device_id`). It registers the connection with the
-  orchestrator's `NotificationService`, which parks the read loop and holds the socket
+  Anamanti Core's `NotificationService`, which parks the read loop and holds the socket
   to push down.
-- **`ambient-notify`** (orchestrator → device): a proactive notification
+- **`anamanti-notify`** (Anamanti Core → device): a proactive notification
   (`data.id`, `data.priority` = `info`|`reminder`|`alert`, `data.title`, `data.body`).
   The device decodes it to a `NotifyEvent` on a dedicated FRB stream; Flutter's
   `NotificationController` shows a banner on the idle screen (top layer, tap or
   auto-expire to dismiss). **Visual-only in this phase** — no spoken output, no
   state-machine interaction.
-- **`ambient-notify-ack`** (device → orchestrator): reserved for a later
+- **`anamanti-notify-ack`** (device → Anamanti Core): reserved for a later
   delivery-tracking phase (store-and-forward across reconnects); the constructor exists
   in both crates but nothing sends it yet.
 
@@ -445,31 +449,31 @@ frames already have).
 - **mDNS / Zeroconf**: the device browses `_wyoming._tcp`, resolves the Mac's
   host + port, and caches it for fast reconnect.
 - No static IP configuration required.
-- **Orchestrator TXT records**: each orchestrator advertises TXT
-  `role=orchestrator`, a friendly `name` (from `AMBIENT_SERVICE_NAME`), and a
-  **stable** `instance_id`. The `instance_id` resolves from `AMBIENT_INSTANCE_ID` →
+- **Anamanti Core TXT records**: each Anamanti Core advertises TXT
+  `role=core`, a friendly `name` (from `ANAMANTI_SERVICE_NAME`), and a
+  **stable** `instance_id`. The `instance_id` resolves from `ANAMANTI_INSTANCE_ID` →
   the working directory's **git branch code** (so a copy run from a test
   branch/worktree names itself by its branch) → the sanitized service name. The
-  device **filters browse results by `role=orchestrator`**, so the raw
+  device **filters browse results by `role=core`**, so the raw
   off-the-shelf Whisper (STT) and Piper (TTS) servers — which also advertise
   `_wyoming._tcp` — are never resolved or connected to.
-- **Deployment layout**: the "local production" orchestrator is a copied release
-  binary at `/Volumes/External/DeveloperSupport/Ambient Orchestrator/`, run outside
-  any git checkout with `AMBIENT_INSTANCE_ID` set in `~/.zshenv`; test copies run
+- **Deployment layout**: the "local production" Anamanti Core is a copied release
+  binary at `/Volumes/External/DeveloperSupport/Anamanti Core/`, run outside
+  any git checkout with `ANAMANTI_INSTANCE_ID` set in `~/.zshenv`; test copies run
   from their git worktree and fall through to the branch-code default.
-- **Multiple displays → one orchestrator**: the orchestrator's accept loop already
+- **Multiple displays → one Anamanti Core**: the Anamanti Core's accept loop already
   spawns a task per connection and every reply is written back on that
-  connection's own socket, so N displays share one orchestrator with no
+  connection's own socket, so N displays share one Anamanti Core with no
   cross-routing. Memory + settings are a single shared household pool (speaker ID
   scopes per person, not per device).
-- **Multiple orchestrators → device picks one**: a display can run a "production"
-  orchestrator plus short-lived test instances (each launched with a distinct
-  `AMBIENT_SERVICE_NAME` / `AMBIENT_INSTANCE_ID` / `AMBIENT_BIND_ADDR` /
-  `AMBIENT_CONFIG_ADDR`; `mdns-sd` does not auto-rename on collision, so the names
-  must differ). The settings screen shows a device-local **Orchestrator** dropdown
+- **Multiple Anamanti Cores → device picks one**: a display can run a "production"
+  Anamanti Core plus short-lived test instances (each launched with a distinct
+  `ANAMANTI_SERVICE_NAME` / `ANAMANTI_INSTANCE_ID` / `ANAMANTI_BIND_ADDR` /
+  `ANAMANTI_CONFIG_ADDR`; `mdns-sd` does not auto-rename on collision, so the names
+  must differ). The settings screen shows a device-local **Anamanti Core** dropdown
   (populated by a full-window mDNS enumeration, `list_orchestrators`), persisted
   by stable `instance_id` key in `AppSettings`. The selection is **strict**: a
-  display pinned to one orchestrator resolves *only* that `instance_id` and stays
+  display pinned to one Anamanti Core resolves *only* that `instance_id` and stays
   **offline** if it is unreachable, never silently switching Macs; the `"Auto"`
   entry (empty key) restores first-responder behavior. The key steers **both**
   discovery paths — voice turns (`WakeWordConfig.orchestrator_key` → `Shared` →
@@ -477,7 +481,7 @@ frames already have).
   `control` → `resolve(preferred)`) — so both hit the same Mac. Shared backend data
   across instances relies on SQLite **WAL** mode; two processes writing the same
   embedded HelixDB graph is unsupported, so a test instance sharing prod data uses
-  `AMBIENT_MEMORY_BACKEND=sqlite` (see `Plan.MD`).
+  `ANAMANTI_MEMORY_BACKEND=sqlite` (see `Plan.MD`).
 - **Resilience**: **auto-reconnect** with exponential backoff via mDNS when the
   Mac is unreachable. The idle photo slideshow keeps running; a subtle
   **disconnected** indicator reflects status; wake words queue until the socket
@@ -505,14 +509,14 @@ frames already have).
 | FRB v2 stream sinks over polling | Push-based, smooth real-time UI updates |
 | Wyoming Protocol | Standard, streaming-friendly, pairs STT + Piper TTS cleanly |
 | mDNS discovery | Robust to IP changes; zero manual config |
-| Device-selectable orchestrator (TXT `instance_id`, strict offline) | Multi-Mac homes (prod + test instances); pin by stable key so a display never silently switches Macs and survives IP changes; `role=orchestrator` filtering also excludes raw STT/TTS servers |
-| Multiple displays share one orchestrator | Per-connection reply routing already isolates devices; one shared household memory/settings pool (speaker ID scopes per person) |
+| Device-selectable Anamanti Core (TXT `instance_id`, strict offline) | Multi-Mac homes (prod + test instances); pin by stable key so a display never silently switches Macs and survives IP changes; `role=core` filtering also excludes raw STT/TTS servers |
+| Multiple displays share one Anamanti Core | Per-connection reply routing already isolates devices; one shared household memory/settings pool (speaker ID scopes per person) |
 | openWakeWord via tract-onnx | Pre-trained models, minimal deps, offline |
 | Pluggable LLM behind a trait | Swap local/cloud without touching the pipeline |
 | Rust-side playback | One audio layer, symmetric with capture |
-| Wake-word barge-in (flush-on-wake + `ambient-interrupt`) | Natural interruption without full-duplex complexity; in-app AEC deferred, but a **required device-side HAL AEC shim** delivers echo cancellation on Echo Show 8 gen-1 (see §4) |
+| Wake-word barge-in (flush-on-wake + `anamanti-interrupt`) | Natural interruption without full-duplex complexity; in-app AEC deferred, but a **required device-side HAL AEC shim** delivers echo cancellation on Echo Show 8 gen-1 (see §4) |
 | Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
-| VAD in the orchestrator | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
+| VAD in the Anamanti Core | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
 | SQLite is the memory store of record | Simple, debuggable; holds explicit+inferred facts and the settings-list/voice management |
 | Recall defaults to embedded HelixDB GraphRAG | Vector KNN + graph hop beats keyword FTS for context; in-process (no server/Docker); needs `OPENAI_API_KEY`, falls back to SQLite FTS if absent |
 | Per-person speaker ID (local, opt-in) | Local ECAPA voiceprint (passive + auto-cluster) keeps voice on the LAN and scopes memory + prompt per person for better context; no raw audio leaves the device |
@@ -531,9 +535,9 @@ adding a new capability.
 
 ### 8.1 How tool calling works
 
-Tool calling lives in the **rig engine** (`orchestrator/src/llm/rig.rs`), the default LLM
-engine (`AMBIENT_LLM_ENGINE=rig`; `native` opts out to the tool-less HTTP backends).
-Each turn the orchestrator advertises a set of **tool definitions** (name +
+Tool calling lives in the **rig engine** (`anamanti-core/src/llm/rig.rs`), the default LLM
+engine (`ANAMANTI_LLM_ENGINE=rig`; `native` opts out to the tool-less HTTP backends).
+Each turn the Anamanti Core advertises a set of **tool definitions** (name +
 description + JSON-schema for the arguments) to the model. If the model asks to call
 one, `RigBackend::respond` runs a short **tool-negotiation loop** (up to
 `MAX_TOOL_ROUNDS`): it executes the tool, appends the result to the conversation, and
@@ -547,34 +551,34 @@ There are **two flavors** of tool:
 - **Info tool** — runs entirely on the Mac and returns text the model speaks
   (e.g. `internet_search`, `calendar_lookup`). Adding one is self-contained in
   `rig.rs`, though it may lean on a supporting module: `calendar_lookup` (read-only
-  web iCalendar) lives in `orchestrator/src/calendar/`, holds an injected
+  web iCalendar) lives in `anamanti-core/src/calendar/`, holds an injected
   `Arc<dyn CalendarSource>` (mirroring how `internet_search` holds a
-  `SearchProvider`), and is advertised only when `AMBIENT_CALENDARS` lists one or
+  `SearchProvider`), and is advertised only when `ANAMANTI_CALENDARS` lists one or
   more `.ics` subscription URLs. It fetches the feeds live per query (with a short
   TTL cache to dedupe fetches inside one tool-negotiation loop), expands recurring
   events (`RRULE`) within the requested window, and filters by time / person
   (fuzzy name match) / free text. A CalDAV or macOS-EventKit source can drop in
   later behind the same `CalendarSource` trait. The **`shopping_list_add`** tool has
   the same shape but acts on an external service: it holds an injected
-  `Arc<dyn GroceryController>` (`orchestrator/src/cadora/`) and, when the household
+  `Arc<dyn GroceryController>` (`anamanti-core/src/cadora/`) and, when the household
   shopping list is linked, POSTs the add to **Cadora's voice API** (the shared family
   backend behind NextHaul et al.) and speaks back its confirmation — mirroring how
   `spotify_control` holds a `SpotifyController`. Linking: NextHaul (Settings → Voice
   & Integrations) mints a one-time **6-digit code** (`/voice/links/pair`); enter it on
-  the config page (Household tab) and the orchestrator redeems it
+  the config page (Household tab) and the Anamanti Core redeems it
   (`/voice/links/redeem`) for a durable voice-link token stored in the 0600 settings
   file. It never touches Supabase directly — Cadora owns list creation, member
   attribution, and dedupe.
 - **Action tool** — additionally causes an effect on the Echo Show (e.g.
   `set_timer`). The tool cannot reach the device directly (it runs inside the LLM
   loop, which has no socket), so it emits a **`DeviceAction`** onto a per-turn
-  channel; the orchestrator's reply loop drains that channel and writes a
-  project-local **`ambient-*`** frame to the device on the same turn socket. The
+  channel; the Anamanti Core's reply loop drains that channel and writes a
+  project-local **`anamanti-*`** frame to the device on the same turn socket. The
   device owns whatever state results.
 
 ### 8.2 Adding an **info** tool (Mac-only)
 
-1. In `orchestrator/src/llm/rig.rs`, add a tool `NAME`, a `Deserialize` args struct, a
+1. In `anamanti-core/src/llm/rig.rs`, add a tool `NAME`, a `Deserialize` args struct, a
    `…_definition() -> ToolDefinition` (JSON-schema for the args), and an
    `…_invoke(args) -> Result<String>` that does the work and returns a short,
    speakable result.
@@ -586,49 +590,49 @@ There are **two flavors** of tool:
    `serve_sequence` test that has a fake model call the tool then answer).
 
 No protocol, device, or Flutter changes are needed — build + test with
-`cargo test --manifest-path orchestrator/Cargo.toml`.
+`cargo test --manifest-path anamanti-core/Cargo.toml`.
 
 ### 8.3 Adding a **device action** (spans all layers)
 
 Worked example: **timers** (`set_timer` / `cancel_timer`). The flow is
-model → Mac tool → `DeviceAction` → `ambient-timer` frame → device timer manager →
+model → Mac tool → `DeviceAction` → `anamanti-timer` frame → device timer manager →
 FRB event → Flutter UI. To add a new action, mirror these steps:
 
-1. **Mac tool** (`orchestrator/src/llm/rig.rs`): as in §8.2, but `…_invoke` takes the per-turn
+1. **Mac tool** (`anamanti-core/src/llm/rig.rs`): as in §8.2, but `…_invoke` takes the per-turn
    `Option<&ActionSink>` and `send`s a new `DeviceAction` variant
-   (`orchestrator/src/llm/mod.rs`) instead of doing the work locally. Action tools are
+   (`anamanti-core/src/llm/mod.rs`) instead of doing the work locally. Action tools are
    registered unconditionally (they need no config).
-2. **Relay** (`orchestrator/src/orchestrator.rs`): the reply loop already drains the per-turn
+2. **Relay** (`anamanti-core/src/orchestrator.rs`): the reply loop already drains the per-turn
    action channel (`drain_device_actions`) and writes the frame; add a match arm
    mapping the new `DeviceAction` to its `WyomingEvent` constructor.
-3. **Wire frame** (`orchestrator/src/wyoming/protocol.rs` **and** `display/rust/src/wyoming/protocol.rs`,
-   kept **byte-identical** with round-trip tests in both crates): add an `ambient-*`
+3. **Wire frame** (`anamanti-core/src/wyoming/protocol.rs` **and** `anamanti-display/rust/src/wyoming/protocol.rs`,
+   kept **byte-identical** with round-trip tests in both crates): add an `anamanti-*`
    `type` const, constructor(s), and — on the device side — a decoder
    (e.g. `timer_command()`).
-4. **Device intake** (`display/rust/src/wyoming/client.rs`): add a `TurnUpdate` variant and a
+4. **Device intake** (`anamanti-display/rust/src/wyoming/client.rs`): add a `TurnUpdate` variant and a
    branch in `handle_server_event` that decodes the frame into it. The frame only
    arrives **mid-turn** (the device is always the Wyoming *client*; the socket exists
    only during a turn), which is fine — device actions are triggered by the very turn
    that carries them.
-5. **Device state** (`display/rust/src/engine/`): own the resulting state in a manager held by
+5. **Device state** (`anamanti-display/rust/src/engine/`): own the resulting state in a manager held by
    the long-lived `Network`/`Shared` (so it outlives the turn socket), applied from
    the `on_update` closure in `net.rs`. Reuse the shared `PlaybackSink` for any sound
-   (no second audio path). See `display/rust/src/engine/timer.rs`.
-6. **FRB event** (`display/rust/src/api/engine.rs`): add `WakeWordEventKind` variant(s) +
+   (no second audio path). See `anamanti-display/rust/src/engine/timer.rs`.
+6. **FRB event** (`anamanti-display/rust/src/api/engine.rs`): add `WakeWordEventKind` variant(s) +
    neutral-default payload fields to the flat `WakeWordEvent`, plus `pub(crate)`
    builders; the manager emits them via the `StreamSink`. Then **regenerate**:
    `flutter_rust_bridge_codegen generate` (never hand-edit `frb_generated.rs` or
-   `display/lib/src/rust/`).
+   `anamanti-display/lib/src/rust/`).
 7. **Flutter** (`lib/`): fold the new event kind into `AssistantState` in
    `AssistantController._onEvent` (the exhaustive `switch` forces you to handle it),
-   and render it. See `display/lib/src/ui/timers_overlay.dart`, mounted in the always-visible
+   and render it. See `anamanti-display/lib/src/ui/timers_overlay.dart`, mounted in the always-visible
    `Stack` in `ambient_screen.dart` so it shows during both idle slideshow and a live
    turn. Timers render in two presentations: a big, screen-filling display on the idle
    screen (single / side-by-side / grid by count, each with a name, large mm:ss readout,
    and a draining circular ring), and a compact chip row top-center while a turn is active,
    so the conversation wins the screen and the timers stay glanceable.
 
-Build/verify each layer independently: `cargo test` for `orchestrator/` and `display/rust/`,
+Build/verify each layer independently: `cargo test` for `anamanti-core/` and `anamanti-display/rust/`,
 `flutter test` + `flutter analyze` for the UI.
 
 ---
@@ -641,8 +645,8 @@ Build/verify each layer independently: `cargo test` for `orchestrator/` and `dis
 - **Music (planned, pre-implementation):** house-wide music is a **Mac-hosted,
   Snapcast-routed** capability that is deliberately **separate from the Wyoming/TTS
   audio path and the device's cpal/oboe path** — music PCM never enters
-  `ambient_orchestrator`. Sources (librespot + web-URL player) write raw PCM to
+  `anamanti_core`. Sources (librespot + web-URL player) write raw PCM to
   snapfifos on the Mac; snapserver (on the Mac) fans out to snapclient speakers;
-  the orchestrator only controls (Web API / mpv IPC / snapserver JSON-RPC ducking).
+  the Anamanti Core only controls (Web API / mpv IPC / snapserver JSON-RPC ducking).
   Design → [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (transport) +
   [`MusicPlan.md`](./MusicPlan.md) (Spotify source + control plane).

@@ -1,25 +1,25 @@
-# Memory Plan — GraphRAG Memory for the Ambient Assistant
+# Memory Plan — GraphRAG Memory for Anamanti
 
 Status: **IMPLEMENTED (v1)** — all four goals built and tested behind the
 `helix` cargo feature (on by default). SQLite remains the default runtime
-backend; HelixDB GraphRAG is opt-in via `AMBIENT_MEMORY_BACKEND=helix`. This
+backend; HelixDB GraphRAG is opt-in via `ANAMANTI_MEMORY_BACKEND=helix`. This
 plan layers a HelixDB-backed GraphRAG memory + chat-log pipeline onto the
-existing Mac-side Rust brain (`ambient_orchestrator`, `/mac`).
+existing Mac-side Rust brain (`anamanti_core`, `/mac`).
 
 ## Implementation status (2026-09-16)
 
 **Built & tested (56 tests green, clippy clean, both feature configs build):**
-- **Goal 2 — chat log:** `orchestrator/src/memory/chatlog.rs` — append-only JSONL, one
+- **Goal 2 — chat log:** `anamanti-core/src/memory/chatlog.rs` — append-only JSONL, one
   record per turn, written by `orchestrator.rs::log_turn`. Always on.
-- **Goal 3 — embeddings:** `orchestrator/src/memory/embed.rs` — `Embedder` trait,
+- **Goal 3 — embeddings:** `anamanti-core/src/memory/embed.rs` — `Embedder` trait,
   `OpenAiEmbedder` (`text-embedding-3-small`), `MockEmbedder` (offline tests).
-  `orchestrator/src/memory/ingester.rs` — background batch ingester (drains JSONL →
+  `anamanti-core/src/memory/ingester.rs` — background batch ingester (drains JSONL →
   batch-embed → extract → upsert → commit offset sidecar).
-- **Goal 1 — GraphRAG store:** `orchestrator/src/memory/helix.rs` — embedded HelixDB
+- **Goal 1 — GraphRAG store:** `anamanti-core/src/memory/helix.rs` — embedded HelixDB
   (`db::HelixDB`, in-process, `HelixDbSource::Disk`), schema
   (`User/Turn/Memory/Entity` + `SAID/MENTIONS/ABOUT/FOLLOWS/KNOWS`), vector
   indexes, idempotent upserts by `ext_id`. Entity extraction:
-  `orchestrator/src/memory/entity.rs` (`AnthropicEntityExtractor` = Claude Haiku 4.5;
+  `anamanti-core/src/memory/entity.rs` (`AnthropicEntityExtractor` = Claude Haiku 4.5;
   `NoopEntityExtractor` when no key; `MockEntityExtractor` for tests).
   **Entity names are editable** to fix a misspelled fact: `HelixMemory::rename_entity`
   (exposed on the `GraphView` trait) fixes the name *everywhere it appears* — the
@@ -32,15 +32,15 @@ existing Mac-side Rust brain (`ambient_orchestrator`, `/mac`).
   `embedding` on a rewritten turn/memory is intentionally left as is (a one-token
   spelling fix barely moves it; re-embedding would need the embedder). Surfaced as
   an "Edit name" button on each `Entity` row of the `/helix` debug page
-  (`POST /helix/rename-entity`, `orchestrator/src/webconfig.rs`).
-- **Goal 4 — recall + inject:** `orchestrator/src/memory/backend.rs` — `Recall` trait
+  (`POST /helix/rename-entity`, `anamanti-core/src/webconfig.rs`).
+- **Goal 4 — recall + inject:** `anamanti-core/src/memory/backend.rs` — `Recall` trait
   (`SqliteRecall` default, `HelixRecall` = embed query → vector KNN + graph
   expansion). Wired into `orchestrator.rs::build_context`.
-- **Wiring:** `config.rs` (all `AMBIENT_*` env vars below), `main.rs`
+- **Wiring:** `config.rs` (all `ANAMANTI_*` env vars below), `main.rs`
   (`build_graphrag_recall`, spawns ingester, tokio runtime with a 16 MiB worker
   stack — the engine's deep async types overflow the 2 MiB default).
 
-**Verified end-to-end:** the real binary with `AMBIENT_MEMORY_BACKEND=helix`
+**Verified end-to-end:** the real binary with `ANAMANTI_MEMORY_BACKEND=helix`
 opens the on-disk store, embeds via HTTP (proven against a fake OpenAI server),
 runs the ingester, and upserts turns into the graph; integration tests drive the
 full chat-log→ingest→recall path on the real embedded engine (mock
@@ -56,13 +56,13 @@ Claude Haiku extraction (`ANTHROPIC_API_KEY`).
 per-turn session id, so `FOLLOWS` chaining is best-effort). See "Deferred".
 
 ### Env vars (added)
-`AMBIENT_MEMORY_BACKEND=sqlite|helix` (default `sqlite`) ·
-`AMBIENT_CHATLOG_PATH` (default `ambient_chatlog.jsonl`) ·
-`AMBIENT_HELIX_PATH` (default `ambient_helix`) ·
-`AMBIENT_EMBED_MODEL` · `AMBIENT_EMBED_DIMS` (default 1536) ·
-`AMBIENT_EXTRACT_MODEL` (default `claude-haiku-4-5`) ·
-`AMBIENT_OPENAI_BASE_URL` · `AMBIENT_ANTHROPIC_BASE_URL` ·
-`AMBIENT_INGEST_INTERVAL_SECS` (default 30) ·
+`ANAMANTI_MEMORY_BACKEND=sqlite|helix` (default `sqlite`) ·
+`ANAMANTI_CHATLOG_PATH` (default `anamanti_chatlog.jsonl`) ·
+`ANAMANTI_HELIX_PATH` (default `anamanti_helix`) ·
+`ANAMANTI_EMBED_MODEL` · `ANAMANTI_EMBED_DIMS` (default 1536) ·
+`ANAMANTI_EXTRACT_MODEL` (default `claude-haiku-4-5`) ·
+`ANAMANTI_OPENAI_BASE_URL` · `ANAMANTI_ANTHROPIC_BASE_URL` ·
+`ANAMANTI_INGEST_INTERVAL_SECS` (default 30) ·
 plus `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
 
 ## Decisions locked (2026-09-15)
@@ -72,7 +72,7 @@ plus `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
    conversation text leaves the device for embedding.)
 2. **Coexistence:** HelixDB runs **alongside** SQLite behind a new
    `MemoryBackend` trait. SQLite stays the default; Helix is opt-in via
-   `AMBIENT_MEMORY_BACKEND=helix`.
+   `ANAMANTI_MEMORY_BACKEND=helix`.
 3. **Ingestion:** **batch in the background** — a task drains the JSONL chat log,
    embeds new records in batches, extracts entities, and upserts into Helix.
    Live turns never block on embedding/ingestion.
@@ -82,7 +82,7 @@ plus `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
 5. **HelixDB deployment:** ~~embedded in-process~~ → **co-located local
    instance** (see Research below). HelixDB v3 has **no embeddable library
    API** — the published Rust crate is an HTTP client. So we run a local Helix
-   instance on the Mac Mini and the orchestrator talks to it over
+   instance on the Mac Mini and the Anamanti Core talks to it over
    `localhost:6969`. As local/private as embedding, minus the in-process part.
 6. **Multi-user household:** the graph models **multiple `User` nodes**.
    **Speaker identification is future work** — until it exists, turns are
@@ -97,18 +97,18 @@ plus `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
 The current memory is deliberately simple (Plan.MD Phase 4):
 
 - **Store:** SQLite + FTS5, one row per fact/preference
-  (`orchestrator/src/memory/mod.rs`, `MemoryStore`). Path from `AMBIENT_DB_PATH`
-  (default `ambient_memory.sqlite`).
+  (`anamanti-core/src/memory/mod.rs`, `MemoryStore`). Path from `ANAMANTI_DB_PATH`
+  (default `anamanti_memory.sqlite`).
 - **Write policy:** *explicit* voice commands ("remember…"/"forget…") via
   `parse_command`, plus *inferred* heuristic extraction via `infer_memories`
-  (`orchestrator/src/memory/extract.rs`).
+  (`anamanti-core/src/memory/extract.rs`).
 - **Read/inject:** `orchestrator.rs::build_context()` runs
   `memory.search(transcript, 8)` (keyword FTS) and appends the hits as a
   `- bullet` list onto the system prompt for that turn.
 - **Management:** list/delete/clear over the Phase-6 control protocol
   (`control.rs`, `settings.rs`) and by voice.
-- HTTP-to-cloud pattern to copy: `orchestrator/src/llm/anthropic.rs` (raw `reqwest`,
-  API key from env). Config/env wiring: `orchestrator/src/config.rs`.
+- HTTP-to-cloud pattern to copy: `anamanti-core/src/llm/anthropic.rs` (raw `reqwest`,
+  API key from env). Config/env wiring: `anamanti-core/src/config.rs`.
 
 **These four goals extend that spine.** Every new piece needs to answer: does it
 *replace* SQLite, or run *alongside* it?
@@ -154,7 +154,7 @@ public embed API.
 
 **Chosen path:** run a **co-located local HelixDB instance** on the Mac Mini
 (installed via the `helix` CLI, `helix start dev`, listening on
-`localhost:6969`). The `HelixMemory` backend (`orchestrator/src/memory/helix.rs`) uses
+`localhost:6969`). The `HelixMemory` backend (`anamanti-core/src/memory/helix.rs`) uses
 the `helix-db` Rust SDK `Client` pointed at `http://localhost:6969` and runs
 queries authored with the Rust `#[query]` DSL via `POST /v2/query` (no separate
 build/deploy step in v3). Traffic never leaves the box, so this keeps the
@@ -162,15 +162,15 @@ local/private property — it just isn't in-process.
 
 **Operational note:** the local Helix instance must be running for the `helix`
 backend to work. Manage it the same way TODO.md already plans to run the
-orchestrator (launchd/login item on the Mac). If Helix is unreachable, fall
+Anamanti Core (launchd/login item on the Mac). If Helix is unreachable, fall
 back to the SQLite backend so turns still work.
 
 ### Integration seam
 
 Introduce a `MemoryBackend` trait so `MemoryStore` (SQLite) and a new
 `HelixMemory` are swappable behind one interface, selected by env
-(`AMBIENT_MEMORY_BACKEND=sqlite|helix`), exactly like `AMBIENT_LLM_BACKEND`.
-This keeps the orchestrator and control protocol unchanged and lets us ship
+(`ANAMANTI_MEMORY_BACKEND=sqlite|helix`), exactly like `ANAMANTI_LLM_BACKEND`.
+This keeps the Anamanti Core and control protocol unchanged and lets us ship
 incrementally.
 
 ---
@@ -180,9 +180,9 @@ incrementally.
 - **Format:** append-only **JSONL**, one record per completed turn. Proposed
   fields: `{ id, ts, session_id, transcript, reply, memories_written[],
   llm_backend, model }`.
-- **Location:** next to the DB (e.g. `AMBIENT_CHATLOG_PATH`, default
-  `ambient_chatlog.jsonl`).
-- **Write point:** end of `Orchestrator::handle_turn` once the reply is final,
+- **Location:** next to the DB (e.g. `ANAMANTI_CHATLOG_PATH`, default
+  `anamanti_chatlog.jsonl`).
+- **Write point:** end of `orchestrator::handle_turn` once the reply is final,
   before/after TTS. Failure to log must **never** break a turn (log-and-continue).
 - **Why a file at all:** it's the durable, human-auditable source of truth and
   the **ingestion queue** for embeddings (Goal 3) — decoupling capture from
@@ -194,7 +194,7 @@ incrementally.
 
 - **Model:** `text-embedding-3-small`, 1536 dims (supports dimension
   reduction via `dimensions` param if we want smaller vectors in Helix).
-- **Client:** new `orchestrator/src/memory/embed.rs`, raw `reqwest` to
+- **Client:** new `anamanti-core/src/memory/embed.rs`, raw `reqwest` to
   `POST https://api.openai.com/v1/embeddings`, key from `OPENAI_API_KEY`
   (same env pattern as `ANTHROPIC_API_KEY`). Supports batch input arrays.
 - **What gets embedded:** each `Turn` (transcript, or transcript+reply — see Q),
@@ -248,7 +248,7 @@ transcript
 
 ## Code surface (new / changed)
 
-New modules under `orchestrator/src/memory/`:
+New modules under `anamanti-core/src/memory/`:
 - `backend.rs` — `MemoryBackend` trait; `MemoryStore` (SQLite, existing) and
   `HelixMemory` both implement it. Selected in `config.rs`.
 - `helix.rs` — `helix-db` SDK `Client` (→ `localhost:6969`); schema + Rust
@@ -261,29 +261,29 @@ New modules under `orchestrator/src/memory/`:
 - `migrate.rs` — one-time SQLite → Helix backfill.
 
 Changed:
-- `config.rs` — `AMBIENT_MEMORY_BACKEND`, plus paths/keys below.
+- `config.rs` — `ANAMANTI_MEMORY_BACKEND`, plus paths/keys below.
 - `orchestrator.rs` — `build_context()` calls the backend's graph retrieval;
   `handle_turn()` appends to the chat log.
 - `Cargo.toml` — add `helix-db = "3"` (SDK client; reqwest already present).
 
-New env vars (following the existing `AMBIENT_*` convention):
-- `AMBIENT_MEMORY_BACKEND=sqlite|helix` (default `sqlite`)
-- `AMBIENT_HELIX_URL` (default `http://localhost:6969`)
-- `AMBIENT_CHATLOG_PATH` (default `ambient_chatlog.jsonl`)
+New env vars (following the existing `ANAMANTI_*` convention):
+- `ANAMANTI_MEMORY_BACKEND=sqlite|helix` (default `sqlite`)
+- `ANAMANTI_HELIX_URL` (default `http://localhost:6969`)
+- `ANAMANTI_CHATLOG_PATH` (default `anamanti_chatlog.jsonl`)
 - `OPENAI_API_KEY` (embeddings) · `ANTHROPIC_API_KEY` (Haiku extraction, reused)
-- `AMBIENT_EXTRACT_MODEL` (default a Claude Haiku 4.5 id)
+- `ANAMANTI_EXTRACT_MODEL` (default a Claude Haiku 4.5 id)
 
 ## Rollout (proposed order)
 
 1. **Chat-log JSONL** (Goal 2) — pure add, zero risk, gives us data immediately.
 2. **HelixDB spike** — install the `helix` CLI, `helix start dev` on `:6969`,
    define the schema + Rust `#[query]` functions, and prove a round-trip from
-   the orchestrator via the `helix-db` SDK. *(Gate: confirm durable local
+   the Anamanti Core via the `helix-db` SDK. *(Gate: confirm durable local
    persistence — see Remaining risks.)*
 3. **Embedding client** (Goal 3) — `embed.rs` + `ingester.rs` batch job over the
    JSONL, incl. Haiku entity extraction.
 4. **GraphRAG retrieval** (Goal 4) — `HelixMemory` behind the `MemoryBackend`
-   trait; wire into `build_context` under `AMBIENT_MEMORY_BACKEND=helix`.
+   trait; wire into `build_context` under `ANAMANTI_MEMORY_BACKEND=helix`.
 5. **Backfill** existing SQLite memories (`migrate.rs`).
 6. Keep SQLite as the default/fallback until the Helix path is proven.
 
@@ -306,7 +306,7 @@ New env vars (following the existing `AMBIENT_*` convention):
 - Q8 embed → **transcript + reply + durable `Memory` rows** all get vectors.
 - Q9 interim speakers → all turns attributed to one shared `household` `User`.
 - Q10 extraction model → **Claude Haiku 4.5** (Anthropic) in the background
-  ingester, reusing the existing `orchestrator/src/llm/anthropic.rs` HTTP client pattern
+  ingester, reusing the existing `anamanti-core/src/llm/anthropic.rs` HTTP client pattern
   (needs `ANTHROPIC_API_KEY`).
 - Q11 migration → **backfill** existing SQLite fact/preference rows into HelixDB
   as `Memory` nodes (embedded + entity-extracted) via a one-time import tool.
@@ -378,7 +378,7 @@ HelixQL deploy). Everything else (trait, ingester, retrieval flow) stands.
 - **Compile cost.** The `helix` feature pulls the engine (SlateDB fork + tantivy
   + foyer): ~90s cold, cached after. `--no-default-features` gives a lean SQLite
   build for fast iteration.
-- **Durability on shutdown.** The orchestrator relies on SlateDB's flush cadence
+- **Durability on shutdown.** The Anamanti Core relies on SlateDB's flush cadence
   + the ingester's per-batch `flush_writer`; there is no explicit `close()` on
   Ctrl-C yet (the `Arc<HelixMemory>` is just dropped). Low risk, worth a follow-up.
 - **Speaker attribution.** Multi-user graph is only as useful as speaker ID;

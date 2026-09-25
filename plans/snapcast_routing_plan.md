@@ -1,4 +1,4 @@
-# Snapcast Routing Plan: house-wide music from the orchestrator host
+# Snapcast Routing Plan: house-wide music from the Anamanti Core host
 
 **Targets:** M4 Mac Mini (always-on hub) + Snapcast speakers on the LAN
 (main speaker = a Linux box; other rooms; optional Echo Show).
@@ -20,14 +20,14 @@ Read together with [`MusicPlan.md`](./MusicPlan.md), [`Plan.MD`](./Plan.MD)
 
 | Question | Decision |
 | --- | --- |
-| **Where does music originate** | On the **Mac orchestrator host**, not the Echo Show — offloads app/power from the ~1 GB device. Answers earlier questions about Android system-audio capture (`MediaProjection`) as **n/a**: no on-device capture, no second device audio path. |
+| **Where does music originate** | On the **Mac Anamanti Core host**, not the Echo Show — offloads app/power from the ~1 GB device. Answers earlier questions about Android system-audio capture (`MediaProjection`) as **n/a**: no on-device capture, no second device audio path. |
 | **Transport** | **Snapcast** — synchronized multi-room, wire-compatible clients, Rust crates exist. ~1 s buffered latency accepted (confirmed "fine"). |
-| **Sources (v1)** | Two, both **external OS processes** (never inside `ambient_orchestrator`): (1) **librespot** (Spotify Connect, the *same* instance MusicPlan.md drives) and (2) a **web-URL/stream player** (mpv/ffmpeg). |
-| **PCM never enters the orchestrator** | Consistent with MusicPlan.md L23–25/§7: each source writes raw PCM to a **snapfifo**; **snapserver** reads the fifo. The orchestrator only issues **control** (Web API / player IPC / snapserver JSON-RPC), never audio bytes. |
+| **Sources (v1)** | Two, both **external OS processes** (never inside `anamanti_core`): (1) **librespot** (Spotify Connect, the *same* instance MusicPlan.md drives) and (2) a **web-URL/stream player** (mpv/ffmpeg). |
+| **PCM never enters the Anamanti Core** | Consistent with MusicPlan.md L23–25/§7: each source writes raw PCM to a **snapfifo**; **snapserver** reads the fifo. The Anamanti Core only issues **control** (Web API / player IPC / snapserver JSON-RPC), never audio bytes. |
 | **snapserver placement** | **On the Mac** (confirmed 2026-09-22) — always-on hub, and the snapfifos are local to the Mac-hosted sources. |
-| **Daemon / routing code location** | **On the orchestrator host** (the Mac): snapserver + source processes + a thin supervisor/control shim. Snapclients are stock `snapclient`. |
+| **Daemon / routing code location** | **On the Anamanti Core host** (the Mac): snapserver + source processes + a thin supervisor/control shim. Snapclients are stock `snapclient`. |
 | **Snapclient endpoints** | The **Linux box** (main speaker) **and the Echo Show(s)** (confirmed 2026-09-22), plus any other rooms. |
-| **Echo Show snapclient form** | **Bundle the prebuilt `snapclient` native binary in the existing app, run it as a *separate OS process*** (a Kotlin foreground service `exec`s it) — **not** linked into the Rust engine, **not** a separate APK. Rationale: keeps the app's single cpal audio path (capture + TTS) exactly as-locked, isolates crashes/RAM, and Android's AudioFlinger mixes the two processes' output. Per-device **toggle** (`AMBIENT_MUSIC_INCLUDE_DEVICE`, default **off**) because of the wake-word-over-music risk (§7). |
+| **Echo Show snapclient form** | **Bundle the prebuilt `snapclient` native binary in the existing app, run it as a *separate OS process*** (a Kotlin foreground service `exec`s it) — **not** linked into the Rust engine, **not** a separate APK. Rationale: keeps the app's single cpal audio path (capture + TTS) exactly as-locked, isolates crashes/RAM, and Android's AudioFlinger mixes the two processes' output. Per-device **toggle** (`ANAMANTI_MUSIC_INCLUDE_DEVICE`, default **off**) because of the wake-word-over-music risk (§7). |
 | **Ducking** | Lower the **Snapcast group volume** via JSON-RPC while the assistant is THINKING/SPEAKING; restore on IDLE. This is the mechanism MusicPlan.md §6/P4 leaves open. |
 
 If a task seems to require changing one of these, stop and confirm first.
@@ -38,7 +38,7 @@ If a task seems to require changing one of these, stop and confirm first.
 
 ```
                  ┌───────────────── Mac Mini (always-on host) ─────────────────┐
-                 │  orchestrator (ambient_orchestrator)                        │
+                 │  Anamanti Core (anamanti_core)                              │
    "play X" ───▶ │   ├─ spotify_control tool ──Web API──▶ Spotify  (MusicPlan) │
                  │   └─ url_play tool ──IPC──▶ url-player                       │
                  │            control only — NEVER PCM                         │
@@ -62,7 +62,7 @@ If a task seems to require changing one of these, stop and confirm first.
 
 **Decoupling (matches MusicPlan.md L58–60):** the routing layer can land and be
 tested — queue a track from a phone onto the "Ambient" Connect device and hear it
-in sync across speakers — **before** any orchestrator tool exists. The tools only
+in sync across speakers — **before** any Anamanti Core tool exists. The tools only
 add hands-free control on top.
 
 ---
@@ -77,7 +77,7 @@ add hands-free control on top.
 | snapclient: main speaker | Linux box | stock `snapclient` + systemd | this plan (config) |
 | snapclient: rooms | each speaker | stock `snapclient` + systemd | this plan (config) |
 | snapclient: Echo Show | Device | **prebuilt `snapclient` binary bundled in the existing app, run as a separate OS process** via a Kotlin foreground service; per-device toggle | **this plan** (device-side) |
-| Control shim (ducking, stream select) | Mac, in `ambient_orchestrator` | snapserver JSON-RPC client tied to pipeline state | **this plan** |
+| Control shim (ducking, stream select) | Mac, in `anamanti_core` | snapserver JSON-RPC client tied to pipeline state | **this plan** |
 | `spotify_control` LLM tool | Mac | rig `PortableTool` | **MusicPlan.md** |
 | `url_play` LLM tool | Mac | rig `PortableTool` (mpv IPC) | this plan (or a follow-up) |
 
@@ -109,26 +109,26 @@ source = pipe:///tmp/snap-web?name=Web&sampleformat=48000:16:2&codec=flac
 
 **Web-URL player process:** `mpv --no-video --ao=pcm`/`--audio-channels` piping to
 `/tmp/snap-web`, launched with an **IPC socket** (`--input-ipc-server`) so the
-orchestrator's `url_play` tool can `loadfile`/`stop`/`set volume` without
-restarting it. Keeps PCM out of the orchestrator (mpv owns decode + fifo write).
+Anamanti Core's `url_play` tool can `loadfile`/`stop`/`set volume` without
+restarting it. Keeps PCM out of the Anamanti Core (mpv owns decode + fifo write).
 
 ---
 
-## 4. Control plane (in `ambient_orchestrator`, control only)
+## 4. Control plane (in `anamanti_core`, control only)
 
-A small **snapserver JSON-RPC client** module (e.g. `orchestrator/src/music/`)
+A small **snapserver JSON-RPC client** module (e.g. `anamanti-core/src/music/`)
 that never touches PCM:
 
 - **Ducking:** hook the existing pipeline state machine — on THINKING/SPEAKING
   lower the music group volume (`Group.SetVolume`), restore on IDLE. Reuses the
-  turn lifecycle the orchestrator already owns; behind `AMBIENT_MUSIC_DUCK_ON_SPEECH`.
+  turn lifecycle the Anamanti Core already owns; behind `ANAMANTI_MUSIC_DUCK_ON_SPEECH`.
   This is the concrete mechanism MusicPlan.md §6/P4 leaves undecided.
 - **Stream select:** when a source starts (Spotify vs Web), point the group at
   that stream.
 - **Group membership:** add/remove the Echo Show snapclient behind
-  `AMBIENT_MUSIC_INCLUDE_DEVICE`.
+  `ANAMANTI_MUSIC_INCLUDE_DEVICE`.
 - **`url_play` tool (this plan or follow-up):** a rig `PortableTool` twin of
-  `InternetSearch` (`orchestrator/src/llm/rig.rs`) — `play`/`stop`/`set_volume`
+  `InternetSearch` (`anamanti-core/src/llm/rig.rs`) — `play`/`stop`/`set_volume`
   for radio/stream URLs via the mpv IPC socket. `spotify_control` (MusicPlan.md)
   stays the Spotify tool; both are advertised only when their master toggle is on.
 
@@ -140,15 +140,15 @@ that never touches PCM:
   (`_snapcast._tcp`) or an explicit host arg — no hardcoded IP in the app,
   consistent with the project's mDNS-only discovery decision.
 - **Config keys** (env-driven, per `config.rs` convention; coordinated with
-  MusicPlan.md's `AMBIENT_SPOTIFY_*`):
+  MusicPlan.md's `ANAMANTI_SPOTIFY_*`):
 
 ```bash
-AMBIENT_MUSIC=on|off                 # master toggle for the routing/control layer (now the JSON key `music.enabled`; default ON)
-AMBIENT_MUSIC_SNAPSERVER=127.0.0.1:1705   # JSON-RPC control endpoint
-AMBIENT_MUSIC_DUCK_ON_SPEECH=on      # duck group volume while the assistant speaks
-AMBIENT_MUSIC_INCLUDE_DEVICE=off     # add the Echo Show snapclient to the group
-AMBIENT_MUSIC_WEB_IPC=/tmp/mpv-web.sock   # mpv IPC socket for url_play
-# Spotify source/control keys are owned by MusicPlan.md (AMBIENT_SPOTIFY_*).
+ANAMANTI_MUSIC=on|off                 # master toggle for the routing/control layer (now the JSON key `music.enabled`; default ON)
+ANAMANTI_MUSIC_SNAPSERVER=127.0.0.1:1705   # JSON-RPC control endpoint
+ANAMANTI_MUSIC_DUCK_ON_SPEECH=on      # duck group volume while the assistant speaks
+ANAMANTI_MUSIC_INCLUDE_DEVICE=off     # add the Echo Show snapclient to the group
+ANAMANTI_MUSIC_WEB_IPC=/tmp/mpv-web.sock   # mpv IPC socket for url_play
+# Spotify source/control keys are owned by MusicPlan.md (ANAMANTI_SPOTIFY_*).
 ```
 
 ---
@@ -160,16 +160,16 @@ AMBIENT_MUSIC_WEB_IPC=/tmp/mpv-web.sock   # mpv IPC socket for url_play
    queuing to the "Ambient" Connect device from a phone. **Unblocks MusicPlan.md P1.**
 2. **P2 — multi-room.** Add room snapclients (+ systemd units); verify lockstep
    playback across all speakers. launchd unit for snapserver on the Mac (coexists
-   with the orchestrator launchd item in `TODO.md §4`).
+   with the Anamanti Core launchd item in `TODO.md §4`).
 3. **P3 — web-URL source.** Add the mpv/ffmpeg → `/tmp/snap-web` source + the
    second snapserver stream; verify a radio URL plays house-wide.
-4. **P4 — control shim.** `orchestrator/src/music/` JSON-RPC client: ducking on
+4. **P4 — control shim.** `anamanti-core/src/music/` JSON-RPC client: ducking on
    THINKING/SPEAKING + stream-select. Host tests against a mock JSON-RPC server.
 5. **P5 — `url_play` tool.** rig `PortableTool` over the mpv IPC socket.
 6. **P6 — Echo Show snapclient.** Cross-compile / obtain a `snapclient` binary for
    the device (armv7 / Android 11), bundle it in the existing app, and start it from
    a Kotlin **foreground service** as a **separate OS process** (not in the Rust
-   engine). Per-device toggle `AMBIENT_MUSIC_INCLUDE_DEVICE` (default **off**) +
+   engine). Per-device toggle `ANAMANTI_MUSIC_INCLUDE_DEVICE` (default **off**) +
    settings switch. Include the wake-word-over-music mitigation: keep the raised
    wake-word threshold in force whenever the device snapclient is in the active
    group (extend the existing SPEAKING-threshold mechanism), and measure
@@ -210,31 +210,31 @@ Executed end-to-end as far as is verifiable without live snapserver/librespot/mp
 hardware and the Linux box:
 
 - **Config-page Music tab + process supervisor: implemented, tested, and
-  smoke-verified live.** The orchestrator's loopback config UI gained a **Music**
+  smoke-verified live.** The Anamanti Core's loopback config UI gained a **Music**
   tab (`webconfig.rs` → `/music`) backed by a `MusicSupervisor`
-  (`orchestrator/src/music/supervisor.rs`) that **starts/stops snapserver,
+  (`anamanti-core/src/music/supervisor.rs`) that **starts/stops snapserver,
   librespot, and mpv** as managed child processes (`kill_on_drop`, per-process log
   files) and shows **live snapserver status** (groups/streams/clients/volumes via
   the JSON-RPC client) plus a **play-a-URL** box (mpv IPC). Endpoints:
   `GET /music/status.json`, `POST /music/{proc,play,stopweb}`. Gated behind
-  `AMBIENT_MUSIC` (the tab reports "disabled" otherwise). Launch commands +
-  fifo/log/bin paths are env-tunable (`AMBIENT_MUSIC_{BIN,RUN,LOG}_DIR`,
-  `AMBIENT_MUSIC_CONF`, `AMBIENT_SPOTIFY_DEVICE_NAME`). Verified with a live
+  `ANAMANTI_MUSIC` (the tab reports "disabled" otherwise). Launch commands +
+  fifo/log/bin paths are env-tunable (`ANAMANTI_MUSIC_{BIN,RUN,LOG}_DIR`,
+  `ANAMANTI_MUSIC_CONF`, `ANAMANTI_SPOTIFY_DEVICE_NAME`). Verified with a live
   binary: the page renders, and starting snapserver from the UI actually launched
   it and the control client reported `reachable: true`. This is the
   point-and-click alternative to the P1–P3 runbook / launchd agents.
 
-- **P4 — ducking: implemented & tested.** New `orchestrator/src/music/` module:
+- **P4 — ducking: implemented & tested.** New `anamanti-core/src/music/` module:
   a `SnapcastClient` (JSON-RPC over TCP :1705, ndjson), a `MusicDucker`
   (per-client attenuate-and-restore, idempotent), and an `MpvControl` (mpv JSON
   IPC). Wired at the `server.rs` `on_event` seam (`Speaking`→duck, `Finished`→
   restore) via `tokio::spawn`, gated behind `music.enabled` (now default **on**;
-  set `music.enabled=false` in `ambient.json` to keep it dormant). Config keys in `config.rs`
-  (`AMBIENT_MUSIC*`). **166 lib unit tests pass** (incl. 6 new music tests against
+  set `music.enabled=false` in `anamanti.json` to keep it dormant). Config keys in `config.rs`
+  (`ANAMANTI_MUSIC*`). **166 lib unit tests pass** (incl. 6 new music tests against
   a fake snapserver + fake mpv socket); `cargo clippy -D warnings` and `cargo fmt`
   clean on the changed files.
 - **P1–P3 — infra: delivered as artifacts + runbook** under
-  `orchestrator/deploy/snapcast/` (snapserver.conf, `setup-mac.sh`, launchd agents
+  `anamanti-core/deploy/snapcast/` (snapserver.conf, `setup-mac.sh`, launchd agents
   for snapserver/librespot/mpv, a Linux `snapclient.service`, and README.md). Not
   started/loaded on the live Mac (no Spotify creds, physical speakers, or
   supervision available overnight); the audio-format flags for the mpv web source

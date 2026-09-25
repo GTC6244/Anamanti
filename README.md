@@ -1,4 +1,4 @@
-# Ambient Smart Display Voice Assistant
+# Anamanti
 
 An always-on, ambient voice assistant that turns a jailbroken **Echo Show 8**
 (running LineageOS) into a private smart display, backed by an **M4 Mac Mini**
@@ -7,6 +7,12 @@ that does the heavy lifting (speech-to-text, an LLM brain, and text-to-speech).
 Say a wake word → the display streams your voice to the Mac → your words appear
 live on screen → the assistant thinks, answers on screen token-by-token, and
 speaks the reply back through the Echo Show's speakers.
+
+> **Naming.** The project is **Anamanti** — from the Irish *anam an tí*, roughly
+> "soul of the home" (pronounced **"AN-um un TEE"**). Its two halves:
+> **Anamanti Core** is the Mac-side brain (STT ↔ LLM + memory ↔ TTS; the crate
+> `anamanti_core`, binary `anamanti-core`), and **Anamanti Display** is the app
+> that runs on the Echo Show (package `com.anamanti.anamanti_display`).
 
 ---
 
@@ -22,14 +28,14 @@ speaks the reply back through the Echo Show's speakers.
   sentence-by-sentence *as the LLM generates it*, so the Echo Show starts speaking
   after the first sentence (~2 s on-device) instead of waiting for the whole reply.
 - 💬 **Barge-in + memory** — say the wake word again mid-reply to interrupt: playback
-  stops instantly and a fresh turn begins (the orchestrator also aborts the in-flight
-  LLM + TTS via an `ambient-interrupt` frame). The assistant remembers
+  stops instantly and a fresh turn begins (the Anamanti Core also aborts the in-flight
+  LLM + TTS via an `anamanti-interrupt` frame). The assistant remembers
   facts/preferences across sessions (stored on the Mac).
-- 📺 **Ambient display** — a landscape Flutter UI tuned for the 8-inch screen,
+- 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder.
 - 🔔 **Proactive notifications** — the Mac can push a visual notification to the
   display *without* you asking (a reminder, an alert), over a persistent connection
-  the device holds open to its pinned orchestrator. Visual-only today (no spoken
+  the device holds open to its pinned Anamanti Core. Visual-only today (no spoken
   output); send a test one from the config page's **Notify** tab.
 
 ## Architecture at a glance
@@ -39,7 +45,7 @@ Echo Show 8 (LineageOS)                     M4 Mac Mini
 ┌──────────────────────┐                    ┌────────────────────────┐
 │ Flutter UI  (Dart)   │                    │ Wyoming STT (Whisper)  │
 │   ▲ FRB v2 streams   │                    │        ▼               │
-│ Rust engine          │── TCP (Wyoming) ──►│ LLM orchestrator       │
+│ Rust engine          │── TCP (Wyoming) ──►│ Anamanti Core (LLM)    │
 │  • capture (cpal)    │◄── transcript ─────│  (Ollama or cloud)     │
 │  • wake word (tract) │◄── TTS audio ──────│        ▼               │
 │  • Wyoming client    │                    │ Wyoming TTS (Piper)    │
@@ -67,18 +73,17 @@ See [`architecture.md`](./plans/architecture.md) for the full design and
 ## Repository layout
 
 ```
-/lib      Flutter application (Dart)
-/rust     Rust systems engine — device (audio, wake word, Wyoming client)
-/mac      Rust orchestrator — Mac Mini brain (STT ↔ LLM + memory ↔ TTS)
-Plan.MD           Living project plan + confirmed decisions
-architecture.md   Detailed technical design
-agents.md         Build guidance for AI agents & contributors
-README.md         You are here
+anamanti-display/   Anamanti Display — the Echo Show app: Flutter UI (`lib/`) +
+                    Rust device engine (`rust/`: audio, wake word, Wyoming client)
+anamanti-core/      Anamanti Core — the Mac Mini brain (STT ↔ LLM + memory ↔ TTS)
+plans/              Design + planning docs (architecture.md, Plan.MD, TODO.md, …)
+agents.md           Build guidance for AI agents & contributors
+README.md           You are here
 ```
 
 ## Getting started
 
-> Phases 1–4 are implemented (device engine + Mac orchestrator); the reactive UI
+> Phases 1–4 are implemented (device engine + Mac Anamanti Core); the reactive UI
 > and settings phases are still in progress. See `Plan.MD` for current state.
 
 ### Prerequisites
@@ -113,76 +118,76 @@ flutter run -d <echo-show-device>
 On first launch the device discovers the Mac's Wyoming service via mDNS. No
 static IP configuration is required.
 
-### Run the Mac Mini orchestrator (the brain)
+### Run the Mac Mini Anamanti Core (the brain)
 
-The `/mac` crate (`ambient_orchestrator`) is the Wyoming host the device
+The `/mac` crate (`anamanti_core`) is the Wyoming host the device
 discovers. It relays audio to a Whisper (STT) server, runs the pluggable LLM with
 persistent memory, and streams a Piper (TTS) reply back — advertising
 `_wyoming._tcp` over mDNS so the device finds it automatically.
 
 ```bash
 # Point at your local Whisper + Piper Wyoming servers and pick an LLM backend.
-AMBIENT_LLM_BACKEND=ollama \
-AMBIENT_STT_ADDR=127.0.0.1:10300 \
-AMBIENT_TTS_ADDR=127.0.0.1:10200 \
-cargo run --manifest-path orchestrator/Cargo.toml --release
+ANAMANTI_LLM_BACKEND=ollama \
+ANAMANTI_STT_ADDR=127.0.0.1:10300 \
+ANAMANTI_TTS_ADDR=127.0.0.1:10200 \
+cargo run --manifest-path anamanti-core/Cargo.toml --release
 ```
 
-- `AMBIENT_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
+- `ANAMANTI_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
   `ANTHROPIC_API_KEY`), `openai` (GPT / o-series; needs `OPENAI_API_KEY`), or
   `mock` (offline echo, no servers needed).
 - **Provider API keys at runtime:** you don't have to set the cloud key before
   launch. The config page (`http://127.0.0.1:8730/`) has Anthropic / OpenAI API-key
   fields — paste a key, pick the backend, and it applies **without a restart** (the
-  key is saved 0600 in `ambient_settings.json`, so it survives reboots too). The env
+  key is saved 0600 in `anamanti_settings.json`, so it survives reboots too). The env
   vars are just the boot seed. For safety the key fields live only on the loopback
   config page, not on the device settings screen.
 - **Model selection:** the settings screen and the config page
   (`http://127.0.0.1:8730/`) show a **drop-down of specific Anthropic / OpenAI
   models from the last 12 months** (fetched live from each provider's `/v1/models`,
-  with a curated built-in fallback). Picking one is saved on the orchestrator
-  (`ambient_settings.json`) and used for every subsequent chat turn. Pin an initial
-  model with `AMBIENT_ANTHROPIC_MODEL` / `AMBIENT_OPENAI_MODEL`.
+  with a curated built-in fallback). Picking one is saved on the Anamanti Core
+  (`anamanti_settings.json`) and used for every subsequent chat turn. Pin an initial
+  model with `ANAMANTI_ANTHROPIC_MODEL` / `ANAMANTI_OPENAI_MODEL`.
 - **Anthropic auth — API key or subscription:** a per-provider toggle chooses how
-  Claude authenticates. `AMBIENT_ANTHROPIC_AUTH=apikey` (default) uses
-  `ANTHROPIC_API_KEY` (`x-api-key`). `AMBIENT_ANTHROPIC_AUTH=subscription` uses a
+  Claude authenticates. `ANAMANTI_ANTHROPIC_AUTH=apikey` (default) uses
+  `ANTHROPIC_API_KEY` (`x-api-key`). `ANAMANTI_ANTHROPIC_AUTH=subscription` uses a
   Claude **subscription OAuth** token (`Authorization: Bearer` + the
   `anthropic-beta: oauth-2025-04-20` header) — provide it via `ANTHROPIC_OAUTH_TOKEN`
-  (run **`claude setup-token`** once), or via `AMBIENT_ANTHROPIC_TOKEN_CMD` (a command
+  (run **`claude setup-token`** once), or via `ANAMANTI_ANTHROPIC_TOKEN_CMD` (a command
   that prints a fresh token, default `ant auth print-credentials --access-token`).
   OpenAI is API-key-only (`OPENAI_API_KEY`) — its ChatGPT subscription does not grant
   API access.
-- Whisper and Piper are off-the-shelf Wyoming servers; the orchestrator is a
-  client to them. See `orchestrator/src/config.rs` for all environment variables.
-- **Multiple displays, one orchestrator:** N Echo Shows can share a single
-  orchestrator — each connection is handled independently and every reply is
+- Whisper and Piper are off-the-shelf Wyoming servers; the Anamanti Core is a
+  client to them. See `anamanti-core/src/config.rs` for all environment variables.
+- **Multiple displays, one Anamanti Core:** N Echo Shows can share a single
+  Anamanti Core — each connection is handled independently and every reply is
   routed back to the display that asked. Memory + settings are one shared
   household pool (speaker ID scopes per person, not per device).
-- **Multiple orchestrators (prod + test):** each orchestrator advertises a
+- **Multiple Anamanti Cores (prod + test):** each Anamanti Core advertises a
   friendly `name` and a stable `instance_id` over mDNS. The device settings screen
-  has an **Orchestrator** dropdown to pick one; `"Auto"` uses the first available.
-  The pick is **strict** — a display pinned to one orchestrator stays offline if
+  has an **Anamanti Core** dropdown to pick one; `"Auto"` uses the first available.
+  The pick is **strict** — a display pinned to one Anamanti Core stays offline if
   it's unreachable rather than silently connecting to another.
   - **Local production** is a copied release binary installed at
-    `/Volumes/External/DeveloperSupport/Ambient Orchestrator/`. It runs outside any
-    git checkout and pins its identity via `AMBIENT_INSTANCE_ID` (set in
+    `/Volumes/External/DeveloperSupport/Anamanti Core/`. It runs outside any
+    git checkout and pins its identity via `ANAMANTI_INSTANCE_ID` (set in
     `~/.zshenv`), using the default ports (10700 / config 8730) and the shared
-    runtime data under `.../ambient-orchestrator/`.
-  - **Test copies** run straight from a git branch/worktree. `AMBIENT_INSTANCE_ID`
+    runtime data under `.../anamanti-core/`.
+  - **Test copies** run straight from a git branch/worktree. `ANAMANTI_INSTANCE_ID`
     is resolved from that env → the working dir's **git branch code** → the
     sanitized service name, so a worktree copy is auto-named by its branch with no
     extra config. Run one alongside production with distinct ports (and a distinct
     service name to avoid an mDNS name clash); sharing production's memory means
-    `AMBIENT_MEMORY_BACKEND=sqlite` (two processes can't share one embedded HelixDB
+    `ANAMANTI_MEMORY_BACKEND=sqlite` (two processes can't share one embedded HelixDB
     graph; SQLite is shared safely via WAL):
 
     ```bash
-    # AMBIENT_INSTANCE_ID is intentionally unset here → defaults to the branch code.
-    env -u AMBIENT_INSTANCE_ID \
-      AMBIENT_SERVICE_NAME="Ambient Orchestrator (test)" \
-      AMBIENT_BIND_ADDR=0.0.0.0:10701 AMBIENT_CONFIG_ADDR=127.0.0.1:8731 \
-      AMBIENT_MEMORY_BACKEND=sqlite \
-      cargo run --manifest-path orchestrator/Cargo.toml --release
+    # ANAMANTI_INSTANCE_ID is intentionally unset here → defaults to the branch code.
+    env -u ANAMANTI_INSTANCE_ID \
+      ANAMANTI_SERVICE_NAME="Anamanti Core (test)" \
+      ANAMANTI_BIND_ADDR=0.0.0.0:10701 ANAMANTI_CONFIG_ADDR=127.0.0.1:8731 \
+      ANAMANTI_MEMORY_BACKEND=sqlite \
+      cargo run --manifest-path anamanti-core/Cargo.toml --release
     ```
 
 > **Android toolchain note:** the project pins **AGP 8.7.3 / Kotlin 2.1.0 /
@@ -212,8 +217,8 @@ wake-word detection, and streams PCM through a pure, unit-tested turn state mach
 Wake-word scoring keeps running during a turn (full-duplex), with a configurable
 raised confidence threshold as the interim self-trigger mitigation.
 
-**Phase 4 complete — Mac Mini assistant pipeline.** The new `/mac` orchestrator
-(`ambient_orchestrator`) ties the brain together: a Wyoming server to the device
+**Phase 4 complete — Mac Mini assistant pipeline.** The new `/mac` Anamanti Core
+(`anamanti_core`) ties the brain together: a Wyoming server to the device
 and a Wyoming client to Whisper (STT, server-side VAD) and Piper (TTS), with a
 **pluggable LLM** trait (Ollama / Claude / mock) and a **persistent SQLite + FTS5
 memory** store (explicit "remember…"/"forget…" commands plus inferred fact/pref

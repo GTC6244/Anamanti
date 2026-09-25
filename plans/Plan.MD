@@ -1,4 +1,4 @@
-# Project Blueprint: Ambient Smart Display Voice Assistant
+# Project Blueprint: Anamanti
 
 **Targets:** Echo Show 8 (LineageOS) + M4 Mac Mini
 
@@ -27,18 +27,18 @@ These answers override any earlier ambiguity in this document:
 | **Memory UX** | Manage via **settings list (view/delete)** + **voice** ("remember…", "forget that") |
 | **Resilience** | **Auto-reconnect** with backoff via mDNS + a subtle **disconnected** status; slideshow keeps running |
 | **Idle screen** | **Photo slideshow** — two selectable backends: **Google Photos** (Ambient API; ideal, but **partner-program gated**) and **Google Drive** folder (interim, works now); plus local gradients |
-| **Photo auth** | **Ambient API:** on-device device-code + QR (`photosambient.mediaitems`) — blocked by Partner Program (`createDevice` 403); TV client baked into the APK. **Drive:** `drive.readonly` consent runs **in the orchestrator** (Desktop client, config-page Photos tab) → device pulls the token over Wyoming (`ambient-get-drive-token`). APK is credential-free for Drive; Mac holds the Drive client (`AMBIENT_GOOGLE_DRIVE_CLIENT_ID/SECRET`) |
+| **Photo auth** | **Ambient API:** on-device device-code + QR (`photosambient.mediaitems`) — blocked by Partner Program (`createDevice` 403); TV client baked into the APK. **Drive:** `drive.readonly` consent runs **in the Anamanti Core** (Desktop client, config-page Photos tab) → device pulls the token over Wyoming (`anamanti-get-drive-token`). APK is credential-free for Drive; Mac holds the Drive client (`ANAMANTI_GOOGLE_DRIVE_CLIENT_ID/SECRET`) |
 | **AEC** | **Ship full-duplex**; raise wake-word confidence **threshold during playback** to suppress self-triggers; real AEC only if still bad |
 | **Settings screen** | User-configurable: **LLM backend**, **TTS voice**, **wake word**, **photo source** |
 | **Camera proximity (2026-09-21)** | Front camera doubles as a **proximity sensor**: a cheap **frame-motion** detector in **Rust** (no ML, no face recognition) brightens the idle screen on approach and dims it after a quiet spell. Sensing lives in Rust (`camera/presence.rs` + Kotlin `CameraBridge` capture shim, twin of `MicBridge`); **brightness actuation stays in Flutter/Android** (`ScreenBrightnessController` → `MainActivity` `MethodChannel`). Degrades silently if the camera is unavailable (permission denied / **privacy shutter** closed / no camera) — the screen just stays bright. `CAMERA` is granted out-of-band (`pm grant`), like `RECORD_AUDIO` |
-| **Tool calling / actions** | **rig-core is the default engine** (tool-calling loop); info tools run on the Mac, device actions (timers/alarms) emit `ambient-*` frames and execute **on-device**. Weather is grounded by a configured **home location** (`AMBIENT_HOME_LOCATION`). Calendar/reminders designed but deferred. **Spotify** playback is a further tool of this kind — see [`MusicPlan.md`](./MusicPlan.md) (control plane on the orchestrator; audio via librespot + Snapcast, not the TTS pipeline). |
-| **Canonical household info (2026-09-22)** | Each orchestrator holds a persisted **`Household`** record (`settings::Household`) — the home **location + units** and a **roster of people** (name, emails, phones, relationship) — as canonical context for tools + the prompt. Location/units **seed from `AMBIENT_HOME_LOCATION`/`AMBIENT_WEATHER_UNITS` at first boot**, then are editable (with the people) from the config page **Household tab** (`/household`, `webconfig.rs`); a persisted value wins over env at the next boot. Stored 0600 (PII) in `ambient_settings.json` alongside Drive. The prompt reads location + roster from the **per-turn settings snapshot** (`orchestrator::location_line` + `household_line`), so edits apply with no restart. The **directions tool's default origin** reads a shared live handle (`directions::LiveHomeLocation` on `LlmFactory`) that `apply_household` updates, so a location edit re-homes routing with no backend rebuild. An **identified speaker** whose name matches a roster member is reconciled to it (`Household::member_matching`): the identity line then uses the canonical name + relationship. Not yet: the roster isn't surfaced to the device (config-page only). |
-| **Shopping list / Cadora integration (2026-09-22)** | The assistant can **add to the household's shared shopping list** via the `shopping_list_add` rig tool. The list lives in **Cadora** — the shared backend behind the family apps (NextHaul et al.), which already ships a headless **voice API** ("one brain, thin front-ends"). The orchestrator is a **fourth voice front-end**: it never touches Supabase/RLS directly (Cadora owns member attribution, list creation, dedupe, and the spoken confirmation); it only calls `POST /voice/command` with the canonical `{action:"add_shopping_item",item,quantity}` body over a `vl_…` **voice-link token** (LLM parses intent, so Cadora's NLU is skipped). **Linking**: mint a **6-digit code** in **NextHaul → Settings → Voice & Integrations** (`POST /voice/links/pair`); enter it once on the config page (Household tab), which redeems it (`POST /voice/links/redeem`) for a durable token stored 0600 in `ambient_settings.json` — the orchestrator is the "speaker" that redeems. (A pasted `vl_…` token is also accepted.) Client seam `orchestrator/src/cadora/` (`GroceryController` trait, mirroring `SpotifyController`); config seed `cadora{base_url,link_token}` (base_url default `https://cadora-server.fly.dev`). Tool advertised only when linked; relinks/withdraws live like `spotify_control`. **v1 exposes add-only** (Cadora's other voice action, `agenda_today`, is deliberately not exposed — it would collide with this assistant's own `calendar_lookup`). |
-| **Proactive notifications (2026-09-23)** | The orchestrator can push notifications to the display **unprompted** (no voice turn) via **Approach A: a persistent, device-dialed Wyoming channel** — the device opens a second long-lived socket to the pinned orchestrator (`ambient-hello` `role=notify`), reconnects with backoff, and receives `ambient-notify` frames the Mac pushes down it. Chosen over a reverse connection / device listener (keeps the device the dialer; reuses the mDNS + `instance_id` pin and the existing accept loop; no new trust direction) and over a doorbell/long-poll (idle-socket savings are free on a mains-powered display). **Shipped visual-only first**: Rust owns the socket + reconnect (`rust/src/wyoming/notify.rs`, `start_notify_channel`), Flutter shows a dismissible banner (`NotificationController` + `NotificationBanner`); no spoken output, no voice-state-machine interaction. Orchestrator side: `NotificationService` registry + config-page **Notify** tab test button (`POST /notifications/test`). Deferred: spoken notifications + barge-in, acks/store-and-forward/TTL, per-device targeting, quiet hours, paired/TLS channel. |
+| **Tool calling / actions** | **rig-core is the default engine** (tool-calling loop); info tools run on the Mac, device actions (timers/alarms) emit `anamanti-*` frames and execute **on-device**. Weather is grounded by a configured **home location** (`ANAMANTI_HOME_LOCATION`). Calendar/reminders designed but deferred. **Spotify** playback is a further tool of this kind — see [`MusicPlan.md`](./MusicPlan.md) (control plane on the Anamanti Core; audio via librespot + Snapcast, not the TTS pipeline). |
+| **Canonical household info (2026-09-22)** | Each Anamanti Core holds a persisted **`Household`** record (`settings::Household`) — the home **location + units** and a **roster of people** (name, emails, phones, relationship) — as canonical context for tools + the prompt. Location/units **seed from `ANAMANTI_HOME_LOCATION`/`ANAMANTI_WEATHER_UNITS` at first boot**, then are editable (with the people) from the config page **Household tab** (`/household`, `webconfig.rs`); a persisted value wins over env at the next boot. Stored 0600 (PII) in `anamanti_settings.json` alongside Drive. The prompt reads location + roster from the **per-turn settings snapshot** (`orchestrator::location_line` + `household_line`), so edits apply with no restart. The **directions tool's default origin** reads a shared live handle (`directions::LiveHomeLocation` on `LlmFactory`) that `apply_household` updates, so a location edit re-homes routing with no backend rebuild. An **identified speaker** whose name matches a roster member is reconciled to it (`Household::member_matching`): the identity line then uses the canonical name + relationship. Not yet: the roster isn't surfaced to the device (config-page only). |
+| **Shopping list / Cadora integration (2026-09-22)** | The assistant can **add to the household's shared shopping list** via the `shopping_list_add` rig tool. The list lives in **Cadora** — the shared backend behind the family apps (NextHaul et al.), which already ships a headless **voice API** ("one brain, thin front-ends"). The Anamanti Core is a **fourth voice front-end**: it never touches Supabase/RLS directly (Cadora owns member attribution, list creation, dedupe, and the spoken confirmation); it only calls `POST /voice/command` with the canonical `{action:"add_shopping_item",item,quantity}` body over a `vl_…` **voice-link token** (LLM parses intent, so Cadora's NLU is skipped). **Linking**: mint a **6-digit code** in **NextHaul → Settings → Voice & Integrations** (`POST /voice/links/pair`); enter it once on the config page (Household tab), which redeems it (`POST /voice/links/redeem`) for a durable token stored 0600 in `anamanti_settings.json` — the Anamanti Core is the "speaker" that redeems. (A pasted `vl_…` token is also accepted.) Client seam `anamanti-core/src/cadora/` (`GroceryController` trait, mirroring `SpotifyController`); config seed `cadora{base_url,link_token}` (base_url default `https://cadora-server.fly.dev`). Tool advertised only when linked; relinks/withdraws live like `spotify_control`. **v1 exposes add-only** (Cadora's other voice action, `agenda_today`, is deliberately not exposed — it would collide with this assistant's own `calendar_lookup`). |
+| **Proactive notifications (2026-09-23)** | The Anamanti Core can push notifications to the display **unprompted** (no voice turn) via **Approach A: a persistent, device-dialed Wyoming channel** — the device opens a second long-lived socket to the pinned Anamanti Core (`anamanti-hello` `role=notify`), reconnects with backoff, and receives `anamanti-notify` frames the Mac pushes down it. Chosen over a reverse connection / device listener (keeps the device the dialer; reuses the mDNS + `instance_id` pin and the existing accept loop; no new trust direction) and over a doorbell/long-poll (idle-socket savings are free on a mains-powered display). **Shipped visual-only first**: Rust owns the socket + reconnect (`rust/src/wyoming/notify.rs`, `start_notify_channel`), Flutter shows a dismissible banner (`NotificationController` + `NotificationBanner`); no spoken output, no voice-state-machine interaction. Anamanti Core side: `NotificationService` registry + config-page **Notify** tab test button (`POST /notifications/test`). Deferred: spoken notifications + barge-in, acks/store-and-forward/TTL, per-device targeting, quiet hours, paired/TLS channel. |
 | **Doc intent** | Onboarding + AI codegen — docs guide AI agents and humans to build from scratch |
-| **Music routing / Snapcast (2026-09-22)** | House-wide music originates on the **Mac orchestrator host**, not the Echo Show (offloads the ~1 GB device; **no on-device system-audio capture, no second device audio path**), and reaches synchronized speakers via **Snapcast** (~1 s buffered latency accepted). Two Mac-hosted **external** sources — **librespot** (Spotify Connect, the shared "Ambient" device) and a **web-URL/stream player** (mpv/ffmpeg) — each write raw PCM to a **snapfifo**; **snapserver runs on the Mac** and reads the fifos. **PCM never enters `ambient_orchestrator`** — the orchestrator only issues control (Web API, mpv IPC, and snapserver **JSON-RPC** for ducking on THINKING/SPEAKING + stream-select). Snapclients: the **Linux main speaker**, other rooms, **and the Echo Show(s)** — the device client is the **prebuilt `snapclient` binary bundled in the existing app but run as a *separate OS process*** (Kotlin foreground service; **not** in the Rust engine, **not** a separate APK), so the app's single locked cpal path (capture + TTS) is untouched. Per-device toggle `AMBIENT_MUSIC_INCLUDE_DEVICE` (default **off**): the device playing continuous music with **no AEC** worsens wake-word self-triggering, so enable only where needed and hold the raised wake-word threshold while it's in the active group. Full design: [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (the "Snapcast routing" transport layer) + [`MusicPlan.md`](./MusicPlan.md) (Spotify source + `spotify_control` control plane). |
-| **Multi-device / multi-orchestrator (2026-09-22)** | (1) **Many displays → one orchestrator**: already correct — the accept loop handles each connection independently and replies on that socket; memory + settings are one shared **household** pool (speaker ID scopes per person, not per device). (2) **Many orchestrators → device picks one**: orchestrators advertise TXT `role`/`name`/`instance_id`; the device filters by `role=orchestrator` (excludes raw STT/TTS), enumerates all, and pins a chosen `instance_id` from a settings dropdown. `instance_id` resolves env → git **branch code** → sanitized service name, so a copy run from a test worktree self-names by its branch. "Local production" is a copied release binary at `/Volumes/External/DeveloperSupport/Ambient Orchestrator/` that sets `AMBIENT_INSTANCE_ID` in `~/.zshenv`; test copies run from their worktree on distinct ports. **Strict**: a pinned display stays offline if its orchestrator is unreachable (never switches Macs); `"Auto"` = first responder. (3) **Shared backend data**: SQLite in **WAL** mode for cross-process sharing; embedded HelixDB is single-process, so a test instance sharing prod data runs `AMBIENT_MEMORY_BACKEND=sqlite`. |
-| **Follow-up listening — reopen the mic after every reply (2026-09-23; revised same day)** | After **every** spoken reply the device **auto-reopens the mic and listens for more input with no wake word**, then **sleeps if nothing is said**; that follow-up turn's LLM prompt is fed the **recent conversation history** for context. The listen window differs by reply: a **question** (`?`) waits **10 s** (`follow_up.question_wait_secs`), any other reply waits **5 s** (`follow_up.reply_wait_secs`). *(Superseded the initial "questions only" design — every turn now behaves the same, just with a different wait.)* Confirmed design choices: **(a) The orchestrator decides + times it** — after the full reply is assembled it always sends the follow-up signal (gated only by `follow_up.enabled`), choosing the wait by whether the reply's last non-whitespace char is `?`. **(b) Signaling reuses the `ambient-*` device-action pattern**: a project-local **`ambient-listen`** frame (orchestrator → device, `data.depth` + **`data.wait_secs`**) sent **before** the final `audio-stop` (the device ends its turn on the first `audio-stop`). **The orchestrator passes the wait time back in this frame.** **(c) The wait is enforced by the orchestrator's no-speech VAD** on the follow-up turn (the device has no VAD, so only the Mac can tell silence from a user mid-sentence): the device echoes `wait_secs` on the follow-up `audio-start` (`followup`/`followup_depth`/`wait_secs`), and the orchestrator sizes that turn's no-speech-finalize window to it. On silence it relays an empty transcript **plus an `audio-stop`** so the device leaves SPEAKING and sleeps promptly (no 15 s hang), and sends no new `ambient-listen` — **silence is the terminator.** **(d) The device gates the mic reopen on its own TTS draining** (the `pending()==0` signal, same as `SpeakingDone`) before spawning the follow-up turn (a fresh Wyoming connection via the barge-in-restart path), so the mic never captures the reply's tail; it inherits the raised in-turn wake-word threshold. **(d.1) Speech-onset debounce (2026-09-24 fix):** the `pending()==0` drain gate frees when the *software* playback ring empties, but the OS/hardware output buffer can still play out a residual TTS tail, so the reopened follow-up mic sometimes caught that tail (or room echo). A single such chunk above `voice_rms_threshold` used to latch `speech_started` immediately, collapsing the full `wait_secs` no-speech window into the ~700 ms `end_silence` finalize and cutting the user off (seen in production: a 10 s follow-up that closed after ~1 s with an empty transcript). Fixed by debouncing the onset — `speech_started` now latches only after **`MIN_SPEECH_ONSET` (250 ms) of *consecutive* voiced audio** (`voiced_onset_step` in `orchestrator.rs`); any non-voiced chunk resets the run, so a lone transient can no longer shorten the wait. Real speech clears 250 ms in a single word. **(e) History = the last 5 turns within the last 10 minutes** (`follow_up.history_turns=5`, `follow_up.history_window_secs=600`), from `ambient_chatlog.jsonl`, injected into follow-up turns **only** — ordinary wake-word turns stay single-turn (locked "single-turn v1" decision unchanged). **(f) `follow_up.max_chain` is now an optional safety ceiling, default `0 = unlimited`** — since silence terminates cleanly, genuine back-and-forth is not artificially capped; a non-zero value re-imposes a hard cap. **Config:** a `follow_up` block in `ambient.json` (`enabled` on, `max_chain` 0, `question_wait_secs` 10, `reply_wait_secs` 5, `history_turns` 5, `history_window_secs` 600). **Known v1 limitations:** the `?` heuristic can misfire on rhetorical questions; two displays mid-conversation can interleave the recency-only history (a conversation token would fix it — deferred). |
+| **Music routing / Snapcast (2026-09-22)** | House-wide music originates on the **Mac Anamanti Core host**, not the Echo Show (offloads the ~1 GB device; **no on-device system-audio capture, no second device audio path**), and reaches synchronized speakers via **Snapcast** (~1 s buffered latency accepted). Two Mac-hosted **external** sources — **librespot** (Spotify Connect, the shared "Ambient" device) and a **web-URL/stream player** (mpv/ffmpeg) — each write raw PCM to a **snapfifo**; **snapserver runs on the Mac** and reads the fifos. **PCM never enters `anamanti_core`** — the Anamanti Core only issues control (Web API, mpv IPC, and snapserver **JSON-RPC** for ducking on THINKING/SPEAKING + stream-select). Snapclients: the **Linux main speaker**, other rooms, **and the Echo Show(s)** — the device client is the **prebuilt `snapclient` binary bundled in the existing app but run as a *separate OS process*** (Kotlin foreground service; **not** in the Rust engine, **not** a separate APK), so the app's single locked cpal path (capture + TTS) is untouched. Per-device toggle `ANAMANTI_MUSIC_INCLUDE_DEVICE` (default **off**): the device playing continuous music with **no AEC** worsens wake-word self-triggering, so enable only where needed and hold the raised wake-word threshold while it's in the active group. Full design: [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (the "Snapcast routing" transport layer) + [`MusicPlan.md`](./MusicPlan.md) (Spotify source + `spotify_control` control plane). |
+| **Multi-device / multi-Anamanti Core (2026-09-22)** | (1) **Many displays → one Anamanti Core**: already correct — the accept loop handles each connection independently and replies on that socket; memory + settings are one shared **household** pool (speaker ID scopes per person, not per device). (2) **Many Anamanti Cores → device picks one**: Anamanti Cores advertise TXT `role`/`name`/`instance_id`; the device filters by `role=core` (excludes raw STT/TTS), enumerates all, and pins a chosen `instance_id` from a settings dropdown. `instance_id` resolves env → git **branch code** → sanitized service name, so a copy run from a test worktree self-names by its branch. "Local production" is a copied release binary at `/Volumes/External/DeveloperSupport/Anamanti Core/` that sets `ANAMANTI_INSTANCE_ID` in `~/.zshenv`; test copies run from their worktree on distinct ports. **Strict**: a pinned display stays offline if its Anamanti Core is unreachable (never switches Macs); `"Auto"` = first responder. (3) **Shared backend data**: SQLite in **WAL** mode for cross-process sharing; embedded HelixDB is single-process, so a test instance sharing prod data runs `ANAMANTI_MEMORY_BACKEND=sqlite`. |
+| **Follow-up listening — reopen the mic after every reply (2026-09-23; revised same day)** | After **every** spoken reply the device **auto-reopens the mic and listens for more input with no wake word**, then **sleeps if nothing is said**; that follow-up turn's LLM prompt is fed the **recent conversation history** for context. The listen window differs by reply: a **question** (`?`) waits **10 s** (`follow_up.question_wait_secs`), any other reply waits **5 s** (`follow_up.reply_wait_secs`). *(Superseded the initial "questions only" design — every turn now behaves the same, just with a different wait.)* Confirmed design choices: **(a) The Anamanti Core decides + times it** — after the full reply is assembled it always sends the follow-up signal (gated only by `follow_up.enabled`), choosing the wait by whether the reply's last non-whitespace char is `?`. **(b) Signaling reuses the `anamanti-*` device-action pattern**: a project-local **`anamanti-listen`** frame (Anamanti Core → device, `data.depth` + **`data.wait_secs`**) sent **before** the final `audio-stop` (the device ends its turn on the first `audio-stop`). **The Anamanti Core passes the wait time back in this frame.** **(c) The wait is enforced by the Anamanti Core's no-speech VAD** on the follow-up turn (the device has no VAD, so only the Mac can tell silence from a user mid-sentence): the device echoes `wait_secs` on the follow-up `audio-start` (`followup`/`followup_depth`/`wait_secs`), and the Anamanti Core sizes that turn's no-speech-finalize window to it. On silence it relays an empty transcript **plus an `audio-stop`** so the device leaves SPEAKING and sleeps promptly (no 15 s hang), and sends no new `anamanti-listen` — **silence is the terminator.** **(d) The device gates the mic reopen on its own TTS draining** (the `pending()==0` signal, same as `SpeakingDone`) before spawning the follow-up turn (a fresh Wyoming connection via the barge-in-restart path), so the mic never captures the reply's tail; it inherits the raised in-turn wake-word threshold. **(d.1) Speech-onset debounce (2026-09-24 fix):** the `pending()==0` drain gate frees when the *software* playback ring empties, but the OS/hardware output buffer can still play out a residual TTS tail, so the reopened follow-up mic sometimes caught that tail (or room echo). A single such chunk above `voice_rms_threshold` used to latch `speech_started` immediately, collapsing the full `wait_secs` no-speech window into the ~700 ms `end_silence` finalize and cutting the user off (seen in production: a 10 s follow-up that closed after ~1 s with an empty transcript). Fixed by debouncing the onset — `speech_started` now latches only after **`MIN_SPEECH_ONSET` (250 ms) of *consecutive* voiced audio** (`voiced_onset_step` in `orchestrator.rs`); any non-voiced chunk resets the run, so a lone transient can no longer shorten the wait. Real speech clears 250 ms in a single word. **(e) History = the last 5 turns within the last 10 minutes** (`follow_up.history_turns=5`, `follow_up.history_window_secs=600`), from `anamanti_chatlog.jsonl`, injected into follow-up turns **only** — ordinary wake-word turns stay single-turn (locked "single-turn v1" decision unchanged). **(f) `follow_up.max_chain` is now an optional safety ceiling, default `0 = unlimited`** — since silence terminates cleanly, genuine back-and-forth is not artificially capped; a non-zero value re-imposes a hard cap. **Config:** a `follow_up` block in `anamanti.json` (`enabled` on, `max_chain` 0, `question_wait_secs` 10, `reply_wait_secs` 5, `history_turns` 5, `history_window_secs` 600). **Known v1 limitations:** the `?` heuristic can misfire on rhetorical questions; two displays mid-conversation can interleave the recency-only history (a conversation token would fix it — deferred). |
 
 ---
 
@@ -50,7 +50,7 @@ These answers override any earlier ambiguity in this document:
 │  Flutter UI Layer        │                        │  Wyoming STT (Whisper/CoreML)│
 │  (Ambient screen, live   │                        │            │                │
 │   transcript, reply text)│                        │            ▼                │
-└───────────▲──────────────┘                        │  LLM Orchestrator           │
+└───────────▲──────────────┘                        │  LLM backend                │
             │ FRB v2 streams / callbacks            │  (pluggable: Ollama / API)  │
 ┌───────────▼──────────────┐                        │            │                │
 │  Rust System Engine      │ ── TCP (Wyoming) ────► │            ▼                │
@@ -86,7 +86,7 @@ Echo Show speakers → return to idle.
 - **Transport:** **Wyoming Protocol** over async `tokio` TCP.
 - **Discovery:** mDNS / Zeroconf (`_wyoming._tcp`) to locate the Mac Mini.
 - **Mac Mini services:** Wyoming STT (Whisper / CoreML) → pluggable LLM
-  orchestrator → Wyoming TTS (Piper).
+  Anamanti Core → Wyoming TTS (Piper).
 
 ---
 
@@ -94,7 +94,7 @@ Echo Show speakers → return to idle.
 
 ### Phase 1 — Workspace Setup & Cross-Compilation ✅ (implemented 2026-09-15)
 - Unified monorepo: `/lib` (Flutter) and `/rust` (systems layer). **Done** —
-  Flutter app scaffolded (`ambient_display`, Android-only), FRB v2 integrated via
+  Flutter app scaffolded (`anamanti_display`, Android-only), FRB v2 integrated via
   `flutter_rust_bridge_codegen integrate` (adds `/rust` cdylib + `rust_builder`
   cargokit plugin).
 - Configure `flutter_rust_bridge_codegen` to watch and generate JNI bindings.
@@ -222,17 +222,17 @@ Echo Show speakers → return to idle.
 > set in Phase 2); none of the new crates raise the floor.
 
 ### Phase 4 — Assistant Pipeline (Mac Mini) ✅ (implemented 2026-09-15)
-Implemented as a new standalone Rust crate in `/mac` (`ambient_orchestrator`,
-binary `ambient-orchestrator`) — the "brain". It is a Wyoming **server** to the
+Implemented as a new standalone Rust crate in `/mac` (`anamanti_core`,
+binary `anamanti-core`) — the "brain". It is a Wyoming **server** to the
 Echo Show and a Wyoming **client** to the downstream Whisper (STT) and Piper (TTS)
 services, inserting the pluggable LLM + persistent memory between them.
 - Wyoming STT (Whisper/CoreML) with **server-side VAD** emits the final transcript.
-  **Done** — `mac/src/wyoming/stt.rs` (`SttSession`) opens a `transcribe` +
+  **Done** — `anamanti-core/src/wyoming/stt.rs` (`SttSession`) opens a `transcribe` +
   `audio-start` stream to the Whisper service, forwards the device's PCM, and waits
   for the server's `transcript` (server-side VAD end-of-speech) before sending
-  `audio-stop`. The orchestrator relays that transcript back to the device.
-- **Pluggable LLM orchestrator** consumes the transcript, streams reply tokens.
-  **Done** — `mac/src/llm/` defines the `LlmBackend` trait
+  `audio-stop`. The Anamanti Core relays that transcript back to the device.
+- **Pluggable LLM backend** consumes the transcript, streams reply tokens.
+  **Done** — `anamanti-core/src/llm/` defines the `LlmBackend` trait
   (`respond(turn) -> ReplyStream` of reply-token fragments) with three config-
   selected implementations: local `ollama` (streaming NDJSON `/api/chat`), cloud
   `anthropic` (Claude Messages API over SSE via raw HTTP — Rust has no official
@@ -240,7 +240,7 @@ services, inserting the pluggable LLM + persistent memory between them.
   a `dyn LlmBackend`, so backends swap without touching the turn logic.
 - **Persistent memory store** (**SQLite** on the Mac) supplies context and records
   facts/preferences across sessions; feeds the LLM prompt. Policy: **explicit +
-  inferred**. **Done** — `mac/src/memory/` is a `rusqlite` (bundled SQLite) store
+  inferred**. **Done** — `anamanti-core/src/memory/` is a `rusqlite` (bundled SQLite) store
   with an **FTS5** index. `parse_command` handles voice "remember…"/"forget…"/
   "forget that" (applied directly with a spoken confirmation, skipping the LLM);
   `infer_memories` auto-extracts facts/prefs from ordinary turns with deterministic
@@ -248,31 +248,31 @@ services, inserting the pluggable LLM + persistent memory between them.
   FTS-searched each turn and injected into the LLM system prompt. `list`/`delete`/
   `forget_*`/`clear` back the settings UI (Phase 6).
 - Wyoming TTS (Piper) synthesizes the reply into audio frames. **Done** —
-  `mac/src/wyoming/tts.rs` (`TtsSession`) sends one `synthesize` request and reads
+  `anamanti-core/src/wyoming/tts.rs` (`TtsSession`) sends one `synthesize` request and reads
   back the `audio-start` → `audio-chunk`… → `audio-stop` stream.
 - Frames stream back to the Echo Show over the Wyoming socket. **Done** —
-  `mac/src/orchestrator.rs` (`Pipeline::run_turn`) drives the full turn and relays
+  `anamanti-core/src/orchestrator.rs` (`Pipeline::run_turn`) drives the full turn and relays
   each TTS frame to the device (a device that closed early — Phase-3 clients end on
-  the transcript — is tolerated, not an error). `mac/src/server.rs` accepts device
-  connections and `mac/src/discovery.rs` advertises `_wyoming._tcp` over mDNS so the
+  the transcript — is tolerated, not an error). `anamanti-core/src/server.rs` accepts device
+  connections and `anamanti-core/src/discovery.rs` advertises `_wyoming._tcp` over mDNS so the
   device discovers the host with no hardcoded IP (symmetric with the Phase-3 browse).
 - Verified: `cargo test` (28 tests: Wyoming codec round-trips, STT/TTS session
   framing, Ollama-NDJSON + Claude-SSE stream parsing against loopback HTTP servers,
   memory FTS/commands/inference, and three full-pipeline integration tests that
   drive a mock device + mock Whisper/Piper through the real `Pipeline`),
   `cargo clippy --all-targets -- -D warnings` (clean), `cargo fmt --check` (clean),
-  and a `--release` build of the `ambient-orchestrator` binary.
+  and a `--release` build of the `anamanti-core` binary.
 
-> **Config note (Phase 4):** the orchestrator is environment-driven
-> (`mac/src/config.rs`). `AMBIENT_LLM_BACKEND=ollama|anthropic|openai|mock` selects
+> **Config note (Phase 4):** the Anamanti Core is environment-driven
+> (`anamanti-core/src/config.rs`). `ANAMANTI_LLM_BACKEND=ollama|anthropic|openai|mock` selects
 > the backend (default `ollama`, model `llama3.2`; `anthropic` needs
 > `ANTHROPIC_API_KEY`, default model `claude-opus-5`; `openai` needs `OPENAI_API_KEY`,
-> default model `gpt-4o-mini`, via `AMBIENT_OPENAI_MODEL`/`AMBIENT_OPENAI_MAX_TOKENS`;
+> default model `gpt-4o-mini`, via `ANAMANTI_OPENAI_MODEL`/`ANAMANTI_OPENAI_MAX_TOKENS`;
 > small `max_tokens` for spoken replies).
-> `AMBIENT_STT_ADDR` / `AMBIENT_TTS_ADDR` point at the Whisper (10300) and Piper
+> `ANAMANTI_STT_ADDR` / `ANAMANTI_TTS_ADDR` point at the Whisper (10300) and Piper
 > (10200) Wyoming servers, and the host advertises `_wyoming._tcp` on
-> `AMBIENT_BIND_ADDR` (default `0.0.0.0:10700`). Whisper and Piper themselves are
-> **off-the-shelf Wyoming servers** (rhasspy ecosystem); the orchestrator is a
+> `ANAMANTI_BIND_ADDR` (default `0.0.0.0:10700`). Whisper and Piper themselves are
+> **off-the-shelf Wyoming servers** (rhasspy ecosystem); the Anamanti Core is a
 > client to them, not a reimplementation.
 
 > **Dep note (Phase 4):** a host-only crate, independent of the device `/rust`
@@ -280,7 +280,7 @@ services, inserting the pluggable LLM + persistent memory between them.
 > shared as a library on the Mac). Uses `tokio`, `serde`/`serde_json`, `reqwest`
 > (rustls-tls; NDJSON + SSE streaming), `rusqlite` (bundled SQLite + FTS5),
 > `mdns-sd` (advertise), `async-trait`/`async-stream`/`futures-util`, and
-> `env_logger`. The Wyoming wire codec is re-implemented in `mac/src/wyoming/
+> `env_logger`. The Wyoming wire codec is re-implemented in `anamanti-core/src/wyoming/
 > protocol.rs` (kept byte-identical to the device's, guarded by round-trip tests)
 > rather than shared across the two crates.
 
@@ -338,9 +338,9 @@ services, inserting the pluggable LLM + persistent memory between them.
   AAudio **output** and `path_provider` link on the 32-bit device target.
 
 > **Wire note (Phase 5):** the device↔Mac hop gained one project-local event,
-> `reply-token` (`data.text`), so the orchestrator streams LLM reply fragments to
+> `reply-token` (`data.text`), so the Anamanti Core streams LLM reply fragments to
 > the device for token-by-token rendering. It rides the existing Wyoming framing
-> and is only on the device↔orchestrator hop (no off-the-shelf server sees it);
+> and is only on the device↔Anamanti Core hop (no off-the-shelf server sees it);
 > the codec is kept byte-identical on both sides (`rust/` and `mac/`). TTS audio
 > continues to use standard `audio-start`/`audio-chunk`/`audio-stop`.
 
@@ -349,7 +349,7 @@ services, inserting the pluggable LLM + persistent memory between them.
   **photo source** (with on-device Google auth + folder picker). **Done** —
   `lib/src/ui/settings_screen.dart` groups the four areas. Wake word + detection
   thresholds and photo source are **device-local** (persisted); LLM backend/model
-  + TTS voice are **orchestrator-managed** (read/changed over the network). Device
+  + TTS voice are **Anamanti Core-managed** (read/changed over the network). Device
   settings persist to a JSON file via `lib/src/settings/settings_store.dart`
   (`AppSettings`, `path_provider`; injectable file path for tests — no
   `shared_preferences` plugin). The Google photo source is wired as a testable
@@ -360,23 +360,23 @@ services, inserting the pluggable LLM + persistent memory between them.
   are in place for it.
 - **Memory management** in settings: view/delete stored items; voice commands
   ("remember…", "forget that"). **Done** — `lib/src/ui/memory_screen.dart` lists
-  the orchestrator's stored facts/preferences and deletes individual entries or
+  the Anamanti Core's stored facts/preferences and deletes individual entries or
   clears all, over the control protocol. The **voice** half already lands on the
   Mac during a turn (Phase 4 `parse_command`); this is the settings-list half.
-- Wire settings through FRB to the Rust engine and the Mac orchestrator. **Done** —
+- Wire settings through FRB to the Rust engine and the Mac Anamanti Core. **Done** —
   two wiring paths:
   - *Device-local → Rust engine:* changing the wake word/thresholds rebuilds the
     `WakeWordConfig` (`buildWakeWordConfigFrom`) and restarts the engine from
     `main.dart`; the photo source change refreshes the slideshow.
-  - *Device → Mac orchestrator:* a **project-local Wyoming control protocol** on
+  - *Device → Mac Anamanti Core:* a **project-local Wyoming control protocol** on
     the device↔Mac hop (symmetric with the Phase-5 `reply-token` extension). New
-    `ambient-*` frames (`ambient-describe-settings` / `ambient-set-settings` /
-    `ambient-list-memories` / `ambient-delete-memory` / `ambient-clear-memories`
-    and their responses) ride the existing framing. The orchestrator's
+    `anamanti-*` frames (`anamanti-describe-settings` / `anamanti-set-settings` /
+    `anamanti-list-memories` / `anamanti-delete-memory` / `anamanti-clear-memories`
+    and their responses) ride the existing framing. The Anamanti Core's
     `Pipeline` now reads a per-turn snapshot of runtime-swappable
-    `SharedSettings` (`mac/src/settings.rs`), so the LLM backend + Piper voice
-    change between turns with **no restart**; `mac/src/control.rs` answers the
-    frames from the memory store + settings, and `mac/src/server.rs` routes control
+    `SharedSettings` (`anamanti-core/src/settings.rs`), so the LLM backend + Piper voice
+    change between turns with **no restart**; `anamanti-core/src/control.rs` answers the
+    frames from the memory store + settings, and `anamanti-core/src/server.rs` routes control
     vs. turn frames on one accept loop. The device speaks the protocol from
     `rust/src/wyoming/control.rs`, exposed to Flutter as async FRB functions
     (`rust/src/api/settings.rs`: `fetch_orchestrator_settings`,
@@ -384,7 +384,7 @@ services, inserting the pluggable LLM + persistent memory between them.
     `clear_memories`).
 - Verified: `cargo test` (mac 42 tests incl. `SharedSettings` swap/atomic-reject,
   the `control::respond` surface, and a loopback control-protocol integration test;
-  device 39 tests incl. control round-trips against a loopback orchestrator and a
+  device 39 tests incl. control round-trips against a loopback Anamanti Core and a
   real bundled-model load/score on `tract`),
   `cargo clippy --all-targets -- -D warnings` + `cargo fmt --check` (both crates
   clean), FRB regenerated, `flutter analyze` clean (app code), `flutter test`
@@ -408,29 +408,29 @@ services, inserting the pluggable LLM + persistent memory between them.
 > **Model selector (Phase 6 follow-up):** the assistant's model is chosen from a
 > **drop-down of specific Anthropic / OpenAI models released in the last 12 months**
 > (superseding the earlier free-text field). A new **OpenAI chat backend**
-> (`mac/src/llm/openai.rs`, streaming `/v1/chat/completions`, `OPENAI_API_KEY`) sits
+> (`anamanti-core/src/llm/openai.rs`, streaming `/v1/chat/completions`, `OPENAI_API_KEY`) sits
 > behind the same `LlmBackend` trait next to `ollama`/`anthropic`/`mock`, so a picked
-> GPT/o-series model drives the real turn. `mac/src/llm/catalog.rs`
+> GPT/o-series model drives the real turn. `anamanti-core/src/llm/catalog.rs`
 > (`ModelCatalog`) builds the list: it live-queries each provider's `GET /v1/models`,
 > filters to the trailing 12 months (Anthropic `created_at`, OpenAI `created` + a
 > chat-model filter), caches ~1h, and falls back to a curated built-in list when a
-> key is missing/offline. It is exposed to the device via `ambient-list-models` →
-> `ambient-models` (new FRB `list_models` → `listModels`) and to the browser via
+> key is missing/offline. It is exposed to the device via `anamanti-list-models` →
+> `anamanti-models` (new FRB `list_models` → `listModels`) and to the browser via
 > `GET /models` on the config page. The chosen model flows through the existing
 > `SharedSettings::apply` → `LlmFactory::build` path and persists to
-> `ambient_settings.json`; the settings screen shows a dropdown for cloud backends
+> `anamanti_settings.json`; the settings screen shows a dropdown for cloud backends
 > and keeps free text for local Ollama tags. Verified: mac `cargo test` (native +
 > helix) + clippy/fmt + `--features rig` check, device `cargo test`
 > (`list_models` round trip), FRB regen, `flutter analyze` + `flutter test`.
 
 > **TTS voice dropdown (Phase 6 follow-up):** the settings TTS voice field is a
 > dropdown of **installed** Piper voices, mirroring the model dropdown. On
-> `ambient-list-voices`, the orchestrator queries Piper's advertised catalog (a
-> downstream Wyoming `describe` → `info`, parsed in `mac/src/wyoming/tts.rs`
-> `describe_voices`/`parse_voice_catalog`) and, when `AMBIENT_TTS_VOICES_DIR` is set
+> `anamanti-list-voices`, the Anamanti Core queries Piper's advertised catalog (a
+> downstream Wyoming `describe` → `info`, parsed in `anamanti-core/src/wyoming/tts.rs`
+> `describe_voices`/`parse_voice_catalog`) and, when `ANAMANTI_TTS_VOICES_DIR` is set
 > (Piper co-located on the Mac), keeps only voices whose `<name>.onnx` is present on
-> disk; unset → the full advertised list. Exposed via `ambient-list-voices` →
-> `ambient-voices` (new FRB `list_voices` → `listVoices`, `VoiceInfo`/`VoiceOption`)
+> disk; unset → the full advertised list. Exposed via `anamanti-list-voices` →
+> `anamanti-voices` (new FRB `list_voices` → `listVoices`, `VoiceInfo`/`VoiceOption`)
 > and to the browser via `GET /voices` on the config page. Both the device screen
 > and the config page show a "Server default" entry, preserve a hand-set voice not
 > in the list, and fall back to a free-text field when the list is unavailable.
@@ -439,34 +439,34 @@ services, inserting the pluggable LLM + persistent memory between them.
 > FRB regen, `flutter analyze` + `flutter test` (voice dropdown + free-text fallback).
 
 > **Anthropic auth mode (Phase 6 follow-up):** cloud Claude can authenticate with an
-> **API key** *or* a **Claude subscription (OAuth)**. `mac/src/llm/anthropic_auth.rs`
+> **API key** *or* a **Claude subscription (OAuth)**. `anamanti-core/src/llm/anthropic_auth.rs`
 > adds `AnthropicAuth` + an `AnthropicTokenProvider` that resolves a subscription
 > Bearer token from `ANTHROPIC_OAUTH_TOKEN` (from `claude setup-token`) or a
-> configurable token-printing command (`AMBIENT_ANTHROPIC_TOKEN_CMD`, default the
+> configurable token-printing command (`ANAMANTI_ANTHROPIC_TOKEN_CMD`, default the
 > `ant` CLI), cached with a short TTL and refreshed on a 401; the subscription path
 > sends `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20` (no `x-api-key`).
-> The mode is a per-turn `RuntimeSettings` field, rides the `ambient-set-settings`
-> frame + config page as `anthropic_auth`, persists to `ambient_settings.json`, and
+> The mode is a per-turn `RuntimeSettings` field, rides the `anamanti-set-settings`
+> frame + config page as `anthropic_auth`, persists to `anamanti_settings.json`, and
 > is surfaced in the device settings screen (a selector shown for the Anthropic
 > backend) and the config page. OpenAI stays API-key-only (no subscription→API path).
-> `AMBIENT_ANTHROPIC_AUTH=apikey|subscription` seeds the initial mode.
+> `ANAMANTI_ANTHROPIC_AUTH=apikey|subscription` seeds the initial mode.
 
 > **Debug GUI pages (Phase 6 follow-up):** the loopback config server
-> (`mac/src/webconfig.rs`) now also serves four read-only inspection pages —
+> (`anamanti-core/src/webconfig.rs`) now also serves four read-only inspection pages —
 > `/chatlog` (recent turns), `/prompts` (the exact assembled LLM prompt per turn,
-> captured to a separate `ambient_promptlog.jsonl` via `memory::PromptLog`, env
-> `AMBIENT_PROMPTLOG_PATH`), `/sqlite` (the memory store rows), and `/helix`
+> captured to a separate `anamanti_promptlog.jsonl` via `memory::PromptLog`, env
+> `ANAMANTI_PROMPTLOG_PATH`), `/sqlite` (the memory store rows), and `/helix`
 > (HelixDB GraphRAG node counts + a sample of nodes, behind the read-only
 > `memory::GraphView` seam; reports "disabled" on the SQLite backend). Each has a
 > `*.json` data endpoint and a shared nav bar. Still no auth — loopback only.
 > Verified: mac `cargo test` (native + helix) + clippy `-D warnings`, plus an
-> end-to-end curl of every page/endpoint against a running mock-backend orchestrator.
+> end-to-end curl of every page/endpoint against a running mock-backend Anamanti Core.
 
-> **Wire note (Phase 6):** the `ambient-*` control frames are project-local to the
-> device↔orchestrator hop (no off-the-shelf Wyoming server sees them), kept
+> **Wire note (Phase 6):** the `anamanti-*` control frames are project-local to the
+> device↔Anamanti Core hop (no off-the-shelf Wyoming server sees them), kept
 > byte-identical in `rust/` and `mac/` `wyoming::protocol::types` and guarded by
 > round-trip tests on both sides. Selecting the cloud (anthropic) backend at
-> runtime still requires an API key on the orchestrator, but that key no longer has
+> runtime still requires an API key on the Anamanti Core, but that key no longer has
 > to be present at boot (see the runtime-key note below); if none is available the
 > change is rejected **in-band** (the response's `ok:false` + message) and the
 > previous backend stays in force, so a control error never drops the device
@@ -489,7 +489,7 @@ recognition, no frames ever leave the device.
   `WakeWordEventKind::Presence` (`present: bool`) on the existing engine event stream.
 - **Actuation (presentation):** `AssistantController` folds `Presence` into
   `AssistantState.userPresent`; `ScreenBrightnessController` crosses a
-  `ambient_display/brightness` `MethodChannel` to `MainActivity`, which sets the
+  `anamanti_display/brightness` `MethodChannel` to `MainActivity`, which sets the
   window `screenBrightness` (near 1.0 / away 0.25, tunable). Starts **bright** and
   stays bright if the camera is unavailable.
 - **Away-mode UI:** `userPresent` also drives the ambient screen's presentation, not
@@ -508,7 +508,7 @@ recognition, no frames ever leave the device.
   movement (motion-only signal, by design/choice).
 - **Permission:** `CAMERA` is a runtime-dangerous permission declared in the
   manifest (`uses-feature` `required=false`) and, like `RECORD_AUDIO`, granted
-  out-of-band on the kiosk device: `adb shell pm grant com.ambientdisplay.ambient_display android.permission.CAMERA`.
+  out-of-band on the kiosk device: `adb shell pm grant com.anamanti.anamanti_display android.permission.CAMERA`.
 - **Dim delay (settings, 2026-09-22):** the **release window** — how long the screen
   stays fully bright after the room goes quiet before dimming to the away-mode clock —
   is now a **device-local setting** (Settings → *Display* → "Stay bright before dim",
@@ -524,32 +524,32 @@ recognition, no frames ever leave the device.
 
 The assistant can call **tools** to fetch info and take actions. Mechanism: the
 LLM is handed tool definitions (name + description + JSON-schema args); if it asks
-for one, the orchestrator executes it, threads the result back, and the model
-answers (`mac/src/llm/rig.rs`, up to `MAX_TOOL_ROUNDS`). Adding a capability = one
+for one, the Anamanti Core executes it, threads the result back, and the model
+answers (`anamanti-core/src/llm/rig.rs`, up to `MAX_TOOL_ROUNDS`). Adding a capability = one
 more tool in `Tools`.
 
 - **Engine:** rig-core is **always compiled in** and is the **default** engine
-  (`AMBIENT_LLM_ENGINE=rig`); `native` opts back out to the tool-less HTTP backends.
+  (`ANAMANTI_LLM_ENGINE=rig`); `native` opts back out to the tool-less HTTP backends.
   Tool turns answer **non-streaming** (rig 0.42's ollama streaming parser drops
   non-final tool calls) — fine, since the reply is spoken whole.
 - **Info tools (Mac-side):** `internet_search`, on by default (`llm.web_search`).
   The default provider is now **Tavily** (`llm.search_provider="tavily"`, needs the
   `TAVILY_API_KEY` secret); keyless **DuckDuckGo** is the alternative. **Weather works** via
   this tool; it is grounded by a configured home location + units
-  (`AMBIENT_HOME_LOCATION` / `AMBIENT_WEATHER_UNITS`), injected into the system
+  (`ANAMANTI_HOME_LOCATION` / `ANAMANTI_WEATHER_UNITS`), injected into the system
   prompt next to the wall-clock and speaker-identity lines (`location_line`).
-  `calendar_lookup` reads connected web `.ics` calendars (`AMBIENT_CALENDARS`).
+  `calendar_lookup` reads connected web `.ics` calendars (`ANAMANTI_CALENDARS`).
   `directions_lookup` returns real distance, travel time, and **live traffic**
-  between two places (`orchestrator/src/directions/`, `DirectionsProvider` trait;
-  v1 backend **Mapbox** via `MAPBOX_TOKEN` / `AMBIENT_DIRECTIONS_PROVIDER`). The
-  origin defaults to `AMBIENT_HOME_LOCATION`; it is **voice-only** in v1 (spoken ETA
+  between two places (`anamanti-core/src/directions/`, `DirectionsProvider` trait;
+  v1 backend **Mapbox** via `MAPBOX_TOKEN` / `ANAMANTI_DIRECTIONS_PROVIDER`). The
+  origin defaults to `ANAMANTI_HOME_LOCATION`; it is **voice-only** in v1 (spoken ETA
   + traffic note; an on-screen route/map is a deferred follow-up). Each info tool is
   advertised only when its config is present.
 - **Shopping list (Cadora) — `shopping_list_add`:** adds items to the household's
   **shared Cadora shopping list** (the same backend NextHaul and the family apps use),
-  so "add milk to the shopping list" writes to the real list. The orchestrator is a
+  so "add milk to the shopping list" writes to the real list. The Anamanti Core is a
   headless **voice front-end** on Cadora's built-in voice API
-  (`orchestrator/src/cadora/`, `GroceryController` trait): each add is one
+  (`anamanti-core/src/cadora/`, `GroceryController` trait): each add is one
   `POST /voice/command` (Bearer `vl_…` voice-link token) with the canonical
   `{action:"add_shopping_item", item, quantity}` body — our LLM has already parsed
   intent, so Cadora's NLU is skipped — and the server's spoken confirmation is relayed.
@@ -558,7 +558,7 @@ more tool in `Tools`.
   Integrations**, add a voice assistant to mint a **6-digit code** (`POST
   /voice/links/pair`); enter it on the config page (Household tab → "Shopping list
   (Cadora)"), which redeems it (`POST /voice/links/redeem`) for a durable `vl_…` token
-  stored in `ambient_settings.json` (0600) — the orchestrator is the "speaker" that
+  stored in `anamanti_settings.json` (0600) — the Anamanti Core is the "speaker" that
   redeems, exactly as NextHaul's own client expects. (A directly-pasted token is also
   accepted as a fallback.) Config seed:
   `cadora{base_url,link_token}` (base_url defaults to `https://cadora-server.fly.dev`).
@@ -566,8 +566,8 @@ more tool in `Tools`.
   restart), exactly like `spotify_control`.
 - **Device actions (implemented, on-device):** the `set_timer` / `cancel_timer`
   tools emit a `DeviceAction` onto a per-turn `ActionSink` (`LlmTurn.actions`); the
-  orchestrator's reply loop drains it (`drain_device_actions`) and relays an
-  `ambient-timer` frame on the turn socket. The device decodes it
+  Anamanti Core's reply loop drains it (`drain_device_actions`) and relays an
+  `anamanti-timer` frame on the turn socket. The device decodes it
   (`TurnUpdate::Timer`) and its long-lived `TimerManager`
   (`rust/src/engine/timer.rs`) owns each countdown (unlimited, outliving the turn
   socket + surviving a Mac disconnect), sounds a synthesized chime via the shared
@@ -583,7 +583,7 @@ more tool in `Tools`.
 > `null` = clear, value = set); `SharedSettings::apply` builds the backend with a
 > factory clone whose keys reflect the target, so a key entered at runtime enables the
 > cloud backend **without a restart**. Keys live in `RuntimeSettings` (the env var is
-> only the boot seed) and persist to `ambient_settings.json` (0600); on load a
+> only the boot seed) and persist to `anamanti_settings.json` (0600); on load a
 > persisted key overlays the env key only when present, so a pre-feature settings file
 > can't wipe a working env key. Key **entry** is exposed only on the loopback config
 > page (`webconfig.rs` — password fields shown per backend); the device/Wyoming
@@ -615,21 +615,21 @@ implementers:
     (a valid token/scope is not enough). Built + on-device; works once accepted.
   - **Google Drive** (interim): `drive.readonly` folder listing. The device-code
     flow rejects Drive scopes, so consent runs **once on the Mac — inside the
-    orchestrator** (`orchestrator/src/drive_consent.rs`, loopback+PKCE, a **"Desktop
+    Anamanti Core** (`anamanti-core/src/drive_consent.rs`, loopback+PKCE, a **"Desktop
     app"** client), driven from the config page **Photos tab** (`/drive`). The
-    orchestrator holds the client id/secret + refresh token + folder ids
-    (`DriveConfig` in `ambient_settings.json`) and the device **pulls the bundle over
-    Wyoming** (`ambient-get-drive-token`), minting access tokens on-device. Reads a
+    Anamanti Core holds the client id/secret + refresh token + folder ids
+    (`DriveConfig` in `anamanti_settings.json`) and the device **pulls the bundle over
+    Wyoming** (`anamanti-get-drive-token`), minting access tokens on-device. Reads a
     folder (owned or "Shared with me"); `drive.file` is unusable here (can't list a
     folder without an interactive Picker). *(Migrated 2026-09-22 from the standalone
     `tools/google_photo_consent.py` + adb-push + Settings "Import" flow.)*
   - Only the **TV (Ambient)** client creds are injected at build via
     `--dart-define-from-file=google_oauth.json` (gitignored): `GOOGLE_OAUTH_*`. The
     APK is **credential-free for Drive** (`AppSettings.driveConfigured` is a runtime
-    check); the Mac's Drive client comes from `AMBIENT_GOOGLE_DRIVE_CLIENT_ID/SECRET`
+    check); the Mac's Drive client comes from `ANAMANTI_GOOGLE_DRIVE_CLIENT_ID/SECRET`
     (optional `_FOLDER_IDS`). Ruled out: the Photos Library API (no library read
     since March 2025). Implemented in `slideshow/ambient_photos.dart`,
-    `drive_photos.dart`, `photo_source.dart`, settings, `main.dart`, and orchestrator
+    `drive_photos.dart`, `photo_source.dart`, settings, `main.dart`, and Anamanti Core
     `drive_consent.rs`/`webconfig.rs`/`control.rs`. Consent screens stay in
     **Testing** mode with household test users.
 - **Persistent memory:** **SQLite** on the Mac. Schema holds structured facts +

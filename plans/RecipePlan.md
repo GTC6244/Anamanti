@@ -6,24 +6,24 @@ appears on the display with **Overview / Ingredients / Steps** tabs to cook alon
 
 > **Status:** **Implemented (2026-09-24), pending on-device QA.** P1–P4 below are
 > built and tested — the `recipe_lookup`/`close_recipe` rig tools + JSON-LD parser
-> (orchestrator, 9 new unit tests), the `ambient-recipe` Wyoming frame (round-trip
+> (Anamanti Core, 9 new unit tests), the `anamanti-recipe` Wyoming frame (round-trip
 > tested in both crates), the FRB `ShowRecipe`/`DismissRecipe` events, and the
 > 3-tab `RecipeView` + `RecipeController` wiring (6 new Dart tests). Full suites
-> green: orchestrator 257, device-rust 85, Flutter 82; clippy + `dart analyze`
+> green: Anamanti Core 257, device-rust 85, Flutter 82; clippy + `dart analyze`
 > clean. **Deferred:** the LLM parse **fallback** (JSON-LD is the shipping parser —
 > see §3/§6) and **P5 on-device validation** (real dish → tabs on the Echo Show,
 > needs the Mac services + a Tavily key). This plan reads together with
 > [`Plan.MD`](./Plan.MD) (the tool-calling / rig engine decisions),
 > [`architecture.md`](./architecture.md) (the design, incl. §4 Wyoming frames and
 > the proactive-notification channel), and [`MusicPlan.md`](./MusicPlan.md) (the
-> precedent for "a skill = a rig LLM tool", and for an orchestrator-owned feature
+> precedent for "a skill = a rig LLM tool", and for an Anamanti Core-owned feature
 > that pushes state to the device).
 
 Recipe mode is **three coordinated pieces** split along the locked Rust/Flutter
 boundary, not one skill:
 
-1. a `recipe_lookup` **rig tool** on the orchestrator (fetch + parse to JSON),
-2. a new **`ambient-recipe` Wyoming frame** carrying that structured JSON to the
+1. a `recipe_lookup` **rig tool** on the Anamanti Core (fetch + parse to JSON),
+2. a new **`anamanti-recipe` Wyoming frame** carrying that structured JSON to the
    device (the notify banner's fixed 4 strings are too narrow), and
 3. a new **display "recipe mode"** — a 3-tab screen the device renders.
 
@@ -33,11 +33,11 @@ boundary, not one skill:
 
 | Question | Decision |
 | --- | --- |
-| **What is a "skill" here** | Same answer as Music: **an LLM tool in the rig engine** (`recipe_lookup`, a `PortableTool` in `orchestrator/src/llm/rig.rs`), alongside `internet_search` / `spotify_control`. Not an Alexa skill, not a gstack dev-skill. |
+| **What is a "skill" here** | Same answer as Music: **an LLM tool in the rig engine** (`recipe_lookup`, a `PortableTool` in `anamanti-core/src/llm/rig.rs`), alongside `internet_search` / `spotify_control`. Not an Alexa skill, not a gstack dev-skill. |
 | **Trigger** | **Voice, by dish name.** *"Show me a recipe for X"* → the tool web-searches (reusing the existing Tavily/DuckDuckGo `SearchProvider`) for a source URL, fetches it, and parses it. No spoken URLs; no phone/config-page push in v1 (left as a future add). |
 | **Parsing engine** | **JSON-LD first, LLM fallback.** Try `schema.org/Recipe` JSON-LD (embedded by most recipe sites) for a fast, accurate parse; when it's absent or malformed, hand the page text to the LLM to emit the same structured JSON. "Parse via an agent" is the fallback, not the only path. |
 | **Data shape** | One `Recipe` JSON payload: `{ id, title, summary, source_url, image_url?, servings?, total_time?, ingredients: [String], steps: [String] }`. Ingredients/steps are ordered string lists (v1: no per-ingredient quantity struct). |
-| **Transport** | A **new `ambient-recipe` Wyoming frame** (mirrored byte-for-byte in both `protocol.rs` files, `ambient-timer` as the template). The notify path's `{id,priority,title,body}` banner stays untouched. |
+| **Transport** | A **new `anamanti-recipe` Wyoming frame** (mirrored byte-for-byte in both `protocol.rs` files, `anamanti-timer` as the template). The notify path's `{id,priority,title,body}` banner stays untouched. |
 | **Display surface** | A **new top-level "recipe mode"** on the device — a 3-tab view (**Overview / Ingredients / Steps**), bottom tab bar. Built new (there is no `TabBar`/mode-registry today); a `RecipeController extends ChangeNotifier` + immutable `RecipeState`, mirroring `NotificationController`. |
 | **Mode lifecycle** | **Voice in; voice or touch out.** Voice opens it and it stays up indefinitely (you cook for 30+ min); dismiss by voice (*"done cooking" / "close the recipe"*) or an on-screen close control. No auto-timeout. |
 | **Audio path** | None. Recipe mode is **visual only** in v1 — no step-by-step spoken read-out, no timers auto-created from step durations (both are future adds). The model still speaks a short confirmation ("Here's a carbonara recipe") via the normal Piper path. |
@@ -49,7 +49,7 @@ If a task seems to require changing one of these, stop and confirm first.
 ## 1. Topology
 
 ```
-  "show me a recipe          ┌──────────────── Mac Mini (orchestrator) ───────────────┐
+  "show me a recipe          ┌──────────────── Mac Mini (Anamanti Core) ───────────────┐
    for carbonara" ──STT──▶ LLM recognizes intent ──▶ recipe_lookup tool
                                                           │
                                     SearchProvider (Tavily/DDG) ──▶ source URL
@@ -62,9 +62,9 @@ If a task seems to require changing one of these, stop and confirm first.
                           tool returns short spoken confirmation to the model,
                           and emits a DeviceAction::ShowRecipe(Recipe)
                                                           │
-                                    orchestrator drains action ──▶ WyomingEvent::recipe(...)
+                                    Anamanti Core drains action ──▶ WyomingEvent::recipe(...)
                           └───────────────────────────────┬────────────────────────────┘
-                                                          │ ambient-recipe frame (JSON)
+                                                          │ anamanti-recipe frame (JSON)
                                                           ▼
   Echo Show 8:  Wyoming client decodes ──▶ FRB event ──▶ RecipeController ──▶ recipe mode
                 (Overview / Ingredients / Steps tabs)   ── "done cooking" / touch ─▶ dismiss
@@ -72,7 +72,7 @@ If a task seems to require changing one of these, stop and confirm first.
 
 **End-to-end flow:** wake word → STT → LLM intent → `recipe_lookup` (search →
 fetch → JSON-LD-or-LLM parse) → the model speaks a one-line confirmation via Piper
-**and** the tool pushes an `ambient-recipe` frame → the device switches into recipe
+**and** the tool pushes an `anamanti-recipe` frame → the device switches into recipe
 mode and renders the tabs → the user cooks, then dismisses by voice or touch.
 
 **Decoupling:** the tool (fetch + parse, returns a spoken confirmation) works and is
@@ -85,21 +85,21 @@ against fixture HTML. The device frame + tabs can land second.
 
 | Piece | Where | Form |
 | --- | --- | --- |
-| Intent + fetch + parse | Orchestrator (Mac) | New `recipe_lookup` `PortableTool` in `llm/rig.rs`, over a new injected `RecipeProvider` trait (twin of `DirectionsProvider`) so it unit-tests offline against fixture HTML |
-| Web search for a source | Orchestrator (Mac) | Reuse the existing `SearchProvider` (Tavily/DuckDuckGo) — no new search infra |
-| HTML fetch | Orchestrator (Mac) | Existing `reqwest` (add no HTML-parser dep if JSON-LD via `serde_json` suffices; a lightweight `scraper` is optional) |
-| Structured push to device | Orchestrator (Mac) | `DeviceAction::ShowRecipe(Recipe)` + new `WyomingEvent::recipe(...)` (`ambient-recipe`), relayed in `drain_device_actions()` |
-| Recipe frame decode | Device (Rust) | New arm in `display/rust/src/wyoming/client.rs`; surfaced via a new FRB event (sidecar stream, like `NotifyEvent`, or a new `WakeWordEventKind` — see §4) |
+| Intent + fetch + parse | Anamanti Core (Mac) | New `recipe_lookup` `PortableTool` in `llm/rig.rs`, over a new injected `RecipeProvider` trait (twin of `DirectionsProvider`) so it unit-tests offline against fixture HTML |
+| Web search for a source | Anamanti Core (Mac) | Reuse the existing `SearchProvider` (Tavily/DuckDuckGo) — no new search infra |
+| HTML fetch | Anamanti Core (Mac) | Existing `reqwest` (add no HTML-parser dep if JSON-LD via `serde_json` suffices; a lightweight `scraper` is optional) |
+| Structured push to device | Anamanti Core (Mac) | `DeviceAction::ShowRecipe(Recipe)` + new `WyomingEvent::recipe(...)` (`anamanti-recipe`), relayed in `drain_device_actions()` |
+| Recipe frame decode | Device (Rust) | New arm in `anamanti-display/rust/src/wyoming/client.rs`; surfaced via a new FRB event (sidecar stream, like `NotifyEvent`, or a new `WakeWordEventKind` — see §4) |
 | Recipe mode UI | Device (Flutter) | New `RecipeController extends ChangeNotifier` + `RecipeState` (copyWith) + a 3-tab screen; an opacity layer in `AmbientScreen`'s Stack or a `Navigator.push` route |
-| Dismiss ("done cooking") | Orchestrator → Device | A `dismiss` sub-action on the same frame (voice), plus an on-screen close button (touch) |
+| Dismiss ("done cooking") | Anamanti Core → Device | A `dismiss` sub-action on the same frame (voice), plus an on-screen close button (touch) |
 
 ---
 
 ## 3. `recipe_lookup` tool (fetch + parse)
 
 A single tool keeps the LLM surface small (same discipline as `spotify_control`'s
-`action` enum). Lives in `orchestrator/src/llm/rig.rs` (`RecipeLookup`, a real
-`PortableTool`) over a new `orchestrator/src/recipe/mod.rs` module holding the
+`action` enum). Lives in `anamanti-core/src/llm/rig.rs` (`RecipeLookup`, a real
+`PortableTool`) over a new `anamanti-core/src/recipe/mod.rs` module holding the
 `RecipeProvider` trait — injected, so it's unit-tested with a fake/fixture, no
 network.
 
@@ -117,8 +117,8 @@ network.
 - **Effect (dual):** the tool **returns a short text confirmation** to the model
   ("Found a carbonara recipe — 4 servings, 25 minutes") so the assistant speaks it,
   **and** pushes `DeviceAction::ShowRecipe(recipe)` onto the turn's `ActionSink`
-  (exactly how the timer tools emit `StartTimer`). The orchestrator drains that
-  action after the reply and writes the `ambient-recipe` frame.
+  (exactly how the timer tools emit `StartTimer`). The Anamanti Core drains that
+  action after the reply and writes the `anamanti-recipe` frame.
 - **Errors surface as speech:** nothing found, fetch failed, or unparseable become
   the tool result so the model apologizes aloud. The error type implements
   `std::error::Error` (rig requirement), mirroring `SearchError`/`DirectionsError`.
@@ -128,7 +128,7 @@ network.
 
 **A dismiss action.** "Done cooking" / "close the recipe" maps to a second, cheap
 tool action (or a distinct `recipe_dismiss` tool) that emits
-`DeviceAction::DismissRecipe`, relayed as an `ambient-recipe` frame with
+`DeviceAction::DismissRecipe`, relayed as an `anamanti-recipe` frame with
 `{ action: "dismiss" }`. The device's on-screen close button handles the touch case
 locally (no round-trip).
 
@@ -136,19 +136,19 @@ locally (no round-trip).
 
 ## 4. Wire format & device plumbing
 
-Follow the **`ambient-timer` template** end to end (it is the existing
-LLM-tool-driven, orchestrator→device structured push):
+Follow the **`anamanti-timer` template** end to end (it is the existing
+LLM-tool-driven, Anamanti Core→device structured push):
 
-**Orchestrator** (`orchestrator/`):
-- `wyoming/protocol.rs` — `types::AMBIENT_RECIPE = "ambient-recipe"`;
+**Anamanti Core** (`anamanti-core/`):
+- `wyoming/protocol.rs` — `types::ANAMANTI_RECIPE = "anamanti-recipe"`;
   `WyomingEvent::recipe(recipe)` / `::recipe_dismiss()` via `with_data(type, json!(...))`;
   an accessor + a `roundtrip` test.
 - `llm/mod.rs` — `DeviceAction::{ShowRecipe(Recipe), DismissRecipe}` variants.
 - `orchestrator.rs` — a `match` arm in `drain_device_actions()` mapping the action
   to the frame and `write_event`.
 
-**Device** (`display/rust/` + `display/lib/`):
-- `wyoming/protocol.rs` — the **same** `types::AMBIENT_RECIPE` constant (the `types`
+**Device** (`anamanti-display/rust/` + `anamanti-display/lib/`):
+- `wyoming/protocol.rs` — the **same** `types::ANAMANTI_RECIPE` constant (the `types`
   block is kept byte-identical; round-trip tests in both crates guard it).
 - `wyoming/client.rs` — dispatch the frame; decode helper `event.recipe()`.
 - **FRB surface — recommended: a sidecar stream like notifications**, because a
@@ -163,7 +163,7 @@ LLM-tool-driven, orchestrator→device structured push):
     FRB struct with `Vec<String>` (preferred — FRB v2 supports it; confirm during
     codegen).
 
-**Display UI** (`display/lib/`):
+**Display UI** (`anamanti-display/lib/`):
 - `RecipeController extends ChangeNotifier` (subscribes to the recipe channel via an
   injectable factory typedef, like `NotifyStreamFactory`), holding an immutable
   `RecipeState { Recipe? current; int tab }` with `copyWith`; owned/disposed in
@@ -187,7 +187,7 @@ LLM-tool-driven, orchestrator→device structured push):
    `PortableTool` + JSON-LD parse + LLM fallback; returns the spoken confirmation.
    Unit-tested against fixture HTML (JSON-LD present *and* absent). No device changes
    yet. Registration in `Tools`, guidance, `tools_from_config`, `LlmFactory`.
-2. **P2 — `ambient-recipe` frame + DeviceAction.** Both `protocol.rs` (byte-identical
+2. **P2 — `anamanti-recipe` frame + DeviceAction.** Both `protocol.rs` (byte-identical
    `types`), `DeviceAction::{ShowRecipe,DismissRecipe}`, `drain_device_actions()`
    relay, device `client.rs` decode, round-trip tests both crates.
 3. **P3 — FRB recipe channel.** New `RecipeEvent` struct + `start_recipe_channel`
@@ -233,8 +233,8 @@ LLM-tool-driven, orchestrator→device structured push):
 
 Per the working agreements (keep the three docs consistent):
 - `agents.md` — add `RecipePlan.md` to the "feature-specific plans branch off these"
-  list, and note the `ambient-recipe` frame in the boundaries/state section.
-- `plans/architecture.md` §4 — document the `ambient-recipe` frame and the recipe
+  list, and note the `anamanti-recipe` frame in the boundaries/state section.
+- `plans/architecture.md` §4 — document the `anamanti-recipe` frame and the recipe
   device mode.
 - `plans/Plan.MD` — add the decision-table rows from §0 here.
 - `plans/TODO.md` — track the P1–P5 phases.

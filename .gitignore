@@ -30,9 +30,9 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
-/display/build/
-/display/build
-/display/coverage/
+/anamanti-display/build/
+/anamanti-display/build
+/anamanti-display/coverage/
 
 # Symbolication related
 app.*.symbols
@@ -41,45 +41,45 @@ app.*.symbols
 app.*.map.json
 
 # Android Studio will place build artifacts here
-/display/android/app/debug
-/display/android/app/profile
-/display/android/app/release
+/anamanti-display/android/app/debug
+/anamanti-display/android/app/profile
+/anamanti-display/android/app/release
 
 # Orchestrator runtime memory DB (created at run time)
-ambient_memory.sqlite
-ambient_memory.sqlite-*
+anamanti_memory.sqlite
+anamanti_memory.sqlite-*
 
 # Android release signing — NEVER commit these
-/display/android/key.properties
-/display/android/app/*.jks
-/display/android/app/*.keystore
+/anamanti-display/android/key.properties
+/anamanti-display/android/app/*.jks
+/anamanti-display/android/app/*.keystore
 *.jks
 *.keystore
 
 # Orchestrator per-instance boot config (may contain OAuth client secrets / refresh
-# tokens in plaintext — keep 0600, never commit). See orchestrator/ambient.example.json.
-ambient.json
+# tokens in plaintext — keep 0600, never commit). See anamanti-core/anamanti.example.json.
+anamanti.json
 
 # Orchestrator persisted runtime settings (contains the search API key in plaintext)
-ambient_settings.json
+anamanti_settings.json
 
 # Orchestrator runtime chat log (append-only turn record; GraphRAG ingest queue)
-ambient_chatlog.jsonl
-ambient_chatlog.jsonl-*
-ambient_chatlog.jsonl.offset
-ambient_helix/
+anamanti_chatlog.jsonl
+anamanti_chatlog.jsonl-*
+anamanti_chatlog.jsonl.offset
+anamanti_helix/
 
 # Orchestrator runtime prompt log (per-turn assembled LLM prompt; debug GUI)
-ambient_promptlog.jsonl
-ambient_promptlog.jsonl-*
+anamanti_promptlog.jsonl
+anamanti_promptlog.jsonl-*
 
 # On-device Google OAuth client credentials (client id + secret) for the photo
 # slideshow. Injected at build with --dart-define-from-file=google_oauth.json.
 # Never commit the real file; the committed google_oauth.example.json is the template.
-/display/google_oauth.json
+/anamanti-display/google_oauth.json
 
 # Google Drive refresh token synced from the Mac consent helper. Live token — never commit.
-/display/google_drive_token.json
+/anamanti-display/google_drive_token.json
 
 # Local test-orchestrator run dir (worktree-local; never commit)
 .ambient-test-run/
