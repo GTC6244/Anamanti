@@ -265,6 +265,123 @@ pub async fn verify_folder(access_token: &str, folder_id: &str) -> Result<usize>
     Ok(v["files"].as_array().map(|a| a.len()).unwrap_or(0))
 }
 
+/// Mint a short-lived Drive access token from the stored refresh token
+/// (`grant_type=refresh_token`). Unlike consent, this needs no browser — it's used
+/// by the config page's folder picker to list the account's folders on demand.
+pub async fn mint_access_token(
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<String> {
+    if client_id.is_empty() || client_secret.is_empty() || refresh_token.is_empty() {
+        bail!("Drive is not linked yet (missing client id/secret or refresh token)");
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("building token-refresh HTTP client")?;
+    let resp = client
+        .post(TOKEN_ENDPOINT)
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .await
+        .context("token refresh request")?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("token refresh failed ({status}): {text}");
+    }
+    let parsed: TokenResp =
+        serde_json::from_str(&text).with_context(|| format!("parsing token response: {text}"))?;
+    if let Some(e) = parsed.error {
+        bail!(
+            "token refresh error: {e} {}",
+            parsed.error_description.unwrap_or_default()
+        );
+    }
+    parsed
+        .access_token
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("token refresh returned no access token"))
+}
+
+/// A Drive folder the user can pick for the slideshow (config-page folder picker).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DriveFolderInfo {
+    pub id: String,
+    pub name: String,
+    /// Shared *with* the user (not owned by them) — surfaced so the picker can badge it.
+    pub shared: bool,
+}
+
+/// List the account's Drive folders (owned + "Shared with me"), name-ordered, so the
+/// config page can offer a picker instead of hand-typed folder ids. Mirrors the
+/// device's `listDriveFolders` query so the picker shows exactly the folders the
+/// slideshow can later read. Paginates up to `max` folders. Needs `drive.readonly`.
+pub async fn list_folders(access_token: &str, max: usize) -> Result<Vec<DriveFolderInfo>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("building folder-list HTTP client")?;
+    let q = "mimeType = 'application/vnd.google-apps.folder' and trashed = false";
+    let mut folders: Vec<DriveFolderInfo> = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut params: Vec<(&str, String)> = vec![
+            ("q", q.to_string()),
+            ("fields", "nextPageToken,files(id,name,shared,ownedByMe)".to_string()),
+            ("pageSize", "100".to_string()),
+            ("orderBy", "name".to_string()),
+            ("corpora", "user".to_string()),
+            ("supportsAllDrives", "true".to_string()),
+            ("includeItemsFromAllDrives", "true".to_string()),
+        ];
+        if let Some(tok) = &page_token {
+            params.push(("pageToken", tok.clone()));
+        }
+        let url = url::Url::parse_with_params(DRIVE_FILES_ENDPOINT, &params)
+            .context("building folder-list URL")?;
+        let resp = client
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .context("folder-list request")?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("{status}: {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("parsing folder-list response: {text}"))?;
+        if let Some(arr) = v["files"].as_array() {
+            for f in arr {
+                let Some(id) = f["id"].as_str() else { continue };
+                let name = f["name"].as_str().unwrap_or(id);
+                let shared = f["ownedByMe"].as_bool() == Some(false) || f["shared"].as_bool() == Some(true);
+                folders.push(DriveFolderInfo {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    shared,
+                });
+                if folders.len() >= max {
+                    return Ok(folders);
+                }
+            }
+        }
+        match v["nextPageToken"].as_str() {
+            Some(t) if !t.is_empty() => page_token = Some(t.to_string()),
+            _ => break,
+        }
+    }
+    Ok(folders)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

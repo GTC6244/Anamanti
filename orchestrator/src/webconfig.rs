@@ -517,6 +517,12 @@ async fn handle(
         let payload = music_stopall_json(music.as_ref()).await.into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
+    // List the linked account's Drive folders for the Photos-page picker. Needs
+    // async I/O (mints an access token, calls the Drive API), so it lives here.
+    if method == "GET" && path == "/drive/folders.json" {
+        let payload = drive_folders_json(&settings).await.into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
     // Save the Drive OAuth client credentials / folder ids (no consent yet).
     if method == "POST" && path == "/drive/save" {
         let payload = drive_save_json(&settings, &body);
@@ -1089,6 +1095,32 @@ fn drive_save_json(settings: &SharedSettings, body: &[u8]) -> String {
         ..Default::default()
     });
     drive_status_json(settings)
+}
+
+/// `GET /drive/folders.json` — list the linked account's Drive folders so the Photos
+/// page can offer a picker instead of hand-typed folder ids. Mints an access token
+/// from the stored refresh token; never returns secrets.
+async fn drive_folders_json(settings: &SharedSettings) -> String {
+    let d = settings.drive();
+    let (Some(cid), Some(secret), Some(rt)) = (
+        d.client_id.clone().filter(|s| !s.is_empty()),
+        d.client_secret.clone().filter(|s| !s.is_empty()),
+        d.refresh_token.clone().filter(|s| !s.is_empty()),
+    ) else {
+        return json!({
+            "ok": false,
+            "message": "Link Google Drive first (set the client id/secret, then Link).",
+        })
+        .to_string();
+    };
+    let token = match crate::drive_consent::mint_access_token(&cid, &secret, &rt).await {
+        Ok(t) => t,
+        Err(e) => return json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    };
+    match crate::drive_consent::list_folders(&token, 500).await {
+        Ok(folders) => json!({ "ok": true, "folders": folders }).to_string(),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
 }
 
 /// `POST /drive/link` — run the one-time OAuth consent using the stored client
@@ -1828,6 +1860,17 @@ mod tests {
         assert_eq!(v["linked"], false);
         assert_eq!(v["client_secret_set"], false);
         assert_eq!(v["folder_ids"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn drive_folders_json_refuses_when_not_linked() {
+        // Unlinked: the guard returns before any network I/O, so this is offline-safe.
+        let v: Value = serde_json::from_str(&drive_folders_json(&settings()).await).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(
+            v["message"].as_str().unwrap().contains("Link Google Drive"),
+            "expected a link-first hint, got {v}"
+        );
     }
 
     #[test]
