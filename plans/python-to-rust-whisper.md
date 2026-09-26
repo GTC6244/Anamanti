@@ -211,3 +211,39 @@ one-line config change. No flag day.
   expected `connecting to TTS ... Connection refused`). **Still pending:** the same
   run on the **M4 Mac Mini** for the real decode-latency number, a full turn with
   Piper + Anthropic, and then the Stage-5 default flip.
+- 2026-09-25 — **M4 Mac Mini validation (this branch, live Echo Show).** Release
+  binary built `--features stt-whisper-metal`; `ggml-base.en` on **Metal (Apple M4)**;
+  test Core isolated on ports 10701/8731 with its own `test-data/` (prod untouched on
+  10700). Config: `anamanti-core/anamanti.test.json`.
+  - **Decode latency (base):** warm **~169 ms mean** (124–194 ms), essentially flat
+    vs. clip length → **RTF ≈ 0.02–0.05** (20–50× real-time). Model math is the win-
+    neutral part; this confirms the in-process path is not a latency regression.
+  - **Decode latency (small):** warm **~391 ms mean** (381–406 ms), RTF 0.04–0.13 —
+    ~2.3× slower than base but still 8–25× real-time. Both models transcribed the
+    tested phrases correctly; small's accuracy edge needs harder/noisier audio to show
+    (not exercised — deferred).
+  - **Full turn works end-to-end:** transcript renders on-device very fast; Anthropic
+    (`claude-opus-5`, rig engine) reply spoken via Piper (10200). **Tool-calling works
+    through the in-process STT path** ("recipe for spaghetti" → `recipe_lookup` →
+    spoken reply).
+  - **Cold start:** first-ever decode on a machine eats a one-time ~7.8 s
+    (whisper.cpp Metal shader/pipeline compilation). **Mitigated:** added a boot-time
+    warm-up decode in `WhisperEngine::open` (`whisper_local.rs` `warm_up()` — one
+    throwaway 1 s-silence decode) so the cold start happens at startup, never on a
+    user's first turn. The Metal pipeline cache also persisted across process
+    restarts, so the cost is effectively once-per-machine.
+  - **VAD finding (to revisit):** two turns blanked as "processing → timeout". Root
+    cause is the Core-side energy VAD, **not** whisper and **not** the model: whisper
+    decoded the speech correctly ("What's the weather right now?") but the utterance's
+    RMS never crossed `voice_rms_threshold` (default **450.0**, `settings.rs`
+    `DEFAULT_VOICE_RMS_THRESHOLD`), so `speech_started` never latched and the
+    orchestrator's anti-hallucination guard discarded the transcript, emitting an
+    empty one. Same behavior on prod/base — a mic-level/threshold tuning issue, not a
+    cutover regression. Knob is a runtime setting (config page :8731 or the settings
+    file); lowering to ~250 should recover quieter/more-distant speech at a small
+    increase in silence-hallucination risk. **Not changed** — left at 450 pending a
+    deliberate tuning pass.
+  - **Still pending for the Stage-5 flip:** a base-vs-small accuracy comparison on
+    harder audio; the committed `SttConfig::default().engine` → `WhisperLocal` change
+    landed together with making the native build the default; then retiring Wyoming a
+    cycle later.

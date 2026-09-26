@@ -45,11 +45,31 @@ impl WhisperEngine {
         } else {
             default_threads()
         };
-        Ok(Self {
+        let engine = Self {
             ctx: Arc::new(ctx),
             language,
             n_threads,
-        })
+        };
+        engine.warm_up();
+        Ok(engine)
+    }
+
+    /// Run one throwaway decode over a short buffer of silence at startup. This
+    /// forces whisper.cpp to build its compute pipeline now — notably compiling the
+    /// Metal shaders, a one-time cost of several seconds on a fresh machine — so the
+    /// user's first real turn decodes at the warm ~sub-200ms latency instead of
+    /// eating that cold start. Non-fatal: a failure here is logged, not propagated.
+    fn warm_up(&self) {
+        let started = std::time::Instant::now();
+        // 1s of silence is enough to exercise the full graph; it decodes to empty text.
+        let silence = vec![0i16; 16_000];
+        match decode(&self.ctx, &silence, self.language.as_deref(), self.n_threads) {
+            Ok(_) => log::info!(
+                "whisper warm-up decode complete in {:.0}ms (Metal pipeline compiled)",
+                started.elapsed().as_secs_f64() * 1000.0
+            ),
+            Err(e) => log::warn!("whisper warm-up decode failed (non-fatal): {e:#}"),
+        }
     }
 
     /// Start a per-turn transcription session.
@@ -161,6 +181,11 @@ fn decode(
     }
     // whisper.cpp wants f32 mono in [-1.0, 1.0] at 16 kHz.
     let audio: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.0).collect();
+    // Decode-latency instrumentation (plans/python-to-rust-whisper.md Stage 5, M4
+    // validation): time the blocking whisper.cpp decode and report it against the
+    // utterance length as a real-time factor (RTF = decode_time / audio_time).
+    let audio_secs = audio.len() as f64 / 16_000.0;
+    let decode_started = std::time::Instant::now();
 
     let mut state = ctx.create_state().context("creating whisper state")?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -189,5 +214,14 @@ fn decode(
                 .with_context(|| format!("reading whisper segment {i}"))?,
         );
     }
+    let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+    let rtf = if audio_secs > 0.0 {
+        decode_ms / (audio_secs * 1000.0)
+    } else {
+        0.0
+    };
+    log::info!(
+        "whisper decode: {audio_secs:.2}s audio in {decode_ms:.0}ms (RTF {rtf:.3}, {n} segments)"
+    );
     Ok(text.trim().to_string())
 }
