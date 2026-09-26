@@ -83,3 +83,13 @@ anamanti_promptlog.jsonl-*
 
 # Local test-orchestrator run dir (worktree-local; never commit)
 .ambient-test-run/
+
+# Whisper ggml model binaries for the in-process STT engine — large (100s of MB),
+# fetched via anamanti-core/scripts/fetch-whisper-models.sh; never commit.
+/models/
+*.bin
+ggml-*.mlmodelc/
+
+# Machine-local test configs (absolute paths, per-box); never commit.
+anamanti.*.json
+!anamanti.example.json

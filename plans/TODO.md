@@ -10,8 +10,19 @@ hardware. Grouped by priority.
 Everything below the UI is in place and unit/integration-tested with mocks; the
 full loop has not been exercised against real services on the device.
 
-- [ ] Stand up the Mac services on the LAN: **wyoming-faster-whisper** (STT, 10300),
-      **wyoming-piper** (TTS, 10200), and **Ollama** (11434) — all off-the-shelf.
+- [ ] Stand up the Mac services on the LAN: **wyoming-piper** (TTS, 10200) and
+      **Ollama** (11434) — off-the-shelf. **STT** is either **wyoming-faster-whisper**
+      (STT, 10300; default `stt.engine=wyoming`) or the **in-process whisper.cpp**
+      engine (`stt.engine=whisper-rs`, `--features stt-whisper-local`, no separate
+      process — see `plans/python-to-rust-whisper.md`).
+- [ ] **STT cutover (gated on M4 validation):** the in-process `whisper-rs` engine is
+      built, wired, and **functionally validated on real device audio** (M1 Max dev
+      box: two live Echo Show turns transcribed correctly over Wyoming/Metal, mock
+      LLM, no Piper). Remaining before the flip: run on the **M4 Mac Mini** for the
+      decode-latency number, a full turn with Piper + Anthropic, then flip the
+      committed default from `wyoming` to `whisper-rs` (make the native build default
+      in the same change) per the Stage 5 checklist in
+      `plans/python-to-rust-whisper.md`; retire the Wyoming path one cycle later.
 - [ ] Run the Anamanti Core: `cargo run --manifest-path anamanti-core/Cargo.toml --release`
       (advertises `_wyoming._tcp`; env in `anamanti-core/src/config.rs`).
 - [ ] Install the release APK on the Echo Show and run one full turn:

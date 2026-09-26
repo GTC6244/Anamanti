@@ -115,8 +115,17 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 ### 2.3 Mac Mini services
 
-- **Wyoming STT** — Whisper (CoreML-accelerated on the M4) exposed via the
-  Wyoming Protocol; emits partial and final transcripts.
+- **STT (Whisper)** — two interchangeable engines behind the
+  `anamanti-core/src/stt/` `Transcriber` seam (`plans/python-to-rust-whisper.md`),
+  selected by the `stt.engine` config key:
+  - **`wyoming`** (default) — the external `wyoming-faster-whisper` Python server
+    over the Wyoming Protocol (`stt_addr`, port 10300).
+  - **`whisper-rs`** — **in-process** whisper.cpp (`stt-whisper-local` build
+    feature; optional `metal`/`coreml` accel). No separate process, no Python: the
+    Core loads a ggml model (`base`/`small`) and transcribes in a `spawn_blocking`
+    task. This is the deploy-simplification path, not a speed change.
+  Either way the transcript is the same Whisper-class text; end-of-speech is the
+  Core's energy VAD (below), never the engine.
 - **LLM backend** — a trait/interface with a streaming
   `respond(transcript) -> token stream`. Two interchangeable implementations:
   local (Ollama/llama.cpp) and cloud (Claude/OpenAI). Selection is config-driven.
@@ -138,13 +147,14 @@ predictable memory use and no GC pauses under the 1 GB limit.
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
   memory writes/recall and the prompt to that person (a shared "household" scope is
   the floor); see `speaker_id_plan.md`.
-- **End-of-speech / VAD** — runs in the **Anamanti Core**, not the STT server:
-  `wyoming-faster-whisper` has no streaming VAD and only transcribes once it
-  receives `audio-stop`, so the Anamanti Core scores per-chunk RMS energy over the
-  incoming PCM and, after speech followed by ~900 ms of trailing silence (or a 6 s
-  no-speech fallback), sends `audio-stop` to STT to finalize (`anamanti-core/src/orchestrator.rs`,
-  `stream_to_transcript`). The Echo Show device still runs **no VAD of its own** —
-  it streams continuously and waits for the transcript.
+- **End-of-speech / VAD** — runs in the **Anamanti Core**, for **both** STT engines
+  (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
+  `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The
+  Anamanti Core scores per-chunk RMS energy over the incoming PCM and, after speech
+  followed by ~900 ms of trailing silence (or a 6 s no-speech fallback), finalizes
+  the transcriber (`anamanti-core/src/orchestrator.rs`, `stream_to_transcript`). The
+  Echo Show device still runs **no VAD of its own** — it streams continuously and
+  waits for the transcript.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
   to the device.
 
@@ -579,7 +589,8 @@ frames already have).
 | Rust-side playback | One audio layer, symmetric with capture |
 | Wake-word barge-in (flush-on-wake + `anamanti-interrupt`) | Natural interruption without full-duplex complexity; in-app AEC deferred, but a **required device-side HAL AEC shim** delivers echo cancellation on Echo Show 8 gen-1 (see §4) |
 | Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
-| VAD in the Anamanti Core | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
+| VAD in the Anamanti Core | Device does no VAD; neither STT engine does streaming VAD, so the Mac runs energy VAD and finalizes the transcriber |
+| STT engine behind a `Transcriber` seam (`wyoming` \| `whisper-rs`) | Default dials `wyoming-faster-whisper`; `whisper-rs` runs whisper.cpp **in-process** (no Python STT server) for deploy simplicity — same Whisper-class text, engine chosen by config (`plans/python-to-rust-whisper.md`) |
 | SQLite is the memory store of record | Simple, debuggable; holds explicit+inferred facts and the settings-list/voice management |
 | Recall defaults to embedded HelixDB GraphRAG | Vector KNN + graph hop beats keyword FTS for context; in-process (no server/Docker); needs `OPENAI_API_KEY`, falls back to SQLite FTS if absent |
 | Per-person speaker ID (local, opt-in) | Local ECAPA voiceprint (passive + auto-cluster) keeps voice on the LAN and scopes memory + prompt per person for better context; no raw audio leaves the device |
