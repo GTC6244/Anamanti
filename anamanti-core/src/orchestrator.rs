@@ -1,9 +1,10 @@
 //! The assistant pipeline (Plan.MD Phase 4). Given a device-facing Wyoming
 //! connection, one [`Pipeline::run_turn`] drives a full voice turn:
 //!
-//! 1. **STT** — forward the device's streamed PCM to the downstream Whisper
-//!    service and wait for its `transcript` (server-side VAD end-of-speech), then
-//!    relay that transcript back to the device.
+//! 1. **STT** — forward the device's streamed PCM to the STT engine (downstream
+//!    Wyoming Whisper or in-process whisper.cpp, behind the [`crate::stt::Transcriber`]
+//!    seam), detect end-of-speech with the Core's energy VAD, finalize, then relay
+//!    the `transcript` back to the device.
 //! 2. **Memory + LLM** — apply explicit memory commands ("remember…"/"forget…")
 //!    or auto-infer facts, build memory context, and stream a reply from the
 //!    pluggable [`LlmBackend`].
@@ -34,8 +35,8 @@ use crate::memory::{
 };
 use crate::settings::{Household, HouseholdMember, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
+use crate::stt::{SttEngine, SttEvent, Transcriber, WyomingTranscriber};
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
-use crate::wyoming::stt::SttSession;
 use crate::wyoming::tts::TtsSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
@@ -146,6 +147,11 @@ pub struct Pipeline {
     /// shared with the ambient push. `None` when weather is disabled — the weather
     /// intent then defers to System-2. Set via `with_weather`.
     weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
+    /// STT engine used to transcribe each turn. `None` keeps the historical path:
+    /// dial the downstream Wyoming Whisper server via the per-turn
+    /// [`ServiceConnector`]. `Some` (e.g. the in-process whisper.cpp engine) supplies
+    /// a session directly and the connector's `connect_stt` is never called.
+    stt_engine: Option<Arc<dyn SttEngine>>,
 }
 
 impl Pipeline {
@@ -171,6 +177,7 @@ impl Pipeline {
             turn_timeout,
             follow_up: FollowUpConfig::default(),
             weather: None,
+            stt_engine: None,
         }
     }
 
@@ -230,6 +237,14 @@ impl Pipeline {
     /// with the ambient push). Without it, the weather intent defers to System-2.
     pub fn with_weather(mut self, weather: Option<Arc<dyn crate::weather::WeatherProvider>>) -> Self {
         self.weather = weather;
+        self
+    }
+
+    /// Attach an in-process STT engine (e.g. whisper.cpp). Without this the pipeline
+    /// dials the downstream Wyoming Whisper server via the per-turn
+    /// [`ServiceConnector`] (the historical default).
+    pub fn with_stt_engine(mut self, engine: Arc<dyn SttEngine>) -> Self {
+        self.stt_engine = Some(engine);
         self
     }
 
@@ -324,8 +339,17 @@ impl Pipeline {
         let dump = TurnAudioDump::for_turn(self.audio_dump_dir.as_deref());
 
         // 2. Open the STT stream and pump device PCM into it until the transcript.
-        let stt_conn = connector.connect_stt().await?;
-        let mut stt = SttSession::begin(stt_conn, format).await?;
+        //    The concrete engine sits behind the `Transcriber` seam
+        //    (`plans/python-to-rust-whisper.md`): an attached in-process engine (e.g.
+        //    whisper.cpp) supplies a session directly; otherwise dial the downstream
+        //    Wyoming Whisper server via the connector (the historical default).
+        let mut stt: Box<dyn Transcriber> = match self.stt_engine.as_ref() {
+            Some(engine) => engine.begin(format).await?,
+            None => {
+                let stt_conn = connector.connect_stt().await?;
+                Box::new(WyomingTranscriber::begin(stt_conn, format).await?)
+            }
+        };
         on_event(TurnEvent::Streaming);
 
         let end_silence = Duration::from_millis(runtime.end_silence_ms);
@@ -343,7 +367,7 @@ impl Pipeline {
         let Some((transcript, voiced_pcm)) = self
             .stream_to_transcript(
                 device,
-                &mut stt,
+                stt.as_mut(),
                 end_silence,
                 no_speech_finalize,
                 voice_rms_threshold,
@@ -356,7 +380,7 @@ impl Pipeline {
             let _ = stt.finish().await;
             return Ok(TurnOutcome::Completed);
         };
-        let _ = stt.finish().await; // close the STT audio stream (post server-VAD)
+        let _ = stt.finish().await; // idempotent finalize (VAD already sent audio-stop)
         if let Some(d) = dump.as_ref() {
             d.set_transcript(&transcript);
         }
@@ -431,7 +455,7 @@ impl Pipeline {
     async fn stream_to_transcript(
         &self,
         device: &mut DynConnection,
-        stt: &mut SttSession<crate::wyoming::DynRead, crate::wyoming::DynWrite>,
+        stt: &mut dyn Transcriber,
         end_silence: std::time::Duration,
         no_speech_finalize: std::time::Duration,
         voice_rms_threshold: f64,
@@ -554,8 +578,7 @@ impl Pipeline {
                 sev = stt.read_event() => {
                     deadline = Instant::now() + self.turn_timeout;
                     match sev? {
-                        Some(ev) if ev.is_transcript() => {
-                            let text = ev.transcript_text().unwrap_or_default().to_string();
+                        Some(SttEvent::Transcript(text)) => {
                             // Guard against STT hallucinations on silence. If our energy
                             // VAD never latched `speech_started`, this turn finalized on
                             // the no-speech timeout: everything we forwarded to Whisper
@@ -584,7 +607,7 @@ impl Pipeline {
                             }
                             return Ok(Some((text, std::mem::take(&mut voiced_pcm))));
                         }
-                        Some(_) => {} // voice-started / voice-stopped etc.
+                        Some(SttEvent::Other) => {} // voice-started / voice-stopped etc.
                         None => anyhow::bail!("STT service closed before returning a transcript"),
                     }
                 }

@@ -50,6 +50,15 @@
     "embed_dims": 192
   },
 
+  "stt": {
+    "engine": "wyoming",
+    "model": "base",
+    "model_dir": "models",
+    "model_path": null,
+    "language": "en",
+    "num_threads": 0
+  },
+
   "follow_up": {
     "enabled": true,
     "max_chain": 0,

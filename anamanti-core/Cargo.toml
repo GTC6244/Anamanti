@@ -38,6 +38,23 @@ required-features = ["aec"]
 # See the Phase 0 spike + `src/aec/mod.rs`.
 aec = ["dep:webrtc-audio-processing"]
 
+# `stt-whisper-local` compiles the in-process Whisper STT engine (whisper.cpp via
+# `whisper-rs`), replacing the out-of-process `wyoming-faster-whisper` Python server
+# (see `plans/python-to-rust-whisper.md`). Off by default because it triggers a heavy
+# native build (whisper.cpp/ggml via cmake + a C/C++ toolchain). CPU-only here;
+# CoreML/Metal acceleration are separate whisper-rs features wired in a later stage.
+stt-whisper-local = ["dep:whisper-rs"]
+
+# Acceleration variants, additive over `stt-whisper-local`. `metal` runs whisper.cpp
+# on the Apple GPU — a pure build flag, no extra model assets — and is the
+# recommended accel on the M4. `coreml` runs the encoder on the ANE but requires a
+# separately generated CoreML encoder model (`*-encoder.mlmodelc`), which today is
+# produced by a Python (torch/coremltools) conversion step — re-introducing a Python
+# build dependency this project is otherwise removing — so it is offered but not the
+# default recommendation. See `plans/python-to-rust-whisper.md` (Stage 4).
+stt-whisper-metal = ["stt-whisper-local", "whisper-rs/metal"]
+stt-whisper-coreml = ["stt-whisper-local", "whisper-rs/coreml"]
+
 [dependencies]
 # Embedded HelixDB engine (always compiled). Pinned to the spike-verified commit.
 db = { git = "https://github.com/HelixDB/helix-db.git", package = "db", rev = "6fde5bc8e3ceb7624124ad18d2ef6ef0bc5d60ff" }
@@ -97,6 +114,12 @@ tokio = { version = "1.34", features = [
 webrtc-audio-processing = { version = "2.1", features = [
     "bundled",
 ], optional = true }
+# In-process Whisper STT (feature `stt-whisper-local`). whisper.cpp bindings; builds
+# the vendored whisper.cpp/ggml from source (cmake + C/C++ toolchain). CPU-only:
+# default-features are off so no GPU/accel backend is pulled here.
+whisper-rs = { version = "0.14", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.34", features = ["test-util"] }
+# WAV fixture parsing for the in-process Whisper integration test (pure Rust).
+hound = "3.5"

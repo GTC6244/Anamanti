@@ -167,7 +167,11 @@ adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d
 ```
 
 - Requires: Flutter SDK, Android SDK + NDK, Rust toolchain, `adb`.
-- Mac side: a Wyoming STT server (Whisper/CoreML) and Piper TTS on the LAN.
+- Mac side: Piper TTS on the LAN, plus **STT** — either the external
+  `wyoming-faster-whisper` server (default, `stt.engine=wyoming`) **or** the
+  in-process whisper.cpp engine (`stt.engine=whisper-rs`, built with
+  `--features stt-whisper-local`; no Python STT server). See
+  `plans/python-to-rust-whisper.md`.
 
 ```bash
 # Mac Mini Anamanti Core (the "brain"). Runs on the Mac, not the device.
@@ -297,6 +301,13 @@ export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-t
 PROD="/Volumes/External/DeveloperSupport/Anamanti Core"
 
 # 1. Build the release binary from the branch you want to ship.
+#    Default STT dials the external wyoming-faster-whisper server. To ship the
+#    in-process whisper.cpp engine instead (no Python STT server), add the feature
+#    and pre-fetch the models (see plans/python-to-rust-whisper.md):
+#      anamanti-core/scripts/fetch-whisper-models.sh "$PROD/models"   # base + small
+#      cargo build --release --features stt-whisper-metal --manifest-path anamanti-core/Cargo.toml
+#    then set "stt": { "engine": "whisper-rs", "model": "base", "model_dir": "models" }
+#    in "$PROD/anamanti.json". (Metal = Apple-GPU accel; plain stt-whisper-local = CPU.)
 cargo build --release --manifest-path anamanti-core/Cargo.toml
 
 # 2. Stop the running production copy — the process LISTENING on :10700. Do NOT

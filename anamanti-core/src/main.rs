@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 
-use anamanti_core::config::{Config, MemoryBackendChoice};
+use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind};
 use anamanti_core::discovery::MdnsAdvertiser;
 use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
 use anamanti_core::notify::NotificationService;
@@ -181,6 +181,45 @@ async fn run() -> Result<()> {
         Ok(None) => log::info!("speaker identification: disabled (shared household)"),
         Err(e) => {
             log::error!("speaker ID init failed ({e:#}); continuing with shared household");
+        }
+    }
+
+    // STT engine selection (plans/python-to-rust-whisper.md). Default: the downstream
+    // Wyoming Whisper server dialed via the connector below. `whisper-rs` loads
+    // whisper.cpp in-process and needs the `stt-whisper-local` build feature.
+    match config.stt.engine {
+        SttEngineKind::Wyoming => {
+            log::info!(
+                "STT engine: wyoming (downstream Whisper at {})",
+                config.stt_addr
+            );
+        }
+        SttEngineKind::WhisperLocal => {
+            #[cfg(feature = "stt-whisper-local")]
+            {
+                let model = config.stt.resolved_model_path();
+                let model_str = model.to_string_lossy().into_owned();
+                let engine = anamanti_core::stt::WhisperEngine::open(
+                    &model_str,
+                    config.stt.language.clone(),
+                    config.stt.num_threads as i32,
+                )
+                .with_context(|| format!("loading in-process Whisper model {model_str}"))?;
+                log::info!(
+                    "STT engine: whisper-rs (in-process; model {model_str}, {} threads)",
+                    config.stt.num_threads
+                );
+                pipeline = pipeline
+                    .with_stt_engine(Arc::new(anamanti_core::stt::WhisperSttEngine::new(engine)));
+            }
+            #[cfg(not(feature = "stt-whisper-local"))]
+            {
+                anyhow::bail!(
+                    "config selects stt.engine = whisper-rs, but this binary was built \
+                     without the `stt-whisper-local` feature; rebuild with \
+                     `--features stt-whisper-local`"
+                );
+            }
         }
     }
 
