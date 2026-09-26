@@ -68,7 +68,7 @@ See [`architecture.md`](./plans/architecture.md) for the full design and
 | Wake word | `tract-onnx` running an openWakeWord model |
 | Transport | Wyoming Protocol over `tokio` TCP |
 | Discovery | mDNS / Zeroconf (`_wyoming._tcp`) |
-| Mac services | Wyoming STT (Whisper/CoreML) · LLM · Wyoming TTS (Piper) |
+| Mac services | STT — Whisper via Wyoming **or** in-process whisper.cpp (`stt.engine`) · LLM · Wyoming TTS (Piper) |
 
 ## Repository layout
 
@@ -157,8 +157,10 @@ cargo run --manifest-path anamanti-core/Cargo.toml --release
   that prints a fresh token, default `ant auth print-credentials --access-token`).
   OpenAI is API-key-only (`OPENAI_API_KEY`) — its ChatGPT subscription does not grant
   API access.
-- Whisper and Piper are off-the-shelf Wyoming servers; the Anamanti Core is a
-  client to them. See `anamanti-core/src/config.rs` for all environment variables.
+- Piper (and, by default, Whisper) are off-the-shelf Wyoming servers the Anamanti
+  Core is a client to. STT can instead run **in-process** (whisper.cpp,
+  `stt.engine=whisper-rs`) with no separate server — see
+  `plans/python-to-rust-whisper.md`. See `anamanti-core/src/config.rs` for config.
 - **Multiple displays, one Anamanti Core:** N Echo Shows can share a single
   Anamanti Core — each connection is handled independently and every reply is
   routed back to the display that asked. Memory + settings are one shared
@@ -219,7 +221,7 @@ raised confidence threshold as the interim self-trigger mitigation.
 
 **Phase 4 complete — Mac Mini assistant pipeline.** The new `/mac` Anamanti Core
 (`anamanti_core`) ties the brain together: a Wyoming server to the device
-and a Wyoming client to Whisper (STT, server-side VAD) and Piper (TTS), with a
+and a Wyoming client to Whisper (STT; Core-side energy VAD) and Piper (TTS), with a
 **pluggable LLM** trait (Ollama / Claude / mock) and a **persistent SQLite + FTS5
 memory** store (explicit "remember…"/"forget…" commands plus inferred fact/pref
 extraction) in the middle. It advertises `_wyoming._tcp` over mDNS and streams the

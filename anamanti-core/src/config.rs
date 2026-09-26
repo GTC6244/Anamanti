@@ -134,6 +134,9 @@ pub struct Config {
     pub graphrag: GraphRagConfig,
     /// Per-person speaker identification settings (speaker_id_plan.md).
     pub speaker: SpeakerConfig,
+    /// STT engine selection: the downstream Wyoming Whisper server (`stt_addr`) or
+    /// the in-process whisper.cpp engine (`plans/python-to-rust-whisper.md`).
+    pub stt: SttConfig,
     /// Auto follow-up listening: reopen the mic (no wake word) when a reply is a
     /// question, and feed recent history into that turn's prompt.
     pub follow_up: FollowUpConfig,
@@ -210,6 +213,71 @@ impl Default for SpeakerConfig {
             new_threshold: 0.40,
             min_speech_ms: 1200,
             embed_dims: 192,
+        }
+    }
+}
+
+/// Which STT engine transcribes a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttEngineKind {
+    /// Dial the downstream Wyoming Whisper server at `stt_addr` (historical default).
+    Wyoming,
+    /// In-process whisper.cpp via `whisper-rs` (requires the `stt-whisper-local`
+    /// build feature).
+    WhisperLocal,
+}
+
+impl SttEngineKind {
+    /// Parse the config label. `wyoming` (or `faster-whisper`) → the downstream
+    /// server; `whisper-rs` / `whisper-local` / `local` → in-process.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "wyoming" | "faster-whisper" | "whisper-wyoming" => Some(Self::Wyoming),
+            "whisper-rs" | "whisper-local" | "whisper_local" | "local" => Some(Self::WhisperLocal),
+            _ => None,
+        }
+    }
+}
+
+/// STT engine selection + in-process model settings (`stt` block). See
+/// `plans/python-to-rust-whisper.md`. Note the downstream address lives in the
+/// top-level `stt_addr` (used when `engine = wyoming`).
+#[derive(Debug, Clone)]
+pub struct SttConfig {
+    /// Which engine transcribes (`wyoming` default, or `whisper-rs`).
+    pub engine: SttEngineKind,
+    /// Named model size for the in-process engine: `base` (default) or `small`,
+    /// resolved to `<model_dir>/ggml-<model>.en.bin` unless `model_path` overrides.
+    pub model: String,
+    /// Directory holding the ggml model files (`ggml-base.en.bin`, …).
+    pub model_dir: PathBuf,
+    /// Explicit ggml model file; overrides `model`/`model_dir` when set.
+    pub model_path: Option<PathBuf>,
+    /// Decode language (`Some("en")`); `None` ⇒ auto-detect.
+    pub language: Option<String>,
+    /// Decode thread cap; `0` ⇒ a sensible default from host parallelism.
+    pub num_threads: u32,
+}
+
+impl SttConfig {
+    /// The ggml model file for the in-process engine: `model_path` if set, else
+    /// `<model_dir>/ggml-<model>.en.bin`.
+    pub fn resolved_model_path(&self) -> PathBuf {
+        self.model_path
+            .clone()
+            .unwrap_or_else(|| self.model_dir.join(format!("ggml-{}.en.bin", self.model)))
+    }
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            engine: SttEngineKind::Wyoming,
+            model: "base".to_string(),
+            model_dir: PathBuf::from("models"),
+            model_path: None,
+            language: Some("en".to_string()),
+            num_threads: 0,
         }
     }
 }
@@ -419,6 +487,7 @@ impl Default for Config {
             helix_path: PathBuf::from("anamanti_helix"),
             graphrag: GraphRagConfig::default(),
             speaker: SpeakerConfig::default(),
+            stt: SttConfig::default(),
             follow_up: FollowUpConfig::default(),
             music: MusicConfig::default(),
             weather: WeatherSettings::default(),
@@ -522,6 +591,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub speaker: FileSpeaker,
     #[serde(default)]
+    pub stt: FileStt,
+    #[serde(default)]
     pub follow_up: FileFollowUp,
     #[serde(default)]
     pub music: FileMusic,
@@ -600,6 +671,17 @@ pub struct FileSpeaker {
     pub new_threshold: Option<f32>,
     pub min_speech_ms: Option<u32>,
     pub embed_dims: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileStt {
+    pub engine: Option<String>,
+    pub model: Option<String>,
+    pub model_dir: Option<PathBuf>,
+    pub model_path: Option<PathBuf>,
+    pub language: Option<String>,
+    pub num_threads: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -841,6 +923,27 @@ impl Config {
             embed_dims: fc.speaker.embed_dims.unwrap_or(sd.embed_dims),
         };
 
+        let sttd = SttConfig::default();
+        let stt = SttConfig {
+            engine: match fc.stt.engine.as_deref() {
+                None => sttd.engine,
+                Some(label) => SttEngineKind::from_label(label).with_context(|| {
+                    format!("unknown stt.engine {label:?} (expected `wyoming` or `whisper-rs`)")
+                })?,
+            },
+            model: nonempty(fc.stt.model).unwrap_or(sttd.model),
+            model_dir: fc.stt.model_dir.unwrap_or(sttd.model_dir),
+            model_path: fc.stt.model_path,
+            // An explicit empty `language` means auto-detect (`None`); absent keeps
+            // the default (`Some("en")`).
+            language: match fc.stt.language {
+                None => sttd.language,
+                Some(s) if s.trim().is_empty() => None,
+                Some(s) => Some(s),
+            },
+            num_threads: fc.stt.num_threads.unwrap_or(sttd.num_threads),
+        };
+
         let fud = FollowUpConfig::default();
         let follow_up = FollowUpConfig {
             enabled: fc.follow_up.enabled.unwrap_or(fud.enabled),
@@ -999,6 +1102,7 @@ impl Config {
             helix_path: fc.helix_path.unwrap_or(d.helix_path),
             graphrag,
             speaker,
+            stt,
             follow_up,
             music,
             weather,
@@ -1627,6 +1731,46 @@ mod tests {
         assert_eq!(c.drive.scope.as_deref(), Some(DEFAULT_DRIVE_SCOPE));
         assert!(!c.speaker.enabled);
         assert!(c.music.enabled);
+        // STT defaults to the downstream Wyoming engine.
+        assert_eq!(c.stt.engine, SttEngineKind::Wyoming);
+        assert_eq!(c.stt.model, "base");
+        assert_eq!(c.stt.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn stt_block_selects_in_process_engine() {
+        let c = Config::from_file(parse(
+            r#"{ "stt": { "engine": "whisper-rs", "model": "small",
+                          "model_dir": "/models", "num_threads": 4 } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.stt.engine, SttEngineKind::WhisperLocal);
+        assert_eq!(c.stt.model, "small");
+        assert_eq!(c.stt.num_threads, 4);
+        assert_eq!(
+            c.stt.resolved_model_path(),
+            std::path::PathBuf::from("/models/ggml-small.en.bin")
+        );
+    }
+
+    #[test]
+    fn stt_model_path_overrides_dir_and_name() {
+        let c = Config::from_file(parse(
+            r#"{ "stt": { "model_path": "/opt/x.bin", "language": "" } }"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            c.stt.resolved_model_path(),
+            std::path::PathBuf::from("/opt/x.bin")
+        );
+        // An explicit empty language means auto-detect.
+        assert_eq!(c.stt.language, None);
+    }
+
+    #[test]
+    fn stt_unknown_engine_is_rejected() {
+        let err = Config::from_file(parse(r#"{ "stt": { "engine": "vosk" } }"#)).unwrap_err();
+        assert!(err.to_string().contains("stt.engine"), "{err}");
     }
 
     #[test]
