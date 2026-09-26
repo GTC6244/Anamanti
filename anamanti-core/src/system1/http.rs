@@ -8,7 +8,8 @@
 //! answers to [`Decision::Resolve`] / [`Decision::Defer`] under a strict confidence
 //! floor. It never extracts free-form slots — anything open-ended defers to System-2.
 //!
-//! Wire shapes (from the Laya-Decision README + source):
+//! Wire shapes (verified live against OpenRouter's `POST /api/v1/systemone`, which is
+//! the shared System One contract the local `laya-serve` sidecar also speaks):
 //! ```json
 //! // request
 //! { "model": "typesafe/jev-1.13",              // omitted for laya-serve
@@ -16,11 +17,11 @@
 //!   "questions": {
 //!     "intent": { "type": "choice", "instructions": "...", "criteria": { "<id>": "<desc>" } },
 //!     "needs_full_understanding": { "type": "noul", "instructions": "..." } } }
-//! // response
+//! // response — a `choice` answer carries `choice` + `confidence` + `probabilities`;
+//! // a `noul` answer carries only its `noul` probability (0..1), no confidence field.
 //! { "model": "...", "answers": {
-//!     "intent": { "type": "choice", "choice": "<id>", "probabilities": {..},
-//!                 "confidence": .., "answer_confidence": 0.97 },
-//!     "needs_full_understanding": { "type": "noul", "noul": 0.03, "answer_confidence": .. } },
+//!     "intent": { "type": "choice", "choice": "<id>", "probabilities": {..}, "confidence": 0.97 },
+//!     "needs_full_understanding": { "type": "noul", "noul": 0.03 } },
 //!   "usage": {..} }
 //! ```
 
@@ -191,10 +192,13 @@ pub fn interpret(resp: &Value, intents: &[String], min_confidence: f64) -> Decis
         None => return Decision::Defer,
     };
 
-    // The `other`/open-ended escape hatches: any of them → defer.
-    let nfu = answers.get(NEEDS_FULL);
-    let nfu_p_true = nfu.and_then(|a| a.get("noul")).and_then(Value::as_f64);
-    let nfu_conf = answer_confidence(nfu);
+    // The open-ended escape hatch: a high `needs_full_understanding` noul means the
+    // turn needs System-2. A `noul` answer carries only the probability (0..1) — no
+    // confidence field — so we gate on that probability alone; a missing answer defers.
+    let nfu_p_true = answers
+        .get(NEEDS_FULL)
+        .and_then(|a| a.get("noul"))
+        .and_then(Value::as_f64);
     if nfu_p_true.map(|p| p >= 0.5).unwrap_or(true) {
         return Decision::Defer; // needs System-2 (or the answer was missing)
     }
@@ -210,10 +214,10 @@ pub fn interpret(resp: &Value, intents: &[String], min_confidence: f64) -> Decis
     if label == "other" || !intents.iter().any(|i| i == label) {
         return Decision::Defer;
     }
-    let intent_conf = answer_confidence(Some(intent_ans));
+    let intent_conf = choice_confidence(Some(intent_ans));
 
-    // Strict gate: both answers must clear the floor.
-    if intent_conf >= min_confidence && nfu_conf >= min_confidence {
+    // Strict gate: the chosen intent must clear the floor.
+    if intent_conf >= min_confidence {
         Decision::Resolve(Resolution {
             intent: label.to_string(),
             confidence: intent_conf,
@@ -223,10 +227,13 @@ pub fn interpret(resp: &Value, intents: &[String], min_confidence: f64) -> Decis
     }
 }
 
-/// Read a single answer's calibrated `answer_confidence` (0.0 when absent).
-fn answer_confidence(answer: Option<&Value>) -> f64 {
+/// Read a `choice`/`score` answer's calibrated `confidence` (0.0 when absent). The
+/// OpenRouter Jev `/v1/systemone` response names this field `confidence`; a local
+/// `laya-serve` build that instead emits `answer_confidence` is also accepted. `noul`
+/// answers have no confidence field and are gated on their probability instead.
+fn choice_confidence(answer: Option<&Value>) -> f64 {
     answer
-        .and_then(|a| a.get("answer_confidence"))
+        .and_then(|a| a.get("confidence").or_else(|| a.get("answer_confidence")))
         .and_then(Value::as_f64)
         .unwrap_or(0.0)
 }
@@ -256,17 +263,18 @@ mod tests {
         assert!(no_model.get("model").is_none());
     }
 
-    fn resp(intent: &str, intent_conf: f64, nfu_p: f64, nfu_conf: f64) -> Value {
+    /// A System One response in the real OpenRouter/laya-serve shape: the `choice`
+    /// answer carries `confidence`; the `noul` answer carries only its probability.
+    fn resp(intent: &str, intent_conf: f64, nfu_p: f64) -> Value {
         json!({
-            "model": "laya",
+            "model": "typesafe/jev-1.13",
             "answers": {
                 "intent": {
                     "type": "choice", "choice": intent,
                     "probabilities": {}, "confidence": intent_conf,
-                    "answer_confidence": intent_conf,
                 },
                 "needs_full_understanding": {
-                    "type": "noul", "noul": nfu_p, "answer_confidence": nfu_conf,
+                    "type": "noul", "noul": nfu_p,
                 },
             },
             "usage": {}
@@ -275,7 +283,7 @@ mod tests {
 
     #[test]
     fn interpret_resolves_confident_closed_intent() {
-        let d = interpret(&resp("weather", 0.97, 0.02, 0.98), &intents(), 0.85);
+        let d = interpret(&resp("weather", 0.97, 0.02), &intents(), 0.85);
         match d {
             Decision::Resolve(r) => {
                 assert_eq!(r.intent, "weather");
@@ -288,7 +296,7 @@ mod tests {
     #[test]
     fn interpret_defers_on_low_confidence() {
         assert_eq!(
-            interpret(&resp("weather", 0.60, 0.02, 0.98), &intents(), 0.85),
+            interpret(&resp("weather", 0.60, 0.02), &intents(), 0.85),
             Decision::Defer
         );
     }
@@ -296,7 +304,7 @@ mod tests {
     #[test]
     fn interpret_defers_when_needs_full_understanding() {
         assert_eq!(
-            interpret(&resp("weather", 0.97, 0.90, 0.95), &intents(), 0.85),
+            interpret(&resp("weather", 0.97, 0.90), &intents(), 0.85),
             Decision::Defer
         );
     }
@@ -304,13 +312,30 @@ mod tests {
     #[test]
     fn interpret_defers_on_other_or_unknown_intent() {
         assert_eq!(
-            interpret(&resp("other", 0.99, 0.01, 0.99), &intents(), 0.85),
+            interpret(&resp("other", 0.99, 0.01), &intents(), 0.85),
             Decision::Defer
         );
         assert_eq!(
-            interpret(&resp("philosophy", 0.99, 0.01, 0.99), &intents(), 0.85),
+            interpret(&resp("philosophy", 0.99, 0.01), &intents(), 0.85),
             Decision::Defer
         );
+    }
+
+    #[test]
+    fn interpret_accepts_legacy_answer_confidence_from_laya_serve() {
+        // A laya-serve build that emits `answer_confidence` instead of `confidence`
+        // on the choice answer still resolves.
+        let legacy = json!({
+            "answers": {
+                "intent": { "type": "choice", "choice": "weather",
+                            "probabilities": {}, "answer_confidence": 0.96 },
+                "needs_full_understanding": { "type": "noul", "noul": 0.02 },
+            }
+        });
+        assert!(matches!(
+            interpret(&legacy, &intents(), 0.85),
+            Decision::Resolve(_)
+        ));
     }
 
     #[test]
