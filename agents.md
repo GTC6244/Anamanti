@@ -200,6 +200,9 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     UI: Config tab)
 #   MAPBOX_TOKEN (or MAPBOX_ACCESS_TOKEN) (the directions_lookup provider token;
 #     UI: Tools tab → /tools)
+#   VISUALCROSSING_API_KEY               (the weather provider key when weather.provider=
+#     visualcrossing, the default; UI: Tools tab → /tools. Absent ⇒ weather falls back to
+#     keyless Open-Meteo)
 #   ANTHROPIC_OAUTH_TOKEN                (Claude subscription token from `claude setup-token`;
 #     UI: Config tab when Anthropic auth = subscription)
 #   OPENROUTER_API_KEY                   (the System-1 `jev` decision backend on OpenRouter;
@@ -236,6 +239,11 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised)
 #   directions.provider="mapbox" (+ the MAPBOX_TOKEN secret, set via env or the Tools
 #     tab) → the directions_lookup tool
+#   weather{enabled,provider,refresh_interval_secs} → the weather_lookup tool + ambient
+#     push. provider="visualcrossing" (default; + the VISUALCROSSING_API_KEY secret, set
+#     via env or the Tools tab) or "openmeteo" (keyless). Provider + key are runtime-
+#     settable on the Tools tab (persisted, rebuilds the tool + retargets the push live);
+#     visualcrossing with no key falls back to keyless Open-Meteo
 #   drive{client_id,client_secret,folder_ids,scope} (Google Drive photo slideshow OAuth
 #     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
 #   spotify{client_id,client_secret,refresh_token,device_name} (spotify_control tool;
@@ -246,6 +254,10 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     Voice & Integrations, enter it on the config page → Household tab → "Shopping list
 #     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)
+#   tool_cache{"<tool>": <seconds>, …} — per-tool response-cache TTLs, a flat map keyed by
+#     tool name, overlaid on built-in defaults; `0` disables a tool's cache. Generic
+#     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults
+#     to 3600s (60 min). Read once at boot (not runtime-settable). Mutating tools uncached.
 #
 # home_location/weather_units, drive, spotify, cadora, the tts_voice, and the llm engine/
 # backend/model/web_search/search_provider fields only SEED the live settings at boot:

@@ -994,6 +994,7 @@ async fn follow_up_turn_includes_recent_history_in_the_prompt() {
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     })
     .unwrap();
 
@@ -1058,6 +1059,7 @@ async fn ordinary_turn_carries_no_history() {
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     })
     .unwrap();
 
@@ -1147,7 +1149,11 @@ async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
         async fn fetch(&self, location: &str, imperial: bool) -> Result<WeatherReport> {
             Ok(WeatherReport {
                 location_label: location.to_string(),
-                units: if imperial { "imperial".into() } else { "metric".into() },
+                units: if imperial {
+                    "imperial".into()
+                } else {
+                    "metric".into()
+                },
                 current: CurrentConditions {
                     temp: 18,
                     feels_like: 17,

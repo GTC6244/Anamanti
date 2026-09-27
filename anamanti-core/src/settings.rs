@@ -388,6 +388,17 @@ pub struct DirectionsUpdate {
     pub mapbox_token: Option<Option<String>>,
 }
 
+/// A requested change to the weather tool config. `provider` selects the forecast
+/// backend (`visualcrossing`/`openmeteo`); `None` leaves it unchanged. `visualcrossing_key`
+/// is tri-state: `None` = leave unchanged; `Some(None)`/`Some(Some(""))` = clear;
+/// `Some(Some(v))` = set. Applied by [`SharedSettings::apply_weather_tool`], which rebuilds
+/// the `weather_lookup` tool and retargets the ambient push live.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WeatherToolUpdate {
+    pub provider: Option<String>,
+    pub visualcrossing_key: Option<Option<String>>,
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -441,6 +452,14 @@ pub struct PersistedSettings {
     /// files.
     #[serde(default)]
     pub cadora: CadoraConfig,
+    /// Runtime-set weather provider label (`visualcrossing`/`openmeteo`). Defaulted
+    /// (absent) for older files, which then fall back to the `weather.provider` seed.
+    #[serde(default)]
+    pub weather_provider: Option<String>,
+    /// Runtime-set Visual Crossing API key. Defaulted (absent) for older files, which
+    /// then fall back to the `VISUALCROSSING_API_KEY` env seed. Plaintext (0600 file).
+    #[serde(default)]
+    pub visualcrossing_key: Option<String>,
     /// Selected System-1 backend. Defaults to **empty** (not "none") for older files, so
     /// an old persisted file can't clobber a config-file `system1.backend` seed — the
     /// overlay only applies when this is non-empty (a save always writes a real label).
@@ -570,12 +589,19 @@ pub struct LlmFactory {
     /// `weather_units` at boot). Kept alongside `directions_provider` for rebuilds.
     pub directions_imperial: bool,
     /// The forecast provider for the `weather_lookup` tool, or `None` when weather is
-    /// disabled. Keyless (Open-Meteo), so present whenever `weather.enabled`; shared
-    /// into every rebuilt backend. The same provider also feeds the ambient push.
+    /// disabled. Built from the live provider label ([`RuntimeSettings::weather_provider`])
+    /// and Visual Crossing key ([`RuntimeSettings::visualcrossing_key`]), refreshed on
+    /// every (re)build — like `directions` — so a provider/key change on the config page
+    /// takes effect live. Shared into every rebuilt backend; the ambient push builds its
+    /// own instance from the same live settings.
     pub weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
     /// Whether weather temperatures are reported in imperial units (°F), from the
     /// household `weather_units` at boot. Mirrors `directions_imperial`.
     pub weather_imperial: bool,
+    /// Whether the weather feature is enabled (`weather.enabled`). Kept so `weather` can
+    /// be rebuilt from a new runtime provider/key without re-reading config; `false`
+    /// forces the provider to `None` regardless of the label/key.
+    pub weather_enabled: bool,
 }
 
 impl LlmFactory {
@@ -768,6 +794,14 @@ pub struct RuntimeSettings {
     /// (via [`CadoraConfig::controller`]) so the `shopping_list_add` tool is
     /// advertised/withdrawn live.
     pub cadora: CadoraConfig,
+    /// The selected weather forecast provider label (`visualcrossing` / `openmeteo`).
+    /// Runtime-settable (config page Tools tab); seeded from `weather.provider` at boot.
+    /// A change rebuilds the `weather_lookup` tool + retargets the ambient push live.
+    pub weather_provider: String,
+    /// Live Visual Crossing API key for the weather provider. Runtime-settable (config
+    /// page Tools tab); seeded from `VISUALCROSSING_API_KEY` at boot. `None` ⇒ the
+    /// Visual Crossing provider falls back to keyless Open-Meteo.
+    pub visualcrossing_key: Option<String>,
     /// The live System-1 fast-decision selection (plans/system1-fast-decisions.md), read
     /// from the per-turn snapshot so a config-page swap takes effect between turns.
     /// Bundled into one field so the widely-constructed `RuntimeSettings` only gains one.
@@ -953,6 +987,8 @@ impl SharedSettings {
             household: s.household.clone(),
             spotify: s.spotify.clone(),
             cadora: s.cadora.clone(),
+            weather_provider: Some(s.weather_provider.clone()),
+            visualcrossing_key: s.visualcrossing_key.clone(),
             system1_backend: s.system1.backend.clone(),
             system1_base_url: s.system1.base_url.clone(),
             system1_model: s.system1.model.clone(),
@@ -988,6 +1024,7 @@ impl SharedSettings {
             directions_imperial: false,
             weather: None,
             weather_imperial: false,
+            weather_enabled: false,
         };
         Self::new(
             factory,
@@ -1011,6 +1048,8 @@ impl SharedSettings {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
         )
@@ -1117,6 +1156,13 @@ impl SharedSettings {
                 &factory.directions_provider,
                 current.mapbox_token.as_deref(),
                 factory.directions_imperial,
+            );
+            // Same for the weather tool: rebuild it from the live provider label + Visual
+            // Crossing key so a normal settings change never drops `weather_lookup`.
+            factory.weather = crate::weather::from_config(
+                factory.weather_enabled,
+                &current.weather_provider,
+                current.visualcrossing_key.as_deref(),
             );
             (
                 Some(factory.build(
@@ -1294,7 +1340,10 @@ impl SharedSettings {
             let current = self.inner.read().unwrap();
             let s1 = &current.system1;
             let backend = update.backend.clone().unwrap_or_else(|| s1.backend.clone());
-            let base_url = update.base_url.clone().unwrap_or_else(|| s1.base_url.clone());
+            let base_url = update
+                .base_url
+                .clone()
+                .unwrap_or_else(|| s1.base_url.clone());
             let model = update.model.clone().unwrap_or_else(|| s1.model.clone());
             let min_conf = update
                 .min_confidence
@@ -1429,6 +1478,17 @@ impl SharedSettings {
         factory.spotify = target.controller();
         // Keep the Cadora shopping-list tool live across this rebuild.
         factory.cadora = current.cadora.controller();
+        // Keep the directions + weather tools live across this rebuild.
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1491,6 +1551,17 @@ impl SharedSettings {
         factory.openai_api_key = current.openai_api_key.clone();
         factory.spotify = current.spotify.controller();
         factory.cadora = target.controller();
+        // Keep the directions + weather tools live across this rebuild.
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1558,6 +1629,12 @@ impl SharedSettings {
             target_token.as_deref(),
             factory.directions_imperial,
         );
+        // Keep the weather tool live across this rebuild.
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1589,6 +1666,111 @@ impl SharedSettings {
         }
         set
     }
+
+    /// The live weather provider label (`visualcrossing`/`openmeteo`). Read by the
+    /// config-page Tools tab status endpoint.
+    pub fn weather_provider_label(&self) -> String {
+        self.inner.read().unwrap().weather_provider.clone()
+    }
+
+    /// Whether a Visual Crossing API key is set (never the value). Read by the config-page
+    /// Tools tab status endpoint.
+    pub fn visualcrossing_key_set(&self) -> bool {
+        self.inner
+            .read()
+            .unwrap()
+            .visualcrossing_key
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Whether the weather feature is enabled at all (`weather.enabled`). When `false`
+    /// the tool + ambient push are dormant regardless of the provider/key.
+    pub fn weather_enabled(&self) -> bool {
+        self.factory.weather_enabled
+    }
+
+    /// Build a weather provider instance from the *current* live provider label + Visual
+    /// Crossing key. Used by the ambient push each tick so a provider/key change on the
+    /// config page retargets the push without a restart. `None` when weather is disabled.
+    pub fn current_weather_provider(&self) -> Option<Arc<dyn crate::weather::WeatherProvider>> {
+        let w = self.inner.read().unwrap();
+        crate::weather::from_config(
+            self.factory.weather_enabled,
+            &w.weather_provider,
+            w.visualcrossing_key.as_deref(),
+        )
+    }
+
+    /// Apply a weather-tool config change (provider label and/or Visual Crossing key),
+    /// rebuild the LLM so `weather_lookup` reflects the new provider, and persist
+    /// (best-effort, 0600). An empty key is treated as a clear. Like
+    /// [`Self::apply_directions`], the rebuild is best-effort: on failure the new
+    /// provider/key is still stored, so it takes effect on the next successful rebuild or
+    /// restart. The ambient push picks up the change on its next tick via
+    /// [`Self::current_weather_provider`]. Returns `(provider_label, visualcrossing_key_set)`.
+    pub fn apply_weather_tool(&self, update: &WeatherToolUpdate) -> (String, bool) {
+        let current = self.inner.read().unwrap().clone();
+        let target_provider = update
+            .provider
+            .as_ref()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .unwrap_or(current.weather_provider.clone());
+        let target_key = match &update.visualcrossing_key {
+            None => current.visualcrossing_key.clone(),
+            Some(k) => k.clone().filter(|s| !s.is_empty()),
+        };
+
+        // Rebuild the backend so the tool reflects the new provider/key. Build before
+        // taking the write lock; on failure, fall through and still store the change.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.cadora = current.cadora.controller();
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &target_provider,
+            target_key.as_deref(),
+        );
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("weather: applied provider/key but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.weather_provider = target_provider.clone();
+        w.visualcrossing_key = target_key.clone();
+        let key_set = target_key.as_deref().is_some_and(|s| !s.is_empty());
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        (target_provider, key_set)
+    }
 }
 
 #[cfg(test)]
@@ -1614,6 +1796,7 @@ mod tests {
             directions_imperial: false,
             weather: None,
             weather_imperial: false,
+            weather_enabled: false,
         }
     }
 
@@ -1655,6 +1838,8 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
         )
@@ -1782,6 +1967,8 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -1933,6 +2120,8 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2073,6 +2262,8 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2143,6 +2334,8 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2221,6 +2414,8 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2290,6 +2485,8 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2313,5 +2510,56 @@ mod tests {
         let p = load_persisted(&path).expect("settings file written");
         assert_eq!(p.anthropic_oauth_token.as_deref(), Some("oauth-xyz"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_weather_tool_switches_provider_and_key() {
+        let mut factory = factory_with_key(None);
+        factory.weather_enabled = true;
+        let s = shared(factory);
+        // Seed defaults: Visual Crossing selected, no key yet.
+        assert_eq!(s.weather_provider_label(), "visualcrossing");
+        assert!(!s.visualcrossing_key_set());
+        assert!(s.weather_enabled());
+
+        // Set a Visual Crossing key.
+        let (prov, key_set) = s.apply_weather_tool(&WeatherToolUpdate {
+            provider: None,
+            visualcrossing_key: Some(Some("vc-key".into())),
+        });
+        assert_eq!(prov, "visualcrossing");
+        assert!(key_set);
+        assert!(s.visualcrossing_key_set());
+        assert!(s.current_weather_provider().is_some());
+
+        // Switch to Open-Meteo (case-insensitive, trimmed); the key is retained.
+        let (prov, _) = s.apply_weather_tool(&WeatherToolUpdate {
+            provider: Some("  OpenMeteo ".into()),
+            visualcrossing_key: None,
+        });
+        assert_eq!(prov, "openmeteo");
+        assert!(s.visualcrossing_key_set());
+
+        // Clear the key.
+        let (_, key_set) = s.apply_weather_tool(&WeatherToolUpdate {
+            provider: None,
+            visualcrossing_key: Some(None),
+        });
+        assert!(!key_set);
+        assert!(!s.visualcrossing_key_set());
+    }
+
+    #[test]
+    fn disabled_weather_never_builds_a_push_provider() {
+        let mut factory = factory_with_key(None);
+        factory.weather_enabled = false;
+        let s = shared(factory);
+        // Even with a provider/key set, a disabled feature yields no push provider.
+        s.apply_weather_tool(&WeatherToolUpdate {
+            provider: Some("visualcrossing".into()),
+            visualcrossing_key: Some(Some("k".into())),
+        });
+        assert!(!s.weather_enabled());
+        assert!(s.current_weather_provider().is_none());
     }
 }

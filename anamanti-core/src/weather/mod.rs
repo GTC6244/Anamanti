@@ -4,13 +4,21 @@
 //! row) when the user asks, and a small icon + temperature beside the idle clock kept
 //! fresh by a periodic background push (see [`WeatherService`]).
 //!
-//! The data comes from **Open-Meteo** — a keyless, structured forecast API — plus its
-//! free geocoding API to resolve the household `home_location` string to coordinates.
-//! WMO weather codes ride through to the device, which maps them to bundled icons.
+//! The data comes from one of two backends behind the [`WeatherProvider`] trait, chosen
+//! by `weather.provider` (see [`from_config`]):
+//! - **Visual Crossing** ([`VisualCrossingWeather`], the default) — its Timeline API
+//!   resolves a place *and* returns current conditions + the 7-day forecast in one keyed
+//!   request. Needs the `VISUALCROSSING_API_KEY` secret.
+//! - **Open-Meteo** ([`OpenMeteoWeather`]) — a keyless, structured forecast API plus its
+//!   free geocoding API to resolve the household `home_location` to coordinates. Also the
+//!   automatic fallback when the Visual Crossing key is absent.
 //!
-//! The provider is abstracted behind the [`WeatherProvider`] trait so the tool and the
-//! periodic push are testable offline (fixture JSON, no network), mirroring how
-//! [`crate::directions::DirectionsProvider`] backs the directions tool. Temperatures
+//! Either way WMO weather codes ride through to the device, which maps them to bundled
+//! icons (Visual Crossing's text icons are translated to WMO codes in [`vc_icon_to_wmo`]).
+//!
+//! The trait keeps the tool and the periodic push testable offline (fixture JSON, no
+//! network), mirroring how [`crate::directions::DirectionsProvider`] backs the directions
+//! tool. Temperatures
 //! and probabilities are stored as whole integers so [`WeatherReport`] is `Eq` (it
 //! rides inside [`crate::llm::DeviceAction`]) and marshals trivially to the device.
 
@@ -25,6 +33,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use url::Url;
 
 /// Current conditions plus a 7-day daily forecast for one place. All temperatures are
 /// whole degrees in `units`; `precip_prob` is a whole percent. Plain integers/strings
@@ -243,6 +252,191 @@ impl WeatherProvider for OpenMeteoWeather {
     }
 }
 
+/// A [`WeatherProvider`] backed by the [Visual Crossing Timeline API]. Unlike Open-Meteo
+/// this resolves a free-text (or full postal) location *and* returns current conditions +
+/// the daily forecast in a single keyed request — no separate geocoding step. Visual
+/// Crossing's text `icon`s are mapped back to WMO codes ([`vc_icon_to_wmo`]) so the device
+/// renders the same bundled icon set regardless of which provider produced the report.
+///
+/// The API key is a **secret** (seeded from `VISUALCROSSING_API_KEY`); it is passed in at
+/// construction rather than read from the environment here.
+///
+/// [Visual Crossing Timeline API]: https://www.visualcrossing.com/resources/documentation/weather-api/timeline-weather-api/
+pub struct VisualCrossingWeather {
+    client: reqwest::Client,
+    base: String,
+    api_key: String,
+}
+
+impl VisualCrossingWeather {
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self::with_base_url(
+            "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline",
+            api_key,
+        )
+    }
+
+    /// Point the Timeline client at a specific API root (for tests).
+    pub fn with_base_url(base: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(StdDuration::from_secs(10))
+            .user_agent("anamanti-core/0.1 (weather)")
+            .build()
+            .unwrap_or_default();
+        Self {
+            client,
+            base: base.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
+        }
+    }
+
+    /// Build the Timeline request URL: `{base}/{location}` (the location is a URL-encoded
+    /// path segment) with the unit group, key, and the `current,days` include list.
+    fn request_url(&self, location: &str, imperial: bool) -> Result<Url> {
+        let mut url = Url::parse(&self.base).context("parsing Visual Crossing base URL")?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Visual Crossing base URL cannot be a base"))?
+            .push(location);
+        url.query_pairs_mut()
+            .append_pair("unitGroup", if imperial { "us" } else { "metric" })
+            .append_pair("key", &self.api_key)
+            .append_pair("include", "current,days")
+            .append_pair("iconSet", "icons2")
+            .append_pair(
+                "elements",
+                "datetime,tempmax,tempmin,temp,feelslike,precipprob,icon,conditions",
+            );
+        Ok(url)
+    }
+}
+
+#[async_trait]
+impl WeatherProvider for VisualCrossingWeather {
+    async fn fetch(&self, location: &str, imperial: bool) -> Result<WeatherReport> {
+        let location = location.trim();
+        anyhow::ensure!(!location.is_empty(), "no home location is set");
+        let url = self.request_url(location, imperial)?;
+        let value: Value = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("GET Visual Crossing timeline")?
+            .error_for_status()
+            .context("Visual Crossing returned an error status")?
+            .json()
+            .await
+            .context("parsing Visual Crossing timeline JSON")?;
+
+        Ok(report_from_visualcrossing(&value, location, imperial))
+    }
+}
+
+/// Map a Visual Crossing timeline JSON body into a [`WeatherReport`]. Missing fields
+/// degrade gracefully (zeros/empties, WMO code 0) rather than failing the whole lookup —
+/// matching [`report_from_forecast`]'s contract for Open-Meteo.
+fn report_from_visualcrossing(value: &Value, query: &str, imperial: bool) -> WeatherReport {
+    let label = value
+        .get("resolvedAddress")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(query)
+        .to_string();
+
+    let daily = vc_daily_from(value.get("days"));
+    let (today_high, today_low) = daily.first().map(|d| (d.high, d.low)).unwrap_or((0, 0));
+
+    let cc = value.get("currentConditions");
+    let icon = cc
+        .and_then(|c| c.get("icon"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let code = vc_icon_to_wmo(icon);
+    let current = CurrentConditions {
+        temp: round_temp(cc.and_then(|c| c.get("temp"))),
+        feels_like: round_temp(cc.and_then(|c| c.get("feelslike"))),
+        weather_code: code,
+        is_day: vc_icon_is_day(icon),
+        high: today_high,
+        low: today_low,
+        description: weather_description(code).to_string(),
+    };
+
+    WeatherReport {
+        location_label: label,
+        units: if imperial { "imperial" } else { "metric" }.to_string(),
+        current,
+        daily,
+    }
+}
+
+/// Build the daily forecast list from Visual Crossing's `days` array (one object per day,
+/// unlike Open-Meteo's parallel arrays).
+fn vc_daily_from(days: Option<&Value>) -> Vec<DailyForecast> {
+    let Some(days) = days.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    days.iter()
+        .map(|day| {
+            let date = day
+                .get("datetime")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let icon = day.get("icon").and_then(Value::as_str).unwrap_or("");
+            DailyForecast {
+                weekday: weekday_label(&date),
+                date,
+                weather_code: vc_icon_to_wmo(icon),
+                high: round_temp(day.get("tempmax")),
+                low: round_temp(day.get("tempmin")),
+                precip_prob: day
+                    .get("precipprob")
+                    .and_then(Value::as_f64)
+                    .map(|p| p.round() as i32)
+                    .unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// Whether a Visual Crossing icon string denotes daytime. VC encodes day/night in the
+/// icon suffix (`clear-day` / `clear-night`); icons with no suffix are treated as day.
+fn vc_icon_is_day(icon: &str) -> bool {
+    !icon.ends_with("-night")
+}
+
+/// Map a Visual Crossing `icon` string to the nearest WMO weather code, so the device's
+/// WMO→icon table ([`weather_description`] + the Flutter `weather_icons.dart`) renders VC
+/// reports identically to Open-Meteo ones. The full [icons2 set] is covered; anything
+/// unrecognized falls back by keyword, then to `0` (clear).
+///
+/// [icons2 set]: https://www.visualcrossing.com/resources/documentation/weather-api/defining-icons-in-the-weather-api/
+fn vc_icon_to_wmo(icon: &str) -> i32 {
+    match icon {
+        "clear-day" | "clear-night" => 0,
+        "partly-cloudy-day" | "partly-cloudy-night" => 2,
+        "cloudy" => 3,
+        "fog" => 45,
+        "wind" => 1,
+        "rain" => 63,
+        "showers-day" | "showers-night" => 80,
+        "thunder-rain" | "thunder-showers-day" | "thunder-showers-night" => 95,
+        "snow" => 73,
+        "snow-showers-day" | "snow-showers-night" => 85,
+        "sleet" => 66,
+        "hail" => 96,
+        "rain-snow" | "rain-snow-showers-day" | "rain-snow-showers-night" => 66,
+        // Unknown icon: best-effort by keyword before giving up on "clear".
+        other if other.contains("thunder") => 95,
+        other if other.contains("snow") || other.contains("sleet") => 73,
+        other if other.contains("rain") || other.contains("shower") => 63,
+        other if other.contains("cloud") => 3,
+        other if other.contains("fog") => 45,
+        _ => 0,
+    }
+}
+
 /// Build a readable place label from a geocoding result: `name`, plus `admin1`
 /// (state/region) when it adds information. Falls back to the query.
 fn geocode_label(result: &Value, query: &str) -> String {
@@ -378,15 +572,118 @@ pub fn weather_description(code: i32) -> &'static str {
     }
 }
 
-/// Build the Open-Meteo weather provider when weather is enabled. Keyless, so this is
-/// `Some` whenever `enabled` — the tool/push are still gated on a home location being
-/// set (an empty location makes [`WeatherProvider::fetch`] fail gracefully).
-pub fn from_config(enabled: bool) -> Option<Arc<dyn WeatherProvider>> {
+/// Build the configured weather provider when weather is enabled, or `None` when it is
+/// disabled. When enabled the result is always `Some` — the tool/push are still gated on
+/// a home location being set (an empty location makes [`WeatherProvider::fetch`] fail
+/// gracefully).
+///
+/// `provider` selects the backend (`weather.provider`):
+/// - `visualcrossing` (default; also the empty/unset value) — the [`VisualCrossingWeather`]
+///   Timeline API, using `api_key` (seeded from the `VISUALCROSSING_API_KEY` secret). If
+///   that key is missing it falls back to keyless Open-Meteo so weather still works.
+/// - `openmeteo` — the keyless [`OpenMeteoWeather`] backend.
+/// - anything else — a warning, then the Open-Meteo fallback.
+pub fn from_config(
+    enabled: bool,
+    provider: &str,
+    api_key: Option<&str>,
+) -> Option<Arc<dyn WeatherProvider>> {
     if !enabled {
         return None;
     }
-    log::info!("weather enabled (Open-Meteo; keyless forecast + geocoding)");
-    Some(Arc::new(OpenMeteoWeather::new()))
+    let key = api_key.map(str::trim).filter(|s| !s.is_empty());
+    let provider = match provider.trim().to_lowercase().as_str() {
+        "openmeteo" | "open-meteo" | "open_meteo" => {
+            log::info!("weather enabled (Open-Meteo; keyless forecast + geocoding)");
+            Arc::new(OpenMeteoWeather::new()) as Arc<dyn WeatherProvider>
+        }
+        "" | "visualcrossing" | "visual-crossing" | "visual_crossing" => match key {
+            Some(key) => {
+                log::info!("weather enabled (Visual Crossing Timeline API)");
+                Arc::new(VisualCrossingWeather::new(key)) as Arc<dyn WeatherProvider>
+            }
+            None => {
+                log::warn!(
+                    "weather.provider=visualcrossing but VISUALCROSSING_API_KEY is unset; \
+                     falling back to keyless Open-Meteo"
+                );
+                Arc::new(OpenMeteoWeather::new()) as Arc<dyn WeatherProvider>
+            }
+        },
+        other => {
+            log::warn!(
+                "weather.provider='{other}' is not supported (use 'visualcrossing' or \
+                 'openmeteo'); falling back to keyless Open-Meteo"
+            );
+            Arc::new(OpenMeteoWeather::new()) as Arc<dyn WeatherProvider>
+        }
+    };
+    // Wrap every provider in the shared response cache. `from_config` is the single
+    // constructor for weather providers (the System-1 fast path, the `weather_lookup`
+    // LLM tool, and the ambient push all build through it), and the cache is process-wide,
+    // so a repeated forecast for the same place+units inside the TTL is served locally
+    // regardless of which caller asks — turning a cold ~1.3 s fetch into a warm lookup.
+    // The TTL is per-tool and configurable (`tool_cache.weather_lookup`, default 60 min).
+    Some(
+        Arc::new(CachingWeatherProvider::new(provider, weather_cache()))
+            as Arc<dyn WeatherProvider>,
+    )
+}
+
+/// The logical tool name weather caches under — its key in the `tool_cache` TTL config
+/// and in the shared [`ToolCache`](crate::cache::ToolCache) key space.
+pub const WEATHER_TOOL: &str = "weather_lookup";
+
+/// The process-wide weather response cache, shared across every provider built by
+/// [`from_config`]. Lazily created on first use.
+fn weather_cache() -> Arc<crate::cache::ToolCache> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Arc<crate::cache::ToolCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Arc::new(crate::cache::ToolCache::new()))
+        .clone()
+}
+
+/// A [`WeatherProvider`] decorator that serves a repeated `(location, imperial)` fetch
+/// from a shared [`ToolCache`](crate::cache::ToolCache) within its configured TTL,
+/// delegating to the wrapped provider on a miss and caching the result. The TTL comes
+/// from `tool_cache.weather_lookup` (default 60 min); `0` turns caching off. Weather is a
+/// pure lookup of its arguments for that window, so this is safe; a miss behaves exactly
+/// like the inner provider (including its Open-Meteo fallback and error paths — errors
+/// are never cached).
+struct CachingWeatherProvider {
+    inner: Arc<dyn WeatherProvider>,
+    cache: Arc<crate::cache::ToolCache>,
+}
+
+impl CachingWeatherProvider {
+    fn new(inner: Arc<dyn WeatherProvider>, cache: Arc<crate::cache::ToolCache>) -> Self {
+        Self { inner, cache }
+    }
+}
+
+#[async_trait]
+impl WeatherProvider for CachingWeatherProvider {
+    async fn fetch(&self, location: &str, imperial: bool) -> Result<WeatherReport> {
+        // Per-tool TTL from the `tool_cache` config (0 ⇒ caching disabled for weather).
+        let ttl = crate::cache::config().ttl(WEATHER_TOOL);
+        if ttl.is_zero() {
+            return self.inner.fetch(location, imperial).await;
+        }
+        // Key on the outgoing call data: the resolved place + units.
+        let key = crate::cache::ToolCache::key(WEATHER_TOOL, &(location, imperial));
+        if let Some(key) = &key {
+            if let Some(hit) = self.cache.get_as::<WeatherReport>(key) {
+                log::info!("weather cache hit for {location:?} (imperial={imperial})");
+                return Ok(hit);
+            }
+        }
+        let report = self.inner.fetch(location, imperial).await?;
+        if let Some(key) = key {
+            self.cache.put_as(key, &report, ttl);
+        }
+        Ok(report)
+    }
 }
 
 /// A short spoken confirmation for the model to relay once the forecast is on screen.
@@ -541,5 +838,170 @@ mod tests {
     async fn empty_location_is_a_graceful_error() {
         let provider = OpenMeteoWeather::new();
         assert!(provider.fetch("   ", true).await.is_err());
+    }
+
+    // ---- Visual Crossing --------------------------------------------------------------
+
+    const VC_TIMELINE: &str = r#"{
+        "resolvedAddress":"Austin, TX, United States",
+        "currentConditions":{"temp":72.4,"feelslike":70.1,"icon":"partly-cloudy-night","conditions":"Partially cloudy"},
+        "days":[
+            {"datetime":"2026-09-25","tempmax":80.2,"tempmin":60.1,"precipprob":10,"icon":"partly-cloudy-day","conditions":"Partially cloudy"},
+            {"datetime":"2026-09-26","tempmax":78.9,"tempmin":59.4,"precipprob":20,"icon":"cloudy"},
+            {"datetime":"2026-09-27","tempmax":75.1,"tempmin":58.0,"precipprob":80,"icon":"rain"},
+            {"datetime":"2026-09-28","tempmax":70.0,"tempmin":55.6,"precipprob":60,"icon":"showers-day"},
+            {"datetime":"2026-09-29","tempmax":82.4,"tempmin":61.2,"precipprob":0,"icon":"clear-day"},
+            {"datetime":"2026-09-30","tempmax":83.8,"tempmin":62.0,"precipprob":5,"icon":"wind"},
+            {"datetime":"2026-10-01","tempmax":79.0,"tempmin":60.5,"precipprob":90,"icon":"thunder-showers-day"}
+        ]
+    }"#;
+
+    #[test]
+    fn vc_icon_mapping_covers_the_icon_set() {
+        assert_eq!(vc_icon_to_wmo("clear-day"), 0);
+        assert_eq!(vc_icon_to_wmo("partly-cloudy-night"), 2);
+        assert_eq!(vc_icon_to_wmo("cloudy"), 3);
+        assert_eq!(vc_icon_to_wmo("rain"), 63);
+        assert_eq!(vc_icon_to_wmo("showers-day"), 80);
+        assert_eq!(vc_icon_to_wmo("thunder-showers-night"), 95);
+        assert_eq!(vc_icon_to_wmo("snow"), 73);
+        assert_eq!(vc_icon_to_wmo("fog"), 45);
+        // Unknown icon falls back by keyword, then to clear.
+        assert_eq!(vc_icon_to_wmo("heavy-rain-mystery"), 63);
+        assert_eq!(vc_icon_to_wmo("mystery"), 0);
+    }
+
+    #[test]
+    fn vc_icon_day_night() {
+        assert!(vc_icon_is_day("partly-cloudy-day"));
+        assert!(!vc_icon_is_day("partly-cloudy-night"));
+        assert!(vc_icon_is_day("cloudy"));
+    }
+
+    #[test]
+    fn parses_visualcrossing_body() {
+        let value: Value = serde_json::from_str(VC_TIMELINE).unwrap();
+        let report = report_from_visualcrossing(&value, "Austin", true);
+        assert_eq!(report.location_label, "Austin, TX, United States");
+        assert_eq!(report.units, "imperial");
+        assert_eq!(report.current.temp, 72);
+        assert_eq!(report.current.feels_like, 70);
+        assert_eq!(report.current.weather_code, 2); // partly cloudy
+        assert!(!report.current.is_day); // "-night" icon
+        assert_eq!(report.current.description, "partly cloudy");
+        // Current high/low mirror today's daily entry.
+        assert_eq!(report.current.high, 80);
+        assert_eq!(report.current.low, 60);
+        assert_eq!(report.daily.len(), 7);
+        assert_eq!(report.daily[0].weekday, "Fri");
+        assert_eq!(report.daily[2].weather_code, 63); // rain
+        assert_eq!(report.daily[2].precip_prob, 80);
+        assert_eq!(report.daily[6].high, 79);
+        assert_eq!(report.daily[6].weather_code, 95); // thunder
+    }
+
+    #[test]
+    fn vc_request_url_encodes_location_and_key() {
+        let provider = VisualCrossingWeather::with_base_url("https://example.test/timeline", "K3Y");
+        let url = provider.request_url("Austin, TX", true).unwrap();
+        // The location is a URL-encoded path segment (the `url` crate leaves commas
+        // literal in path segments but escapes the space); key + unit group are query args.
+        assert!(url.as_str().contains("/timeline/Austin,%20TX"), "{url}");
+        assert!(
+            !url.as_str().contains("/timeline//"),
+            "no double slash: {url}"
+        );
+        assert!(url.as_str().contains("unitGroup=us"), "{url}");
+        assert!(url.as_str().contains("key=K3Y"), "{url}");
+        // Metric maps to the "metric" unit group.
+        let metric = provider.request_url("Paris", false).unwrap();
+        assert!(metric.as_str().contains("unitGroup=metric"), "{metric}");
+    }
+
+    #[tokio::test]
+    async fn visualcrossing_fetches_in_one_request() {
+        let (url, server) = serve_sequence(vec![VC_TIMELINE.to_string()]);
+        let provider = VisualCrossingWeather::with_base_url(url, "test-key");
+        let report = provider.fetch("Austin", true).await.unwrap();
+        assert_eq!(report.location_label, "Austin, TX, United States");
+        assert_eq!(report.current.temp, 72);
+        assert_eq!(report.daily.len(), 7);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn vc_empty_location_is_a_graceful_error() {
+        let provider = VisualCrossingWeather::new("test-key");
+        assert!(provider.fetch("   ", true).await.is_err());
+    }
+
+    // ---- provider selection -----------------------------------------------------------
+
+    #[test]
+    fn from_config_disabled_is_none() {
+        assert!(from_config(false, "visualcrossing", Some("k")).is_none());
+    }
+
+    #[test]
+    fn from_config_selects_visualcrossing_with_a_key() {
+        // Present whenever enabled; the concrete backend is an implementation detail, so
+        // we assert selection succeeds (no panic / Some) across the key/no-key branches.
+        assert!(from_config(true, "visualcrossing", Some("k")).is_some());
+        // No key ⇒ falls back to keyless Open-Meteo (still Some).
+        assert!(from_config(true, "visualcrossing", None).is_some());
+        assert!(from_config(true, "", None).is_some());
+    }
+
+    #[test]
+    fn from_config_openmeteo_and_unknown_fall_back_to_some() {
+        assert!(from_config(true, "openmeteo", None).is_some());
+        assert!(from_config(true, "not-a-provider", Some("k")).is_some());
+    }
+
+    /// A provider that counts how many times the upstream `fetch` actually ran, so the
+    /// caching decorator can be verified without any network.
+    struct CountingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl WeatherProvider for CountingProvider {
+        async fn fetch(&self, location: &str, imperial: bool) -> Result<WeatherReport> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(WeatherReport {
+                location_label: location.to_string(),
+                units: if imperial { "imperial" } else { "metric" }.to_string(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_provider_serves_repeat_calls_without_refetching() {
+        use std::sync::atomic::Ordering;
+        let inner = Arc::new(CountingProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        // A dedicated cache (not the process-global one) so the test is isolated. The TTL
+        // comes from the process cache config, which defaults `weather_lookup` to 60 min.
+        let cache = Arc::new(crate::cache::ToolCache::new());
+        let provider = CachingWeatherProvider::new(inner.clone(), cache);
+
+        // First call misses → upstream runs once.
+        let a = provider.fetch("Austin", true).await.unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        // Identical call is served from cache → upstream NOT hit again.
+        let b = provider.fetch("Austin", true).await.unwrap();
+        assert_eq!(
+            inner.calls.load(Ordering::SeqCst),
+            1,
+            "second call must be cached"
+        );
+        assert_eq!(a, b);
+        // Different units is a distinct key → upstream runs again.
+        provider.fetch("Austin", false).await.unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        // Different place → another upstream call.
+        provider.fetch("Dallas", true).await.unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 3);
     }
 }

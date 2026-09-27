@@ -6,7 +6,8 @@
 //!
 //! Only **secrets** remain environment variables: the provider API keys/tokens
 //! (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `MAPBOX_TOKEN`/
-//! `MAPBOX_ACCESS_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`) and the standard `RUST_LOG`.
+//! `MAPBOX_ACCESS_TOKEN`, `VISUALCROSSING_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`) and the
+//! standard `RUST_LOG`.
 //! Everything else — addresses, paths, identity, feature toggles, and the OAuth
 //! *client* credentials for Spotify/Drive — lives in the JSON file.
 
@@ -186,6 +187,10 @@ pub struct Config {
     /// Cadora shopping-list seed (base URL + voice-link token). The token is normally
     /// minted by the config-page pairing flow. Overlaid by the persisted settings file.
     pub cadora: CadoraConfig,
+    /// Per-tool response-cache TTLs (`tool_cache` in the file), keyed by tool name (e.g.
+    /// `weather_lookup`, default 3600 s). Installed process-wide at boot; see
+    /// [`crate::cache`]. `0` disables caching for a tool.
+    pub tool_cache: crate::cache::ToolCacheConfig,
 }
 
 /// Speaker-identification configuration. Off by default (`speaker.enabled`); a
@@ -386,14 +391,23 @@ impl Default for MusicConfig {
     }
 }
 
-/// Weather feature settings. Weather uses the keyless Open-Meteo API, so there is no
-/// key to configure — just the master switch and how often the ambient indicator (the
-/// icon + temperature beside the idle clock) is refreshed by the background push.
+/// Weather feature settings: the master switch, which forecast provider backs the
+/// `weather_lookup` tool + ambient push, and how often the ambient indicator (the icon +
+/// temperature beside the idle clock) is refreshed by the background push.
+///
+/// The provider is chosen by `weather.provider` (default `visualcrossing`). Visual
+/// Crossing needs the `VISUALCROSSING_API_KEY` secret (read from the environment); when
+/// that key is absent — or `weather.provider` is `openmeteo` — the keyless Open-Meteo
+/// backend is used instead.
 #[derive(Debug, Clone)]
 pub struct WeatherSettings {
     /// Master switch (`weather.enabled`, default on). Off ⇒ the `weather_lookup` tool
     /// is not advertised and the ambient push does not run.
     pub enabled: bool,
+    /// Forecast backend (`weather.provider`): `visualcrossing` (default; needs the
+    /// `VISUALCROSSING_API_KEY` secret) or `openmeteo` (keyless). An unset/empty value
+    /// means Visual Crossing; an unknown value falls back to Open-Meteo.
+    pub provider: String,
     /// How often (seconds) the ambient current-conditions push refreshes
     /// (`weather.refresh_interval_secs`, default 1800 = 30 minutes). Clamped to a sane
     /// floor so a misconfiguration can't hammer the API.
@@ -404,6 +418,7 @@ impl Default for WeatherSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            provider: "visualcrossing".to_string(),
             refresh_interval_secs: 1800,
         }
     }
@@ -550,6 +565,7 @@ impl Default for Config {
             },
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
+            tool_cache: crate::cache::ToolCacheConfig::default(),
         }
     }
 }
@@ -650,6 +666,11 @@ pub struct FileConfig {
     pub spotify: FileSpotify,
     #[serde(default)]
     pub cadora: FileCadora,
+    /// Per-tool cache TTLs in seconds, keyed by tool name (e.g. `weather_lookup`). A flat
+    /// map so it stays generic; overlaid on the built-in defaults, `0` disables a tool's
+    /// cache. Absent ⇒ defaults only (see [`crate::cache::ToolCacheConfig`]).
+    #[serde(default)]
+    pub tool_cache: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -760,6 +781,8 @@ pub struct FileMusic {
 #[serde(deny_unknown_fields)]
 pub struct FileWeather {
     pub enabled: Option<bool>,
+    /// Forecast backend: `visualcrossing` (default) or `openmeteo`.
+    pub provider: Option<String>,
     pub refresh_interval_secs: Option<u64>,
 }
 
@@ -1044,6 +1067,7 @@ impl Config {
         let wd = WeatherSettings::default();
         let weather = WeatherSettings {
             enabled: fc.weather.enabled.unwrap_or(wd.enabled),
+            provider: nonempty(fc.weather.provider).unwrap_or(wd.provider),
             refresh_interval_secs: fc
                 .weather
                 .refresh_interval_secs
@@ -1054,8 +1078,7 @@ impl Config {
         let system1 = System1Config {
             backend: nonempty(fc.system1.backend).unwrap_or(s1d.backend),
             base_url: nonempty(fc.system1.base_url).unwrap_or(s1d.base_url),
-            openrouter_model: nonempty(fc.system1.openrouter_model)
-                .unwrap_or(s1d.openrouter_model),
+            openrouter_model: nonempty(fc.system1.openrouter_model).unwrap_or(s1d.openrouter_model),
             device: nonempty(fc.system1.device).unwrap_or(s1d.device),
             model: nonempty(fc.system1.model).unwrap_or(s1d.model),
             min_confidence: fc.system1.min_confidence.unwrap_or(s1d.min_confidence),
@@ -1210,6 +1233,11 @@ impl Config {
             drive,
             spotify,
             cadora,
+            tool_cache: {
+                let mut tc = crate::cache::ToolCacheConfig::default();
+                tc.overlay(fc.tool_cache);
+                tc
+            },
         })
     }
 
@@ -1221,7 +1249,9 @@ impl Config {
     /// is [`Self::shared_settings`], which also applies the persisted overlay and makes
     /// the engine runtime-swappable; this helper is kept for direct/one-shot use.
     pub fn build_system1(&self) -> Result<Arc<dyn crate::system1::DecisionEngine>> {
-        let key = env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty());
+        let key = env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         if self.system1.backend.eq_ignore_ascii_case("jev") && key.is_none() {
             log::warn!(
                 "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
@@ -1411,10 +1441,13 @@ impl Config {
             ),
             directions_provider: self.directions_provider.clone(),
             directions_imperial: imperial,
-            // Weather is keyless (Open-Meteo), so it's present whenever enabled; the
-            // tool/push still no-op gracefully until a home location is set.
-            weather: crate::weather::from_config(self.weather.enabled),
+            // Weather backend (Visual Crossing by default, keyless Open-Meteo fallback);
+            // present whenever enabled, and the tool/push still no-op gracefully until a
+            // home location is set. Rebuilt from the live provider label + key on every
+            // swap; `weather_enabled` gates it entirely.
+            weather: self.weather_provider(),
             weather_imperial: imperial,
+            weather_enabled: self.weather.enabled,
         }
     }
 
@@ -1461,6 +1494,28 @@ impl Config {
             .or_else(|| env::var("MAPBOX_ACCESS_TOKEN").ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Initial Visual Crossing API key for the weather provider — a secret, seeded from
+    /// `VISUALCROSSING_API_KEY`. Absent/empty ⇒ weather falls back to keyless Open-Meteo.
+    pub fn initial_visualcrossing_key(&self) -> Option<String> {
+        env::var("VISUALCROSSING_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Build the weather forecast provider from the config + the environment secret, or
+    /// `None` when weather is disabled. Defaults to Visual Crossing when
+    /// `VISUALCROSSING_API_KEY` is set; otherwise falls back to keyless Open-Meteo. Used
+    /// by both the `weather_lookup` tool ([`Self::llm_factory`]) and the ambient push
+    /// (`main`).
+    pub fn weather_provider(&self) -> Option<Arc<dyn crate::weather::WeatherProvider>> {
+        crate::weather::from_config(
+            self.weather.enabled,
+            &self.weather.provider,
+            self.initial_visualcrossing_key().as_deref(),
+        )
     }
 
     /// Initial Anthropic subscription OAuth token — a secret, seeded from
@@ -1541,6 +1596,10 @@ impl Config {
         // persisted values below (a value entered on the config page wins).
         let mut anthropic_oauth_token = self.initial_anthropic_oauth_token();
         let mut mapbox_token = self.initial_mapbox_token();
+        // Weather provider label (config-file seed) + Visual Crossing key (env secret),
+        // each overlaid by any persisted value below (a config-page change wins).
+        let mut weather_provider = self.weather.provider.clone();
+        let mut visualcrossing_key = self.initial_visualcrossing_key();
         let mut anthropic_auth = self.anthropic_auth;
         let mut tts_voice = self.tts_voice.clone();
 
@@ -1564,7 +1623,9 @@ impl Config {
         let mut system1_model = self.system1.openrouter_model.clone();
         let mut system1_min_confidence = self.system1.min_confidence;
         let mut system1_intents = self.system1.intents.clone();
-        let mut openrouter_api_key = env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty());
+        let mut openrouter_api_key = env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -1591,6 +1652,14 @@ impl Config {
             }
             if p.mapbox_token.is_some() {
                 mapbox_token = p.mapbox_token;
+            }
+            // Same guard for the weather provider/key: only override the seed when the
+            // persisted file actually carries a value.
+            if let Some(prov) = p.weather_provider.filter(|s| !s.trim().is_empty()) {
+                weather_provider = prov;
+            }
+            if p.visualcrossing_key.is_some() {
+                visualcrossing_key = p.visualcrossing_key.filter(|s| !s.is_empty());
             }
             anthropic_auth = AnthropicAuth::from_label(&p.anthropic_auth);
             tts_voice = p.tts_voice;
@@ -1699,6 +1768,14 @@ impl Config {
             mapbox_token.as_deref(),
             build_factory.directions_imperial,
         );
+        // Seed the initial weather provider from the resolved provider label + Visual
+        // Crossing key (env overlaid by persisted) so `weather_lookup` is advertised at
+        // boot with the right backend.
+        build_factory.weather = crate::weather::from_config(
+            build_factory.weather_enabled,
+            &weather_provider,
+            visualcrossing_key.as_deref(),
+        );
         let (llm, llm_backend, llm_model) = build_factory
             .build(
                 engine,
@@ -1748,6 +1825,8 @@ impl Config {
                 household,
                 spotify,
                 cadora,
+                weather_provider,
+                visualcrossing_key,
                 system1: crate::settings::System1Runtime {
                     engine: system1,
                     backend: system1_backend,
@@ -1881,6 +1960,38 @@ mod tests {
         assert_eq!(c.stt.engine, SttEngineKind::Wyoming);
         assert_eq!(c.stt.model, "base");
         assert_eq!(c.stt.language.as_deref(), Some("en"));
+        // No tool_cache block ⇒ built-in defaults (weather cached 60 min).
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn tool_cache_block_overlays_per_tool_ttls() {
+        let c = Config::from_file(parse(
+            r#"{ "tool_cache": { "weather_lookup": 1800, "directions_lookup": 600 } }"#,
+        ))
+        .unwrap();
+        // File entries win; an unmentioned tool stays uncached.
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::from_secs(1800)
+        );
+        assert_eq!(
+            c.tool_cache.ttl("directions_lookup"),
+            std::time::Duration::from_secs(600)
+        );
+        assert_eq!(c.tool_cache.ttl("recipe_lookup"), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn tool_cache_zero_disables_a_defaulted_tool() {
+        let c = Config::from_file(parse(r#"{ "tool_cache": { "weather_lookup": 0 } }"#)).unwrap();
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::ZERO
+        );
     }
 
     #[test]

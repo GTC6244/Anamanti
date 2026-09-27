@@ -1,4 +1,4 @@
-<p class="sub">Every completed turn (transcript + reply), newest first.</p>
+<p class="sub">Every completed turn (transcript + reply), newest first. Click a turn to see its per-stage latency breakdown.</p>
 <div class="card">
   <div class="toolbar">
     <button onclick="load()">Refresh</button>
@@ -9,7 +9,62 @@
   </div>
   <div id="out" class="muted">Loading…</div>
 </div>
+<style>
+  tr.turn{cursor:pointer;}
+  tr.turn:hover td{background:rgba(127,127,127,0.08);}
+  tr.turn .caret{display:inline-block;width:1em;color:var(--muted,#888);transition:transform .12s;}
+  tr.turn.open .caret{transform:rotate(90deg);}
+  tr.detail>td{background:rgba(127,127,127,0.05);padding:0.6rem 0.9rem;}
+  .timing{border-collapse:collapse;width:auto;min-width:22rem;}
+  .timing td{border:0;padding:0.15rem 0.9rem 0.15rem 0;white-space:nowrap;}
+  .timing td.v{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;}
+  .timing tr.total td{border-top:1px solid rgba(127,127,127,0.3);padding-top:0.35rem;}
+  .lat{font-variant-numeric:tabular-nums;}
+</style>
 <script>
+// Human-readable ms (→ seconds past 1000ms), for the latency column + breakdown.
+function fmtMs(v){
+  if(v==null) return '<span class="muted">—</span>';
+  if(v >= 1000) return (v/1000).toFixed(v>=10000?1:2)+' s';
+  return v+' ms';
+}
+// Ordered [label, ms] rows for whichever stages actually ran this turn.
+function timingRows(t){
+  const rows = [];
+  if(t.stt_ms!=null) rows.push(['STT — end-of-speech → transcript', t.stt_ms]);
+  if(t.system1_ms!=null){
+    const x = [];
+    if(t.system1_intent) x.push('intent '+t.system1_intent);
+    if(t.system1_confidence!=null) x.push('conf '+Number(t.system1_confidence).toFixed(2));
+    if(t.system1_outcome) x.push(t.system1_outcome);
+    rows.push(['System-1 decision' + (x.length?' ('+x.join(', ')+')':''), t.system1_ms]);
+  }
+  if(t.fetch_ms!=null) rows.push(['Fast-path fetch (e.g. weather forecast)', t.fetch_ms]);
+  if(t.recall_ms!=null) rows.push(['Memory recall', t.recall_ms]);
+  if(t.prompt_ms!=null) rows.push(['Prompt build', t.prompt_ms]);
+  if(t.llm_ms!=null) rows.push(['LLM — time to first reply token', t.llm_ms]);
+  if(t.tts_ms!=null) rows.push(['TTS — first chunk synthesis', t.tts_ms]);
+  return rows;
+}
+function timingDetail(t){
+  if(!t){ return '<p class="muted" style="margin:0;">No timing recorded for this turn (logged before latency capture, or a turn with no measured stages).</p>'; }
+  const path = t.path ? '<span class="badge">'+esc(t.path)+' path</span> ' : '';
+  let h = path + '<table class="timing"><tbody>';
+  for(const [label, ms] of timingRows(t)){
+    h += '<tr><td>'+esc(label)+'</td><td class="v">'+fmtMs(ms)+'</td></tr>';
+  }
+  if(t.total_ms!=null){
+    h += '<tr class="total"><td>End-of-speech → reply (total)</td><td class="v">'+fmtMs(t.total_ms)+'</td></tr>';
+  }
+  return h + '</tbody></table>';
+}
+function toggle(tr){
+  const detail = tr.nextElementSibling;
+  if(!detail || !detail.classList.contains('detail')) return;
+  const show = detail.style.display === 'none';
+  detail.style.display = show ? '' : 'none';
+  tr.classList.toggle('open', show);
+}
 async function load(){
   const n = document.getElementById('limit').value;
   const out = document.getElementById('out');
@@ -19,13 +74,17 @@ async function load(){
     const recs = j.records || [];
     document.getElementById('meta').textContent = recs.length + ' shown';
     if(!recs.length){ out.innerHTML = '<p class="muted">No turns logged yet.</p>'; return; }
-    let h = '<table><thead><tr><th>Time</th><th>Speaker</th><th>Model</th><th>User</th><th>Assistant</th><th>Memories</th></tr></thead><tbody>';
+    let h = '<table><thead><tr><th></th><th>Time</th><th>Speaker</th><th>Model</th><th>User</th><th>Assistant</th><th>Latency</th><th>Memories</th></tr></thead><tbody>';
     for(const r of recs){
       const who = esc(r.speaker_name || r.speaker_id || '');
       const model = esc([r.llm_backend, r.model].filter(Boolean).join(' / '));
       const mems = (r.memories_written||[]).map(m => '<div>'+esc(m)+'</div>').join('') || '<span class="muted">—</span>';
-      h += '<tr><td class="muted">'+esc(fmtTime(r.ts))+'</td><td>'+who+'</td><td><span class="badge">'+model+'</span></td>'
-        +  '<td class="pre">'+esc(r.transcript)+'</td><td class="pre">'+esc(r.reply)+'</td><td>'+mems+'</td></tr>';
+      const total = (r.timing && r.timing.total_ms!=null) ? fmtMs(r.timing.total_ms) : '<span class="muted">—</span>';
+      h += '<tr class="turn" onclick="toggle(this)"><td><span class="caret">▸</span></td>'
+        +  '<td class="muted">'+esc(fmtTime(r.ts))+'</td><td>'+who+'</td><td><span class="badge">'+model+'</span></td>'
+        +  '<td class="pre">'+esc(r.transcript)+'</td><td class="pre">'+esc(r.reply)+'</td>'
+        +  '<td class="lat">'+total+'</td><td>'+mems+'</td></tr>';
+      h += '<tr class="detail" style="display:none;"><td></td><td colspan="7">'+timingDetail(r.timing)+'</td></tr>';
     }
     out.innerHTML = h + '</tbody></table>';
   }catch(e){ out.textContent = 'Request failed: ' + e; }

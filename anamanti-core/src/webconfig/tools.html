@@ -15,6 +15,29 @@
   </div>
 </div>
 
+<div class="card">
+  <h2>Weather</h2>
+  <p class="desc">Backs the <code>weather_lookup</code> tool and the ambient icon + temperature beside the clock. <b>Visual Crossing</b> (default) needs an API key from visualcrossing.com and resolves the forecast in one request; <b>Open-Meteo</b> is keyless. Changes apply live — no restart.</p>
+  <p class="desc" id="w_statusline">Loading…</p>
+
+  <label>Provider
+    <select id="w_provider">
+      <option value="visualcrossing">Visual Crossing (needs API key)</option>
+      <option value="openmeteo">Open-Meteo (keyless)</option>
+    </select>
+  </label>
+
+  <label>Visual Crossing API key <span class="hint" id="w_key_state"></span>
+    <input id="w_key" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+
+  <div class="card-actions">
+    <div id="w_status" class="status"></div>
+    <button id="w_clear">Clear key</button>
+    <button id="w_save" class="primary">Save weather</button>
+  </div>
+</div>
+
 <script>
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
@@ -38,4 +61,36 @@
   }
   $('save').addEventListener('click', save);
   load();
+
+  // ---- Weather ---------------------------------------------------------------------
+  const wStatusEl = $('w_status');
+  function wShow(ok, msg){ wStatusEl.textContent = msg; wStatusEl.className = 'status ' + (ok?'ok':'err'); }
+  function effectiveLabel(j){
+    if(!j.enabled) return 'weather is disabled in the config file';
+    if(j.effective === 'visualcrossing') return 'active ✓ — Visual Crossing';
+    if(j.provider === 'visualcrossing' && !j.key_set) return 'active ✓ — Open-Meteo (Visual Crossing selected but no key)';
+    return 'active ✓ — Open-Meteo';
+  }
+  async function wLoad(){
+    try{
+      const j = await apiJSON('/tools/weather/status.json');
+      $('w_provider').value = (j.provider === 'openmeteo') ? 'openmeteo' : 'visualcrossing';
+      $('w_key_state').textContent = j.key_set ? '(a key is set)' : '(no key set)';
+      $('w_key').value = '';
+      $('w_statusline').textContent = 'weather_lookup: ' + effectiveLabel(j);
+    }catch(e){ wShow(false, 'Could not load status: ' + e); }
+  }
+  async function wSave(clear){
+    const body = { provider: $('w_provider').value };
+    if(clear){ body.clear = true; }
+    else { const k = $('w_key').value.trim(); if(k) body.visualcrossing_key = k; }
+    try{
+      const j = await apiJSON('/tools/weather/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ wShow(false, j.message || 'Rejected.'); } else { wShow(true, 'Saved.'); }
+      wLoad();
+    }catch(e){ wShow(false, 'Request failed: ' + e); }
+  }
+  $('w_save').addEventListener('click', () => wSave(false));
+  $('w_clear').addEventListener('click', () => wSave(true));
+  wLoad();
 </script>

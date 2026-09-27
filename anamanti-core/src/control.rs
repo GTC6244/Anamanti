@@ -461,6 +461,7 @@ mod tests {
                 directions_imperial: false,
                 weather: None,
                 weather_imperial: false,
+                weather_enabled: false,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -482,6 +483,8 @@ mod tests {
                 household: crate::settings::Household::default(),
                 spotify: crate::settings::SpotifyConfig::default(),
                 cadora: crate::settings::CadoraConfig::default(),
+                weather_provider: "visualcrossing".into(),
+                visualcrossing_key: None,
                 system1: crate::settings::System1Runtime::default(),
             },
         );

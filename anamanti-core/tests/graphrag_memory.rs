@@ -64,6 +64,7 @@ fn record(id: &str, transcript: &str, reply: &str, memories: &[&str]) -> ChatLog
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     }
 }
 

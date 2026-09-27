@@ -48,7 +48,7 @@ use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine,
-    SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update,
+    SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update, WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -436,6 +436,24 @@ async fn handle(
     // Save the Mapbox token for the directions tool (rebuilds the tool set live).
     if method == "POST" && path == "/tools/save" {
         let payload = directions_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Weather tool status — the selected provider + whether a Visual Crossing key is set
+    // (never the key), and whether the weather feature is enabled at all.
+    if method == "GET" && path == "/tools/weather/status.json" {
+        let payload = weather_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the weather provider + Visual Crossing key (rebuilds the tool + retargets the
+    // ambient push live).
+    if method == "POST" && path == "/tools/weather/save" {
+        let payload = weather_save_json(&settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -890,6 +908,34 @@ fn directions_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     directions_status_json(settings)
 }
 
+/// `GET /tools/weather/status.json` — the weather tool state for the `/tools` page.
+/// Reports the selected provider, whether a Visual Crossing key is set (never the key),
+/// whether weather is enabled, and whether Visual Crossing is effectively active (it is
+/// selected and a key is present; otherwise the tool falls back to keyless Open-Meteo).
+fn weather_status_json(settings: &SharedSettings) -> String {
+    let provider = settings.weather_provider_label();
+    let key_set = settings.visualcrossing_key_set();
+    let enabled = settings.weather_enabled();
+    // Which backend actually serves requests, mirroring `weather::from_config`.
+    let effective = if !enabled {
+        "disabled"
+    } else if provider == "openmeteo" || provider == "open-meteo" || provider == "open_meteo" {
+        "openmeteo"
+    } else if key_set {
+        "visualcrossing"
+    } else {
+        "openmeteo" // visualcrossing selected but no key → keyless fallback
+    };
+    json!({
+        "ok": true,
+        "provider": provider,
+        "key_set": key_set,
+        "enabled": enabled,
+        "effective": effective,
+    })
+    .to_string()
+}
+
 /// Current System-1 selection for the config page. Never returns the OpenRouter key,
 /// only whether one is set.
 fn system1_status_json(settings: &SharedSettings) -> String {
@@ -905,6 +951,38 @@ fn system1_status_json(settings: &SharedSettings) -> String {
         "active": v.backend != "none",
     })
     .to_string()
+}
+
+/// `POST /tools/weather/save` — set the weather provider and/or Visual Crossing key.
+/// `provider` (when present) switches the backend; a blank/absent `visualcrossing_key` is
+/// left unchanged (a page reload never wipes the stored key), while an explicit
+/// `"clear": true` clears it. Rebuilds the tool + retargets the ambient push live.
+fn weather_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let provider = data
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let clear = data.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let visualcrossing_key = if clear {
+        Some(None)
+    } else {
+        match data.get("visualcrossing_key").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+            _ => None,
+        }
+    };
+    settings.apply_weather_tool(&WeatherToolUpdate {
+        provider,
+        visualcrossing_key,
+    });
+    weather_status_json(settings)
 }
 
 /// Apply a System-1 selection from the config page (rebuilds the engine live + persists).
@@ -2055,6 +2133,44 @@ mod tests {
         // A page reload posting a blank token must not wipe the stored one.
         directions_save_json(&s, br#"{"mapbox_token":""}"#);
         assert!(s.mapbox_token_set());
+    }
+
+    #[test]
+    fn weather_save_switches_provider_and_hides_the_key() {
+        let s = settings();
+        let before: Value = serde_json::from_str(&weather_status_json(&s)).unwrap();
+        assert_eq!(before["provider"], "visualcrossing");
+        assert_eq!(before["key_set"], false);
+
+        // Set a Visual Crossing key — never echoed back.
+        let out = weather_save_json(
+            &s,
+            br#"{"provider":"visualcrossing","visualcrossing_key":"vc-secret"}"#,
+        );
+        assert!(!out.contains("vc-secret"), "key leaked: {out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["provider"], "visualcrossing");
+        assert_eq!(v["key_set"], true);
+        assert!(s.visualcrossing_key_set());
+
+        // Switch provider to Open-Meteo; the key is retained (blank field = keep).
+        let v: Value =
+            serde_json::from_str(&weather_save_json(&s, br#"{"provider":"openmeteo"}"#)).unwrap();
+        assert_eq!(v["provider"], "openmeteo");
+        assert!(s.visualcrossing_key_set());
+
+        // A page reload posting a blank key must not wipe the stored one.
+        weather_save_json(&s, br#"{"provider":"openmeteo","visualcrossing_key":""}"#);
+        assert!(s.visualcrossing_key_set());
+
+        // Explicit clear removes it.
+        let v: Value = serde_json::from_str(&weather_save_json(
+            &s,
+            br#"{"provider":"visualcrossing","clear":true}"#,
+        ))
+        .unwrap();
+        assert_eq!(v["key_set"], false);
+        assert!(!s.visualcrossing_key_set());
     }
 
     #[test]

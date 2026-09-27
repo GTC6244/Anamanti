@@ -63,7 +63,12 @@ impl WhisperEngine {
         let started = std::time::Instant::now();
         // 1s of silence is enough to exercise the full graph; it decodes to empty text.
         let silence = vec![0i16; 16_000];
-        match decode(&self.ctx, &silence, self.language.as_deref(), self.n_threads) {
+        match decode(
+            &self.ctx,
+            &silence,
+            self.language.as_deref(),
+            self.n_threads,
+        ) {
             Ok(_) => log::info!(
                 "whisper warm-up decode complete in {:.0}ms (Metal pipeline compiled)",
                 started.elapsed().as_secs_f64() * 1000.0

@@ -216,9 +216,11 @@ pub fn build(
     match backend.to_lowercase().as_str() {
         "none" | "off" | "" => Ok(none()),
         "mock" => Ok(Arc::new(mock::MockDecider::defer())),
-        "laya-serve" | "laya_serve" => {
-            Ok(Arc::new(HttpDecider::laya_serve(base_url, min_confidence, intents)))
-        }
+        "laya-serve" | "laya_serve" => Ok(Arc::new(HttpDecider::laya_serve(
+            base_url,
+            min_confidence,
+            intents,
+        ))),
         "jev" => Ok(Arc::new(HttpDecider::jev(
             base_url,
             model,
@@ -263,7 +265,10 @@ mod tests {
     fn parse_duration_handles_common_phrasings() {
         assert_eq!(parse_duration_secs("set a timer for 10 minutes"), Some(600));
         assert_eq!(parse_duration_secs("10 minute timer"), Some(600));
-        assert_eq!(parse_duration_secs("set a timer for 1 hour 30 minutes"), Some(5400));
+        assert_eq!(
+            parse_duration_secs("set a timer for 1 hour 30 minutes"),
+            Some(5400)
+        );
         assert_eq!(parse_duration_secs("half an hour"), Some(1800));
         assert_eq!(parse_duration_secs("a minute"), Some(60));
         assert_eq!(parse_duration_secs("90 seconds"), Some(90));

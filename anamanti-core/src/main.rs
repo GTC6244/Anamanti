@@ -75,6 +75,11 @@ async fn run() -> Result<()> {
     // to an installed model so the assistant still responds.
     ensure_ollama_model(&mut config).await;
 
+    // Install the per-tool response-cache TTLs process-wide before any provider is built
+    // or any turn runs, so weather (and future opted-in tools) cache per their configured
+    // TTL (`tool_cache` in the config; weather defaults to 60 min).
+    anamanti_core::cache::set_config(config.tool_cache.clone());
+
     let memory = Arc::new(MemoryStore::open(&config.db_path).context("opening memory store")?);
     log::info!("memory store holds {} entries", memory.count()?);
 
@@ -136,9 +141,12 @@ async fn run() -> Result<()> {
         settings.system1_view().backend
     );
 
-    // Forecast provider (keyless Open-Meteo), shared by the System-1 weather fast path
-    // and the ambient push. `None` when weather is disabled.
-    let weather_provider = anamanti_core::weather::from_config(config.weather.enabled);
+    // Forecast provider (Visual Crossing by default, keyless Open-Meteo fallback),
+    // built from the live settings so it honors the configured provider + key. Shared
+    // by the System-1 weather fast path (wired onto the pipeline below). `None` when
+    // weather is disabled. The ambient push rebuilds its own provider each tick from
+    // live settings so a config-page provider/key switch retargets it without restart.
+    let weather_provider = settings.current_weather_provider();
 
     let mut pipeline = Pipeline::with_settings(
         settings,
@@ -245,24 +253,28 @@ async fn run() -> Result<()> {
     // config page (whose "Notify" tab can push a test notification).
     let notify = Arc::new(NotificationService::new());
 
-    // Ambient weather push (keyless Open-Meteo): the registry of persistent weather
-    // channels the device dials, plus a periodic task that fetches current conditions
-    // for the household location and fans them out so the icon + temperature beside the
-    // idle clock stay fresh. Dormant (no task) when weather is disabled in the config.
+    // Ambient weather push: the registry of persistent weather channels the device
+    // dials, plus a periodic task that fetches current conditions for the household
+    // location and fans them out so the icon + temperature beside the idle clock stay
+    // fresh. The provider is Visual Crossing by default (keyless Open-Meteo fallback).
+    // Dormant (no task) when weather is disabled in the config.
     let weather_svc = Arc::new(WeatherService::new());
-    if let Some(provider) = weather_provider.clone() {
+    if config.weather.enabled {
         let imperial =
             anamanti_core::directions::units_are_imperial(config.weather_units.as_deref());
+        // The push builds its provider from the live settings each tick, so a config-page
+        // provider/key switch retargets it without a restart.
         anamanti_core::weather::service::spawn_periodic(
             weather_svc.clone(),
-            provider,
+            pipeline.settings().clone(),
             pipeline.settings().home_location(),
             imperial,
             config.weather.refresh_interval(),
         );
         log::info!(
-            "weather push: every {}s (imperial={imperial})",
-            config.weather.refresh_interval().as_secs()
+            "weather push: every {}s (imperial={imperial}, provider={})",
+            config.weather.refresh_interval().as_secs(),
+            config.weather.provider,
         );
     }
 

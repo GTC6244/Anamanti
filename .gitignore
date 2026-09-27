@@ -4,6 +4,9 @@
 *.pyc
 *.swp
 .DS_Store
+# Local Rust build output (when CARGO_TARGET_DIR isn't on the external drive)
+/target/
+/target-local/
 .atom/
 .build/
 .buildlog/
