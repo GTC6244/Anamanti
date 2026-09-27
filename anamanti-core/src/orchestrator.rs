@@ -770,6 +770,7 @@ impl Pipeline {
         // Build per-person memory context and stream the LLM reply. A recall
         // failure (e.g. a transient GraphRAG backend error) must not sink the turn —
         // proceed with no memory context rather than erroring.
+        let recall_start = Instant::now();
         let context = self
             .build_context(transcript, scope)
             .await
@@ -777,6 +778,15 @@ impl Pipeline {
                 log::warn!("memory recall failed; answering without context: {e:#}");
                 String::new()
             });
+        log::info!(
+            "system2: memory recall in {}ms ({} ctx chars)",
+            recall_start.elapsed().as_millis(),
+            context.len(),
+        );
+
+        // Prompt assembly (system prompt + grounding + recalled context). Timed
+        // separately from recall and the LLM round trips.
+        let prompt_start = Instant::now();
         // Ground "here" and who lives here from the canonical household record (live
         // per-turn snapshot, so config-page edits take effect without a restart).
         let household = &runtime.household;
@@ -832,6 +842,16 @@ impl Pipeline {
             Vec::new()
         };
 
+        log::info!(
+            "system2: prompt build in {}ms ({} prompt chars, {} history msgs)",
+            prompt_start.elapsed().as_millis(),
+            system_prompt.len(),
+            history.len(),
+        );
+
+        // The LLM round trips + tool calls happen inside the backend as this stream is
+        // polled (rig.rs logs each round/tool with its own elapsed ms). `respond`
+        // itself only builds the lazy stream, so it returns near-instantly.
         let mut stream = runtime
             .llm
             .respond(
@@ -1250,7 +1270,13 @@ impl Pipeline {
         )
         .await
         {
-            Ok(Ok(report)) => report,
+            Ok(Ok(report)) => {
+                log::info!(
+                    "system1 weather: fetch OK in {}ms (location {location:?})",
+                    t0.elapsed().as_millis(),
+                );
+                report
+            }
             Ok(Err(e)) => {
                 log::warn!(
                     "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
@@ -1286,12 +1312,18 @@ impl Pipeline {
             .ok();
         on_event(TurnEvent::Speaking);
         let mut audio_started = false;
+        let tts_start = Instant::now();
         if let Err(e) = self
             .speak_chunk(writer, runtime, connector, &reply, &mut audio_started, dump)
             .await
         {
             log::warn!("system1 weather: TTS failed ({e:#}); widget + text still sent");
         }
+        log::info!(
+            "system1 weather: TTS in {}ms ({} reply chars)",
+            tts_start.elapsed().as_millis(),
+            reply.len(),
+        );
         emit_follow_up_and_stop(writer, &self.follow_up, audio_started, &reply, followup_depth)
             .await;
         Some(reply)

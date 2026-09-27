@@ -50,7 +50,11 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        // Millisecond timestamps: turn latency is measured in sub-second deltas, so
+        // whole-second stamps hide where a turn actually spends its time.
+        .format_timestamp_millis()
+        .init();
 
     let cli = parse_cli().context("parsing command-line arguments")?;
     let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
