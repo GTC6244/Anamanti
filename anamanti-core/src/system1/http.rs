@@ -196,7 +196,11 @@ pub fn build_request(transcript: &str, model: Option<&str>, intents: &[String]) 
     let mut criteria = Map::new();
     for intent in intents {
         let desc = intent_description(intent);
-        let desc = if desc.is_empty() { intent.as_str() } else { desc };
+        let desc = if desc.is_empty() {
+            intent.as_str()
+        } else {
+            desc
+        };
         criteria.insert(intent.clone(), json!(desc));
     }
     criteria.insert(

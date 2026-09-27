@@ -2143,7 +2143,10 @@ mod tests {
         assert_eq!(before["key_set"], false);
 
         // Set a Visual Crossing key — never echoed back.
-        let out = weather_save_json(&s, br#"{"provider":"visualcrossing","visualcrossing_key":"vc-secret"}"#);
+        let out = weather_save_json(
+            &s,
+            br#"{"provider":"visualcrossing","visualcrossing_key":"vc-secret"}"#,
+        );
         assert!(!out.contains("vc-secret"), "key leaked: {out}");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["provider"], "visualcrossing");

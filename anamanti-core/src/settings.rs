@@ -1340,7 +1340,10 @@ impl SharedSettings {
             let current = self.inner.read().unwrap();
             let s1 = &current.system1;
             let backend = update.backend.clone().unwrap_or_else(|| s1.backend.clone());
-            let base_url = update.base_url.clone().unwrap_or_else(|| s1.base_url.clone());
+            let base_url = update
+                .base_url
+                .clone()
+                .unwrap_or_else(|| s1.base_url.clone());
             let model = update.model.clone().unwrap_or_else(|| s1.model.clone());
             let min_conf = update
                 .min_confidence
