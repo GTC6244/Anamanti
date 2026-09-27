@@ -134,6 +134,11 @@ pub struct DecisionRequest {
     /// HTTP engine uses this to retry an otherwise-deferred turn with the location folded
     /// into the question. `None` when unset — no retry, the turn just defers.
     pub location: Option<String>,
+    /// Active-timer state the device reported this turn (running count / soonest
+    /// remaining / labels), **orthogonal to `screen`** — a timer can run behind another
+    /// widget. Ground truth for the `timer_query` / `timer_cancel` / `stop_dismiss`
+    /// decisions (plans/system1-fast-decisions.md §17, §19). Empty when nothing runs.
+    pub timers: crate::wyoming::protocol::TimerContext,
 }
 
 /// A resolved fast intent. M1+ extends this with structured args so the orchestrator
@@ -248,6 +253,7 @@ mod tests {
             screen: None,
             history: Vec::new(),
             location: None,
+            timers: Default::default(),
         }
     }
 

@@ -354,10 +354,10 @@ New JSON block in `anamanti.json` (all optional, defaults shown; add to `anamant
    config-tunable; per-intent thresholds and resolve-rate/precision telemetry remain open (§13).
 6. **M5 — intent-set expansion (planned, decided 2026-09-27; §15–§18).** Adds the temporal question,
    device-context disambiguation, and the expanded Resolve set.
-   - **M5.0 — Pre-req P0: device → Core context extension (§19). BUILD FIRST.** Report background
-     timer state (running/remaining/labels) on every turn and thread the existing widget context +
-     timers into `DecisionRequest`. Hard-gates `timer_query`, `timer_cancel`, and the `stop_dismiss`
-     ladder.
+   - **M5.0 — Pre-req P0: device → Core context extension (§19). ✅ LANDED 2026-09-27.** Reports
+     background timer state (running/remaining/labels) on every turn and threads the existing widget
+     context + timers into `DecisionRequest`. Hard-gates `timer_query`, `timer_cancel`, and the
+     `stop_dismiss` ladder.
    - **M5.1** temporal question + resolve-by-tense matrix (§16). **M5.2** the no-slot intents
      (`time`, `date`, `*_dismiss`, `end_session`) + `stop_dismiss` ladder (§17) + `timer_query`/
      `timer_cancel`. **M5.3** calibration against the §18 corpus; per-intent thresholds.
@@ -703,6 +703,17 @@ knee where the ✗ set is ~100% deferred. These double as `mock`/golden-decision
 - remember I'm allergic to peanuts *(handled by `parse_command` before System-1 — must never reach it)*
 
 ## 19. Implementation plan — Pre-req P0: device → Core context extension
+
+> **Status: ✅ IMPLEMENTED 2026-09-27.** Both facts in §19.0 handled; device + Core changes below
+> landed. Core: 316 lib tests + new `protocol` parser tests green; device: 95 tests + new
+> `client`/`timer` tests green; `cargo clippy --all-targets -D warnings` clean on both crates; `cargo
+> fmt` clean. **Deferred to M5.2:** §19.4 step 3 (folding the device summary into the classifier
+> `state`) — it only matters once `stop_dismiss` exists and needs a live model to calibrate, so adding
+> it now would change weather/timer resolution behavior with nothing consuming it. **Note:** one
+> unrelated test (`tests/pipeline.rs::silent_turn_discards_stt_hallucination_and_ends_the_chain`) was
+> **already failing on clean `origin/main`** before this work — an upstream "relay raw transcript
+> pre-gate" change relays the raw STT text to the device before the no-speech gate; verified by
+> running it against a stashed-clean tree. Left as-is per direction; tracked separately.
 
 **This is the first build step** (gates §16 forecast-vs-current framing only loosely, but hard-gates
 `timer_query`, `timer_cancel`, and the entire `stop_dismiss` ladder in §17). Land it before any new

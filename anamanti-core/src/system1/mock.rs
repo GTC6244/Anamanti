@@ -51,6 +51,7 @@ mod tests {
             screen: None,
             history: Vec::new(),
             location: None,
+            timers: Default::default(),
         }
     }
 

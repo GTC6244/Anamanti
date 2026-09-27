@@ -300,14 +300,14 @@ impl Pipeline {
     ) -> Result<TurnOutcome> {
         // 1. Wait for the device's `audio-start`; a clean close before that just
         //    ends the connection.
-        let (format, followup_depth, followup_wait_secs, screen) = loop {
+        let (format, followup_depth, followup_wait_secs, device_ctx) = loop {
             match device.read().await? {
                 Some(ev) if ev.event_type == types::AUDIO_START => {
                     break (
                         protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO),
                         protocol::followup_depth(&ev.data),
                         protocol::followup_wait_secs(&ev.data),
-                        protocol::display_context(&ev.data),
+                        protocol::device_context(&ev.data),
                     );
                 }
                 Some(_) => continue, // ignore stray pre-turn frames
@@ -320,7 +320,7 @@ impl Pipeline {
             format,
             followup_depth,
             followup_wait_secs,
-            screen,
+            device_ctx,
             on_event,
         )
         .await
@@ -338,7 +338,7 @@ impl Pipeline {
         format: AudioFormat,
         followup_depth: u32,
         followup_wait_secs: u32,
-        screen: Option<protocol::DisplayContext>,
+        device_ctx: protocol::DeviceContext,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<TurnOutcome> {
         // Take one settings snapshot for the whole turn so a concurrent control
@@ -439,7 +439,7 @@ impl Pipeline {
                 device,
                 connector,
                 followup_depth,
-                screen.as_ref(),
+                &device_ctx,
                 on_event,
                 dump.as_ref(),
                 &mut timing,
@@ -682,7 +682,7 @@ impl Pipeline {
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
         followup_depth: u32,
-        screen: Option<&protocol::DisplayContext>,
+        device_ctx: &protocol::DeviceContext,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
         timing: &mut crate::memory::TurnTiming,
@@ -730,11 +730,16 @@ impl Pipeline {
         if runtime.system1.engine.name() != "none" {
             let req = crate::system1::DecisionRequest {
                 transcript: transcript.to_string(),
-                screen: None, // M1: derive a label from the turn's `screen` context
-                history: Vec::new(), // M1: recent turns for follow-up disambiguation
+                // The foreground widget label ("recipe"/"weather"), so screen-relative
+                // commands can route; `None` on an idle display.
+                screen: device_ctx.widget_label().map(str::to_string),
+                history: Vec::new(), // M5: recent turns for follow-up disambiguation
                 // Home location grounds location-dependent intents (weather): the HTTP
                 // engine retries an otherwise-deferred turn with this folded into the query.
                 location: self.settings.home_location().get(),
+                // Background timer state (running/remaining/labels), ground truth for the
+                // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
+                timers: device_ctx.timers.clone(),
             };
             let engine = runtime.system1.engine.name().to_string();
             log::info!("system1 ({engine}) call: deciding on {transcript:?}");
@@ -865,7 +870,7 @@ impl Pipeline {
         // Tell the model what the display is currently showing (its "display context"),
         // so it can drive that screen by voice with the matching tool. Absent on an idle
         // display. Extensible per screen kind — see `display_context_line`.
-        if let Some(screen) = screen {
+        if let Some(screen) = device_ctx.widget.as_ref() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&display_context_line(screen));
         }

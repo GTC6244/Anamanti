@@ -324,6 +324,12 @@ async fn run_turn_task(
     // `audio-start`, so the orchestrator's LLM knows what the display is showing and can
     // drive it (switch tabs / scroll / close). `None` on an idle screen.
     conn.set_display_context(crate::engine::display_context());
+    // Stamp the active-timer context (running count / soonest-remaining / labels) as
+    // `screen.timers`, orthogonal to the widget above, so the Core/System-1 sees a timer
+    // counting in the background regardless of what screen is foreground. `None` (no
+    // `timers` block) when nothing is running. See plans/system1-fast-decisions.md §17/§19.
+    let timer_snapshot = shared.timers.snapshot();
+    conn.set_timer_context((timer_snapshot.running > 0).then(|| timer_snapshot.to_json()));
 
     // Idle watchdog for this turn: a follow-up turn keeps the mic open for the listen
     // window; give the device a small margin past it so the orchestrator's no-speech

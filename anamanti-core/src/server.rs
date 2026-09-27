@@ -101,10 +101,11 @@ async fn handle_connection(
                 // both back as 0.
                 let followup_depth = protocol::followup_depth(&ev.data);
                 let followup_wait_secs = protocol::followup_wait_secs(&ev.data);
-                // What the display is currently showing (its "display context", e.g. an
-                // open recipe screen), so the LLM knows it can drive the screen by voice
-                // this turn.
-                let screen = protocol::display_context(&ev.data);
+                // The turn's device context: what the display is currently showing (its
+                // "display context", e.g. an open recipe screen) plus orthogonal
+                // background state like active timers, so the LLM can drive the screen by
+                // voice and System-1 can route timer/stop commands this turn.
+                let device_ctx = protocol::device_context(&ev.data);
                 // Best-effort music ducking: lower the music group's volume while
                 // the assistant speaks and restore it when the turn ends. Fired on
                 // a spawned task so it never blocks (or fails) the turn; `duck`/
@@ -140,7 +141,7 @@ async fn handle_connection(
                         format,
                         followup_depth,
                         followup_wait_secs,
-                        screen,
+                        device_ctx,
                         &mut on_event,
                     )
                     .await?

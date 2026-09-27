@@ -740,6 +740,101 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
     }
 }
 
+/// Active-timer state the device reports on **every** turn, **orthogonal to the
+/// foreground widget** (`DisplayContext`): a timer can be counting down while a recipe,
+/// the weather, or the idle slideshow is front-and-center, so this rides as a `timers`
+/// sibling of `kind` inside the `screen` block rather than as a `kind` variant. The
+/// device owns timers (countdown + alarm), so this is the Core's only view of them — it
+/// unblocks the System-1 `timer_query` / `timer_cancel` / `stop_dismiss` decisions
+/// (plans/system1-fast-decisions.md §17, §19). `ringing` is intentionally absent in this
+/// phase (today's alarm is a finite bell that self-removes — see §19.7).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TimerContext {
+    /// How many timers are currently running (0 = none).
+    pub running: u32,
+    /// Whole seconds until the *soonest-to-fire* timer, so "how much time is left?" can
+    /// be answered without any Core-side timer state. `None` when nothing is running.
+    pub next_remaining_secs: Option<u64>,
+    /// Labels of the running timers (only the non-empty ones), for future labeled
+    /// query/cancel. May be empty even when `running > 0` (unlabeled timers).
+    pub labels: Vec<String>,
+}
+
+impl TimerContext {
+    /// Whether any timer is currently running.
+    pub fn any_running(&self) -> bool {
+        self.running > 0
+    }
+}
+
+/// The full device context for a turn: the foreground widget (if any) **plus** the
+/// orthogonal background state (active timers now; media later). Parsed once from the
+/// `audio-start` data via [`device_context`]. Keeping [`display_context`] separate lets
+/// the System-2 prompt line stay widget-only while System-1 sees the superset.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeviceContext {
+    /// The foreground widget, discriminated by `screen.kind`. `None` on an idle screen.
+    pub widget: Option<DisplayContext>,
+    /// Background timer state, reported regardless of `widget`.
+    pub timers: TimerContext,
+}
+
+impl DeviceContext {
+    /// A short label for the foreground widget (`"recipe"` / `"weather"`), or `None` on
+    /// an idle screen — the compact form System-1 routes on.
+    pub fn widget_label(&self) -> Option<&'static str> {
+        match self.widget {
+            Some(DisplayContext::Recipe(_)) => Some("recipe"),
+            Some(DisplayContext::Weather(_)) => Some("weather"),
+            None => None,
+        }
+    }
+}
+
+/// Parse the active-timer state from an `audio-start` data block's `screen.timers`
+/// object. Missing/absent → an empty [`TimerContext`] (older device, or no timers),
+/// **independently of `screen.kind`** — so a timer running behind another widget (or an
+/// idle screen with no `kind`) is still seen, which [`display_context`] alone would drop.
+pub fn timer_context(data: &Value) -> TimerContext {
+    let Some(timers) = data
+        .as_object()
+        .and_then(|o| o.get("screen"))
+        .and_then(Value::as_object)
+        .and_then(|s| s.get("timers"))
+        .and_then(Value::as_object)
+    else {
+        return TimerContext::default();
+    };
+    let running = timers.get("running").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let next_remaining_secs = timers.get("next_remaining_secs").and_then(Value::as_u64);
+    let labels = timers
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    TimerContext {
+        running,
+        next_remaining_secs,
+        labels,
+    }
+}
+
+/// Parse the full [`DeviceContext`] (foreground widget + background timers) from an
+/// `audio-start` data block. The turn pipeline uses this so System-1 sees background
+/// timers; [`display_context`] remains for the System-2 prompt line.
+pub fn device_context(data: &Value) -> DeviceContext {
+    DeviceContext {
+        widget: display_context(data),
+        timers: timer_context(data),
+    }
+}
+
 /// Parse the `weather` sub-object of a `screen` block into a [`WeatherScreen`].
 fn parse_weather_screen(weather: &Map<String, Value>) -> Option<WeatherScreen> {
     Some(WeatherScreen {
@@ -994,6 +1089,57 @@ mod tests {
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
         let other = json!({ "screen": { "kind": "music" } });
         assert_eq!(display_context(&other), None);
+    }
+
+    #[test]
+    fn timer_context_parses_orthogonally_to_widget_kind() {
+        // No screen block at all → empty timer context.
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        assert_eq!(timer_context(&plain.data), TimerContext::default());
+        assert!(!timer_context(&plain.data).any_running());
+
+        // A screen block with a widget but no timers → still empty.
+        let widget_only = json!({ "screen": { "kind": "recipe" } });
+        assert_eq!(timer_context(&widget_only), TimerContext::default());
+
+        // Timers reported WITHOUT any `kind` (idle screen, timer in background) must
+        // still be seen — this is exactly what display_context() alone would drop.
+        let idle_with_timer = json!({
+            "screen": { "timers": { "running": 2, "next_remaining_secs": 125, "labels": ["pasta", ""] } }
+        });
+        assert_eq!(
+            timer_context(&idle_with_timer),
+            TimerContext {
+                running: 2,
+                next_remaining_secs: Some(125),
+                labels: vec!["pasta".to_string()], // the empty label is filtered out
+            }
+        );
+        // display_context sees nothing here (no `kind`), proving orthogonality.
+        assert_eq!(display_context(&idle_with_timer), None);
+
+        // Timers reported ALONGSIDE a foreground widget: device_context carries both.
+        let recipe_plus_timer = json!({
+            "screen": {
+                "kind": "weather",
+                "weather": { "location": "Austin", "units": "imperial", "temp": 90, "description": "sunny" },
+                "timers": { "running": 1, "next_remaining_secs": 30 }
+            }
+        });
+        let dev = device_context(&recipe_plus_timer);
+        assert_eq!(dev.widget_label(), Some("weather"));
+        assert_eq!(dev.timers.running, 1);
+        assert_eq!(dev.timers.next_remaining_secs, Some(30));
+        assert!(dev.timers.labels.is_empty());
+    }
+
+    #[test]
+    fn device_context_defaults_when_empty() {
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        let dev = device_context(&plain.data);
+        assert_eq!(dev, DeviceContext::default());
+        assert_eq!(dev.widget_label(), None);
+        assert!(!dev.timers.any_running());
     }
 
     #[tokio::test]
