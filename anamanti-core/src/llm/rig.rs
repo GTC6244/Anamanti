@@ -1823,16 +1823,31 @@ impl LlmBackend for RigBackend {
         if tool_defs.is_empty() {
             let stream = async_stream::try_stream! {
                 let messages = seed_messages(turn.history, turn.user_message);
+                // One streamed LLM round trip. Report time-to-first-token (the
+                // latency the user actually feels before audio starts) and total.
+                let rt_start = std::time::Instant::now();
                 let response =
                     open_stream(&model, &system_prompt, &messages, &tool_defs, max_tokens).await?;
                 futures_util::pin_mut!(response);
+                let mut first_token = true;
                 while let Some(part) = response.next().await {
                     if let StreamedAssistantContent::Text(text) = part? {
                         if !text.text.is_empty() {
+                            if first_token {
+                                log::info!(
+                                    "rig LLM stream: first token in {}ms",
+                                    rt_start.elapsed().as_millis(),
+                                );
+                                first_token = false;
+                            }
                             yield text.text;
                         }
                     }
                 }
+                log::info!(
+                    "rig LLM stream: complete in {}ms",
+                    rt_start.elapsed().as_millis(),
+                );
             };
             return Ok(Box::pin(stream));
         }
@@ -1847,10 +1862,21 @@ impl LlmBackend for RigBackend {
         let stream = async_stream::try_stream! {
             let mut messages: Vec<Message> = seed_messages(turn.history, turn.user_message);
 
-            for _round in 0..MAX_TOOL_ROUNDS {
+            for round in 0..MAX_TOOL_ROUNDS {
+                // One Anthropic/Ollama round trip: request (prompt + prior tool
+                // results) → full completion. Isolated so a slow LLM leg is visible
+                // apart from tool execution.
+                let rt_start = std::time::Instant::now();
                 let (text, calls) =
                     open_completion(&model, &system_prompt, &messages, &tool_defs, max_tokens)
                         .await?;
+                log::info!(
+                    "rig LLM round {} round-trip in {}ms ({} reply chars, {} tool call(s))",
+                    round + 1,
+                    rt_start.elapsed().as_millis(),
+                    text.len(),
+                    calls.len(),
+                );
 
                 if !text.is_empty() {
                     yield text;
@@ -1876,12 +1902,16 @@ impl LlmBackend for RigBackend {
                         call.function.name,
                         call.function.arguments
                     );
+                    // Isolate each tool's own execution time (network fetch, DB, etc.).
+                    let tool_start = std::time::Instant::now();
                     let result = tools
                         .dispatch(&call.function.name, &call.function.arguments, actions.as_ref())
                         .await
                         .unwrap_or_else(|e| format!("tool error: {e:#}"));
                     log::info!(
-                        "rig tool result ({} chars): {}",
+                        "rig tool result: {} in {}ms ({} chars): {}",
+                        call.function.name,
+                        tool_start.elapsed().as_millis(),
                         result.len(),
                         result.chars().take(200).collect::<String>()
                     );

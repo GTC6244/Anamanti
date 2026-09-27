@@ -50,7 +50,11 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        // Millisecond timestamps: turn latency is measured in sub-second deltas, so
+        // whole-second stamps hide where a turn actually spends its time.
+        .format_timestamp_millis()
+        .init();
 
     let cli = parse_cli().context("parsing command-line arguments")?;
     let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
@@ -121,6 +125,24 @@ async fn run() -> Result<()> {
         }
     }
 
+    // System-1 fast-decision engine (plans/system1-fast-decisions.md). Default `none`
+    // (disabled) reproduces today's behavior; a bad/unimplemented backend fails loudly
+    // at boot rather than silently.
+    // System-1 fast-decision engine was built inside `shared_settings` (config seed +
+    // persisted overlay) and lives in the runtime-swappable settings, so it can be
+    // changed live from the config page. Log the selected backend.
+    log::info!(
+        "system1 decision engine: {}",
+        settings.system1_view().backend
+    );
+
+    // Forecast provider (Visual Crossing by default, keyless Open-Meteo fallback),
+    // built from the live settings so it honors the configured provider + key. Shared
+    // by the System-1 weather fast path (wired onto the pipeline below). `None` when
+    // weather is disabled. The ambient push rebuilds its own provider each tick from
+    // live settings so a config-page provider/key switch retargets it without restart.
+    let weather_provider = settings.current_weather_provider();
+
     let mut pipeline = Pipeline::with_settings(
         settings,
         memory,
@@ -130,7 +152,8 @@ async fn run() -> Result<()> {
     .with_chatlog(chatlog.clone())
     .with_promptlog(promptlog.clone())
     .with_follow_up(config.follow_up.clone())
-    .with_audio_dump(config.audio_dump_dir.clone());
+    .with_audio_dump(config.audio_dump_dir.clone())
+    .with_weather(weather_provider.clone());
     // Home location + household roster are grounded from the runtime settings
     // snapshot each turn (seeded from the config file's home_location at boot, then
     // editable from the config dashboard's Household tab), not fixed onto the pipeline.

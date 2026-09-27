@@ -80,6 +80,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             cadora: CadoraConfig::default(),
             weather_provider: "visualcrossing".to_string(),
             visualcrossing_key: None,
+            system1: anamanti_core::settings::System1Runtime::default(),
         },
     );
     let pipeline = Pipeline::with_settings(

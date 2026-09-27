@@ -485,6 +485,7 @@ mod tests {
                 cadora: crate::settings::CadoraConfig::default(),
                 weather_provider: "visualcrossing".into(),
                 visualcrossing_key: None,
+                system1: crate::settings::System1Runtime::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();
