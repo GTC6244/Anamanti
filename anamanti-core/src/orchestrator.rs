@@ -46,6 +46,14 @@ use crate::wyoming::{DynConnection, DynRead, DynWrite};
 /// listen window (see [`Pipeline::run_turn_after_start`]).
 const DEFAULT_NO_SPEECH_FINALIZE: Duration = Duration::from_secs(6);
 
+/// Wall-clock budget for the System-1 weather fetch on the *fast* path. The provider's
+/// own client timeout (10 s) bounds a single request, but a fast-path fetch can chain a
+/// geocode *then* a forecast call — up to ~20 s of dead air before it gives up. That
+/// defeats the point of the fast path: a slow/flaky Open-Meteo should fail over to
+/// System-2 promptly, not stall the user. Bound the whole fetch here; on timeout we
+/// defer, exactly as we do on any other fetch error.
+const SYSTEM1_WEATHER_BUDGET: Duration = Duration::from_millis(2500);
+
 /// Minimum span of *consecutive* voiced audio (chunks above `voice_rms_threshold`)
 /// required before we latch `speech_started` and switch a turn's finalize clock from
 /// the `no_speech_finalize` window to the much shorter `end_silence` window. This
@@ -1235,10 +1243,26 @@ impl Pipeline {
         }
         let imperial =
             crate::directions::units_are_imperial(runtime.household.weather_units.as_deref());
-        let report = match provider.fetch(&location, imperial).await {
-            Ok(report) => report,
-            Err(e) => {
-                log::warn!("system1 weather fetch failed ({e:#}); deferring to System-2");
+        let t0 = Instant::now();
+        let report = match tokio::time::timeout(
+            SYSTEM1_WEATHER_BUDGET,
+            provider.fetch(&location, imperial),
+        )
+        .await
+        {
+            Ok(Ok(report)) => report,
+            Ok(Err(e)) => {
+                log::warn!(
+                    "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
+                    t0.elapsed().as_millis(),
+                );
+                return None; // nothing emitted yet — safe to defer
+            }
+            Err(_) => {
+                log::warn!(
+                    "system1 weather fetch exceeded {}ms budget; deferring to System-2",
+                    SYSTEM1_WEATHER_BUDGET.as_millis(),
+                );
                 return None; // nothing emitted yet — safe to defer
             }
         };
