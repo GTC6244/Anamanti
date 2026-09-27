@@ -36,6 +36,18 @@ use super::{Decision, DecisionEngine, DecisionRequest, Resolution};
 /// The `noul` question id used to detect turns that need System-2 reasoning.
 const NEEDS_FULL: &str = "needs_full_understanding";
 
+/// The `noul` question id that detects a specific, non-home place named in the turn
+/// (e.g. "the weather **in Paris, France**"). System-1 is a router, not a slot
+/// extractor — it can flag *that* a place was named but cannot hand back the string.
+/// So a location intent that names a place is deferred to System-2, where the LLM
+/// extracts it and calls the location-aware tool. Absent this, the fast-path handler
+/// would silently answer for the home location (wrong place, fast).
+const NAMES_PLACE: &str = "names_place";
+
+/// Probability floor (P(true)) at which the `names_place` noul is treated as "a
+/// specific place was named" — high enough to route to System-2 for extraction.
+const NAMES_PLACE_THRESHOLD: f64 = 0.5;
+
 /// Intents that are ambiguous without a place. When one of these is chosen confidently
 /// but the turn still defers (the model judged it "needs a location"), the engine retries
 /// once with the home location folded into the question — a second fast System One call,
@@ -122,24 +134,21 @@ impl DecisionEngine for HttpDecider {
     }
 
     async fn decide(&self, req: &DecisionRequest) -> Result<Decision> {
+        // ONE System-One round trip carries the whole routing question set (intent
+        // choice + `needs_full_understanding` + `names_place` nouls). System One bundles
+        // many questions per pass (up to 64), so we ask everything at once rather than a
+        // defer-then-retry sequence. A location intent with no place named resolves here
+        // against the home default (see the `needs_full_understanding` wording); a named
+        // place is routed to System-2 for extraction.
         let body = build_request(&req.transcript, self.model.as_deref(), &self.intents);
         let value = self.post(&body).await?;
         let decision = interpret(&value, &self.intents, self.min_confidence);
-        if matches!(decision, Decision::Resolve(_)) {
-            return Ok(decision);
-        }
 
-        // Escalate once: a confident, location-dependent intent (e.g. `weather`) that
-        // deferred usually just lacks a place. Retry with the home location folded into
-        // the question text — the model's `needs_full_understanding` noul then drops
-        // below the defer line. Two fast System One calls still beat a System-2 turn.
-        if let Some(loc) = req.location.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
-            if confident_location_intent(&value, &self.intents, self.min_confidence).is_some() {
-                let augmented = format!("{} in {}", req.transcript.trim(), loc);
-                let body = build_request(&augmented, self.model.as_deref(), &self.intents);
-                let value = self.post(&body).await?;
-                return Ok(interpret(&value, &self.intents, self.min_confidence));
-            }
+        // A location intent that named a specific place can't be fast-pathed (System One
+        // flags the place but can't extract the string, and the handler only knows the
+        // home location) — defer to System-2 to extract it.
+        if names_place_forces_defer(&decision, &value) {
+            return Ok(Decision::Defer);
         }
         Ok(decision)
     }
@@ -204,7 +213,16 @@ pub fn build_request(transcript: &str, model: Option<&str>, intents: &[String]) 
         NEEDS_FULL: {
             "type": "noul",
             "instructions": "Does answering `message` require open-ended reasoning, personal \
-                             memory, or details not implied by a simple command?",
+                             memory, or multi-step understanding? A location-based command \
+                             (like weather) defaults to the user's home location when no \
+                             place is named, so a missing location by itself does NOT count.",
+        },
+        NAMES_PLACE: {
+            "type": "noul",
+            "instructions": "Does `message` name a specific geographic place — a city, \
+                             country, or landmark (e.g. \"Paris\", \"in Tokyo\") — as the \
+                             location to act on, rather than implying the user's current \
+                             home area?",
         },
     });
 
@@ -260,24 +278,30 @@ pub fn interpret(resp: &Value, intents: &[String], min_confidence: f64) -> Decis
     }
 }
 
-/// If the response confidently chose a location-dependent intent (in both
-/// [`LOCATION_INTENTS`] and this router's `intents`) that nonetheless deferred, return
-/// it — the signal to retry with the home location folded into the question. Returns
-/// `None` when the choice was open-ended, low-confidence, or not location-dependent.
-fn confident_location_intent<'a>(
-    resp: &'a Value,
-    intents: &[String],
-    min_confidence: f64,
-) -> Option<&'a str> {
-    let intent = resp.get("answers")?.get("intent")?;
-    let choice = intent.get("choice").and_then(Value::as_str)?;
-    if !LOCATION_INTENTS.contains(&choice) || !intents.iter().any(|i| i == choice) {
-        return None;
-    }
-    if choice_confidence(Some(intent)) >= min_confidence {
-        Some(choice)
-    } else {
-        None
+/// Read the `names_place` noul's P(true), or 0.0 when the answer is absent.
+fn names_place_prob(resp: &Value) -> f64 {
+    resp.get("answers")
+        .and_then(|a| a.get(NAMES_PLACE))
+        .and_then(|a| a.get("noul"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
+/// Whether a resolved decision must be re-routed to System-2 because the turn named a
+/// specific place a location intent can't fast-path. System-1 flags *that* a place was
+/// named but can't extract the string, and the fast-path handler only knows the home
+/// location — so resolving here would answer for the wrong place.
+///
+/// Evaluated only against the **original** transcript's response in [`HttpDecider::decide`],
+/// never the home-augmented retry (which deliberately injects the home place name and must
+/// still be allowed to resolve).
+fn names_place_forces_defer(decision: &Decision, resp: &Value) -> bool {
+    match decision {
+        Decision::Resolve(r) => {
+            LOCATION_INTENTS.contains(&r.intent.as_str())
+                && names_place_prob(resp) >= NAMES_PLACE_THRESHOLD
+        }
+        _ => false,
     }
 }
 
@@ -335,6 +359,36 @@ mod tests {
         })
     }
 
+    /// A location intent that names a specific place resolves in `interpret` but is
+    /// re-routed to System-2 by `names_place_forces_defer` (evaluated on the original
+    /// transcript only, so the home-augmented retry can still resolve). No place named,
+    /// or a non-location intent, is unaffected.
+    #[test]
+    fn names_place_reroutes_only_resolved_location_intents() {
+        // Weather naming a place: interpret resolves, but the gate forces a defer.
+        let mut naming = resp("weather", 0.99, 0.02);
+        naming["answers"][NAMES_PLACE] = json!({ "type": "noul", "noul": 0.98 });
+        let d = interpret(&naming, &intents(), 0.85);
+        assert!(matches!(d, Decision::Resolve(_)));
+        assert!(names_place_forces_defer(&d, &naming));
+
+        // Weather, no place named → stays on the fast path.
+        let mut homey = resp("weather", 0.99, 0.02);
+        homey["answers"][NAMES_PLACE] = json!({ "type": "noul", "noul": 0.05 });
+        let d = interpret(&homey, &intents(), 0.85);
+        assert!(matches!(d, Decision::Resolve(_)));
+        assert!(!names_place_forces_defer(&d, &homey));
+
+        // A non-location intent (timer) that happens to name a place is not re-routed.
+        let mut timer = resp("timer", 0.99, 0.02);
+        timer["answers"][NAMES_PLACE] = json!({ "type": "noul", "noul": 0.98 });
+        let d = interpret(&timer, &intents(), 0.85);
+        assert!(!names_place_forces_defer(&d, &timer));
+
+        // A deferred decision is never force-deferred (nothing to re-route).
+        assert!(!names_place_forces_defer(&Decision::Defer, &naming));
+    }
+
     #[test]
     fn interpret_resolves_confident_closed_intent() {
         let d = interpret(&resp("weather", 0.97, 0.02), &intents(), 0.85);
@@ -372,30 +426,6 @@ mod tests {
         assert_eq!(
             interpret(&resp("philosophy", 0.99, 0.01), &intents(), 0.85),
             Decision::Defer
-        );
-    }
-
-    #[test]
-    fn confident_location_intent_flags_deferred_weather_for_retry() {
-        // Confident `weather` that deferred (high noul) → retry candidate.
-        let deferred_weather = resp("weather", 0.99, 0.94);
-        assert_eq!(
-            confident_location_intent(&deferred_weather, &intents(), 0.85),
-            Some("weather")
-        );
-        // A confident but non-location intent (`timer`) is never retried.
-        assert_eq!(
-            confident_location_intent(&resp("timer", 0.99, 0.9), &intents(), 0.85),
-            None
-        );
-        // Low-confidence or open-ended choices are not retried.
-        assert_eq!(
-            confident_location_intent(&resp("weather", 0.50, 0.94), &intents(), 0.85),
-            None
-        );
-        assert_eq!(
-            confident_location_intent(&resp("other", 0.99, 0.94), &intents(), 0.85),
-            None
         );
     }
 
