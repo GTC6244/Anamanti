@@ -1247,3 +1247,45 @@ async fn system1_timer_resolve_starts_timer_and_skips_the_llm() {
     assert_eq!(reply, "Timer set for 10 minutes.");
     assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
 }
+
+/// System-1 resolves a `time` clock query entirely from the wall clock: it speaks a
+/// short reply and never runs the LLM. (plans/system1-fast-decisions.md, M5.2)
+#[tokio::test]
+async fn system1_time_resolve_speaks_the_clock_and_skips_the_llm() {
+    use anamanti_core::system1::mock::MockDecider;
+
+    struct PanicLlm;
+    #[async_trait]
+    impl LlmBackend for PanicLlm {
+        fn name(&self) -> &str {
+            "panic"
+        }
+        async fn respond(&self, _turn: LlmTurn) -> Result<ReplyStream> {
+            panic!("System-2 LLM must not run when System-1 resolves a clock query");
+        }
+    }
+
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(PanicLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_system1(Arc::new(MockDecider::resolve("time", 0.99)));
+
+    let connector = MockConnector::new("what time is it");
+    let ((transcript, reply, kinds), _events) = run_one_turn(&pipeline, &connector).await;
+
+    assert_eq!(transcript, "what time is it");
+    assert!(
+        reply.starts_with("It's "),
+        "expected a spoken time reply, got {reply:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == types::AUDIO_START),
+        "expected TTS audio, got {kinds:?}"
+    );
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}

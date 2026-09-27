@@ -1272,8 +1272,85 @@ impl Pipeline {
                 )
                 .await
             }
+            "time" | "date" => {
+                // Clock queries answer from the wall clock (no tool, no network, no
+                // widget). Always resolvable → always commit.
+                let reply = spoken_clock_reply(&r.intent);
+                self.speak_fast_reply(
+                    runtime,
+                    device,
+                    connector,
+                    None,
+                    &reply,
+                    followup_depth,
+                    false,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
             _ => None, // no fast-path handler yet → defer
         }
+    }
+
+    /// Commit a fully-formed fast-path reply and close the turn: optionally send a
+    /// device-action `frame` first (a timer/dismiss action), relay the reply token,
+    /// synthesize it with Piper, then close. With `end_session` the turn ends on a bare
+    /// `audio-stop` (no follow-up `listen`), so the device returns to IDLE / wake-word;
+    /// otherwise the follow-up listen window is emitted like any other reply. Returns
+    /// `Some(reply)` — callers use this only once they have committed to owning the turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn speak_fast_reply(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        frame: Option<WyomingEvent>,
+        reply: &str,
+        followup_depth: u32,
+        end_session: bool,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let (_reader, writer) = device.split_mut();
+        if let Some(frame) = &frame {
+            protocol::write_event(writer, frame).await.ok();
+        }
+        on_event(TurnEvent::ReplyToken(reply.to_string()));
+        protocol::write_event(writer, &WyomingEvent::reply_token(reply))
+            .await
+            .ok();
+        on_event(TurnEvent::Speaking);
+        let mut audio_started = false;
+        let tts_start = Instant::now();
+        if let Err(e) = self
+            .speak_chunk(writer, runtime, connector, reply, &mut audio_started, dump)
+            .await
+        {
+            log::warn!("system1 fast reply: TTS failed ({e:#}); text still sent");
+        }
+        timing.tts_ms = Some(tts_start.elapsed().as_millis() as u64);
+        if end_session {
+            // End the follow-up chain: no `listen` frame, just close the audio stream so
+            // the device leaves SPEAKING and returns to IDLE / wake-word-waiting.
+            if audio_started {
+                protocol::write_event(writer, &WyomingEvent::audio_stop(0))
+                    .await
+                    .ok();
+            }
+        } else {
+            emit_follow_up_and_stop(
+                writer,
+                &self.follow_up,
+                audio_started,
+                reply,
+                followup_depth,
+            )
+            .await;
+        }
+        Some(reply.to_string())
     }
 
     /// The System-1 `timer` fast path: parse an unambiguous duration from the transcript,
@@ -1658,6 +1735,16 @@ fn sanitize_for_tts(text: &str) -> String {
 /// about the time/date, and must not volunteer it otherwise. Without that guard the
 /// prominently-stated clock became the most salient fact in context, so on a vague or
 /// mis-transcribed request the model would default to reciting the time.
+/// A short spoken reply for the System-1 `time` / `date` clock intents, formatted from
+/// the device's wall clock. `time` → "It's 3:45 PM."; anything else → today's date.
+fn spoken_clock_reply(intent: &str) -> String {
+    let now = chrono::Local::now();
+    match intent {
+        "time" => format!("It's {}.", now.format("%-I:%M %p")),
+        _ => format!("Today is {}.", now.format("%A, %B %-d")),
+    }
+}
+
 fn current_datetime_line() -> String {
     let now = chrono::Local::now();
     format!(

@@ -190,7 +190,9 @@ impl HttpDecider {
 fn intent_description(intent: &str) -> &str {
     match intent {
         "weather" => "current conditions or the forecast",
-        "timer" => "start, cancel, or ask about a timer or alarm",
+        "timer" => "start a timer or alarm for a stated duration",
+        "time" => "the current time of day right now",
+        "date" => "today's date or the current day of the week",
         "recipe_nav" => "navigate or scroll the recipe already on screen",
         "music" => "play, pause, skip, or change music volume",
         "shopping_add" => "add an item to the shopping list",

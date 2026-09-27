@@ -24,11 +24,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 /// The built-in intents the router may resolve when the config leaves `intents` empty.
-/// Grows as handlers land (M1: weather; M3: timer). An intent listed here still only
-/// resolves if the orchestrator has a handler for it *and* the handler's preconditions
-/// hold (e.g. timer needs a parseable duration), otherwise the turn defers to System-2.
+/// Grows as handlers land (M1: weather; M3: timer; M5.2: clock queries). An intent listed
+/// here still only resolves if the orchestrator has a handler for it *and* the handler's
+/// preconditions hold (e.g. timer needs a parseable duration), otherwise the turn defers
+/// to System-2.
 pub fn default_intents() -> Vec<String> {
-    vec!["weather".to_string(), "timer".to_string()]
+    vec![
+        "weather".to_string(),
+        "timer".to_string(),
+        "time".to_string(),
+        "date".to_string(),
+    ]
 }
 
 /// Parse a spoken timer/alarm duration into whole seconds, or `None` when the text has
