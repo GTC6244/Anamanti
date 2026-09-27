@@ -386,11 +386,11 @@ impl Pipeline {
         }
         on_event(TurnEvent::Transcript(transcript.clone()));
 
-        // Relay the transcript to the device (renders on screen; ends its input).
-        device
-            .send(&WyomingEvent::transcript(&transcript))
-            .await
-            .ok();
+        // NOTE: the transcript is already relayed to the device inside
+        // `stream_to_transcript`, the instant STT returns it (before the VAD gate /
+        // System-1 / System-2) — see the diagnostic echo there. Re-sending here would
+        // duplicate it, and on a no-speech finalize would overwrite the raw text with an
+        // empty string, hiding what STT actually heard.
 
         if transcript.trim().is_empty() {
             // No speech within the listen window: sleep. Send an `audio-stop` so the
@@ -579,6 +579,16 @@ impl Pipeline {
                     deadline = Instant::now() + self.turn_timeout;
                     match sev? {
                         Some(SttEvent::Transcript(text)) => {
+                            // Diagnostic echo (#1): relay exactly what STT produced to the
+                            // device the instant it arrives — BEFORE the VAD gate, System-1,
+                            // or System-2 — so the device confirms STT is alive regardless of
+                            // any downstream gating/decision. This is the only place the raw
+                            // (pre-gate) transcript is emitted; the caller no longer re-sends it.
+                            log::info!(
+                                "STT transcript {text:?} (speech_started={speech_started})"
+                            );
+                            device.send(&WyomingEvent::transcript(&text)).await.ok();
+
                             // Guard against STT hallucinations on silence. If our energy
                             // VAD never latched `speech_started`, this turn finalized on
                             // the no-speech timeout: everything we forwarded to Whisper
@@ -688,11 +698,15 @@ impl Pipeline {
                 // engine retries an otherwise-deferred turn with this folded into the query.
                 location: self.settings.home_location().get(),
             };
-            match runtime.system1.engine.decide(&req).await {
+            let engine = runtime.system1.engine.name().to_string();
+            log::info!("system1 ({engine}) call: deciding on {transcript:?}");
+            let t0 = Instant::now();
+            let decision = runtime.system1.engine.decide(&req).await;
+            let ms = t0.elapsed().as_millis();
+            match decision {
                 Ok(crate::system1::Decision::Resolve(r)) => {
                     log::info!(
-                        "system1 ({}) resolved intent `{}` (conf {:.2})",
-                        runtime.system1.engine.name(),
+                        "system1 ({engine}) RESOLVE intent `{}` (conf {:.2}) in {ms}ms",
                         r.intent,
                         r.confidence,
                     );
@@ -711,20 +725,31 @@ impl Pipeline {
                     {
                         // Fully handled on the fast path (widget + spoken reply +
                         // follow-up). The caller still logs the turn to the chat log.
+                        log::info!("system1 ({engine}) handled intent `{}` on the fast path", r.intent);
                         return Ok((reply, memories_written));
                     }
-                    log::debug!(
-                        "system1 intent `{}` not handled on the fast path; deferring to System-2",
+                    log::info!(
+                        "system1 ({engine}) intent `{}` has no fast-path handler; \
+                         deferring to System-2",
                         r.intent
                     );
                 }
-                Ok(crate::system1::Decision::Defer) => {}
-                Err(e) => log::debug!(
-                    "system1 ({}) decide failed ({e:#}); deferring to System-2",
-                    runtime.system1.engine.name()
+                Ok(crate::system1::Decision::Defer) => {
+                    log::info!("system1 ({engine}) DEFER in {ms}ms; falling through to System-2");
+                }
+                Err(e) => log::warn!(
+                    "system1 ({engine}) decide FAILED in {ms}ms ({e:#}); deferring to System-2"
                 ),
             }
         }
+
+        // ---- System-2 path (memory recall + full LLM completion) ----
+        let sys2_start = Instant::now();
+        log::info!(
+            "system2 ({}/{}) call: memory recall + LLM completion for {transcript:?}",
+            runtime.llm_backend,
+            runtime.llm_model.as_deref().unwrap_or("?"),
+        );
 
         // Inferred capture from an ordinary turn — attributed to this speaker.
         for (kind, content) in infer_memories(transcript) {
@@ -918,7 +943,14 @@ impl Pipeline {
             log::info!("barge-in: aborting in-flight LLM generation + TTS for this turn");
         }
 
-        Ok((reply.trim().to_string(), memories_written))
+        let reply = reply.trim().to_string();
+        log::info!(
+            "system2 complete in {}ms ({} chars{})",
+            sys2_start.elapsed().as_millis(),
+            reply.len(),
+            if interrupted { ", barged-in" } else { "" },
+        );
+        Ok((reply, memories_written))
     }
 
     /// Append the completed turn to the chat log, if one is attached. A failure is
