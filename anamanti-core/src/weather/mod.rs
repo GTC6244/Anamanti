@@ -618,7 +618,72 @@ pub fn from_config(
             Arc::new(OpenMeteoWeather::new()) as Arc<dyn WeatherProvider>
         }
     };
-    Some(provider)
+    // Wrap every provider in the shared response cache. `from_config` is the single
+    // constructor for weather providers (the System-1 fast path, the `weather_lookup`
+    // LLM tool, and the ambient push all build through it), and the cache is process-wide,
+    // so a repeated forecast for the same place+units inside the TTL is served locally
+    // regardless of which caller asks — turning a cold ~1.3 s fetch into a warm lookup.
+    // The TTL is per-tool and configurable (`tool_cache.weather_lookup`, default 60 min).
+    Some(
+        Arc::new(CachingWeatherProvider::new(provider, weather_cache()))
+            as Arc<dyn WeatherProvider>,
+    )
+}
+
+/// The logical tool name weather caches under — its key in the `tool_cache` TTL config
+/// and in the shared [`ToolCache`](crate::cache::ToolCache) key space.
+pub const WEATHER_TOOL: &str = "weather_lookup";
+
+/// The process-wide weather response cache, shared across every provider built by
+/// [`from_config`]. Lazily created on first use.
+fn weather_cache() -> Arc<crate::cache::ToolCache> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Arc<crate::cache::ToolCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Arc::new(crate::cache::ToolCache::new()))
+        .clone()
+}
+
+/// A [`WeatherProvider`] decorator that serves a repeated `(location, imperial)` fetch
+/// from a shared [`ToolCache`](crate::cache::ToolCache) within its configured TTL,
+/// delegating to the wrapped provider on a miss and caching the result. The TTL comes
+/// from `tool_cache.weather_lookup` (default 60 min); `0` turns caching off. Weather is a
+/// pure lookup of its arguments for that window, so this is safe; a miss behaves exactly
+/// like the inner provider (including its Open-Meteo fallback and error paths — errors
+/// are never cached).
+struct CachingWeatherProvider {
+    inner: Arc<dyn WeatherProvider>,
+    cache: Arc<crate::cache::ToolCache>,
+}
+
+impl CachingWeatherProvider {
+    fn new(inner: Arc<dyn WeatherProvider>, cache: Arc<crate::cache::ToolCache>) -> Self {
+        Self { inner, cache }
+    }
+}
+
+#[async_trait]
+impl WeatherProvider for CachingWeatherProvider {
+    async fn fetch(&self, location: &str, imperial: bool) -> Result<WeatherReport> {
+        // Per-tool TTL from the `tool_cache` config (0 ⇒ caching disabled for weather).
+        let ttl = crate::cache::config().ttl(WEATHER_TOOL);
+        if ttl.is_zero() {
+            return self.inner.fetch(location, imperial).await;
+        }
+        // Key on the outgoing call data: the resolved place + units.
+        let key = crate::cache::ToolCache::key(WEATHER_TOOL, &(location, imperial));
+        if let Some(key) = &key {
+            if let Some(hit) = self.cache.get_as::<WeatherReport>(key) {
+                log::info!("weather cache hit for {location:?} (imperial={imperial})");
+                return Ok(hit);
+            }
+        }
+        let report = self.inner.fetch(location, imperial).await?;
+        if let Some(key) = key {
+            self.cache.put_as(key, &report, ttl);
+        }
+        Ok(report)
+    }
 }
 
 /// A short spoken confirmation for the model to relay once the forecast is on screen.
@@ -842,7 +907,10 @@ mod tests {
         // The location is a URL-encoded path segment (the `url` crate leaves commas
         // literal in path segments but escapes the space); key + unit group are query args.
         assert!(url.as_str().contains("/timeline/Austin,%20TX"), "{url}");
-        assert!(!url.as_str().contains("/timeline//"), "no double slash: {url}");
+        assert!(
+            !url.as_str().contains("/timeline//"),
+            "no double slash: {url}"
+        );
         assert!(url.as_str().contains("unitGroup=us"), "{url}");
         assert!(url.as_str().contains("key=K3Y"), "{url}");
         // Metric maps to the "metric" unit group.
@@ -888,5 +956,52 @@ mod tests {
     fn from_config_openmeteo_and_unknown_fall_back_to_some() {
         assert!(from_config(true, "openmeteo", None).is_some());
         assert!(from_config(true, "not-a-provider", Some("k")).is_some());
+    }
+
+    /// A provider that counts how many times the upstream `fetch` actually ran, so the
+    /// caching decorator can be verified without any network.
+    struct CountingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl WeatherProvider for CountingProvider {
+        async fn fetch(&self, location: &str, imperial: bool) -> Result<WeatherReport> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(WeatherReport {
+                location_label: location.to_string(),
+                units: if imperial { "imperial" } else { "metric" }.to_string(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn caching_provider_serves_repeat_calls_without_refetching() {
+        use std::sync::atomic::Ordering;
+        let inner = Arc::new(CountingProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        // A dedicated cache (not the process-global one) so the test is isolated. The TTL
+        // comes from the process cache config, which defaults `weather_lookup` to 60 min.
+        let cache = Arc::new(crate::cache::ToolCache::new());
+        let provider = CachingWeatherProvider::new(inner.clone(), cache);
+
+        // First call misses → upstream runs once.
+        let a = provider.fetch("Austin", true).await.unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        // Identical call is served from cache → upstream NOT hit again.
+        let b = provider.fetch("Austin", true).await.unwrap();
+        assert_eq!(
+            inner.calls.load(Ordering::SeqCst),
+            1,
+            "second call must be cached"
+        );
+        assert_eq!(a, b);
+        // Different units is a distinct key → upstream runs again.
+        provider.fetch("Austin", false).await.unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        // Different place → another upstream call.
+        provider.fetch("Dallas", true).await.unwrap();
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 3);
     }
 }

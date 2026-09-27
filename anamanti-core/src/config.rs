@@ -187,6 +187,10 @@ pub struct Config {
     /// Cadora shopping-list seed (base URL + voice-link token). The token is normally
     /// minted by the config-page pairing flow. Overlaid by the persisted settings file.
     pub cadora: CadoraConfig,
+    /// Per-tool response-cache TTLs (`tool_cache` in the file), keyed by tool name (e.g.
+    /// `weather_lookup`, default 3600 s). Installed process-wide at boot; see
+    /// [`crate::cache`]. `0` disables caching for a tool.
+    pub tool_cache: crate::cache::ToolCacheConfig,
 }
 
 /// Speaker-identification configuration. Off by default (`speaker.enabled`); a
@@ -561,6 +565,7 @@ impl Default for Config {
             },
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
+            tool_cache: crate::cache::ToolCacheConfig::default(),
         }
     }
 }
@@ -661,6 +666,11 @@ pub struct FileConfig {
     pub spotify: FileSpotify,
     #[serde(default)]
     pub cadora: FileCadora,
+    /// Per-tool cache TTLs in seconds, keyed by tool name (e.g. `weather_lookup`). A flat
+    /// map so it stays generic; overlaid on the built-in defaults, `0` disables a tool's
+    /// cache. Absent ⇒ defaults only (see [`crate::cache::ToolCacheConfig`]).
+    #[serde(default)]
+    pub tool_cache: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1068,8 +1078,7 @@ impl Config {
         let system1 = System1Config {
             backend: nonempty(fc.system1.backend).unwrap_or(s1d.backend),
             base_url: nonempty(fc.system1.base_url).unwrap_or(s1d.base_url),
-            openrouter_model: nonempty(fc.system1.openrouter_model)
-                .unwrap_or(s1d.openrouter_model),
+            openrouter_model: nonempty(fc.system1.openrouter_model).unwrap_or(s1d.openrouter_model),
             device: nonempty(fc.system1.device).unwrap_or(s1d.device),
             model: nonempty(fc.system1.model).unwrap_or(s1d.model),
             min_confidence: fc.system1.min_confidence.unwrap_or(s1d.min_confidence),
@@ -1224,6 +1233,11 @@ impl Config {
             drive,
             spotify,
             cadora,
+            tool_cache: {
+                let mut tc = crate::cache::ToolCacheConfig::default();
+                tc.overlay(fc.tool_cache);
+                tc
+            },
         })
     }
 
@@ -1235,7 +1249,9 @@ impl Config {
     /// is [`Self::shared_settings`], which also applies the persisted overlay and makes
     /// the engine runtime-swappable; this helper is kept for direct/one-shot use.
     pub fn build_system1(&self) -> Result<Arc<dyn crate::system1::DecisionEngine>> {
-        let key = env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty());
+        let key = env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         if self.system1.backend.eq_ignore_ascii_case("jev") && key.is_none() {
             log::warn!(
                 "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
@@ -1607,7 +1623,9 @@ impl Config {
         let mut system1_model = self.system1.openrouter_model.clone();
         let mut system1_min_confidence = self.system1.min_confidence;
         let mut system1_intents = self.system1.intents.clone();
-        let mut openrouter_api_key = env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty());
+        let mut openrouter_api_key = env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -1942,6 +1960,38 @@ mod tests {
         assert_eq!(c.stt.engine, SttEngineKind::Wyoming);
         assert_eq!(c.stt.model, "base");
         assert_eq!(c.stt.language.as_deref(), Some("en"));
+        // No tool_cache block ⇒ built-in defaults (weather cached 60 min).
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn tool_cache_block_overlays_per_tool_ttls() {
+        let c = Config::from_file(parse(
+            r#"{ "tool_cache": { "weather_lookup": 1800, "directions_lookup": 600 } }"#,
+        ))
+        .unwrap();
+        // File entries win; an unmentioned tool stays uncached.
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::from_secs(1800)
+        );
+        assert_eq!(
+            c.tool_cache.ttl("directions_lookup"),
+            std::time::Duration::from_secs(600)
+        );
+        assert_eq!(c.tool_cache.ttl("recipe_lookup"), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn tool_cache_zero_disables_a_defaulted_tool() {
+        let c = Config::from_file(parse(r#"{ "tool_cache": { "weather_lookup": 0 } }"#)).unwrap();
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::ZERO
+        );
     }
 
     #[test]

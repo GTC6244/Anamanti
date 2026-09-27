@@ -243,7 +243,10 @@ impl Pipeline {
 
     /// Provide the forecast provider used by the System-1 `weather` fast path (shared
     /// with the ambient push). Without it, the weather intent defers to System-2.
-    pub fn with_weather(mut self, weather: Option<Arc<dyn crate::weather::WeatherProvider>>) -> Self {
+    pub fn with_weather(
+        mut self,
+        weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
+    ) -> Self {
         self.weather = weather;
         self
     }
@@ -372,7 +375,7 @@ impl Pipeline {
         } else {
             DEFAULT_NO_SPEECH_FINALIZE
         };
-        let Some((transcript, voiced_pcm)) = self
+        let Some((transcript, voiced_pcm, stt_dur)) = self
             .stream_to_transcript(
                 device,
                 stt.as_mut(),
@@ -388,6 +391,14 @@ impl Pipeline {
             let _ = stt.finish().await;
             return Ok(TurnOutcome::Completed);
         };
+        // Per-turn latency breakdown (persisted with the chat-log record, surfaced in
+        // the `/chatlog` UI). Anchored at end-of-speech: `stt_dur` is that instant →
+        // transcript; the processing timer below measures transcript → reply.
+        let mut timing = crate::memory::TurnTiming {
+            stt_ms: Some(stt_dur.as_millis() as u64),
+            ..Default::default()
+        };
+        let processing_start = Instant::now();
         let _ = stt.finish().await; // idempotent finalize (VAD already sent audio-stop)
         if let Some(d) = dump.as_ref() {
             d.set_transcript(&transcript);
@@ -431,6 +442,7 @@ impl Pipeline {
                 screen.as_ref(),
                 on_event,
                 dump.as_ref(),
+                &mut timing,
             )
             .await?;
         if let Some(d) = dump.as_ref() {
@@ -438,9 +450,20 @@ impl Pipeline {
         }
         on_event(TurnEvent::Reply(reply.clone()));
 
+        // Whole server-side turn: end-of-speech → reply ready (STT finalize + processing).
+        timing.total_ms =
+            Some(stt_dur.as_millis() as u64 + processing_start.elapsed().as_millis() as u64);
+
         // Record the completed turn for the background GraphRAG ingester. Never
         // let a logging failure break the turn.
-        self.log_turn(&runtime, &speaker, &transcript, &reply, memories_written);
+        self.log_turn(
+            &runtime,
+            &speaker,
+            &transcript,
+            &reply,
+            memories_written,
+            timing,
+        );
 
         on_event(TurnEvent::Finished);
         Ok(TurnOutcome::Completed)
@@ -469,7 +492,7 @@ impl Pipeline {
         voice_rms_threshold: f64,
         mic_rate: u32,
         dump: Option<&TurnAudioDump>,
-    ) -> Result<Option<(String, Vec<i16>)>> {
+    ) -> Result<Option<(String, Vec<i16>, Duration)>> {
         // `voice_rms_threshold`: RMS (i16 units) above which a chunk counts as speech
         // rather than room noise. The Echo's far-field pickup is quiet (~50 idle,
         // several hundred+ while speaking). `end_silence`: trailing silence after
@@ -491,6 +514,9 @@ impl Pipeline {
         let mut voiced_run = Duration::ZERO;
         // True once we've sent `audio-stop` to STT and are just awaiting the result.
         let mut finalized = false;
+        // When end-of-speech was detected (audio-stop sent). Used to measure the STT
+        // finalize latency (end-of-speech → transcript) for the per-turn timing record.
+        let mut finalized_at: Option<Instant> = None;
         // Accumulated voiced PCM (samples from chunks above the energy gate), used
         // for the speaker embedding once the transcript arrives.
         let mut voiced_pcm: Vec<i16> = Vec::new();
@@ -570,6 +596,7 @@ impl Pipeline {
                                         );
                                         stt.finish().await?;
                                         finalized = true;
+                                        finalized_at = Some(Instant::now());
                                     }
                                 }
                                 // After finalizing, drop further mic chunks: STT has
@@ -621,9 +648,10 @@ impl Pipeline {
                                          Whisper hallucination on silence)"
                                     );
                                 }
-                                return Ok(Some((String::new(), Vec::new())));
+                                return Ok(Some((String::new(), Vec::new(), Duration::ZERO)));
                             }
-                            return Ok(Some((text, std::mem::take(&mut voiced_pcm))));
+                            let stt_dur = finalized_at.map(|t| t.elapsed()).unwrap_or_default();
+                            return Ok(Some((text, std::mem::take(&mut voiced_pcm), stt_dur)));
                         }
                         Some(SttEvent::Other) => {} // voice-started / voice-stopped etc.
                         None => anyhow::bail!("STT service closed before returning a transcript"),
@@ -657,6 +685,7 @@ impl Pipeline {
         screen: Option<&protocol::DisplayContext>,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
     ) -> Result<(String, Vec<String>)> {
         // Memory entries written this turn (for the chat log / ingester).
         let mut memories_written = Vec::new();
@@ -666,6 +695,7 @@ impl Pipeline {
         // Explicit command → apply, confirm, and speak the confirmation in one
         // chunk, skipping the LLM. (Instant, so it is not barge-in-interruptible.)
         if let Some(cmd) = parse_command(transcript) {
+            timing.path = Some("command".to_string());
             match &cmd {
                 MemoryCommand::Remember { content, .. } => memories_written.push(content.clone()),
                 MemoryCommand::NameSpeaker(name) => {
@@ -700,7 +730,7 @@ impl Pipeline {
         if runtime.system1.engine.name() != "none" {
             let req = crate::system1::DecisionRequest {
                 transcript: transcript.to_string(),
-                screen: None,        // M1: derive a label from the turn's `screen` context
+                screen: None, // M1: derive a label from the turn's `screen` context
                 history: Vec::new(), // M1: recent turns for follow-up disambiguation
                 // Home location grounds location-dependent intents (weather): the HTTP
                 // engine retries an otherwise-deferred turn with this folded into the query.
@@ -711,8 +741,11 @@ impl Pipeline {
             let t0 = Instant::now();
             let decision = runtime.system1.engine.decide(&req).await;
             let ms = t0.elapsed().as_millis();
+            timing.system1_ms = Some(ms as u64);
             match decision {
                 Ok(crate::system1::Decision::Resolve(r)) => {
+                    timing.system1_intent = Some(r.intent.clone());
+                    timing.system1_confidence = Some(r.confidence);
                     log::info!(
                         "system1 ({engine}) RESOLVE intent `{}` (conf {:.2}) in {ms}ms",
                         r.intent,
@@ -728,14 +761,21 @@ impl Pipeline {
                             followup_depth,
                             on_event,
                             dump,
+                            timing,
                         )
                         .await
                     {
                         // Fully handled on the fast path (widget + spoken reply +
                         // follow-up). The caller still logs the turn to the chat log.
-                        log::info!("system1 ({engine}) handled intent `{}` on the fast path", r.intent);
+                        timing.path = Some("system1".to_string());
+                        timing.system1_outcome = Some("resolve".to_string());
+                        log::info!(
+                            "system1 ({engine}) handled intent `{}` on the fast path",
+                            r.intent
+                        );
                         return Ok((reply, memories_written));
                     }
+                    timing.system1_outcome = Some("no-handler".to_string());
                     log::info!(
                         "system1 ({engine}) intent `{}` has no fast-path handler; \
                          deferring to System-2",
@@ -743,16 +783,21 @@ impl Pipeline {
                     );
                 }
                 Ok(crate::system1::Decision::Defer) => {
+                    timing.system1_outcome = Some("defer".to_string());
                     log::info!("system1 ({engine}) DEFER in {ms}ms; falling through to System-2");
                 }
-                Err(e) => log::warn!(
-                    "system1 ({engine}) decide FAILED in {ms}ms ({e:#}); deferring to System-2"
-                ),
+                Err(e) => {
+                    timing.system1_outcome = Some("error".to_string());
+                    log::warn!(
+                        "system1 ({engine}) decide FAILED in {ms}ms ({e:#}); deferring to System-2"
+                    );
+                }
             }
         }
 
         // ---- System-2 path (memory recall + full LLM completion) ----
         let sys2_start = Instant::now();
+        timing.path = Some("system2".to_string());
         log::info!(
             "system2 ({}/{}) call: memory recall + LLM completion for {transcript:?}",
             runtime.llm_backend,
@@ -778,9 +823,10 @@ impl Pipeline {
                 log::warn!("memory recall failed; answering without context: {e:#}");
                 String::new()
             });
+        let recall_ms = recall_start.elapsed().as_millis() as u64;
+        timing.recall_ms = Some(recall_ms);
         log::info!(
-            "system2: memory recall in {}ms ({} ctx chars)",
-            recall_start.elapsed().as_millis(),
+            "system2: memory recall in {recall_ms}ms ({} ctx chars)",
             context.len(),
         );
 
@@ -842,9 +888,10 @@ impl Pipeline {
             Vec::new()
         };
 
+        let prompt_ms = prompt_start.elapsed().as_millis() as u64;
+        timing.prompt_ms = Some(prompt_ms);
         log::info!(
-            "system2: prompt build in {}ms ({} prompt chars, {} history msgs)",
-            prompt_start.elapsed().as_millis(),
+            "system2: prompt build in {prompt_ms}ms ({} prompt chars, {} history msgs)",
             system_prompt.len(),
             history.len(),
         );
@@ -852,6 +899,13 @@ impl Pipeline {
         // The LLM round trips + tool calls happen inside the backend as this stream is
         // polled (rig.rs logs each round/tool with its own elapsed ms). `respond`
         // itself only builds the lazy stream, so it returns near-instantly.
+        // Timing (surfaced in `/chatlog`): LLM + TTS interleave in the streaming path, so
+        // we capture two clean anchors instead of an overlapping split — `llm_ms` = time
+        // to the first reply token (LLM latency before streaming), `tts_ms` = the first
+        // TTS chunk's synthesis. Declared out here so the `drive` future can fill them.
+        let gen_start = Instant::now();
+        let mut first_token_ms: Option<u64> = None;
+        let mut first_tts_ms: Option<u64> = None;
         let mut stream = runtime
             .llm
             .respond(
@@ -894,6 +948,9 @@ impl Pipeline {
                     // device as they arrive, before rendering more of the reply.
                     drain_device_actions(&mut action_rx, writer).await;
                     let tok = tok?;
+                    if first_token_ms.is_none() {
+                        first_token_ms = Some(gen_start.elapsed().as_millis() as u64);
+                    }
                     reply.push_str(&tok);
                     pending.push_str(&tok);
                     protocol::write_event(writer, &WyomingEvent::reply_token(&tok))
@@ -907,7 +964,8 @@ impl Pipeline {
                             on_event(TurnEvent::Speaking);
                             speaking = true;
                         }
-                        if !self
+                        let tts_t0 = Instant::now();
+                        let spoke = self
                             .speak_chunk(
                                 writer,
                                 runtime,
@@ -916,8 +974,11 @@ impl Pipeline {
                                 &mut audio_started,
                                 dump,
                             )
-                            .await?
-                        {
+                            .await?;
+                        if first_tts_ms.is_none() {
+                            first_tts_ms = Some(tts_t0.elapsed().as_millis() as u64);
+                        }
+                        if !spoke {
                             // Device closed mid-relay; stop generating.
                             return Ok::<(), anyhow::Error>(());
                         }
@@ -931,8 +992,12 @@ impl Pipeline {
                     if !speaking {
                         on_event(TurnEvent::Speaking);
                     }
+                    let tts_t0 = Instant::now();
                     self.speak_chunk(writer, runtime, connector, &rest, &mut audio_started, dump)
                         .await?;
+                    if first_tts_ms.is_none() {
+                        first_tts_ms = Some(tts_t0.elapsed().as_millis() as u64);
+                    }
                 }
                 // Follow-up listen (after EVERY reply) + the final `audio-stop`. Shared
                 // with the System-1 fast path via `emit_follow_up_and_stop`. Reaching
@@ -970,6 +1035,8 @@ impl Pipeline {
         if interrupted {
             log::info!("barge-in: aborting in-flight LLM generation + TTS for this turn");
         }
+        timing.llm_ms = first_token_ms;
+        timing.tts_ms = first_tts_ms;
 
         let reply = reply.trim().to_string();
         log::info!(
@@ -990,6 +1057,7 @@ impl Pipeline {
         transcript: &str,
         reply: &str,
         memories_written: Vec<String>,
+        timing: crate::memory::TurnTiming,
     ) {
         let Some(log) = &self.chatlog else {
             return;
@@ -1006,6 +1074,7 @@ impl Pipeline {
             model: runtime.llm_model.clone(),
             speaker_id: speaker.speaker_id.clone(),
             speaker_name: speaker.name.clone(),
+            timing: Some(timing),
         };
         if let Err(e) = log.append(&record) {
             log::warn!("failed to append chat log record: {e:#}");
@@ -1170,11 +1239,20 @@ impl Pipeline {
         followup_depth: u32,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
     ) -> Option<String> {
         match r.intent.as_str() {
             "weather" => {
-                self.handle_weather(runtime, device, connector, followup_depth, on_event, dump)
-                    .await
+                self.handle_weather(
+                    runtime,
+                    device,
+                    connector,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
             }
             "timer" => {
                 self.handle_timer(
@@ -1185,6 +1263,7 @@ impl Pipeline {
                     followup_depth,
                     on_event,
                     dump,
+                    timing,
                 )
                 .await
             }
@@ -1206,9 +1285,10 @@ impl Pipeline {
         followup_depth: u32,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
     ) -> Option<String> {
         let secs = crate::system1::parse_duration_secs(transcript)?; // unclear → defer
-        // Guard rails: ignore absurd durations (>24h) — defer to System-2.
+                                                                     // Guard rails: ignore absurd durations (>24h) — defer to System-2.
         if secs == 0 || secs > 24 * 3600 {
             log::debug!("system1 timer: duration {secs}s out of range; deferring to System-2");
             return None;
@@ -1226,14 +1306,22 @@ impl Pipeline {
             .ok();
         on_event(TurnEvent::Speaking);
         let mut audio_started = false;
+        let tts_start = Instant::now();
         if let Err(e) = self
             .speak_chunk(writer, runtime, connector, &reply, &mut audio_started, dump)
             .await
         {
             log::warn!("system1 timer: TTS failed ({e:#}); timer started, text still sent");
         }
-        emit_follow_up_and_stop(writer, &self.follow_up, audio_started, &reply, followup_depth)
-            .await;
+        timing.tts_ms = Some(tts_start.elapsed().as_millis() as u64);
+        emit_follow_up_and_stop(
+            writer,
+            &self.follow_up,
+            audio_started,
+            &reply,
+            followup_depth,
+        )
+        .await;
         Some(reply)
     }
 
@@ -1242,6 +1330,7 @@ impl Pipeline {
     /// summary and invite a follow-up. Skips memory recall + the LLM entirely. Returns
     /// `None` (defer) only on a precondition that fails before anything is emitted (no
     /// provider, no home location, or the fetch errors).
+    #[allow(clippy::too_many_arguments)]
     async fn handle_weather(
         &self,
         runtime: &crate::settings::RuntimeSettings,
@@ -1250,13 +1339,10 @@ impl Pipeline {
         followup_depth: u32,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
     ) -> Option<String> {
         let provider = self.weather.as_ref()?; // weather disabled → defer
-        let location = runtime
-            .household
-            .location
-            .clone()
-            .unwrap_or_default();
+        let location = runtime.household.location.clone().unwrap_or_default();
         if location.trim().is_empty() {
             log::debug!("system1 weather: no home location configured; deferring to System-2");
             return None;
@@ -1264,34 +1350,33 @@ impl Pipeline {
         let imperial =
             crate::directions::units_are_imperial(runtime.household.weather_units.as_deref());
         let t0 = Instant::now();
-        let report = match tokio::time::timeout(
-            SYSTEM1_WEATHER_BUDGET,
-            provider.fetch(&location, imperial),
-        )
-        .await
-        {
-            Ok(Ok(report)) => {
-                log::info!(
-                    "system1 weather: fetch OK in {}ms (location {location:?})",
-                    t0.elapsed().as_millis(),
-                );
-                report
-            }
-            Ok(Err(e)) => {
-                log::warn!(
-                    "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
-                    t0.elapsed().as_millis(),
-                );
-                return None; // nothing emitted yet — safe to defer
-            }
-            Err(_) => {
-                log::warn!(
-                    "system1 weather fetch exceeded {}ms budget; deferring to System-2",
-                    SYSTEM1_WEATHER_BUDGET.as_millis(),
-                );
-                return None; // nothing emitted yet — safe to defer
-            }
-        };
+        let report =
+            match tokio::time::timeout(SYSTEM1_WEATHER_BUDGET, provider.fetch(&location, imperial))
+                .await
+            {
+                Ok(Ok(report)) => {
+                    timing.fetch_ms = Some(t0.elapsed().as_millis() as u64);
+                    log::info!(
+                        "system1 weather: fetch OK in {}ms (location {location:?})",
+                        t0.elapsed().as_millis(),
+                    );
+                    report
+                }
+                Ok(Err(e)) => {
+                    log::warn!(
+                        "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
+                        t0.elapsed().as_millis(),
+                    );
+                    return None; // nothing emitted yet — safe to defer
+                }
+                Err(_) => {
+                    log::warn!(
+                        "system1 weather fetch exceeded {}ms budget; deferring to System-2",
+                        SYSTEM1_WEATHER_BUDGET.as_millis(),
+                    );
+                    return None; // nothing emitted yet — safe to defer
+                }
+            };
 
         // Committed: from here we own the turn and must not fall through (that would
         // double-speak). Best-effort writes mirror the normal reply path.
@@ -1319,13 +1404,20 @@ impl Pipeline {
         {
             log::warn!("system1 weather: TTS failed ({e:#}); widget + text still sent");
         }
+        timing.tts_ms = Some(tts_start.elapsed().as_millis() as u64);
         log::info!(
             "system1 weather: TTS in {}ms ({} reply chars)",
             tts_start.elapsed().as_millis(),
             reply.len(),
         );
-        emit_follow_up_and_stop(writer, &self.follow_up, audio_started, &reply, followup_depth)
-            .await;
+        emit_follow_up_and_stop(
+            writer,
+            &self.follow_up,
+            audio_started,
+            &reply,
+            followup_depth,
+        )
+        .await;
         Some(reply)
     }
 

@@ -134,6 +134,7 @@ async fn run() -> anyhow::Result<()> {
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     };
     log.append(&mk(
         "l1",

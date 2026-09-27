@@ -21,7 +21,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// One completed conversation turn, as persisted to the JSONL log.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq` (not `Eq`) because the embedded `TurnTiming` carries an `f64` confidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatLogRecord {
     /// Monotonic-ish unique id (`{unix_millis}-{counter}`), stable across restarts
     /// only in ordering, not value. Used as the HelixDB `Turn.ext_id` for
@@ -51,6 +52,56 @@ pub struct ChatLogRecord {
     /// The speaker's name, if their cluster has been named.
     #[serde(default)]
     pub speaker_name: Option<String>,
+    /// Per-stage latency breakdown for this turn (STT, System-1 decision, fast-path
+    /// fetch, System-2 recall/prompt/LLM, TTS, total). Absent for turns logged before
+    /// timing capture shipped (the `/chatlog` UI shows "no timing recorded" for those).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<TurnTiming>,
+}
+
+/// Per-stage server-side latency for one turn, in milliseconds. Every field is
+/// optional because the stages that run depend on the path taken: a System-1 fast-path
+/// turn has `system1_ms` + `fetch_ms` + `tts_ms` but no `recall_ms`/`prompt_ms`/`llm_ms`,
+/// a System-2 turn has the reverse, and a memory command has neither. Serialized with
+/// `skip_serializing_if` so a record only carries the stages that actually happened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TurnTiming {
+    /// Which path answered the turn: `"command"`, `"system1"`, or `"system2"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// End-of-speech (VAD finalize) → STT transcript returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stt_ms: Option<u64>,
+    /// System-1 decision-engine latency (jev/laya round-trip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system1_ms: Option<u64>,
+    /// System-1 outcome: `"resolve"`, `"defer"`, `"error"`, or `"no-handler"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system1_outcome: Option<String>,
+    /// The resolved System-1 intent (e.g. `"weather"`), when it resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system1_intent: Option<String>,
+    /// The System-1 confidence (0.0–1.0), when it resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system1_confidence: Option<f64>,
+    /// A fast-path tool fetch (e.g. the weather forecast HTTP call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_ms: Option<u64>,
+    /// System-2 memory recall (GraphRAG/FTS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_ms: Option<u64>,
+    /// System-2 prompt assembly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_ms: Option<u64>,
+    /// System-2 LLM completion round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_ms: Option<u64>,
+    /// TTS synthesis of the reply's first chunk (when playback begins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts_ms: Option<u64>,
+    /// End-of-speech → reply ready: the whole server-side turn latency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_ms: Option<u64>,
 }
 
 /// Append-only JSONL writer, safe to share across concurrent turns behind an `Arc`.
@@ -170,6 +221,7 @@ mod tests {
             model: None,
             speaker_id: "household".to_string(),
             speaker_name: None,
+            timing: None,
         }
     }
 
@@ -210,5 +262,43 @@ mod tests {
         let a = log.next_id();
         let b = log.next_id();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn timing_round_trips_and_omits_empty_stages() {
+        let mut r = rec("t", "what's the weather");
+        r.timing = Some(TurnTiming {
+            path: Some("system1".to_string()),
+            stt_ms: Some(466),
+            system1_ms: Some(369),
+            system1_outcome: Some("resolve".to_string()),
+            system1_intent: Some("weather".to_string()),
+            system1_confidence: Some(1.0),
+            fetch_ms: Some(1261),
+            tts_ms: Some(308),
+            total_ms: Some(2409),
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&r).unwrap();
+        // Present stages serialize…
+        assert!(json.contains("\"fetch_ms\":1261"), "{json}");
+        assert!(json.contains("\"system1_intent\":\"weather\""), "{json}");
+        // …absent System-2 stages are skipped entirely (skip_serializing_if).
+        assert!(!json.contains("recall_ms"), "{json}");
+        assert!(!json.contains("llm_ms"), "{json}");
+        // Round-trips losslessly.
+        let back: ChatLogRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn old_records_without_timing_still_parse() {
+        // A pre-feature JSONL line (no `timing` key) must deserialize with `timing: None`.
+        let line = r#"{"id":"1-0","ts":1,"session_id":"s1","transcript":"hi","reply":"hey",
+            "memories_written":[],"llm_backend":"mock","model":null,"speaker_id":"household",
+            "speaker_name":null}"#;
+        let r: ChatLogRecord = serde_json::from_str(line).unwrap();
+        assert_eq!(r.timing, None);
+        assert_eq!(r.transcript, "hi");
     }
 }

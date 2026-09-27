@@ -254,6 +254,10 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     Voice & Integrations, enter it on the config page → Household tab → "Shopping list
 #     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)
+#   tool_cache{"<tool>": <seconds>, …} — per-tool response-cache TTLs, a flat map keyed by
+#     tool name, overlaid on built-in defaults; `0` disables a tool's cache. Generic
+#     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults
+#     to 3600s (60 min). Read once at boot (not runtime-settable). Mutating tools uncached.
 #
 # home_location/weather_units, drive, spotify, cadora, the tts_voice, and the llm engine/
 # backend/model/web_search/search_provider fields only SEED the live settings at boot:

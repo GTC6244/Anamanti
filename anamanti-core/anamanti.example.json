@@ -126,5 +126,9 @@
   "cadora": {
     "base_url": "https://cadora-server.fly.dev",
     "link_token": null
+  },
+
+  "tool_cache": {
+    "weather_lookup": 3600
   }
 }

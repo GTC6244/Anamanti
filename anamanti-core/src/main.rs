@@ -75,6 +75,11 @@ async fn run() -> Result<()> {
     // to an installed model so the assistant still responds.
     ensure_ollama_model(&mut config).await;
 
+    // Install the per-tool response-cache TTLs process-wide before any provider is built
+    // or any turn runs, so weather (and future opted-in tools) cache per their configured
+    // TTL (`tool_cache` in the config; weather defaults to 60 min).
+    anamanti_core::cache::set_config(config.tool_cache.clone());
+
     let memory = Arc::new(MemoryStore::open(&config.db_path).context("opening memory store")?);
     log::info!("memory store holds {} entries", memory.count()?);
 

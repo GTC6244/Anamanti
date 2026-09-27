@@ -262,7 +262,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   the HelixDB GraphRAG node stats + a sample of nodes (behind the read-only
   `memory::GraphView` seam; reports "disabled" on the SQLite backend). Each has a
   `*.json` data endpoint the page fetches. No auth — keep the config address on a
-  trusted network.
+  trusted network. On `/chatlog`, each turn is **click-to-expand**: the orchestrator
+  records a per-turn latency breakdown (`memory::TurnTiming` — STT finalize, System-1
+  decision + intent/confidence, fast-path fetch, System-2 recall/prompt/LLM-first-token,
+  TTS first chunk, and the end-of-speech→reply total) onto the `ChatLogRecord`, and the
+  row expands to show the stages that actually ran. Optional + `skip_serializing_if`, so
+  pre-feature log lines parse fine and render "no timing recorded".
 - **Household / home context** (`settings::Household`, editable at `GET /household`
   on the config page): a persisted record of the home **location + units** and a
   **roster of people** (name, emails, phones, relationship). Location/units seed from
@@ -425,8 +430,18 @@ predictable memory use and no GC pauses under the 1 GB limit.
   drive the **full-screen forecast** (today's conditions + a 7-day row); `current` is
   broadcast periodically on the persistent channel (below) by the Anamanti Core's
   `WeatherService` to refresh the **small icon + temperature beside the idle clock**
-  without a voice turn. Data comes from the keyless **Open-Meteo** API behind a
-  `WeatherProvider` trait. See `WeatherPlan.md`.
+  without a voice turn. Data comes from **Visual Crossing** (default) or keyless
+  **Open-Meteo** behind a `WeatherProvider` trait. Every provider built by
+  `weather::from_config` is wrapped in a shared **`cache::ToolCache`** (a generic,
+  TTL-bounded tool-response cache keyed on the outgoing call data — here `(location,
+  units)`), so a repeated forecast within the TTL is served locally instead of re-hitting
+  the API. The cache is process-wide, so the System-1 fast path, the `weather_lookup`
+  tool, and the ambient push all share hits. **TTL is per tool type and configurable** via
+  the `tool_cache` config block (`{ "<tool>": <seconds> }`, overlaid on defaults; `0`
+  disables a tool's cache), installed process-wide at boot via `cache::set_config`;
+  `weather_lookup` defaults to **3600 s (60 min)**. `ToolCache` is generic — its entries
+  carry their own TTL, so other read-only tools can opt in at their own TTL; mutating tools
+  (timers, shopping-list) must not. See `WeatherPlan.md`.
 - **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
   `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's
