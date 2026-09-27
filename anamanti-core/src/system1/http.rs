@@ -193,6 +193,19 @@ fn intent_description(intent: &str) -> &str {
         "timer" => "start a timer or alarm for a stated duration",
         "time" => "the current time of day right now",
         "date" => "today's date or the current day of the week",
+        "timer_cancel" => "cancel or stop a running timer or alarm",
+        "timer_query" => "ask how much time is left on a running timer",
+        "weather_dismiss" => "close or dismiss the weather screen",
+        "recipe_dismiss" => "close or dismiss the recipe screen",
+        "end_session" => {
+            "the user is finished and wants no more replies — a sign-off or dismissal \
+             like \"that's all\", \"nothing else\", or \"goodbye\"; NOT stopping a timer \
+             or music"
+        }
+        "stop_dismiss" => {
+            "a bare \"stop\", \"cancel\", \"never mind\", or \"dismiss\" with no named \
+             target (what it refers to depends on what is currently active)"
+        }
         "recipe_nav" => "navigate or scroll the recipe already on screen",
         "music" => "play, pause, skip, or change music volume",
         "shopping_add" => "add an item to the shopping list",

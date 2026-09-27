@@ -34,6 +34,12 @@ pub fn default_intents() -> Vec<String> {
         "timer".to_string(),
         "time".to_string(),
         "date".to_string(),
+        "timer_cancel".to_string(),
+        "timer_query".to_string(),
+        "weather_dismiss".to_string(),
+        "recipe_dismiss".to_string(),
+        "end_session".to_string(),
+        "stop_dismiss".to_string(),
     ]
 }
 

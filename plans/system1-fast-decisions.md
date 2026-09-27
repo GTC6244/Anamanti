@@ -362,9 +362,19 @@ New JSON block in `anamanti.json` (all optional, defaults shown; add to `anamant
      `HttpDecider` now asks a 3-way `temporal` choice and **defers on a confident `past`** (no fast
      history path). Confidence-gated so an unsure temporal never over-defers a present query;
      present/future resolve (weather's widget already carries current + forecast, so no handler
-     change). Pure `build_request`/`interpret` unit tests cover it. **M5.2** the no-slot intents
-     (`time`, `date`, `*_dismiss`, `end_session`) + `stop_dismiss` ladder (§17) + `timer_query`/
-     `timer_cancel`. **M5.3** calibration against the §18 corpus; per-intent thresholds.
+     change). Pure `build_request`/`interpret` unit tests cover it.
+   - **M5.2 ✅ LANDED 2026-09-27** — the no-slot intents + the `stop_dismiss` ladder. Added handlers
+     for `time`/`date` (wall clock), `timer_cancel`/`timer_query` (gated on a running timer from the
+     P0 context), `weather_dismiss`/`recipe_dismiss` (gated on that screen being foreground),
+     `end_session` (brief ack + **no `listen` frame** → device returns to IDLE), and `stop_dismiss`
+     (the deterministic priority ladder over device context, with the **ground-truth veto** → defer
+     when nothing is active). A shared `speak_fast_reply` helper centralizes the commit-and-close
+     tail. Pipeline tests drive each with a panicking LLM (System-2 skipped) or assert the veto
+     defers. **Scoped out to M5.3 (needs a live model to calibrate):** the 3B "classifier sees the
+     device state" enhancement (§17.4) — the ladder already owns the referent deterministically, so
+     the classifier stays state-blind for now; folding the device summary into the request `state`
+     lands with calibration. Ladder rungs 1 (alarm ringing) & 3 (media) remain parked (§19.7).
+   - **M5.3** calibration against the §18 corpus; per-intent thresholds; the 3B state-fold.
 
 ## 11. Testing
 
@@ -611,6 +621,14 @@ both `present` and `future` resolve.
 | `end_session`, `stop_dismiss`, dismiss family | — | — | — | atemporal; ignore the field |
 
 ## 17. Device-context disambiguation (decided 2026-09-27 — 3B hybrid + ground-truth veto)
+
+> **Status: ✅ ladder + veto IMPLEMENTED 2026-09-27 (M5.2).** `handle_stop_dismiss` runs the §17.3
+> priority ladder over the P0 device context and returns `None` (→ defer) when no rung matches (the
+> ground-truth veto). Rungs 2 (running timer), 4 (open screen), 5 (end an active follow-up) are live;
+> rungs 1 (alarm ringing) & 3 (media) are parked (§19.7). **Not yet done (M5.3):** §17.4's "classifier
+> sees the state" half — the classifier is currently state-blind and the ladder alone owns the
+> referent (still correct; the state-fold only improves recall on vague phrasing and needs live
+> calibration).
 
 ### 17.1 In-scope — extend the reported device context (committed 2026-09-27)
 `DisplayContext` (`protocol.rs:690`) today reports **only the foreground widget** (`screen.kind` =

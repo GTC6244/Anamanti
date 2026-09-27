@@ -763,6 +763,7 @@ impl Pipeline {
                             transcript,
                             device,
                             connector,
+                            device_ctx,
                             followup_depth,
                             on_event,
                             dump,
@@ -1241,6 +1242,7 @@ impl Pipeline {
         _transcript: &str,
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
         followup_depth: u32,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
@@ -1284,6 +1286,71 @@ impl Pipeline {
                     &reply,
                     followup_depth,
                     false,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "timer_cancel" => {
+                self.handle_timer_cancel(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "timer_query" => {
+                self.handle_timer_query(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "weather_dismiss" | "recipe_dismiss" => {
+                self.handle_screen_dismiss(
+                    &r.intent,
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "end_session" => {
+                self.handle_end_session(
+                    runtime,
+                    device,
+                    connector,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "stop_dismiss" => {
+                self.handle_stop_dismiss(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
                     on_event,
                     dump,
                     timing,
@@ -1351,6 +1418,241 @@ impl Pipeline {
             .await;
         }
         Some(reply.to_string())
+    }
+
+    /// The System-1 `timer_cancel` fast path: cancel all running timers and confirm.
+    /// **Precondition (ground truth):** a timer must actually be running — otherwise there
+    /// is nothing to cancel, so defer to System-2 (which can tell the user there are no
+    /// timers). Only unlabeled "cancel all" resolves here; a labeled cancel needs a
+    /// free-form slot and stays on System-2.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_timer_cancel(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        if !device_ctx.timers.any_running() {
+            return None; // nothing to cancel → defer
+        }
+        let reply = if device_ctx.timers.running > 1 {
+            "Okay, I've cancelled your timers.".to_string()
+        } else {
+            "Okay, I've cancelled your timer.".to_string()
+        };
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            Some(WyomingEvent::timer_cancel(None)),
+            &reply,
+            followup_depth,
+            false,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `timer_query` fast path: answer "how much time is left?" from the
+    /// device-reported remaining time. **Precondition:** a timer must be running (else
+    /// defer). Labeled queries need a free-form slot and stay on System-2.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_timer_query(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        if !device_ctx.timers.any_running() {
+            return None; // no timer → defer
+        }
+        let reply = match device_ctx.timers.next_remaining_secs {
+            Some(secs) if secs > 0 => format!("You have {} left.", human_duration(secs)),
+            _ => "Your timer is just about up.".to_string(),
+        };
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            None,
+            &reply,
+            followup_depth,
+            false,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `weather_dismiss` / `recipe_dismiss` fast path: close the named
+    /// screen and give a brief ack. **Precondition:** that screen must actually be the
+    /// foreground widget (ground truth from `device_ctx`), else defer — "close the recipe"
+    /// with no recipe up is meaningless and better handled by System-2.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_screen_dismiss(
+        &self,
+        intent: &str,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let frame = match intent {
+            "weather_dismiss" => {
+                if !matches!(
+                    device_ctx.widget,
+                    Some(protocol::DisplayContext::Weather(_))
+                ) {
+                    return None;
+                }
+                WyomingEvent::weather_dismiss()
+            }
+            "recipe_dismiss" => {
+                if !matches!(device_ctx.widget, Some(protocol::DisplayContext::Recipe(_))) {
+                    return None;
+                }
+                WyomingEvent::recipe_dismiss()
+            }
+            _ => return None,
+        };
+        let reply = "Okay.".to_string();
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            Some(frame),
+            &reply,
+            followup_depth,
+            false,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `end_session` fast path: the user signalled they are done, so give a
+    /// brief acknowledgement and **end the follow-up chain** — `speak_fast_reply` with
+    /// `end_session = true` closes on a bare `audio-stop` (no `listen`), returning the
+    /// device to IDLE / wake-word-waiting. Always resolvable (a fresh "goodbye" turn just
+    /// ends cleanly).
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_end_session(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let reply = "Okay.".to_string();
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            None,
+            &reply,
+            followup_depth,
+            true,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `stop_dismiss` fast path: a bare "stop"/"cancel"/"never mind" whose
+    /// target is not named. The **deterministic priority ladder** picks the referent from
+    /// live device state (ground truth) — the classifier never chooses it (§17). A rung
+    /// with no valid target falls through; if nothing matches, return `None` (the
+    /// **ground-truth veto**) so the turn defers to System-2 rather than guessing.
+    ///
+    /// Rung 1 (alarm *ringing*) and rung 3 (media *playing*) are parked until those
+    /// signals are reported (§19.7); rung 2 (running timer), rung 4 (open screen), and
+    /// rung 5 (end an active follow-up) are live.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_stop_dismiss(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        // Rung 2: a running timer → cancel it.
+        if device_ctx.timers.any_running() {
+            return self
+                .handle_timer_cancel(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await;
+        }
+        // Rung 4: an open screen → dismiss it.
+        let dismiss_intent = match device_ctx.widget {
+            Some(protocol::DisplayContext::Weather(_)) => Some("weather_dismiss"),
+            Some(protocol::DisplayContext::Recipe(_)) => Some("recipe_dismiss"),
+            None => None,
+        };
+        if let Some(intent) = dismiss_intent {
+            return self
+                .handle_screen_dismiss(
+                    intent,
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await;
+        }
+        // Rung 5: mid-conversation with nothing active → end the follow-up chain.
+        if followup_depth > 0 {
+            return self
+                .handle_end_session(
+                    runtime,
+                    device,
+                    connector,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await;
+        }
+        // Ground-truth veto: nothing to act on → defer to System-2.
+        None
     }
 
     /// The System-1 `timer` fast path: parse an unambiguous duration from the transcript,
