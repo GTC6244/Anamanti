@@ -197,6 +197,9 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     UI: Config tab)
 #   MAPBOX_TOKEN (or MAPBOX_ACCESS_TOKEN) (the directions_lookup provider token;
 #     UI: Tools tab → /tools)
+#   VISUALCROSSING_API_KEY               (the weather provider key when weather.provider=
+#     visualcrossing, the default; UI: Tools tab → /tools. Absent ⇒ weather falls back to
+#     keyless Open-Meteo)
 #   ANTHROPIC_OAUTH_TOKEN                (Claude subscription token from `claude setup-token`;
 #     UI: Config tab when Anthropic auth = subscription)
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
@@ -226,6 +229,11 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised)
 #   directions.provider="mapbox" (+ the MAPBOX_TOKEN secret, set via env or the Tools
 #     tab) → the directions_lookup tool
+#   weather{enabled,provider,refresh_interval_secs} → the weather_lookup tool + ambient
+#     push. provider="visualcrossing" (default; + the VISUALCROSSING_API_KEY secret, set
+#     via env or the Tools tab) or "openmeteo" (keyless). Provider + key are runtime-
+#     settable on the Tools tab (persisted, rebuilds the tool + retargets the push live);
+#     visualcrossing with no key falls back to keyless Open-Meteo
 #   drive{client_id,client_secret,folder_ids,scope} (Google Drive photo slideshow OAuth
 #     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
 #   spotify{client_id,client_secret,refresh_token,device_name} (spotify_control tool;

@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use serde_json::{to_value as json_to_value, Value};
 
 use crate::directions::LiveHomeLocation;
-use crate::weather::{WeatherProvider, WeatherReport};
+use crate::weather::WeatherReport;
 use crate::wyoming::protocol::WyomingEvent;
 
 /// Serialize a report to the JSON `weather` payload carried in the frame; an empty
@@ -88,13 +88,14 @@ impl WeatherService {
 }
 
 /// Spawn the periodic ambient-weather push. Every `interval` it reads the live home
-/// location, fetches current conditions from `provider`, and broadcasts them to all
-/// connected weather channels. No-ops on a tick when no location is set or the fetch
-/// fails (the previous report stays on screen). Returns immediately; the task runs for
-/// the process lifetime.
+/// location, builds the *currently selected* forecast provider from `settings` (so a
+/// config-page provider/key change retargets the push without a restart), fetches current
+/// conditions, and broadcasts them to all connected weather channels. No-ops on a tick
+/// when no location is set, weather is disabled, or the fetch fails (the previous report
+/// stays on screen). Returns immediately; the task runs for the process lifetime.
 pub fn spawn_periodic(
     service: Arc<WeatherService>,
-    provider: Arc<dyn WeatherProvider>,
+    settings: Arc<crate::settings::SharedSettings>,
     home_location: LiveHomeLocation,
     imperial: bool,
     interval: Duration,
@@ -103,8 +104,8 @@ pub fn spawn_periodic(
         // A tiny initial delay lets the device dial its channel before the first push.
         tokio::time::sleep(Duration::from_secs(2)).await;
         loop {
-            match home_location.get() {
-                Some(loc) => match provider.fetch(&loc, imperial).await {
+            match (home_location.get(), settings.current_weather_provider()) {
+                (Some(loc), Some(provider)) => match provider.fetch(&loc, imperial).await {
                     Ok(report) => {
                         let n = service.broadcast(&report);
                         log::debug!(
@@ -115,7 +116,8 @@ pub fn spawn_periodic(
                     }
                     Err(e) => log::warn!("weather push: fetch failed: {e:#}"),
                 },
-                None => log::debug!("weather push: no home location set; skipping tick"),
+                (None, _) => log::debug!("weather push: no home location set; skipping tick"),
+                (_, None) => log::debug!("weather push: weather disabled; skipping tick"),
             }
             tokio::time::sleep(interval).await;
         }

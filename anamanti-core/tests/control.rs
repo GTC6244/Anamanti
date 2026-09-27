@@ -43,6 +43,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         directions_imperial: false,
         weather: None,
         weather_imperial: false,
+        weather_enabled: false,
     };
     let (llm, backend, model) = factory
         .build(
@@ -77,6 +78,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             household: Household::default(),
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
+            weather_provider: "visualcrossing".to_string(),
+            visualcrossing_key: None,
         },
     );
     let pipeline = Pipeline::with_settings(

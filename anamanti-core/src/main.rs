@@ -225,24 +225,28 @@ async fn run() -> Result<()> {
     // config page (whose "Notify" tab can push a test notification).
     let notify = Arc::new(NotificationService::new());
 
-    // Ambient weather push (keyless Open-Meteo): the registry of persistent weather
-    // channels the device dials, plus a periodic task that fetches current conditions
-    // for the household location and fans them out so the icon + temperature beside the
-    // idle clock stay fresh. Dormant (no task) when weather is disabled in the config.
+    // Ambient weather push: the registry of persistent weather channels the device
+    // dials, plus a periodic task that fetches current conditions for the household
+    // location and fans them out so the icon + temperature beside the idle clock stay
+    // fresh. The provider is Visual Crossing by default (keyless Open-Meteo fallback).
+    // Dormant (no task) when weather is disabled in the config.
     let weather_svc = Arc::new(WeatherService::new());
-    if let Some(provider) = anamanti_core::weather::from_config(config.weather.enabled) {
+    if config.weather.enabled {
         let imperial =
             anamanti_core::directions::units_are_imperial(config.weather_units.as_deref());
+        // The push builds its provider from the live settings each tick, so a config-page
+        // provider/key switch retargets it without a restart.
         anamanti_core::weather::service::spawn_periodic(
             weather_svc.clone(),
-            provider,
+            pipeline.settings().clone(),
             pipeline.settings().home_location(),
             imperial,
             config.weather.refresh_interval(),
         );
         log::info!(
-            "weather push: every {}s (imperial={imperial})",
-            config.weather.refresh_interval().as_secs()
+            "weather push: every {}s (imperial={imperial}, provider={})",
+            config.weather.refresh_interval().as_secs(),
+            config.weather.provider,
         );
     }
 

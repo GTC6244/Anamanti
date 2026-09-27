@@ -95,6 +95,7 @@
 
   "weather": {
     "enabled": true,
+    "provider": "visualcrossing",
     "refresh_interval_secs": 1800
   },
 

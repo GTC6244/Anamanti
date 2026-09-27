@@ -12,7 +12,16 @@ screen, a small weather icon + the current temperature sit beside the clock.
 > `role=weather` channel), the FRB `ShowWeather`/`WeatherCurrent`/`DismissWeather`
 > events + the `WeatherPush` sidecar stream, and the `WeatherView` + the `_AmbientClock`
 > indicator (new Dart tests). Suites green: Anamanti Core 273, device-rust 90, Flutter
-> 93; clippy + `dart analyze` clean; FRB codegen clean. Reads together with
+> 93; clippy + `dart analyze` clean; FRB codegen clean.
+>
+> **Update (2026-09-27):** added a **Visual Crossing** provider behind the same
+> `WeatherProvider` trait and made it the **default** (`weather.provider="visualcrossing"`,
+> keyed by the `VISUALCROSSING_API_KEY` secret; keyless Open-Meteo is the fallback). The
+> provider label + key are runtime-settable on the config-page **Tools tab** — a change
+> rebuilds `weather_lookup` and retargets the ambient push live (no restart), mirroring the
+> Mapbox pattern. Anamanti Core lib suite now 293 (green); clippy `-D warnings` clean.
+>
+> Reads together with
 > [`RecipePlan.md`](./RecipePlan.md) (the near-identical device-push template) and
 > [`architecture.md`](./architecture.md) §4 (frame catalog).
 
@@ -31,7 +40,7 @@ Weather is **three coordinated pieces** split along the locked Rust/Flutter boun
 
 | Question | Decision |
 | --- | --- |
-| **Data source** | **Open-Meteo** — keyless, structured current + 7-day forecast with WMO weather codes, plus its free geocoding API to resolve `home_location`. Behind a `WeatherProvider` trait (injected, offline fixture tests), mirroring `DirectionsProvider`. |
+| **Data source** | Behind a `WeatherProvider` trait (injected, offline fixture tests), mirroring `DirectionsProvider`, with two backends selectable by `weather.provider`: **Visual Crossing** (default, `visualcrossing`) — its Timeline API resolves the place *and* returns current + 7-day forecast in one keyed request (needs the `VISUALCROSSING_API_KEY` secret; its text icons are mapped to WMO codes in `vc_icon_to_wmo`); and **Open-Meteo** (`openmeteo`) — keyless, structured current + 7-day forecast with WMO codes + its free geocoding API. Open-Meteo is also the automatic fallback when the Visual Crossing key is absent. **Runtime-settable:** the provider label + Visual Crossing key live on the config page **Tools tab** (persisted to `anamanti_settings.json`, `0600`), and a change rebuilds the `weather_lookup` tool + retargets the ambient push live — mirroring the Mapbox token pattern. |
 | **Trigger (full screen)** | **Voice.** Any weather question → the LLM calls `weather_lookup` (defaulting the place to the household `home_location`); the tool pushes the forecast and returns a short spoken confirmation. Dismiss by voice (`close_weather`), an on-screen close control, or **automatically after 60 s** (unlike recipe mode, which has no timeout — you glance at weather, you cook along with a recipe). The auto-close timer resets when a fresh forecast is shown and leaves the ambient clock chip untouched (`AssistantController._weatherAutoClose`, default 60 s). |
 | **Ambient indicator** | **Always-on periodic push.** A Core `WeatherService` background task fetches current conditions every `weather.refresh_interval_secs` (default 30 min) and broadcasts an `anamanti-weather` `current` frame down the persistent channel, so the icon + temperature stay fresh with no voice turn. |
 | **Imagery** | **Bundled icon set.** Flutter's built-in Material icons, chosen by WMO code + day/night (`weather_icons.dart`) — offline, scalable to the big today panel and the small chip, and free of raster assets (respects the ~1 GB memory budget). |
@@ -71,9 +80,9 @@ If a task seems to require changing one of these, stop and confirm first.
 
 | Piece | Where | Form |
 | --- | --- | --- |
-| Fetch + parse | Core | `anamanti-core/src/weather/mod.rs`: `WeatherProvider` trait + `OpenMeteoWeather` (geocode + forecast, WMO codes), `WeatherReport`/`CurrentConditions`/`DailyForecast` (integer temps so it's `Eq` inside `DeviceAction`). |
+| Fetch + parse | Core | `anamanti-core/src/weather/mod.rs`: `WeatherProvider` trait + `VisualCrossingWeather` (Timeline API, one keyed request; `vc_icon_to_wmo` icon→WMO mapping) and `OpenMeteoWeather` (geocode + forecast, WMO codes); `from_config(enabled, provider, api_key)` selects the backend (Visual Crossing default, Open-Meteo fallback). `WeatherReport`/`CurrentConditions`/`DailyForecast` (integer temps so it's `Eq` inside `DeviceAction`). |
 | The tool | Core | `WeatherLookup` / `close_weather` in `llm/rig.rs` (over `WeatherConfig{provider, live home_location, imperial}`), registered in `Tools`/`dispatch`/`tools_from_config`; guidance clause. |
-| Config | Core | `weather { enabled, refresh_interval_secs }` in `config.rs` + `anamanti.example.json`. Reuses `home_location`/`weather_units`. |
+| Config | Core | `weather { enabled, provider, refresh_interval_secs }` in `config.rs` + `anamanti.example.json`; the `VISUALCROSSING_API_KEY` secret from env. Reuses `home_location`/`weather_units`. Provider + key are runtime-settable via `SharedSettings::apply_weather_tool` (persisted, best-effort rebuild) and surfaced on the config-page Tools tab (`/tools/weather/status.json` + `/tools/weather/save`, `tools.html`). |
 | Ambient push | Core | `weather::WeatherService` (registry, twin of `NotificationService`) + `service::spawn_periodic`, wired in `main.rs`; served by the `role=weather` arm in `server.rs`. |
 | Frame | both crates | `anamanti-weather` + `weather_show/current/dismiss` constructors + `weather_command()` decoder + `hello_weather`/`hello_role`, byte-identical, round-trip tested. |
 | Device decode | Device Rust | `TurnUpdate::Weather` (`client.rs`) → `WakeWordEvent::{show,current,dismiss}_weather` (`net.rs`); the persistent channel `wyoming/weather.rs` → `WeatherPush` FRB stream (`start_weather_channel`). |
