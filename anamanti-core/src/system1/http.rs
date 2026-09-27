@@ -48,6 +48,16 @@ const NAMES_PLACE: &str = "names_place";
 /// specific place was named" — high enough to route to System-2 for extraction.
 const NAMES_PLACE_THRESHOLD: f64 = 0.5;
 
+/// The `choice` question id that classifies the turn's time frame (past / present /
+/// future). Used as a **defer gate**: the Core has no fast historical-data path, so a
+/// turn the model is confident concerns the PAST routes to System-2. present/future
+/// proceed (weather resolves for both — the widget carries current + forecast). See
+/// `plans/system1-fast-decisions.md` §16.
+const TEMPORAL: &str = "temporal";
+
+/// The temporal label that forces a defer.
+const TEMPORAL_PAST: &str = "past";
+
 /// Intents that are ambiguous without a place. When one of these is chosen confidently
 /// but the turn still defers (the model judged it "needs a location"), the engine retries
 /// once with the home location folded into the question — a second fast System One call,
@@ -228,6 +238,18 @@ pub fn build_request(transcript: &str, model: Option<&str>, intents: &[String]) 
                              location to act on, rather than implying the user's current \
                              home area?",
         },
+        TEMPORAL: {
+            "type": "choice",
+            "instructions": "Does answering `message` concern the PAST (already happened / \
+                             historical), the PRESENT (now / the current state), or the \
+                             FUTURE (upcoming / a forecast / scheduled)? Choose 'present' \
+                             if it is not time-bound.",
+            "criteria": {
+                "past": "already happened; historical; a previous time",
+                "present": "now; the current state; or not time-bound",
+                "future": "upcoming; a forecast; something scheduled",
+            },
+        },
     });
 
     let mut body = Map::new();
@@ -256,6 +278,17 @@ pub fn interpret(resp: &Value, intents: &[String], min_confidence: f64) -> Decis
         .and_then(Value::as_f64);
     if nfu_p_true.map(|p| p >= 0.5).unwrap_or(true) {
         return Decision::Defer; // needs System-2 (or the answer was missing)
+    }
+
+    // Temporal defer-gate (§16): no fast historical-data path, so a turn the model is
+    // *confident* concerns the PAST goes to System-2. present/future proceed; an unsure
+    // temporal never over-defers a present query (preserves weather/timer recall). The
+    // question is optional — a checkpoint that doesn't answer it just skips this gate.
+    if let Some(t) = answers.get(TEMPORAL) {
+        let is_past = t.get("choice").and_then(Value::as_str) == Some(TEMPORAL_PAST);
+        if is_past && choice_confidence(Some(t)) >= min_confidence {
+            return Decision::Defer;
+        }
     }
 
     let intent_ans = match answers.get("intent") {
@@ -340,9 +373,51 @@ mod tests {
         assert!(crit.get("timer").is_some());
         assert!(crit.get("other").is_some());
         assert_eq!(body["questions"][NEEDS_FULL]["type"], json!("noul"));
+        // The temporal choice carries past/present/future.
+        assert_eq!(body["questions"][TEMPORAL]["type"], json!("choice"));
+        let tcrit = &body["questions"][TEMPORAL]["criteria"];
+        assert!(tcrit.get("past").is_some());
+        assert!(tcrit.get("present").is_some());
+        assert!(tcrit.get("future").is_some());
         // laya-serve omits the model.
         let no_model = build_request("hi", None, &intents());
         assert!(no_model.get("model").is_none());
+    }
+
+    /// Add a `temporal` choice answer to a response built by `resp`.
+    fn with_temporal(mut resp: Value, label: &str, conf: f64) -> Value {
+        resp["answers"][TEMPORAL] = json!({
+            "type": "choice", "choice": label, "probabilities": {}, "confidence": conf,
+        });
+        resp
+    }
+
+    #[test]
+    fn interpret_defers_on_confident_past() {
+        // A past-tense turn defers even with a confident, closed intent (no fast history).
+        let past = with_temporal(resp("weather", 0.97, 0.02), "past", 0.95);
+        assert_eq!(interpret(&past, &intents(), 0.85), Decision::Defer);
+    }
+
+    #[test]
+    fn interpret_ignores_low_confidence_past() {
+        // Unsure temporal must NOT over-defer a confident present-ish query.
+        let unsure = with_temporal(resp("weather", 0.97, 0.02), "past", 0.60);
+        assert!(matches!(
+            interpret(&unsure, &intents(), 0.85),
+            Decision::Resolve(_)
+        ));
+    }
+
+    #[test]
+    fn interpret_resolves_present_and_future() {
+        for tense in ["present", "future"] {
+            let r = with_temporal(resp("weather", 0.97, 0.02), tense, 0.99);
+            assert!(
+                matches!(interpret(&r, &intents(), 0.85), Decision::Resolve(_)),
+                "temporal={tense} should resolve"
+            );
+        }
     }
 
     /// A System One response in the real OpenRouter/laya-serve shape: the `choice`

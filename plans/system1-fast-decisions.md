@@ -358,7 +358,11 @@ New JSON block in `anamanti.json` (all optional, defaults shown; add to `anamant
      background timer state (running/remaining/labels) on every turn and threads the existing widget
      context + timers into `DecisionRequest`. Hard-gates `timer_query`, `timer_cancel`, and the
      `stop_dismiss` ladder.
-   - **M5.1** temporal question + resolve-by-tense matrix (§16). **M5.2** the no-slot intents
+   - **M5.1 ✅ LANDED 2026-09-27** — temporal question + resolve-by-tense matrix (§16): the
+     `HttpDecider` now asks a 3-way `temporal` choice and **defers on a confident `past`** (no fast
+     history path). Confidence-gated so an unsure temporal never over-defers a present query;
+     present/future resolve (weather's widget already carries current + forecast, so no handler
+     change). Pure `build_request`/`interpret` unit tests cover it. **M5.2** the no-slot intents
      (`time`, `date`, `*_dismiss`, `end_session`) + `stop_dismiss` ladder (§17) + `timer_query`/
      `timer_cancel`. **M5.3** calibration against the §18 corpus; per-intent thresholds.
 
@@ -571,6 +575,11 @@ wake-word-waiting. Optional sub-second ack ("okay") or a silent close. Safest re
 `followup_depth > 0` (mid-conversation) — a fresh wake-word turn has nothing to end.
 
 ## 16. Temporal classification (decided 2026-09-27 — 3-way)
+
+> **Status: ✅ IMPLEMENTED 2026-09-27 (M5.1).** `HttpDecider` asks the 3-way `temporal` choice and
+> `interpret` defers on a **confident `past`** (gated by `min_confidence`, so an unsure temporal never
+> over-defers a present query). present/future resolve unchanged. Unit-tested in `system1/http.rs`.
+> The question is optional on the wire — a checkpoint that doesn't answer it simply skips the gate.
 
 A third question in the same one-shot forward pass (free):
 
