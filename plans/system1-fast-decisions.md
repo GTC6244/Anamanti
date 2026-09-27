@@ -352,6 +352,15 @@ New JSON block in `anamanti.json` (all optional, defaults shown; add to `anamant
    `music_action` choice) **plus** on-device QA — enumerated as follow-ups, not shipped blind.
 5. **M4 — tuning + docs. ✅ Knobs in place; docs updated.** `min_confidence` and the intent list are
    config-tunable; per-intent thresholds and resolve-rate/precision telemetry remain open (§13).
+6. **M5 — intent-set expansion (planned, decided 2026-09-27; §15–§18).** Adds the temporal question,
+   device-context disambiguation, and the expanded Resolve set.
+   - **M5.0 — Pre-req P0: device → Core context extension (§19). BUILD FIRST.** Report background
+     timer state (running/remaining/labels) on every turn and thread the existing widget context +
+     timers into `DecisionRequest`. Hard-gates `timer_query`, `timer_cancel`, and the `stop_dismiss`
+     ladder.
+   - **M5.1** temporal question + resolve-by-tense matrix (§16). **M5.2** the no-slot intents
+     (`time`, `date`, `*_dismiss`, `end_session`) + `stop_dismiss` ladder (§17) + `timer_query`/
+     `timer_cancel`. **M5.3** calibration against the §18 corpus; per-intent thresholds.
 
 ## 11. Testing
 
@@ -388,6 +397,32 @@ Resolve/Defer branch), `agents.md` (secrets list + the `system1` config block), 
   fallback and `laya-embedded` as an optional escape hatch. (Safe merge default stays `none`.)
 - **Resolved replies are not barge-in-interruptible in v1** — the templated line is sub-second, so
   the interruptible window is negligible; matches the existing canned-reply behavior.
+
+**Decided (2026-09-27) — intent-set expansion (see §15–§18; not yet implemented):**
+- **Expand the Resolve set** beyond weather+timer to the no-slot / deterministically-parseable
+  intents in §15 (`timer_cancel`, `timer_query`, `time`, `date`, `weather_dismiss`,
+  `recipe_dismiss`, `end_session`, `stop_dismiss`). Free-form-slot intents (`internet_search`,
+  `directions_lookup`, `recipe_lookup`, `shopping_add`) stay **route-only** (classify, never
+  resolve).
+- **`timer_query` is in scope** ("how much time is left?"), resolved **when the device reports an
+  active timer** — answered straight from the timer context parameters (§17.1), so the Core needs
+  no timer state of its own.
+- **Add a 3-way `temporal` question** (past / present / future) to the one-shot set. Used as a
+  **defer gate** (`past` → defer for every data intent — no fast historical fetch) and a **data
+  selector** (weather `present`=current, `future`=forecast). See §16.
+- **`end_session` intent** — an explicit "I'm done" that ends the follow-up chain by **skipping the
+  `listen` frame** (sending `audio_stop` alone), returning the device to IDLE / wake-word-waiting.
+- **Device-context disambiguation (3B hybrid + ground-truth veto).** Bare/overloaded commands
+  ("stop", "never mind", "dismiss") map to a generic `stop_dismiss` label; the **orchestrator**
+  resolves the referent from live device state via a deterministic **priority ladder**. The
+  classifier *sees* the state (to sharpen confidence on vague phrasing) but never chooses the
+  referent, and a `stop_dismiss` with no valid referent **defers** (ground-truth veto). See §17.
+- **Device-context extension is committed (in scope, not merely a prerequisite).** `DisplayContext`
+  today reports only the **foreground widget** (`recipe`/`weather`), so a timer running **behind**
+  another screen is invisible. The device must report **active/ringing timers as context parameters
+  on every turn regardless of the foreground widget** (plus soonest-remaining time for
+  `timer_query`, and media state later). This is a device+protocol change that unblocks
+  `timer_query`, `timer_cancel`, and the `stop_dismiss` ladder (§17.1).
 
 **Open:**
 1. **Checkpoint choice / size** for the home intent set (English vs multilingual; the
@@ -490,3 +525,269 @@ These need a real sidecar / device and could not be exercised unattended:
   still completes via System-2.
 - **Latency:** measure a resolved turn vs a System-2 turn (transcript → first audio) to confirm the
   win; log timestamps around the seam if needed.
+
+---
+
+## 15. Expanded intent taxonomy (planned — decided 2026-09-27, not yet implemented)
+
+System-1 is a **typed classifier** (choice / noul / score) — it returns a *label*, never free-form
+text. So an intent is only **Resolve-able** (answer + skip System-2) when its arguments are
+**absent, defaulted, or deterministically parseable**. Anything needing a free-form slot can be
+**classified** but not **resolved**. That splits every candidate into three uses:
+
+- **Resolve** — System-1 answers and returns (skips recall + LLM). The latency win.
+- **Route-only** — System-1 can't answer, but the cheap label still (a) can trigger immediate
+  "filler" speech while the slow tool runs, and (b) tells System-2 which tool to reach for. (The
+  filler tie-in is the immediacy work; see the turn-pipeline filler discussion.)
+- **Defer** — the `other` bucket, unchanged.
+
+### 15.1 Tier A — Resolve (no free-form slot)
+
+| Intent | Maps to | Args | Status |
+|---|---|---|---|
+| `weather` | `weather_lookup` → `ShowWeather` | home location (default) | ✅ shipped (M1). Named place → `names_place` noul → defer |
+| `timer_start` | `StartTimer` | duration via `parse_duration_secs` | ✅ shipped (M3, as `timer`) |
+| `timer_cancel` | `CancelTimer{None}` | none (cancel-all) | planned. Labeled cancel needs a slot → defer |
+| `time` | spoken, `current_datetime_line()` | none | planned. No widget, no clock round-trip |
+| `date` | spoken, from clock | none | planned |
+| `weather_dismiss` | `DismissWeather` | none | planned; gate on `screen == weather` |
+| `recipe_dismiss` | `DismissRecipe` | none | planned; gate on `screen == recipe` (your `close_recipe`) |
+| `end_session` | `audio_stop` **without** a `listen` frame | none | planned. Ends the follow-up chain → device returns to IDLE / wake-word (see §15.3) |
+| `stop_dismiss` | context ladder (§17) | none (referent from device state) | planned. Bare "stop"/"never mind"/"dismiss" |
+| `timer_query` | spoken, from timer context params | none | planned. Resolved **only when the device reports an active timer** (§17.1); the remaining time comes from the context parameters, so no Core-side timer state is needed |
+
+### 15.2 Tier C — Route-only (classify → filler + tool hint; System-2 answers)
+
+Free-form slots, so **never resolved** — but these are the *slow* tools where an instant filler
+("let me check…") pays off most: `internet_search`, `directions_lookup`, `recipe_lookup`,
+`calendar_lookup` (some "today/tomorrow" sub-cases could graduate to Tier A), `shopping_add`.
+
+### 15.3 `end_session` — how it ends the chain
+
+`emit_follow_up_and_stop` (`orchestrator.rs:1716`) sends the `listen` frame **then** `audio_stop`.
+The `end_session` handler simply **skips the `listen` frame** and sends `audio_stop` alone. The
+device ends its turn on the first `audio_stop`, and with no `listen` it drops back to IDLE /
+wake-word-waiting. Optional sub-second ack ("okay") or a silent close. Safest resolved only when
+`followup_depth > 0` (mid-conversation) — a fresh wake-word turn has nothing to end.
+
+## 16. Temporal classification (decided 2026-09-27 — 3-way)
+
+A third question in the same one-shot forward pass (free):
+
+```jsonc
+"temporal": { "type": "choice",
+  "instructions": "Does answering `message` concern the PAST (already happened / historical), the
+                   PRESENT (now / current state), or the FUTURE (upcoming / forecast / scheduled)?
+                   Choose 'present' if not time-bound.",
+  "criteria": { "past": "...", "present": "...", "future": "..." } }
+```
+
+It is both a **defer gate** (we have no fast historical-data path) and a **data selector**
+(current vs forecast). Not-time-bound commands classify as `present` and their intent ignores the
+field.
+
+**Rule:** `temporal == past` → **defer** for every data intent. Weather is the only intent where
+both `present` and `future` resolve.
+
+### 16.1 Resolve-by-tense matrix
+
+| Intent | Past | Present | Future | Data source / note |
+|---|---|---|---|---|
+| `weather` | defer (no historical fetch) | **resolve** — current | **resolve** — forecast (`ShowWeather` already carries the 7-day row) | Open-Meteo; tense selects current vs forecast |
+| `time` | defer | **resolve** (clock) | defer ("time in 3 hrs" = calc) | spoken |
+| `date` | defer | **resolve** (clock) | defer ("date next Friday" = calc) | spoken |
+| `timer_start` | n/a | n/a | **resolve** (inherently future) | tense not a gate |
+| `timer_cancel` / `timer_query` | n/a | **resolve** | n/a | present-only |
+| `calendar_lookup` *(if added)* | defer | resolve ("today") | resolve ("tomorrow/this week") | past → historical → System-2 |
+| `end_session`, `stop_dismiss`, dismiss family | — | — | — | atemporal; ignore the field |
+
+## 17. Device-context disambiguation (decided 2026-09-27 — 3B hybrid + ground-truth veto)
+
+### 17.1 In-scope — extend the reported device context (committed 2026-09-27)
+`DisplayContext` (`protocol.rs:690`) today reports **only the foreground widget** (`screen.kind` =
+`recipe` / `weather`). That is the core limitation: a timer (or, later, music) can be **running in
+the background** while a *different* widget — or the idle slideshow — is front-and-center, and the
+Core is currently blind to it. So "how much time is left?" or "stop" can't be resolved even though a
+timer plainly exists.
+
+> **Note (background context, not just the foreground widget):** the device already tracks its
+> timers for the countdown UI, so it must **report active/ringing timers as context parameters on
+> every turn regardless of which widget is foreground** — the timer state is orthogonal to the
+> `screen.kind`, not a variant of it. This unblocks `timer_query`, `timer_cancel`, and the
+> `stop_dismiss` ladder when a timer is running behind another screen. Media state follows the same
+> pattern when music lands.
+
+Add to the `audio-start` `screen` block (device → Core), surfaced on `DecisionRequest`:
+
+```jsonc
+"device": {
+  "screen": "recipe" | "weather" | "idle",              // foreground widget (existing)
+  "timers": { "running": 2, "ringing": true,            // NEW — reported even when backgrounded
+              "next_remaining_secs": 125,               //   soonest-to-fire, so timer_query can answer
+              "labels": ["pasta"] },                    //   optional, for labeled cancel/query later
+  "media":  { "state": "playing" | "paused" | "none" }  // NEW (when music lands)
+}
+```
+
+### 17.2 Split phrasing from referent
+- **Explicit phrasing routes directly**, no ladder: "cancel the timer" → `timer_cancel`, "pause the
+  music" → music, "close the recipe" → `recipe_dismiss`, "that's all" → `end_session`.
+- **Bare/overloaded words** ("stop", "cancel", "never mind", "dismiss", "done") → the generic
+  **`stop_dismiss`** label; the orchestrator resolves the referent via the ladder below.
+
+### 17.3 The priority ladder (deterministic; orchestrator owns the referent)
+1. alarm **ringing** → cancel that timer *(loudest thing wins)*
+2. else timer **running** → `timer_cancel`
+3. else media **playing** → pause
+4. else recipe/weather **screen up** → dismiss it
+5. else in a **follow-up chain** (`followup_depth > 0`) → `end_session`
+6. else → **defer**
+
+### 17.4 The 3B hybrid contract
+- **Model's job:** classify the intent (incl. the `stop_dismiss` family) **with** device state folded
+  into `state`, so vague/anaphoric phrasing ("close this", "that's enough") resolves confidently. It
+  does **not** name the referent.
+- **Ladder's job:** given `stop_dismiss`, pick the referent from live context (§17.3).
+- **Ground-truth veto (neutralizes the precision risk):** if the ladder finds **no valid referent**,
+  the turn **defers** — even if the model was confident. The model can never conjure a stop action
+  from nothing.
+- **On disagreement** (model guessed "music", ladder says timer): ladder wins; log the divergence
+  for calibration.
+
+## 18. Calibration corpus (Tier A; temporal-tagged)
+
+Precision-first: a mis-resolve on a ✗ is worse than a defer on a ✓. Sweep `min_confidence` to the
+knee where the ✗ set is ~100% deferred. These double as `mock`/golden-decision fixtures (§11).
+
+**`weather`**
+- ✓ present: what's the weather · is it raining right now · current temperature
+- ✓ future: will it rain today/tomorrow/this weekend · what's the forecast
+- ✗ past → defer: what was the weather yesterday · how hot did it get last week
+- ✗ defer: what's the weather in Tokyo *(`names_place`)*
+
+**`timer_start`**
+- ✓ set a timer for ten minutes · 90 second timer · set a timer for 1 hour 30 minutes
+- ✗ defer: set a timer *(no duration)* · wake me up at 7am *(clock alarm)*
+
+**`timer_cancel`**
+- ✓ cancel my timer · stop the timer · turn off the alarm · cancel all timers
+- ✗ defer: cancel the pasta timer *(labeled → slot)*
+
+**`timer_query`** (resolved only when the device reports an active timer)
+- ✓ (timer running) how much time is left · how long on my timer · is my timer still going
+- ✗ defer: how much time is left *when no timer is active* · how long on the pasta timer *(labeled → slot)*
+
+**`time` / `date`** (present only)
+- ✓ what time is it · do you have the time · what's the date · what day is it
+- ✗ defer: what time is it in London *(`names_place`)* · what's the date next Friday *(future calc)*
+
+**`weather_dismiss` / `recipe_dismiss`** (gate on matching screen)
+- ✓ close the weather · dismiss the forecast — *(weather screen up)*
+- ✓ close the recipe · I'm done cooking — *(recipe screen up)*
+- ✗ defer: close the recipe *when no recipe screen is up* · go back to the ingredients *(→ recipe_nav)*
+
+**`end_session`** (safest when `followup_depth > 0`)
+- ✓ that's all · I'm done · nothing else · goodbye · go to sleep · you can go now · we're good
+- ✗ defer: stop *(bare — ladder territory)* · stop the timer *(→ timer_cancel)* · pause *(→ media)*
+
+**`stop_dismiss`** (referent from device context)
+- ✓ (timer running) stop · cancel that · that's enough → `timer_cancel`
+- ✓ (alarm ringing) stop · turn it off · okay okay → cancel ringing timer
+- ✓ (recipe up, nothing running) stop · dismiss · close this → `recipe_dismiss`
+- ✓ (nothing active, in follow-up) stop · done → `end_session`
+- ✗ defer: bare "stop" with **no** device context and **not** in a follow-up *(ground-truth veto)*
+
+**Cross-cutting must-always-defer (precision anchors → `other`)**
+- who was the 16th president · what's 15% of 240 · translate "thanks" to Spanish
+- add milk to the list *(Tier C)* · directions to mom's *(Tier C)* · find me a lasagna recipe *(Tier C)*
+- remember I'm allergic to peanuts *(handled by `parse_command` before System-1 — must never reach it)*
+
+## 19. Implementation plan — Pre-req P0: device → Core context extension
+
+**This is the first build step** (gates §16 forecast-vs-current framing only loosely, but hard-gates
+`timer_query`, `timer_cancel`, and the entire `stop_dismiss` ladder in §17). Land it before any new
+intent handler. It is additive and self-contained: no new frame types, no new intents — just richer
+turn context flowing device → Core.
+
+### 19.0 Two facts this plan is built on (verified in-tree, 2026-09-27)
+1. **The existing widget context is not wired into System-1 yet.** `orchestrator.rs:703` builds
+   `DecisionRequest { screen: None /* M1 TODO */, history: Vec::new(), .. }` — the `screen` captured
+   from the turn's `audio-start` (`orchestrator.rs:307`) is dropped. So P0 must thread the *existing*
+   recipe/weather context too, not just the new timer fields. (The doc's earlier "populated in M1"
+   note in §6.1 is aspirational; the code has stubs.)
+2. **Timers carry no deadline or ringing state today.** `TimerEntry`
+   (`anamanti-display/rust/src/engine/timer.rs:38`) holds only `{label, abort}`; a fired timer rings a
+   finite bell and **removes itself** (`timer.rs:138`). So "how much time is left" needs a stored
+   deadline, and a *persistent* "ringing" state does not exist. **Decision for P0:** report
+   `running` + `next_remaining_secs` + `labels` (fully covers the user's "background timers as
+   context"); **park `ringing`** (ladder rung 1) until/unless we add a latched/looping alarm UX — see
+   §19.7. Rung 2 (`running` → `timer_cancel`) already covers "stop the timer".
+
+### 19.1 Wire shape & compatibility
+Timer/media state is **orthogonal to the foreground widget**, so it rides as sibling keys inside the
+existing `audio-start` `screen` block (not a new `kind`, not a new frame):
+```jsonc
+"screen": {
+  "kind": "recipe", "recipe": { ... },                 // existing foreground widget (optional/absent)
+  "timers": { "running": 2, "next_remaining_secs": 125, // NEW — present even with no/other widget
+              "labels": ["pasta"] }
+  // "media": { "state": "playing" }                    // NEW later, when music lands
+}
+```
+**Additive & backward-compatible:** an old Core ignores `timers`; an old device omits it and the new
+Core reads it as empty. Guard both crates' round-trip tests (device `types` ↔ core `protocol` are
+byte-identical for frames; this is *data*, but keep the tests green).
+
+### 19.2 Device changes (`anamanti-display/rust`)
+1. **Store the deadline.** Add `deadline: Instant` to `TimerEntry` (`engine/timer.rs:38`), set to
+   `Instant::now() + Duration::from_secs(secs)` at insert (`timer.rs:140`).
+2. **Snapshot method.** `TimerManager::snapshot() -> TimerSnapshot` iterating the live map:
+   `running = len`, `next_remaining_secs = min(deadline - now).max(0)`, `labels = non-empty labels`.
+   Cheap; takes the existing `Mutex`.
+3. **Merge into `audio-start`.** `WyomingClient::send_audio_start` (`wyoming/client.rs:129-147`)
+   currently inserts only `self.display_context` under `"screen"`. Extend it to also insert the
+   per-turn timer snapshot as `screen.timers` — **and to emit a `screen` block even when
+   `display_context` is `None`** but a timer is running (today it no-ops on an idle screen). Source the
+   snapshot at turn start: the turn driver (the engine holding the `TimerManager`) computes
+   `snapshot()` and hands it to the client via a new `set_timer_context(...)` just before
+   `send_audio_start` (keeps `WyomingClient` decoupled from `TimerManager`).
+
+### 19.3 Core changes (`anamanti-core`)
+1. **Parse orthogonally.** In `wyoming/protocol.rs`, add `TimerContext { running: u32,
+   next_remaining_secs: Option<u64>, labels: Vec<String> }` and a `device_context(data) ->
+   DeviceContext { widget: Option<DisplayContext>, timers: TimerContext }`. Critically, parse
+   `screen.timers` **independently of `screen.kind`** — the current `display_context()` early-returns
+   `None` when `kind` is absent (`protocol.rs:732`), which would drop timers on an idle screen. Keep
+   `display_context()` as-is for the System-2 prompt line; `device_context()` is the superset.
+2. **Capture it.** In `orchestrator.rs:300-312`, replace the `display_context(&ev.data)` capture with
+   `device_context(&ev.data)` so the turn carries both widget + timers.
+
+### 19.4 Thread into System-1
+1. **Extend `DecisionRequest`** (`system1/mod.rs`): keep `screen: Option<String>`, add
+   `timers: TimerContext` (and later `media`).
+2. **Populate it for real** (`orchestrator.rs:701`): set `screen` = a label derived from the widget
+   (`"recipe"`/`"weather"`/absent) — closing the existing TODO — and `timers` = the parsed snapshot.
+3. **Fold a compact device summary into the classifier `state`** (`system1/http.rs::build_request`)
+   for the 3B hybrid (§17.4): e.g. `state.timers_running`, `state.timer_ringing` (false for now),
+   `state.screen`. Deterministic handlers read the typed `DecisionRequest.timers`; the model only
+   *sees* the summary to sharpen `stop_dismiss` confidence.
+
+### 19.5 What P0 unblocks (built in later milestones, not here)
+- `timer_query` → answered from `timers.next_remaining_secs`; **resolves only when `running > 0`**.
+- `timer_cancel` bare-word path and the `stop_dismiss` ladder rungs 2 & 4 (running timer / open
+  screen). Rung 1 (ringing) stays parked (§19.7).
+
+### 19.6 Tests
+- **Device:** `snapshot()` computes remaining + count (unit); `send_audio_start` emits `screen.timers`
+  with and without a foreground widget (assert JSON shape).
+- **Core:** `device_context` parses `timers` with `kind` present, with `kind` absent, and when
+  `timers` is missing (→ empty); a golden `audio-start` fixture round-trips.
+- **Pipeline:** a turn started with a running-timer context makes `DecisionRequest.timers.running > 0`
+  reach the engine (extend the `mock` decider fixtures).
+
+### 19.7 Parked (explicit follow-ups, not P0)
+- **`ringing` / ladder rung 1** — needs a latched or looping alarm that persists until dismissed;
+  today's finite bell + self-removal (`timer.rs:138`) has nothing to silence. Revisit with any
+  "alarm keeps sounding until you say stop" UX.
+- **`media` state** — lands with music transport; same orthogonal-field pattern.
+- **Labeled timer query/cancel** — needs the free-form label slot → stays on System-2.
