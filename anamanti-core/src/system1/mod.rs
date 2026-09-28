@@ -24,11 +24,23 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 /// The built-in intents the router may resolve when the config leaves `intents` empty.
-/// Grows as handlers land (M1: weather; M3: timer). An intent listed here still only
-/// resolves if the orchestrator has a handler for it *and* the handler's preconditions
-/// hold (e.g. timer needs a parseable duration), otherwise the turn defers to System-2.
+/// Grows as handlers land (M1: weather; M3: timer; M5.2: clock queries). An intent listed
+/// here still only resolves if the orchestrator has a handler for it *and* the handler's
+/// preconditions hold (e.g. timer needs a parseable duration), otherwise the turn defers
+/// to System-2.
 pub fn default_intents() -> Vec<String> {
-    vec!["weather".to_string(), "timer".to_string()]
+    vec![
+        "weather".to_string(),
+        "timer".to_string(),
+        "time".to_string(),
+        "date".to_string(),
+        "timer_cancel".to_string(),
+        "timer_query".to_string(),
+        "weather_dismiss".to_string(),
+        "recipe_dismiss".to_string(),
+        "end_session".to_string(),
+        "stop_dismiss".to_string(),
+    ]
 }
 
 /// Parse a spoken timer/alarm duration into whole seconds, or `None` when the text has
@@ -134,6 +146,11 @@ pub struct DecisionRequest {
     /// HTTP engine uses this to retry an otherwise-deferred turn with the location folded
     /// into the question. `None` when unset — no retry, the turn just defers.
     pub location: Option<String>,
+    /// Active-timer state the device reported this turn (running count / soonest
+    /// remaining / labels), **orthogonal to `screen`** — a timer can run behind another
+    /// widget. Ground truth for the `timer_query` / `timer_cancel` / `stop_dismiss`
+    /// decisions (plans/system1-fast-decisions.md §17, §19). Empty when nothing runs.
+    pub timers: crate::wyoming::protocol::TimerContext,
 }
 
 /// A resolved fast intent. M1+ extends this with structured args so the orchestrator
@@ -248,6 +265,7 @@ mod tests {
             screen: None,
             history: Vec::new(),
             location: None,
+            timers: Default::default(),
         }
     }
 
