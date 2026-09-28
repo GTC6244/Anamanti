@@ -374,7 +374,16 @@ New JSON block in `anamanti.json` (all optional, defaults shown; add to `anamant
      device state" enhancement (§17.4) — the ladder already owns the referent deterministically, so
      the classifier stays state-blind for now; folding the device summary into the request `state`
      lands with calibration. Ladder rungs 1 (alarm ringing) & 3 (media) remain parked (§19.7).
-   - **M5.3** calibration against the §18 corpus; per-intent thresholds; the 3B state-fold.
+   - **M5.3 ◑ IN PROGRESS 2026-09-27** — **3B state-fold ✅ landed**: `build_request` folds a compact
+     device summary (`screen` label + `timers_running`/`timer_remaining_secs`) into the request
+     `state`, but **only when present**, so ordinary turns stay byte-identical (`state = {message}`).
+     The classifier now *sees* device state (sharpening `stop_dismiss`/dismiss confidence) while the
+     ladder still owns the referent. **Calibration harness ✅ landed**: `tests/system1_calibration.rs`
+     — an `#[ignore]`d tool seeded with the §18 corpus that measures resolve precision/recall against
+     a live backend (laya-serve or Jev) and reports where `min_confidence` should sit. **Still open
+     (needs a live model + on-device QA — cannot be done here):** running the harness to pick the
+     actual threshold value(s), and deciding per-intent thresholds (§13 Q4) — deliberately NOT shipped
+     as dead config until the harness data shows a single global threshold is insufficient.
 
 ## 11. Testing
 
@@ -625,10 +634,10 @@ both `present` and `future` resolve.
 > **Status: ✅ ladder + veto IMPLEMENTED 2026-09-27 (M5.2).** `handle_stop_dismiss` runs the §17.3
 > priority ladder over the P0 device context and returns `None` (→ defer) when no rung matches (the
 > ground-truth veto). Rungs 2 (running timer), 4 (open screen), 5 (end an active follow-up) are live;
-> rungs 1 (alarm ringing) & 3 (media) are parked (§19.7). **Not yet done (M5.3):** §17.4's "classifier
-> sees the state" half — the classifier is currently state-blind and the ladder alone owns the
-> referent (still correct; the state-fold only improves recall on vague phrasing and needs live
-> calibration).
+> rungs 1 (alarm ringing) & 3 (media) are parked (§19.7). **§17.4's "classifier sees the state" half
+> ✅ landed (M5.3):** `build_request` folds a compact device summary into the request `state` (only
+> when present), so the classifier is now context-aware; the ladder still owns the referent. The
+> remaining M5.3 work is empirical — running the calibration harness to tune the threshold(s).
 
 ### 17.1 In-scope — extend the reported device context (committed 2026-09-27)
 `DisplayContext` (`protocol.rs:690`) today reports **only the foreground widget** (`screen.kind` =

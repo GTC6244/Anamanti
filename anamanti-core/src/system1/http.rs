@@ -150,7 +150,12 @@ impl DecisionEngine for HttpDecider {
         // defer-then-retry sequence. A location intent with no place named resolves here
         // against the home default (see the `needs_full_understanding` wording); a named
         // place is routed to System-2 for extraction.
-        let body = build_request(&req.transcript, self.model.as_deref(), &self.intents);
+        let body = build_request(
+            &req.transcript,
+            self.model.as_deref(),
+            &self.intents,
+            &device_state_fields(req),
+        );
         let value = self.post(&body).await?;
         let decision = interpret(&value, &self.intents, self.min_confidence);
 
@@ -214,10 +219,36 @@ fn intent_description(intent: &str) -> &str {
     }
 }
 
-/// Build the `/v1/systemone` request body: the transcript as state plus the fixed
-/// routing question set (an `intent` choice over `intents` + `other`, and a
-/// `needs_full_understanding` noul). Pure, so it is unit-tested without a server.
-pub fn build_request(transcript: &str, model: Option<&str>, intents: &[String]) -> Value {
+/// The compact device-state fields folded into the request `state` for the 3B hybrid
+/// (§17.4): the foreground widget label and any running-timer summary. Present only when
+/// there is something to report, so an ordinary turn (idle screen, no timer) sends the
+/// byte-identical `{ "message": … }` state it always did — the classifier only *sees*
+/// device state when there is state, which is exactly when `stop_dismiss` / dismiss
+/// phrasings need it. The deterministic ladder still owns the referent; this only sharpens
+/// the classifier's confidence on vague phrasing.
+pub fn device_state_fields(req: &DecisionRequest) -> Map<String, Value> {
+    let mut m = Map::new();
+    if let Some(screen) = req.screen.as_deref().filter(|s| !s.is_empty()) {
+        m.insert("screen".to_string(), json!(screen));
+    }
+    if req.timers.running > 0 {
+        m.insert("timers_running".to_string(), json!(req.timers.running));
+        if let Some(secs) = req.timers.next_remaining_secs {
+            m.insert("timer_remaining_secs".to_string(), json!(secs));
+        }
+    }
+    m
+}
+
+/// Build the `/v1/systemone` request body: the transcript (plus any device-state fields
+/// for the 3B hybrid) as `state`, and the fixed routing question set. Pure, so it is
+/// unit-tested without a server.
+pub fn build_request(
+    transcript: &str,
+    model: Option<&str>,
+    intents: &[String],
+    device_state: &Map<String, Value>,
+) -> Value {
     let mut criteria = Map::new();
     for intent in intents {
         let desc = intent_description(intent);
@@ -267,11 +298,17 @@ pub fn build_request(transcript: &str, model: Option<&str>, intents: &[String]) 
         },
     });
 
+    let mut state = Map::new();
+    state.insert("message".to_string(), json!(transcript));
+    for (k, v) in device_state {
+        state.insert(k.clone(), v.clone());
+    }
+
     let mut body = Map::new();
     if let Some(m) = model {
         body.insert("model".to_string(), json!(m));
     }
-    body.insert("state".to_string(), json!({ "message": transcript }));
+    body.insert("state".to_string(), Value::Object(state));
     body.insert("questions".to_string(), questions);
     Value::Object(body)
 }
@@ -378,7 +415,12 @@ mod tests {
 
     #[test]
     fn build_request_shapes_state_and_questions() {
-        let body = build_request("show me the weather", Some("typesafe/jev-1.13"), &intents());
+        let body = build_request(
+            "show me the weather",
+            Some("typesafe/jev-1.13"),
+            &intents(),
+            &Map::new(),
+        );
         assert_eq!(body["model"], json!("typesafe/jev-1.13"));
         assert_eq!(body["state"]["message"], json!("show me the weather"));
         assert_eq!(body["questions"]["intent"]["type"], json!("choice"));
@@ -395,8 +437,47 @@ mod tests {
         assert!(tcrit.get("present").is_some());
         assert!(tcrit.get("future").is_some());
         // laya-serve omits the model.
-        let no_model = build_request("hi", None, &intents());
+        let no_model = build_request("hi", None, &intents(), &Map::new());
         assert!(no_model.get("model").is_none());
+        // With no device state, `state` is exactly `{ message }` (byte-identical to before).
+        assert_eq!(no_model["state"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn device_state_fields_reports_screen_and_timers_only_when_present() {
+        use crate::wyoming::protocol::TimerContext;
+        // Idle screen, no timer → empty (ordinary turn stays byte-identical).
+        let bare = DecisionRequest {
+            transcript: "stop".into(),
+            screen: None,
+            history: Vec::new(),
+            location: None,
+            timers: TimerContext::default(),
+        };
+        assert!(device_state_fields(&bare).is_empty());
+
+        // A recipe on screen with two timers running folds both into the state.
+        let ctx = DecisionRequest {
+            transcript: "stop".into(),
+            screen: Some("recipe".into()),
+            history: Vec::new(),
+            location: None,
+            timers: TimerContext {
+                running: 2,
+                next_remaining_secs: Some(90),
+                labels: vec![],
+            },
+        };
+        let fields = device_state_fields(&ctx);
+        assert_eq!(fields.get("screen"), Some(&json!("recipe")));
+        assert_eq!(fields.get("timers_running"), Some(&json!(2)));
+        assert_eq!(fields.get("timer_remaining_secs"), Some(&json!(90)));
+
+        // The fields ride inside the request `state` alongside `message`.
+        let body = build_request("stop", None, &intents(), &fields);
+        assert_eq!(body["state"]["message"], json!("stop"));
+        assert_eq!(body["state"]["screen"], json!("recipe"));
+        assert_eq!(body["state"]["timers_running"], json!(2));
     }
 
     /// Add a `temporal` choice answer to a response built by `resp`.
