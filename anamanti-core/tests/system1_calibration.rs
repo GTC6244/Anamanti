@@ -86,7 +86,10 @@ fn corpus() -> Vec<Case> {
         // timer start
         case("set a timer for ten minutes", Resolve(timer_start)),
         case("ninety second timer", Resolve(timer_start)),
-        case("set a timer", Defer), // no duration (handler defers even if classified)
+        // "set a timer" is correctly CLASSIFIED as timer here; the orchestrator's handler
+        // then defers because `parse_duration_secs` finds no duration (unit-tested in
+        // tests/pipeline.rs). So classifier-level this is a resolve, not a defer.
+        case("set a timer", Resolve(timer_start)),
         // clock
         case("what time is it", Resolve(time)),
         case("what's the date", Resolve(date)),

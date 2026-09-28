@@ -380,10 +380,14 @@ New JSON block in `anamanti.json` (all optional, defaults shown; add to `anamant
      The classifier now *sees* device state (sharpening `stop_dismiss`/dismiss confidence) while the
      ladder still owns the referent. **Calibration harness ✅ landed**: `tests/system1_calibration.rs`
      — an `#[ignore]`d tool seeded with the §18 corpus that measures resolve precision/recall against
-     a live backend (laya-serve or Jev) and reports where `min_confidence` should sit. **Still open
-     (needs a live model + on-device QA — cannot be done here):** running the harness to pick the
-     actual threshold value(s), and deciding per-intent thresholds (§13 Q4) — deliberately NOT shipped
-     as dead config until the harness data shows a single global threshold is insufficient.
+     a live backend (laya-serve or Jev) and reports where `min_confidence` should sit.
+   - **M5.3 calibration RUN 2026-09-27 (live jev/OpenRouter):** the §18 corpus scores **22/22 at
+     `min_confidence=0.85`** — 0 mis-resolves, 0 wrong-intent, 0 missed resolves. So a **single global
+     0.85 threshold is sufficient; per-intent thresholds are NOT needed** (§13 Q4 answered). The run
+     surfaced + fixed one real bug: `time`/`date` now defer on a named place (added to
+     `PLACE_SENSITIVE_INTENTS`), so "what time is it in London" no longer answers the local time.
+     **Remaining:** on-device QA on the Echo Show (a test Core is running from this worktree on :10702
+     with the jev backend for exactly that).
 
 ## 11. Testing
 

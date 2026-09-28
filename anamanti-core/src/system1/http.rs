@@ -58,12 +58,13 @@ const TEMPORAL: &str = "temporal";
 /// The temporal label that forces a defer.
 const TEMPORAL_PAST: &str = "past";
 
-/// Intents that are ambiguous without a place. When one of these is chosen confidently
-/// but the turn still defers (the model judged it "needs a location"), the engine retries
-/// once with the home location folded into the question — a second fast System One call,
-/// still far cheaper than a System-2 turn. Verified live: "what's the weather" defers
-/// (noul ~0.94) but "what's the weather in <place>" resolves (noul ~0.3).
-const LOCATION_INTENTS: &[&str] = &["weather"];
+/// Intents whose answer changes with the place named, so a turn that names a *specific*
+/// place (high `names_place`) must defer to System-2 rather than fast-path against the home
+/// default: `weather` (the fast handler only knows the home forecast) and `time`/`date`
+/// (the wall clock is local — "what time is it in London" is a different timezone the fast
+/// path can't compute). Verified live (jev): "what's the weather" resolves but "…in Tokyo"
+/// defers; likewise "what time is it" resolves but "…in London" must defer.
+const PLACE_SENSITIVE_INTENTS: &[&str] = &["weather", "time", "date"];
 
 /// An HTTP System-1 engine speaking `/v1/systemone`.
 pub struct HttpDecider {
@@ -377,17 +378,14 @@ fn names_place_prob(resp: &Value) -> f64 {
 }
 
 /// Whether a resolved decision must be re-routed to System-2 because the turn named a
-/// specific place a location intent can't fast-path. System-1 flags *that* a place was
-/// named but can't extract the string, and the fast-path handler only knows the home
-/// location — so resolving here would answer for the wrong place.
-///
-/// Evaluated only against the **original** transcript's response in [`HttpDecider::decide`],
-/// never the home-augmented retry (which deliberately injects the home place name and must
-/// still be allowed to resolve).
+/// specific place a [place-sensitive intent](PLACE_SENSITIVE_INTENTS) can't fast-path.
+/// System-1 flags *that* a place was named but can't extract the string, and the fast-path
+/// handler only knows the home location / local clock — so resolving here would answer for
+/// the wrong place (wrong forecast, or the wrong timezone).
 fn names_place_forces_defer(decision: &Decision, resp: &Value) -> bool {
     match decision {
         Decision::Resolve(r) => {
-            LOCATION_INTENTS.contains(&r.intent.as_str())
+            PLACE_SENSITIVE_INTENTS.contains(&r.intent.as_str())
                 && names_place_prob(resp) >= NAMES_PLACE_THRESHOLD
         }
         _ => false,
