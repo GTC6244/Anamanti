@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 518702162;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1716420688;
 
 // Section: executor
 
@@ -670,6 +670,40 @@ fn wire__crate__api__engine__note_user_activity_impl(
             transform_result_sse::<_, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok({
                     crate::api::engine::note_user_activity();
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine__set_place_context_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_place_context",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_active = <bool>::sse_decode(&mut deserializer);
+            let api_name = <String>::sse_decode(&mut deserializer);
+            let api_address = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::set_place_context(api_active, api_name, api_address);
                 })?;
                 Ok(output_ok)
             })())
@@ -1512,6 +1546,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_present = <bool>::sse_decode(deserializer);
         let mut var_recipeJson = <String>::sse_decode(deserializer);
         let mut var_weatherJson = <String>::sse_decode(deserializer);
+        let mut var_placeJson = <String>::sse_decode(deserializer);
         let mut var_recipeAction = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
@@ -1530,6 +1565,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             present: var_present,
             recipe_json: var_recipeJson,
             weather_json: var_weatherJson,
+            place_json: var_placeJson,
             recipe_action: var_recipeAction,
         };
     }
@@ -1562,9 +1598,11 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             19 => crate::api::engine::WakeWordEventKind::ShowWeather,
             20 => crate::api::engine::WakeWordEventKind::WeatherCurrent,
             21 => crate::api::engine::WakeWordEventKind::DismissWeather,
-            22 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
-            23 => crate::api::engine::WakeWordEventKind::RecipeScroll,
-            24 => crate::api::engine::WakeWordEventKind::Presence,
+            22 => crate::api::engine::WakeWordEventKind::ShowPlace,
+            23 => crate::api::engine::WakeWordEventKind::DismissPlace,
+            24 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
+            25 => crate::api::engine::WakeWordEventKind::RecipeScroll,
+            26 => crate::api::engine::WakeWordEventKind::Presence,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -1623,23 +1661,23 @@ fn pde_ffi_dispatcher_primary_impl(
         14 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
         15 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
         16 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        20 => {
+        21 => {
             wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        21 => {
+        22 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        22 => {
+        23 => {
             wire__crate__api__engine__start_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
-        24 => {
+        24 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        25 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        25 => {
+        26 => {
             wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        26 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        27 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -1663,8 +1701,9 @@ fn pde_ffi_dispatcher_sync_impl(
             wire__crate__api__engine__is_wake_word_engine_running_impl(ptr, rust_vec_len, data_len)
         }
         17 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1969,6 +2008,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.present.into_into_dart().into_dart(),
             self.recipe_json.into_into_dart().into_dart(),
             self.weather_json.into_into_dart().into_dart(),
+            self.place_json.into_into_dart().into_dart(),
             self.recipe_action.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -2011,9 +2051,11 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::ShowWeather => 19.into_dart(),
             Self::WeatherCurrent => 20.into_dart(),
             Self::DismissWeather => 21.into_dart(),
-            Self::RecipeNavigate => 22.into_dart(),
-            Self::RecipeScroll => 23.into_dart(),
-            Self::Presence => 24.into_dart(),
+            Self::ShowPlace => 22.into_dart(),
+            Self::DismissPlace => 23.into_dart(),
+            Self::RecipeNavigate => 24.into_dart(),
+            Self::RecipeScroll => 25.into_dart(),
+            Self::Presence => 26.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -2432,6 +2474,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <bool>::sse_encode(self.present, serializer);
         <String>::sse_encode(self.recipe_json, serializer);
         <String>::sse_encode(self.weather_json, serializer);
+        <String>::sse_encode(self.place_json, serializer);
         <String>::sse_encode(self.recipe_action, serializer);
     }
 }
@@ -2463,9 +2506,11 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::ShowWeather => 19,
                 crate::api::engine::WakeWordEventKind::WeatherCurrent => 20,
                 crate::api::engine::WakeWordEventKind::DismissWeather => 21,
-                crate::api::engine::WakeWordEventKind::RecipeNavigate => 22,
-                crate::api::engine::WakeWordEventKind::RecipeScroll => 23,
-                crate::api::engine::WakeWordEventKind::Presence => 24,
+                crate::api::engine::WakeWordEventKind::ShowPlace => 22,
+                crate::api::engine::WakeWordEventKind::DismissPlace => 23,
+                crate::api::engine::WakeWordEventKind::RecipeNavigate => 24,
+                crate::api::engine::WakeWordEventKind::RecipeScroll => 25,
+                crate::api::engine::WakeWordEventKind::Presence => 26,
                 _ => {
                     unimplemented!("");
                 }

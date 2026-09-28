@@ -34,6 +34,7 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         NotifyConfig,
         WeatherConfig,
         noteUserActivity,
+        setPlaceContext,
         setRecipeContext,
         setWeatherContext;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
@@ -262,6 +263,7 @@ class _AmbientHomeState extends State<AmbientHome> {
       // can drive it by voice — switch tabs, scroll, close.
       setRecipeContext: setRecipeContext,
       setWeatherContext: setWeatherContext,
+      setPlaceContext: setPlaceContext,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
       // flip to a "processing" indicator the instant the user stops talking.
       endpointCueEnabled: _settings.endpointCueEnabled,

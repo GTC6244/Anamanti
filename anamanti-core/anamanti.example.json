@@ -99,6 +99,11 @@
     "refresh_interval_secs": 1800
   },
 
+  "places": {
+    "enabled": true,
+    "provider": "google"
+  },
+
   "system1": {
     "backend": "none",
     "base_url": "http://127.0.0.1:8000",

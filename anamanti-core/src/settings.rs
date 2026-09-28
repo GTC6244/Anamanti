@@ -402,6 +402,15 @@ pub struct WeatherToolUpdate {
     pub visualcrossing_key: Option<Option<String>>,
 }
 
+/// A requested change to the places tool config. `google_places_key` is tri-state:
+/// `None` = leave unchanged; `Some(None)`/`Some(Some(""))` = clear; `Some(Some(v))` =
+/// set. Applied by [`SharedSettings::apply_places_tool`], which rebuilds the backend so
+/// the `places_lookup` tool is advertised/withdrawn live.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlacesToolUpdate {
+    pub google_places_key: Option<Option<String>>,
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -463,6 +472,11 @@ pub struct PersistedSettings {
     /// then fall back to the `VISUALCROSSING_API_KEY` env seed. Plaintext (0600 file).
     #[serde(default)]
     pub visualcrossing_key: Option<String>,
+    /// Runtime-set Google Places API key for the places tool. Defaulted (absent) for
+    /// older files, which then fall back to the `GOOGLE_PLACES_API_KEY` env seed.
+    /// Plaintext (0600 file).
+    #[serde(default)]
+    pub google_places_key: Option<String>,
     /// Selected System-1 backend. Defaults to **empty** (not "none") for older files, so
     /// an old persisted file can't clobber a config-file `system1.backend` seed — the
     /// overlay only applies when this is non-empty (a save always writes a real label).
@@ -605,6 +619,11 @@ pub struct LlmFactory {
     /// be rebuilt from a new runtime provider/key without re-reading config; `false`
     /// forces the provider to `None` regardless of the label/key.
     pub weather_enabled: bool,
+    /// The Google Places provider for the `places_lookup` tool, or `None` when no key is
+    /// configured. Built from the live key ([`RuntimeSettings::google_places_key`]) and
+    /// refreshed on every (re)build — like `weather`/`directions` — so a key entered on
+    /// the config page advertises the tool live. Shared into every rebuilt backend.
+    pub places: Option<Arc<dyn crate::places::PlacesProvider>>,
 }
 
 impl LlmFactory {
@@ -679,6 +698,7 @@ impl LlmFactory {
                                     self.cadora.clone(),
                                     self.weather.clone(),
                                     self.weather_imperial,
+                                    self.places.clone(),
                                 ),
                             )?),
                             _ => Arc::new(AnthropicBackend::new(
@@ -728,6 +748,7 @@ impl LlmFactory {
                             self.cadora.clone(),
                             self.weather.clone(),
                             self.weather_imperial,
+                            self.places.clone(),
                         ),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
@@ -805,6 +826,10 @@ pub struct RuntimeSettings {
     /// page Tools tab); seeded from `VISUALCROSSING_API_KEY` at boot. `None` ⇒ the
     /// Visual Crossing provider falls back to keyless Open-Meteo.
     pub visualcrossing_key: Option<String>,
+    /// Live Google Places API key for the `places_lookup` tool. Runtime-settable (config
+    /// page Tools tab); seeded from `GOOGLE_PLACES_API_KEY` at boot. `None` ⇒ the tool
+    /// isn't advertised (Google Places has no keyless fallback).
+    pub google_places_key: Option<String>,
     /// The live System-1 fast-decision selection (plans/system1-fast-decisions.md), read
     /// from the per-turn snapshot so a config-page swap takes effect between turns.
     /// Bundled into one field so the widely-constructed `RuntimeSettings` only gains one.
@@ -992,6 +1017,7 @@ impl SharedSettings {
             cadora: s.cadora.clone(),
             weather_provider: Some(s.weather_provider.clone()),
             visualcrossing_key: s.visualcrossing_key.clone(),
+            google_places_key: s.google_places_key.clone(),
             system1_backend: s.system1.backend.clone(),
             system1_base_url: s.system1.base_url.clone(),
             system1_model: s.system1.model.clone(),
@@ -1028,6 +1054,7 @@ impl SharedSettings {
             weather: None,
             weather_imperial: false,
             weather_enabled: false,
+            places: None,
         };
         Self::new(
             factory,
@@ -1053,6 +1080,7 @@ impl SharedSettings {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
         )
@@ -1167,6 +1195,9 @@ impl SharedSettings {
                 &current.weather_provider,
                 current.visualcrossing_key.as_deref(),
             );
+            // Same for the places tool: rebuild it from the live Google Places key so a
+            // normal settings change never drops `places_lookup`.
+            factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
             (
                 Some(factory.build(
                     target_engine,
@@ -1492,6 +1523,9 @@ impl SharedSettings {
             &current.weather_provider,
             current.visualcrossing_key.as_deref(),
         );
+        // Keep the places tool live across this rebuild.
+        factory.places =
+            crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1565,6 +1599,9 @@ impl SharedSettings {
             &current.weather_provider,
             current.visualcrossing_key.as_deref(),
         );
+        // Keep the places tool live across this rebuild.
+        factory.places =
+            crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1638,6 +1675,9 @@ impl SharedSettings {
             &current.weather_provider,
             current.visualcrossing_key.as_deref(),
         );
+        // Keep the places tool live across this rebuild.
+        factory.places =
+            crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1742,6 +1782,9 @@ impl SharedSettings {
             &target_provider,
             target_key.as_deref(),
         );
+        // Keep the places tool live across this rebuild.
+        factory.places =
+            crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1774,6 +1817,80 @@ impl SharedSettings {
         }
         (target_provider, key_set)
     }
+
+    /// Whether a Google Places API key is set (never the value). Read by the config-page
+    /// Tools tab status endpoint.
+    pub fn google_places_key_set(&self) -> bool {
+        self.inner
+            .read()
+            .unwrap()
+            .google_places_key
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Apply a places-tool config change (the Google Places API key), rebuild the LLM so
+    /// `places_lookup` is advertised/withdrawn, and persist (best-effort, 0600). An empty
+    /// key is treated as a clear (the tool is withdrawn — Google Places has no keyless
+    /// fallback). Like [`Self::apply_weather_tool`] the rebuild is best-effort: on failure
+    /// the new key is still stored, so it takes effect on the next successful rebuild or
+    /// restart. Returns whether a key is now set.
+    pub fn apply_places_tool(&self, update: &PlacesToolUpdate) -> bool {
+        let current = self.inner.read().unwrap().clone();
+        let target_key = match &update.google_places_key {
+            None => current.google_places_key.clone(),
+            Some(k) => k.clone().filter(|s| !s.is_empty()),
+        };
+
+        // Rebuild the backend so the tool reflects the new key. Build before taking the
+        // write lock; on failure, fall through and still store the change.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.cadora = current.cadora.controller();
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
+        factory.places = crate::places::from_key("google", target_key.as_deref());
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("places: applied key but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.google_places_key = target_key.clone();
+        let key_set = target_key.as_deref().is_some_and(|s| !s.is_empty());
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        key_set
+    }
 }
 
 #[cfg(test)]
@@ -1800,6 +1917,7 @@ mod tests {
             weather: None,
             weather_imperial: false,
             weather_enabled: false,
+            places: None,
         }
     }
 
@@ -1843,6 +1961,7 @@ mod tests {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
         )
@@ -1972,6 +2091,7 @@ mod tests {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2125,6 +2245,7 @@ mod tests {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2267,6 +2388,7 @@ mod tests {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2339,6 +2461,7 @@ mod tests {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2419,6 +2542,7 @@ mod tests {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),
@@ -2490,6 +2614,7 @@ mod tests {
                 cadora: CadoraConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: System1Runtime::default(),
             },
             Some(path.clone()),

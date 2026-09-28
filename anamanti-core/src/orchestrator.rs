@@ -1530,6 +1530,12 @@ impl Pipeline {
                 }
                 WyomingEvent::recipe_dismiss()
             }
+            "place_dismiss" => {
+                if !matches!(device_ctx.widget, Some(protocol::DisplayContext::Place(_))) {
+                    return None;
+                }
+                WyomingEvent::place_dismiss()
+            }
             _ => return None,
         };
         let reply = "Okay.".to_string();
@@ -1620,6 +1626,7 @@ impl Pipeline {
         let dismiss_intent = match device_ctx.widget {
             Some(protocol::DisplayContext::Weather(_)) => Some("weather_dismiss"),
             Some(protocol::DisplayContext::Recipe(_)) => Some("recipe_dismiss"),
+            Some(protocol::DisplayContext::Place(_)) => Some("place_dismiss"),
             None => None,
         };
         if let Some(intent) = dismiss_intent {
@@ -2130,7 +2137,24 @@ fn display_context_line(ctx: &protocol::DisplayContext) -> String {
     match ctx {
         protocol::DisplayContext::Recipe(screen) => recipe_screen_line(screen),
         protocol::DisplayContext::Weather(screen) => weather_screen_line(screen),
+        protocol::DisplayContext::Place(screen) => place_screen_line(screen),
     }
+}
+
+/// The prompt line for the place card: names the place on screen so the model can answer
+/// follow-ups in context ("is it open on Sunday?" → `places_lookup` for the same place)
+/// or `close_places` when the user says to close it.
+fn place_screen_line(screen: &protocol::PlaceScreen) -> String {
+    let name = screen.name.trim();
+    let which = if name.is_empty() {
+        "a place".to_string()
+    } else {
+        name.to_string()
+    };
+    format!(
+        "The place card is currently open on the display, showing {which}. Use the \
+         `places_lookup` tool to look up another place and `close_places` to close it."
+    )
 }
 
 /// The prompt line for the weather screen: names what the forecast currently shows, so
@@ -2302,6 +2326,10 @@ async fn drain_device_actions<W>(
                 serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
             ),
             DeviceAction::DismissWeather => WyomingEvent::weather_dismiss(),
+            DeviceAction::ShowPlace(report) => WyomingEvent::place_show(
+                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+            ),
+            DeviceAction::DismissPlace => WyomingEvent::place_dismiss(),
             DeviceAction::RecipeControl(nav) => match nav {
                 RecipeNav::TabOverview => WyomingEvent::recipe_navigate("overview"),
                 RecipeNav::TabIngredients => WyomingEvent::recipe_navigate("ingredients"),

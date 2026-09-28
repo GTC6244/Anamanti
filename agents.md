@@ -29,7 +29,10 @@ Feature-specific plans branch off these — e.g.
 the `anamanti-recipe` frame + the display's 3-tab recipe screen), and
 [`WeatherPlan.md`](./plans/WeatherPlan.md) (weather: the `weather_lookup` tool +
 the `anamanti-weather` frame + the display's full-screen forecast and the ambient
-icon/temperature beside the clock).
+icon/temperature beside the clock), and
+[`PlacesPlan.md`](./plans/PlacesPlan.md) (places: the `places_lookup` tool over the
+Google Places API + the `anamanti-place` frame + the display's full-screen place card,
+plus the route-only System-1 `place` intent).
 
 ---
 
@@ -203,6 +206,8 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #   VISUALCROSSING_API_KEY               (the weather provider key when weather.provider=
 #     visualcrossing, the default; UI: Tools tab → /tools. Absent ⇒ weather falls back to
 #     keyless Open-Meteo)
+#   GOOGLE_PLACES_API_KEY                (the places_lookup provider key — Google Places API
+#     New; UI: Tools tab → /tools. Absent ⇒ the tool is not advertised, no keyless fallback)
 #   ANTHROPIC_OAUTH_TOKEN                (Claude subscription token from `claude setup-token`;
 #     UI: Config tab when Anthropic auth = subscription)
 #   OPENROUTER_API_KEY                   (the System-1 `jev` decision backend on OpenRouter;
@@ -244,6 +249,10 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     via env or the Tools tab) or "openmeteo" (keyless). Provider + key are runtime-
 #     settable on the Tools tab (persisted, rebuilds the tool + retargets the push live);
 #     visualcrossing with no key falls back to keyless Open-Meteo
+#   places{enabled,provider} → the places_lookup tool (Google Places API New) + the
+#     anamanti-place frame + the display's place card. provider="google" (default/only) +
+#     the GOOGLE_PLACES_API_KEY secret, set via env or the Tools tab (runtime-settable,
+#     rebuilds the tool live). No keyless fallback — no key ⇒ the tool is not advertised
 #   drive{client_id,client_secret,folder_ids,scope} (Google Drive photo slideshow OAuth
 #     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
 #   spotify{client_id,client_secret,refresh_token,device_name} (spotify_control tool;

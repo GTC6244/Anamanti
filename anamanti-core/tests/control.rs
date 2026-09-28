@@ -44,6 +44,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         weather: None,
         weather_imperial: false,
         weather_enabled: false,
+        places: None,
     };
     let (llm, backend, model) = factory
         .build(
@@ -80,6 +81,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             cadora: CadoraConfig::default(),
             weather_provider: "visualcrossing".to_string(),
             visualcrossing_key: None,
+            google_places_key: None,
             system1: anamanti_core::settings::System1Runtime::default(),
         },
     );

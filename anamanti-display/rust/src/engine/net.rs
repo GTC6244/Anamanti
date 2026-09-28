@@ -412,6 +412,19 @@ async fn run_turn_task(
                     WakeWordEvent::dismiss_weather()
                 }
             },
+            // A place-card command relayed on the voice socket. `Show` opens the
+            // full-screen card; `Dismiss` closes it. The card is UI-owned and outlives
+            // the turn.
+            TurnUpdate::Place(cmd) => match cmd {
+                wyoming::protocol::PlaceCommand::Show(report) => {
+                    log::info!("turn: show place");
+                    WakeWordEvent::show_place(report.to_string())
+                }
+                wyoming::protocol::PlaceCommand::Dismiss => {
+                    log::info!("turn: dismiss place");
+                    WakeWordEvent::dismiss_place()
+                }
+            },
             // Record the request to reopen the mic after this reply. Acted on only after
             // this turn's reply audio drains (drain watcher below), so the follow-up mic
             // never records the tail of the TTS. Nothing to add here.

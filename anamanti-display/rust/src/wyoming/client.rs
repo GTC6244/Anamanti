@@ -249,6 +249,10 @@ pub enum TurnUpdate {
     /// UI (the weather screen outlives the turn's socket), so it does not change the
     /// turn's state machine.
     Weather(protocol::WeatherCommand),
+    /// A device-action **place** command relayed from the orchestrator: show a place
+    /// card full-screen, or dismiss it. Handled by the UI (the place card outlives the
+    /// turn's socket), so it does not change the turn's state machine.
+    Place(protocol::PlaceCommand),
     /// The orchestrator asked the device to **listen for a follow-up** after its reply.
     /// The payload is `(depth, wait_secs)`: the chain depth the follow-up turn should
     /// carry, and how long to keep the mic open for input before sleeping (longer after
@@ -457,6 +461,13 @@ where
         types::WEATHER => {
             if let Some(cmd) = event.weather_command() {
                 on_update(TurnUpdate::Weather(cmd));
+            }
+        }
+        // A device action (place show/dismiss) relayed on the voice-turn socket. The
+        // place card is owned by the UI and outlives the turn, so just surface it.
+        types::PLACE => {
+            if let Some(cmd) = event.place_command() {
+                on_update(TurnUpdate::Place(cmd));
             }
         }
         // Follow-up-listen request (the reply was a question). Surface it without

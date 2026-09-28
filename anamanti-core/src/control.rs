@@ -462,6 +462,7 @@ mod tests {
                 weather: None,
                 weather_imperial: false,
                 weather_enabled: false,
+                places: None,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -485,6 +486,7 @@ mod tests {
                 cadora: crate::settings::CadoraConfig::default(),
                 weather_provider: "visualcrossing".into(),
                 visualcrossing_key: None,
+                google_places_key: None,
                 system1: crate::settings::System1Runtime::default(),
             },
         );

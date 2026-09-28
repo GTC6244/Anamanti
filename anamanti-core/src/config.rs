@@ -145,6 +145,8 @@ pub struct Config {
     pub music: MusicConfig,
     /// Weather feature settings (the `weather_lookup` tool + the ambient push).
     pub weather: WeatherSettings,
+    /// Places feature settings (the `places_lookup` tool).
+    pub places: PlacesSettings,
     /// System-1 fast-decision engine selection (plans/system1-fast-decisions.md).
     pub system1: System1Config,
     /// Where the runtime-swappable settings overlay is persisted (`settings_path` in
@@ -431,6 +433,26 @@ impl WeatherSettings {
     }
 }
 
+/// Places feature settings (the `places_lookup` tool). The Google Places API key is a
+/// secret (`GOOGLE_PLACES_API_KEY`), never stored here.
+#[derive(Debug, Clone)]
+pub struct PlacesSettings {
+    /// Master switch (`places.enabled`, default on). Off ⇒ the `places_lookup` tool is
+    /// not advertised.
+    pub enabled: bool,
+    /// Backend (`places.provider`): `google` (default/only). Unknown ⇒ tool disabled.
+    pub provider: String,
+}
+
+impl Default for PlacesSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: "google".to_string(),
+        }
+    }
+}
+
 /// System-1 fast-decision settings (plans/system1-fast-decisions.md). Selects and
 /// configures the pluggable [`crate::system1::DecisionEngine`] that runs before memory
 /// recall + the LLM. Default `backend = "none"` reproduces today's behavior.
@@ -545,6 +567,7 @@ impl Default for Config {
             follow_up: FollowUpConfig::default(),
             music: MusicConfig::default(),
             weather: WeatherSettings::default(),
+            places: PlacesSettings::default(),
             system1: System1Config::default(),
             settings_path: Some(PathBuf::from("anamanti_settings.json")),
             audio_dump_dir: None,
@@ -654,6 +677,8 @@ pub struct FileConfig {
     pub music: FileMusic,
     #[serde(default)]
     pub weather: FileWeather,
+    #[serde(default)]
+    pub places: FilePlaces,
     #[serde(default)]
     pub system1: FileSystem1,
     #[serde(default)]
@@ -784,6 +809,16 @@ pub struct FileWeather {
     /// Forecast backend: `visualcrossing` (default) or `openmeteo`.
     pub provider: Option<String>,
     pub refresh_interval_secs: Option<u64>,
+}
+
+/// The `places` block of the config file (all fields optional; absent → defaults). The
+/// Google Places API key is a secret and lives in `GOOGLE_PLACES_API_KEY`, never here.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilePlaces {
+    pub enabled: Option<bool>,
+    /// Backend: `google` (default/only).
+    pub provider: Option<String>,
 }
 
 /// The `system1` block of the config file (all fields optional; absent → defaults, and
@@ -1074,6 +1109,12 @@ impl Config {
                 .unwrap_or(wd.refresh_interval_secs),
         };
 
+        let pd = PlacesSettings::default();
+        let places = PlacesSettings {
+            enabled: fc.places.enabled.unwrap_or(pd.enabled),
+            provider: nonempty(fc.places.provider).unwrap_or(pd.provider),
+        };
+
         let s1d = System1Config::default();
         let system1 = System1Config {
             backend: nonempty(fc.system1.backend).unwrap_or(s1d.backend),
@@ -1202,6 +1243,7 @@ impl Config {
             follow_up,
             music,
             weather,
+            places,
             system1,
             settings_path,
             audio_dump_dir: fc.audio_dump_dir,
@@ -1448,6 +1490,9 @@ impl Config {
             weather: self.weather_provider(),
             weather_imperial: imperial,
             weather_enabled: self.weather.enabled,
+            // Places backend (Google Places API New); present only when enabled AND a key
+            // is set (no keyless fallback). Rebuilt from the live key on every swap.
+            places: self.places_provider(),
         }
     }
 
@@ -1515,6 +1560,28 @@ impl Config {
             self.weather.enabled,
             &self.weather.provider,
             self.initial_visualcrossing_key().as_deref(),
+        )
+    }
+
+    /// Initial Google Places API key for the `places_lookup` tool — a secret, seeded from
+    /// `GOOGLE_PLACES_API_KEY`. Runtime-settable from the Tools tab. Absent ⇒ the tool
+    /// isn't advertised (Google Places has no keyless fallback).
+    pub fn initial_google_places_key(&self) -> Option<String> {
+        env::var("GOOGLE_PLACES_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Build the places provider from the config + the environment secret, or `None` when
+    /// places is disabled or no key is present. Used by [`Self::llm_factory`].
+    pub fn places_provider(&self) -> Option<Arc<dyn crate::places::PlacesProvider>> {
+        if !self.places.enabled {
+            return None;
+        }
+        crate::places::from_key(
+            &self.places.provider,
+            self.initial_google_places_key().as_deref(),
         )
     }
 
@@ -1600,6 +1667,8 @@ impl Config {
         // each overlaid by any persisted value below (a config-page change wins).
         let mut weather_provider = self.weather.provider.clone();
         let mut visualcrossing_key = self.initial_visualcrossing_key();
+        // Google Places API key (env secret), overlaid by any persisted value below.
+        let mut google_places_key = self.initial_google_places_key();
         let mut anthropic_auth = self.anthropic_auth;
         let mut tts_voice = self.tts_voice.clone();
 
@@ -1660,6 +1729,9 @@ impl Config {
             }
             if p.visualcrossing_key.is_some() {
                 visualcrossing_key = p.visualcrossing_key.filter(|s| !s.is_empty());
+            }
+            if p.google_places_key.is_some() {
+                google_places_key = p.google_places_key.filter(|s| !s.is_empty());
             }
             anthropic_auth = AnthropicAuth::from_label(&p.anthropic_auth);
             tts_voice = p.tts_voice;
@@ -1776,6 +1848,13 @@ impl Config {
             &weather_provider,
             visualcrossing_key.as_deref(),
         );
+        // Seed the initial places provider from the resolved Google Places key (env
+        // overlaid by persisted) so `places_lookup` is advertised at boot with a key set.
+        build_factory.places = if self.places.enabled {
+            crate::places::from_key(&self.places.provider, google_places_key.as_deref())
+        } else {
+            None
+        };
         let (llm, llm_backend, llm_model) = build_factory
             .build(
                 engine,
@@ -1827,6 +1906,7 @@ impl Config {
                 cadora,
                 weather_provider,
                 visualcrossing_key,
+                google_places_key,
                 system1: crate::settings::System1Runtime {
                     engine: system1,
                     backend: system1_backend,
