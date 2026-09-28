@@ -67,13 +67,16 @@ impl LlmEngine {
 /// cut end-of-turn latency; A/B-tunable from the device settings screen.
 pub const DEFAULT_END_SILENCE_MS: u64 = 700;
 
-/// Default RMS (i16 units) above which an incoming chunk counts as speech rather
-/// than room noise. Set above the Echo Show's measured far-field idle noise floor
-/// (~100–200 i16), which the original 120 sat *inside* — so every frame read as
-/// speech and end-of-speech never fired, stalling the turn. Speech runs ~1000+, so
-/// 450 cleanly separates the two. Lower it for a very quiet mic, raise it for a
-/// noisy room (A/B-tunable from the device settings screen / config page).
-pub const DEFAULT_VOICE_RMS_THRESHOLD: f64 = 450.0;
+/// Default RMS (i16 units) above which an incoming chunk counts as speech rather than
+/// room noise. This is a compromise across units, expected to be tuned per-device
+/// (A/B-tunable from the device settings screen / config page). Too low (the original 120)
+/// sits inside some Echo Shows' far-field idle noise floor (~100–200 i16), so every frame
+/// reads as speech, end-of-speech never fires, and the turn stalls. Too high (450) discards
+/// genuine but quiet far-field speech: on-device QA found a unit whose speech ran below 450,
+/// so real utterances were dropped as "silence" and the turn returned nothing. 180 clears
+/// the low end of the noise-floor range while still catching quieter speech; raise it in a
+/// noisy room, lower it for a very quiet mic.
+pub const DEFAULT_VOICE_RMS_THRESHOLD: f64 = 180.0;
 
 fn default_end_silence_ms() -> u64 {
     DEFAULT_END_SILENCE_MS

@@ -386,8 +386,16 @@ New JSON block in `anamanti.json` (all optional, defaults shown; add to `anamant
      0.85 threshold is sufficient; per-intent thresholds are NOT needed** (§13 Q4 answered). The run
      surfaced + fixed one real bug: `time`/`date` now defer on a named place (added to
      `PLACE_SENSITIVE_INTENTS`), so "what time is it in London" no longer answers the local time.
-     **Remaining:** on-device QA on the Echo Show (a test Core is running from this worktree on :10702
-     with the jev backend for exactly that).
+   - **M5.3 on-device QA ✅ PASSED 2026-09-27 (Echo Show, jev backend).** Live-hardware run resolved
+     `weather`, `time`, `date`, `timer`, `timer_query` ("1 minute 57 seconds left" — the P0
+     device→Core timer context round-tripping on real hardware), `timer_cancel`, `end_session`, and
+     deferred "what time is it in London" → System-2 — all fast-path resolves at conf 1.00 in
+     156–363 ms. `weather_dismiss` with no widget open correctly deferred to a graceful System-2 reply
+     (precondition guard). **Env finding (not a code bug):** a fresh Core's default
+     `voice_rms_threshold=450` was too high for the QA unit's quiet far-field speech (real utterances
+     discarded as silence); **default lowered 450 → 180** as a cross-unit compromise (still per-device
+     tunable). Follow-up: add a `voice_rms_threshold` field to the web Config page (editable via the
+     API today but no form field).
 
 ## 11. Testing
 
