@@ -402,6 +402,17 @@ actions".
       ask, and shows a **small icon + current temperature beside the idle clock** kept
       fresh by an always-on periodic push (`WeatherService` → the persistent
       `role=weather` channel). Suites green; **pending on-device QA** (§4 of the plan).
+- [x] **Places tool + display** (2026-09-28, see `PlacesPlan.md`): the `places_lookup` /
+      `close_places` rig tools query the **Google Places API (New)** (behind a
+      `PlacesProvider` trait, `GOOGLE_PLACES_API_KEY` secret, runtime-settable on the Tools
+      tab; no keyless fallback) and push a place card over a new **`anamanti-place`** frame.
+      The device renders a full-screen **place card** (`PlaceView`: photo + name, address,
+      hours + open-now, rating, phone, website). Ambiguous queries disambiguate over the
+      follow-up loop; a **route-only System-1 `place` intent** classifies then defers to
+      System-2. Suites green (Core lib 320+places, device-rust 96, Flutter 107); clippy +
+      `dart analyze` clean; FRB codegen clean. **Pending on-device QA** (§4 of the plan):
+      release APK, set `GOOGLE_PLACES_API_KEY` + a `home_location`, ask "what are the hours
+      for <cafe>" → card with photo + hours; confirm disambiguation and voice/touch close.
 - [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
       tool returns real distance, travel time, and **live traffic** between two places
       (`driving`/`walking`/`cycling`). Lives in `anamanti-core/src/directions/` behind a

@@ -228,6 +228,12 @@ pub enum WakeWordEventKind {
     WeatherCurrent,
     /// Weather mode: dismiss the full-screen weather view and return to idle/ambient.
     DismissWeather,
+    /// Place mode: the orchestrator pushed a place to show full-screen on the place
+    /// card. `place_json` carries the report as a JSON string (name, address, hours[],
+    /// open_now, rating, phone, website, photo_uri, …) which the UI parses into the card.
+    ShowPlace,
+    /// Place mode: dismiss the full-screen place card and return to idle/ambient.
+    DismissPlace,
     /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
     /// (`"overview"` / `"ingredients"` / `"steps"`).
     RecipeNavigate,
@@ -285,6 +291,9 @@ pub struct WakeWordEvent {
     /// for every other kind. The UI decodes it into the weather screen + the ambient
     /// clock indicator.
     pub weather_json: String,
+    /// The place report as a JSON string (`ShowPlace`); empty for every other kind. The
+    /// UI decodes it into the place card.
+    pub place_json: String,
     /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
     /// scroll direction (`RecipeScroll`). Empty for every other kind.
     pub recipe_action: String,
@@ -309,6 +318,7 @@ impl WakeWordEvent {
             present: false,
             recipe_json: String::new(),
             weather_json: String::new(),
+            place_json: String::new(),
             recipe_action: String::new(),
         }
     }
@@ -452,6 +462,17 @@ impl WakeWordEvent {
         Self::base(WakeWordEventKind::DismissWeather)
     }
 
+    pub(crate) fn show_place(place_json: String) -> Self {
+        Self {
+            place_json,
+            ..Self::base(WakeWordEventKind::ShowPlace)
+        }
+    }
+
+    pub(crate) fn dismiss_place() -> Self {
+        Self::base(WakeWordEventKind::DismissPlace)
+    }
+
     pub(crate) fn recipe_navigate(target: String) -> Self {
         Self {
             recipe_action: target,
@@ -574,6 +595,27 @@ pub fn set_weather_context(
                 "temp": temp,
                 "description": description,
             },
+        }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(screen);
+}
+
+/// Report the place card's state as the device's **display context** so the next voice
+/// turn's `audio-start` carries it to the orchestrator, letting the LLM know a place card
+/// is up (and which place) so it can answer follow-ups in context or close it on request.
+/// The place card's setter for the general display-context mechanism (see
+/// [`set_weather_context`] / [`crate::engine::set_display_context`]).
+///
+/// Flutter calls this when the place card opens or closes. `active == false` clears the
+/// context (idle screen); the other fields are ignored.
+#[frb(sync)]
+pub fn set_place_context(active: bool, name: String, address: String) {
+    let screen = if active {
+        Some(serde_json::json!({
+            "kind": "place",
+            "place": { "name": name, "address": address },
         }))
     } else {
         None

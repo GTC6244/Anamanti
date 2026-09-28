@@ -28,6 +28,11 @@ use async_trait::async_trait;
 /// here still only resolves if the orchestrator has a handler for it *and* the handler's
 /// preconditions hold (e.g. timer needs a parseable duration), otherwise the turn defers
 /// to System-2.
+///
+/// `place` is a deliberate **route-only** member: it has a free-form slot (the place
+/// name), so the classifier recognizes it but the orchestrator has **no** handler — the
+/// turn defers to the System-2 LLM, which calls the `places_lookup` tool with the extracted
+/// place name (see `plans/system1-fast-decisions.md` §15.2, Tier C).
 pub fn default_intents() -> Vec<String> {
     vec![
         "weather".to_string(),
@@ -40,6 +45,7 @@ pub fn default_intents() -> Vec<String> {
         "recipe_dismiss".to_string(),
         "end_session".to_string(),
         "stop_dismiss".to_string(),
+        "place".to_string(),
     ]
 }
 

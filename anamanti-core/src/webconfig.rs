@@ -48,7 +48,8 @@ use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine,
-    SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update, WeatherToolUpdate,
+    PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update,
+    WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -454,6 +455,22 @@ async fn handle(
     // ambient push live).
     if method == "POST" && path == "/tools/weather/save" {
         let payload = weather_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Places tool status — whether a Google Places key is set (never the key).
+    if method == "GET" && path == "/tools/places/status.json" {
+        let payload = places_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the Google Places key for the places tool (rebuilds the tool set live).
+    if method == "POST" && path == "/tools/places/save" {
+        let payload = places_save_json(&settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -983,6 +1000,43 @@ fn weather_save_json(settings: &SharedSettings, body: &[u8]) -> String {
         visualcrossing_key,
     });
     weather_status_json(settings)
+}
+
+/// `GET /tools/places/status.json` — the places tool state for the `/tools` page.
+/// Reports only whether a Google Places key is set (never the key) and whether the
+/// `places_lookup` tool is therefore active (no keyless fallback).
+fn places_status_json(settings: &SharedSettings) -> String {
+    let key_set = settings.google_places_key_set();
+    json!({
+        "ok": true,
+        "key_set": key_set,
+        "tool_active": key_set,
+    })
+    .to_string()
+}
+
+/// `POST /tools/places/save` — set the Google Places key for the places tool. A
+/// blank/absent key is left unchanged (a page reload never wipes the stored key), while an
+/// explicit `"clear": true` clears it (withdrawing the tool). Rebuilds the backend so
+/// `places_lookup` activates/withdraws live.
+fn places_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let clear = data.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let google_places_key = if clear {
+        Some(None)
+    } else {
+        match data.get("google_places_key").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+            _ => None,
+        }
+    };
+    settings.apply_places_tool(&PlacesToolUpdate { google_places_key });
+    places_status_json(settings)
 }
 
 /// Apply a System-1 selection from the config page (rebuilds the engine live + persists).

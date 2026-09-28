@@ -23,6 +23,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:anamanti_display/src/engine/recipe_data.dart';
+import 'package:anamanti_display/src/engine/place_data.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 
@@ -57,6 +58,17 @@ typedef WeatherContextSink =
       required String units,
       required int temp,
       required String description,
+    });
+
+/// Pushes the current place-card state down to the native engine, so the next voice
+/// turn's `audio-start` tells the orchestrator a place card is up (and which place) —
+/// letting the LLM answer follow-ups in context or close it. Production wires the native
+/// [setPlaceContext]; null (the default, for tests) disables it.
+typedef PlaceContextSink =
+    void Function({
+      required bool active,
+      required String name,
+      required String address,
     });
 
 /// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
@@ -151,6 +163,7 @@ class AssistantState {
     this.recipe,
     this.weather,
     this.weatherCurrent,
+    this.place,
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
@@ -242,6 +255,14 @@ class AssistantState {
   /// until the first push arrives (or weather is disabled / no home location).
   final WeatherData? weatherCurrent;
 
+  /// The place currently shown full-screen on the place card, or `null` when the card is
+  /// closed. Pushed by the `places_lookup` tool ("show" action) and dismissed by voice or
+  /// the close control. Outlives the voice turn.
+  final PlaceData? place;
+
+  /// Whether the full-screen place card is currently on screen.
+  bool get placeActive => place != null;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -269,6 +290,8 @@ class AssistantState {
     WeatherData? weather,
     bool clearWeather = false,
     WeatherData? weatherCurrent,
+    PlaceData? place,
+    bool clearPlace = false,
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
@@ -289,6 +312,7 @@ class AssistantState {
       recipe: clearRecipe ? null : (recipe ?? this.recipe),
       weather: clearWeather ? null : (weather ?? this.weather),
       weatherCurrent: weatherCurrent ?? this.weatherCurrent,
+      place: clearPlace ? null : (place ?? this.place),
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
@@ -311,13 +335,17 @@ class AssistantController extends ChangeNotifier {
     DateTime Function()? clock,
     VoidCallback? onUserActivity,
     Duration weatherAutoClose = const Duration(seconds: 60),
+    Duration placeAutoClose = const Duration(minutes: 5),
     RecipeContextSink? setRecipeContext,
     WeatherContextSink? setWeatherContext,
+    PlaceContextSink? setPlaceContext,
   })  : _config = config,
         _onUserActivity = onUserActivity,
         _weatherAutoClose = weatherAutoClose,
+        _placeAutoClose = placeAutoClose,
         _setRecipeContext = setRecipeContext,
         _setWeatherContext = setWeatherContext,
+        _setPlaceContext = setPlaceContext,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -364,6 +392,12 @@ class AssistantController extends ChangeNotifier {
   final Duration _weatherAutoClose;
   Timer? _weatherAutoCloseTimer;
 
+  /// How long the full-screen place card stays up before it auto-dismisses back to the
+  /// idle screen. Reset each time a new place is shown; cancelled on an early voice/touch
+  /// dismiss or when another full-screen widget replaces it.
+  final Duration _placeAutoClose;
+  Timer? _placeAutoCloseTimer;
+
   /// Sink for pushing recipe-screen context to the native engine (see
   /// [RecipeContextSink]); null disables it (tests with no native library).
   final RecipeContextSink? _setRecipeContext;
@@ -371,6 +405,10 @@ class AssistantController extends ChangeNotifier {
   /// Sink for pushing weather-screen context to the native engine (see
   /// [WeatherContextSink]); null disables it (tests with no native library).
   final WeatherContextSink? _setWeatherContext;
+
+  /// Sink for pushing place-card context to the native engine (see [PlaceContextSink]);
+  /// null disables it (tests with no native library).
+  final PlaceContextSink? _setPlaceContext;
 
   /// The active recipe pane's latest scroll position, tracked so recipe context
   /// pushes carry it. `_recipeAtTop` starts true (a freshly opened tab is at the top);
@@ -611,10 +649,13 @@ class AssistantController extends ChangeNotifier {
         final recipe = RecipeData.tryParse(e.recipeJson);
         if (recipe != null) {
           _weatherAutoCloseTimer?.cancel();
+          _placeAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
-          _emit(_state.copyWith(recipe: recipe, recipeTab: 0, clearWeather: true));
+          _emit(_state.copyWith(
+              recipe: recipe, recipeTab: 0, clearWeather: true, clearPlace: true));
           _pushRecipeContext();
+          _pushPlaceContext();
         }
       case WakeWordEventKind.dismissRecipe:
         _clearRecipe();
@@ -626,6 +667,7 @@ class AssistantController extends ChangeNotifier {
         if (weather != null) {
           // Loading a full-screen widget unloads the previous one (here: the recipe
           // screen) so they never stack.
+          _placeAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
           _emit(
@@ -633,11 +675,13 @@ class AssistantController extends ChangeNotifier {
               weather: weather,
               weatherCurrent: weather,
               clearRecipe: true,
+              clearPlace: true,
               recipeTab: 0,
             ),
           );
           _scheduleWeatherAutoClose();
           _pushWeatherContext();
+          _pushPlaceContext();
         }
       case WakeWordEventKind.weatherCurrent:
         // An ambient refresh (from the persistent channel or riding a show): update the
@@ -650,6 +694,26 @@ class AssistantController extends ChangeNotifier {
         _weatherAutoCloseTimer?.cancel();
         _emit(_state.copyWith(clearWeather: true));
         _pushWeatherContext();
+      case WakeWordEventKind.showPlace:
+        // The orchestrator pushed a place; open the full-screen place card. A payload
+        // that fails to parse is ignored rather than crashing. Loading a full-screen
+        // widget unloads the previous one (recipe / weather) so they never stack.
+        final place = PlaceData.tryParse(e.placeJson);
+        if (place != null) {
+          _weatherAutoCloseTimer?.cancel();
+          _recipeAtTop = true;
+          _recipeAtBottom = false;
+          _emit(_state.copyWith(
+              place: place, clearRecipe: true, clearWeather: true, recipeTab: 0));
+          _schedulePlaceAutoClose();
+          _pushRecipeContext();
+          _pushWeatherContext();
+          _pushPlaceContext();
+        }
+      case WakeWordEventKind.dismissPlace:
+        _placeAutoCloseTimer?.cancel();
+        _emit(_state.copyWith(clearPlace: true));
+        _pushPlaceContext();
       case WakeWordEventKind.recipeNavigate:
         // Voice tab switch ("show the ingredients" / "go to the steps").
         if (_state.recipe != null) {
@@ -696,6 +760,19 @@ class AssistantController extends ChangeNotifier {
     });
   }
 
+  /// (Re)arm the full-screen place-card auto-dismiss (default 5 minutes). A new place
+  /// restarts the clock; firing closes the card and clears its display context.
+  void _schedulePlaceAutoClose() {
+    _placeAutoCloseTimer?.cancel();
+    if (_placeAutoClose <= Duration.zero) return;
+    _placeAutoCloseTimer = Timer(_placeAutoClose, () {
+      if (_state.place != null) {
+        _emit(_state.copyWith(clearPlace: true));
+        _pushPlaceContext();
+      }
+    });
+  }
+
   /// Push the current weather-screen state (active + what it shows) down to the native
   /// engine so the next voice turn carries it to the orchestrator. A no-op when no sink
   /// is wired (tests). Only the full screen counts as display context — the ambient chip
@@ -733,6 +810,30 @@ class AssistantController extends ChangeNotifier {
     if (_state.weather != null) {
       _emit(_state.copyWith(clearWeather: true));
       _pushWeatherContext();
+    }
+  }
+
+  /// Push the current place-card state (active + which place) down to the native engine
+  /// so the next voice turn carries it to the orchestrator. A no-op when no sink is wired
+  /// (tests).
+  void _pushPlaceContext() {
+    final sink = _setPlaceContext;
+    if (sink == null) return;
+    final p = _state.place;
+    if (p == null) {
+      sink(active: false, name: '', address: '');
+      return;
+    }
+    sink(active: true, name: p.name, address: p.address);
+  }
+
+  /// Dismiss the full-screen place card from the UI (the user taps the close control).
+  /// Voice dismissal arrives instead as a `dismissPlace` event.
+  void dismissPlace() {
+    _placeAutoCloseTimer?.cancel();
+    if (_state.place != null) {
+      _emit(_state.copyWith(clearPlace: true));
+      _pushPlaceContext();
     }
   }
 
@@ -934,6 +1035,7 @@ class AssistantController extends ChangeNotifier {
     _reconnectTimer?.cancel();
     _offlinePollTimer?.cancel();
     _weatherAutoCloseTimer?.cancel();
+    _placeAutoCloseTimer?.cancel();
     _sub?.cancel();
     super.dispose();
   }

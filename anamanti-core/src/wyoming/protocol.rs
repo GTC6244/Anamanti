@@ -189,6 +189,12 @@ pub mod types {
     /// `weather` is the structured report — `location_label`, `units`, `current{…}`,
     /// `daily[]`). Byte-identical to the device crate's `types::WEATHER`.
     pub const WEATHER: &str = "anamanti-weather";
+
+    /// orchestrator → device: show/dismiss the full-screen place card (data: `action`
+    /// = `"show"` / `"dismiss"`; for `show`, `place` is the structured report — `name`,
+    /// `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`, `photo_uri`, …).
+    /// Byte-identical to the device crate's `types::PLACE`.
+    pub const PLACE: &str = "anamanti-place";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -414,6 +420,24 @@ impl WyomingEvent {
     /// True if this is an `anamanti-weather` frame.
     pub fn is_weather(&self) -> bool {
         self.event_type == types::WEATHER
+    }
+
+    /// An `anamanti-place` **show** action (orchestrator → device): render `place`
+    /// (a serialized [`crate::places::PlaceReport`]) full-screen on the place card.
+    /// Voice-triggered by the `places_lookup` tool.
+    pub fn place_show(place: Value) -> Self {
+        Self::with_data(types::PLACE, json!({ "action": "show", "place": place }))
+    }
+
+    /// An `anamanti-place` **dismiss** action (orchestrator → device): close the
+    /// full-screen place card and return to the idle/ambient display.
+    pub fn place_dismiss() -> Self {
+        Self::with_data(types::PLACE, json!({ "action": "dismiss" }))
+    }
+
+    /// True if this is an `anamanti-place` frame.
+    pub fn is_place(&self) -> bool {
+        self.event_type == types::PLACE
     }
 
     /// An `anamanti-speak` request (device → orchestrator): please synthesize `text`
@@ -692,6 +716,8 @@ pub enum DisplayContext {
     Recipe(RecipeScreen),
     /// The weather forecast screen is up (`kind: "weather"`).
     Weather(WeatherScreen),
+    /// The place card is up (`kind: "place"`).
+    Place(PlaceScreen),
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
@@ -723,6 +749,17 @@ pub struct WeatherScreen {
     pub description: String,
 }
 
+/// The place card's state, as carried in a [`DisplayContext::Place`]. Tells the model a
+/// place card is on screen (and for which place), so it can answer follow-ups ("is it
+/// open on Sunday?") or `close_places` on "close it".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlaceScreen {
+    /// The place shown (e.g. "Blue Bottle Coffee").
+    pub name: String,
+    /// Its one-line address.
+    pub address: String,
+}
+
 /// Pull the display context out of an `audio-start` data block's `screen` object, or
 /// `None` when the display reports nothing (an idle screen, or a device that doesn't
 /// stamp context). Dispatches on `screen.kind`; an unknown kind (e.g. a newer device
@@ -735,6 +772,9 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         }
         "weather" => {
             parse_weather_screen(screen.get("weather")?.as_object()?).map(DisplayContext::Weather)
+        }
+        "place" => {
+            parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place)
         }
         _ => None,
     }
@@ -786,6 +826,7 @@ impl DeviceContext {
         match self.widget {
             Some(DisplayContext::Recipe(_)) => Some("recipe"),
             Some(DisplayContext::Weather(_)) => Some("weather"),
+            Some(DisplayContext::Place(_)) => Some("place"),
             None => None,
         }
     }
@@ -851,6 +892,22 @@ fn parse_weather_screen(weather: &Map<String, Value>) -> Option<WeatherScreen> {
         temp: weather.get("temp").and_then(Value::as_i64).unwrap_or(0) as i32,
         description: weather
             .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// Parse the `place` sub-object of a `screen` block into a [`PlaceScreen`].
+fn parse_place_screen(place: &Map<String, Value>) -> Option<PlaceScreen> {
+    Some(PlaceScreen {
+        name: place
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        address: place
+            .get("address")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),

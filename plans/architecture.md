@@ -442,6 +442,20 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `weather_lookup` defaults to **3600 s (60 min)**. `ToolCache` is generic — its entries
   carry their own TTL, so other read-only tools can opt in at their own TTL; mutating tools
   (timers, shopping-list) must not. See `WeatherPlan.md`.
+- **`anamanti-place`** (Anamanti Core → device): a project-local **device-action** frame
+  (`data.action` = `show`/`dismiss`; for `show`, `data.place` is the structured
+  `PlaceReport` — `name`, `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`,
+  `category`, `price_level`, `photo_uri`). Rides the per-turn voice socket only (no ambient
+  push), emitted by the `places_lookup` / `close_places` tools
+  (`DeviceAction::{ShowPlace,DismissPlace}` → `drain_device_actions` → `TurnUpdate::Place`
+  → FRB `WakeWordEvent::{show,dismiss}_place`), driving the **full-screen place card**
+  (`PlaceView`). Data comes from the **Google Places API (New)** behind a `PlacesProvider`
+  trait (Text Search + Place Details; the hero photo is resolved to a **keyless** `photoUri`
+  via `skipHttpRedirect=true`, so the device fetches it directly and the APK stays
+  credential-free). The `GOOGLE_PLACES_API_KEY` secret is required — **no keyless fallback**,
+  so without it the tool is not advertised. A place query is also a **route-only System-1
+  `place` intent** (classified, then deferred to System-2 which owns the free-form
+  place-name slot). See `PlacesPlan.md`.
 - **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
   `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's

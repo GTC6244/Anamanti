@@ -27,6 +27,7 @@ import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/ui/status_indicator.dart';
 import 'package:anamanti_display/src/ui/timers_overlay.dart';
 import 'package:anamanti_display/src/ui/weather_icons.dart';
+import 'package:anamanti_display/src/ui/place_view.dart';
 import 'package:anamanti_display/src/ui/weather_view.dart';
 
 class AmbientScreen extends StatelessWidget {
@@ -68,8 +69,9 @@ class AmbientScreen extends StatelessWidget {
           // Weather mode: the full-screen forecast is on screen. Like recipe mode it
           // takes over the idle presentation but yields to an active voice turn.
           final weatherActive = state.weatherActive;
+          final placeActive = state.placeActive;
           // Any full-screen mode that overlays the idle presentation.
-          final modeActive = recipeActive || weatherActive;
+          final modeActive = recipeActive || weatherActive || placeActive;
           // Away / "off" mode: nobody in front of the display and no active turn.
           // Only the big centered clock shows; everything else fades away. A turn
           // always wins (saying the wake word implies you're here), so off mode is
@@ -158,6 +160,24 @@ class AmbientScreen extends StatelessWidget {
                           key: ValueKey(state.weather!.locationLabel),
                           weather: state.weather!,
                           onClose: assistant.dismissWeather,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+
+              // Place mode: a full-screen place card (photo + details). Same precedence
+              // as recipe/weather mode — above the idle presentation, below the
+              // conversation panel. Dismissed by voice or the view's own close control.
+              AnimatedOpacity(
+                opacity: placeActive ? 1 : 0,
+                duration: const Duration(milliseconds: 250),
+                child: IgnorePointer(
+                  ignoring: !placeActive,
+                  child: placeActive
+                      ? PlaceView(
+                          key: ValueKey(state.place!.name),
+                          place: state.place!,
+                          onClose: assistant.dismissPlace,
                         )
                       : const SizedBox.shrink(),
                 ),

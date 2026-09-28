@@ -126,6 +126,18 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              to close/dismiss the weather.",
         );
     }
+    if has(PLACES_LOOKUP) {
+        parts.push(
+            "You can pull up information about a place on the display with the \
+             `places_lookup` tool. Whenever the user asks where a business or landmark is, \
+             when it's open, its hours, phone number, rating, or to tell them about a \
+             specific restaurant, shop, cafe, or attraction, you MUST call `places_lookup` \
+             with their phrasing as `query` — never guess at an address or hours. If it \
+             returns several options, ask the user which one they mean and call again with \
+             the same `query` plus the chosen `place_id`. Relay the tool's short spoken \
+             confirmation. Use `close_places` when they ask to close/dismiss it.",
+        );
+    }
     if has(ShoppingListControl::NAME) {
         parts.push(
             "You can add items to the household's shared shopping list with the \
@@ -1385,6 +1397,155 @@ fn close_weather_invoke(actions: Option<&ActionSink>) -> Result<String> {
 }
 
 // ===========================================================================
+// Places tool (look up a place, show its card on the display)
+// ===========================================================================
+
+/// Tool name for looking up a place and showing its card on the display.
+pub const PLACES_LOOKUP: &str = "places_lookup";
+/// Tool name for dismissing the place card.
+pub const CLOSE_PLACES: &str = "close_places";
+
+/// Typed arguments for [`PlacesLookup`].
+#[derive(Debug, Deserialize)]
+struct PlacesArgs {
+    /// The place to look up, e.g. "the Louvre" or "coffee shop downtown". Optional only
+    /// so the model can re-call with just a `place_id` after disambiguating.
+    #[serde(default)]
+    query: Option<String>,
+    /// A specific candidate id from a prior ambiguous lookup. When set, the tool skips
+    /// the search and shows that exact place.
+    #[serde(default)]
+    place_id: Option<String>,
+}
+
+/// The places tool: text-searches the Google Places API for a business/point of interest
+/// (biased toward the household home location), and — when the match is unambiguous —
+/// pushes its full details to the display as a [`DeviceAction::ShowPlace`] and returns a
+/// short spoken confirmation. When several comparable candidates match it returns a
+/// spoken candidate list **without** showing anything, so the model asks the user which
+/// one and re-calls with the chosen `place_id`. The provider is injected so it's testable
+/// offline (see `crate::places`).
+pub struct PlacesLookup {
+    provider: Arc<dyn crate::places::PlacesProvider>,
+    home_location: LiveHomeLocation,
+}
+
+impl PlacesLookup {
+    pub fn new(provider: Arc<dyn crate::places::PlacesProvider>, home_location: LiveHomeLocation) -> Self {
+        Self {
+            provider,
+            home_location,
+        }
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: PLACES_LOOKUP.to_string(),
+            description: "Look up a business or point of interest (its address, opening \
+                          hours, rating, phone number, website) and show a card for it on \
+                          the display. Use whenever the user asks where a place is, when \
+                          it's open, its hours/phone/rating, or to tell them about a \
+                          specific business, restaurant, shop, landmark, or attraction. \
+                          Pass the user's phrasing as `query`. If the tool returns several \
+                          options, ask the user which one they mean, then call again with \
+                          the same `query` plus the chosen `place_id`. Returns a short \
+                          spoken line to relay."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The place to look up, e.g. \"the Louvre\" or \
+                                        \"coffee shop downtown\". Include any location the \
+                                        user mentioned."
+                    },
+                    "place_id": {
+                        "type": "string",
+                        "description": "Only when re-calling after the user picked one of \
+                                        the options this tool returned: copy that option's \
+                                        EXACT place_id from the list (an opaque id like \
+                                        \"ChIJ…\" or \"places/…\"). Never invent or guess \
+                                        an id from the name/address."
+                    }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    /// Execute the tool: either show a pinned candidate (`place_id`), or search and — on a
+    /// single match — show it, else return the candidate list for the model to
+    /// disambiguate. Failures and a missing device surface as the tool result so the
+    /// model apologizes aloud.
+    async fn invoke(&self, arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+        let args: PlacesArgs =
+            serde_json::from_value(arguments.clone()).context("parsing places_lookup arguments")?;
+        let sink = actions.context("no display is connected to show a place on right now")?;
+
+        // Second call: the model pinned a specific candidate → show it directly.
+        if let Some(place_id) = args
+            .place_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return self.show(place_id, sink).await;
+        }
+
+        let query = args
+            .query
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .context("no place to look up was given")?;
+        let bias = self.home_location.get();
+        let candidates = self
+            .provider
+            .search(&query, bias.as_deref())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        match candidates.as_slice() {
+            [] => Ok(format!("I couldn't find anything matching \"{query}\".")),
+            [only] => self.show(&only.place_id, sink).await,
+            // Ambiguous: ask which one (no card shown yet). The model re-calls with a
+            // `place_id` from this list.
+            many => Ok(crate::places::render_candidates(many)),
+        }
+    }
+
+    /// Fetch a place's details, push the card, and return the spoken confirmation.
+    async fn show(&self, place_id: &str, sink: &ActionSink) -> Result<String> {
+        let report = self
+            .provider
+            .details(place_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        let confirmation = crate::places::render_confirmation(&report);
+        sink.send(DeviceAction::ShowPlace(report))
+            .map_err(|_| anyhow::anyhow!("the display disconnected before the place could show"))?;
+        Ok(confirmation)
+    }
+}
+
+fn close_places_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CLOSE_PLACES.to_string(),
+        description: "Close the place card on the display and return to the idle screen. \
+                      Use when the user asks to close/dismiss the place."
+            .to_string(),
+        parameters: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// Execute `close_places`: emit a [`DeviceAction::DismissPlace`] on the per-turn sink.
+fn close_places_invoke(actions: Option<&ActionSink>) -> Result<String> {
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::DismissPlace)
+        .map_err(|_| anyhow::anyhow!("the display disconnected before the place could close"))?;
+    Ok("Okay, closing that.".to_string())
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -1405,6 +1566,7 @@ pub struct Tools {
     grocery: Option<Arc<ShoppingListControl>>,
     recipe: Option<Arc<RecipeLookup>>,
     weather: Option<Arc<WeatherLookup>>,
+    places: Option<Arc<PlacesLookup>>,
 }
 
 impl Tools {
@@ -1412,6 +1574,7 @@ impl Tools {
     /// added when `search` is `Some`, the calendar tool when `calendar` is `Some`, the
     /// directions tool when `directions` is `Some`, and the Spotify tool when
     /// `spotify` is `Some`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         search: Option<Arc<dyn SearchProvider>>,
         calendar: Option<Arc<dyn CalendarSource>>,
@@ -1420,6 +1583,7 @@ impl Tools {
         grocery: Option<Arc<dyn GroceryController>>,
         recipe: Option<Arc<dyn RecipeProvider>>,
         weather: Option<crate::weather::WeatherConfig>,
+        places: Option<crate::places::PlacesConfig>,
     ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
@@ -1465,6 +1629,11 @@ impl Tools {
             definitions.push(w.definition());
             definitions.push(close_weather_definition());
         }
+        let places = places.map(|cfg| Arc::new(PlacesLookup::new(cfg.provider, cfg.home_location)));
+        if let Some(p) = &places {
+            definitions.push(p.definition());
+            definitions.push(close_places_definition());
+        }
         Self {
             definitions,
             search,
@@ -1474,6 +1643,7 @@ impl Tools {
             grocery,
             recipe,
             weather,
+            places,
         }
     }
 
@@ -1524,6 +1694,14 @@ impl Tools {
             CLOSE_WEATHER => match &self.weather {
                 Some(_) => close_weather_invoke(actions),
                 None => anyhow::bail!("weather lookup is not enabled"),
+            },
+            PLACES_LOOKUP => match &self.places {
+                Some(places) => places.invoke(arguments, actions).await,
+                None => anyhow::bail!("places lookup is not enabled"),
+            },
+            CLOSE_PLACES => match &self.places {
+                Some(_) => close_places_invoke(actions),
+                None => anyhow::bail!("places lookup is not enabled"),
             },
             RECIPE_CONTROL => match &self.recipe {
                 Some(_) => recipe_control_invoke(arguments, actions),
@@ -1578,6 +1756,7 @@ pub fn tools_from_config(
     grocery: Option<Arc<dyn GroceryController>>,
     weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
     weather_imperial: bool,
+    places: Option<Arc<dyn crate::places::PlacesProvider>>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
     // The recipe tool needs real web search to find a source page, so it rides the
@@ -1596,6 +1775,13 @@ pub fn tools_from_config(
         home_location: home_location.clone(),
         imperial: weather_imperial,
     });
+    // Places biases its search toward the same live home location; clone the shared
+    // handle before it's moved into the directions config below. `None` → the
+    // places_lookup tool isn't advertised (no Google Places key).
+    let places = places.map(|provider| crate::places::PlacesConfig {
+        provider,
+        home_location: home_location.clone(),
+    });
     let directions = directions.map(|(provider, imperial)| DirectionsConfig {
         provider,
         home_location,
@@ -1607,7 +1793,7 @@ pub fn tools_from_config(
     // Grocery (Cadora shopping list) is likewise passed in from the live settings
     // (`CadoraConfig::controller`); `None` → the shopping_list_add tool isn't advertised.
     Some(Arc::new(Tools::new(
-        search, calendar, directions, spotify, grocery, recipe, weather,
+        search, calendar, directions, spotify, grocery, recipe, weather, places,
     )))
 }
 
@@ -2143,6 +2329,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2188,6 +2375,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2228,6 +2416,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2248,7 +2437,7 @@ mod tests {
 
     #[test]
     fn directions_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2264,6 +2453,7 @@ mod tests {
                 home_location: LiveHomeLocation::default(),
                 imperial: false,
             }),
+            None,
             None,
             None,
             None,
@@ -2307,7 +2497,7 @@ mod tests {
 
     #[test]
     fn spotify_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2323,6 +2513,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(with
             .definitions
@@ -2332,7 +2523,7 @@ mod tests {
 
     #[test]
     fn shopping_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2346,6 +2537,7 @@ mod tests {
             Some(Arc::new(StaticGrocery {
                 last: std::sync::Mutex::new(None),
             })),
+            None,
             None,
             None,
         );
@@ -2436,6 +2628,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2476,6 +2669,7 @@ mod tests {
             None,
             None,
             Some(controller.clone()),
+            None,
             None,
             None,
         )));
@@ -2561,7 +2755,7 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None, None, None, None, None, None);
+        let tools = Tools::new(None, None, None, None, None, None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -2579,7 +2773,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
         let tools = Some(Arc::new(Tools::new(
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend

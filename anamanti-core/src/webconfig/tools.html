@@ -38,6 +38,22 @@
   </div>
 </div>
 
+<div class="card">
+  <h2>Places (Google)</h2>
+  <p class="desc">Enables the <code>places_lookup</code> tool — a place's address, hours, rating, phone, and a photo, shown on the display. Get a key at console.cloud.google.com (enable the <b>Places API (New)</b>). There is no keyless fallback: no key ⇒ the tool is not advertised. Changes apply live — no restart.</p>
+  <p class="desc" id="p_statusline">Loading…</p>
+
+  <label>Google Places API key <span class="hint" id="p_key_state"></span>
+    <input id="p_key" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+
+  <div class="card-actions">
+    <div id="p_status" class="status"></div>
+    <button id="p_clear">Clear key</button>
+    <button id="p_save" class="primary">Save places</button>
+  </div>
+</div>
+
 <script>
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
@@ -93,4 +109,29 @@
   $('w_save').addEventListener('click', () => wSave(false));
   $('w_clear').addEventListener('click', () => wSave(true));
   wLoad();
+
+  // ---- Places ----------------------------------------------------------------------
+  const pStatusEl = $('p_status');
+  function pShow(ok, msg){ pStatusEl.textContent = msg; pStatusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function pLoad(){
+    try{
+      const j = await apiJSON('/tools/places/status.json');
+      $('p_key_state').textContent = j.key_set ? '(a key is set)' : '(no key set)';
+      $('p_key').value = '';
+      $('p_statusline').textContent = 'places_lookup: ' + (j.tool_active ? 'active ✓' : 'inactive — set a key');
+    }catch(e){ pShow(false, 'Could not load status: ' + e); }
+  }
+  async function pSave(clear){
+    const body = {};
+    if(clear){ body.clear = true; }
+    else { const k = $('p_key').value.trim(); if(k) body.google_places_key = k; }
+    try{
+      const j = await apiJSON('/tools/places/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ pShow(false, j.message || 'Rejected.'); } else { pShow(true, 'Saved.'); }
+      pLoad();
+    }catch(e){ pShow(false, 'Request failed: ' + e); }
+  }
+  $('p_save').addEventListener('click', () => pSave(false));
+  $('p_clear').addEventListener('click', () => pSave(true));
+  pLoad();
 </script>

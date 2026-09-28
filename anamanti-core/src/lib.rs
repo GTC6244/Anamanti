@@ -28,6 +28,7 @@ pub mod memory;
 pub mod music;
 pub mod notify;
 pub mod orchestrator;
+pub mod places;
 pub mod recipe;
 pub mod server;
 pub mod settings;

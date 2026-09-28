@@ -203,6 +203,10 @@ fn intent_description(intent: &str) -> &str {
         "timer_query" => "ask how much time is left on a running timer",
         "weather_dismiss" => "close or dismiss the weather screen",
         "recipe_dismiss" => "close or dismiss the recipe screen",
+        "place" => {
+            "ask about a specific business, shop, restaurant, cafe, landmark, or point of \
+             interest — where it is, its address, hours, phone, or rating"
+        }
         "end_session" => {
             "the user is finished and wants no more replies — a sign-off or dismissal \
              like \"that's all\", \"nothing else\", or \"goodbye\"; NOT stopping a timer \
