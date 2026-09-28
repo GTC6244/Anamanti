@@ -122,8 +122,9 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              Whenever the user asks about the weather, the temperature, the forecast, or \
              whether it will rain/snow/be hot or cold, you MUST call `weather_lookup` (omit \
              `location` to use home) and relay its short spoken confirmation — never guess at \
-             conditions or say you can't check the weather. Use `close_weather` when they ask \
-             to close/dismiss the weather.",
+             conditions or say you can't check the weather. When they ask about a future day \
+             (\"tomorrow\", \"this weekend\", \"Saturday\"), pass `when`. Use `close_weather` \
+             when they ask to close/dismiss the weather.",
         );
     }
     if has(PLACES_LOOKUP) {
@@ -1303,6 +1304,10 @@ struct WeatherArgs {
     /// location when omitted, so "what's the weather" works with no place named).
     #[serde(default)]
     location: Option<String>,
+    /// When to get the forecast for (optional; defaults to right now). Accepts
+    /// `today`/`now`, `tomorrow`, a weekday name ("Saturday"), or `YYYY-MM-DD`.
+    #[serde(default)]
+    when: Option<String>,
 }
 
 /// The weather tool: fetches current conditions + a 7-day forecast for a place
@@ -1333,11 +1338,13 @@ impl WeatherLookup {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: WEATHER_LOOKUP.to_string(),
-            description: "Get the current weather and a 7-day forecast and show it on the \
+            description: "Get the weather and a 10-hour hourly forecast and show it on the \
                           display's weather screen. Use whenever the user asks about the \
                           weather, temperature, forecast, or how hot/cold/rainy it is. If the \
-                          user names no place, omit `location` — it defaults to home. Returns a \
-                          short spoken confirmation to relay."
+                          user names no place, omit `location` — it defaults to home. For a \
+                          future day (e.g. \"weather on Saturday\", \"will it rain tomorrow\") \
+                          pass `when`; omit it for right now. Returns a short spoken \
+                          confirmation to relay."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -1346,6 +1353,12 @@ impl WeatherLookup {
                         "type": "string",
                         "description": "The place to get the weather for, e.g. \"Paris\" or \
                                         \"Denver, Colorado\". Omit for the user's home location."
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "The day to forecast: \"today\"/\"now\", \"tomorrow\", a \
+                                        weekday name like \"Saturday\", or a date \"YYYY-MM-DD\". \
+                                        Omit for right now."
                     }
                 }
             }),
@@ -1365,9 +1378,11 @@ impl WeatherLookup {
             .filter(|s| !s.is_empty())
             .or_else(|| self.home_location.get())
             .context("no location was given and no home location is set")?;
+        let when = crate::weather::resolve_when(args.when.as_deref(), Local::now())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let report = self
             .provider
-            .fetch(&location, self.imperial)
+            .fetch(&location, self.imperial, when)
             .await
             .map_err(|e| anyhow::anyhow!("{e:#}"))?;
         let confirmation = crate::weather::render_confirmation(&report);

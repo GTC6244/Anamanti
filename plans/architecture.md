@@ -430,10 +430,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
   dismissed by voice (`close_recipe`) or touch. See `RecipePlan.md`.
 - **`anamanti-weather`** (Anamanti Core → device): a project-local **device-action** frame
   (`data.action` = `show`/`current`/`dismiss`; for `show`/`current`, `data.weather` is the
-  structured `WeatherReport` — `location_label`, `units`, `current{…}`, `daily[7]`). It
+  structured `WeatherReport` — `location_label`, `units`, `when_label`, `current{…}`,
+  `hourly[10]`). It
   rides **two transports**: `show`/`dismiss` on the per-turn voice socket, emitted by the
   `weather_lookup` / `close_weather` tools (`DeviceAction::{ShowWeather,DismissWeather}`),
-  drive the **full-screen forecast** (today's conditions + a 7-day row); `current` is
+  drive the **full-screen forecast** (a conditions panel + a 10-hour hourly row; the
+  optional `weather_lookup` `when` arg targets a future day, whose row starts at 08:00 and
+  whose panel shows that day's summary); `current` is
   broadcast periodically on the persistent channel (below) by the Anamanti Core's
   `WeatherService` to refresh the **small icon + temperature beside the idle clock**
   without a voice turn. Data comes from **Visual Crossing** (default) or keyless

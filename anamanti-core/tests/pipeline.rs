@@ -1146,7 +1146,12 @@ async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
     struct FakeWeather;
     #[async_trait]
     impl WeatherProvider for FakeWeather {
-        async fn fetch(&self, location: &str, imperial: bool) -> Result<WeatherReport> {
+        async fn fetch(
+            &self,
+            location: &str,
+            imperial: bool,
+            _when: anamanti_core::weather::ForecastWhen,
+        ) -> Result<WeatherReport> {
             Ok(WeatherReport {
                 location_label: location.to_string(),
                 units: if imperial {
@@ -1154,6 +1159,7 @@ async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
                 } else {
                     "metric".into()
                 },
+                when_label: String::new(),
                 current: CurrentConditions {
                     temp: 18,
                     feels_like: 17,
@@ -1163,7 +1169,7 @@ async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
                     low: 12,
                     description: "Partly cloudy".into(),
                 },
-                daily: Vec::new(),
+                hourly: Vec::new(),
             })
         }
     }

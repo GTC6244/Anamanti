@@ -105,7 +105,10 @@ pub fn spawn_periodic(
         tokio::time::sleep(Duration::from_secs(2)).await;
         loop {
             match (home_location.get(), settings.current_weather_provider()) {
-                (Some(loc), Some(provider)) => match provider.fetch(&loc, imperial).await {
+                (Some(loc), Some(provider)) => match provider
+                    .fetch(&loc, imperial, crate::weather::ForecastWhen::Now)
+                    .await
+                {
                     Ok(report) => {
                         let n = service.broadcast(&report);
                         log::debug!(
@@ -134,12 +137,13 @@ mod tests {
         WeatherReport {
             location_label: "Austin, Texas".into(),
             units: "imperial".into(),
+            when_label: String::new(),
             current: CurrentConditions {
                 temp: 72,
                 description: "partly cloudy".into(),
                 ..Default::default()
             },
-            daily: Vec::new(),
+            hourly: Vec::new(),
         }
     }
 

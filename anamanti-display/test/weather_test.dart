@@ -15,9 +15,20 @@ const _weatherJson = '''
 {"location_label":"Austin, Texas","units":"imperial",
  "current":{"temp":72,"feels_like":70,"weather_code":2,"is_day":true,
             "high":80,"low":60,"description":"partly cloudy"},
- "daily":[
-   {"date":"2026-09-25","weekday":"Fri","weather_code":2,"high":80,"low":60,"precip_prob":10},
-   {"date":"2026-09-26","weekday":"Sat","weather_code":61,"high":75,"low":58,"precip_prob":80}
+ "hourly":[
+   {"time":"12 PM","weather_code":2,"temp":72,"precip_prob":10,"is_day":true},
+   {"time":"1 PM","weather_code":61,"temp":73,"precip_prob":80,"is_day":true}
+ ]}
+''';
+
+// A future-day forecast: a day label + the day's summary in `current`.
+const _futureWeatherJson = '''
+{"location_label":"Austin, Texas","units":"imperial","when_label":"Sat, Sep 26",
+ "current":{"temp":75,"feels_like":75,"weather_code":61,"is_day":true,
+            "high":75,"low":58,"description":"rain"},
+ "hourly":[
+   {"time":"8 AM","weather_code":2,"temp":62,"precip_prob":15,"is_day":true},
+   {"time":"9 AM","weather_code":3,"temp":64,"precip_prob":15,"is_day":true}
  ]}
 ''';
 
@@ -85,9 +96,21 @@ void main() {
       expect(w.current.isDay, isTrue);
       expect(w.current.high, 80);
       expect(w.current.description, 'partly cloudy');
-      expect(w.daily, hasLength(2));
-      expect(w.daily[1].weekday, 'Sat');
-      expect(w.daily[1].precipProb, 80);
+      expect(w.isFutureDay, isFalse);
+      expect(w.whenLabel, isEmpty);
+      expect(w.hourly, hasLength(2));
+      expect(w.hourly[0].time, '12 PM');
+      expect(w.hourly[1].temp, 73);
+      expect(w.hourly[1].precipProb, 80);
+    });
+
+    test('parses a future-day payload with a day label and summary', () {
+      final w = WeatherData.tryParse(_futureWeatherJson)!;
+      expect(w.isFutureDay, isTrue);
+      expect(w.whenLabel, 'Sat, Sep 26');
+      expect(w.current.high, 75);
+      expect(w.current.description, 'rain');
+      expect(w.hourly.first.time, '8 AM');
     });
 
     test('rejects empty and malformed payloads', () {
@@ -96,11 +119,13 @@ void main() {
       expect(WeatherData.tryParse('[1,2,3]'), isNull);
     });
 
-    test('tolerates missing current/daily', () {
-      final w = WeatherData.tryParse('{"location_label":"X","units":"metric"}')!;
+    test('tolerates missing current/hourly', () {
+      final w = WeatherData.tryParse(
+        '{"location_label":"X","units":"metric"}',
+      )!;
       expect(w.unitSuffix, '°C');
       expect(w.current.temp, 0);
-      expect(w.daily, isEmpty);
+      expect(w.hourly, isEmpty);
     });
   });
 
@@ -144,7 +169,10 @@ void main() {
     // a current push updates the ambient indicator only (never opens the screen).
     controller.applyWeatherPush(_weatherJson);
     expect(controller.state.weatherActive, isFalse);
-    expect(controller.state.weatherCurrent!.current.description, 'partly cloudy');
+    expect(
+      controller.state.weatherCurrent!.current.description,
+      'partly cloudy',
+    );
 
     // re-open then dismiss via the UI close method.
     engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
@@ -154,25 +182,28 @@ void main() {
     expect(controller.state.weatherActive, isFalse);
   });
 
-  test('full-screen weather auto-closes after the timeout (chip stays)', () async {
-    final engine = StreamController<WakeWordEvent>.broadcast();
-    final controller = AssistantController(
-      config: _cfg(),
-      startEngine: (_) => engine.stream,
-      weatherAutoClose: const Duration(milliseconds: 40),
-    )..start();
-    addTearDown(controller.dispose);
+  test(
+    'full-screen weather auto-closes after the timeout (chip stays)',
+    () async {
+      final engine = StreamController<WakeWordEvent>.broadcast();
+      final controller = AssistantController(
+        config: _cfg(),
+        startEngine: (_) => engine.stream,
+        weatherAutoClose: const Duration(milliseconds: 40),
+      )..start();
+      addTearDown(controller.dispose);
 
-    engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
-    await Future<void>.delayed(Duration.zero);
-    expect(controller.state.weatherActive, isTrue);
+      engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.weatherActive, isTrue);
 
-    // After the timeout the full screen closes on its own, but the ambient
-    // indicator (the clock chip) is left in place.
-    await Future<void>.delayed(const Duration(milliseconds: 80));
-    expect(controller.state.weatherActive, isFalse);
-    expect(controller.state.weatherCurrent, isNotNull);
-  });
+      // After the timeout the full screen closes on its own, but the ambient
+      // indicator (the clock chip) is left in place.
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(controller.state.weatherActive, isFalse);
+      expect(controller.state.weatherCurrent, isNotNull);
+    },
+  );
 
   test('a new forecast resets the auto-close timer', () async {
     final engine = StreamController<WakeWordEvent>.broadcast();
@@ -194,39 +225,43 @@ void main() {
     expect(controller.state.weatherActive, isFalse);
   });
 
-  test('pushes weather display-context on show and clears it on dismiss', () async {
-    final engine = StreamController<WakeWordEvent>.broadcast();
-    final pushes = <Map<String, Object?>>[];
-    final controller = AssistantController(
-      config: _cfg(),
-      startEngine: (_) => engine.stream,
-      setWeatherContext: ({
-        required bool active,
-        required String location,
-        required String units,
-        required int temp,
-        required String description,
-      }) => pushes.add({
-        'active': active,
-        'location': location,
-        'units': units,
-        'temp': temp,
-        'description': description,
-      }),
-    )..start();
-    addTearDown(controller.dispose);
+  test(
+    'pushes weather display-context on show and clears it on dismiss',
+    () async {
+      final engine = StreamController<WakeWordEvent>.broadcast();
+      final pushes = <Map<String, Object?>>[];
+      final controller = AssistantController(
+        config: _cfg(),
+        startEngine: (_) => engine.stream,
+        setWeatherContext:
+            ({
+              required bool active,
+              required String location,
+              required String units,
+              required int temp,
+              required String description,
+            }) => pushes.add({
+              'active': active,
+              'location': location,
+              'units': units,
+              'temp': temp,
+              'description': description,
+            }),
+      )..start();
+      addTearDown(controller.dispose);
 
-    engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
-    await Future<void>.delayed(Duration.zero);
-    expect(pushes.last['active'], isTrue);
-    expect(pushes.last['location'], 'Austin, Texas');
-    expect(pushes.last['units'], 'imperial');
-    expect(pushes.last['temp'], 72);
-    expect(pushes.last['description'], 'partly cloudy');
+      engine.add(_ev(WakeWordEventKind.showWeather, weatherJson: _weatherJson));
+      await Future<void>.delayed(Duration.zero);
+      expect(pushes.last['active'], isTrue);
+      expect(pushes.last['location'], 'Austin, Texas');
+      expect(pushes.last['units'], 'imperial');
+      expect(pushes.last['temp'], 72);
+      expect(pushes.last['description'], 'partly cloudy');
 
-    controller.dismissWeather();
-    expect(pushes.last['active'], isFalse);
-  });
+      controller.dismissWeather();
+      expect(pushes.last['active'], isFalse);
+    },
+  );
 
   test('a full-screen widget unloads the previously-loaded one', () async {
     final engine = StreamController<WakeWordEvent>.broadcast();
@@ -243,9 +278,7 @@ void main() {
 
     // Asking for a recipe must unload the weather screen (not stack behind it),
     // while the ambient clock chip (weatherCurrent) is preserved.
-    engine.add(
-      _ev(WakeWordEventKind.showRecipe, recipeJson: _recipeJson),
-    );
+    engine.add(_ev(WakeWordEventKind.showRecipe, recipeJson: _recipeJson));
     await Future<void>.delayed(Duration.zero);
     expect(controller.state.recipeActive, isTrue);
     expect(controller.state.weatherActive, isFalse);
@@ -271,7 +304,7 @@ void main() {
     expect(controller.state.weatherActive, isFalse);
   });
 
-  testWidgets('WeatherView renders today panel + 7-day row and closes', (
+  testWidgets('WeatherView renders today panel + hourly row and closes', (
     tester,
   ) async {
     final weather = WeatherData.tryParse(_weatherJson)!;
@@ -286,11 +319,31 @@ void main() {
     expect(find.text('Austin, Texas'), findsOneWidget);
     expect(find.text('72°F'), findsOneWidget);
     expect(find.text('Partly cloudy'), findsOneWidget);
-    // The 7-day row shows each day's weekday.
-    expect(find.text('Fri'), findsOneWidget);
-    expect(find.text('Sat'), findsOneWidget);
+    // A right-now forecast shows the live "Feels" figure.
+    expect(find.textContaining('Feels'), findsOneWidget);
+    // The hourly row shows each hour's clock label.
+    expect(find.text('12 PM'), findsOneWidget);
+    expect(find.text('1 PM'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('weather-close')));
     expect(closed, isTrue);
   });
+
+  testWidgets(
+    'WeatherView shows the day label and hides Feels for a future day',
+    (tester) async {
+      final weather = WeatherData.tryParse(_futureWeatherJson)!;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: WeatherView(weather: weather, onClose: () {}),
+        ),
+      );
+
+      // The header appends the day; the panel drops the live-only "Feels" figure.
+      expect(find.text('Austin, Texas · Sat, Sep 26'), findsOneWidget);
+      expect(find.textContaining('Feels'), findsNothing);
+      expect(find.text('8 AM'), findsOneWidget);
+    },
+  );
 }

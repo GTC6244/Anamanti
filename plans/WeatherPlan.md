@@ -1,8 +1,8 @@
 # Weather Plan: Forecast on the Display
 
 **Targets:** M4 Mac Mini (fetch) + Echo Show 8 (the weather screen + ambient indicator)
-**Feature:** ask about the weather → a full-screen forecast appears (today's conditions
-with big imagery + a 7-day row along the bottom); and **always**, on the idle/home
+**Feature:** ask about the weather → a full-screen forecast appears (a big conditions
+panel + a **10-hour hourly row** along the bottom); and **always**, on the idle/home
 screen, a small weather icon + the current temperature sit beside the clock.
 
 > **Status:** **Implemented (2026-09-25), pending on-device QA.** Built and tested: the
@@ -20,6 +20,16 @@ screen, a small weather icon + the current temperature sit beside the clock.
 > provider label + key are runtime-settable on the config-page **Tools tab** — a change
 > rebuilds `weather_lookup` and retargets the ambient push live (no restart), mirroring the
 > Mapbox pattern. Anamanti Core lib suite now 293 (green); clippy `-D warnings` clean.
+>
+> **Update (2026-09-28):** the full-screen card now shows a **10-hour hourly row**
+> instead of the 7-day daily row (`WeatherReport.hourly` + `when_label` replace `daily`;
+> both providers fetch hourly data). For a right-now request the row starts at the current
+> hour (truncated); `weather_lookup` gained an optional **`when`** argument (`today`/
+> `tomorrow`/a weekday/`YYYY-MM-DD`, resolved by `weather::resolve_when`) so a future-day
+> request shows that day's hourly row starting at **08:00** with the big panel showing that
+> day's summary. Hourly is no longer a non-goal (§3). No FRB/frame change — the report
+> still travels as JSON. Suites green: Anamanti Core lib 324, Flutter 101; clippy
+> `-D warnings` + `dart analyze` clean.
 >
 > Reads together with
 > [`RecipePlan.md`](./RecipePlan.md) (the near-identical device-push template) and
@@ -59,7 +69,7 @@ If a task seems to require changing one of these, stop and confirm first.
         ──STT──▶ LLM intent ──▶ weather_lookup tool
                                       │  Open-Meteo geocode + forecast
                                       ▼
-                          WeatherReport { location, units, current, daily[7] }
+                          WeatherReport { location, units, when_label, current, hourly[10] }
                                       │
                     tool returns a spoken confirmation to the model, and
                     emits DeviceAction::ShowWeather(report)
@@ -86,13 +96,14 @@ If a task seems to require changing one of these, stop and confirm first.
 | Ambient push | Core | `weather::WeatherService` (registry, twin of `NotificationService`) + `service::spawn_periodic`, wired in `main.rs`; served by the `role=weather` arm in `server.rs`. |
 | Frame | both crates | `anamanti-weather` + `weather_show/current/dismiss` constructors + `weather_command()` decoder + `hello_weather`/`hello_role`, byte-identical, round-trip tested. |
 | Device decode | Device Rust | `TurnUpdate::Weather` (`client.rs`) → `WakeWordEvent::{show,current,dismiss}_weather` (`net.rs`); the persistent channel `wyoming/weather.rs` → `WeatherPush` FRB stream (`start_weather_channel`). |
-| UI | Flutter | `weather_data.dart` (parse) + `weather_icons.dart` (WMO→icon) + `WeatherView` (today panel + 7-day row) + `_AmbientClock` chip; `AssistantState.weather`/`weatherActive`/`weatherCurrent`; `WeatherChannelController` wired in `main.dart`. |
+| UI | Flutter | `weather_data.dart` (parse; `WeatherHour` + `whenLabel`) + `weather_icons.dart` (WMO→icon) + `WeatherView` (conditions panel + 10-hour hourly row, day label + no "Feels" for a future day) + `_AmbientClock` chip; `AssistantState.weather`/`weatherActive`/`weatherCurrent`; `WeatherChannelController` wired in `main.dart`. |
 
 ---
 
 ## 3. Non-goals (v1)
 
-- Hourly forecast, radar/precipitation maps, severe-weather alerts.
+- ~~Hourly forecast~~ (shipped 2026-09-28; see the update note above). Radar/
+  precipitation maps, severe-weather alerts remain out of scope.
 - Per-device targeting of the ambient push (broadcasts to all, like notify).
 - A config-page "push weather now" test button (the periodic task + a voice ask cover it).
 - Spoken multi-day read-out (the model speaks a one-line confirmation only).
@@ -100,7 +111,9 @@ If a task seems to require changing one of these, stop and confirm first.
 ## 4. On-device validation (pending)
 
 Release APK per `agents.md`; set `home_location` + `weather_units`:
-- "what's the weather" → spoken confirmation + full-screen forecast with the 7-day row;
+- "what's the weather" → spoken confirmation + full-screen forecast with the 10-hour
+  hourly row (starting at the current hour); "what's the weather Saturday" → the hourly
+  row starts at 8am with that day's summary in the panel;
   "close the weather" and the on-screen close both dismiss.
 - The small icon + temperature appear beside the idle clock and refresh on the interval
   (and reappear after a Mac restart — the channel reconnects with backoff).
