@@ -261,8 +261,10 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     rebuilds the tool live). No keyless fallback — no key ⇒ the tool is not advertised
 #   drive{client_id,client_secret,folder_ids,scope} (Google Drive photo slideshow OAuth
 #     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
-#   spotify{client_id,client_secret,refresh_token,device_name} (spotify_control tool;
-#     Premium; easiest setup is config page → Music tab → "Connect Spotify")
+#   spotify{client_id,client_secret,refresh_token,device_name,redirect_url} (spotify_control
+#     tool; Premium; easiest setup is config page → Music tab → "Connect Spotify". redirect_url
+#     is the OAuth callback the consent flow binds + registers, default
+#     http://127.0.0.1:8888/callback)
 #   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
 #     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
 #     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
@@ -394,10 +396,11 @@ Notes:
   # also rename the sidecar files if present: anamanti_chatlog.jsonl.offset / -* etc.
   ```
   Then in `~/.zshenv` rename the provider/secret env vars from `AMBIENT_*` to
-  `ANAMANTI_*` (e.g. `AMBIENT_INSTANCE_ID`→`ANAMANTI_INSTANCE_ID`,
-  `AMBIENT_SPOTIFY_*`→`ANAMANTI_SPOTIFY_*`). Skipping any of these silently loses the
-  corresponding state (memory/settings) because the renamed binary creates new empty
-  files at the new default paths.
+  `ANAMANTI_*` (e.g. `AMBIENT_INSTANCE_ID`→`ANAMANTI_INSTANCE_ID`). (Spotify creds are
+  **not** environment variables — they live in the `spotify` block of `anamanti.json`
+  and in `anamanti_settings.json`, migrated by the settings-file rename above.)
+  Skipping any of these silently loses the corresponding state (memory/settings)
+  because the renamed binary creates new empty files at the new default paths.
 - **Redeploy Core and Display together.** The Wyoming frame names (`anamanti-*`), the
   mDNS TXT role (`role=core`), the config filename, env vars, and data-file names all
   changed, so a new Core will not interoperate with an old Display build (or vice

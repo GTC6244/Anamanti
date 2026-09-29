@@ -69,7 +69,7 @@ and be tested (queue a track from a phone onto the "Ambient" Connect device)
 | Piece | Where | Form |
 | --- | --- | --- |
 | Intent + Web API calls | Anamanti Core (Mac) | New rig `PortableTool` in `llm/rig.rs` (`definition()` + guidance text, twin of `InternetSearch`) |
-| OAuth / refresh token / secrets | Anamanti Core (Mac) | `ANAMANTI_SPOTIFY_*` env/config, mirroring the Google consent flow |
+| OAuth / refresh token / secrets | Anamanti Core (Mac) | The `spotify` block in `anamanti.json` (boot seed) + config-page consent, mirroring the Google flow; persisted 0600 in `anamanti_settings.json` |
 | librespot (PCM producer) | Mac, **beside** Anamanti Core | Separate process — Snapcast's `librespot`/`spotify` stream source, or launchd |
 | snapserver (multi-room sync) | Mac (recommended) | **Snapcast PR** (external to this plan) |
 | Echo Show | Device | snapclient + optional now-playing UI via a state stream — **opt-in** |
@@ -91,7 +91,7 @@ it is unit-tested with a fake, no network).
 - **Resolution:** `play`/`queue` hit the Web API **search** endpoint (limit 1),
   then issue playback — a `track` plays as `uris`, an artist/album/playlist as a
   `context_uri`. `play` with no `query` resumes.
-- **Target device:** resolved by name from `ANAMANTI_SPOTIFY_DEVICE_NAME` (default
+- **Target device:** resolved by name from `spotify.device_name` (default
   `"Ambient"`) via `GET /v1/me/player/devices`; every control call passes that
   `device_id`. The access token is refreshed from the refresh token and cached
   until ~30 s before expiry.
@@ -107,19 +107,26 @@ it is unit-tested with a fake, no network).
 
 ## 4. Configuration keys
 
-**Spotify control plane** (this feature; read by `music::spotify::from_env`):
+**Spotify control plane** (this feature; the `spotify` block of `anamanti.json`,
+parsed by `config.rs` → `FileSpotify` and seeded into `settings::SpotifyConfig`):
 
-```bash
-ANAMANTI_SPOTIFY_CLIENT_ID=…         # Spotify developer app (Premium account)
-ANAMANTI_SPOTIFY_CLIENT_SECRET=…
-ANAMANTI_SPOTIFY_REFRESH_TOKEN=…     # from the one-time consent in §8
-ANAMANTI_SPOTIFY_DEVICE_NAME=Ambient # librespot Connect device to target (shared with librespot)
+```json
+"spotify": {
+  "client_id": "…",                                 // Spotify developer app (Premium account)
+  "client_secret": "…",
+  "refresh_token": "…",                             // minted by the one-time consent (§8)
+  "device_name": "Ambient",                         // librespot Connect device to target (shared with librespot)
+  "redirect_url": "http://127.0.0.1:8888/callback"  // OAuth callback; must match a Redirect URI registered in the Spotify app
+}
 ```
 
-The `spotify_control` tool is advertised **only when all three of ID/secret/
-refresh-token are set** (exactly like `calendar_lookup` needs `ANAMANTI_CALENDARS`).
-Secrets never leave the Mac. Requires **Spotify Premium** (the Web API player
-endpoints are Premium-only).
+These are **boot seeds**: they are editable at runtime from the config page → Music
+tab and persisted (0600) to `anamanti_settings.json`, and a persisted value wins over
+the JSON seed on the next boot. There are **no `ANAMANTI_SPOTIFY_*` environment
+variables** — unlike the provider API keys, Spotify creds are not env secrets; they
+live in the JSON file / settings. The `spotify_control` tool is advertised **only when
+client id + secret + refresh-token are all present**. Requires **Spotify Premium** (the
+Web API player endpoints are Premium-only).
 
 **Music transport + ducking** (PR 38 — `snapcast_routing_plan.md`, `config.rs`):
 
@@ -161,7 +168,7 @@ who started playback — no extra work here.
 ## 6. Open questions / dependencies
 
 - **One librespot instance, shared.** `spotify_control` targets the device named
-  by `ANAMANTI_SPOTIFY_DEVICE_NAME`, which **must equal** the `--name` PR 38's
+  by `spotify.device_name`, which **must equal** the `--name` PR 38's
   supervisor launches librespot with (default `"Ambient"` on both — keep them in
   sync if either changes).
 - **Token refresh lifetime / launchd:** the client refreshes the access token
@@ -187,9 +194,10 @@ who started playback — no extra work here.
 ## 8. One-time consent runbook (get the refresh token)
 
 The `spotify_control` tool needs a long-lived **refresh token** for the Premium
-account. This is a one-time step on the Mac; the token then lives in the
-Anamanti Core's environment. (A config-page consent UI is the §9 follow-up; until
-then, do this by hand.)
+account. The easy path is the **config-page consent UI** (§9, implemented); this manual
+runbook is the **headless fallback** for a Mac with no browser access. Either way the
+token ends up in the Anamanti Core's settings (`anamanti_settings.json`), never in an
+environment variable.
 
 1. **Create a Spotify app** at <https://developer.spotify.com/dashboard> → note
    the **Client ID** and **Client Secret**. Add a Redirect URI of
@@ -217,14 +225,17 @@ then, do this by hand.)
 
    Copy the `refresh_token` from the JSON.
 
-4. **Configure the Anamanti Core** (e.g. in `~/.zshenv` for the local-production
-   install, alongside `ANAMANTI_INSTANCE_ID`):
+4. **Configure the Anamanti Core** by adding a `spotify` block to its `anamanti.json`
+   (these seed the settings at boot; the config page can edit them later):
 
-   ```bash
-   export ANAMANTI_SPOTIFY_CLIENT_ID="…"
-   export ANAMANTI_SPOTIFY_CLIENT_SECRET="…"
-   export ANAMANTI_SPOTIFY_REFRESH_TOKEN="…"     # from step 3
-   # ANAMANTI_SPOTIFY_DEVICE_NAME defaults to "Ambient" (matches librespot)
+   ```json
+   "spotify": {
+     "client_id": "…",
+     "client_secret": "…",
+     "refresh_token": "…",                             // from step 3
+     "device_name": "Ambient",                         // defaults to "Ambient" (matches librespot)
+     "redirect_url": "http://127.0.0.1:8888/callback"  // must match step 1's Redirect URI
+   }
    ```
 
    Restart the Anamanti Core. On boot it logs `spotify_control: enabled, targeting
@@ -241,15 +252,19 @@ The Google-Drive loopback consent pattern is mirrored for Spotify:
 
 - **`anamanti-core/src/spotify_consent.rs`** — loopback Authorization-Code + PKCE
   flow. **Unlike Drive**, Spotify requires an *exact pre-registered* redirect, so
-  it binds a **fixed** port (default 8888) and the operator registers
-  `http://127.0.0.1:8888/callback` in their Spotify app (the page tells them so).
-- **`SpotifyConfig` in `settings.rs`** — client id/secret/refresh-token/device,
-  persisted (0600) and seeded from `ANAMANTI_SPOTIFY_*` at boot. Unlike Drive, a
-  change **rebuilds the LLM** (`apply_spotify`) so `spotify_control` is advertised/
-  withdrawn live — the tool activates the instant consent completes.
+  consent uses a **fixed redirect URL** (default `http://127.0.0.1:8888/callback`,
+  configurable — see `redirect_url` below) and binds that URL's own host+port; the
+  operator registers the same value in their Spotify app (the page tells them so).
+- **`SpotifyConfig` in `settings.rs`** — client id/secret/refresh-token/device/
+  **redirect-url**, persisted (0600) and seeded from the `spotify` block of
+  `anamanti.json` at boot (`config.rs` → `FileSpotify`). Unlike Drive, a change
+  **rebuilds the LLM** (`apply_spotify`) so `spotify_control` is advertised/withdrawn
+  live — the tool activates the instant consent completes. `redirect_url` defaults to
+  `http://127.0.0.1:8888/callback` via `redirect_url_or_default()` when unset.
 - **Config page → Music tab** — a "Spotify (voice control)" card: client id/secret/
-  device inputs, **Save**, and **Connect Spotify** (`POST /spotify/save`,
-  `/spotify/link`, `GET /spotify/status.json`). Secrets are never echoed back.
+  device/**redirect-url** inputs, **Save**, and **Connect Spotify** (`POST
+  /spotify/save`, `/spotify/link`, `GET /spotify/status.json`, which returns the
+  active `redirect_url`). Secrets are never echoed back.
 
 So the end-to-end setup is now: open the config page → Music tab → paste client
 id/secret → Connect Spotify → approve in the browser → say "play some Radiohead."
