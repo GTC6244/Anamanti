@@ -383,7 +383,10 @@ Notes:
   folder.
 - Persistence: the process is detached but does **not** survive a reboot — running
   it under launchd is the open item in `TODO.md §4`.
-- **⚠️ One-time migration for an existing (pre-rename) production install.** The
+- **⚠️ One-time migration for an existing (pre-rename) production install.**
+  **Status: DONE for the local production install (2026-09-29)** — the folder, data
+  files, config paths, and identity were migrated and the running Core + the Echo Show
+  are on the new names (kept here as reference for any other pre-rename install). The
   Anamanti rename changed the on-disk names the binary looks for, so migrate the
   existing prod install **once** or it will start with fresh, empty state:
   ```bash
@@ -404,6 +407,13 @@ Notes:
   and in `anamanti_settings.json`, migrated by the settings-file rename above.)
   Skipping any of these silently loses the corresponding state (memory/settings)
   because the renamed binary creates new empty files at the new default paths.
+  For a **full identity rename** (optional — the `instance_id` is otherwise an opaque
+  stable key), also set `service_name`/`instance_id` in `anamanti.json` to
+  `"Anamanti Core"`/`"anamanti-core"` **and** re-pin the device to match: the Echo Show
+  stores its pinned Core id as `orchestratorKey` in `/data/data/com.anamanti.anamanti_display/files/settings.json`
+  (a **strict** pin — it stays offline rather than switching Macs), so update that value
+  (or set it to Auto) or the device will stop connecting. This is what the 2026-09-29
+  local-prod migration did.
 - **Redeploy Core and Display together.** The Wyoming frame names (`anamanti-*`), the
   mDNS TXT role (`role=core`), the config filename, env vars, and data-file names all
   changed, so a new Core will not interoperate with an old Display build (or vice
