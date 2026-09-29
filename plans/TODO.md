@@ -28,6 +28,12 @@ full loop has not been exercised against real services on the device.
 - [ ] Install the release APK on the Echo Show and run one full turn:
       wake word → STT → LLM → TTS playback, with the transcript/reply rendered live.
 - [ ] Confirm **mDNS discovery** works across the real network (no hardcoded IP).
+- [ ] Verify **Core re-advertises on interface change** on hardware: with the
+      device connected, switch the Mac's active LAN (unplug Ethernet so it fails
+      over to Wi-Fi, or force a DHCP renew) and confirm the Core re-registers the
+      new IPv4 (log line "LAN address changed …; re-advertised") and the device
+      reconnects without a Core restart. (`anamanti-core/src/discovery.rs` IP
+      watcher; ~30 s `mdns-sd` interface poll interval.)
 - [x] Exercise **barge-in** (wake word during playback) on-device — works: a wake word
       mid-reply flushes playback and starts a fresh turn (flush-on-wake + the
       `anamanti-interrupt` frame aborts the Anamanti Core's in-flight LLM+TTS). Detection

@@ -607,6 +607,16 @@ frames already have).
   Mac is unreachable. The idle photo slideshow keeps running; a subtle
   **disconnected** indicator reflects status; wake words queue until the socket
   is restored.
+- **Core re-advertises on interface change**: the Core advertises a **single
+  pinned routable IPv4** (resolved via the routing table, not `addr_auto` — which
+  would leak the Mac's IPv6 link-locals and make the device grab an unreachable
+  address). Since `mdns-sd` only auto-refreshes addresses for `addr_auto`
+  services, a pinned record would otherwise go stale if the Mac's active LAN
+  changes after boot (Wi-Fi↔Ethernet failover, DHCP renew, en0↔en1). The Core's
+  advertiser (`anamanti-core/src/discovery.rs`) subscribes to the daemon's
+  `IpAdd`/`IpDel` monitor events (the daemon polls interfaces every ~30 s) and
+  **re-registers** the service with the freshly-resolved primary IPv4 whenever it
+  changes, so the device always sees a reachable address without a Core restart.
 
 ---
 

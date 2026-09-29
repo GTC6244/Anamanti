@@ -1214,7 +1214,8 @@ impl SharedSettings {
             );
             // Same for the places tool: rebuild it from the live Google Places key so a
             // normal settings change never drops `places_lookup`.
-            factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
+            factory.places =
+                crate::places::from_key("google", current.google_places_key.as_deref());
             (
                 Some(factory.build(
                     target_engine,
@@ -1544,8 +1545,7 @@ impl SharedSettings {
             current.visualcrossing_key.as_deref(),
         );
         // Keep the places tool live across this rebuild.
-        factory.places =
-            crate::places::from_key("google", current.google_places_key.as_deref());
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1620,8 +1620,7 @@ impl SharedSettings {
             current.visualcrossing_key.as_deref(),
         );
         // Keep the places tool live across this rebuild.
-        factory.places =
-            crate::places::from_key("google", current.google_places_key.as_deref());
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1696,8 +1695,7 @@ impl SharedSettings {
             current.visualcrossing_key.as_deref(),
         );
         // Keep the places tool live across this rebuild.
-        factory.places =
-            crate::places::from_key("google", current.google_places_key.as_deref());
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1803,8 +1801,7 @@ impl SharedSettings {
             target_key.as_deref(),
         );
         // Keep the places tool live across this rebuild.
-        factory.places =
-            crate::places::from_key("google", current.google_places_key.as_deref());
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
