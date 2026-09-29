@@ -1,10 +1,12 @@
 // Full-screen weather screen for the 8-inch Echo Show.
 //
 // Shown when the orchestrator's `weather_lookup` tool pushes a forecast (see
-// [AssistantState.weather]). A big "today" panel — large condition icon, current
-// temperature, high/low, description, location — fills the screen, with a 7-day
-// forecast row along the bottom (per-day icon, weekday, high/low, precip chance).
-// Landscape-first with large, arm's-length type. Left by voice or the close control.
+// [AssistantState.weather]). A big conditions panel — large condition icon,
+// temperature, high/low, description, location — fills the screen, with a 10-hour
+// hourly forecast row along the bottom (per-hour icon, clock label, temperature,
+// precip chance). For a future-day request the panel shows that day's summary and its
+// label sits beside the location. Landscape-first with large, arm's-length type. Left
+// by voice or the close control.
 
 import 'package:flutter/material.dart';
 
@@ -37,12 +39,21 @@ class WeatherView extends StatelessWidget {
             children: [
               _header(),
               Expanded(child: _today(c)),
-              _forecastRow(),
+              _hourlyRow(),
             ],
           ),
         ),
       ),
     );
+  }
+
+  /// The header title: the location, with the forecast day appended for a future-day
+  /// request (e.g. "Austin, Texas · Sat, Oct 3").
+  String _headerLabel() {
+    final loc = weather.locationLabel.isEmpty
+        ? 'Weather'
+        : weather.locationLabel;
+    return weather.isFutureDay ? '$loc · ${weather.whenLabel}' : loc;
   }
 
   Widget _header() {
@@ -52,7 +63,7 @@ class WeatherView extends StatelessWidget {
         children: [
           Expanded(
             child: Text(
-              weather.locationLabel.isEmpty ? 'Weather' : weather.locationLabel,
+              _headerLabel(),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
@@ -68,7 +79,10 @@ class WeatherView extends StatelessWidget {
             tooltip: 'Close weather',
             onPressed: onClose,
             iconSize: 32,
-            icon: Icon(Icons.close, color: Colors.white.withValues(alpha: 0.85)),
+            icon: Icon(
+              Icons.close,
+              color: Colors.white.withValues(alpha: 0.85),
+            ),
           ),
         ],
       ),
@@ -119,7 +133,10 @@ class WeatherView extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: 10),
                 child: Text(
-                  'H ${c.high}°   L ${c.low}°   Feels ${c.feelsLike}°',
+                  // "Feels like" is a live-now figure; omit it for a future day.
+                  weather.isFutureDay
+                      ? 'H ${c.high}°   L ${c.low}°'
+                      : 'H ${c.high}°   L ${c.low}°   Feels ${c.feelsLike}°',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.65),
                     fontSize: 20,
@@ -134,10 +151,10 @@ class WeatherView extends StatelessWidget {
     );
   }
 
-  /// The 7-day forecast row along the bottom.
-  Widget _forecastRow() {
-    final days = weather.daily;
-    if (days.isEmpty) return const SizedBox.shrink();
+  /// The 10-hour hourly forecast row along the bottom.
+  Widget _hourlyRow() {
+    final hours = weather.hourly;
+    if (hours.isEmpty) return const SizedBox.shrink();
     return Container(
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.28),
@@ -147,8 +164,8 @@ class WeatherView extends StatelessWidget {
       ),
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
       child: Row(
-        children: days
-            .map((d) => Expanded(child: _DayCell(day: d)))
+        children: hours
+            .map((h) => Expanded(child: _HourCell(hour: h)))
             .toList(growable: false),
       ),
     );
@@ -158,10 +175,10 @@ class WeatherView extends StatelessWidget {
       s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 }
 
-class _DayCell extends StatelessWidget {
-  const _DayCell({required this.day});
+class _HourCell extends StatelessWidget {
+  const _HourCell({required this.hour});
 
-  final WeatherDay day;
+  final WeatherHour hour;
 
   @override
   Widget build(BuildContext context) {
@@ -169,40 +186,35 @@ class _DayCell extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          day.weekday.isEmpty ? '—' : day.weekday,
+          hour.time.isEmpty ? '—' : hour.time,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             color: Colors.white.withValues(alpha: 0.85),
-            fontSize: 16,
+            fontSize: 15,
             fontWeight: FontWeight.w600,
           ),
         ),
         const SizedBox(height: 6),
         Icon(
-          weatherIcon(day.weatherCode, isDay: true),
+          weatherIcon(hour.weatherCode, isDay: hour.isDay),
           size: 34,
-          color: weatherIconColor(day.weatherCode, isDay: true),
+          color: weatherIconColor(hour.weatherCode, isDay: hour.isDay),
         ),
         const SizedBox(height: 6),
         Text(
-          '${day.high}°',
+          '${hour.temp}°',
           style: const TextStyle(
             color: Colors.white,
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),
         ),
-        Text(
-          '${day.low}°',
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.55),
-            fontSize: 15,
-          ),
-        ),
-        if (day.precipProb > 0)
+        if (hour.precipProb > 0)
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Text(
-              '${day.precipProb}%',
+              '${hour.precipProb}%',
               style: const TextStyle(
                 color: Color(0xFF7CC4FA),
                 fontSize: 13,

@@ -1798,33 +1798,35 @@ impl Pipeline {
         let imperial =
             crate::directions::units_are_imperial(runtime.household.weather_units.as_deref());
         let t0 = Instant::now();
-        let report =
-            match tokio::time::timeout(SYSTEM1_WEATHER_BUDGET, provider.fetch(&location, imperial))
-                .await
-            {
-                Ok(Ok(report)) => {
-                    timing.fetch_ms = Some(t0.elapsed().as_millis() as u64);
-                    log::info!(
-                        "system1 weather: fetch OK in {}ms (location {location:?})",
-                        t0.elapsed().as_millis(),
-                    );
-                    report
-                }
-                Ok(Err(e)) => {
-                    log::warn!(
-                        "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
-                        t0.elapsed().as_millis(),
-                    );
-                    return None; // nothing emitted yet — safe to defer
-                }
-                Err(_) => {
-                    log::warn!(
-                        "system1 weather fetch exceeded {}ms budget; deferring to System-2",
-                        SYSTEM1_WEATHER_BUDGET.as_millis(),
-                    );
-                    return None; // nothing emitted yet — safe to defer
-                }
-            };
+        let report = match tokio::time::timeout(
+            SYSTEM1_WEATHER_BUDGET,
+            provider.fetch(&location, imperial, crate::weather::ForecastWhen::Now),
+        )
+        .await
+        {
+            Ok(Ok(report)) => {
+                timing.fetch_ms = Some(t0.elapsed().as_millis() as u64);
+                log::info!(
+                    "system1 weather: fetch OK in {}ms (location {location:?})",
+                    t0.elapsed().as_millis(),
+                );
+                report
+            }
+            Ok(Err(e)) => {
+                log::warn!(
+                    "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
+                    t0.elapsed().as_millis(),
+                );
+                return None; // nothing emitted yet — safe to defer
+            }
+            Err(_) => {
+                log::warn!(
+                    "system1 weather fetch exceeded {}ms budget; deferring to System-2",
+                    SYSTEM1_WEATHER_BUDGET.as_millis(),
+                );
+                return None; // nothing emitted yet — safe to defer
+            }
+        };
 
         // Committed: from here we own the turn and must not fall through (that would
         // double-speak). Best-effort writes mirror the normal reply path.
