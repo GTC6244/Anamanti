@@ -5,6 +5,9 @@
 full-screen card appears with its name, a photo, address, opening hours (with an
 open-now chip), rating, phone, website, category, and price level.
 
+> The `PlaceView` full-screen mode is catalogued alongside the rest of the Display's
+> UI in [`DisplayUI.md`](./DisplayUI.md) — update it there when this screen changes.
+
 > **Status:** **Implemented (2026-09-28), pending on-device QA.** Built and tested: the
 > `places_lookup` / `close_places` rig tools + the Google Places (New) provider behind a
 > `PlacesProvider` trait (Anamanti Core, new unit tests + a loopback integration test),

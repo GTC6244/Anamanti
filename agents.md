@@ -4,6 +4,12 @@ Build guidance for AI coding agents (and humans) working in this repository.
 Read this together with [`architecture.md`](./plans/architecture.md) (the design) and
 [`Plan.MD`](./plans/Plan.MD) (phases, confirmed decisions, open questions).
 
+> **Display UI inventory.** [`DisplayUI.md`](./plans/DisplayUI.md) is the canonical,
+> category-by-category catalog of everything that can appear on the Anamanti Display
+> screen — backgrounds/idle, overlays, widgets, banners, full-screen views, status
+> indicators, and settings — with file paths and how each is triggered. When you add,
+> remove, or restructure any on-screen UI, update `DisplayUI.md` in the same change.
+
 > **Naming.** The project is **Anamanti** (from the Irish *anam an tí*, "soul of
 > the home"; pronounced **"AN-um un TEE"** — formerly "Easy Home"/"Ambient"). It
 > has two halves: **Anamanti Core**, the Mac-side brain (formerly "the
@@ -136,7 +142,8 @@ anamanti-core/      Anamanti Core — everything that runs on the Mac (crate
                     client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory,
                     mDNS.
 plans/              Design + planning docs: architecture.md (design, source of
-                    truth), Plan.MD (phases + decision table), TODO.md, the
+                    truth), Plan.MD (phases + decision table), TODO.md,
+                    DisplayUI.md (the Display's on-screen UI catalog), the
                     *_plan / rollout notes, and MusicPlan.md.
 agents.md           This file (repo root).
 CLAUDE.md           Harness entry point; points here (repo root).
@@ -438,7 +445,9 @@ Notes:
 - When you make or discover a design decision, record it in `Plan.MD` (decision
   table) and reflect structural changes in `architecture.md`.
 - Keep the three docs consistent: `README.md` (overview), `architecture.md`
-  (design), `Plan.MD` (delivery). If you change behavior, update all three.
+  (design), `Plan.MD` (delivery). If you change behavior, update all three. When the
+  change touches the Display's on-screen UI, also update
+  [`plans/DisplayUI.md`](./plans/DisplayUI.md) (the UI catalog).
 - Do not add a second audio path, a second interop mechanism, or an IP-based
   discovery fallback without confirmation — these violate locked decisions.
 - Respect the memory budget: avoid large models, unbounded buffers, or holding
