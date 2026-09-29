@@ -1365,8 +1365,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   OrchestratorSettings dco_decode_orchestrator_settings(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return OrchestratorSettings(
       ok: dco_decode_bool(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -1376,6 +1376,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ttsVoice: dco_decode_opt_String(arr[5]),
       endSilenceMs: dco_decode_u_32(arr[6]),
       voiceRmsThreshold: dco_decode_f_64(arr[7]),
+      vadEngine: dco_decode_String(arr[8]),
+      sileroThreshold: dco_decode_f_64(arr[9]),
     );
   }
 
@@ -1383,8 +1385,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SettingsUpdate dco_decode_settings_update(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return SettingsUpdate(
       llmBackend: dco_decode_opt_String(arr[0]),
       llmModel: dco_decode_opt_String(arr[1]),
@@ -1393,6 +1395,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ttsVoice: dco_decode_opt_String(arr[4]),
       endSilenceMs: dco_decode_opt_box_autoadd_u_32(arr[5]),
       voiceRmsThreshold: dco_decode_opt_box_autoadd_f_64(arr[6]),
+      vadEngine: dco_decode_opt_String(arr[7]),
+      sileroThreshold: dco_decode_opt_box_autoadd_f_64(arr[8]),
     );
   }
 
@@ -1869,6 +1873,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_ttsVoice = sse_decode_opt_String(deserializer);
     var var_endSilenceMs = sse_decode_u_32(deserializer);
     var var_voiceRmsThreshold = sse_decode_f_64(deserializer);
+    var var_vadEngine = sse_decode_String(deserializer);
+    var var_sileroThreshold = sse_decode_f_64(deserializer);
     return OrchestratorSettings(
       ok: var_ok,
       message: var_message,
@@ -1878,6 +1884,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ttsVoice: var_ttsVoice,
       endSilenceMs: var_endSilenceMs,
       voiceRmsThreshold: var_voiceRmsThreshold,
+      vadEngine: var_vadEngine,
+      sileroThreshold: var_sileroThreshold,
     );
   }
 
@@ -1891,6 +1899,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_ttsVoice = sse_decode_opt_String(deserializer);
     var var_endSilenceMs = sse_decode_opt_box_autoadd_u_32(deserializer);
     var var_voiceRmsThreshold = sse_decode_opt_box_autoadd_f_64(deserializer);
+    var var_vadEngine = sse_decode_opt_String(deserializer);
+    var var_sileroThreshold = sse_decode_opt_box_autoadd_f_64(deserializer);
     return SettingsUpdate(
       llmBackend: var_llmBackend,
       llmModel: var_llmModel,
@@ -1899,6 +1909,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ttsVoice: var_ttsVoice,
       endSilenceMs: var_endSilenceMs,
       voiceRmsThreshold: var_voiceRmsThreshold,
+      vadEngine: var_vadEngine,
+      sileroThreshold: var_sileroThreshold,
     );
   }
 
@@ -2402,6 +2414,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.ttsVoice, serializer);
     sse_encode_u_32(self.endSilenceMs, serializer);
     sse_encode_f_64(self.voiceRmsThreshold, serializer);
+    sse_encode_String(self.vadEngine, serializer);
+    sse_encode_f_64(self.sileroThreshold, serializer);
   }
 
   @protected
@@ -2417,6 +2431,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.ttsVoice, serializer);
     sse_encode_opt_box_autoadd_u_32(self.endSilenceMs, serializer);
     sse_encode_opt_box_autoadd_f_64(self.voiceRmsThreshold, serializer);
+    sse_encode_opt_String(self.vadEngine, serializer);
+    sse_encode_opt_box_autoadd_f_64(self.sileroThreshold, serializer);
   }
 
   @protected

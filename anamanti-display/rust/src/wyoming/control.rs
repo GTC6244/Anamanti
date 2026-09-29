@@ -89,6 +89,12 @@ fn parse_settings(ev: &WyomingEvent) -> OrchestratorSettings {
             .get("voice_rms_threshold")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
+        vad_engine: opt_str(&ev.data, "vad_engine").unwrap_or_default(),
+        silero_threshold: ev
+            .data
+            .get("silero_threshold")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
     }
 }
 
@@ -234,6 +240,12 @@ pub async fn update_settings(
     }
     if let Some(thr) = update.voice_rms_threshold {
         data.insert("voice_rms_threshold".into(), json!(thr));
+    }
+    if let Some(engine) = update.vad_engine.as_deref().filter(|s| !s.is_empty()) {
+        data.insert("vad_engine".into(), json!(engine));
+    }
+    if let Some(thr) = update.silero_threshold {
+        data.insert("silero_threshold".into(), json!(thr));
     }
 
     let request = WyomingEvent::with_data(types::SET_SETTINGS, Value::Object(data));
@@ -604,6 +616,8 @@ mod tests {
             tts_voice: Some("en_US-amy-medium".to_string()),
             end_silence_ms: None,
             voice_rms_threshold: None,
+            vad_engine: None,
+            silero_threshold: None,
         };
         let out = update_settings(&cache, Duration::from_millis(0), None, &update)
             .await
@@ -637,6 +651,8 @@ mod tests {
             tts_voice: None,
             end_silence_ms: None,
             voice_rms_threshold: None,
+            vad_engine: None,
+            silero_threshold: None,
         };
         let out = update_settings(&cache, Duration::from_millis(0), None, &update)
             .await
@@ -654,7 +670,8 @@ mod tests {
         let response = WyomingEvent::with_data(
             types::SETTINGS,
             json!({ "ok": true, "llm_backend": "ollama",
-                    "end_silence_ms": 550, "voice_rms_threshold": 80.0 }),
+                    "end_silence_ms": 550, "voice_rms_threshold": 80.0,
+                    "vad_engine": "silero", "silero_threshold": 0.4 }),
         );
         let server = serve_once(listener, response).await;
 
@@ -667,6 +684,8 @@ mod tests {
             tts_voice: None,
             end_silence_ms: Some(550),
             voice_rms_threshold: Some(80.0),
+            vad_engine: Some("silero".to_string()),
+            silero_threshold: Some(0.4),
         };
         let out = update_settings(&cache, Duration::from_millis(0), None, &update)
             .await
@@ -674,11 +693,15 @@ mod tests {
         // Response parsing surfaces the VAD values to the settings screen.
         assert_eq!(out.end_silence_ms, 550);
         assert_eq!(out.voice_rms_threshold, 80.0);
+        assert_eq!(out.vad_engine, "silero");
+        assert_eq!(out.silero_threshold, 0.4);
 
         // The request carried the VAD keys the orchestrator's parse_update reads.
         let request = server.await.unwrap();
         assert_eq!(request.data["end_silence_ms"], json!(550));
         assert_eq!(request.data["voice_rms_threshold"], json!(80.0));
+        assert_eq!(request.data["vad_engine"], json!("silero"));
+        assert_eq!(request.data["silero_threshold"], json!(0.4));
     }
 
     #[tokio::test]
@@ -700,6 +723,8 @@ mod tests {
             tts_voice: None,
             end_silence_ms: None,
             voice_rms_threshold: None,
+            vad_engine: None,
+            silero_threshold: None,
         };
         update_settings(&cache, Duration::from_millis(0), None, &update)
             .await

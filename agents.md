@@ -73,9 +73,12 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   frame so the Anamanti Core aborts the in-flight LLM + TTS. **AEC is not shipped**
   (investigated on hardware — see below; self-triggering during loud playback is a
   known, accepted limitation).
-- **VAD:** off-device — the **Anamanti Core** decides end-of-speech (energy VAD;
-  faster-whisper has no streaming VAD, so the Mac sends `audio-stop`). The device
-  never runs its own VAD.
+- **VAD:** off-device — the **Anamanti Core** decides end-of-speech (neither STT
+  engine has streaming VAD, so the Mac sends `audio-stop`). The device never runs
+  its own VAD. The detector is **pluggable behind a `SpeechGate` seam**
+  (`anamanti-core/src/vad/`): the **energy/RMS gate is the committed default**, with
+  an opt-in **Silero** neural engine selected by `vad.engine` — see
+  `plans/VadSileroPlan.md`.
 - **Memory:** persistent **SQLite** on the Mac is the store of record for
   **explicit + inferred** facts (writes + the settings list + voice
   "remember…"/"forget that"). **Retrieval/recall defaults to the embedded HelixDB
@@ -428,8 +431,9 @@ Notes:
 
 - IDLE: wake-word scoring only; socket dormant; photo slideshow on screen.
 - TRIGGERED: open TCP, send `audio-start`.
-- STREAMING: send PCM frames; read `transcript` events; the **Anamanti Core's energy
-  VAD** detects end-of-speech and sends `audio-stop` to STT (device runs no VAD).
+- STREAMING: send PCM frames; read `transcript` events; the **Anamanti Core's VAD**
+  (energy by default; pluggable `SpeechGate` — see `plans/VadSileroPlan.md`) detects
+  end-of-speech and sends `audio-stop` to STT (device runs no VAD).
 - THINKING: LLM (with persistent memory) streams reply tokens (render live).
 - THINKING→SPEAKING: the Anamanti Core segments the LLM stream into sentences and
   synthesizes each with Piper as it forms (streaming TTS), coalesced into one

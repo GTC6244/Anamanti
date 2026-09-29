@@ -138,6 +138,9 @@ pub struct Config {
     /// STT engine selection: the downstream Wyoming Whisper server (`stt_addr`) or
     /// the in-process whisper.cpp engine (`plans/python-to-rust-whisper.md`).
     pub stt: SttConfig,
+    /// End-of-speech VAD engine: the energy/RMS gate (default) or opt-in Silero
+    /// (`plans/VadSileroPlan.md`).
+    pub vad: VadConfig,
     /// Auto follow-up listening: reopen the mic (no wake word) when a reply is a
     /// question, and feed recent history into that turn's prompt.
     pub follow_up: FollowUpConfig,
@@ -287,6 +290,79 @@ impl Default for SttConfig {
             model_path: None,
             language: Some("en".to_string()),
             num_threads: 0,
+        }
+    }
+}
+
+/// Which end-of-speech VAD engine the Anamanti Core runs (`vad.engine`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VadEngineKind {
+    /// The energy/RMS gate — the committed default. No model, no extra deps.
+    Energy,
+    /// The neural Silero VAD — opt-in (`vad.engine="silero"`); requires the
+    /// `vad-silero` build feature (onnxruntime via `ort`) and a model file. See
+    /// `plans/VadSileroPlan.md`.
+    Silero,
+}
+
+impl VadEngineKind {
+    /// Parse the config label. `energy`/`rms` → energy; `silero`/`neural` → Silero.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "energy" | "rms" => Some(Self::Energy),
+            "silero" | "neural" => Some(Self::Silero),
+            _ => None,
+        }
+    }
+
+    /// Canonical string label (for JSON relays + persistence).
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Energy => "energy",
+            Self::Silero => "silero",
+        }
+    }
+}
+
+/// Silero neural-VAD settings (`vad.silero` block). Only consulted when
+/// `vad.engine="silero"`.
+#[derive(Debug, Clone)]
+pub struct SileroConfig {
+    /// Path to the Silero **v4** ONNX model (`silero_vad.onnx`), resolved relative to
+    /// the working directory. Provisioned by `scripts/fetch-vad-model.sh` (not
+    /// committed). v4 is used deliberately: the v5 export scores a near-constant ~0
+    /// under onnxruntime and never fires (see `crate::vad::silero` + VadSileroPlan.md).
+    pub model_path: PathBuf,
+    /// Speech-probability gate in `0.0..=1.0`: a frame is voiced when its Silero
+    /// probability is `>= threshold`. 0.5 is the Silero-recommended default.
+    pub threshold: f32,
+}
+
+impl Default for SileroConfig {
+    fn default() -> Self {
+        Self {
+            model_path: PathBuf::from("models/silero_vad.onnx"),
+            threshold: 0.5,
+        }
+    }
+}
+
+/// End-of-speech VAD engine selection + engine settings (`vad` block). The detector
+/// sits behind the `SpeechGate` seam (`crate::vad`); the surrounding onset-debounce /
+/// hangover state machine is engine-independent. See `plans/VadSileroPlan.md`.
+#[derive(Debug, Clone)]
+pub struct VadConfig {
+    /// Which engine decides speech per chunk (`energy` default, or `silero`).
+    pub engine: VadEngineKind,
+    /// Silero engine settings (used only when `engine == Silero`).
+    pub silero: SileroConfig,
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            engine: VadEngineKind::Energy,
+            silero: SileroConfig::default(),
         }
     }
 }
@@ -564,6 +640,7 @@ impl Default for Config {
             graphrag: GraphRagConfig::default(),
             speaker: SpeakerConfig::default(),
             stt: SttConfig::default(),
+            vad: VadConfig::default(),
             follow_up: FollowUpConfig::default(),
             music: MusicConfig::default(),
             weather: WeatherSettings::default(),
@@ -672,6 +749,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub stt: FileStt,
     #[serde(default)]
+    pub vad: FileVad,
+    #[serde(default)]
     pub follow_up: FileFollowUp,
     #[serde(default)]
     pub music: FileMusic,
@@ -770,6 +849,21 @@ pub struct FileStt {
     pub model_path: Option<PathBuf>,
     pub language: Option<String>,
     pub num_threads: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileVad {
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub silero: FileSilero,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSilero {
+    pub model_path: Option<PathBuf>,
+    pub threshold: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1059,6 +1153,20 @@ impl Config {
             num_threads: fc.stt.num_threads.unwrap_or(sttd.num_threads),
         };
 
+        let vadd = VadConfig::default();
+        let vad = VadConfig {
+            engine: match fc.vad.engine.as_deref() {
+                None => vadd.engine,
+                Some(label) => VadEngineKind::from_label(label).with_context(|| {
+                    format!("unknown vad.engine {label:?} (expected `energy` or `silero`)")
+                })?,
+            },
+            silero: SileroConfig {
+                model_path: fc.vad.silero.model_path.unwrap_or(vadd.silero.model_path),
+                threshold: fc.vad.silero.threshold.unwrap_or(vadd.silero.threshold),
+            },
+        };
+
         let fud = FollowUpConfig::default();
         let follow_up = FollowUpConfig {
             enabled: fc.follow_up.enabled.unwrap_or(fud.enabled),
@@ -1240,6 +1348,7 @@ impl Config {
             graphrag,
             speaker,
             stt,
+            vad,
             follow_up,
             music,
             weather,
@@ -1674,6 +1783,11 @@ impl Config {
 
         let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
         let mut voice_rms_threshold = crate::settings::DEFAULT_VOICE_RMS_THRESHOLD;
+        // Silero neural-VAD threshold: config-file seed (`vad.silero.threshold`),
+        // overlaid by any persisted value below (config page / device win).
+        let mut silero_threshold = self.vad.silero.threshold;
+        // VAD engine selection: config-file seed (`vad.engine`), overlaid by persisted.
+        let mut vad_engine = self.vad.engine;
         // Google Drive photo config: config-file seed (client creds/folders), overlaid
         // by any persisted values below (the refresh token + page-set fields win).
         let mut drive = self.initial_drive();
@@ -1737,6 +1851,16 @@ impl Config {
             tts_voice = p.tts_voice;
             end_silence_ms = p.end_silence_ms;
             voice_rms_threshold = p.voice_rms_threshold;
+            // Only override the seed when the persisted file carries a value (older
+            // files leave it absent → keep the config-file seed).
+            if let Some(t) = p.silero_threshold {
+                silero_threshold = t;
+            }
+            if let Some(label) = p.vad_engine.as_deref() {
+                if let Some(e) = VadEngineKind::from_label(label) {
+                    vad_engine = e;
+                }
+            }
             // Overlay persisted Drive fields onto the config-file seed: a persisted
             // value wins (refresh token, page-set creds/folders), but keep the seed for
             // any field the persisted file leaves empty so setting a client id in
@@ -1900,6 +2024,8 @@ impl Config {
                 tts_voice,
                 end_silence_ms,
                 voice_rms_threshold,
+                silero_threshold,
+                vad_engine,
                 drive,
                 household,
                 spotify,
@@ -2040,6 +2166,9 @@ mod tests {
         assert_eq!(c.stt.engine, SttEngineKind::Wyoming);
         assert_eq!(c.stt.model, "base");
         assert_eq!(c.stt.language.as_deref(), Some("en"));
+        // VAD defaults to the energy gate.
+        assert_eq!(c.vad.engine, VadEngineKind::Energy);
+        assert_eq!(c.vad.silero.threshold, 0.5);
         // No tool_cache block ⇒ built-in defaults (weather cached 60 min).
         assert_eq!(
             c.tool_cache.ttl("weather_lookup"),
@@ -2088,6 +2217,36 @@ mod tests {
             c.stt.resolved_model_path(),
             std::path::PathBuf::from("/models/ggml-small.en.bin")
         );
+    }
+
+    #[test]
+    fn vad_block_selects_silero_engine_and_settings() {
+        let c = Config::from_file(parse(
+            r#"{ "vad": { "engine": "silero",
+                          "silero": { "model_path": "/m/silero_vad.onnx", "threshold": 0.35 } } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.vad.engine, VadEngineKind::Silero);
+        assert_eq!(
+            c.vad.silero.model_path,
+            std::path::PathBuf::from("/m/silero_vad.onnx")
+        );
+        assert_eq!(c.vad.silero.threshold, 0.35);
+    }
+
+    #[test]
+    fn vad_unknown_engine_is_a_hard_error() {
+        let err = Config::from_file(parse(r#"{ "vad": { "engine": "webrtc" } }"#)).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown vad.engine"),
+            "expected a clear engine error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn vad_rejects_unknown_keys() {
+        // `deny_unknown_fields` turns a typo into a hard parse error, not a silent default.
+        assert!(serde_json::from_str::<FileConfig>(r#"{ "vad": { "engien": "silero" } }"#).is_err());
     }
 
     #[test]

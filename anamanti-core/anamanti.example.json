@@ -59,6 +59,14 @@
     "num_threads": 0
   },
 
+  "vad": {
+    "engine": "energy",
+    "silero": {
+      "model_path": "models/silero_vad.onnx",
+      "threshold": 0.5
+    }
+  },
+
   "follow_up": {
     "enabled": true,
     "max_chain": 0,
