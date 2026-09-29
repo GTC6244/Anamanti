@@ -55,6 +55,12 @@ stt-whisper-local = ["dep:whisper-rs"]
 stt-whisper-metal = ["stt-whisper-local", "whisper-rs/metal"]
 stt-whisper-coreml = ["stt-whisper-local", "whisper-rs/coreml"]
 
+# `vad-silero` compiles the neural Silero VAD engine (onnxruntime via `ort`). Off by
+# default: it pulls a prebuilt onnxruntime binary at build time and the energy gate
+# stays the committed default. Selected at runtime via `vad.engine="silero"` only when
+# built with this feature. See `plans/VadSileroPlan.md`.
+vad-silero = ["dep:ort"]
+
 [dependencies]
 # Embedded HelixDB engine (always compiled). Pinned to the spike-verified commit.
 db = { git = "https://github.com/HelixDB/helix-db.git", package = "db", rev = "6fde5bc8e3ceb7624124ad18d2ef6ef0bc5d60ff" }
@@ -118,6 +124,11 @@ webrtc-audio-processing = { version = "2.1", features = [
 # the vendored whisper.cpp/ggml from source (cmake + C/C++ toolchain). CPU-only:
 # default-features are off so no GPU/accel backend is pulled here.
 whisper-rs = { version = "0.14", default-features = false, optional = true }
+# Neural Silero VAD engine (feature `vad-silero`). onnxruntime via `ort` — stock
+# Silero v4/v5 use ONNX `If` control-flow that pure-Rust tract cannot translate, so
+# the neural gate runs on onnxruntime (Core/Mac-side only; not the device). ort
+# fetches a prebuilt onnxruntime binary at build time. See `plans/VadSileroPlan.md`.
+ort = { version = "=2.0.0-rc.13", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.34", features = ["test-util"] }

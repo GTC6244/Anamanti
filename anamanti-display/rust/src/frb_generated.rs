@@ -1379,6 +1379,8 @@ impl SseDecode for crate::api::settings::OrchestratorSettings {
         let mut var_ttsVoice = <Option<String>>::sse_decode(deserializer);
         let mut var_endSilenceMs = <u32>::sse_decode(deserializer);
         let mut var_voiceRmsThreshold = <f64>::sse_decode(deserializer);
+        let mut var_vadEngine = <String>::sse_decode(deserializer);
+        let mut var_sileroThreshold = <f64>::sse_decode(deserializer);
         return crate::api::settings::OrchestratorSettings {
             ok: var_ok,
             message: var_message,
@@ -1388,6 +1390,8 @@ impl SseDecode for crate::api::settings::OrchestratorSettings {
             tts_voice: var_ttsVoice,
             end_silence_ms: var_endSilenceMs,
             voice_rms_threshold: var_voiceRmsThreshold,
+            vad_engine: var_vadEngine,
+            silero_threshold: var_sileroThreshold,
         };
     }
 }
@@ -1402,6 +1406,8 @@ impl SseDecode for crate::api::settings::SettingsUpdate {
         let mut var_ttsVoice = <Option<String>>::sse_decode(deserializer);
         let mut var_endSilenceMs = <Option<u32>>::sse_decode(deserializer);
         let mut var_voiceRmsThreshold = <Option<f64>>::sse_decode(deserializer);
+        let mut var_vadEngine = <Option<String>>::sse_decode(deserializer);
+        let mut var_sileroThreshold = <Option<f64>>::sse_decode(deserializer);
         return crate::api::settings::SettingsUpdate {
             llm_backend: var_llmBackend,
             llm_model: var_llmModel,
@@ -1410,6 +1416,8 @@ impl SseDecode for crate::api::settings::SettingsUpdate {
             tts_voice: var_ttsVoice,
             end_silence_ms: var_endSilenceMs,
             voice_rms_threshold: var_voiceRmsThreshold,
+            vad_engine: var_vadEngine,
+            silero_threshold: var_sileroThreshold,
         };
     }
 }
@@ -1864,6 +1872,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::settings::OrchestratorSetting
             self.tts_voice.into_into_dart().into_dart(),
             self.end_silence_ms.into_into_dart().into_dart(),
             self.voice_rms_threshold.into_into_dart().into_dart(),
+            self.vad_engine.into_into_dart().into_dart(),
+            self.silero_threshold.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1890,6 +1900,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::settings::SettingsUpdate {
             self.tts_voice.into_into_dart().into_dart(),
             self.end_silence_ms.into_into_dart().into_dart(),
             self.voice_rms_threshold.into_into_dart().into_dart(),
+            self.vad_engine.into_into_dart().into_dart(),
+            self.silero_threshold.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2363,6 +2375,8 @@ impl SseEncode for crate::api::settings::OrchestratorSettings {
         <Option<String>>::sse_encode(self.tts_voice, serializer);
         <u32>::sse_encode(self.end_silence_ms, serializer);
         <f64>::sse_encode(self.voice_rms_threshold, serializer);
+        <String>::sse_encode(self.vad_engine, serializer);
+        <f64>::sse_encode(self.silero_threshold, serializer);
     }
 }
 
@@ -2376,6 +2390,8 @@ impl SseEncode for crate::api::settings::SettingsUpdate {
         <Option<String>>::sse_encode(self.tts_voice, serializer);
         <Option<u32>>::sse_encode(self.end_silence_ms, serializer);
         <Option<f64>>::sse_encode(self.voice_rms_threshold, serializer);
+        <Option<String>>::sse_encode(self.vad_engine, serializer);
+        <Option<f64>>::sse_encode(self.silero_threshold, serializer);
     }
 }
 

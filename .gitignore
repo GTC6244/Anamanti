@@ -93,6 +93,11 @@ anamanti_promptlog.jsonl-*
 *.bin
 ggml-*.mlmodelc/
 
+# Anamanti Core model dir — fetched binaries (ggml Whisper, silero_vad.onnx via
+# anamanti-core/scripts/fetch-vad-model.sh); never commit. Scoped to the Core so the
+# device's committed openWakeWord .onnx assets are unaffected.
+/anamanti-core/models/
+
 # Machine-local test configs (absolute paths, per-box); never commit.
 anamanti.*.json
 !anamanti.example.json

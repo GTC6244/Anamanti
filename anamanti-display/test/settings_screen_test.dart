@@ -500,4 +500,89 @@ void main() {
     expect(store.value.driveConfigured, isTrue);
     expect(store.value.driveFolderIds, <String>['1AbC', '1XyZ']);
   });
+
+  testWidgets('VAD engine swaps to Silero, revealing the threshold, and Save sends it',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(); // default: energy engine
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final scrollable = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-vad-engine')),
+      200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-vad-engine')));
+    await tester.pumpAndSettle();
+
+    // Energy is the default → the Silero-only threshold slider is hidden.
+    expect(find.byKey(const Key('settings-vad-silero-threshold')), findsNothing);
+
+    // Switch the engine to Silero.
+    await tester.tap(find.byKey(const Key('settings-vad-engine')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Silero').last);
+    await tester.pumpAndSettle();
+
+    // The threshold slider now appears.
+    expect(find.byKey(const Key('settings-vad-silero-threshold')), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-save')),
+      -200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-save')));
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(client.applyCalls.single['vadEngine'], 'silero');
+    // The threshold is sent too (its seeded/default value, a valid 0..1 double).
+    expect(client.applyCalls.single['sileroThreshold'], isA<double>());
+  });
+
+  testWidgets('seeded Silero settings render the threshold slider', (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(
+      settings: const OrchestratorSettingsView(
+        ok: true,
+        message: 'ok',
+        llmBackend: 'ollama',
+        llmModel: 'llama3.2',
+        ttsVoice: null,
+        vadEngine: 'silero',
+        sileroThreshold: 0.4,
+      ),
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final scrollable = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-vad-silero-threshold')),
+      200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-vad-silero-threshold')));
+    await tester.pumpAndSettle();
+
+    // The adopted Silero threshold (0.40) is shown on the slider label.
+    expect(find.textContaining('0.40'), findsOneWidget);
+  });
 }

@@ -37,6 +37,7 @@ use crate::settings::{Household, HouseholdMember, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
 use crate::stt::{SttEngine, SttEvent, Transcriber, WyomingTranscriber};
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
+use crate::vad::SpeechGate;
 use crate::wyoming::tts::TtsSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
@@ -160,6 +161,11 @@ pub struct Pipeline {
     /// [`ServiceConnector`]. `Some` (e.g. the in-process whisper.cpp engine) supplies
     /// a session directly and the connector's `connect_stt` is never called.
     stt_engine: Option<Arc<dyn SttEngine>>,
+    /// Shared, pre-loaded Silero VAD model (feature `vad-silero`). `Some` selects the
+    /// neural gate for every turn; `None` keeps the energy gate. Loaded once at boot
+    /// (`with_silero`) and cloned into each per-turn [`crate::vad::SileroGate`].
+    #[cfg(feature = "vad-silero")]
+    silero: Option<Arc<crate::vad::SileroModel>>,
 }
 
 impl Pipeline {
@@ -186,7 +192,19 @@ impl Pipeline {
             follow_up: FollowUpConfig::default(),
             weather: None,
             stt_engine: None,
+            #[cfg(feature = "vad-silero")]
+            silero: None,
         }
+    }
+
+    /// Select the neural Silero VAD engine, using a model loaded once at boot. When
+    /// set, every turn's end-of-speech decision runs through Silero instead of the
+    /// energy gate. Only available with the `vad-silero` feature. See
+    /// `plans/VadSileroPlan.md`.
+    #[cfg(feature = "vad-silero")]
+    pub fn with_silero(mut self, model: Arc<crate::vad::SileroModel>) -> Self {
+        self.silero = Some(model);
+        self
     }
 
     /// Set the debug-only per-turn audio capture directory (AEC corpus). `None`
@@ -364,7 +382,11 @@ impl Pipeline {
         on_event(TurnEvent::Streaming);
 
         let end_silence = Duration::from_millis(runtime.end_silence_ms);
-        let voice_rms_threshold = runtime.voice_rms_threshold;
+        // The per-chunk speech decision runs behind the `SpeechGate` seam (energy gate
+        // by default; see `crate::vad` + `plans/VadSileroPlan.md`). Built per-turn from
+        // the live settings snapshot and reset before the pump loop.
+        let mut gate = self.build_speech_gate(&runtime);
+        gate.reset();
         // How long to wait for the user to *start* speaking before finalizing (and, on
         // silence, sleeping). A follow-up turn (the device auto-opened the mic, no wake
         // word) uses the window the reply that triggered it chose — 10 s after a
@@ -381,7 +403,7 @@ impl Pipeline {
                 stt.as_mut(),
                 end_silence,
                 no_speech_finalize,
-                voice_rms_threshold,
+                gate.as_mut(),
                 format.rate,
                 dump.as_ref(),
             )
@@ -469,6 +491,40 @@ impl Pipeline {
         Ok(TurnOutcome::Completed)
     }
 
+    /// Build the per-turn end-of-speech VAD gate from the live settings snapshot.
+    /// The detector sits behind the [`SpeechGate`](crate::vad::SpeechGate) seam so it
+    /// can be swapped without touching the pump loop's state machine. The engine is
+    /// chosen live from `runtime.vad_engine` (config-page/device swap, no restart); a
+    /// swap to Silero when no model is loaded (feature off or model absent) falls back
+    /// to the energy gate with a warning. See `plans/VadSileroPlan.md`.
+    fn build_speech_gate(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+    ) -> Box<dyn SpeechGate> {
+        #[cfg(feature = "vad-silero")]
+        if matches!(runtime.vad_engine, crate::config::VadEngineKind::Silero) {
+            match &self.silero {
+                Some(model) => {
+                    return Box::new(crate::vad::SileroGate::new(
+                        model.clone(),
+                        runtime.silero_threshold,
+                    ));
+                }
+                None => log::warn!(
+                    "vad.engine=silero but no Silero model is loaded; using the energy VAD"
+                ),
+            }
+        }
+        #[cfg(not(feature = "vad-silero"))]
+        if matches!(runtime.vad_engine, crate::config::VadEngineKind::Silero) {
+            log::warn!(
+                "vad.engine=silero but this binary was built without the `vad-silero` \
+                 feature; using the energy VAD"
+            );
+        }
+        Box::new(crate::vad::EnergyGate::new(runtime.voice_rms_threshold))
+    }
+
     /// Pump loop: forward device `audio-chunk`s to STT, detect end-of-speech, and
     /// return STT's `transcript`. `None` if the device hung up or the turn idled
     /// past `turn_timeout`.
@@ -476,12 +532,12 @@ impl Pipeline {
     /// wyoming-faster-whisper does **not** do streaming VAD — it transcribes the
     /// buffered utterance only once it receives `audio-stop`. The device, meanwhile,
     /// streams continuously and waits for the transcript before it stops. So the
-    /// orchestrator is the only party that can close the loop: it runs a simple
-    /// energy VAD over the incoming PCM and, once speech has been followed by a
-    /// short trailing silence, sends `audio-stop` to STT to finalize the transcript.
-    /// Returns the transcript together with the utterance's **voiced** PCM (the
-    /// chunks that passed the energy gate), so the caller can compute a speaker
-    /// embedding without re-reading the socket. `None` on disconnect/timeout.
+    /// orchestrator is the only party that can close the loop: it runs its VAD gate
+    /// ([`SpeechGate`](crate::vad::SpeechGate)) over the incoming PCM and, once speech
+    /// has been followed by a short trailing silence, sends `audio-stop` to STT to
+    /// finalize the transcript. Returns the transcript together with the utterance's
+    /// **voiced** PCM (the chunks the gate marked as speech), so the caller can compute
+    /// a speaker embedding without re-reading the socket. `None` on disconnect/timeout.
     #[allow(clippy::too_many_arguments)]
     async fn stream_to_transcript(
         &self,
@@ -489,15 +545,15 @@ impl Pipeline {
         stt: &mut dyn Transcriber,
         end_silence: std::time::Duration,
         no_speech_finalize: std::time::Duration,
-        voice_rms_threshold: f64,
+        gate: &mut dyn SpeechGate,
         mic_rate: u32,
         dump: Option<&TurnAudioDump>,
     ) -> Result<Option<(String, Vec<i16>, Duration)>> {
-        // `voice_rms_threshold`: RMS (i16 units) above which a chunk counts as speech
-        // rather than room noise. The Echo's far-field pickup is quiet (~50 idle,
-        // several hundred+ while speaking). `end_silence`: trailing silence after
-        // speech that marks end-of-utterance. Both come from the per-turn settings
-        // snapshot so they are A/B-tunable from the device without a restart.
+        // `gate`: the per-chunk speech decision (energy/RMS by default). The energy
+        // gate is A/B-tunable via `voice_rms_threshold`; the Echo's far-field pickup is
+        // quiet (~50 idle, several hundred+ while speaking). `end_silence`: trailing
+        // silence after speech that marks end-of-utterance, from the per-turn settings
+        // snapshot so it is A/B-tunable from the device without a restart.
         //
         // If no speech is ever detected, still finalize after `no_speech_finalize` so a
         // silent or too-quiet utterance ends the turn instead of hanging to
@@ -553,7 +609,7 @@ impl Pipeline {
                                 }
                                 if !finalized {
                                     let now = Instant::now();
-                                    let voiced = rms_i16_le(&pcm) > voice_rms_threshold;
+                                    let voiced = gate.push(&pcm, mic_rate);
                                     if voiced {
                                         last_voice = now;
                                         // Keep the voiced samples for speaker ID.
@@ -591,8 +647,9 @@ impl Pipeline {
                                     };
                                     if ended {
                                         log::info!(
-                                            "VAD: end-of-speech (speech_started={speech_started}); \
-                                             finalizing STT"
+                                            "VAD: end-of-speech (speech_started={speech_started}, \
+                                             prob={:.2}); finalizing STT",
+                                            gate.prob()
                                         );
                                         stt.finish().await?;
                                         finalized = true;
@@ -2359,24 +2416,6 @@ fn reply_is_question(reply: &str) -> bool {
     trimmed.ends_with('?') || trimmed.ends_with('？')
 }
 
-/// Root-mean-square amplitude (in `i16` units) of a little-endian PCM16 buffer,
-/// used by the turn's energy VAD to tell speech from room noise. A trailing odd
-/// byte (never expected from a well-formed frame) is ignored.
-fn rms_i16_le(pcm: &[u8]) -> f64 {
-    let mut sum_sq = 0f64;
-    let mut n = 0u64;
-    for c in pcm.chunks_exact(2) {
-        let s = i16::from_le_bytes([c[0], c[1]]) as f64;
-        sum_sq += s * s;
-        n += 1;
-    }
-    if n == 0 {
-        0.0
-    } else {
-        (sum_sq / n as f64).sqrt()
-    }
-}
-
 /// Wall-clock duration of one i16-LE mono PCM chunk of `byte_len` bytes at
 /// `sample_rate` Hz. Zero when the rate is unknown so it never contributes to the
 /// onset debounce (see [`voiced_onset_step`]).
@@ -2521,27 +2560,10 @@ mod household_tests {
 
 #[cfg(test)]
 mod vad_tests {
-    use super::{chunk_duration, rms_i16_le, voiced_onset_step, MIN_SPEECH_ONSET};
+    // RMS-gate tests moved with `rms_i16_le` to `crate::vad` (the `EnergyGate` seam);
+    // this module now covers only the orchestrator-owned onset-debounce state machine.
+    use super::{chunk_duration, voiced_onset_step, MIN_SPEECH_ONSET};
     use std::time::Duration;
-
-    fn pcm(samples: &[i16]) -> Vec<u8> {
-        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
-    }
-
-    #[test]
-    fn rms_of_silence_is_zero() {
-        assert_eq!(rms_i16_le(&pcm(&[0, 0, 0, 0])), 0.0);
-        assert_eq!(rms_i16_le(&[]), 0.0);
-    }
-
-    #[test]
-    fn rms_tracks_amplitude() {
-        // A constant ±1000 signal has RMS 1000; loud speech reads far above the
-        // 120-unit voice threshold while a quiet ±30 noise floor stays below it.
-        assert!((rms_i16_le(&pcm(&[1000, -1000, 1000, -1000])) - 1000.0).abs() < 1e-6);
-        assert!(rms_i16_le(&pcm(&[30, -30, 25, -20])) < 120.0);
-        assert!(rms_i16_le(&pcm(&[800, -600, 700, -900])) > 120.0);
-    }
 
     #[test]
     fn chunk_duration_is_bytes_over_rate() {

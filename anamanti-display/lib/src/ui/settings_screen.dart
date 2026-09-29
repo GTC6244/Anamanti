@@ -103,6 +103,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Orchestrator-side VAD tuning (loaded from the Mac, applied on Save).
   int _endSilenceMs = 700;
   double _voiceRmsThreshold = 120;
+  // VAD engine (energy | silero) and the Silero speech-probability gate.
+  String _vadEngine = 'energy';
+  double _sileroThreshold = 0.5;
 
   @override
   void initState() {
@@ -169,6 +172,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (remote.voiceRmsThreshold > 0) {
           _voiceRmsThreshold = remote.voiceRmsThreshold;
         }
+        if (remote.vadEngine.isNotEmpty) _vadEngine = remote.vadEngine;
+        if (remote.sileroThreshold > 0) _sileroThreshold = remote.sileroThreshold;
         _remoteLoading = false;
       });
     } catch (e) {
@@ -457,6 +462,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               : _voiceController.text.trim(),
           endSilenceMs: _endSilenceMs,
           voiceRmsThreshold: _voiceRmsThreshold,
+          vadEngine: _vadEngine,
+          sileroThreshold: _sileroThreshold,
         );
         if (!result.ok) remoteNote = 'Assistant: ${result.message}';
       } catch (e) {
@@ -932,6 +939,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
         sliderKey: const Key('settings-vad-level'),
         onChanged: (v) => setState(() => _voiceRmsThreshold = v),
       ),
+      // VAD engine selection (applied on the Mac; the energy⇄silero swap takes effect
+      // without a restart). Silero is a neural detector — more robust to noise, but it
+      // needs a Core built with the `vad-silero` feature + a model, else it falls back
+      // to energy. Its probability threshold is shown only when Silero is selected.
+      ListTile(
+        leading: const Icon(Icons.graphic_eq),
+        title: const Text('VAD engine'),
+        subtitle: const Text('Energy (RMS) or Silero (neural)'),
+        trailing: DropdownButton<String>(
+          key: const Key('settings-vad-engine'),
+          value: _vadEngine == 'silero' ? 'silero' : 'energy',
+          items: const [
+            DropdownMenuItem(value: 'energy', child: Text('Energy')),
+            DropdownMenuItem(value: 'silero', child: Text('Silero')),
+          ],
+          onChanged: (v) {
+            if (v == null || v == _vadEngine) return;
+            setState(() => _vadEngine = v);
+          },
+        ),
+      ),
+      if (_vadEngine == 'silero')
+        _rangeSlider(
+          label: 'Silero speech threshold',
+          value: _sileroThreshold,
+          min: 0.0,
+          max: 1.0,
+          divisions: 20,
+          format: (v) => v.toStringAsFixed(2),
+          sliderKey: const Key('settings-vad-silero-threshold'),
+          onChanged: (v) => setState(() => _sileroThreshold = v),
+        ),
     ];
   }
 

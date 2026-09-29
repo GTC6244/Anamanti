@@ -1712,6 +1712,8 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "search_key_set": v.search_key_set,
         "end_silence_ms": v.end_silence_ms,
         "voice_rms_threshold": v.voice_rms_threshold,
+        "silero_threshold": v.silero_threshold,
+        "vad_engine": v.vad_engine.as_label(),
     })
     .to_string()
 }
@@ -1777,6 +1779,14 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         search_api_key,
         end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
         voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
+        silero_threshold: data
+            .get("silero_threshold")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
+        vad_engine: data
+            .get("vad_engine")
+            .and_then(Value::as_str)
+            .and_then(crate::config::VadEngineKind::from_label),
     }
 }
 

@@ -92,6 +92,8 @@ class FakeOrchestratorClient implements OrchestratorClient {
     String? ttsVoice,
     int? endSilenceMs,
     double? voiceRmsThreshold,
+    String? vadEngine,
+    double? sileroThreshold,
   }) async {
     applyCalls.add({
       'llmBackend': llmBackend,
@@ -101,6 +103,8 @@ class FakeOrchestratorClient implements OrchestratorClient {
       'ttsVoice': ttsVoice,
       'endSilenceMs': endSilenceMs,
       'voiceRmsThreshold': voiceRmsThreshold,
+      'vadEngine': vadEngine,
+      'sileroThreshold': sileroThreshold,
     });
     _settings = OrchestratorSettingsView(
       ok: true,
@@ -111,6 +115,8 @@ class FakeOrchestratorClient implements OrchestratorClient {
       ttsVoice: setTtsVoice ? ttsVoice : _settings.ttsVoice,
       endSilenceMs: endSilenceMs ?? _settings.endSilenceMs,
       voiceRmsThreshold: voiceRmsThreshold ?? _settings.voiceRmsThreshold,
+      vadEngine: vadEngine ?? _settings.vadEngine,
+      sileroThreshold: sileroThreshold ?? _settings.sileroThreshold,
     );
     return _settings;
   }
