@@ -6,6 +6,7 @@ import 'dart:async';
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
+import 'package:anamanti_display/src/ui/seven_day_view.dart';
 import 'package:anamanti_display/src/ui/weather_icons.dart';
 import 'package:anamanti_display/src/ui/weather_view.dart';
 import 'package:flutter/material.dart';
@@ -32,6 +33,22 @@ const _futureWeatherJson = '''
  ]}
 ''';
 
+// A "week" layout forecast: layout=="week" + a 7-day `daily` array of highs/lows.
+const _weekWeatherJson = '''
+{"location_label":"Austin, Texas","units":"imperial","layout":"week",
+ "current":{"temp":72,"feels_like":70,"weather_code":2,"is_day":true,
+            "high":80,"low":60,"description":"partly cloudy"},
+ "daily":[
+   {"date":"2026-09-29","weekday":"Mon","weather_code":2,"high":80,"low":60,"precip_prob":10},
+   {"date":"2026-09-30","weekday":"Tue","weather_code":61,"high":78,"low":58,"precip_prob":70},
+   {"date":"2026-10-01","weekday":"Wed","weather_code":3,"high":75,"low":57,"precip_prob":0},
+   {"date":"2026-10-02","weekday":"Thu","weather_code":0,"high":82,"low":61,"precip_prob":0},
+   {"date":"2026-10-03","weekday":"Fri","weather_code":80,"high":79,"low":59,"precip_prob":40},
+   {"date":"2026-10-04","weekday":"Sat","weather_code":2,"high":81,"low":62,"precip_prob":5},
+   {"date":"2026-10-05","weekday":"Sun","weather_code":95,"high":77,"low":60,"precip_prob":85}
+ ]}
+''';
+
 const _recipeJson =
     '{"title":"Spaghetti","ingredients":["pasta"],"steps":["boil","serve"]}';
 
@@ -48,7 +65,7 @@ WakeWordConfig _cfg() => WakeWordConfig(
   smoothingWindow: 2,
   fireOnPeak: false,
   playbackBufferSecs: 30,
-      captureGainDb: 0,
+  captureGainDb: 0,
   useAudiorecord: false,
   micSource: 6,
   platformAec: false,
@@ -126,6 +143,26 @@ void main() {
       expect(w.unitSuffix, '°C');
       expect(w.current.temp, 0);
       expect(w.hourly, isEmpty);
+    });
+
+    test('defaults to the hourly layout with an empty daily list', () {
+      final w = WeatherData.tryParse(_weatherJson)!;
+      expect(w.layout, isEmpty);
+      expect(w.isWeek, isFalse);
+      expect(w.daily, isEmpty);
+    });
+
+    test('parses a week payload with a 7-day daily forecast', () {
+      final w = WeatherData.tryParse(_weekWeatherJson)!;
+      expect(w.layout, 'week');
+      expect(w.isWeek, isTrue);
+      expect(w.daily, hasLength(7));
+      expect(w.daily.first.weekday, 'Mon');
+      expect(w.daily.first.high, 80);
+      expect(w.daily.first.low, 60);
+      expect(w.daily[1].precipProb, 70);
+      expect(w.daily.last.weekday, 'Sun');
+      expect(w.daily.last.weatherCode, 95);
     });
   });
 
@@ -346,4 +383,52 @@ void main() {
       expect(find.text('8 AM'), findsOneWidget);
     },
   );
+
+  testWidgets('SevenDayView renders 7 day columns with highs/lows and closes', (
+    tester,
+  ) async {
+    final weather = WeatherData.tryParse(_weekWeatherJson)!;
+    var closed = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SevenDayView(weather: weather, onClose: () => closed = true),
+      ),
+    );
+
+    // Header names the 7-day forecast and the location.
+    expect(find.text('7-Day Forecast · Austin, Texas'), findsOneWidget);
+    // The first column is labelled "Today"; the rest use their weekday.
+    expect(find.text('Today'), findsOneWidget);
+    expect(find.text('Tue'), findsOneWidget);
+    expect(find.text('Sun'), findsOneWidget);
+    // Highs carry the unit suffix; lows carry a bare degree sign.
+    expect(find.text('80°F'), findsOneWidget);
+    expect(find.text('58°'), findsOneWidget);
+    // Precip chance shows only for days with a non-zero probability.
+    expect(find.text('70%'), findsOneWidget);
+    expect(find.text('85%'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('weather-week-close')));
+    expect(closed, isTrue);
+  });
+
+  testWidgets('SevenDayView shows an empty state when there are no days', (
+    tester,
+  ) async {
+    const weather = WeatherData(
+      locationLabel: 'Austin, Texas',
+      units: 'imperial',
+      current: CurrentConditions(),
+      layout: 'week',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SevenDayView(weather: weather, onClose: () {}),
+      ),
+    );
+
+    expect(find.text('No forecast available'), findsOneWidget);
+  });
 }

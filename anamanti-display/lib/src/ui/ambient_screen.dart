@@ -28,6 +28,7 @@ import 'package:anamanti_display/src/ui/status_indicator.dart';
 import 'package:anamanti_display/src/ui/timers_overlay.dart';
 import 'package:anamanti_display/src/ui/weather_icons.dart';
 import 'package:anamanti_display/src/ui/place_view.dart';
+import 'package:anamanti_display/src/ui/seven_day_view.dart';
 import 'package:anamanti_display/src/ui/weather_view.dart';
 
 class AmbientScreen extends StatelessWidget {
@@ -146,8 +147,10 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
-              // Weather mode: a full-screen forecast (today + 7-day row). Same
-              // precedence as recipe mode — above the idle presentation, below the
+              // Weather mode: a full-screen forecast. The default hourly view (today's
+              // big conditions panel + a 10-hour row) or, when the report's layout is
+              // "week", the separate 7-day forecast widget (7 columns of highs/lows).
+              // Same precedence as recipe mode — above the idle presentation, below the
               // conversation panel, so a voice turn still overlays it. Dismissed by
               // voice or the view's own close control.
               AnimatedOpacity(
@@ -156,11 +159,19 @@ class AmbientScreen extends StatelessWidget {
                 child: IgnorePointer(
                   ignoring: !weatherActive,
                   child: weatherActive
-                      ? WeatherView(
-                          key: ValueKey(state.weather!.locationLabel),
-                          weather: state.weather!,
-                          onClose: assistant.dismissWeather,
-                        )
+                      ? (state.weather!.isWeek
+                            ? SevenDayView(
+                                key: ValueKey(
+                                  'week:${state.weather!.locationLabel}',
+                                ),
+                                weather: state.weather!,
+                                onClose: assistant.dismissWeather,
+                              )
+                            : WeatherView(
+                                key: ValueKey(state.weather!.locationLabel),
+                                weather: state.weather!,
+                                onClose: assistant.dismissWeather,
+                              ))
                       : const SizedBox.shrink(),
                 ),
               ),

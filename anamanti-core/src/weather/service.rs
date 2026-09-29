@@ -144,6 +144,7 @@ mod tests {
                 ..Default::default()
             },
             hourly: Vec::new(),
+            ..Default::default()
         }
     }
 

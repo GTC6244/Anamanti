@@ -431,12 +431,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **`anamanti-weather`** (Anamanti Core → device): a project-local **device-action** frame
   (`data.action` = `show`/`current`/`dismiss`; for `show`/`current`, `data.weather` is the
   structured `WeatherReport` — `location_label`, `units`, `when_label`, `current{…}`,
-  `hourly[10]`). It
+  `hourly[10]`, `daily[7]`, `layout`). It
   rides **two transports**: `show`/`dismiss` on the per-turn voice socket, emitted by the
   `weather_lookup` / `close_weather` tools (`DeviceAction::{ShowWeather,DismissWeather}`),
   drive the **full-screen forecast** (a conditions panel + a 10-hour hourly row; the
   optional `weather_lookup` `when` arg targets a future day, whose row starts at 08:00 and
-  whose panel shows that day's summary); `current` is
+  whose panel shows that day's summary). The optional `weather_lookup` **`layout`** arg
+  (`"week"`) instead selects a **separate 7-day forecast widget** (`SevenDayView`: the
+  screen split into 7 vertical columns of daily high/low + icon + precip), chosen on the
+  device by `WeatherData.isWeek` — same frame and `AssistantState.weather` slot, so no wire
+  change. `current` is
   broadcast periodically on the persistent channel (below) by the Anamanti Core's
   `WeatherService` to refresh the **small icon + temperature beside the idle clock**
   without a voice turn. Data comes from **Visual Crossing** (default) or keyless

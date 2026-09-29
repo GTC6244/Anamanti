@@ -1308,6 +1308,11 @@ struct WeatherArgs {
     /// `today`/`now`, `tomorrow`, a weekday name ("Saturday"), or `YYYY-MM-DD`.
     #[serde(default)]
     when: Option<String>,
+    /// Which display layout to show (optional; defaults to the hourly view). `"hourly"`
+    /// shows the big-conditions panel + 10-hour row; `"week"` shows the separate 7-day
+    /// forecast widget (7 columns of daily highs/lows).
+    #[serde(default)]
+    layout: Option<String>,
 }
 
 /// The weather tool: fetches current conditions + a 7-day forecast for a place
@@ -1338,13 +1343,15 @@ impl WeatherLookup {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: WEATHER_LOOKUP.to_string(),
-            description: "Get the weather and a 10-hour hourly forecast and show it on the \
-                          display's weather screen. Use whenever the user asks about the \
-                          weather, temperature, forecast, or how hot/cold/rainy it is. If the \
-                          user names no place, omit `location` — it defaults to home. For a \
-                          future day (e.g. \"weather on Saturday\", \"will it rain tomorrow\") \
-                          pass `when`; omit it for right now. Returns a short spoken \
-                          confirmation to relay."
+            description: "Get the weather and show it on the display's weather screen. Use \
+                          whenever the user asks about the weather, temperature, forecast, or \
+                          how hot/cold/rainy it is. If the user names no place, omit `location` \
+                          — it defaults to home. For a future day (e.g. \"weather on \
+                          Saturday\", \"will it rain tomorrow\") pass `when`; omit it for right \
+                          now. Set `layout` to \"week\" for a multi-day/weekly request (e.g. \
+                          \"7-day forecast\", \"what's the week look like\", \"forecast for the \
+                          rest of the week\") to show the 7-day view; otherwise omit it for the \
+                          default hourly view. Returns a short spoken confirmation to relay."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -1359,6 +1366,14 @@ impl WeatherLookup {
                         "description": "The day to forecast: \"today\"/\"now\", \"tomorrow\", a \
                                         weekday name like \"Saturday\", or a date \"YYYY-MM-DD\". \
                                         Omit for right now."
+                    },
+                    "layout": {
+                        "type": "string",
+                        "enum": ["hourly", "week"],
+                        "description": "The display layout: \"hourly\" (default) for the \
+                                        big-conditions panel + 10-hour row, or \"week\" for the \
+                                        7-day forecast view. Use \"week\" for weekly/multi-day \
+                                        requests; omit otherwise."
                     }
                 }
             }),
@@ -1380,11 +1395,21 @@ impl WeatherLookup {
             .context("no location was given and no home location is set")?;
         let when = crate::weather::resolve_when(args.when.as_deref(), Local::now())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let report = self
+        let mut report = self
             .provider
             .fetch(&location, self.imperial, when)
             .await
             .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        // A "week" request switches the display to the 7-day forecast widget; anything
+        // else (including an omitted/unknown value) keeps the default hourly view.
+        if args
+            .layout
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|l| l.eq_ignore_ascii_case("week"))
+        {
+            report.layout = "week".to_string();
+        }
         let confirmation = crate::weather::render_confirmation(&report);
         sink.send(DeviceAction::ShowWeather(report)).map_err(|_| {
             anyhow::anyhow!("the display disconnected before the weather could show")
@@ -2769,6 +2794,72 @@ mod tests {
                 label: Some("pasta".to_string())
             }
         );
+    }
+
+    /// A canned weather provider that returns a fixed report (with a daily forecast) so
+    /// the `weather_lookup` tool's layout handling can be tested without any network.
+    struct StaticWeather;
+    #[async_trait]
+    impl crate::weather::WeatherProvider for StaticWeather {
+        async fn fetch(
+            &self,
+            location: &str,
+            imperial: bool,
+            _when: crate::weather::ForecastWhen,
+        ) -> Result<crate::weather::WeatherReport> {
+            Ok(crate::weather::WeatherReport {
+                location_label: location.to_string(),
+                units: if imperial { "imperial" } else { "metric" }.to_string(),
+                daily: vec![crate::weather::DailyForecast {
+                    weekday: "Mon".into(),
+                    high: 80,
+                    low: 60,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+        }
+    }
+
+    fn static_weather_tool() -> WeatherLookup {
+        WeatherLookup::new(
+            Arc::new(StaticWeather),
+            LiveHomeLocation::new(Some("Austin, TX".to_string())),
+            true,
+        )
+    }
+
+    #[tokio::test]
+    async fn weather_lookup_defaults_to_hourly_layout_and_passes_daily_through() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        static_weather_tool()
+            .invoke(&json!({}), Some(&tx))
+            .await
+            .unwrap();
+        match rx.try_recv().unwrap() {
+            DeviceAction::ShowWeather(report) => {
+                // No `layout` argument → the default hourly view.
+                assert_eq!(report.layout, "");
+                // The provider's daily forecast rides through for the 7-day widget.
+                assert_eq!(report.daily.len(), 1);
+                assert_eq!(report.daily[0].high, 80);
+            }
+            other => panic!("expected ShowWeather, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn weather_lookup_week_layout_selects_the_7_day_widget() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        static_weather_tool()
+            .invoke(&json!({ "layout": "Week" }), Some(&tx))
+            .await
+            .unwrap();
+        match rx.try_recv().unwrap() {
+            // Case-insensitive: "Week" → the 7-day layout.
+            DeviceAction::ShowWeather(report) => assert_eq!(report.layout, "week"),
+            other => panic!("expected ShowWeather, got {other:?}"),
+        }
     }
 
     #[test]

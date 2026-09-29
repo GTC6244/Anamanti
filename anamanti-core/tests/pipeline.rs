@@ -1170,6 +1170,7 @@ async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
                     description: "Partly cloudy".into(),
                 },
                 hourly: Vec::new(),
+                ..Default::default()
             })
         }
     }

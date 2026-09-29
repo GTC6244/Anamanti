@@ -16,6 +16,8 @@ class WeatherData {
     required this.current,
     this.whenLabel = '',
     this.hourly = const [],
+    this.daily = const [],
+    this.layout = '',
   });
 
   final String locationLabel;
@@ -34,8 +36,19 @@ class WeatherData {
   /// The hourly forecast row (up to 10 entries).
   final List<WeatherHour> hourly;
 
+  /// The daily forecast (up to 7 days starting today), rendered by the separate 7-day
+  /// forecast widget when [isWeek] is true.
+  final List<WeatherDay> daily;
+
+  /// Presentation hint from the orchestrator: `"week"` selects the separate 7-day
+  /// forecast widget; empty or `"hourly"` selects the default hourly view.
+  final String layout;
+
   /// Whether this report is for a future day rather than right now.
   bool get isFutureDay => whenLabel.isNotEmpty;
+
+  /// Whether the display should render the separate 7-day forecast widget.
+  bool get isWeek => layout == 'week';
 
   /// The degree symbol suffix for this report's units ("°F" / "°C").
   String get unitSuffix => units == 'imperial' ? '°F' : '°C';
@@ -56,6 +69,8 @@ class WeatherData {
           currentMap is Map<String, dynamic> ? currentMap : const {},
         ),
         hourly: _hours(decoded['hourly']),
+        daily: _days(decoded['daily']),
+        layout: (decoded['layout'] as String?) ?? '',
       );
     } catch (_) {
       return null;
@@ -67,6 +82,14 @@ class WeatherData {
     return value
         .whereType<Map<String, dynamic>>()
         .map(WeatherHour._fromMap)
+        .toList(growable: false);
+  }
+
+  static List<WeatherDay> _days(Object? value) {
+    if (value is! List) return const [];
+    return value
+        .whereType<Map<String, dynamic>>()
+        .map(WeatherDay._fromMap)
         .toList(growable: false);
   }
 }
@@ -126,6 +149,37 @@ class WeatherHour {
     temp: _int(m['temp']),
     precipProb: _int(m['precip_prob']),
     isDay: m['is_day'] as bool? ?? true,
+  );
+}
+
+/// One day of the forecast (a column in the 7-day forecast widget).
+class WeatherDay {
+  const WeatherDay({
+    this.date = '',
+    this.weekday = '',
+    this.weatherCode = 0,
+    this.high = 0,
+    this.low = 0,
+    this.precipProb = 0,
+  });
+
+  /// ISO date, `YYYY-MM-DD`.
+  final String date;
+
+  /// Short weekday label for the column header, e.g. "Thu".
+  final String weekday;
+  final int weatherCode;
+  final int high;
+  final int low;
+  final int precipProb;
+
+  static WeatherDay _fromMap(Map<String, dynamic> m) => WeatherDay(
+    date: (m['date'] as String?) ?? '',
+    weekday: (m['weekday'] as String?) ?? '',
+    weatherCode: _int(m['weather_code']),
+    high: _int(m['high']),
+    low: _int(m['low']),
+    precipProb: _int(m['precip_prob']),
   );
 }
 

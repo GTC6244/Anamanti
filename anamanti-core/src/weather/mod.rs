@@ -61,6 +61,18 @@ pub struct WeatherReport {
     /// for a right-now forecast, or at 08:00 local on the requested future day.
     #[serde(default)]
     pub hourly: Vec<HourlyForecast>,
+    /// The daily forecast: up to 7 days starting today, used by the separate 7-day
+    /// forecast widget (see `layout`). Always populated regardless of `layout` so the
+    /// device can switch views without a refetch; empty only if the provider omits it.
+    #[serde(default)]
+    pub daily: Vec<DailyForecast>,
+    /// Presentation hint for the display's full-screen weather screen. Empty or
+    /// `"hourly"` (the default) renders the hourly view (big panel + 10-hour row);
+    /// `"week"` renders the separate 7-day forecast widget (7 vertical columns of
+    /// highs/lows). Set from the `weather_lookup` tool's `layout` argument; the ambient
+    /// push always leaves it empty (hourly).
+    #[serde(default)]
+    pub layout: String,
 }
 
 /// Conditions right now, plus today's high/low for the ambient indicator.
@@ -571,6 +583,8 @@ fn report_from_visualcrossing(
         when_label,
         current,
         hourly,
+        daily,
+        layout: String::new(),
     }
 }
 
@@ -765,6 +779,8 @@ fn report_from_forecast(
         when_label,
         current,
         hourly,
+        daily: daily_forecast,
+        layout: String::new(),
     }
 }
 
