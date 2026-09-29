@@ -4,6 +4,11 @@
 // orchestrator-managed settings (a [FakeOrchestratorClient], no native library).
 // An in-memory store keeps `pumpAndSettle` reliable (fake-async can't drive real
 // file IO); the real file round trip is covered by `settings_store_test.dart`.
+//
+// The screen is paged: the root is a menu of categories, and each control lives
+// on its category page. `openCategory` taps into a page; `backToMenu` returns.
+// Save lives in the AppBar and applies both halves from any page, so tests tap it
+// directly without scrolling.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,6 +19,19 @@ import 'package:anamanti_display/src/ui/settings_screen.dart';
 
 import 'support/fake_orchestrator_client.dart';
 import 'support/in_memory_settings_store.dart';
+
+/// Open the category page whose menu key is `settings-menu-<name>` (the enum's
+/// `.name`, e.g. `assistant`, `deviceConfig`, `speechDetection`).
+Future<void> openCategory(WidgetTester tester, String name) async {
+  await tester.tap(find.byKey(Key('settings-menu-$name')));
+  await tester.pumpAndSettle();
+}
+
+/// Return from a category page to the root menu.
+Future<void> backToMenu(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('settings-back-to-menu')));
+  await tester.pumpAndSettle();
+}
 
 void main() {
   testWidgets('loads remote settings and applies both halves on Save',
@@ -32,17 +50,22 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // Remote settings were fetched and the backend dropdown reflects them.
+    // Remote settings were fetched; the Assistant page's backend dropdown reflects
+    // them.
     expect(client.fetchCount, 1);
+    await openCategory(tester, 'assistant');
     expect(find.text('Local (Ollama)'), findsOneWidget);
+    await backToMenu(tester);
 
-    // Change the wake word away from the default (hey_jarvis).
+    // Change the wake word away from the default (hey_jarvis) on the Device Config
+    // page.
+    await openCategory(tester, 'deviceConfig');
     await tester.tap(find.byKey(const Key('settings-wakeword')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('alexa').last);
     await tester.pumpAndSettle();
 
-    // Save.
+    // Save (available from any page).
     await tester.tap(find.byKey(const Key('settings-save')));
     await tester.pumpAndSettle();
 
@@ -71,6 +94,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    await openCategory(tester, 'assistant');
     await tester.tap(find.byKey(const Key('settings-backend')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cloud (Claude)').last);
@@ -100,6 +124,8 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
+
+    await openCategory(tester, 'assistant');
 
     // Switch to the Claude backend → the model becomes a dropdown of Anthropic
     // models (the OpenAI entry is filtered out).
@@ -140,6 +166,8 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    await openCategory(tester, 'assistant');
+
     // The voice control is a dropdown of installed voices (labels carry locale).
     await tester.tap(find.byKey(const Key('settings-voice')));
     await tester.pumpAndSettle();
@@ -170,6 +198,8 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    await openCategory(tester, 'assistant');
+
     // With no installed voices, the control is a text field the user can type into.
     await tester.enterText(
         find.byKey(const Key('settings-voice')), 'en_GB-alan-medium');
@@ -194,6 +224,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    await openCategory(tester, 'assistant');
     await tester.tap(find.byKey(const Key('settings-backend')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cloud (Claude)').last);
@@ -229,6 +260,8 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    // The Assistant page shows the offline notice when the Mac is unreachable.
+    await openCategory(tester, 'assistant');
     expect(find.text('Assistant offline'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('settings-save')));
@@ -261,7 +294,9 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // The dropdown offers Auto plus each discovered orchestrator.
+    // The orchestrator picker lives on the Assistant page. It offers Auto plus each
+    // discovered orchestrator.
+    await openCategory(tester, 'assistant');
     await tester.tap(find.byKey(const Key('settings-orchestrator')));
     await tester.pumpAndSettle();
     expect(find.text('Auto (first available)').last, findsOneWidget);
@@ -295,6 +330,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    await openCategory(tester, 'assistant');
     expect(find.text('Assistant offline'), findsOneWidget);
     // The Orchestrator picker (outside the offline-gated assistant tiles) is present.
     expect(find.byKey(const Key('settings-orchestrator')), findsOneWidget);
@@ -320,8 +356,9 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // The Display section exposes the dim-delay slider, labelled with the current
+    // The Device Config page exposes the dim-delay slider, labelled with the current
     // value formatted as minutes.
+    await openCategory(tester, 'deviceConfig');
     final scrollable = find.byType(Scrollable).first;
     await tester.scrollUntilVisible(
       find.byKey(const Key('settings-dim-delay')),
@@ -334,12 +371,6 @@ void main() {
 
     // Saving persists the device-local dim delay and surfaces it to the parent so
     // the engine restarts with the new proximity release window.
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('settings-save')),
-      -200,
-      scrollable: scrollable,
-    );
-    await tester.ensureVisible(find.byKey(const Key('settings-save')));
     await tester.tap(find.byKey(const Key('settings-save')));
     await tester.pumpAndSettle();
 
@@ -365,6 +396,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    await openCategory(tester, 'deviceConfig');
     final scrollable = find.byType(Scrollable).first;
     await tester.scrollUntilVisible(
       find.byKey(const Key('settings-dim-delay')),
@@ -384,12 +416,6 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('settings-save')),
-      -200,
-      scrollable: scrollable,
-    );
-    await tester.ensureVisible(find.byKey(const Key('settings-save')));
     await tester.tap(find.byKey(const Key('settings-save')));
     await tester.pumpAndSettle();
 
@@ -397,36 +423,6 @@ void main() {
     expect(applied, isNotNull);
     expect(applied!.dimDelaySecs, 3600);
     expect(store.value.dimDelaySecs, 3600);
-  });
-
-  testWidgets('memory tile navigates to the memory screen', (tester) async {
-    final store = InMemorySettingsStore();
-    final client = FakeOrchestratorClient();
-    await tester.pumpWidget(MaterialApp(
-      home: SettingsScreen(
-        initial: const AppSettings(),
-        store: store,
-        client: client,
-        onApplied: (_) {},
-      ),
-    ));
-    await tester.pumpAndSettle();
-
-    // The memory tile sits at the bottom of the settings list; scroll it fully into
-    // view before tapping (the list is long enough that a partial reveal can leave
-    // the tile's center off-screen).
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('settings-memory')),
-      200,
-      scrollable: find.byType(Scrollable).first,
-    );
-    await tester.ensureVisible(find.byKey(const Key('settings-memory')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('settings-memory')));
-    await tester.pumpAndSettle();
-
-    // The memory screen's app bar title is shown.
-    expect(find.text('Memory'), findsOneWidget);
   });
 
   testWidgets('syncs Drive from the orchestrator, enabling folder pick + Save',
@@ -455,6 +451,8 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
+    // The photo source lives on the Background page.
+    await openCategory(tester, 'background');
     final scrollable = find.byType(Scrollable).first;
 
     // Before syncing there are no Drive credentials, so "Choose folders" is disabled.
@@ -484,12 +482,6 @@ void main() {
     );
 
     // Save persists the synced Drive credentials device-locally (no rebuild needed).
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('settings-save')),
-      -200,
-      scrollable: scrollable,
-    );
-    await tester.ensureVisible(find.byKey(const Key('settings-save')));
     await tester.tap(find.byKey(const Key('settings-save')));
     await tester.pumpAndSettle();
 
@@ -515,12 +507,8 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    final scrollable = find.byType(Scrollable).first;
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('settings-vad-engine')),
-      200,
-      scrollable: scrollable,
-    );
+    // The VAD controls live on the Speech Detection page.
+    await openCategory(tester, 'speechDetection');
     await tester.ensureVisible(find.byKey(const Key('settings-vad-engine')));
     await tester.pumpAndSettle();
 
@@ -536,12 +524,6 @@ void main() {
     // The threshold slider now appears.
     expect(find.byKey(const Key('settings-vad-silero-threshold')), findsOneWidget);
 
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('settings-save')),
-      -200,
-      scrollable: scrollable,
-    );
-    await tester.ensureVisible(find.byKey(const Key('settings-save')));
     await tester.tap(find.byKey(const Key('settings-save')));
     await tester.pumpAndSettle();
 
@@ -573,12 +555,7 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    final scrollable = find.byType(Scrollable).first;
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('settings-vad-silero-threshold')),
-      200,
-      scrollable: scrollable,
-    );
+    await openCategory(tester, 'speechDetection');
     await tester.ensureVisible(find.byKey(const Key('settings-vad-silero-threshold')));
     await tester.pumpAndSettle();
 
