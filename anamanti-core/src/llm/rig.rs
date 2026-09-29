@@ -1431,7 +1431,10 @@ pub struct PlacesLookup {
 }
 
 impl PlacesLookup {
-    pub fn new(provider: Arc<dyn crate::places::PlacesProvider>, home_location: LiveHomeLocation) -> Self {
+    pub fn new(
+        provider: Arc<dyn crate::places::PlacesProvider>,
+        home_location: LiveHomeLocation,
+    ) -> Self {
         Self {
             provider,
             home_location,

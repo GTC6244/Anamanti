@@ -129,8 +129,8 @@ pub async fn run_consent(
         .await
         .with_context(|| {
             format!(
-            "binding loopback redirect on {host}:{port} (is another consent or app using it?)"
-        )
+                "binding loopback redirect on {host}:{port} (is another consent or app using it?)"
+            )
         })?;
     let url = auth_url(client_id, redirect_url, scope, &challenge)?;
 

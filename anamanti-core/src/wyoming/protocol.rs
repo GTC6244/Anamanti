@@ -773,9 +773,7 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         "weather" => {
             parse_weather_screen(screen.get("weather")?.as_object()?).map(DisplayContext::Weather)
         }
-        "place" => {
-            parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place)
-        }
+        "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
         _ => None,
     }
 }

@@ -624,11 +624,17 @@ mod tests {
         });
 
         let provider = GooglePlaces::with_base_url(format!("http://{addr}"), "test-key");
-        let candidates = provider.search("coffee shop", Some("Austin")).await.unwrap();
+        let candidates = provider
+            .search("coffee shop", Some("Austin"))
+            .await
+            .unwrap();
         assert_eq!(candidates.len(), 2);
         let report = provider.details(&candidates[0].place_id).await.unwrap();
         assert_eq!(report.name, "Blue Bottle Coffee");
-        assert_eq!(report.photo_uri, "https://lh3.googleusercontent.com/keyless");
+        assert_eq!(
+            report.photo_uri,
+            "https://lh3.googleusercontent.com/keyless"
+        );
         server.await.unwrap();
     }
 }
