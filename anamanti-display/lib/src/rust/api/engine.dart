@@ -274,6 +274,16 @@ class WakeWordConfig {
   /// delivers audio faster than real-time playback drains it. A/B-tunable.
   final int playbackBufferSecs;
 
+  /// Software capture gain in **decibels**, applied to the 16 kHz mono audio right
+  /// after resampling — i.e. to both the wake-word detector input *and* the PCM
+  /// streamed to the Core. `0.0` (default) is unity/no-op. Positive values boost a
+  /// quiet far-field signal; it is the in-app, root-free analogue of the AEC shim's
+  /// `persist.vendor.amznaec.gain_db` makeup gain (which the sandboxed app cannot
+  /// set). Clamped to `[0, 36]` dB and the boosted signal is clamped back into i16
+  /// range so it never overflows the model input. A/B-tunable from the settings
+  /// screen. Applies on both the `cpal` and `AudioRecord` capture paths.
+  final double captureGainDb;
+
   /// **Android only.** Use the Kotlin `AudioRecord` capture layer instead of
   /// `cpal`, to reach the HAL's far-field `VOICE_RECOGNITION` source (array
   /// beamforming) + platform audio effects. `false` (default) keeps the `cpal`
@@ -327,6 +337,7 @@ class WakeWordConfig {
     required this.smoothingWindow,
     required this.fireOnPeak,
     required this.playbackBufferSecs,
+    required this.captureGainDb,
     required this.useAudiorecord,
     required this.micSource,
     required this.platformAec,
@@ -351,6 +362,7 @@ class WakeWordConfig {
       smoothingWindow.hashCode ^
       fireOnPeak.hashCode ^
       playbackBufferSecs.hashCode ^
+      captureGainDb.hashCode ^
       useAudiorecord.hashCode ^
       micSource.hashCode ^
       platformAec.hashCode ^
@@ -377,6 +389,7 @@ class WakeWordConfig {
           smoothingWindow == other.smoothingWindow &&
           fireOnPeak == other.fireOnPeak &&
           playbackBufferSecs == other.playbackBufferSecs &&
+          captureGainDb == other.captureGainDb &&
           useAudiorecord == other.useAudiorecord &&
           micSource == other.micSource &&
           platformAec == other.platformAec &&

@@ -85,6 +85,11 @@ const PROXIMITY_FPS: i32 = 5;
 /// climbing toward the wake word without flooding (one line per drained block).
 const SCORE_LOG_FLOOR: f32 = 0.05;
 
+/// Upper bound (dB) on the software capture gain applied to the resampled mic
+/// signal. Caps how much a quiet far-field mic can be boosted in-app; beyond this
+/// the boosted signal is mostly amplified noise and clipping.
+const MAX_CAPTURE_GAIN_DB: f32 = 36.0;
+
 struct EngineHandle {
     running: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -421,6 +426,21 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // when nothing crosses the detection threshold.
     let mut diag_peak: f32 = 0.0;
 
+    // Software capture gain (dB → linear multiplier), applied to every resampled
+    // block below. The root-free, in-app analogue of the AEC shim's makeup gain
+    // (`persist.vendor.amznaec.gain_db`, which the sandboxed app cannot set): boosts
+    // a quiet far-field signal so both the wake-word detector and the streamed PCM
+    // clear the level the models/VAD expect. `0.0` dB = unity (no-op).
+    let capture_gain_db = config.capture_gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB);
+    let capture_gain = if capture_gain_db > 0.0 {
+        10f32.powf(capture_gain_db / 20.0)
+    } else {
+        1.0
+    };
+    if capture_gain != 1.0 {
+        log::info!("capture gain: {capture_gain_db:.1} dB (×{capture_gain:.2})");
+    }
+
     while running.load(Ordering::SeqCst) {
         let n = consumer.pop_slice(&mut scratch);
         if n == 0 {
@@ -436,6 +456,15 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
 
         if resampled.is_empty() {
             continue;
+        }
+
+        // Apply the software capture gain once, before either consumer sees the block,
+        // so wake-word scoring and the streamed PCM stay in sync. Clamp back into i16
+        // range so a boosted signal never overflows the model input / the i16 stream.
+        if capture_gain != 1.0 {
+            for s in resampled.iter_mut() {
+                *s = (*s * capture_gain).clamp(i16::MIN as f32, i16::MAX as f32);
+            }
         }
 
         // While a turn is active, forward this 16 kHz block to the Wyoming client

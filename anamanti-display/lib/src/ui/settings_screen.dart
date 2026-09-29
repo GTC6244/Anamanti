@@ -724,6 +724,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
           () => _settings = _settings.copyWith(smoothingWindow: v.round()),
         ),
       ),
+      _rangeSlider(
+        label: 'Capture gain (dB)',
+        value: _settings.captureGainDb,
+        min: 0,
+        max: 36,
+        divisions: 36,
+        format: (v) => '${v.round()} dB',
+        sliderKey: const Key('settings-capture-gain'),
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(captureGainDb: v.roundToDouble()),
+        ),
+      ),
       SwitchListTile(
         key: const Key('settings-fire-on-peak'),
         secondary: const Icon(Icons.bolt),
@@ -746,6 +758,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
         onChanged: (v) =>
             setState(() => _settings = _settings.copyWith(useAudioRecord: v)),
       ),
+      if (_settings.useAudioRecord) ...[
+        SwitchListTile(
+          key: const Key('settings-platform-ns'),
+          secondary: const Icon(Icons.noise_control_off),
+          title: const Text('Noise suppression'),
+          subtitle: const Text(
+            'Platform NoiseSuppressor. On by default — but if the wake word is '
+            'missed in a noisy room, try turning this OFF (aggressive NS can '
+            'distort speech and hurt detection)',
+          ),
+          value: _settings.platformNs,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(platformNs: v)),
+        ),
+        SwitchListTile(
+          key: const Key('settings-platform-agc'),
+          secondary: const Icon(Icons.graphic_eq),
+          title: const Text('Automatic gain control'),
+          subtitle: const Text(
+            'Platform AutomaticGainControl — boosts quiet far-field speech',
+          ),
+          value: _settings.platformAgc,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(platformAgc: v)),
+        ),
+        SwitchListTile(
+          key: const Key('settings-platform-aec'),
+          secondary: const Icon(Icons.hearing),
+          title: const Text('Echo cancellation'),
+          subtitle: const Text(
+            'Platform AcousticEchoCanceler. Off by default — the Mac does AEC and '
+            'this device\'s platform AEC was found not to actually cancel',
+          ),
+          value: _settings.platformAec,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(platformAec: v)),
+        ),
+      ],
     ];
   }
 
