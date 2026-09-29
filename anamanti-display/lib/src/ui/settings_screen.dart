@@ -1,17 +1,23 @@
 // Settings screen (Plan.MD §3, Phase 6).
 //
-// Exposes the four configurable areas from the plan:
-//  * Wake word (+ detection thresholds) — device-local, applied by restarting the
-//    native engine with a new config.
-//  * LLM backend, model, and TTS voice — orchestrator-managed, read/changed over
-//    the Wyoming control protocol.
-//  * Photo source — local ambient gradients or a linked Google folder (on-device
-//    OAuth seam).
-//  * Memory management — a link into the view/delete list ([MemoryScreen]).
+// A paged settings surface: the root shows a menu of categories, and tapping one
+// opens that category's page (back returns to the menu). The categories are:
+//  * Assistant — orchestrator pin + LLM backend, model, and TTS voice
+//    (orchestrator-managed, read/changed over the Wyoming control protocol).
+//  * Device Config (Wake word & Display) — wake word, detection thresholds +
+//    capture tuning, and the idle-dim delay (device-local; restarts the engine).
+//  * Speech Processing — playback buffer and the local end-of-speech "processing"
+//    cue (device-local).
+//  * Speech Detection — the Anamanti Core's end-of-speech VAD: engine (energy /
+//    Silero), silence window, voice-level threshold, Silero probability threshold
+//    (orchestrator-managed).
+//  * Background — idle-screen photo source (local gradients or a linked Google
+//    folder, on-device OAuth seam).
 //
 // Device-local settings are persisted with [SettingsStore]; remote settings are
-// applied on the Mac. Both happen when the user taps Save; the parent is notified
-// via [onApplied] so it can restart the engine and refresh the slideshow.
+// applied on the Mac. Both happen when the user taps Save (available from every
+// page); the parent is notified via [onApplied] so it can restart the engine and
+// refresh the slideshow.
 
 import 'package:flutter/material.dart';
 
@@ -22,8 +28,6 @@ import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 import 'package:anamanti_display/src/settings/settings_store.dart';
 import 'package:anamanti_display/src/slideshow/ambient_photos.dart';
 import 'package:anamanti_display/src/slideshow/drive_photos.dart';
-import 'package:anamanti_display/src/ui/memory_screen.dart';
-import 'package:anamanti_display/src/ui/people_screen.dart';
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
 /// is the orchestrator's backend label.
@@ -42,6 +46,21 @@ const Set<String> _kCloudBackends = {'anthropic', 'openai'};
 /// Display picker: 30s, 1m, 2m, 5m, 10m, 15m, 30m, 1h. The slider snaps between
 /// these presets rather than sweeping a continuous range. Kept in ascending order.
 const List<int> _kDimDelayPresets = <int>[30, 60, 120, 300, 600, 900, 1800, 3600];
+
+/// The top-level settings categories, shown as a menu; selecting one opens its
+/// page. Order matches the menu order.
+enum _SettingsCategory {
+  assistant('Assistant'),
+  deviceConfig('Device Config'),
+  speechProcessing('Speech Processing'),
+  speechDetection('Speech Detection'),
+  background('Background');
+
+  const _SettingsCategory(this.title);
+
+  /// The page's AppBar title.
+  final String title;
+}
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -82,6 +101,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _remoteLoading = true;
   String? _remoteError;
   bool _saving = false;
+
+  /// The open category page, or null while the top-level menu is shown.
+  _SettingsCategory? _category;
 
   // Ambient-link QR dialog state: whether a QR dialog is showing, and whether the
   // user cancelled (so a late-completing poll doesn't apply a link they aborted).
@@ -488,82 +510,125 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Settings'),
-        actions: [
-          _saving
-              ? const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              : TextButton(
-                  key: const Key('settings-save'),
-                  onPressed: _save,
-                  child: const Text('Save'),
+    final category = _category;
+    final atMenu = category == null;
+    return PopScope(
+      // At the menu, let the route pop (leave settings). On a category page,
+      // intercept the pop and return to the menu instead.
+      canPop: atMenu,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !atMenu) setState(() => _category = null);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          leading: atMenu
+              ? null
+              : IconButton(
+                  key: const Key('settings-back-to-menu'),
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'Settings',
+                  onPressed: () => setState(() => _category = null),
                 ),
-        ],
+          title: Text(atMenu ? 'Settings' : category.title),
+          actions: [
+            _saving
+                ? const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                : TextButton(
+                    key: const Key('settings-save'),
+                    onPressed: _save,
+                    child: const Text('Save'),
+                  ),
+          ],
+        ),
+        body: atMenu ? _menu() : _categoryPage(category),
       ),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        children: [
-          _section('Wake word'),
-          _wakeWordTile(),
-          _thresholdTile(),
-          const Divider(),
-          _section('Assistant'),
+    );
+  }
+
+  /// The top-level category menu.
+  Widget _menu() {
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        _menuTile(
+          _SettingsCategory.assistant,
+          Icons.smart_toy_outlined,
+          'LLM backend, model, and voice',
+        ),
+        _menuTile(
+          _SettingsCategory.deviceConfig,
+          Icons.tune,
+          'Wake word & display',
+        ),
+        _menuTile(
+          _SettingsCategory.speechProcessing,
+          Icons.graphic_eq,
+          'Playback buffer & processing cue',
+        ),
+        _menuTile(
+          _SettingsCategory.speechDetection,
+          Icons.record_voice_over,
+          'End-of-speech VAD & thresholds',
+        ),
+        _menuTile(
+          _SettingsCategory.background,
+          Icons.photo_library_outlined,
+          'Idle photo slideshow',
+        ),
+      ],
+    );
+  }
+
+  Widget _menuTile(_SettingsCategory category, IconData icon, String subtitle) {
+    return ListTile(
+      key: Key('settings-menu-${category.name}'),
+      leading: Icon(icon),
+      title: Text(category.title),
+      subtitle: Text(subtitle),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => setState(() => _category = category),
+    );
+  }
+
+  /// The body for a single category page.
+  Widget _categoryPage(_SettingsCategory category) {
+    final List<Widget> children;
+    switch (category) {
+      case _SettingsCategory.assistant:
+        children = [
           // Device-local: which orchestrator this display talks to. Shown above
           // (and outside) the orchestrator-fetched tiles so it stays usable even
           // when the selected orchestrator is offline.
           _orchestratorTile(),
           ..._assistantTiles(),
-          const Divider(),
-          _section('Idle photos'),
-          ..._photoTiles(),
+        ];
+      case _SettingsCategory.deviceConfig:
+        children = [
+          _section('Wake word'),
+          _wakeWordTile(),
+          _thresholdTile(),
+          ..._detectionTuningTiles(),
           const Divider(),
           _section('Display'),
           ..._displayTiles(),
-          const Divider(),
-          _section('Speech & detection'),
-          ..._detectionTuningTiles(),
-          ..._speechTiles(),
-          const Divider(),
-          _section('Memory'),
-          ListTile(
-            key: const Key('settings-memory'),
-            leading: const Icon(Icons.psychology_outlined),
-            title: const Text('Manage remembered facts'),
-            subtitle: const Text(
-              'View and delete what the assistant remembers',
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => MemoryScreen(client: widget.client),
-              ),
-            ),
-          ),
-          const Divider(),
-          _section('People'),
-          ListTile(
-            key: const Key('settings-people'),
-            leading: const Icon(Icons.groups_outlined),
-            title: const Text('Manage people'),
-            subtitle: const Text('Name the voices the assistant recognizes'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => PeopleScreen(client: widget.client),
-              ),
-            ),
-          ),
-          const SizedBox(height: 24),
-        ],
-      ),
+        ];
+      case _SettingsCategory.speechProcessing:
+        children = _speechTiles();
+      case _SettingsCategory.speechDetection:
+        children = _vadTiles();
+      case _SettingsCategory.background:
+        children = _photoTiles();
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [...children, const SizedBox(height: 24)],
     );
   }
 
@@ -863,7 +928,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ];
   }
 
-  List<Widget> _assistantTiles() {
+  /// Placeholder tiles shown for the orchestrator-managed sections (Assistant,
+  /// Speech Detection) while the Mac is being contacted or is unreachable. Returns
+  /// null once the remote settings have loaded, so the caller renders its controls.
+  List<Widget>? _remoteGuardTiles() {
     if (_remoteLoading) {
       return const [
         ListTile(
@@ -882,7 +950,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           leading: const Icon(Icons.cloud_off),
           title: const Text('Assistant offline'),
           subtitle: const Text(
-            'LLM and voice settings need the Mac to be reachable.',
+            'These settings need the Mac to be reachable.',
           ),
           trailing: TextButton(
             onPressed: _loadRemote,
@@ -891,6 +959,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ];
     }
+    return null;
+  }
+
+  List<Widget> _assistantTiles() {
+    final guard = _remoteGuardTiles();
+    if (guard != null) return guard;
     return [
       ListTile(
         leading: const Icon(Icons.smart_toy_outlined),
@@ -916,29 +990,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _authField(),
       _modelField(),
       _voiceField(),
-      // Orchestrator-side end-of-speech VAD tuning (applied on the Mac). Shortening
-      // the silence window cuts the wait before the reply; lowering the level helps
-      // a quiet far-field mic register as speech instead of hitting the slow timeout.
-      _rangeSlider(
-        label: 'End-of-speech wait (ms)',
-        value: _endSilenceMs.toDouble(),
-        min: 300,
-        max: 1500,
-        divisions: 24,
-        format: (v) => '${v.round()}',
-        sliderKey: const Key('settings-vad-silence'),
-        onChanged: (v) => setState(() => _endSilenceMs = v.round()),
-      ),
-      _rangeSlider(
-        label: 'Voice level threshold',
-        value: _voiceRmsThreshold,
-        min: 20,
-        max: 400,
-        divisions: 38,
-        format: (v) => '${v.round()}',
-        sliderKey: const Key('settings-vad-level'),
-        onChanged: (v) => setState(() => _voiceRmsThreshold = v),
-      ),
+    ];
+  }
+
+  /// Speech Detection: the Anamanti Core's end-of-speech VAD tuning, applied on the
+  /// Mac (orchestrator-managed). Shortening the silence window cuts the wait before
+  /// the reply; lowering the level helps a quiet far-field mic register as speech
+  /// instead of hitting the slow timeout. Also selects the VAD engine (energy vs
+  /// Silero) and, for Silero, its speech-probability threshold.
+  List<Widget> _vadTiles() {
+    final guard = _remoteGuardTiles();
+    if (guard != null) return guard;
+    return [
       // VAD engine selection (applied on the Mac; the energy⇄silero swap takes effect
       // without a restart). Silero is a neural detector — more robust to noise, but it
       // needs a Core built with the `vad-silero` feature + a model, else it falls back
@@ -971,6 +1034,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           sliderKey: const Key('settings-vad-silero-threshold'),
           onChanged: (v) => setState(() => _sileroThreshold = v),
         ),
+      _rangeSlider(
+        label: 'End-of-speech wait (ms)',
+        value: _endSilenceMs.toDouble(),
+        min: 300,
+        max: 1500,
+        divisions: 24,
+        format: (v) => '${v.round()}',
+        sliderKey: const Key('settings-vad-silence'),
+        onChanged: (v) => setState(() => _endSilenceMs = v.round()),
+      ),
+      _rangeSlider(
+        label: 'Voice level threshold',
+        value: _voiceRmsThreshold,
+        min: 20,
+        max: 400,
+        divisions: 38,
+        format: (v) => '${v.round()}',
+        sliderKey: const Key('settings-vad-level'),
+        onChanged: (v) => setState(() => _voiceRmsThreshold = v),
+      ),
     ];
   }
 
