@@ -968,6 +968,10 @@ pub struct FileSpotify {
     pub client_secret: Option<String>,
     pub refresh_token: Option<String>,
     pub device_name: Option<String>,
+    /// OAuth redirect URL for the consent flow (default
+    /// `http://127.0.0.1:8888/callback`). Must match a Redirect URI registered in the
+    /// Spotify app.
+    pub redirect_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1293,6 +1297,7 @@ impl Config {
             client_secret: nonempty(fc.spotify.client_secret),
             refresh_token: nonempty(fc.spotify.refresh_token),
             device_name: nonempty(fc.spotify.device_name),
+            redirect_url: nonempty(fc.spotify.redirect_url),
             scope: None,
         };
 

@@ -1399,13 +1399,15 @@ fn spotify_status_json(settings: &SharedSettings) -> String {
         "client_secret_set": s.client_secret.as_deref().is_some_and(|v| !v.is_empty()),
         "has_refresh_token": s.refresh_token.as_deref().is_some_and(|v| !v.is_empty()),
         "device_name": s.device_label(),
+        "redirect_url": s.redirect_url_or_default(),
     })
     .to_string()
 }
 
-/// `POST /spotify/save` — set the Spotify app client id/secret and device name. A
-/// blank or absent credential is left unchanged (a page reload never wipes a stored
-/// secret). Applying rebuilds the LLM so the `spotify_control` tool tracks linkage.
+/// `POST /spotify/save` — set the Spotify app client id/secret, device name, and OAuth
+/// redirect URL. A blank or absent value is left unchanged (a page reload never wipes a
+/// stored secret). Applying rebuilds the LLM so the `spotify_control` tool tracks
+/// linkage.
 fn spotify_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     let data: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -1422,6 +1424,7 @@ fn spotify_save_json(settings: &SharedSettings, body: &[u8]) -> String {
         client_id: opt_set("client_id"),
         client_secret: opt_set("client_secret"),
         device_name: opt_set("device_name"),
+        redirect_url: opt_set("redirect_url"),
         ..Default::default()
     });
     spotify_status_json(settings)
@@ -1429,8 +1432,9 @@ fn spotify_save_json(settings: &SharedSettings, body: &[u8]) -> String {
 
 /// `POST /spotify/link` — run the one-time Spotify OAuth consent using the stored
 /// client credentials (opens a browser on the Mac) and store the refresh token.
-/// Requires the redirect `http://127.0.0.1:8888/callback` to be registered in the
-/// Spotify app. On success the `spotify_control` tool activates immediately.
+/// Requires the configured redirect URL (default `http://127.0.0.1:8888/callback`) to
+/// be registered in the Spotify app. On success the `spotify_control` tool activates
+/// immediately.
 async fn spotify_link_json(settings: &SharedSettings) -> String {
     let s = settings.spotify();
     let (Some(cid), Some(secret)) = (
@@ -1443,10 +1447,11 @@ async fn spotify_link_json(settings: &SharedSettings) -> String {
         })
         .to_string();
     };
+    let redirect_url = s.redirect_url_or_default();
     let outcome = match crate::spotify_consent::run_consent(
         &cid,
         &secret,
-        crate::spotify_consent::DEFAULT_CONSENT_PORT,
+        &redirect_url,
         crate::spotify_consent::SPOTIFY_SCOPE,
         std::time::Duration::from_secs(180),
     )

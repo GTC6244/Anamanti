@@ -96,6 +96,28 @@ far end — transparent to `AudioRecord`/AudioFlinger.
 - [ ] **Set `persist.vendor.amznaec.log 0`** on this device for daily use — telemetry
       is currently on (`log 1`) from the install. (Same as follow-up #1 below.)
 
+### Re-verified live on hardware (2026-09-28)
+
+- [x] Confirmed on the connected Echo Show (serial `G0918309009403GL`): the shim
+      `/system/vendor/lib/libamznaec_shim.so` is present **and loaded** —
+      `LD_PRELOAD=libamznaec_shim.so` in the live `android.hardware.audio.service`
+      (pid 249) environ and the `.so` mapped in with an executable segment. Props:
+      `persist.vendor.amznaec.enable=1`, `persist.vendor.amznaec.log=1`. Engine =
+      Speex (no `persist.vendor.amznaec.engine`/`gain_db`/`spx_filter_ms` overrides set
+      → shim defaults, i.e. makeup `gain_db=20`, **not** the production unit's tuned 34).
+- [x] **Two gain levers for the low-mic-level / missed-onset problem** (2026-09-28):
+  - **Shim makeup gain (device-side, correct layer):** `persist.vendor.amznaec.gain_db`
+    is a root-only vendor prop the sandboxed app **cannot** set. Provision it with the
+    new **`anamanti-display/scripts/set-aec-gain.sh [GAIN_DB] [SERIAL]`** (default 34;
+    `adb root` + `setprop` + audio-HAL restart, revert with `… 20`).
+  - **In-app "Capture gain (dB)" setting (app-side, root-free analogue):** a new
+    device-local `AppSettings.captureGainDb` (0–36 dB, default 0 = no-op) applied in the
+    Rust engine to the resampled 16 kHz block **before** both the wake-word detector and
+    the streamed PCM (`engine/mod.rs`; `WakeWordConfig.capture_gain_db`). Settings →
+    Speech & detection → "Capture gain (dB)". Works on any unit, no root. Prefer tuning
+    the shim (device-wide, pre-AEC-independent) where you have adb; use the in-app gain
+    as the portable fallback. **Don't stack both aggressively** — double-boosting clips.
+
 **Remaining AEC follow-ups (device-side; not in this repo's build):**
 
 1. [ ] **Quiet the shim's debug logging** in daily use: `setprop

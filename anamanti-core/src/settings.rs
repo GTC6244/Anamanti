@@ -271,6 +271,11 @@ pub struct SpotifyConfig {
     /// librespot Connect device to target (default `"Ambient"` when unset).
     #[serde(default)]
     pub device_name: Option<String>,
+    /// OAuth **redirect URL** the consent flow listens on and sends to Spotify. `None`/
+    /// empty ⇒ the built-in default (`http://127.0.0.1:8888/callback`). Must exactly
+    /// match a Redirect URI registered in the Spotify app.
+    #[serde(default)]
+    pub redirect_url: Option<String>,
     /// OAuth scope granted (informational).
     #[serde(default)]
     pub scope: Option<String>,
@@ -298,6 +303,17 @@ impl SpotifyConfig {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("Ambient")
+            .to_string()
+    }
+
+    /// The OAuth redirect URL to use for consent, defaulting to the built-in loopback
+    /// callback ([`crate::spotify_consent::DEFAULT_REDIRECT_URL`]) when unset.
+    pub fn redirect_url_or_default(&self) -> String {
+        self.redirect_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::spotify_consent::DEFAULT_REDIRECT_URL)
             .to_string()
     }
 
@@ -375,6 +391,7 @@ pub struct SpotifyUpdate {
     pub client_secret: Option<Option<String>>,
     pub refresh_token: Option<Option<String>>,
     pub device_name: Option<Option<String>>,
+    pub redirect_url: Option<Option<String>>,
     pub scope: Option<Option<String>>,
 }
 
@@ -1540,6 +1557,9 @@ impl SharedSettings {
         }
         if let Some(v) = &update.device_name {
             target.device_name = v.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(v) = &update.redirect_url {
+            target.redirect_url = v.clone().filter(|s| !s.is_empty());
         }
         if let Some(v) = &update.scope {
             target.scope = v.clone().filter(|s| !s.is_empty());

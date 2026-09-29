@@ -1462,8 +1462,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordConfig dco_decode_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 20)
-      throw Exception('unexpected arr length: expect 20 but see ${arr.length}');
+    if (arr.length != 21)
+      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
     return WakeWordConfig(
       melspecModelPath: dco_decode_String(arr[0]),
       embeddingModelPath: dco_decode_String(arr[1]),
@@ -1477,14 +1477,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       smoothingWindow: dco_decode_u_32(arr[9]),
       fireOnPeak: dco_decode_bool(arr[10]),
       playbackBufferSecs: dco_decode_u_32(arr[11]),
-      useAudiorecord: dco_decode_bool(arr[12]),
-      micSource: dco_decode_u_32(arr[13]),
-      platformAec: dco_decode_bool(arr[14]),
-      platformAgc: dco_decode_bool(arr[15]),
-      platformNs: dco_decode_bool(arr[16]),
-      cameraProximity: dco_decode_bool(arr[17]),
-      proximityMotionThreshold: dco_decode_f_32(arr[18]),
-      proximityReleaseSecs: dco_decode_u_32(arr[19]),
+      captureGainDb: dco_decode_f_32(arr[12]),
+      useAudiorecord: dco_decode_bool(arr[13]),
+      micSource: dco_decode_u_32(arr[14]),
+      platformAec: dco_decode_bool(arr[15]),
+      platformAgc: dco_decode_bool(arr[16]),
+      platformNs: dco_decode_bool(arr[17]),
+      cameraProximity: dco_decode_bool(arr[18]),
+      proximityMotionThreshold: dco_decode_f_32(arr[19]),
+      proximityReleaseSecs: dco_decode_u_32(arr[20]),
     );
   }
 
@@ -1984,6 +1985,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_smoothingWindow = sse_decode_u_32(deserializer);
     var var_fireOnPeak = sse_decode_bool(deserializer);
     var var_playbackBufferSecs = sse_decode_u_32(deserializer);
+    var var_captureGainDb = sse_decode_f_32(deserializer);
     var var_useAudiorecord = sse_decode_bool(deserializer);
     var var_micSource = sse_decode_u_32(deserializer);
     var var_platformAec = sse_decode_bool(deserializer);
@@ -2005,6 +2007,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       smoothingWindow: var_smoothingWindow,
       fireOnPeak: var_fireOnPeak,
       playbackBufferSecs: var_playbackBufferSecs,
+      captureGainDb: var_captureGainDb,
       useAudiorecord: var_useAudiorecord,
       micSource: var_micSource,
       platformAec: var_platformAec,
@@ -2500,6 +2503,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.smoothingWindow, serializer);
     sse_encode_bool(self.fireOnPeak, serializer);
     sse_encode_u_32(self.playbackBufferSecs, serializer);
+    sse_encode_f_32(self.captureGainDb, serializer);
     sse_encode_bool(self.useAudiorecord, serializer);
     sse_encode_u_32(self.micSource, serializer);
     sse_encode_bool(self.platformAec, serializer);

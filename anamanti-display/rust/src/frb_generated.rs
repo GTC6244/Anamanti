@@ -1502,6 +1502,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_smoothingWindow = <u32>::sse_decode(deserializer);
         let mut var_fireOnPeak = <bool>::sse_decode(deserializer);
         let mut var_playbackBufferSecs = <u32>::sse_decode(deserializer);
+        let mut var_captureGainDb = <f32>::sse_decode(deserializer);
         let mut var_useAudiorecord = <bool>::sse_decode(deserializer);
         let mut var_micSource = <u32>::sse_decode(deserializer);
         let mut var_platformAec = <bool>::sse_decode(deserializer);
@@ -1523,6 +1524,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
             smoothing_window: var_smoothingWindow,
             fire_on_peak: var_fireOnPeak,
             playback_buffer_secs: var_playbackBufferSecs,
+            capture_gain_db: var_captureGainDb,
             use_audiorecord: var_useAudiorecord,
             mic_source: var_micSource,
             platform_aec: var_platformAec,
@@ -1977,6 +1979,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.smoothing_window.into_into_dart().into_dart(),
             self.fire_on_peak.into_into_dart().into_dart(),
             self.playback_buffer_secs.into_into_dart().into_dart(),
+            self.capture_gain_db.into_into_dart().into_dart(),
             self.use_audiorecord.into_into_dart().into_dart(),
             self.mic_source.into_into_dart().into_dart(),
             self.platform_aec.into_into_dart().into_dart(),
@@ -2460,6 +2463,7 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <u32>::sse_encode(self.smoothing_window, serializer);
         <bool>::sse_encode(self.fire_on_peak, serializer);
         <u32>::sse_encode(self.playback_buffer_secs, serializer);
+        <f32>::sse_encode(self.capture_gain_db, serializer);
         <bool>::sse_encode(self.use_audiorecord, serializer);
         <u32>::sse_encode(self.mic_source, serializer);
         <bool>::sse_encode(self.platform_aec, serializer);

@@ -38,7 +38,11 @@ class AppSettings {
     this.smoothingWindow = 2,
     this.fireOnPeak = false,
     this.playbackBufferSecs = 30,
+    this.captureGainDb = 0.0,
     this.useAudioRecord = true,
+    this.platformNs = true,
+    this.platformAgc = true,
+    this.platformAec = false,
     this.endpointCueEnabled = true,
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
@@ -83,10 +87,34 @@ class AppSettings {
   /// spoken reply so long TTS answers are not truncated. A/B-tunable.
   final int playbackBufferSecs;
 
+  /// Software capture gain in **decibels** applied to the resampled mic signal (both
+  /// the wake-word detector input and the streamed PCM). `0.0` = unity/no-op. Raise it
+  /// if a quiet far-field mic causes wake-word or speech-onset **misses** — the in-app,
+  /// root-free analogue of the AEC shim's `persist.vendor.amznaec.gain_db`. Engine
+  /// clamps to [0, 36] dB. A/B-tunable.
+  final double captureGainDb;
+
   /// **Android only.** Capture through the Kotlin `AudioRecord` layer
   /// (`VOICE_RECOGNITION` source + platform noise-suppression/AGC) instead of the
   /// default `cpal` path. A/B-tunable on-device to compare far-field pickup.
   final bool useAudioRecord;
+
+  /// **Android only.** Attach the platform `NoiseSuppressor` to the AudioRecord
+  /// session. On by default. Note: aggressive noise suppression can *distort*
+  /// speech and cause wake-word **misses** in a noisy room — turn this off to A/B
+  /// test far-field responsiveness. Only applies on the [useAudioRecord] path.
+  final bool platformNs;
+
+  /// **Android only.** Attach the platform `AutomaticGainControl` to the AudioRecord
+  /// session. On by default; helps the Echo Show's quiet far-field pickup. Only
+  /// applies on the [useAudioRecord] path.
+  final bool platformAgc;
+
+  /// **Android only.** Attach the platform `AcousticEchoCanceler` to the AudioRecord
+  /// session. Off by default — the host-side WebRTC APM does AEC and this device's
+  /// platform AEC was found not to actually cancel (see agents.md). Exposed as an
+  /// experimental lever. Only applies on the [useAudioRecord] path.
+  final bool platformAec;
 
   /// Whether the device shows a local "processing" cue the instant the user stops
   /// speaking, instead of waiting for the Mac's VAD + transcript round trip.
@@ -154,7 +182,11 @@ class AppSettings {
     int? smoothingWindow,
     bool? fireOnPeak,
     int? playbackBufferSecs,
+    double? captureGainDb,
     bool? useAudioRecord,
+    bool? platformNs,
+    bool? platformAgc,
+    bool? platformAec,
     bool? endpointCueEnabled,
     int? endpointSilenceMs,
     double? endpointRmsThreshold,
@@ -177,7 +209,11 @@ class AppSettings {
       smoothingWindow: smoothingWindow ?? this.smoothingWindow,
       fireOnPeak: fireOnPeak ?? this.fireOnPeak,
       playbackBufferSecs: playbackBufferSecs ?? this.playbackBufferSecs,
+      captureGainDb: captureGainDb ?? this.captureGainDb,
       useAudioRecord: useAudioRecord ?? this.useAudioRecord,
+      platformNs: platformNs ?? this.platformNs,
+      platformAgc: platformAgc ?? this.platformAgc,
+      platformAec: platformAec ?? this.platformAec,
       endpointCueEnabled: endpointCueEnabled ?? this.endpointCueEnabled,
       endpointSilenceMs: endpointSilenceMs ?? this.endpointSilenceMs,
       endpointRmsThreshold: endpointRmsThreshold ?? this.endpointRmsThreshold,
@@ -202,7 +238,11 @@ class AppSettings {
     'smoothingWindow': smoothingWindow,
     'fireOnPeak': fireOnPeak,
     'playbackBufferSecs': playbackBufferSecs,
+    'captureGainDb': captureGainDb,
     'useAudioRecord': useAudioRecord,
+    'platformNs': platformNs,
+    'platformAgc': platformAgc,
+    'platformAec': platformAec,
     'endpointCueEnabled': endpointCueEnabled,
     'endpointSilenceMs': endpointSilenceMs,
     'endpointRmsThreshold': endpointRmsThreshold,
@@ -252,9 +292,21 @@ class AppSettings {
         min: 2,
         max: 120,
       ),
+      captureGainDb: json['captureGainDb'] is num
+          ? (json['captureGainDb'] as num).toDouble().clamp(0.0, 36.0)
+          : defaults.captureGainDb,
       useAudioRecord: json['useAudioRecord'] is bool
           ? json['useAudioRecord'] as bool
           : defaults.useAudioRecord,
+      platformNs: json['platformNs'] is bool
+          ? json['platformNs'] as bool
+          : defaults.platformNs,
+      platformAgc: json['platformAgc'] is bool
+          ? json['platformAgc'] as bool
+          : defaults.platformAgc,
+      platformAec: json['platformAec'] is bool
+          ? json['platformAec'] as bool
+          : defaults.platformAec,
       endpointCueEnabled: json['endpointCueEnabled'] is bool
           ? json['endpointCueEnabled'] as bool
           : defaults.endpointCueEnabled,
@@ -316,7 +368,11 @@ class AppSettings {
       smoothingWindow == other.smoothingWindow &&
       fireOnPeak == other.fireOnPeak &&
       playbackBufferSecs == other.playbackBufferSecs &&
+      captureGainDb == other.captureGainDb &&
       useAudioRecord == other.useAudioRecord &&
+      platformNs == other.platformNs &&
+      platformAgc == other.platformAgc &&
+      platformAec == other.platformAec &&
       endpointCueEnabled == other.endpointCueEnabled &&
       endpointSilenceMs == other.endpointSilenceMs &&
       endpointRmsThreshold == other.endpointRmsThreshold &&
@@ -340,7 +396,13 @@ class AppSettings {
     smoothingWindow,
     fireOnPeak,
     playbackBufferSecs,
-    useAudioRecord,
+    Object.hash(
+      captureGainDb,
+      useAudioRecord,
+      platformNs,
+      platformAgc,
+      platformAec,
+    ),
     endpointCueEnabled,
     endpointSilenceMs,
     endpointRmsThreshold,
