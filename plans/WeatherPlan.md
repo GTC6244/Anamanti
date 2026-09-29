@@ -5,6 +5,10 @@
 panel + a **10-hour hourly row** along the bottom); and **always**, on the idle/home
 screen, a small weather icon + the current temperature sit beside the clock.
 
+> The `WeatherView` / `SevenDayView` full-screen modes and the weather-beside-clock
+> chip are catalogued alongside the rest of the Display's UI in
+> [`DisplayUI.md`](./DisplayUI.md) — update it there when this screen changes.
+
 > **Status:** **Implemented (2026-09-25), pending on-device QA.** Built and tested: the
 > `weather_lookup` / `close_weather` rig tools + the Open-Meteo provider (Anamanti Core,
 > new unit tests), the `anamanti-weather` Wyoming frame (round-trip tested in both

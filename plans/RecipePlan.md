@@ -4,6 +4,9 @@
 **Feature:** hands-free recipes — *"show me a recipe for carbonara"* → a full recipe
 appears on the display with **Overview / Ingredients / Steps** tabs to cook along.
 
+> The `RecipeView` full-screen mode is catalogued alongside the rest of the Display's
+> UI in [`DisplayUI.md`](./DisplayUI.md) — update it there when this screen changes.
+
 > **Status:** **Implemented (2026-09-24), pending on-device QA.** P1–P4 below are
 > built and tested — the `recipe_lookup`/`close_recipe` rig tools + JSON-LD parser
 > (Anamanti Core, 9 new unit tests), the `anamanti-recipe` Wyoming frame (round-trip

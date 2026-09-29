@@ -95,6 +95,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 ### 2.2 Flutter UI (Echo Show)
 
+> **Full on-screen UI inventory:** [`DisplayUI.md`](./DisplayUI.md) is the canonical
+> catalog of every element that can appear on the Display — backgrounds, overlays,
+> widgets, banners, full-screen views, status indicators, and settings — grouped by
+> category with file paths and triggers. Keep it updated when you add or change UI.
+
 - Always-on landscape layout tuned for the 8-inch display.
 - Consumes FRB-generated `StreamSink` events; no polling.
 - Primary states: **idle/ambient**, **live transcript**, **thinking**,
