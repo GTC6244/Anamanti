@@ -23,6 +23,13 @@ class WakeWordDefaults {
   static const int smoothingWindow = 2;
   static const bool fireOnPeak = false;
   static const int playbackBufferSecs = 30;
+
+  /// Software capture gain in dB applied to the resampled mic signal (both the
+  /// wake-word detector input and the streamed PCM). `0` = unity/no-op. The in-app,
+  /// root-free analogue of the AEC shim's `persist.vendor.amznaec.gain_db` makeup
+  /// gain — raise it if a quiet far-field mic causes wake-word/onset misses. Engine
+  /// clamps to [0, 36] dB.
+  static const double captureGainDb = 0.0;
   static const int discoveryTimeoutSecs = 3;
   static const int turnTimeoutSecs = 15;
 
@@ -78,6 +85,7 @@ Future<WakeWordConfig> buildWakeWordConfig({
   int smoothingWindow = WakeWordDefaults.smoothingWindow,
   bool fireOnPeak = WakeWordDefaults.fireOnPeak,
   int playbackBufferSecs = WakeWordDefaults.playbackBufferSecs,
+  double captureGainDb = WakeWordDefaults.captureGainDb,
   bool useAudioRecord = WakeWordDefaults.useAudioRecord,
   int micSource = WakeWordDefaults.micSource,
   bool platformAec = WakeWordDefaults.platformAec,
@@ -102,6 +110,7 @@ Future<WakeWordConfig> buildWakeWordConfig({
     smoothingWindow: smoothingWindow,
     fireOnPeak: fireOnPeak,
     playbackBufferSecs: playbackBufferSecs,
+    captureGainDb: captureGainDb,
     useAudiorecord: useAudioRecord,
     micSource: micSource,
     platformAec: platformAec,
@@ -125,7 +134,11 @@ Future<WakeWordConfig> buildWakeWordConfigFrom(AppSettings settings) {
     smoothingWindow: settings.smoothingWindow,
     fireOnPeak: settings.fireOnPeak,
     playbackBufferSecs: settings.playbackBufferSecs,
+    captureGainDb: settings.captureGainDb,
     useAudioRecord: settings.useAudioRecord,
+    platformNs: settings.platformNs,
+    platformAgc: settings.platformAgc,
+    platformAec: settings.platformAec,
     // How long the screen stays bright after the room goes quiet before dimming to
     // the away-mode clock — the proximity detector's release window (Plan.MD §5).
     proximityReleaseSecs: settings.dimDelaySecs,

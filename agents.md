@@ -70,9 +70,12 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **Playback:** Rust (`cpal`/`oboe`), symmetric with capture.
 - **Barge-in:** wake word stays active during playback; saying it again flushes
   playback immediately and starts a fresh turn, and sends an `anamanti-interrupt`
-  frame so the Anamanti Core aborts the in-flight LLM + TTS. **AEC is not shipped**
-  (investigated on hardware — see below; self-triggering during loud playback is a
-  known, accepted limitation).
+  frame so the Anamanti Core aborts the in-flight LLM + TTS. **In-app AEC is not part
+  of this build**, but echo cancellation *is* provided at the device layer by a
+  required audio-HAL shim (`libamznaec_shim.so` — SpeexDSP linear AEC against the Echo
+  Show's DAC loopback, ~16 dB, talker-preserving), so barge-in over playback yields
+  clean transcripts. See the AEC-interim decision + risk section below, architecture.md
+  §4, and TODO.md §2.
 - **VAD:** off-device — the **Anamanti Core** decides end-of-speech (energy VAD;
   faster-whisper has no streaming VAD, so the Mac sends `audio-stop`). The device
   never runs its own VAD.
@@ -94,10 +97,13 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **Resilience:** **auto-reconnect** with backoff via mDNS + a subtle
   disconnected indicator; wake words queue until reconnected.
 - **AEC interim:** raise the wake-word confidence **threshold during playback** to
-  suppress self-triggers. Real AEC was attempted on hardware and deferred — the
+  suppress self-triggers. In-app AEC was attempted on hardware and deferred — the
   `VOICE_COMMUNICATION` preset doesn't cancel on this device, and software AEC is
-  net-negative for flush-on-wake barge-in (no simultaneous echo to cancel). See the
-  risk section below.
+  net-negative for flush-on-wake barge-in (no simultaneous echo to cancel). Echo
+  cancellation is instead delivered **outside this build** by a required device-side
+  audio-HAL shim (`libamznaec_shim.so`, SpeexDSP, ~16 dB) — see the risk section below,
+  architecture.md §4, and TODO.md §2. The raised threshold remains the in-app
+  mitigation layered on top.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
 - **Proactive notifications (Approach A):** the Anamanti Core can push **visual**
@@ -463,7 +469,15 @@ Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
 
 ## Remaining risk to watch (see Plan.MD §4)
 
-**AEC (echo cancellation) — investigated on hardware, not shipped.** Findings:
+**AEC (echo cancellation) — SOLVED at the device layer (2026-09), not in-app.** A
+vendor audio-HAL shim (`libamznaec_shim.so`, `LD_PRELOAD`ed into
+`android.hardware.audio.service`) runs SpeexDSP linear AEC against the Echo Show's
+sample-aligned DAC loopback, giving ~16 dB talker-preserving cancellation before
+`AudioRecord` ever sees the mic — so barge-in over playback now produces clean
+transcripts. It is a **device prerequisite**, not part of this build (source +
+reversible install: <https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim>;
+architecture.md §4, TODO.md §2). Live-verified present + loaded on hardware
+(2026-09-28). The in-app approaches below were investigated and **not** shipped:
 - Platform AEC via the AAudio `VOICE_COMMUNICATION` input preset is reachable and does
   **not** break the wake word (on a release build), but it does **not actually cancel**
   the device's own playback here (measured mic RMS ~0.1 during playback vs ~0.003 idle)
@@ -476,8 +490,9 @@ Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
   cancel echo, VAD-detect the user) with a production AEC (AEC3/speexdsp + double-talk
   detector + residual suppressor), or coordinate the platform audio mode
   (`MODE_IN_COMMUNICATION` + routed output) so the hardware AEC references the render
-  stream. For now the shipping mitigation is the raised wake-word threshold during
-  playback, and self-triggering over loud playback is an accepted limitation.
+  stream — which is exactly what the device-side HAL shim above now does. The raised
+  wake-word threshold during playback remains the in-app mitigation for self-triggering,
+  layered on top of the shim's cancellation.
 - **On-device testing MUST use `--release` APKs** — debug Rust makes tract-onnx
   inference ~3.6× slower on the 32-bit device, which starves the wake-word loop and
   masquerades as unrelated audio bugs.
