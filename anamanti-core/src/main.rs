@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 
-use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind};
+use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind, VadEngineKind};
 use anamanti_core::discovery::MdnsAdvertiser;
 use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
 use anamanti_core::notify::NotificationService;
@@ -234,6 +234,49 @@ async fn run() -> Result<()> {
             }
         }
     }
+
+    // End-of-speech VAD engine (plans/VadSileroPlan.md). The engine is runtime-swappable
+    // from the config page / device (energy ⇄ silero), so on a `vad-silero` build we load
+    // the Silero model whenever it's available — even when the boot engine is energy — so
+    // a later swap works without a restart. `silero` needs the `vad-silero` feature + a
+    // model file; loading is fatal only when the *seeded* engine is already silero (a
+    // misconfigured production start should fail loud, not silently run energy). The
+    // seeded engine already reflects the config seed overlaid by any persisted value.
+    let seeded_vad = pipeline.settings().snapshot().vad_engine;
+    #[cfg(feature = "vad-silero")]
+    {
+        let model_path = config.vad.silero.model_path.clone();
+        let want_silero = matches!(seeded_vad, VadEngineKind::Silero);
+        match anamanti_core::vad::SileroModel::load(&model_path) {
+            Ok(model) => {
+                log::info!(
+                    "Silero VAD model loaded ({}); engine is live-swappable",
+                    model_path.display()
+                );
+                pipeline = pipeline.with_silero(model);
+            }
+            Err(e) if want_silero => {
+                return Err(e).with_context(|| {
+                    format!("loading Silero VAD model {}", model_path.display())
+                });
+            }
+            Err(e) => {
+                log::warn!(
+                    "Silero VAD model unavailable ({e:#}); energy VAD only — a runtime swap \
+                     to silero will fall back until a model exists at {}",
+                    model_path.display()
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "vad-silero"))]
+    if matches!(seeded_vad, VadEngineKind::Silero) {
+        anyhow::bail!(
+            "vad.engine = silero, but this binary was built without the `vad-silero` \
+             feature; rebuild with `--features vad-silero`"
+        );
+    }
+    log::info!("VAD engine (boot): {}", seeded_vad.as_label());
 
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
         stt_addr: config.stt_addr,

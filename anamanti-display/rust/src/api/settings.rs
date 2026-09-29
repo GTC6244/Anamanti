@@ -42,6 +42,10 @@ pub struct OrchestratorSettings {
     pub end_silence_ms: u32,
     /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
     pub voice_rms_threshold: f64,
+    /// Orchestrator VAD engine label: `energy` or `silero` (empty if unknown).
+    pub vad_engine: String,
+    /// Orchestrator VAD: Silero speech-probability gate, `0.0..1.0` (0 if unknown).
+    pub silero_threshold: f64,
 }
 
 /// One selectable LLM model for the settings model dropdown, as reported by the
@@ -155,6 +159,10 @@ pub struct SettingsUpdate {
     pub end_silence_ms: Option<u32>,
     /// New orchestrator VAD speech RMS threshold, or `None` to leave it.
     pub voice_rms_threshold: Option<f64>,
+    /// New VAD engine label (`energy`/`silero`), or `None` to leave it unchanged.
+    pub vad_engine: Option<String>,
+    /// New Silero speech-probability gate (`0.0..1.0`), or `None` to leave it.
+    pub silero_threshold: Option<f64>,
 }
 
 fn timeout(secs: u64) -> Duration {

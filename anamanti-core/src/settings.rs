@@ -78,6 +78,11 @@ pub const DEFAULT_END_SILENCE_MS: u64 = 700;
 /// noisy room, lower it for a very quiet mic.
 pub const DEFAULT_VOICE_RMS_THRESHOLD: f64 = 180.0;
 
+/// Default Silero speech-probability gate (0.0..1.0). Used when neither the config
+/// file's `vad.silero.threshold` nor a persisted value is present. A frame counts as
+/// speech when its Silero probability is `>= this`.
+pub const DEFAULT_SILERO_THRESHOLD: f32 = 0.5;
+
 fn default_end_silence_ms() -> u64 {
     DEFAULT_END_SILENCE_MS
 }
@@ -465,6 +470,14 @@ pub struct PersistedSettings {
     /// Speech-vs-noise RMS threshold (VAD). Defaulted for older files.
     #[serde(default = "default_voice_rms_threshold")]
     pub voice_rms_threshold: f64,
+    /// Silero speech-probability gate (neural VAD), `0.0..1.0`. `Option` so an older
+    /// file (absent) keeps the config-file seed rather than forcing a default.
+    #[serde(default)]
+    pub silero_threshold: Option<f32>,
+    /// VAD engine label (`energy`/`silero`). `Option` so an older file (absent) keeps
+    /// the config-file `vad.engine` seed.
+    #[serde(default)]
+    pub vad_engine: Option<String>,
     /// Google Drive photo-slideshow credentials + linkage. Defaulted (empty) for
     /// older files.
     #[serde(default)]
@@ -821,6 +834,12 @@ pub struct RuntimeSettings {
     pub end_silence_ms: u64,
     /// RMS (i16 units) above which a chunk counts as speech for the VAD.
     pub voice_rms_threshold: f64,
+    /// Silero speech-probability gate (`0.0..1.0`) for the neural VAD engine.
+    /// A/B-tunable from the device / config page; read from the per-turn snapshot.
+    pub silero_threshold: f32,
+    /// Which VAD engine decides end-of-speech (energy default, or silero). Live-swappable
+    /// from the config page; a swap to silero with no model loaded falls back to energy.
+    pub vad_engine: crate::config::VadEngineKind,
     /// Google Drive photo-slideshow credentials + linkage (orchestrator-owned;
     /// pulled by the device over Wyoming). Orthogonal to the LLM rebuild path.
     pub drive: DriveConfig,
@@ -948,6 +967,10 @@ pub struct SettingsView {
     pub end_silence_ms: u64,
     /// Speech-vs-noise RMS threshold for the VAD.
     pub voice_rms_threshold: f64,
+    /// Silero speech-probability gate (`0.0..1.0`) for the neural VAD engine.
+    pub silero_threshold: f32,
+    /// The active VAD engine (energy / silero).
+    pub vad_engine: crate::config::VadEngineKind,
 }
 
 /// A requested settings change. Absent fields are left unchanged; a `tts_voice` of
@@ -980,6 +1003,10 @@ pub struct SettingsUpdate {
     pub end_silence_ms: Option<u64>,
     /// New speech-vs-noise RMS threshold for the VAD, or `None` to leave it.
     pub voice_rms_threshold: Option<f64>,
+    /// New Silero speech-probability gate (`0.0..1.0`), or `None` to leave it.
+    pub silero_threshold: Option<f32>,
+    /// Switch the VAD engine (energy / silero), or `None` to leave it unchanged.
+    pub vad_engine: Option<crate::config::VadEngineKind>,
 }
 
 /// Thread-safe holder for the runtime settings plus the factory that rebuilds
@@ -1028,6 +1055,8 @@ impl SharedSettings {
             tts_voice: s.tts_voice.clone(),
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
+            silero_threshold: Some(s.silero_threshold),
+            vad_engine: Some(s.vad_engine.as_label().to_string()),
             drive: s.drive.clone(),
             household: s.household.clone(),
             spotify: s.spotify.clone(),
@@ -1091,6 +1120,8 @@ impl SharedSettings {
                 tts_voice,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -1133,6 +1164,8 @@ impl SharedSettings {
             search_key_set: s.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
+            silero_threshold: s.silero_threshold,
+            vad_engine: s.vad_engine,
         }
     }
 
@@ -1276,6 +1309,12 @@ impl SharedSettings {
         if let Some(thr) = update.voice_rms_threshold {
             w.voice_rms_threshold = thr.clamp(0.0, 5000.0);
         }
+        if let Some(t) = update.silero_threshold {
+            w.silero_threshold = t.clamp(0.0, 1.0);
+        }
+        if let Some(e) = update.vad_engine {
+            w.vad_engine = e;
+        }
         let view = SettingsView {
             llm_backend: w.llm_backend.clone(),
             llm_model: w.llm_model.clone(),
@@ -1297,6 +1336,8 @@ impl SharedSettings {
             search_key_set: w.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
             end_silence_ms: w.end_silence_ms,
             voice_rms_threshold: w.voice_rms_threshold,
+            silero_threshold: w.silero_threshold,
+            vad_engine: w.vad_engine,
         };
         // Persist the new state (best-effort) after dropping the write lock so IO
         // never blocks a concurrent turn's snapshot.
@@ -1975,6 +2016,8 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2105,6 +2148,8 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2130,6 +2175,58 @@ mod tests {
         assert_eq!(p.search_provider, "tavily");
         assert_eq!(p.search_api_key.as_deref(), Some("tvly-secret"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_sets_and_clamps_silero_threshold() {
+        let s = shared(factory_with_key(None));
+        // In range: applied verbatim, reflected in the view and the per-turn snapshot.
+        let view = s
+            .apply(&SettingsUpdate {
+                silero_threshold: Some(0.35),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.silero_threshold, 0.35);
+        assert_eq!(s.snapshot().silero_threshold, 0.35);
+        // Out-of-range values clamp to [0, 1] so a bad request can't wedge the gate.
+        let hi = s
+            .apply(&SettingsUpdate {
+                silero_threshold: Some(9.0),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hi.silero_threshold, 1.0);
+        let lo = s
+            .apply(&SettingsUpdate {
+                silero_threshold: Some(-1.0),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(lo.silero_threshold, 0.0);
+    }
+
+    #[test]
+    fn apply_swaps_the_vad_engine() {
+        use crate::config::VadEngineKind;
+        let s = shared(factory_with_key(None));
+        assert_eq!(s.snapshot().vad_engine, VadEngineKind::Energy);
+        let view = s
+            .apply(&SettingsUpdate {
+                vad_engine: Some(VadEngineKind::Silero),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.vad_engine, VadEngineKind::Silero);
+        assert_eq!(s.snapshot().vad_engine, VadEngineKind::Silero);
+        // And back.
+        let view = s
+            .apply(&SettingsUpdate {
+                vad_engine: Some(VadEngineKind::Energy),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.vad_engine, VadEngineKind::Energy);
     }
 
     #[test]
@@ -2259,6 +2356,8 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2402,6 +2501,8 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2475,6 +2576,8 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2556,6 +2659,8 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2628,6 +2733,8 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),

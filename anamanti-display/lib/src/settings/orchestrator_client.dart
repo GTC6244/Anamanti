@@ -19,6 +19,8 @@ class OrchestratorSettingsView {
     this.ttsVoice,
     this.endSilenceMs = 0,
     this.voiceRmsThreshold = 0,
+    this.vadEngine = '',
+    this.sileroThreshold = 0,
   });
 
   final bool ok;
@@ -35,6 +37,12 @@ class OrchestratorSettingsView {
 
   /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
   final double voiceRmsThreshold;
+
+  /// Orchestrator VAD engine: `energy` or `silero` (empty if unknown).
+  final String vadEngine;
+
+  /// Orchestrator VAD: Silero speech-probability gate, 0.0–1.0 (0 if unknown).
+  final double sileroThreshold;
 }
 
 /// One selectable LLM model for the settings model dropdown (last 12 months).
@@ -193,6 +201,8 @@ abstract class OrchestratorClient {
     String? ttsVoice,
     int? endSilenceMs,
     double? voiceRmsThreshold,
+    String? vadEngine,
+    double? sileroThreshold,
   });
 
   /// The selectable LLM models for the model dropdown (Anthropic + OpenAI, each
@@ -274,6 +284,8 @@ class FrbOrchestratorClient implements OrchestratorClient {
     String? ttsVoice,
     int? endSilenceMs,
     double? voiceRmsThreshold,
+    String? vadEngine,
+    double? sileroThreshold,
   }) async {
     final result = await frb.updateOrchestratorSettings(
       orchestratorKey: orchestratorKey,
@@ -285,6 +297,8 @@ class FrbOrchestratorClient implements OrchestratorClient {
         ttsVoice: ttsVoice,
         endSilenceMs: endSilenceMs,
         voiceRmsThreshold: voiceRmsThreshold,
+        vadEngine: vadEngine,
+        sileroThreshold: sileroThreshold,
       ),
       discoveryTimeoutSecs: _timeout,
     );
@@ -410,5 +424,7 @@ class FrbOrchestratorClient implements OrchestratorClient {
         ttsVoice: s.ttsVoice,
         endSilenceMs: s.endSilenceMs,
         voiceRmsThreshold: s.voiceRmsThreshold,
+        vadEngine: s.vadEngine,
+        sileroThreshold: s.sileroThreshold,
       );
 }
