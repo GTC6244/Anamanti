@@ -39,11 +39,12 @@
     <input id="sp_cid" type="text" placeholder="Client ID" style="min-width:16rem">
     <input id="sp_secret" type="password" placeholder="Client secret (blank = keep)" style="min-width:16rem">
     <input id="sp_dev" type="text" placeholder="Device name (default Ambient)" style="min-width:12rem">
+    <input id="sp_redirect" type="text" placeholder="Redirect URL (default http://127.0.0.1:8888/callback)" style="min-width:22rem">
     <button class="primary" onclick="spotifySave()">Save</button>
     <button onclick="spotifyLink()">Connect Spotify</button>
     <span id="spmsg" class="muted"></span>
   </div>
-  <p class="hint" style="margin:0.5rem 0 0">First register <code>http://127.0.0.1:8888/callback</code> as a Redirect URI in your Spotify app. "Connect Spotify" opens a browser on the Mac; approve access, then return here. The <code>spotify_control</code> voice tool activates immediately on success.</p>
+  <p class="hint" style="margin:0.5rem 0 0">First register <code id="sp_redirect_code">http://127.0.0.1:8888/callback</code> (the Redirect URL above) as a Redirect URI in your Spotify app. "Connect Spotify" opens a browser on the Mac; approve access, then return here. The <code>spotify_control</code> voice tool activates immediately on success.</p>
 </div>
 <script>
 async function proc(key, action){
@@ -122,6 +123,10 @@ async function spotifyLoad(){
                       : '<span class="badge">no credentials</span>');
     el.innerHTML = 'Status: ' + state + ' &nbsp; device: <code>' + esc(j.device_name || 'Ambient') + '</code>';
     if(j.device_name) document.getElementById('sp_dev').placeholder = esc(j.device_name);
+    if(j.redirect_url){
+      document.getElementById('sp_redirect').placeholder = esc(j.redirect_url);
+      document.getElementById('sp_redirect_code').textContent = j.redirect_url;
+    }
   }catch(e){ document.getElementById('sp').textContent = 'Request failed: ' + e; }
 }
 async function spotifySave(){
@@ -130,6 +135,7 @@ async function spotifySave(){
     client_id: document.getElementById('sp_cid').value.trim(),
     client_secret: document.getElementById('sp_secret').value,
     device_name: document.getElementById('sp_dev').value.trim(),
+    redirect_url: document.getElementById('sp_redirect').value.trim(),
   };
   try{
     const r = await fetch('/spotify/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
