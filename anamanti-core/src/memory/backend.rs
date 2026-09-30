@@ -16,11 +16,27 @@
 //! selected, so nothing about settings/voice management changes.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use super::MemoryStore;
+
+/// The outcome of a recall: the context snippets plus an optional per-stage latency
+/// split. Only the GraphRAG backend fills the two timings — the query-embedding
+/// network round-trip (`embed_ms`) versus the local HelixDB vector KNN + graph
+/// expansion (`search_ms`) — so the `/chatlog` page can show them as two separate
+/// rows. SQLite FTS leaves both `None` (it does neither).
+#[derive(Debug, Clone, Default)]
+pub struct RecallResult {
+    /// Context snippets, most relevant first, de-duplicated, capped to `limit`.
+    pub hits: Vec<String>,
+    /// Query-embedding round-trip latency in ms (GraphRAG only; the OpenAI call).
+    pub embed_ms: Option<u64>,
+    /// Local vector KNN + graph-expansion latency in ms (GraphRAG only).
+    pub search_ms: Option<u64>,
+}
 
 /// Produces the memory context lines for a turn. `Send + Sync` for sharing behind
 /// an `Arc` across concurrent turns.
@@ -28,13 +44,29 @@ use super::MemoryStore;
 pub trait Recall: Send + Sync {
     /// Return up to `limit` context snippets relevant to `transcript` for the given
     /// speaker (`None` = shared/household scope), most relevant first, already
-    /// de-duplicated. A speaker's own memories plus shared ones are in scope.
+    /// de-duplicated, wrapped in a [`RecallResult`] whose optional per-stage timings
+    /// the caller records for the timing logs. A speaker's own memories plus shared
+    /// ones are in scope.
     async fn recall(
         &self,
         transcript: &str,
         speaker_id: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<String>>;
+    ) -> Result<RecallResult>;
+
+    /// Short, stable id of this backend for the timing logs: `"helix"` (embedded
+    /// HelixDB GraphRAG) or `"sqlite-fts"`. Defaults to FTS so any future backend
+    /// opts in explicitly.
+    fn backend(&self) -> &'static str {
+        "sqlite-fts"
+    }
+
+    /// Whether a recall of a non-empty transcript issues a query-embedding network
+    /// call (OpenAI embeddings). `true` for GraphRAG, `false` for pure-local FTS.
+    /// This is the dominant, variable component of a recall's latency.
+    fn embeds_query(&self) -> bool {
+        false
+    }
 }
 
 /// SQLite FTS recall — the default backend (unchanged Phase-4 behavior).
@@ -55,9 +87,13 @@ impl Recall for SqliteRecall {
         transcript: &str,
         speaker_id: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<String>> {
+    ) -> Result<RecallResult> {
         let hits = self.memory.search_scoped(transcript, speaker_id, limit)?;
-        Ok(hits.into_iter().map(|m| m.content).collect())
+        Ok(RecallResult {
+            hits: hits.into_iter().map(|m| m.content).collect(),
+            // FTS is purely local: no embedding, no separate graph stage to split out.
+            ..Default::default()
+        })
     }
 }
 
@@ -90,12 +126,31 @@ mod helix_recall {
             transcript: &str,
             speaker_id: Option<&str>,
             limit: usize,
-        ) -> Result<Vec<String>> {
+        ) -> Result<RecallResult> {
             if transcript.trim().is_empty() {
-                return Ok(Vec::new());
+                return Ok(RecallResult::default());
             }
+            // Time the two stages separately: the OpenAI embedding round-trip (the
+            // variable, network-bound cost) vs. the local vector KNN + graph hop.
+            let t0 = Instant::now();
             let qvec = self.embedder.embed_one(transcript).await?;
-            self.helix.recall(qvec, speaker_id, self.k, limit).await
+            let embed_ms = t0.elapsed().as_millis() as u64;
+            let t1 = Instant::now();
+            let hits = self.helix.recall(qvec, speaker_id, self.k, limit).await?;
+            let search_ms = t1.elapsed().as_millis() as u64;
+            Ok(RecallResult {
+                hits,
+                embed_ms: Some(embed_ms),
+                search_ms: Some(search_ms),
+            })
+        }
+
+        fn backend(&self) -> &'static str {
+            "helix"
+        }
+
+        fn embeds_query(&self) -> bool {
+            true
         }
     }
 }
@@ -123,10 +178,13 @@ mod tests {
             )
             .unwrap();
         let recall = SqliteRecall::new(store);
-        let hits = recall
+        let res = recall
             .recall("what music do I like", None, 5)
             .await
             .unwrap();
-        assert!(hits.iter().any(|h| h.contains("jazz")));
+        assert!(res.hits.iter().any(|h| h.contains("jazz")));
+        // FTS reports no per-stage split.
+        assert_eq!(res.embed_ms, None);
+        assert_eq!(res.search_ms, None);
     }
 }

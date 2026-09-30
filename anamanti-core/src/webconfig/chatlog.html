@@ -40,7 +40,25 @@ function timingRows(t){
     rows.push(['System-1 decision' + (x.length?' ('+x.join(', ')+')':''), t.system1_ms]);
   }
   if(t.fetch_ms!=null) rows.push(['Fast-path fetch (e.g. weather forecast)', t.fetch_ms]);
-  if(t.recall_ms!=null) rows.push(['Memory recall', t.recall_ms]);
+  if(t.recall_ms!=null){
+    // When Helix ran, split the grouped recall into its two stages: the OpenAI
+    // query-embedding round-trip (the variable, network-bound cost) and the local
+    // HelixDB vector KNN + graph expansion. Otherwise show one grouped row.
+    if(t.recall_backend==='helix' && (t.recall_embed_ms!=null || t.recall_search_ms!=null)){
+      if(t.recall_embed_ms!=null) rows.push(['Memory recall — query embedding (OpenAI)', t.recall_embed_ms]);
+      if(t.recall_search_ms!=null) rows.push(['Memory recall — graph search (HelixDB GraphRAG)', t.recall_search_ms]);
+    } else {
+      let src = '';
+      if(t.recall_backend==='helix') src = 'HelixDB GraphRAG';
+      else if(t.recall_backend==='sqlite-fts') src = 'SQLite FTS';
+      else if(t.recall_backend) src = t.recall_backend;
+      let emb = '';
+      if(t.recall_embedded===true) emb = ', OpenAI embedding';
+      else if(t.recall_embedded===false) emb = ', no embedding';
+      const suffix = src ? ' ('+src+emb+')' : '';
+      rows.push(['Memory recall'+suffix, t.recall_ms]);
+    }
+  }
   if(t.prompt_ms!=null) rows.push(['Prompt build', t.prompt_ms]);
   if(t.llm_ms!=null) rows.push(['LLM — time to first reply token', t.llm_ms]);
   if(t.tts_ms!=null) rows.push(['TTS — first chunk synthesis', t.tts_ms]);
