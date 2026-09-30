@@ -124,6 +124,29 @@ void main() {
     expect(dim.copyWith(audioPlaying: true).screenAwake, isTrue);
   });
 
+  test('a wake-word detection wakes the screen even while the camera reports absent',
+      () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+    )..start();
+    addTearDown(controller.dispose);
+
+    // Dim: the camera released presence and no turn is in flight.
+    engine.add(_presence(false));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.userPresent, isFalse);
+    expect(controller.state.screenAwake, isFalse);
+
+    // The wake word fires → the turn starts (phase: listening), so the screen must
+    // wake to full brightness immediately, without waiting on a camera motion flip.
+    engine.add(_event(WakeWordEventKind.detected));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.phase, TurnPhase.listening);
+    expect(controller.state.screenAwake, isTrue);
+  });
+
   test('presence(true) drives the backlight to full even after a dedup no-op',
       () async {
     final calls = <double>[];
