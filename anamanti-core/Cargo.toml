@@ -23,6 +23,15 @@ name = "aec_spike"
 required-features = ["aec"]
 
 [features]
+# `vad-silero` is ON by default (2026-09-30): the neural Silero VAD is the committed
+# end-of-speech engine (`VadConfig::default().engine == Silero`), so a plain
+# `cargo build --release` compiles it in and a plain run boots on Silero. This pulls a
+# prebuilt onnxruntime binary at build time and REQUIRES the Silero v4 model on disk
+# (`scripts/fetch-vad-model.sh <dir>`) — a `silero` boot with no model is a HARD ERROR
+# (fail-loud). To build the old energy-only Core (no onnxruntime, no model needed), use
+# `--no-default-features` (add back any other features you want). See VadSileroPlan.md §5 (M3).
+default = ["vad-silero"]
+
 # The embedded HelixDB GraphRAG memory backend (deps `db`/`helix-ast`), the
 # rig-core agent framework (`rig-core`, powering the LLM tool/web-search path), and
 # the ECAPA-TDNN ONNX voiceprint embedder (pure-Rust `tract-onnx`; speaker_id_plan.md
@@ -55,10 +64,11 @@ stt-whisper-local = ["dep:whisper-rs"]
 stt-whisper-metal = ["stt-whisper-local", "whisper-rs/metal"]
 stt-whisper-coreml = ["stt-whisper-local", "whisper-rs/coreml"]
 
-# `vad-silero` compiles the neural Silero VAD engine (onnxruntime via `ort`). Off by
-# default: it pulls a prebuilt onnxruntime binary at build time and the energy gate
-# stays the committed default. Selected at runtime via `vad.engine="silero"` only when
-# built with this feature. See `plans/VadSileroPlan.md`.
+# `vad-silero` compiles the neural Silero VAD engine (onnxruntime via `ort`). ON by
+# default (see the `default` line above): it pulls a prebuilt onnxruntime binary at build
+# time and Silero is now the committed runtime default. Disable with
+# `--no-default-features` for an energy-only build (no onnxruntime, no model file needed).
+# See `plans/VadSileroPlan.md`.
 vad-silero = ["dep:ort"]
 
 [dependencies]

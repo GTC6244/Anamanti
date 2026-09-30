@@ -45,7 +45,7 @@ service is located via mDNS, so neither node hardcodes an IP.
                                │ TCP · Wyoming Protocol · newline JSON + PCM
                                ▼
 ┌─────────────────────────── M4 Mac Mini ───────────────────────────┐
-│  Wyoming STT (Whisper / CoreML)  · Anamanti Core VAD (energy dflt) │
+│  Wyoming STT (Whisper / CoreML)  · Anamanti Core VAD (silero dflt) │
 │        │ final transcript                                          │
 │        ▼                                                           │
 │  LLM backend  (trait-based, pluggable)  ◄─► Persistent Memory      │
@@ -130,7 +130,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
     Core loads a ggml model (`base`/`small`) and transcribes in a `spawn_blocking`
     task. This is the deploy-simplification path, not a speed change.
   Either way the transcript is the same Whisper-class text; end-of-speech is the
-  Core's VAD (below; energy by default, pluggable), never the engine.
+  Core's VAD (below; Silero by default since 2026-09-30, pluggable), never the engine.
 - **LLM backend** — a trait/interface with a streaming
   `respond(transcript) -> token stream`. Two interchangeable implementations:
   local (Ollama/llama.cpp) and cloud (Claude/OpenAI). Selection is config-driven.
@@ -156,10 +156,14 @@ predictable memory use and no GC pauses under the 1 GB limit.
   (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
   `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The
   per-chunk speech decision is **pluggable behind a `SpeechGate` seam**
-  (`anamanti-core/src/vad/`): the **committed default is the energy/RMS gate**
-  (`EnergyGate` — score per-chunk RMS, voiced when above `voice_rms_threshold`), with
-  an opt-in **Silero** neural engine (`SileroGate`, `vad.engine="silero"`) planned —
-  see `plans/VadSileroPlan.md`. The surrounding state machine is engine-independent:
+  (`anamanti-core/src/vad/`): the **committed default is the neural Silero gate since
+  2026-09-30** (`SileroGate`, `vad.engine="silero"`; the `vad-silero` feature is on by
+  default and a default boot requires the v4 model on disk — a `silero` boot with no
+  model is a hard error). The **energy/RMS gate** (`EnergyGate` — score per-chunk RMS,
+  voiced when above `voice_rms_threshold`) is now the opt-in fallback
+  (`vad.engine="energy"` or a `--no-default-features` build) and the auto-fallback when
+  no model is loaded — see `plans/VadSileroPlan.md`. The surrounding state machine is
+  engine-independent:
   after speech (a 250 ms onset debounce) followed by ~700 ms of trailing silence (or a
   6 s no-speech fallback), it finalizes the transcriber
   (`anamanti-core/src/orchestrator.rs`, `stream_to_transcript`). The Echo Show device
@@ -330,7 +334,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **STREAMING** — send raw PCM chunks in Wyoming frames; concurrently read
   `transcript` events on the same socket. The device streams continuously and runs
   no VAD; **the Anamanti Core detects end-of-speech** (its `SpeechGate` VAD over the
-  PCM — energy by default, Silero opt-in; see `plans/VadSileroPlan.md`) and sends
+  PCM — Silero by default since 2026-09-30, energy/RMS opt-in; see `plans/VadSileroPlan.md`) and sends
   `audio-stop` to the STT server, which then returns the final transcript.
 - **STREAMING → (optional) System-1 fast decision:** once the transcript is final, an
   **optional pluggable System-1 decision engine** may run on the Anamanti Core *before* THINKING
@@ -684,7 +688,7 @@ frames already have).
 | Rust-side playback | One audio layer, symmetric with capture |
 | Wake-word barge-in (flush-on-wake + `anamanti-interrupt`) | Natural interruption without full-duplex complexity; in-app AEC deferred, but a **required device-side HAL AEC shim** delivers echo cancellation on Echo Show 8 gen-1 (see §4) |
 | Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
-| VAD in the Anamanti Core (pluggable `SpeechGate`) | Device does no VAD; neither STT engine does streaming VAD, so the Mac runs its own VAD and finalizes the transcriber — energy/RMS gate by default, opt-in Silero engine (`plans/VadSileroPlan.md`) |
+| VAD in the Anamanti Core (pluggable `SpeechGate`) | Device does no VAD; neither STT engine does streaming VAD, so the Mac runs its own VAD and finalizes the transcriber — **neural Silero gate by default since 2026-09-30** (`vad-silero` feature on, needs the v4 model on disk), energy/RMS gate the opt-in fallback (`plans/VadSileroPlan.md`) |
 | STT engine behind a `Transcriber` seam (`wyoming` \| `whisper-rs`) | Default dials `wyoming-faster-whisper`; `whisper-rs` runs whisper.cpp **in-process** (no Python STT server) for deploy simplicity — same Whisper-class text, engine chosen by config (`plans/python-to-rust-whisper.md`) |
 | SQLite is the memory store of record | Simple, debuggable; holds explicit+inferred facts and the settings-list/voice management |
 | Recall defaults to embedded HelixDB GraphRAG | Vector KNN + graph hop beats keyword FTS for context; in-process (no server/Docker); needs `OPENAI_API_KEY`, falls back to SQLite FTS if absent |

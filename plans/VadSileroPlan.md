@@ -6,6 +6,17 @@ Anamanti Core's end-of-speech pipeline, alongside the existing energy/RMS VAD.
 Read with [`architecture.md`](./architecture.md) §4 (the turn pipeline) and
 [`Plan.MD`](./Plan.MD) (decision table row *"End-of-speech VAD — pluggable engine"*).
 
+> **STATUS (2026-09-30): Silero is now the committed default.** The `vad-silero`
+> build feature is **on by default** and `VadConfig::default().engine == Silero`, so a
+> plain `cargo build` + boot runs Silero and **requires the v4 model on disk** (a
+> `silero` boot with no model is a hard error). Energy/RMS is the opt-in fallback
+> (`vad.engine="energy"` or `--no-default-features`). This was an **owner-directed flip
+> ahead of the M3 far-field validation gate** described below (§2, §5/M3) — the driver
+> was a live background-noise failure of the energy gate (end-of-speech never firing).
+> M3's measurement work remains outstanding and should still be completed to confirm
+> the choice; if it regresses, revert by dropping `default = ["vad-silero"]` and
+> restoring `engine: Energy` in `VadConfig::default()`.
+
 ---
 
 ## 1. Why
@@ -48,11 +59,15 @@ that decision actually locks: VAD stays **off-device** (the device never runs it
 own VAD) and stays **on the Core**. Silero runs on the Mac. No new device
 protocol, no second audio path.
 
-Merge-safety mirrors the `stt.engine` and `system1.backend` precedents: the
-committed default stays **energy**, so a default build is byte-for-byte unchanged
-until someone opts in via config. Flipping the default to Silero is **gated on M4
-+ Echo Show far-field validation** (Phase M3), exactly like `stt.engine` stays
-`wyoming` until M4 validation.
+Merge-safety originally mirrored the `stt.engine` / `system1.backend` precedents
+(committed default **energy**, byte-for-byte unchanged until opt-in). **Superseded
+2026-09-30:** the committed default was flipped to **Silero** (feature on by default;
+`VadConfig::default().engine == Silero`) — an owner-directed decision ahead of the M3
+gate, driven by a live background-noise failure of the energy gate. Consequences: a
+default build now pulls onnxruntime and a default boot **requires the v4 model on disk**
+(hard error otherwise). The M3 far-field validation below is **still worth completing**
+to confirm the flip; energy remains one config key away (`vad.engine="energy"`) or an
+`--no-default-features` build.
 
 ## 3. Architecture — a `SpeechGate` seam
 
@@ -207,12 +222,15 @@ Each phase is independently landable; the default stays energy throughout M0–M
     end-of-turn latency win the better confidence unlocks; optional adaptive hangover
     that shortens once `prob` collapses. Needs the M3 measurements to tune safely.
 
-- **M3 — On-device validation + default flip decision.** M4 Mac Mini + Echo Show
-  far-field QA. Measure, against energy@180 as baseline: false-accepts on
-  TV/music, missed quiet utterances, end-of-turn latency at the retuned hangover,
-  and per-frame inference time on the M4. **Only then** decide whether to flip the
-  committed default to `silero` (record the outcome as a dated decision-table
-  update, like the `stt.engine` cutover).
+- **M3 — On-device validation. ⚠️ Default already flipped (2026-09-30) ahead of this
+  gate; validation still owed.** The committed default is now `silero` (feature on by
+  default) — an owner-directed flip driven by a live background-noise failure of the
+  energy gate, not by the measurements this phase was meant to produce. Still do the M4
+  Mac Mini + Echo Show far-field QA to confirm the choice: measure, against energy@180 as
+  baseline, false-accepts on TV/music, missed quiet utterances, end-of-turn latency at
+  the retuned hangover, and per-frame inference time on the M4. Record the numbers as a
+  dated decision-table update; if they regress vs energy, revert the default (drop
+  `default = ["vad-silero"]` + restore `engine: Energy` in `VadConfig::default()`).
 
 ## 6. Risks & open questions
 

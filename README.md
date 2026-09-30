@@ -221,7 +221,7 @@ raised confidence threshold as the interim self-trigger mitigation.
 
 **Phase 4 complete — Mac Mini assistant pipeline.** The new `/mac` Anamanti Core
 (`anamanti_core`) ties the brain together: a Wyoming server to the device
-and a Wyoming client to Whisper (STT; Core-side energy VAD) and Piper (TTS), with a
+and a Wyoming client to Whisper (STT; Core-side VAD — neural Silero by default, energy/RMS fallback) and Piper (TTS), with a
 **pluggable LLM** trait (Ollama / Claude / mock) and a **persistent SQLite + FTS5
 memory** store (explicit "remember…"/"forget…" commands plus inferred fact/pref
 extraction) in the middle. It advertises `_wyoming._tcp` over mDNS and streams the

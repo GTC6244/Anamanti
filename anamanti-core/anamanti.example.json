@@ -60,7 +60,7 @@
   },
 
   "vad": {
-    "engine": "energy",
+    "engine": "silero",
     "silero": {
       "model_path": "models/silero_vad.onnx",
       "threshold": 0.5
