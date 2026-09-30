@@ -379,6 +379,53 @@ void main() {
     expect(store.value.dimDelaySecs, 120);
   });
 
+  testWidgets(
+      'listening-ring controls render, the toggle hides the dials, and Save persists',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+    AppSettings? applied;
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        // A non-default reactivity so we can see it rendered.
+        initial: const AppSettings(ringReactivity: 1.5),
+        store: store,
+        client: client,
+        onApplied: (s) => applied = s,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // Speech Processing exposes the ring reactivity dial (ring on by default),
+    // labelled with the current value.
+    await openCategory(tester, 'speechProcessing');
+    final scrollable = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-ring-reactivity')),
+      200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-ring-reactivity')));
+    await tester.pumpAndSettle();
+    expect(find.text('1.50×'), findsOneWidget);
+
+    // Turning the ring off collapses its dials.
+    await tester.ensureVisible(find.byKey(const Key('settings-listening-ring')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-listening-ring')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('settings-ring-reactivity')), findsNothing);
+
+    // Save persists the toggle; the (unchanged) reactivity value is preserved.
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+    expect(applied, isNotNull);
+    expect(applied!.listeningRingEnabled, isFalse);
+    expect(store.value.listeningRingEnabled, isFalse);
+    expect(store.value.ringReactivity, 1.5);
+  });
+
   testWidgets('dim-delay picker snaps to a fixed preset when dragged',
       (tester) async {
     final store = InMemorySettingsStore();

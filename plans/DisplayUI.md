@@ -28,6 +28,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **App shell** | `AmbientDisplayApp` / `AmbientHome`, `AmbientScreen` (compositor) |
 | **Backgrounds / idle** | `SlideshowView`, `SlideshowController`, `PhotoSource` backends (local / Ambient / Drive) |
 | **Overlays (always-on)** | idle `_AmbientClock` + weather-beside-clock chip, `StatusIndicator`, settings gear |
+| **Overlays (listening cue)** | `ListeningOverlay` — big glowing blue ring (hollow) that reacts to mic level while listening |
 | **Overlays (timers)** | `TimersOverlay` — big (idle) + compact (in-turn) |
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
 | **Banners** | `NotificationBanner` (proactive push from Core) |
@@ -79,15 +80,19 @@ events; nothing here touches audio buffers or sockets directly.
    `state.weather!.isWeek`.
 7. `PlaceView` (placeActive).
 8. `ConversationView` — live transcript + reply, 300 ms fade, padded 28.
-9. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
-   hidden during a turn, off mode, any full-screen mode, or when timers exist.
-10. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
-11. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
-12. Compact `TimersOverlay` (`compact: true`) — top-center chip row, only while a
+9. `ListeningOverlay` — big glowing blue ring (hollow), centered, 250 ms fade;
+   `IgnorePointer`, shown only while `state.listening` (wake word / follow-up listen
+   → end-of-speech). Reacts to `state.micLevel`. Mounted only while shown so its
+   pulse controller isn't spinning during idle.
+10. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
+    hidden during a turn, off mode, any full-screen mode, or when timers exist.
+11. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
+12. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
+13. Compact `TimersOverlay` (`compact: true`) — top-center chip row, only while a
     turn is active.
-13. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
+14. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
     `open-settings`; fades out during a turn and in away mode.
-14. `NotificationBanner` — top layer; shows even in away mode.
+15. `NotificationBanner` — top layer; shows even in away mode.
 
 ---
 
@@ -155,7 +160,38 @@ Core-owned path).
 
 ---
 
-## 3. Overlays — timers
+## 3. Overlays — listening cue
+
+**`ListeningOverlay` / `_ListeningOverlayState`** — `lib/src/ui/listening_overlay.dart`
+- A large (260 px) glowing blue **ring** (hollow — no fill, so the slideshow shows
+  through the centre), centered on screen, that gives an unmistakable "I heard you —
+  I'm listening" cue and doubles as a **live voice visualizer**. A bright blue-white
+  stroke with a soft blue glow (two stacked `BoxShadow`s — a wide halo + a tight edge
+  bloom). Its **stroke width, scale, and glow react to the microphone amplitude**
+  (`AssistantState.micLevel`, the input RMS streamed by `WakeWordEventKind.level`),
+  **auto-ranged against a slowly-decaying peak** (so it stays visibly dynamic despite
+  the small, gain/AEC/distance-dependent absolute RMS) with asymmetric attack/release
+  smoothing so each syllable pumps the ring and it settles cleanly; under a baseline
+  it keeps a slow "breathing" pulse (a single
+  `AnimationController`, 1.4 s, `repeat(reverse: true)`) so it feels alive before you
+  speak. `IgnorePointer` — touches pass through to the layers beneath.
+- Shown while `AssistantState.listening` (`phase == listening || connecting`): it
+  appears on `WakeWordEventKind.detected` (wake word) **and** `listeningFollowup` (a
+  follow-up listen reopens the mic), stays up through the `connecting` → `streaming`
+  hop and while the user speaks, and hides when end-of-speech moves the turn on
+  (local cue → `processing`, or the authoritative `transcript` → `thinking`) or the
+  turn ends. Excludes the TTS `speaking` phase (that's the assistant talking).
+  `AmbientScreen` wraps it in an `AnimatedOpacity` (key `listening-cue`, 250 ms) and
+  mounts the widget only while shown, so the pulse controller isn't spinning during
+  the idle day.
+- **User-configurable** in Settings → Speech Processing: a master on/off
+  (`AppSettings.listeningRingEnabled` — when off the overlay never appears) plus the
+  reactivity / attack / release / auto-range-decay dials (`ringReactivity`,
+  `ringAttack`, `ringRelease`, `ringDecay`). `AmbientScreen` receives these from
+  `main.dart` and passes them to `ListeningOverlay`; changes apply instantly on Save
+  (a `setState` in `_onSettingsApplied`), with no engine restart or Mac round-trip.
+
+## 4. Overlays — timers
 
 **`TimersOverlay` / `_TimersOverlayState`** — `lib/src/ui/timers_overlay.dart`
 - On-device countdown timers; repaints twice a second to interpolate remaining
@@ -174,7 +210,7 @@ Core-owned path).
 
 ---
 
-## 4. Overlays — away / off mode
+## 5. Overlays — away / off mode
 
 - When the camera proximity sensor reports nobody present and nothing else is
   active (`offMode`), the blackout layer fades in and only the large dimmed
@@ -187,7 +223,7 @@ Core-owned path).
 
 ---
 
-## 5. Banners
+## 6. Banners
 
 **`NotificationBanner`** — `lib/src/ui/notification_banner.dart`
 - Top-center dismissible card over the slideshow for a pushed `NotifyEvent`.
@@ -203,7 +239,7 @@ Core-owned path).
 
 ---
 
-## 6. Conversation UI
+## 7. Conversation UI
 
 **`ConversationView` / `_Bubble`** — `lib/src/ui/conversation_view.dart`
 - Live turn panel over the slideshow, capped at 720px reading width. Two bubbles:
@@ -229,7 +265,7 @@ Full state-machine flow: `agents.md` cheat-sheet + `architecture.md §4`.
 
 ---
 
-## 7. Full-screen views (pushed from Anamanti Core)
+## 8. Full-screen views (pushed from Anamanti Core)
 
 These are **not** navigation routes — they are `AnimatedOpacity` layers inside
 `AmbientScreen`'s Stack, shown when the matching `AssistantState` field is
@@ -279,7 +315,7 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 ---
 
-## 8. Settings (navigation route)
+## 9. Settings (navigation route)
 
 **`SettingsScreen` / `_SettingsScreenState`** — `lib/src/ui/settings_screen.dart`
 - The only `Navigator.push` in the app (tap the gear on `AmbientScreen`). A
@@ -295,7 +331,9 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
   - **Audio Diagnostics** — a full custom page (`AudioDiagnosticsView`, not a tile
     list) for visually tuning the mic. See its own section below.
   - **Speech Processing** — playback buffer, "Instant processing cue", endpoint
-    silence ms, endpoint RMS threshold.
+    silence ms, endpoint RMS threshold, and the **Listening ring** controls (on/off
+    switch + reactivity / attack / release / auto-range dials — presentational,
+    applied instantly on Save, no engine restart).
   - **Speech Detection** — VAD engine (Energy vs Silero), Silero threshold,
     end-silence ms, voice RMS threshold (applied on the Mac; see
     [`VadSileroPlan.md`](./VadSileroPlan.md)).
@@ -332,7 +370,7 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 ---
 
-## 9. Settings sub-screens — built but currently UNWIRED
+## 10. Settings sub-screens — built but currently UNWIRED
 
 These widgets exist and are tested but are **not reachable** from the running app
 in this version (referenced only from `test/`). Listed so they are not

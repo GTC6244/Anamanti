@@ -21,6 +21,7 @@ import 'package:anamanti_display/src/engine/notification_controller.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
+import 'package:anamanti_display/src/ui/listening_overlay.dart';
 import 'package:anamanti_display/src/ui/notification_banner.dart';
 import 'package:anamanti_display/src/ui/recipe_view.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
@@ -38,10 +39,24 @@ class AmbientScreen extends StatelessWidget {
     required this.slideshow,
     this.notifications,
     this.onOpenSettings,
+    this.listeningRingEnabled = true,
+    this.ringReactivity = 1.0,
+    this.ringAttack = 0.65,
+    this.ringRelease = 0.08,
+    this.ringDecay = 0.99,
   });
 
   final AssistantController assistant;
   final SlideshowController slideshow;
+
+  /// Whether the glowing "listening" ring pops up while listening, and its tuning
+  /// (see [ListeningOverlay]) — user-adjustable in Speech Processing settings.
+  /// Purely presentational; defaults keep tests/other callers unchanged.
+  final bool listeningRingEnabled;
+  final double ringReactivity;
+  final double ringAttack;
+  final double ringRelease;
+  final double ringDecay;
 
   /// Proactive notifications pushed by the orchestrator (Approach A). When null (as
   /// in widget tests that only exercise the turn UI) no banner is shown.
@@ -79,6 +94,11 @@ class AmbientScreen extends StatelessWidget {
           // strictly the idle-and-absent case. Recipe/weather mode also imply
           // engagement, so they suppress the away face.
           final offMode = !state.userPresent && !active && !modeActive;
+          // "Listening" cue: the device is actively listening to the user (wake word
+          // or follow-up listen fired, through end-of-speech). Shows the big glowing
+          // blue ring, which reacts to the live mic level. Suppressed when the user
+          // has turned the ring off in settings.
+          final listening = state.listening && listeningRingEnabled;
           return Stack(
             fit: StackFit.expand,
             children: [
@@ -204,6 +224,30 @@ class AmbientScreen extends StatelessWidget {
                     padding: const EdgeInsets.all(28),
                     child: ConversationView(state: state),
                   ),
+                ),
+              ),
+
+              // "Listening" cue: a large glowing blue ring centered on screen while
+              // the device is listening to the user — from the wake word until
+              // end-of-speech — reacting to the live mic level. Draws above the
+              // conversation panel and below the status chip / settings / banner.
+              // Pointer-transparent — a touch should still reach the slideshow /
+              // dismiss controls beneath it. The ring widget only exists while shown
+              // so its pulse controller isn't spinning during the whole idle day.
+              IgnorePointer(
+                child: AnimatedOpacity(
+                  key: const Key('listening-cue'),
+                  opacity: listening ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: listening
+                      ? ListeningOverlay(
+                          level: state.micLevel,
+                          reactivity: ringReactivity,
+                          attack: ringAttack,
+                          release: ringRelease,
+                          decay: ringDecay,
+                        )
+                      : const SizedBox.shrink(),
                 ),
               ),
 

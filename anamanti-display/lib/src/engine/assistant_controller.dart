@@ -311,6 +311,14 @@ class AssistantState {
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
+  /// Whether the device is actively listening to the user: from the wake word (or a
+  /// follow-up listen opening the mic), across the brief connect/stream hop, until
+  /// end-of-speech moves the turn on to processing/thinking. Drives the live
+  /// listening ring ([ListeningOverlay]), which reacts to [micLevel]. Excludes the
+  /// TTS `speaking` phase (that's the assistant talking, not the user).
+  bool get listening =>
+      phase == TurnPhase.listening || phase == TurnPhase.connecting;
+
   /// Whether the conversation panel (transcript + reply text) should stay on
   /// screen: while a turn is active, and afterwards for as long as the reply audio
   /// is still playing. The audio outlives the turn, so this is the visibility gate
