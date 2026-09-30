@@ -5,9 +5,11 @@
 //! the `speech_started` latch, the `end_silence` hangover, and the
 //! `no_speech_finalize` fallback). This module owns only the **per-chunk speech
 //! decision** behind the [`SpeechGate`] trait, so the detector can be swapped
-//! without touching that machinery. The committed default is [`EnergyGate`] (an
-//! amplitude/RMS threshold); an opt-in Silero neural engine is planned — see
-//! `plans/VadSileroPlan.md`.
+//! without touching that machinery. The committed default is the [`SileroGate`]
+//! neural engine (2026-09-30; `vad-silero` feature on by default); the
+//! [`EnergyGate`] (an amplitude/RMS threshold) is the opt-in fallback engine
+//! (`vad.engine="energy"`, or an energy-only `--no-default-features` build) and the
+//! automatic fallback when no Silero model is loaded — see `plans/VadSileroPlan.md`.
 
 pub mod energy;
 #[cfg(feature = "vad-silero")]

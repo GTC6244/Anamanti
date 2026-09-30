@@ -85,9 +85,16 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **VAD:** off-device — the **Anamanti Core** decides end-of-speech (neither STT
   engine has streaming VAD, so the Mac sends `audio-stop`). The device never runs
   its own VAD. The detector is **pluggable behind a `SpeechGate` seam**
-  (`anamanti-core/src/vad/`): the **energy/RMS gate is the committed default**, with
-  an opt-in **Silero** neural engine selected by `vad.engine` — see
-  `plans/VadSileroPlan.md`.
+  (`anamanti-core/src/vad/`). **As of 2026-09-30 the neural Silero engine is the
+  committed default** (`vad.engine="silero"`, `VadConfig::default()`; the `vad-silero`
+  build feature is **on by default**) — an energy/RMS gate is more robust to background
+  noise's amplitude-vs-speech ambiguity than the old energy default. Consequences of the
+  flip: a default `cargo build` pulls onnxruntime and a default boot **requires the
+  Silero v4 model on disk** (`anamanti-core/scripts/fetch-vad-model.sh <dir>`) — a
+  `silero` boot with no model is a **hard error** (fail-loud). The **energy/RMS gate**
+  is now the opt-in fallback (`vad.engine="energy"`, or an energy-only
+  `cargo build --no-default-features`) and the automatic fallback when a `vad-silero`
+  build has no model loaded. See `plans/VadSileroPlan.md`.
 - **Memory:** persistent **SQLite** on the Mac is the store of record for
   **explicit + inferred** facts (writes + the settings list + voice
   "remember…"/"forget that"). **Retrieval/recall defaults to the embedded HelixDB
@@ -340,6 +347,13 @@ export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-t
 PROD="/Volumes/External/DeveloperSupport/Anamanti Core"
 
 # 1. Build the release binary from the branch you want to ship.
+#    VAD: `vad-silero` is a DEFAULT feature (2026-09-30), so this build compiles in
+#    onnxruntime and the Core boots on Silero. That REQUIRES the Silero v4 model in the
+#    prod folder — fetch it once (idempotent; skips if present):
+#      anamanti-core/scripts/fetch-vad-model.sh "$PROD/models"      # silero_vad.onnx (v4)
+#    A `silero` boot with no model is a HARD ERROR. To ship the old energy-only Core
+#    instead, build `--no-default-features` (re-add any features you want) and set
+#    "vad": { "engine": "energy" } in "$PROD/anamanti.json".
 #    Default STT dials the external wyoming-faster-whisper server. To ship the
 #    in-process whisper.cpp engine instead (no Python STT server), add the feature
 #    and pre-fetch the models (see plans/python-to-rust-whisper.md):
@@ -347,6 +361,7 @@ PROD="/Volumes/External/DeveloperSupport/Anamanti Core"
 #      cargo build --release --features stt-whisper-metal --manifest-path anamanti-core/Cargo.toml
 #    then set "stt": { "engine": "whisper-rs", "model": "base", "model_dir": "models" }
 #    in "$PROD/anamanti.json". (Metal = Apple-GPU accel; plain stt-whisper-local = CPU.)
+anamanti-core/scripts/fetch-vad-model.sh "$PROD/models"
 cargo build --release --manifest-path anamanti-core/Cargo.toml
 
 # 2. Stop the running production copy — the process LISTENING on :10700. Do NOT
@@ -460,8 +475,9 @@ Notes:
 - IDLE: wake-word scoring only; socket dormant; photo slideshow on screen.
 - TRIGGERED: open TCP, send `audio-start`.
 - STREAMING: send PCM frames; read `transcript` events; the **Anamanti Core's VAD**
-  (energy by default; pluggable `SpeechGate` — see `plans/VadSileroPlan.md`) detects
-  end-of-speech and sends `audio-stop` to STT (device runs no VAD).
+  (neural Silero by default since 2026-09-30; pluggable `SpeechGate`, energy/RMS is the
+  opt-in fallback — see `plans/VadSileroPlan.md`) detects end-of-speech and sends
+  `audio-stop` to STT (device runs no VAD).
 - THINKING: LLM (with persistent memory) streams reply tokens (render live).
 - THINKING→SPEAKING: the Anamanti Core segments the LLM stream into sentences and
   synthesizes each with Piper as it forms (streaming TTS), coalesced into one

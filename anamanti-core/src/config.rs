@@ -297,10 +297,13 @@ impl Default for SttConfig {
 /// Which end-of-speech VAD engine the Anamanti Core runs (`vad.engine`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VadEngineKind {
-    /// The energy/RMS gate — the committed default. No model, no extra deps.
+    /// The energy/RMS gate — opt-in since 2026-09-30 (`vad.engine="energy"`). No model,
+    /// no extra deps; also the automatic fallback when a `vad-silero` build has no model
+    /// loaded. Select it (or build `--no-default-features`) for the historical behavior.
     Energy,
-    /// The neural Silero VAD — opt-in (`vad.engine="silero"`); requires the
-    /// `vad-silero` build feature (onnxruntime via `ort`) and a model file. See
+    /// The neural Silero VAD — the committed default (2026-09-30). Requires the
+    /// `vad-silero` build feature (on by default; onnxruntime via `ort`) and the v4 model
+    /// file on disk; a `silero` boot with no model is a hard error. See
     /// `plans/VadSileroPlan.md`.
     Silero,
 }
@@ -361,7 +364,11 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            engine: VadEngineKind::Energy,
+            // Silero is the committed default (2026-09-30; VadSileroPlan.md §5/M3).
+            // A default build (`vad-silero` on) boots on Silero and requires the v4
+            // model on disk (`scripts/fetch-vad-model.sh`); a missing model is a
+            // hard boot error. Set `vad.engine="energy"` to opt back into the RMS gate.
+            engine: VadEngineKind::Silero,
             silero: SileroConfig::default(),
         }
     }
@@ -2171,8 +2178,8 @@ mod tests {
         assert_eq!(c.stt.engine, SttEngineKind::Wyoming);
         assert_eq!(c.stt.model, "base");
         assert_eq!(c.stt.language.as_deref(), Some("en"));
-        // VAD defaults to the energy gate.
-        assert_eq!(c.vad.engine, VadEngineKind::Energy);
+        // VAD defaults to the neural Silero gate (committed default since 2026-09-30).
+        assert_eq!(c.vad.engine, VadEngineKind::Silero);
         assert_eq!(c.vad.silero.threshold, 0.5);
         // No tool_cache block ⇒ built-in defaults (weather cached 60 min).
         assert_eq!(
