@@ -23,11 +23,15 @@ import 'package:flutter/material.dart';
 
 import 'package:qr_flutter/qr_flutter.dart';
 
+import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 import 'package:anamanti_display/src/settings/settings_store.dart';
 import 'package:anamanti_display/src/slideshow/ambient_photos.dart';
 import 'package:anamanti_display/src/slideshow/drive_photos.dart';
+import 'package:anamanti_display/src/ui/audio_diagnostics_view.dart';
+import 'package:anamanti_display/src/rust/api/engine.dart'
+    show updateDiagnosticsTuning;
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
 /// is the orchestrator's backend label.
@@ -52,6 +56,7 @@ const List<int> _kDimDelayPresets = <int>[30, 60, 120, 300, 600, 900, 1800, 3600
 enum _SettingsCategory {
   assistant('Assistant'),
   deviceConfig('Device Config'),
+  audioDiagnostics('Audio Diagnostics'),
   speechProcessing('Speech Processing'),
   speechDetection('Speech Detection'),
   background('Background');
@@ -69,6 +74,7 @@ class SettingsScreen extends StatefulWidget {
     required this.store,
     required this.client,
     required this.onApplied,
+    this.assistant,
   });
 
   /// The current device-local settings to edit.
@@ -83,6 +89,11 @@ class SettingsScreen extends StatefulWidget {
   /// Called after a successful Save with the new device-local settings, so the app
   /// can restart the engine (wake word/thresholds) and refresh the slideshow.
   final ValueChanged<AppSettings> onApplied;
+
+  /// The live wake-word engine controller, for the Audio Diagnostics page's real-time
+  /// meters. Null in contexts without a running engine (e.g. some tests); the page
+  /// then shows an "engine unavailable" note.
+  final AssistantController? assistant;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -568,6 +579,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'Wake word & display',
         ),
         _menuTile(
+          _SettingsCategory.audioDiagnostics,
+          Icons.equalizer,
+          'Live mic meter & wake-word tuning',
+        ),
+        _menuTile(
           _SettingsCategory.speechProcessing,
           Icons.graphic_eq,
           'Playback buffer & processing cue',
@@ -599,6 +615,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// The body for a single category page.
   Widget _categoryPage(_SettingsCategory category) {
+    // Audio Diagnostics is a full custom page (live meters), not a tile list.
+    if (category == _SettingsCategory.audioDiagnostics) {
+      return _audioDiagnosticsPage();
+    }
     final List<Widget> children;
     switch (category) {
       case _SettingsCategory.assistant:
@@ -619,6 +639,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _section('Display'),
           ..._displayTiles(),
         ];
+      case _SettingsCategory.audioDiagnostics:
+        // Handled by the early return above; keep the switch exhaustive.
+        children = const [];
       case _SettingsCategory.speechProcessing:
         children = _speechTiles();
       case _SettingsCategory.speechDetection:
@@ -629,6 +652,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [...children, const SizedBox(height: 24)],
+    );
+  }
+
+  /// The Audio Diagnostics page: live mic + wake-word meters with live-applied
+  /// tuning. Needs the running engine controller; without one (e.g. the Mac-less
+  /// test harness) it shows a short unavailable note.
+  Widget _audioDiagnosticsPage() {
+    final assistant = widget.assistant;
+    if (assistant == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Microphone engine is not running yet — open this page once the '
+            'display has started listening.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+    return AudioDiagnosticsView(
+      key: const Key('audio-diagnostics-view'),
+      controller: assistant,
+      settings: _settings,
+      onChanged: (next) => setState(() => _settings = next),
+      onTune: (gain, threshold) =>
+          updateDiagnosticsTuning(gainDb: gain, threshold: threshold),
     );
   }
 

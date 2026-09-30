@@ -89,7 +89,6 @@ ical = "0.11"
 rrule = "0.14"
 futures-util = "0.3"
 log = "0.4.34"
-mdns-sd = "0.11"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
@@ -134,3 +133,18 @@ ort = { version = "=2.0.0-rc.13", optional = true }
 tokio = { version = "1.34", features = ["test-util"] }
 # WAV fixture parsing for the in-process Whisper integration test (pure Rust).
 hound = "3.5"
+
+# --- mDNS advertisement backend (see src/discovery.rs) --------------------------
+# macOS (production): register the Wyoming service through Apple's system daemon
+# `mDNSResponder` via `DNSServiceRegister`. The OS daemon — not this process —
+# owns address advertisement, multicast-group membership, sleep/wake recovery,
+# interface-change refresh, and name-collision probing, which eliminates the
+# stale-record failures that previously required restarting the Core. astro-dnssd
+# links only the always-present system `libSystem`/dns_sd; no extra system deps.
+[target.'cfg(target_os = "macos")'.dependencies]
+astro-dnssd = "0.3"
+
+# Other platforms (dev/CI): keep the pure-Rust `mdns-sd` responder so the crate
+# still self-advertises off macOS.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+mdns-sd = "0.11"

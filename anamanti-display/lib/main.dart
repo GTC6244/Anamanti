@@ -377,6 +377,8 @@ class _AmbientHomeState extends State<AmbientHome> {
           store: _store,
           client: _client,
           onApplied: _onSettingsApplied,
+          // The live engine controller powers the Audio Diagnostics page's meters.
+          assistant: _assistant,
         ),
       ),
     );

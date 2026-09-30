@@ -194,6 +194,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
     Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
     (payload fields carry neutral defaults when not relevant), so the boundary needs
     no `freezed` codegen and there is exactly one stream to manage.
+  - The periodic `level` event carries the mic **RMS** and, while a wake-word model
+    is loaded, the live wake-word diagnostics (`score`, `avg_score`, `threshold`,
+    `gain_db`) that drive the **Audio Diagnostics** settings page's meters +
+    readouts (`WakeWordEvent::level_diag`). That page also live-tunes the running
+    engine's capture gain + idle threshold **without a restart** via the small
+    `#[frb(sync)]` `update_diagnostics_tuning(gain_db, threshold)` call (the loop
+    re-reads two atomics each block; they re-seed from `WakeWordConfig` on restart).
   - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
     boundary. `AssistantController` (`anamanti-display/lib/src/engine/assistant_controller.dart`)
     folds this single event stream into an observable `AssistantState` / `TurnPhase`
@@ -608,8 +615,9 @@ frames already have).
 - **Multiple Anamanti Cores → device picks one**: a display can run a "production"
   Anamanti Core plus short-lived test instances (each launched with a distinct
   `ANAMANTI_SERVICE_NAME` / `ANAMANTI_INSTANCE_ID` / `ANAMANTI_BIND_ADDR` /
-  `ANAMANTI_CONFIG_ADDR`; `mdns-sd` does not auto-rename on collision, so the names
-  must differ). The settings screen shows a device-local **Anamanti Core** dropdown
+  `ANAMANTI_CONFIG_ADDR`; give each a distinct `service_name` — on macOS
+  `mDNSResponder` auto-renames a colliding instance, but the device still keys off
+  the stable `instance_id` TXT regardless). The settings screen shows a device-local **Anamanti Core** dropdown
   (populated by a full-window mDNS enumeration, `list_orchestrators`), persisted
   by stable `instance_id` key in `AppSettings`. The selection is **strict**: a
   display pinned to one Anamanti Core resolves *only* that `instance_id` and stays
@@ -625,16 +633,26 @@ frames already have).
   Mac is unreachable. The idle photo slideshow keeps running; a subtle
   **disconnected** indicator reflects status; wake words queue until the socket
   is restored.
-- **Core re-advertises on interface change**: the Core advertises a **single
-  pinned routable IPv4** (resolved via the routing table, not `addr_auto` — which
-  would leak the Mac's IPv6 link-locals and make the device grab an unreachable
-  address). Since `mdns-sd` only auto-refreshes addresses for `addr_auto`
-  services, a pinned record would otherwise go stale if the Mac's active LAN
-  changes after boot (Wi-Fi↔Ethernet failover, DHCP renew, en0↔en1). The Core's
-  advertiser (`anamanti-core/src/discovery.rs`) subscribes to the daemon's
-  `IpAdd`/`IpDel` monitor events (the daemon polls interfaces every ~30 s) and
-  **re-registers** the service with the freshly-resolved primary IPv4 whenever it
-  changes, so the device always sees a reachable address without a Core restart.
+- **Advertisement backend — OS `mDNSResponder` on macOS**: the Core registers
+  `_wyoming._tcp` through Apple's **system `mDNSResponder`** via `DNSServiceRegister`
+  (the `astro-dnssd` wrapper in `anamanti-core/src/discovery.rs`). The OS daemon —
+  not the Core process — owns the live advertisement: address records, multicast-
+  group membership, sleep/wake recovery, interface-change refresh (Wi-Fi↔Ethernet
+  failover, DHCP renew, en0↔en1), and name-collision probing/auto-rename. This
+  replaced a hand-rolled in-process pure-Rust responder (`mdns-sd`) that had to pin
+  a single routable IPv4 and re-register on `IpAdd`/`IpDel` monitor events within a
+  ~30 s interface-poll window, and could not reliably rejoin multicast groups after
+  the Mac slept — so an overnight sleep/wake left a zombie record that answered
+  nothing until the Core was **restarted** (the recurring "mDNS bites daily" failure).
+  Delegating to `mDNSResponder` removes that whole class of staleness. *(Off macOS —
+  dev/CI only — the crate falls back to the old `mdns-sd` pinned-IPv4 advertiser.)*
+- **Device picks a reachable address**: because `mDNSResponder` advertises *all* of
+  the host's addresses (it no longer pins one IPv4), a resolve returns the full set —
+  including loopback and IPv6 link-locals (`fe80::…`). The device's browser
+  (`endpoint_from` / `choose_address` in `anamanti-display/rust/src/wyoming/discovery.rs`)
+  skips loopback/unspecified/link-local entries and prefers a routable IPv4 over
+  global IPv6, so it always dials a reachable endpoint instead of an arbitrary set
+  member — the correctness the Core-side single-IPv4 pin used to guarantee.
 
 ---
 

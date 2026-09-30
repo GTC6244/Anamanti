@@ -34,7 +34,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Speech Processing / Speech Detection / Background) |
+| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background), `AudioDiagnosticsView` |
 | **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
@@ -319,7 +319,7 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 **`SettingsScreen` / `_SettingsScreenState`** — `lib/src/ui/settings_screen.dart`
 - The only `Navigator.push` in the app (tap the gear on `AmbientScreen`). A
-  two-level master/detail: `_menu()` lists 5 category tiles; selecting one opens
+  two-level master/detail: `_menu()` lists 6 category tiles; selecting one opens
   `_categoryPage`. `enum _SettingsCategory`:
   - **Assistant** — orchestrator (which Mac) + LLM backend, Anthropic auth
     (API key vs subscription/OAuth), model, voice. Orchestrator-managed; shows
@@ -328,6 +328,8 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
     capture gain, "Fire on peak", "AudioRecord capture (far-field)", noise
     suppression / AGC / echo cancellation switches) + Display ("Dim screen after"
     preset slider, 30 s…1 h).
+  - **Audio Diagnostics** — a full custom page (`AudioDiagnosticsView`, not a tile
+    list) for visually tuning the mic. See its own section below.
   - **Speech Processing** — playback buffer, "Instant processing cue", endpoint
     silence ms, endpoint RMS threshold, and the **Listening ring** controls (on/off
     switch + reactivity / attack / release / auto-range dials — presentational,
@@ -340,6 +342,31 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 - On Save → `onApplied(next)` in `main.dart` restarts the engine (wake/threshold
   changes) and/or refreshes the slideshow (photo-source changes); assistant / VAD
   settings apply on the Mac.
+
+**`AudioDiagnosticsView`** — `lib/src/ui/audio_diagnostics_view.dart`
+- The **Audio Diagnostics** settings category — a live, visual mic-tuning surface.
+  Rendered full-page by `SettingsScreen._audioDiagnosticsPage()` (passed the live
+  `AssistantController` via the new `SettingsScreen.assistant` field, wired from
+  `main.dart`'s `_openSettings`). Driven entirely by the always-on wake-word
+  engine's event stream folded into `AssistantState` — no second audio path.
+- Shows: a **Microphone monitor** toggle (pauses/resumes the visualization only —
+  the wake-word mic is always on); a **mic input-level (RMS) meter** on a dBFS
+  scale (so quiet far-field audio is visible); a **wake-word score meter** with the
+  firing **threshold** drawn as a bright line and the smoothed score as a faint
+  tick, flashing a **DETECTED** chip when the wake word fires; a **numeric
+  readouts** grid (RMS, dBFS, score, smoothed, threshold, gain, device / rate /
+  channels); a **recent-detections** history (time + score); and two **live-tuning**
+  sliders (**Capture gain**, **Sensitivity (idle)**).
+- The tuning sliders apply to the **running engine instantly** via the new FRB
+  `updateDiagnosticsTuning(gainDb, threshold)` (no restart), and mirror into the
+  parent's editable `AppSettings` via `onChanged` so the shared **Save** button
+  persists them across restarts.
+- Data path: the Rust `run_loop` enriches its periodic `WakeWordEventKind.level`
+  event with the live `score` / `avgScore` / `threshold` / `gainDb` (see
+  `rust/src/engine/mod.rs`, `WakeWordEvent::level_diag`); the controller stores them
+  on `AssistantState` (`wakeScore`, `wakeAvgScore`, `wakeThreshold`, `captureGainDb`,
+  `captureDevice` / `captureSampleRate` / `captureChannels`, `detectionSeq`,
+  `lastDetectionScore`).
 
 ---
 

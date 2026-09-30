@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1716420688;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 957648075;
 
 // Section: executor
 
@@ -1020,6 +1020,39 @@ fn wire__crate__api__engine__stop_weather_channel_impl(
         },
     )
 }
+fn wire__crate__api__engine__update_diagnostics_tuning_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_diagnostics_tuning",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_gain_db = <f32>::sse_decode(&mut deserializer);
+            let api_threshold = <f32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::update_diagnostics_tuning(api_gain_db, api_threshold);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__settings__update_orchestrator_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1547,6 +1580,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_channels = <u16>::sse_decode(deserializer);
         let mut var_rms = <f32>::sse_decode(deserializer);
         let mut var_score = <f32>::sse_decode(deserializer);
+        let mut var_avgScore = <f32>::sse_decode(deserializer);
+        let mut var_threshold = <f32>::sse_decode(deserializer);
+        let mut var_gainDb = <f32>::sse_decode(deserializer);
         let mut var_model = <String>::sse_decode(deserializer);
         let mut var_transcript = <String>::sse_decode(deserializer);
         let mut var_reply = <String>::sse_decode(deserializer);
@@ -1566,6 +1602,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             channels: var_channels,
             rms: var_rms,
             score: var_score,
+            avg_score: var_avgScore,
+            threshold: var_threshold,
+            gain_db: var_gainDb,
             model: var_model,
             transcript: var_transcript,
             reply: var_reply,
@@ -1687,7 +1726,7 @@ fn pde_ffi_dispatcher_primary_impl(
         26 => {
             wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        27 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        28 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -1714,6 +1753,7 @@ fn pde_ffi_dispatcher_sync_impl(
         18 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
         19 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
         20 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -2014,6 +2054,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.channels.into_into_dart().into_dart(),
             self.rms.into_into_dart().into_dart(),
             self.score.into_into_dart().into_dart(),
+            self.avg_score.into_into_dart().into_dart(),
+            self.threshold.into_into_dart().into_dart(),
+            self.gain_db.into_into_dart().into_dart(),
             self.model.into_into_dart().into_dart(),
             self.transcript.into_into_dart().into_dart(),
             self.reply.into_into_dart().into_dart(),
@@ -2485,6 +2528,9 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <u16>::sse_encode(self.channels, serializer);
         <f32>::sse_encode(self.rms, serializer);
         <f32>::sse_encode(self.score, serializer);
+        <f32>::sse_encode(self.avg_score, serializer);
+        <f32>::sse_encode(self.threshold, serializer);
+        <f32>::sse_encode(self.gain_db, serializer);
         <String>::sse_encode(self.model, serializer);
         <String>::sse_encode(self.transcript, serializer);
         <String>::sse_encode(self.reply, serializer);

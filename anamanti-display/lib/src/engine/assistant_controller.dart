@@ -155,6 +155,15 @@ class AssistantState {
     this.statusMessage = 'Starting…',
     this.wakeWord = '',
     this.micLevel = 0.0,
+    this.wakeScore = 0.0,
+    this.wakeAvgScore = 0.0,
+    this.wakeThreshold = 0.0,
+    this.captureGainDb = 0.0,
+    this.captureDevice = '',
+    this.captureSampleRate = 0,
+    this.captureChannels = 0,
+    this.detectionSeq = 0,
+    this.lastDetectionScore = 0.0,
     this.captureReady = false,
     this.timers = const [],
     this.audioPlaying = false,
@@ -187,8 +196,44 @@ class AssistantState {
   /// Name of the wake word that last fired.
   final String wakeWord;
 
-  /// Input RMS level (~0..1), surfaced in capture-only mode as a liveness cue.
+  /// Input RMS level (~0..1), surfaced in capture-only mode as a liveness cue and
+  /// as the live mic meter on the audio-diagnostics screen.
   final double micLevel;
+
+  /// The raw current-block wake-word confidence (~0..1), carried on every mic-level
+  /// event while a model is loaded. Drives the diagnostics score meter; 0 when no
+  /// model is loaded (capture-only).
+  final double wakeScore;
+
+  /// The smoothed wake-word score the detection gate actually tests (average, or peak
+  /// in peak mode). Shown alongside [wakeScore] on the diagnostics meter.
+  final double wakeAvgScore;
+
+  /// The wake-word detection threshold currently in effect on the engine (idle, or the
+  /// raised active threshold during a turn). Drawn as the firing line on the meter.
+  final double wakeThreshold;
+
+  /// The software capture gain (dB) currently applied by the engine. Reflects live
+  /// diagnostics-screen adjustments; shown in the numeric readouts.
+  final double captureGainDb;
+
+  /// Capture device name reported when the mic started (diagnostics readout).
+  final String captureDevice;
+
+  /// Capture device's native sample rate in Hz (diagnostics readout).
+  final int captureSampleRate;
+
+  /// Capture device's channel count before mono downmix (diagnostics readout).
+  final int captureChannels;
+
+  /// Monotonic counter bumped each time the wake word fires. The diagnostics screen
+  /// watches it to flash + append to its detection history (a counter, so repeated
+  /// detections still register). 0 = none yet.
+  final int detectionSeq;
+
+  /// The smoothed score of the most recent wake-word detection (paired with
+  /// [detectionSeq]).
+  final double lastDetectionScore;
 
   /// True once the mic capture stream has started at least once.
   final bool captureReady;
@@ -288,6 +333,15 @@ class AssistantState {
     String? statusMessage,
     String? wakeWord,
     double? micLevel,
+    double? wakeScore,
+    double? wakeAvgScore,
+    double? wakeThreshold,
+    double? captureGainDb,
+    String? captureDevice,
+    int? captureSampleRate,
+    int? captureChannels,
+    int? detectionSeq,
+    double? lastDetectionScore,
     bool? captureReady,
     List<TimerModel>? timers,
     bool? audioPlaying,
@@ -312,6 +366,15 @@ class AssistantState {
       statusMessage: statusMessage ?? this.statusMessage,
       wakeWord: wakeWord ?? this.wakeWord,
       micLevel: micLevel ?? this.micLevel,
+      wakeScore: wakeScore ?? this.wakeScore,
+      wakeAvgScore: wakeAvgScore ?? this.wakeAvgScore,
+      wakeThreshold: wakeThreshold ?? this.wakeThreshold,
+      captureGainDb: captureGainDb ?? this.captureGainDb,
+      captureDevice: captureDevice ?? this.captureDevice,
+      captureSampleRate: captureSampleRate ?? this.captureSampleRate,
+      captureChannels: captureChannels ?? this.captureChannels,
+      detectionSeq: detectionSeq ?? this.detectionSeq,
+      lastDetectionScore: lastDetectionScore ?? this.lastDetectionScore,
       captureReady: captureReady ?? this.captureReady,
       timers: timers ?? this.timers,
       audioPlaying: audioPlaying ?? this.audioPlaying,
@@ -525,12 +588,15 @@ class AssistantController extends ChangeNotifier {
           _state.copyWith(
             captureReady: true,
             statusMessage: 'Listening on ${e.device}',
+            captureDevice: e.device,
+            captureSampleRate: e.deviceSampleRate,
+            captureChannels: e.channels,
           ),
         );
       case WakeWordEventKind.status:
         _emit(_state.copyWith(statusMessage: e.message));
       case WakeWordEventKind.level:
-        _onLevel(e.rms);
+        _onLevel(e);
       case WakeWordEventKind.detected:
         // A wake word starts a fresh turn: clear the previous exchange and reset the
         // local end-of-speech tracker. Also clear any lingering audio-playing flag
@@ -546,6 +612,10 @@ class AssistantController extends ChangeNotifier {
             reply: '',
             audioPlaying: false,
             followUp: false,
+            // Record the fire for the diagnostics screen's flash + history.
+            detectionSeq: _state.detectionSeq + 1,
+            lastDetectionScore: e.score,
+            wakeScore: e.score,
           ),
         );
       case WakeWordEventKind.connecting:
@@ -936,9 +1006,18 @@ class AssistantController extends ChangeNotifier {
   /// Fold a mic-level event into the state, and — while we're actively listening —
   /// run the local end-of-speech detector so the UI flips to [TurnPhase.processing]
   /// the moment the user stops talking, ahead of the Mac's VAD + transcript.
-  void _onLevel(double rms) {
+  void _onLevel(WakeWordEvent e) {
+    final rms = e.rms;
     final now = _clock();
-    var next = _state.copyWith(micLevel: rms);
+    // Fold the enriched level event (mic RMS + live wake-word diagnostics) into the
+    // state so the audio-diagnostics screen's meters + readouts update in real time.
+    var next = _state.copyWith(
+      micLevel: rms,
+      wakeScore: e.score,
+      wakeAvgScore: e.avgScore,
+      wakeThreshold: e.threshold,
+      captureGainDb: e.gainDb,
+    );
     if (_endpointCueEnabled && _state.phase == TurnPhase.listening) {
       if (rms >= _endpointRmsThreshold) {
         _speechSeen = true;
