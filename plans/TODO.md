@@ -129,6 +129,12 @@ far end — transparent to `AudioRecord`/AudioFlinger.
     Speech & detection → "Capture gain (dB)". Works on any unit, no root. Prefer tuning
     the shim (device-wide, pre-AEC-independent) where you have adb; use the in-app gain
     as the portable fallback. **Don't stack both aggressively** — double-boosting clips.
+  - **Visual tuning aid (in-app):** Settings → **Audio Diagnostics** (`AudioDiagnosticsView`,
+    see `plans/DisplayUI.md §8`) turns the mic monitor on and shows a live RMS meter (dBFS),
+    a wake-word score meter with the firing threshold line, a detection flash + history, and
+    numeric readouts — with **live** capture-gain + sensitivity sliders that apply to the
+    running engine without a restart (`update_diagnostics_tuning`). Use it to dial the idle
+    RMS to ~0.003 and watch the wake-word score climb past the threshold when you speak.
 
 **Remaining AEC follow-ups (device-side; not in this repo's build):**
 

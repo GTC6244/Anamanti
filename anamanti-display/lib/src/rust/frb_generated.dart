@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1716420688;
+  int get rustContentHash => 957648075;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -194,6 +194,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiEngineStopWakeWordEngine();
 
   Future<void> crateApiEngineStopWeatherChannel();
+
+  void crateApiEngineUpdateDiagnosticsTuning({
+    required double gainDb,
+    required double threshold,
+  });
 
   Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
     required String orchestratorKey,
@@ -1077,6 +1082,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "stop_weather_channel", argNames: []);
 
   @override
+  void crateApiEngineUpdateDiagnosticsTuning({
+    required double gainDb,
+    required double threshold,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_f_32(gainDb, serializer);
+          sse_encode_f_32(threshold, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 27)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineUpdateDiagnosticsTuningConstMeta,
+        argValues: [gainDb, threshold],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineUpdateDiagnosticsTuningConstMeta =>
+      const TaskConstMeta(
+        debugName: "update_diagnostics_tuning",
+        argNames: ["gainDb", "threshold"],
+      );
+
+  @override
   Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
     required String orchestratorKey,
     required SettingsUpdate update,
@@ -1092,7 +1127,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1493,8 +1528,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 18)
-      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
+    if (arr.length != 21)
+      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -1503,17 +1538,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       channels: dco_decode_u_16(arr[4]),
       rms: dco_decode_f_32(arr[5]),
       score: dco_decode_f_32(arr[6]),
-      model: dco_decode_String(arr[7]),
-      transcript: dco_decode_String(arr[8]),
-      reply: dco_decode_String(arr[9]),
-      timerId: dco_decode_u_32(arr[10]),
-      timerLabel: dco_decode_String(arr[11]),
-      timerRemainingSecs: dco_decode_u_32(arr[12]),
-      present: dco_decode_bool(arr[13]),
-      recipeJson: dco_decode_String(arr[14]),
-      weatherJson: dco_decode_String(arr[15]),
-      placeJson: dco_decode_String(arr[16]),
-      recipeAction: dco_decode_String(arr[17]),
+      avgScore: dco_decode_f_32(arr[7]),
+      threshold: dco_decode_f_32(arr[8]),
+      gainDb: dco_decode_f_32(arr[9]),
+      model: dco_decode_String(arr[10]),
+      transcript: dco_decode_String(arr[11]),
+      reply: dco_decode_String(arr[12]),
+      timerId: dco_decode_u_32(arr[13]),
+      timerLabel: dco_decode_String(arr[14]),
+      timerRemainingSecs: dco_decode_u_32(arr[15]),
+      present: dco_decode_bool(arr[16]),
+      recipeJson: dco_decode_String(arr[17]),
+      weatherJson: dco_decode_String(arr[18]),
+      placeJson: dco_decode_String(arr[19]),
+      recipeAction: dco_decode_String(arr[20]),
     );
   }
 
@@ -2029,6 +2067,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_channels = sse_decode_u_16(deserializer);
     var var_rms = sse_decode_f_32(deserializer);
     var var_score = sse_decode_f_32(deserializer);
+    var var_avgScore = sse_decode_f_32(deserializer);
+    var var_threshold = sse_decode_f_32(deserializer);
+    var var_gainDb = sse_decode_f_32(deserializer);
     var var_model = sse_decode_String(deserializer);
     var var_transcript = sse_decode_String(deserializer);
     var var_reply = sse_decode_String(deserializer);
@@ -2048,6 +2089,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       channels: var_channels,
       rms: var_rms,
       score: var_score,
+      avgScore: var_avgScore,
+      threshold: var_threshold,
+      gainDb: var_gainDb,
       model: var_model,
       transcript: var_transcript,
       reply: var_reply,
@@ -2527,6 +2571,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_16(self.channels, serializer);
     sse_encode_f_32(self.rms, serializer);
     sse_encode_f_32(self.score, serializer);
+    sse_encode_f_32(self.avgScore, serializer);
+    sse_encode_f_32(self.threshold, serializer);
+    sse_encode_f_32(self.gainDb, serializer);
     sse_encode_String(self.model, serializer);
     sse_encode_String(self.transcript, serializer);
     sse_encode_String(self.reply, serializer);

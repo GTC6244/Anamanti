@@ -194,6 +194,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
     Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
     (payload fields carry neutral defaults when not relevant), so the boundary needs
     no `freezed` codegen and there is exactly one stream to manage.
+  - The periodic `level` event carries the mic **RMS** and, while a wake-word model
+    is loaded, the live wake-word diagnostics (`score`, `avg_score`, `threshold`,
+    `gain_db`) that drive the **Audio Diagnostics** settings page's meters +
+    readouts (`WakeWordEvent::level_diag`). That page also live-tunes the running
+    engine's capture gain + idle threshold **without a restart** via the small
+    `#[frb(sync)]` `update_diagnostics_tuning(gain_db, threshold)` call (the loop
+    re-reads two atomics each block; they re-seed from `WakeWordConfig` on restart).
   - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
     boundary. `AssistantController` (`anamanti-display/lib/src/engine/assistant_controller.dart`)
     folds this single event stream into an observable `AssistantState` / `TurnPhase`
