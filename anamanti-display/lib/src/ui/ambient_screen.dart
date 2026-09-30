@@ -93,7 +93,11 @@ class AmbientScreen extends StatelessWidget {
           // always wins (saying the wake word implies you're here), so off mode is
           // strictly the idle-and-absent case. Recipe/weather mode also imply
           // engagement, so they suppress the away face.
-          final offMode = !state.userPresent && !active && !modeActive;
+          // The inverse of [AssistantState.screenAwake] — the single source of truth
+          // shared with the backlight actuator so the away-face and the physical
+          // brightness always agree (equivalent to `!userPresent && !active &&
+          // !modeActive`).
+          final offMode = !state.screenAwake;
           // "Listening" cue: the device is actively listening to the user (wake word
           // or follow-up listen fired, through end-of-speech). Shows the big glowing
           // blue ring, which reacts to the live mic level. Suppressed when the user

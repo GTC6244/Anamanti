@@ -81,9 +81,10 @@ class _AmbientHomeState extends State<AmbientHome> {
   OrchestratorClient _client = const FrbOrchestratorClient();
   final SlideshowController _slideshow = SlideshowController();
 
-  /// Actuates the window backlight from the camera proximity sensor's presence
-  /// state (Plan.MD §5). Long-lived across engine restarts so it only crosses the
-  /// platform channel when the target brightness actually changes.
+  /// Actuates the window backlight from whether the screen is awake
+  /// ([AssistantState.screenAwake]) — camera presence, an active voice turn, or a
+  /// full-screen mode (Plan.MD §5). Long-lived across engine restarts so it only
+  /// crosses the platform channel when the target brightness actually changes.
   final ScreenBrightnessController _brightness = ScreenBrightnessController();
 
   AppSettings _settings = const AppSettings();
@@ -288,9 +289,12 @@ class _AmbientHomeState extends State<AmbientHome> {
         }
       },
     )..start();
-    // Actuate the screen backlight whenever the proximity sensor's presence flips.
-    // The old controller (if any) was just disposed, dropping its listeners.
-    assistant.addListener(() => _brightness.apply(assistant.state.userPresent));
+    // Actuate the screen backlight whenever the screen wakes or sleeps. Driven by
+    // `screenAwake` (not `userPresent` alone) so a camera approach, a voice turn, or
+    // a full-screen mode all restore full brightness — matching exactly when the
+    // away-face blackout lifts. The old controller (if any) was just disposed,
+    // dropping its listeners.
+    assistant.addListener(() => _brightness.apply(assistant.state.screenAwake));
 
     // Proactive-notification channel: a persistent, device-dialed connection to the
     // pinned orchestrator that receives pushed visual notifications (Approach A).

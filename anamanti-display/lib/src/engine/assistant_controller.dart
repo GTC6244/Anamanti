@@ -325,6 +325,18 @@ class AssistantState {
   /// the UI keys off — not [turnActive] alone.
   bool get displayActive => turnActive || audioPlaying;
 
+  /// Whether the screen is "awake" — i.e. showing its full presentation rather than
+  /// the dimmed away-mode clock. True when the camera reports someone present, while
+  /// a voice turn / reply audio is on screen, or while any full-screen mode
+  /// (recipe / weather / place) is up. This is the exact inverse of the UI's
+  /// `offMode`, and the **single source of truth** for both blanking the slideshow
+  /// ([AmbientScreen]) and driving the backlight ([ScreenBrightnessController]): a
+  /// wake from *any* of these causes must brighten the screen to full, not just a
+  /// camera-presence flip. (Historically the backlight tracked only [userPresent],
+  /// so a turn/mode that woke the display left the backlight stuck dim.)
+  bool get screenAwake =>
+      userPresent || displayActive || recipeActive || weatherActive || placeActive;
+
   AssistantState copyWith({
     TurnPhase? phase,
     bool? online,

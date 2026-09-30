@@ -109,6 +109,71 @@ void main() {
     expect(controller.state.userPresent, isTrue);
   });
 
+  test('screenAwake wakes on presence, a voice turn, or a full-screen mode', () {
+    const dim = AssistantState(userPresent: false);
+    // Camera absent + idle + no mode → asleep (dims to the away face).
+    expect(dim.screenAwake, isFalse);
+
+    // Camera approach wakes it.
+    expect(dim.copyWith(userPresent: true).screenAwake, isTrue);
+
+    // A voice turn wakes it even while the camera still reports absent — the bug the
+    // backlight fix targets: the away-face lifts, so the backlight must too.
+    expect(dim.copyWith(phase: TurnPhase.thinking).screenAwake, isTrue);
+    // Reply audio outliving the turn keeps it awake.
+    expect(dim.copyWith(audioPlaying: true).screenAwake, isTrue);
+  });
+
+  test('a wake-word detection wakes the screen even while the camera reports absent',
+      () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+    )..start();
+    addTearDown(controller.dispose);
+
+    // Dim: the camera released presence and no turn is in flight.
+    engine.add(_presence(false));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.userPresent, isFalse);
+    expect(controller.state.screenAwake, isFalse);
+
+    // The wake word fires → the turn starts (phase: listening), so the screen must
+    // wake to full brightness immediately, without waiting on a camera motion flip.
+    engine.add(_event(WakeWordEventKind.detected));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.phase, TurnPhase.listening);
+    expect(controller.state.screenAwake, isTrue);
+  });
+
+  test('presence(true) drives the backlight to full even after a dedup no-op',
+      () async {
+    final calls = <double>[];
+    const channel = MethodChannel('test/ambient_brightness_wake');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'setBrightness') calls.add(call.arguments as double);
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    final c = ScreenBrightnessController(
+      channel: channel,
+      nearBrightness: 1.0,
+      awayBrightness: 0.25,
+    );
+
+    // A wake → dim → wake cycle restores full brightness on the second wake.
+    await c.apply(true); // bright
+    await c.apply(false); // dim
+    await c.apply(true); // wake again → back to full, not stuck dim
+    expect(calls, [1.0, 0.25, 1.0]);
+  });
+
   test('brightness controller maps presence and de-dupes channel calls', () async {
     final calls = <double>[];
     const channel = MethodChannel('test/ambient_brightness');
