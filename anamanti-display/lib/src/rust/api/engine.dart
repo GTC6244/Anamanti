@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level_diag`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`, `WeatherHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
 
@@ -33,6 +33,21 @@ Future<void> stopWakeWordEngine() =>
 /// Whether the wake-word engine is currently running.
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
+
+/// Live-adjust the capture gain (dB) and idle wake-word detection threshold on the
+/// **running** engine without restarting it, so the audio-diagnostics screen's
+/// sliders take effect instantly while the user watches the meters. The engine
+/// re-reads both values each audio block. They are re-seeded from [`WakeWordConfig`]
+/// on the next engine start, so persist the chosen values to settings to keep them
+/// across restarts. A harmless no-op when no engine is running. `gain_db` is clamped
+/// to `[0, 36]`; `threshold` to `[0, 1]`.
+void updateDiagnosticsTuning({
+  required double gainDb,
+  required double threshold,
+}) => RustLib.instance.api.crateApiEngineUpdateDiagnosticsTuning(
+  gainDb: gainDb,
+  threshold: threshold,
+);
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
 /// — so it resets the screen-dim countdown (and brightens the screen if it had
@@ -423,8 +438,24 @@ class WakeWordEvent {
   /// Input RMS level (`Level`).
   final double rms;
 
-  /// Wake-word confidence in [0, 1] (`Detected`).
+  /// Wake-word confidence in [0, 1] — the raw current-block score (`Level`,
+  /// diagnostics) or the smoothed score that fired (`Detected`).
   final double score;
+
+  /// The smoothed score the detection gate actually tests (average, or peak in
+  /// peak mode) in [0, 1]. Carried on `Level` events so the audio-diagnostics
+  /// screen can show the value being compared against the threshold; 0 otherwise.
+  final double avgScore;
+
+  /// The wake-word detection threshold currently in effect in [0, 1] (the idle
+  /// threshold, or the raised active threshold during a turn). Carried on `Level`
+  /// events so the diagnostics meter can draw the firing line; 0 otherwise.
+  final double threshold;
+
+  /// The software capture gain in dB currently applied to the mic signal. Carried
+  /// on `Level` events so the diagnostics screen reflects live gain changes; 0
+  /// otherwise.
+  final double gainDb;
 
   /// Wake-word name that fired (`Detected`).
   final String model;
@@ -475,6 +506,9 @@ class WakeWordEvent {
     required this.channels,
     required this.rms,
     required this.score,
+    required this.avgScore,
+    required this.threshold,
+    required this.gainDb,
     required this.model,
     required this.transcript,
     required this.reply,
@@ -497,6 +531,9 @@ class WakeWordEvent {
       channels.hashCode ^
       rms.hashCode ^
       score.hashCode ^
+      avgScore.hashCode ^
+      threshold.hashCode ^
+      gainDb.hashCode ^
       model.hashCode ^
       transcript.hashCode ^
       reply.hashCode ^
@@ -521,6 +558,9 @@ class WakeWordEvent {
           channels == other.channels &&
           rms == other.rms &&
           score == other.score &&
+          avgScore == other.avgScore &&
+          threshold == other.threshold &&
+          gainDb == other.gainDb &&
           model == other.model &&
           transcript == other.transcript &&
           reply == other.reply &&
@@ -544,7 +584,9 @@ enum WakeWordEventKind {
   status,
 
   /// Periodic input level in `rms` (~0.0..1.0) — proves capture is live even
-  /// before a wake-word model is present.
+  /// before a wake-word model is present. When a model is loaded it also carries
+  /// the live wake-word diagnostics (`score`, `avg_score`, `threshold`, `gain_db`)
+  /// that drive the audio-diagnostics screen.
   level,
 
   /// The wake word fired; `model` and `score` are populated.

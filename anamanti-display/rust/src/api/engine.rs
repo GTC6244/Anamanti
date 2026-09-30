@@ -173,7 +173,9 @@ pub enum WakeWordEventKind {
     /// Informational status in `message` (e.g. model loaded, capture-only).
     Status,
     /// Periodic input level in `rms` (~0.0..1.0) — proves capture is live even
-    /// before a wake-word model is present.
+    /// before a wake-word model is present. When a model is loaded it also carries
+    /// the live wake-word diagnostics (`score`, `avg_score`, `threshold`, `gain_db`)
+    /// that drive the audio-diagnostics screen.
     Level,
     /// The wake word fired; `model` and `score` are populated.
     Detected,
@@ -274,8 +276,21 @@ pub struct WakeWordEvent {
     pub channels: u16,
     /// Input RMS level (`Level`).
     pub rms: f32,
-    /// Wake-word confidence in [0, 1] (`Detected`).
+    /// Wake-word confidence in [0, 1] — the raw current-block score (`Level`,
+    /// diagnostics) or the smoothed score that fired (`Detected`).
     pub score: f32,
+    /// The smoothed score the detection gate actually tests (average, or peak in
+    /// peak mode) in [0, 1]. Carried on `Level` events so the audio-diagnostics
+    /// screen can show the value being compared against the threshold; 0 otherwise.
+    pub avg_score: f32,
+    /// The wake-word detection threshold currently in effect in [0, 1] (the idle
+    /// threshold, or the raised active threshold during a turn). Carried on `Level`
+    /// events so the diagnostics meter can draw the firing line; 0 otherwise.
+    pub threshold: f32,
+    /// The software capture gain in dB currently applied to the mic signal. Carried
+    /// on `Level` events so the diagnostics screen reflects live gain changes; 0
+    /// otherwise.
+    pub gain_db: f32,
     /// Wake-word name that fired (`Detected`).
     pub model: String,
     /// Recognized speech (`Transcript`).
@@ -318,6 +333,9 @@ impl WakeWordEvent {
             channels: 0,
             rms: 0.0,
             score: 0.0,
+            avg_score: 0.0,
+            threshold: 0.0,
+            gain_db: 0.0,
             model: String::new(),
             transcript: String::new(),
             reply: String::new(),
@@ -351,6 +369,23 @@ impl WakeWordEvent {
     pub(crate) fn level(rms: f32) -> Self {
         Self {
             rms,
+            ..Self::base(WakeWordEventKind::Level)
+        }
+    }
+
+    /// A `Level` event enriched with the live wake-word diagnostics — the raw
+    /// current-block `score`, the smoothed `avg_score` the gate tests, the
+    /// `threshold` in effect, and the `gain_db` applied — so the audio-diagnostics
+    /// screen can render the mic meter, the score-vs-threshold meter, and the
+    /// numeric readouts from one stream. Emitted (in place of [`Self::level`]) while
+    /// a wake-word model is loaded.
+    pub(crate) fn level_diag(rms: f32, score: f32, avg_score: f32, threshold: f32, gain_db: f32) -> Self {
+        Self {
+            rms,
+            score,
+            avg_score,
+            threshold,
+            gain_db,
             ..Self::base(WakeWordEventKind::Level)
         }
     }
@@ -524,6 +559,18 @@ pub fn stop_wake_word_engine() {
 #[frb(sync)]
 pub fn is_wake_word_engine_running() -> bool {
     crate::engine::is_running()
+}
+
+/// Live-adjust the capture gain (dB) and idle wake-word detection threshold on the
+/// **running** engine without restarting it, so the audio-diagnostics screen's
+/// sliders take effect instantly while the user watches the meters. The engine
+/// re-reads both values each audio block. They are re-seeded from [`WakeWordConfig`]
+/// on the next engine start, so persist the chosen values to settings to keep them
+/// across restarts. A harmless no-op when no engine is running. `gain_db` is clamped
+/// to `[0, 36]`; `threshold` to `[0, 1]`.
+#[frb(sync)]
+pub fn update_diagnostics_tuning(gain_db: f32, threshold: f32) {
+    crate::engine::update_tuning(gain_db, threshold);
 }
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
