@@ -180,10 +180,15 @@ Core-owned path).
   active (`offMode`), the blackout layer fades in and only the large dimmed
   centered `_AmbientClock` remains; `StatusIndicator`, idle clock, and gear fade
   out (the `NotificationBanner` still shows).
-- `ScreenBrightnessController` (`lib/src/engine/screen_brightness.dart`) dims the
-  backlight via a platform `MethodChannel` (`anamanti_display/brightness`) after
-  the configured "Dim screen after" idle window; any touch (via the root
-  `Listener`) brightens it again.
+- `ScreenBrightnessController` (`lib/src/engine/screen_brightness.dart`) actuates the
+  backlight via a platform `MethodChannel` (`anamanti_display/brightness`), driven by
+  `AssistantState.screenAwake` — the exact inverse of `offMode`. It dims to
+  `brightnessAway` (0.25) only in away mode and returns to full `brightnessNear` (1.0)
+  on **any** wake: a camera approach, a touch/voice turn, or a full-screen mode. Wiring
+  it to `screenAwake` (not `userPresent` alone) keeps the backlight and the blackout in
+  lockstep, so the screen can never "wake" visually while the backlight stays dim. The
+  "Dim screen after" setting controls the camera's release window (how long with no
+  motion before away mode); it is not a separate dimmer.
 
 ---
 
