@@ -56,8 +56,22 @@ impl OpenAiEmbedder {
         model: impl Into<String>,
         dimensions: usize,
     ) -> Self {
+        // Reuse one keep-alive connection across the many embedding calls (per-turn
+        // recall + the background ingester share this client). A generous idle
+        // timeout keeps the pooled TLS connection warm between turns, and TCP
+        // keepalive stops a NAT/firewall silently dropping it — both save the
+        // DNS+TLS handshake (~hundreds of ms) on the next request. Falls back to the
+        // default client if the builder ever fails.
+        let client = reqwest::Client::builder()
+            .pool_idle_timeout(std::time::Duration::from_secs(300))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|e| {
+                log::warn!("pooled embeddings HTTP client build failed ({e}); using default");
+                reqwest::Client::new()
+            });
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -76,10 +90,15 @@ impl Embedder for OpenAiEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+        // Request base64-encoded vectors: OpenAI returns each embedding as
+        // little-endian f32 bytes in base64, which is far smaller on the wire than a
+        // JSON array of decimal floats (~1536 numbers), so the response transfers and
+        // parses faster. We decode it back to `Vec<f32>` below.
         let body = json!({
             "model": self.model,
             "input": texts,
             "dimensions": self.dimensions,
+            "encoding_format": "base64",
         });
         let resp = self
             .client
@@ -99,7 +118,7 @@ impl Embedder for OpenAiEmbedder {
         // The API preserves input order and echoes each `index`; sort defensively.
         let mut data = parsed.data;
         data.sort_by_key(|d| d.index);
-        Ok(data.into_iter().map(|d| d.embedding).collect())
+        data.into_iter().map(|d| d.embedding.into_vec()).collect()
     }
 }
 
@@ -111,7 +130,49 @@ struct EmbeddingsResponse {
 #[derive(serde::Deserialize)]
 struct EmbeddingDatum {
     index: usize,
-    embedding: Vec<f32>,
+    embedding: EmbeddingData,
+}
+
+/// One embedding as returned by the API. We request `encoding_format="base64"`
+/// (the [`EmbeddingData::Base64`] arm), but the untagged enum also accepts a plain
+/// float array so a `float`-format response (or an API that ignores the param)
+/// still parses.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum EmbeddingData {
+    /// base64 of the raw little-endian `f32` bytes.
+    Base64(String),
+    /// A JSON array of floats (`encoding_format="float"`).
+    Floats(Vec<f32>),
+}
+
+impl EmbeddingData {
+    /// Materialize the vector, decoding the base64 arm from little-endian f32 bytes.
+    fn into_vec(self) -> Result<Vec<f32>> {
+        match self {
+            EmbeddingData::Floats(v) => Ok(v),
+            EmbeddingData::Base64(s) => decode_base64_f32(&s),
+        }
+    }
+}
+
+/// Decode an OpenAI base64 embedding: standard base64 → raw bytes → little-endian
+/// `f32`s. Errors if the payload isn't valid base64 or isn't a whole number of
+/// 4-byte floats.
+fn decode_base64_f32(s: &str) -> Result<Vec<f32>> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .context("decoding base64 embedding")?;
+    anyhow::ensure!(
+        bytes.len() % 4 == 0,
+        "base64 embedding byte length {} is not a multiple of 4",
+        bytes.len()
+    );
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 /// Deterministic, network-free embedder for tests. Maps text to a fixed-dim vector
@@ -235,6 +296,62 @@ mod tests {
         assert_eq!(vecs.len(), 2);
         assert_eq!(vecs[0], vec![1.0, 0.0], "index 0 must come first");
         assert_eq!(vecs[1], vec![0.0, 1.0]);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn decode_base64_f32_round_trips_little_endian() {
+        use base64::Engine;
+        let vals: Vec<f32> = vec![1.0, 0.0, -2.5, 42.25];
+        let mut bytes = Vec::new();
+        for v in &vals {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(decode_base64_f32(&b64).unwrap(), vals);
+        // A non-multiple-of-4 byte length is rejected.
+        let bad = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        assert!(decode_base64_f32(&bad).is_err());
+    }
+
+    /// The real client + parser against a canned **base64** response (the format we
+    /// now request), confirming we decode little-endian f32 bytes back to the vector.
+    #[tokio::test]
+    async fn openai_embedder_decodes_base64_response() {
+        use base64::Engine;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let b64 = |v: &[f32]| {
+            let mut bytes = Vec::new();
+            for x in v {
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        };
+        let body = format!(
+            r#"{{"data":[{{"index":0,"embedding":"{}"}}]}}"#,
+            b64(&[1.0, 0.0, -2.5])
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+
+        let e = OpenAiEmbedder::new(format!("http://{addr}"), "k", "text-embedding-3-small", 3);
+        let vecs = e.embed(&["hello".to_string()]).await.unwrap();
+        assert_eq!(vecs, vec![vec![1.0, 0.0, -2.5]]);
         server.await.unwrap();
     }
 }

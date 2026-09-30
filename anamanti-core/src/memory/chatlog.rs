@@ -90,6 +90,26 @@ pub struct TurnTiming {
     /// System-2 memory recall (GraphRAG/FTS).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_ms: Option<u64>,
+    /// Which recall backend actually answered this turn: `"helix"` (embedded HelixDB
+    /// GraphRAG) or `"sqlite-fts"` (the always-available keyword fallback). Recorded
+    /// per turn so the `/chatlog` page shows whether a `memory_backend="helix"`
+    /// instance really ran GraphRAG or silently fell back to FTS at boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_backend: Option<String>,
+    /// Whether this recall made a query-embedding network call (OpenAI embeddings):
+    /// `true` for the GraphRAG backend, `false` for SQLite FTS. This is the variable
+    /// component of `recall_ms` — the embedding round-trip dominates recall latency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_embedded: Option<bool>,
+    /// GraphRAG only: the query-embedding round-trip (OpenAI) portion of `recall_ms`,
+    /// broken out so the `/chatlog` page shows the network embedding and the local
+    /// graph search as two separate rows. Absent on the FTS backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_embed_ms: Option<u64>,
+    /// GraphRAG only: the local HelixDB vector KNN + graph-expansion portion of
+    /// `recall_ms` (the non-network part). Absent on the FTS backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_search_ms: Option<u64>,
     /// System-2 prompt assembly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_ms: Option<u64>,

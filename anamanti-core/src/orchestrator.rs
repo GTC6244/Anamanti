@@ -879,17 +879,38 @@ impl Pipeline {
         // failure (e.g. a transient GraphRAG backend error) must not sink the turn —
         // proceed with no memory context rather than erroring.
         let recall_start = Instant::now();
-        let context = self
+        let recalled = self
             .build_context(transcript, scope)
             .await
             .unwrap_or_else(|e| {
                 log::warn!("memory recall failed; answering without context: {e:#}");
-                String::new()
+                crate::memory::RecallResult::default()
             });
         let recall_ms = recall_start.elapsed().as_millis() as u64;
+        let context = recalled
+            .hits
+            .iter()
+            .map(|c| format!("- {c}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         timing.recall_ms = Some(recall_ms);
+        // Record which backend actually answered (the boot fallback is silent, so this
+        // is the only per-turn proof that a helix-configured instance ran GraphRAG vs
+        // fell back to FTS) and whether it paid the OpenAI embedding round-trip that
+        // dominates recall latency. When Helix runs, also record the embed-vs-search
+        // split so the chatlog page shows the network embedding separately from the
+        // local graph search.
+        let recall_backend = self.recall.backend();
+        let recall_embedded = self.recall.embeds_query();
+        timing.recall_backend = Some(recall_backend.to_string());
+        timing.recall_embedded = Some(recall_embedded);
+        timing.recall_embed_ms = recalled.embed_ms;
+        timing.recall_search_ms = recalled.search_ms;
         log::info!(
-            "system2: memory recall in {recall_ms}ms ({} ctx chars)",
+            "system2: memory recall in {recall_ms}ms via {recall_backend} \
+             (embed {:?}ms, search {:?}ms, {} ctx chars)",
+            recalled.embed_ms,
+            recalled.search_ms,
             context.len(),
         );
 
@@ -1218,16 +1239,17 @@ impl Pipeline {
         })
     }
 
-    /// Gather memory entries relevant to the transcript as prompt context for this
-    /// speaker (their own entries plus shared), via the configured recall backend
-    /// (SQLite FTS by default; HelixDB GraphRAG when set).
-    async fn build_context(&self, transcript: &str, speaker_id: Option<&str>) -> Result<String> {
-        let hits = self.recall.recall(transcript, speaker_id, 8).await?;
-        Ok(hits
-            .iter()
-            .map(|c| format!("- {c}"))
-            .collect::<Vec<_>>()
-            .join("\n"))
+    /// Recall memory entries relevant to the transcript for this speaker (their own
+    /// entries plus shared), via the configured recall backend (SQLite FTS by default;
+    /// HelixDB GraphRAG when set). Returns the raw [`RecallResult`] — hits plus the
+    /// optional embed/search timing split — so the caller can both format the context
+    /// and record the per-stage latencies.
+    async fn build_context(
+        &self,
+        transcript: &str,
+        speaker_id: Option<&str>,
+    ) -> Result<crate::memory::RecallResult> {
+        self.recall.recall(transcript, speaker_id, 8).await
     }
 
     /// The recent conversation, as `(user, assistant)` pairs oldest-first, for a

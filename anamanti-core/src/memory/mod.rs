@@ -32,7 +32,7 @@ pub mod helix;
 pub mod ingester;
 
 pub use backend::HelixRecall;
-pub use backend::{Recall, SqliteRecall};
+pub use backend::{Recall, RecallResult, SqliteRecall};
 pub use chatlog::{ChatLog, ChatLogRecord, TurnTiming};
 pub use extract::{infer_memories, parse_command, MemoryCommand};
 pub use graphview::GraphView;
