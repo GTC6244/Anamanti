@@ -81,9 +81,10 @@ class _AmbientHomeState extends State<AmbientHome> {
   OrchestratorClient _client = const FrbOrchestratorClient();
   final SlideshowController _slideshow = SlideshowController();
 
-  /// Actuates the window backlight from the camera proximity sensor's presence
-  /// state (Plan.MD §5). Long-lived across engine restarts so it only crosses the
-  /// platform channel when the target brightness actually changes.
+  /// Actuates the window backlight from whether the screen is awake
+  /// ([AssistantState.screenAwake]) — camera presence, an active voice turn, or a
+  /// full-screen mode (Plan.MD §5). Long-lived across engine restarts so it only
+  /// crosses the platform channel when the target brightness actually changes.
   final ScreenBrightnessController _brightness = ScreenBrightnessController();
 
   AppSettings _settings = const AppSettings();
@@ -288,9 +289,12 @@ class _AmbientHomeState extends State<AmbientHome> {
         }
       },
     )..start();
-    // Actuate the screen backlight whenever the proximity sensor's presence flips.
-    // The old controller (if any) was just disposed, dropping its listeners.
-    assistant.addListener(() => _brightness.apply(assistant.state.userPresent));
+    // Actuate the screen backlight whenever the screen wakes or sleeps. Driven by
+    // `screenAwake` (not `userPresent` alone) so a camera approach, a voice turn, or
+    // a full-screen mode all restore full brightness — matching exactly when the
+    // away-face blackout lifts. The old controller (if any) was just disposed,
+    // dropping its listeners.
+    assistant.addListener(() => _brightness.apply(assistant.state.screenAwake));
 
     // Proactive-notification channel: a persistent, device-dialed connection to the
     // pinned orchestrator that receives pushed visual notifications (Approach A).
@@ -353,9 +357,14 @@ class _AmbientHomeState extends State<AmbientHome> {
         !listEquals(next.driveFolderIds, _settings.driveFolderIds) ||
         next.driveLinked != _settings.driveLinked;
 
-    _settings = next;
-    // Re-pin the control client to the (possibly new) orchestrator selection.
-    _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
+    // setState so purely-presentational changes (e.g. the listening-ring toggle and
+    // its reactivity/attack/release/decay dials) repaint AmbientScreen even when
+    // neither the engine nor the photo source changed.
+    setState(() {
+      _settings = next;
+      // Re-pin the control client to the (possibly new) orchestrator selection.
+      _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
+    });
     if (photoChanged) {
       // A new/changed link means new refresh tokens: re-mint before rebuilding.
       await _refreshGoogleTokens();
@@ -372,6 +381,8 @@ class _AmbientHomeState extends State<AmbientHome> {
           store: _store,
           client: _client,
           onApplied: _onSettingsApplied,
+          // The live engine controller powers the Audio Diagnostics page's meters.
+          assistant: _assistant,
         ),
       ),
     );
@@ -405,15 +416,27 @@ class _AmbientHomeState extends State<AmbientHome> {
         slideshow: _slideshow,
         notifications: _notifications,
         onOpenSettings: _openSettings,
+        listeningRingEnabled: _settings.listeningRingEnabled,
+        ringReactivity: _settings.ringReactivity,
+        ringAttack: _settings.ringAttack,
+        ringRelease: _settings.ringRelease,
+        ringDecay: _settings.ringDecay,
       );
     }
-    // A screen touch counts as user activity: reset the dim countdown (and brighten
-    // a dimmed screen). Translucent so it observes every touch without stealing it
-    // from the widgets below (settings control, timer chips, notification banner).
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: (_) => noteUserActivity(),
-      child: content,
+    // Kiosk guard: never let the hardware/gesture Back button pop the root route,
+    // which would drop the whole app to the Android launcher (it looked like the app
+    // "died"). Pushed routes like SettingsScreen still pop normally — this only
+    // blocks exiting the app from the ambient home screen.
+    return PopScope(
+      canPop: false,
+      // A screen touch counts as user activity: reset the dim countdown (and brighten
+      // a dimmed screen). Translucent so it observes every touch without stealing it
+      // from the widgets below (settings control, timer chips, notification banner).
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => noteUserActivity(),
+        child: content,
+      ),
     );
   }
 }

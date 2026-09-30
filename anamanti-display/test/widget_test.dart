@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/ambient_screen.dart';
+import 'package:anamanti_display/src/ui/listening_overlay.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 
 WakeWordConfig _testConfig() => WakeWordConfig(
@@ -46,6 +47,7 @@ WakeWordEvent _event(
   String transcript = '',
   String reply = '',
   String model = '',
+  double rms = 0,
   int timerId = 0,
   String timerLabel = '',
   int timerRemainingSecs = 0,
@@ -58,8 +60,11 @@ WakeWordEvent _event(
     device: '',
     deviceSampleRate: 0,
     channels: 0,
-    rms: 0,
+    rms: rms,
     score: 0,
+    avgScore: 0,
+    threshold: 0,
+    gainDb: 0,
     model: model,
     transcript: transcript,
     reply: reply,
@@ -244,6 +249,74 @@ void main() {
     await h.settle(tester);
     expect(h.assistant.state.reply, 'fresh answer');
     expect(h.assistant.state.audioPlaying, isFalse);
+
+    await h.dispose(tester);
+  });
+
+  testWidgets(
+      'the listening ring shows while listening, reacts to mic level, then hides at '
+      'end-of-speech', (tester) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    double cueOpacity() => tester
+        .widget<AnimatedOpacity>(find.byKey(const Key('listening-cue')))
+        .opacity;
+
+    // Idle: no ring.
+    expect(cueOpacity(), 0);
+    expect(find.byType(ListeningOverlay), findsNothing);
+
+    // Wake word fires → the glowing ring appears (device is listening).
+    h.add(_event(WakeWordEventKind.detected, model: 'alexa'));
+    await h.settle(tester);
+    expect(h.assistant.state.listening, isTrue);
+    expect(cueOpacity(), 1);
+    expect(find.byType(ListeningOverlay), findsOneWidget);
+
+    // Survives the brief connecting → streaming hop while we dial the Mac.
+    h.add(_event(WakeWordEventKind.connecting, message: 'connecting'));
+    h.add(_event(WakeWordEventKind.streaming));
+    await h.settle(tester);
+    expect(cueOpacity(), 1);
+
+    // Mic level flows into the ring, which stays visible while the user speaks.
+    h.add(_event(WakeWordEventKind.level, rms: 0.08));
+    await h.settle(tester);
+    expect(cueOpacity(), 1);
+    expect(
+      tester.widget<ListeningOverlay>(find.byType(ListeningOverlay)).level,
+      0.08,
+    );
+
+    // Transcript → thinking: the user has finished, so the listening ring hides.
+    h.add(_event(WakeWordEventKind.transcript, transcript: 'hi there'));
+    await h.settle(tester);
+    expect(h.assistant.state.listening, isFalse);
+    expect(cueOpacity(), 0);
+
+    await h.dispose(tester);
+  });
+
+  testWidgets('the listening ring clears when the turn ends', (tester) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    double cueOpacity() => tester
+        .widget<AnimatedOpacity>(find.byKey(const Key('listening-cue')))
+        .opacity;
+
+    h.add(_event(WakeWordEventKind.detected, model: 'alexa'));
+    await h.settle(tester);
+    expect(cueOpacity(), 1);
+
+    // The host was unreachable: the turn ends — the ring must clear rather than
+    // glow forever.
+    h.add(_event(WakeWordEventKind.disconnected,
+        message: 'no Wyoming host: browse timed out'));
+    await h.settle(tester);
+    expect(h.assistant.state.listening, isFalse);
+    expect(cueOpacity(), 0);
 
     await h.dispose(tester);
   });

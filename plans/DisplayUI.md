@@ -28,12 +28,13 @@ events; nothing here touches audio buffers or sockets directly.
 | **App shell** | `AmbientDisplayApp` / `AmbientHome`, `AmbientScreen` (compositor) |
 | **Backgrounds / idle** | `SlideshowView`, `SlideshowController`, `PhotoSource` backends (local / Ambient / Drive) |
 | **Overlays (always-on)** | idle `_AmbientClock` + weather-beside-clock chip, `StatusIndicator`, settings gear |
+| **Overlays (listening cue)** | `ListeningOverlay` — big glowing blue ring (hollow) that reacts to mic level while listening |
 | **Overlays (timers)** | `TimersOverlay` — big (idle) + compact (in-turn) |
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
 | **Banners** | `NotificationBanner` (proactive push from Core) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Speech Processing / Speech Detection / Background) |
+| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background), `AudioDiagnosticsView` |
 | **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
@@ -79,15 +80,19 @@ events; nothing here touches audio buffers or sockets directly.
    `state.weather!.isWeek`.
 7. `PlaceView` (placeActive).
 8. `ConversationView` — live transcript + reply, 300 ms fade, padded 28.
-9. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
-   hidden during a turn, off mode, any full-screen mode, or when timers exist.
-10. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
-11. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
-12. Compact `TimersOverlay` (`compact: true`) — top-center chip row, only while a
+9. `ListeningOverlay` — big glowing blue ring (hollow), centered, 250 ms fade;
+   `IgnorePointer`, shown only while `state.listening` (wake word / follow-up listen
+   → end-of-speech). Reacts to `state.micLevel`. Mounted only while shown so its
+   pulse controller isn't spinning during idle.
+10. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
+    hidden during a turn, off mode, any full-screen mode, or when timers exist.
+11. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
+12. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
+13. Compact `TimersOverlay` (`compact: true`) — top-center chip row, only while a
     turn is active.
-13. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
+14. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
     `open-settings`; fades out during a turn and in away mode.
-14. `NotificationBanner` — top layer; shows even in away mode.
+15. `NotificationBanner` — top layer; shows even in away mode.
 
 ---
 
@@ -155,7 +160,38 @@ Core-owned path).
 
 ---
 
-## 3. Overlays — timers
+## 3. Overlays — listening cue
+
+**`ListeningOverlay` / `_ListeningOverlayState`** — `lib/src/ui/listening_overlay.dart`
+- A large (260 px) glowing blue **ring** (hollow — no fill, so the slideshow shows
+  through the centre), centered on screen, that gives an unmistakable "I heard you —
+  I'm listening" cue and doubles as a **live voice visualizer**. A bright blue-white
+  stroke with a soft blue glow (two stacked `BoxShadow`s — a wide halo + a tight edge
+  bloom). Its **stroke width, scale, and glow react to the microphone amplitude**
+  (`AssistantState.micLevel`, the input RMS streamed by `WakeWordEventKind.level`),
+  **auto-ranged against a slowly-decaying peak** (so it stays visibly dynamic despite
+  the small, gain/AEC/distance-dependent absolute RMS) with asymmetric attack/release
+  smoothing so each syllable pumps the ring and it settles cleanly; under a baseline
+  it keeps a slow "breathing" pulse (a single
+  `AnimationController`, 1.4 s, `repeat(reverse: true)`) so it feels alive before you
+  speak. `IgnorePointer` — touches pass through to the layers beneath.
+- Shown while `AssistantState.listening` (`phase == listening || connecting`): it
+  appears on `WakeWordEventKind.detected` (wake word) **and** `listeningFollowup` (a
+  follow-up listen reopens the mic), stays up through the `connecting` → `streaming`
+  hop and while the user speaks, and hides when end-of-speech moves the turn on
+  (local cue → `processing`, or the authoritative `transcript` → `thinking`) or the
+  turn ends. Excludes the TTS `speaking` phase (that's the assistant talking).
+  `AmbientScreen` wraps it in an `AnimatedOpacity` (key `listening-cue`, 250 ms) and
+  mounts the widget only while shown, so the pulse controller isn't spinning during
+  the idle day.
+- **User-configurable** in Settings → Speech Processing: a master on/off
+  (`AppSettings.listeningRingEnabled` — when off the overlay never appears) plus the
+  reactivity / attack / release / auto-range-decay dials (`ringReactivity`,
+  `ringAttack`, `ringRelease`, `ringDecay`). `AmbientScreen` receives these from
+  `main.dart` and passes them to `ListeningOverlay`; changes apply instantly on Save
+  (a `setState` in `_onSettingsApplied`), with no engine restart or Mac round-trip.
+
+## 4. Overlays — timers
 
 **`TimersOverlay` / `_TimersOverlayState`** — `lib/src/ui/timers_overlay.dart`
 - On-device countdown timers; repaints twice a second to interpolate remaining
@@ -174,20 +210,25 @@ Core-owned path).
 
 ---
 
-## 4. Overlays — away / off mode
+## 5. Overlays — away / off mode
 
 - When the camera proximity sensor reports nobody present and nothing else is
   active (`offMode`), the blackout layer fades in and only the large dimmed
   centered `_AmbientClock` remains; `StatusIndicator`, idle clock, and gear fade
   out (the `NotificationBanner` still shows).
-- `ScreenBrightnessController` (`lib/src/engine/screen_brightness.dart`) dims the
-  backlight via a platform `MethodChannel` (`anamanti_display/brightness`) after
-  the configured "Dim screen after" idle window; any touch (via the root
-  `Listener`) brightens it again.
+- `ScreenBrightnessController` (`lib/src/engine/screen_brightness.dart`) actuates the
+  backlight via a platform `MethodChannel` (`anamanti_display/brightness`), driven by
+  `AssistantState.screenAwake` — the exact inverse of `offMode`. It dims to
+  `brightnessAway` (0.25) only in away mode and returns to full `brightnessNear` (1.0)
+  on **any** wake: a camera approach, a touch/voice turn, or a full-screen mode. Wiring
+  it to `screenAwake` (not `userPresent` alone) keeps the backlight and the blackout in
+  lockstep, so the screen can never "wake" visually while the backlight stays dim. The
+  "Dim screen after" setting controls the camera's release window (how long with no
+  motion before away mode); it is not a separate dimmer.
 
 ---
 
-## 5. Banners
+## 6. Banners
 
 **`NotificationBanner`** — `lib/src/ui/notification_banner.dart`
 - Top-center dismissible card over the slideshow for a pushed `NotifyEvent`.
@@ -203,7 +244,7 @@ Core-owned path).
 
 ---
 
-## 6. Conversation UI
+## 7. Conversation UI
 
 **`ConversationView` / `_Bubble`** — `lib/src/ui/conversation_view.dart`
 - Live turn panel over the slideshow, capped at 720px reading width. Two bubbles:
@@ -229,7 +270,7 @@ Full state-machine flow: `agents.md` cheat-sheet + `architecture.md §4`.
 
 ---
 
-## 7. Full-screen views (pushed from Anamanti Core)
+## 8. Full-screen views (pushed from Anamanti Core)
 
 These are **not** navigation routes — they are `AnimatedOpacity` layers inside
 `AmbientScreen`'s Stack, shown when the matching `AssistantState` field is
@@ -279,11 +320,11 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 ---
 
-## 8. Settings (navigation route)
+## 9. Settings (navigation route)
 
 **`SettingsScreen` / `_SettingsScreenState`** — `lib/src/ui/settings_screen.dart`
 - The only `Navigator.push` in the app (tap the gear on `AmbientScreen`). A
-  two-level master/detail: `_menu()` lists 5 category tiles; selecting one opens
+  two-level master/detail: `_menu()` lists 6 category tiles; selecting one opens
   `_categoryPage`. `enum _SettingsCategory`:
   - **Assistant** — orchestrator (which Mac) + LLM backend, Anthropic auth
     (API key vs subscription/OAuth), model, voice. Orchestrator-managed; shows
@@ -292,8 +333,12 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
     capture gain, "Fire on peak", "AudioRecord capture (far-field)", noise
     suppression / AGC / echo cancellation switches) + Display ("Dim screen after"
     preset slider, 30 s…1 h).
+  - **Audio Diagnostics** — a full custom page (`AudioDiagnosticsView`, not a tile
+    list) for visually tuning the mic. See its own section below.
   - **Speech Processing** — playback buffer, "Instant processing cue", endpoint
-    silence ms, endpoint RMS threshold.
+    silence ms, endpoint RMS threshold, and the **Listening ring** controls (on/off
+    switch + reactivity / attack / release / auto-range dials — presentational,
+    applied instantly on Save, no engine restart).
   - **Speech Detection** — VAD engine (Energy vs Silero), Silero threshold,
     end-silence ms, voice RMS threshold (applied on the Mac; see
     [`VadSileroPlan.md`](./VadSileroPlan.md)).
@@ -303,9 +348,34 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
   changes) and/or refreshes the slideshow (photo-source changes); assistant / VAD
   settings apply on the Mac.
 
+**`AudioDiagnosticsView`** — `lib/src/ui/audio_diagnostics_view.dart`
+- The **Audio Diagnostics** settings category — a live, visual mic-tuning surface.
+  Rendered full-page by `SettingsScreen._audioDiagnosticsPage()` (passed the live
+  `AssistantController` via the new `SettingsScreen.assistant` field, wired from
+  `main.dart`'s `_openSettings`). Driven entirely by the always-on wake-word
+  engine's event stream folded into `AssistantState` — no second audio path.
+- Shows: a **Microphone monitor** toggle (pauses/resumes the visualization only —
+  the wake-word mic is always on); a **mic input-level (RMS) meter** on a dBFS
+  scale (so quiet far-field audio is visible); a **wake-word score meter** with the
+  firing **threshold** drawn as a bright line and the smoothed score as a faint
+  tick, flashing a **DETECTED** chip when the wake word fires; a **numeric
+  readouts** grid (RMS, dBFS, score, smoothed, threshold, gain, device / rate /
+  channels); a **recent-detections** history (time + score); and two **live-tuning**
+  sliders (**Capture gain**, **Sensitivity (idle)**).
+- The tuning sliders apply to the **running engine instantly** via the new FRB
+  `updateDiagnosticsTuning(gainDb, threshold)` (no restart), and mirror into the
+  parent's editable `AppSettings` via `onChanged` so the shared **Save** button
+  persists them across restarts.
+- Data path: the Rust `run_loop` enriches its periodic `WakeWordEventKind.level`
+  event with the live `score` / `avgScore` / `threshold` / `gainDb` (see
+  `rust/src/engine/mod.rs`, `WakeWordEvent::level_diag`); the controller stores them
+  on `AssistantState` (`wakeScore`, `wakeAvgScore`, `wakeThreshold`, `captureGainDb`,
+  `captureDevice` / `captureSampleRate` / `captureChannels`, `detectionSeq`,
+  `lastDetectionScore`).
+
 ---
 
-## 9. Settings sub-screens — built but currently UNWIRED
+## 10. Settings sub-screens — built but currently UNWIRED
 
 These widgets exist and are tested but are **not reachable** from the running app
 in this version (referenced only from `test/`). Listed so they are not

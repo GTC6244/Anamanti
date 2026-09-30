@@ -80,12 +80,42 @@ fn orchestrator_meta(info: &ServiceInfo) -> Option<(String, String)> {
     Some((key, name))
 }
 
+/// Is this a link-local address (IPv4 169.254.0.0/16 or IPv6 fe80::/10)?
+/// Link-local addresses are not routable across the LAN and cannot be dialed
+/// without a scope id, so they must never be chosen as a Wyoming endpoint.
+fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        // `Ipv6Addr::is_unicast_link_local` is still unstable, so test fe80::/10.
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
+/// Choose the best reachable address from a resolved service's address set.
+///
+/// A resolver (macOS `mDNSResponder`, or any `addr_auto` advertiser) announces
+/// *every* address the host holds — including loopback and IPv6 link-locals
+/// (`fe80::…`) — and the set is unordered, so blindly taking the first entry can
+/// pick an address the device can never connect to. We therefore skip loopback,
+/// unspecified, and link-local addresses, then prefer IPv4 (the LAN norm for this
+/// deployment) over global IPv6. Returns `None` if nothing reachable remains.
+fn choose_address<'a>(addrs: impl IntoIterator<Item = &'a IpAddr>) -> Option<IpAddr> {
+    addrs
+        .into_iter()
+        .copied()
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !is_link_local(ip))
+        .max_by_key(|ip| match ip {
+            IpAddr::V4(_) => 2, // prefer IPv4 on this LAN
+            IpAddr::V6(_) => 1,
+        })
+}
+
 /// Build a [`WyomingEndpoint`] from a resolved service, returning `None` unless it
-/// is an orchestrator (TXT `role=core`) with at least one address. This is
-/// the single place the orchestrator role filter lives.
+/// is an orchestrator (TXT `role=core`) with at least one *reachable* address.
+/// This is the single place the orchestrator role filter lives.
 fn endpoint_from(info: &ServiceInfo) -> Option<WyomingEndpoint> {
     let (key, name) = orchestrator_meta(info)?;
-    let &address = info.get_addresses().iter().next()?;
+    let address = choose_address(info.get_addresses())?;
     Some(WyomingEndpoint {
         address,
         port: info.get_port(),
@@ -429,6 +459,25 @@ mod tests {
             err.to_string().contains("other-mac"),
             "error names the selected orchestrator, not the cached one: {err}"
         );
+    }
+
+    #[test]
+    fn choose_address_prefers_reachable_ipv4_over_ipv6_and_skips_link_local() {
+        use std::net::Ipv6Addr;
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50));
+        let ll4 = IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1));
+        let ll6 = IpAddr::V6("fe80::1".parse::<Ipv6Addr>().unwrap());
+        let g6 = IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap());
+        let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        // A routable IPv4 wins over global IPv6, link-locals, and loopback.
+        assert_eq!(choose_address([&ll6, &g6, &lan, &ll4, &lo]), Some(lan));
+        // No IPv4 available: a global IPv6 is chosen over a link-local one.
+        assert_eq!(choose_address([&ll6, &g6]), Some(g6));
+        // Only unreachable addresses remain: nothing is chosen (keep browsing).
+        assert_eq!(choose_address([&ll6, &ll4, &lo]), None);
+        // Empty set resolves to nothing.
+        assert_eq!(choose_address(std::iter::empty::<&IpAddr>()), None);
     }
 
     #[test]
