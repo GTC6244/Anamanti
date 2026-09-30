@@ -28,12 +28,18 @@ full loop has not been exercised against real services on the device.
 - [ ] Install the release APK on the Echo Show and run one full turn:
       wake word → STT → LLM → TTS playback, with the transcript/reply rendered live.
 - [ ] Confirm **mDNS discovery** works across the real network (no hardcoded IP).
-- [ ] Verify **Core re-advertises on interface change** on hardware: with the
-      device connected, switch the Mac's active LAN (unplug Ethernet so it fails
-      over to Wi-Fi, or force a DHCP renew) and confirm the Core re-registers the
-      new IPv4 (log line "LAN address changed …; re-advertised") and the device
-      reconnects without a Core restart. (`anamanti-core/src/discovery.rs` IP
-      watcher; ~30 s `mdns-sd` interface poll interval.)
+- [ ] Verify **discovery survives interface change + sleep/wake** on hardware (the
+      "mDNS bites daily / only a Core restart fixes it" failure). macOS now registers
+      via the OS `mDNSResponder` (`DNSServiceRegister`/`astro-dnssd`), which owns
+      address refresh, multicast rejoin, and sleep/wake recovery — so no in-process
+      re-advertise is needed. Tests: (a) with the device connected, switch the Mac's
+      active LAN (unplug Ethernet → Wi-Fi failover, or force a DHCP renew) and confirm
+      the device reconnects without a Core restart; (b) let the Mac sleep overnight (or
+      `pmset sleepnow`), wake it, and confirm the device rediscovers/reconnects without
+      a restart. (`anamanti-core/src/discovery.rs`; device-side reachable-address pick
+      in `anamanti-display/rust/src/wyoming/discovery.rs`.) Residual: if `mDNSResponder`
+      itself restarts, `astro-dnssd`'s poll thread exits and the record is lost until the
+      Core restarts — rare; revisit if observed.
 - [x] Exercise **barge-in** (wake word during playback) on-device — works: a wake word
       mid-reply flushes playback and starts a fresh turn (flush-on-wake + the
       `anamanti-interrupt` frame aborts the Anamanti Core's in-flight LLM+TTS). Detection
@@ -272,7 +278,15 @@ steers both the voice-turn path and the settings/control path. SQLite opens WAL.
 ## 4. Ops & deployment polish
 
 - [ ] Run the Anamanti Core as a managed service on the Mac (launchd/login item) so it
-      survives restarts.
+      survives restarts. **Also covers the one mDNS residual** from the
+      2026-09-30 native-Bonjour switch (see Plan.MD decision table): macOS now
+      advertises via the OS `mDNSResponder` (`DNSServiceRegister`/`astro-dnssd`),
+      which handles sleep/wake + interface changes itself — but if `mDNSResponder`
+      *itself* restarts, `astro-dnssd`'s poll thread exits and the service record is
+      lost until the Core process restarts. Rare, but a launchd `KeepAlive` that
+      restarts the Core (and ideally a `caffeinate`/`ProcessType` that keeps the Mac
+      awake) auto-recovers it. Revisit `discovery.rs` to re-register on
+      `kDNSServiceErr_ServiceNotRunning` only if it's still observed after launchd.
 - [ ] Document the concrete LAN setup (server versions, ports, Piper voice, model
       choices) in `README.md` from a real deployment.
 - [ ] Confirm auto-reconnect/backoff behavior end-to-end when the Mac goes away and
