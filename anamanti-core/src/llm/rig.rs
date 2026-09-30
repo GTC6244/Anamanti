@@ -1387,10 +1387,14 @@ impl WeatherLookup {
         let args: WeatherArgs = serde_json::from_value(arguments.clone())
             .context("parsing weather_lookup arguments")?;
         let sink = actions.context("no display is connected to show the weather on right now")?;
-        let location = args
+        // An omitted/empty `location` means "use home" — the device's own location, which
+        // gets the plain confirmation phrasing (no place name, no "on the screen" trailer).
+        let explicit = args
             .location
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty());
+        let is_home = explicit.is_none();
+        let location = explicit
             .or_else(|| self.home_location.get())
             .context("no location was given and no home location is set")?;
         let when = crate::weather::resolve_when(args.when.as_deref(), Local::now())
@@ -1410,7 +1414,7 @@ impl WeatherLookup {
         {
             report.layout = "week".to_string();
         }
-        let confirmation = crate::weather::render_confirmation(&report);
+        let confirmation = crate::weather::render_confirmation(&report, is_home);
         sink.send(DeviceAction::ShowWeather(report)).map_err(|_| {
             anyhow::anyhow!("the display disconnected before the weather could show")
         })?;
