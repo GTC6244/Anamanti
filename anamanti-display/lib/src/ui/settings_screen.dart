@@ -975,6 +975,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       ],
+      // Listening ring: the glowing blue overlay shown while listening, which reacts
+      // to your voice. A master on/off plus its reactivity/attack/release/auto-range
+      // dials. Purely presentational — applied instantly on Save, no engine restart.
+      SwitchListTile(
+        key: const Key('settings-listening-ring'),
+        secondary: const Icon(Icons.blur_circular),
+        title: const Text('Listening ring'),
+        subtitle: const Text(
+          'Show a glowing ring while listening that reacts to your voice',
+        ),
+        value: _settings.listeningRingEnabled,
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(listeningRingEnabled: v),
+        ),
+      ),
+      if (_settings.listeningRingEnabled) ...[
+        _rangeSlider(
+          label: 'Ring reactivity',
+          value: _settings.ringReactivity,
+          min: 0.25,
+          max: 2.5,
+          divisions: 45,
+          format: (v) => '${v.toStringAsFixed(2)}×',
+          sliderKey: const Key('settings-ring-reactivity'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringReactivity: v)),
+        ),
+        _rangeSlider(
+          label: 'Ring attack',
+          value: _settings.ringAttack,
+          min: 0.1,
+          max: 1.0,
+          divisions: 18,
+          format: (v) => v.toStringAsFixed(2),
+          sliderKey: const Key('settings-ring-attack'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringAttack: v)),
+        ),
+        _rangeSlider(
+          label: 'Ring release',
+          value: _settings.ringRelease,
+          min: 0.02,
+          max: 0.5,
+          divisions: 48,
+          format: (v) => v.toStringAsFixed(2),
+          sliderKey: const Key('settings-ring-release'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringRelease: v)),
+        ),
+        _rangeSlider(
+          label: 'Ring auto-range',
+          value: _settings.ringDecay,
+          min: 0.90,
+          max: 0.999,
+          divisions: 99,
+          format: (v) => v.toStringAsFixed(3),
+          sliderKey: const Key('settings-ring-decay'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringDecay: v)),
+        ),
+      ],
     ];
   }
 

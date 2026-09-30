@@ -46,6 +46,11 @@ class AppSettings {
     this.endpointCueEnabled = true,
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
+    this.listeningRingEnabled = true,
+    this.ringReactivity = 1.0,
+    this.ringAttack = 0.65,
+    this.ringRelease = 0.08,
+    this.ringDecay = 0.99,
     this.dimDelaySecs = 300,
     this.photoSource = PhotoSourceKind.local,
     this.ambientRefreshToken = '',
@@ -127,6 +132,29 @@ class AppSettings {
   /// Mic RMS level (0..1) below which audio counts as silence for the local cue.
   final double endpointRmsThreshold;
 
+  /// Whether the large glowing "listening" ring pops up while the device listens to
+  /// you (wake word → end-of-speech). Purely presentational; off hides the overlay
+  /// entirely. See [ListeningOverlay].
+  final bool listeningRingEnabled;
+
+  /// How strongly the listening ring reacts to your voice — a multiplier on the
+  /// amplitude-driven swing (thickness/scale/glow). 1.0 = default; higher = more
+  /// dramatic. Presentational.
+  final double ringReactivity;
+
+  /// Listening-ring attack: how quickly it responds as your voice gets louder
+  /// (per-frame ease, 0..1; higher = snappier). Presentational.
+  final double ringAttack;
+
+  /// Listening-ring release: how quickly it settles back as you quiet down
+  /// (per-frame ease, 0..1; lower = more lingering). Presentational.
+  final double ringRelease;
+
+  /// Listening-ring auto-range decay: how fast the ring re-scales to your current
+  /// speaking level (per-frame peak decay, closer to 1 = holds the range longer).
+  /// Presentational.
+  final double ringDecay;
+
   /// How long (seconds) the idle screen stays fully bright after the room goes
   /// quiet before it dims to the calm "away" clock face. Maps to the camera
   /// proximity detector's release window (`WakeWordConfig.proximityReleaseSecs`):
@@ -190,6 +218,11 @@ class AppSettings {
     bool? endpointCueEnabled,
     int? endpointSilenceMs,
     double? endpointRmsThreshold,
+    bool? listeningRingEnabled,
+    double? ringReactivity,
+    double? ringAttack,
+    double? ringRelease,
+    double? ringDecay,
     int? dimDelaySecs,
     PhotoSourceKind? photoSource,
     String? ambientRefreshToken,
@@ -217,6 +250,11 @@ class AppSettings {
       endpointCueEnabled: endpointCueEnabled ?? this.endpointCueEnabled,
       endpointSilenceMs: endpointSilenceMs ?? this.endpointSilenceMs,
       endpointRmsThreshold: endpointRmsThreshold ?? this.endpointRmsThreshold,
+      listeningRingEnabled: listeningRingEnabled ?? this.listeningRingEnabled,
+      ringReactivity: ringReactivity ?? this.ringReactivity,
+      ringAttack: ringAttack ?? this.ringAttack,
+      ringRelease: ringRelease ?? this.ringRelease,
+      ringDecay: ringDecay ?? this.ringDecay,
       dimDelaySecs: dimDelaySecs ?? this.dimDelaySecs,
       photoSource: photoSource ?? this.photoSource,
       ambientRefreshToken: ambientRefreshToken ?? this.ambientRefreshToken,
@@ -246,6 +284,11 @@ class AppSettings {
     'endpointCueEnabled': endpointCueEnabled,
     'endpointSilenceMs': endpointSilenceMs,
     'endpointRmsThreshold': endpointRmsThreshold,
+    'listeningRingEnabled': listeningRingEnabled,
+    'ringReactivity': ringReactivity,
+    'ringAttack': ringAttack,
+    'ringRelease': ringRelease,
+    'ringDecay': ringDecay,
     'dimDelaySecs': dimDelaySecs,
     'photoSource': photoSource.name,
     'ambientRefreshToken': ambientRefreshToken,
@@ -320,6 +363,21 @@ class AppSettings {
         json['endpointRmsThreshold'],
         defaults.endpointRmsThreshold,
       ),
+      listeningRingEnabled: json['listeningRingEnabled'] is bool
+          ? json['listeningRingEnabled'] as bool
+          : defaults.listeningRingEnabled,
+      ringReactivity: json['ringReactivity'] is num
+          ? (json['ringReactivity'] as num).toDouble().clamp(0.1, 4.0)
+          : defaults.ringReactivity,
+      ringAttack: json['ringAttack'] is num
+          ? (json['ringAttack'] as num).toDouble().clamp(0.05, 1.0)
+          : defaults.ringAttack,
+      ringRelease: json['ringRelease'] is num
+          ? (json['ringRelease'] as num).toDouble().clamp(0.01, 1.0)
+          : defaults.ringRelease,
+      ringDecay: json['ringDecay'] is num
+          ? (json['ringDecay'] as num).toDouble().clamp(0.5, 0.9999)
+          : defaults.ringDecay,
       dimDelaySecs: asInt(
         json['dimDelaySecs'],
         defaults.dimDelaySecs,
@@ -376,6 +434,11 @@ class AppSettings {
       endpointCueEnabled == other.endpointCueEnabled &&
       endpointSilenceMs == other.endpointSilenceMs &&
       endpointRmsThreshold == other.endpointRmsThreshold &&
+      listeningRingEnabled == other.listeningRingEnabled &&
+      ringReactivity == other.ringReactivity &&
+      ringAttack == other.ringAttack &&
+      ringRelease == other.ringRelease &&
+      ringDecay == other.ringDecay &&
       dimDelaySecs == other.dimDelaySecs &&
       photoSource == other.photoSource &&
       ambientRefreshToken == other.ambientRefreshToken &&
@@ -414,6 +477,14 @@ class AppSettings {
     driveRefreshToken,
     Object.hashAll(driveFolderIds),
     driveLinked,
-    Object.hash(driveClientId, driveClientSecret),
+    Object.hash(
+      driveClientId,
+      driveClientSecret,
+      listeningRingEnabled,
+      ringReactivity,
+      ringAttack,
+      ringRelease,
+      ringDecay,
+    ),
   );
 }
