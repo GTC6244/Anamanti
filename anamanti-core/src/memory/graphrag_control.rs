@@ -70,6 +70,9 @@ impl Recall for SwappableRecall {
     fn embeds_query(&self) -> bool {
         true
     }
+    fn embedder_label(&self) -> Option<&'static str> {
+        self.current().embedder_label()
+    }
 }
 
 /// A [`GraphView`] that forwards to a swappable inner store (debug GUI `/helix`).
@@ -497,8 +500,10 @@ mod tests {
 
         let tmp = std::env::temp_dir().join(format!("anamanti-ctrl-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let mut config = Config::default();
-        config.helix_path = tmp.join("helix");
+        let config = Config {
+            helix_path: tmp.join("helix"),
+            ..Config::default()
+        };
         let chatlog = Arc::new(ChatLog::open(tmp.join("chatlog.jsonl")).unwrap());
 
         let ctrl = GraphRagController::start(&config, &chatlog)

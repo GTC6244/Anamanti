@@ -34,6 +34,11 @@ pub trait Embedder: Send + Sync {
     /// vector index, so it must be stable for a given embedder instance.
     fn dimensions(&self) -> usize;
 
+    /// Short provider label for diagnostics/UI: `"local"`, `"openai"`, `"mock"`.
+    fn label(&self) -> &'static str {
+        "embedding"
+    }
+
     /// Convenience: embed a single text.
     async fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
         let mut v = self.embed(&[text.to_string()]).await?;
@@ -101,6 +106,10 @@ impl OpenAiEmbedder {
 impl Embedder for OpenAiEmbedder {
     fn dimensions(&self) -> usize {
         self.dimensions
+    }
+
+    fn label(&self) -> &'static str {
+        "openai"
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -307,6 +316,10 @@ impl Embedder for LocalNomicEmbedder {
         self.dims
     }
 
+    fn label(&self) -> &'static str {
+        "local"
+    }
+
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.embed_prefixed(Self::DOC_PREFIX, texts).await
     }
@@ -345,6 +358,10 @@ impl Default for MockEmbedder {
 impl Embedder for MockEmbedder {
     fn dimensions(&self) -> usize {
         self.dims
+    }
+
+    fn label(&self) -> &'static str {
+        "mock"
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
