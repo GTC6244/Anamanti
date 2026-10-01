@@ -49,6 +49,7 @@ pub async fn run<F>(
     discovery_timeout: Duration,
     orchestrator_key: Option<String>,
     device_id: String,
+    device_name: String,
     running: Arc<AtomicBool>,
     mut on_report: F,
 ) where
@@ -61,6 +62,7 @@ pub async fn run<F>(
             discovery_timeout,
             orchestrator_key.as_deref(),
             &device_id,
+            &device_name,
             &running,
             &mut on_report,
         )
@@ -96,6 +98,7 @@ async fn connect_and_listen<F>(
     discovery_timeout: Duration,
     orchestrator_key: Option<&str>,
     device_id: &str,
+    device_name: &str,
     running: &Arc<AtomicBool>,
     on_report: &mut F,
 ) -> Result<ListenEnd>
@@ -114,9 +117,12 @@ where
     let mut writer = write_half;
 
     // Register this connection as the device's weather channel (role=weather).
-    protocol::write_event(&mut writer, &WyomingEvent::hello_weather(device_id, ""))
-        .await
-        .context("sending anamanti-hello (weather)")?;
+    protocol::write_event(
+        &mut writer,
+        &WyomingEvent::hello_weather(device_id, "", device_name),
+    )
+    .await
+    .context("sending anamanti-hello (weather)")?;
     log::info!("weather channel connected to {endpoint}");
 
     loop {

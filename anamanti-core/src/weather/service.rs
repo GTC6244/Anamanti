@@ -49,7 +49,11 @@ impl WeatherService {
     /// [`deregister`](Self::deregister) on close) and the receiver the connection task
     /// drains to write pushes out. If a report is already cached it is queued
     /// immediately so the device shows conditions without waiting for the next tick.
-    pub fn register(&self, _device_id: &str) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
+    pub fn register(
+        &self,
+        _device_id: &str,
+        _name: &str,
+    ) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         if let Some(report) = self.last.lock().unwrap().as_ref() {
             let _ = tx.send(WyomingEvent::weather_current(to_value(report)));
@@ -153,8 +157,8 @@ mod tests {
         let svc = WeatherService::new();
         assert_eq!(svc.connected(), 0);
 
-        let (id_a, mut rx_a) = svc.register("dev-a");
-        let (_id_b, rx_b) = svc.register("dev-b");
+        let (id_a, mut rx_a) = svc.register("dev-a", "Kitchen");
+        let (_id_b, rx_b) = svc.register("dev-b", "Bedroom");
         assert_eq!(svc.connected(), 2);
 
         drop(rx_b);
@@ -173,7 +177,7 @@ mod tests {
     fn a_new_channel_gets_the_last_report_immediately() {
         let svc = WeatherService::new();
         svc.broadcast(&report()); // caches, nobody connected yet
-        let (_id, mut rx) = svc.register("late");
+        let (_id, mut rx) = svc.register("late", "");
         let got = rx
             .try_recv()
             .expect("late joiner replayed the cached report");

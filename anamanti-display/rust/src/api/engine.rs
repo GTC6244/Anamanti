@@ -15,6 +15,35 @@ pub fn engine_greeting(name: String) -> String {
     format!("Hello {name}, the anamanti-display Rust engine is alive 👋")
 }
 
+/// A stable per-device hardware id derived from the primary network interface's MAC
+/// address, formatted `anamanti-<12 lowercase hex>` (colons stripped) — e.g.
+/// `anamanti-140ac5942aca`. Reading the MAC from `/sys/class/net/<iface>/address`
+/// guarantees uniqueness across devices without any build-time configuration.
+///
+/// Returns an empty string if no usable MAC is found (an unreadable file, or an
+/// all-zero / locked-down `02:00:00:00:00:00` placeholder); the Dart layer then
+/// falls back to a persisted random id so the device still has a stable identity.
+#[flutter_rust_bridge::frb(sync)]
+pub fn device_hardware_id() -> String {
+    for iface in ["wlan0", "eth0"] {
+        let path = format!("/sys/class/net/{iface}/address");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let hex: String = raw
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        // A valid MAC is 12 hex digits and not an all-zero / randomized placeholder.
+        if hex.len() == 12 && hex != "000000000000" && hex != "020000000000" {
+            return format!("anamanti-{hex}");
+        }
+    }
+    String::new()
+}
+
 /// Reports the native engine's version and build target so the device can show
 /// exactly which cross-compiled binary it is running.
 #[flutter_rust_bridge::frb(sync)]
@@ -702,6 +731,9 @@ pub struct NotifyConfig {
     /// A stable identifier for this display, sent in the `anamanti-hello` frame so the
     /// orchestrator can key notifications per device (may be empty).
     pub device_id: String,
+    /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+    /// `device_id` in the `anamanti-hello` frame so the Core can name it (may be empty).
+    pub device_name: String,
 }
 
 /// One proactive notification pushed from the orchestrator, streamed to Flutter.
@@ -778,6 +810,7 @@ pub fn start_notify_channel(
                 timeout,
                 key,
                 config.device_id,
+                config.device_name,
                 loop_running,
                 move |note| {
                     sink.add(NotifyEvent {
@@ -830,6 +863,9 @@ pub struct WeatherConfig {
     pub discovery_timeout_secs: u64,
     /// A stable identifier for this display, sent in the `anamanti-hello` frame.
     pub device_id: String,
+    /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+    /// `device_id` in the `anamanti-hello` frame (may be empty).
+    pub device_name: String,
 }
 
 /// One ambient current-conditions push from the orchestrator, streamed to Flutter.
@@ -900,6 +936,7 @@ pub fn start_weather_channel(
                 timeout,
                 key,
                 config.device_id,
+                config.device_name,
                 loop_running,
                 move |report_json| sink.add(WeatherPush { report_json }).is_ok(),
             ));

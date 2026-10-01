@@ -130,10 +130,12 @@ mod helix_recall {
             if transcript.trim().is_empty() {
                 return Ok(RecallResult::default());
             }
-            // Time the two stages separately: the OpenAI embedding round-trip (the
-            // variable, network-bound cost) vs. the local vector KNN + graph hop.
+            // Time the two stages separately: the query-embedding cost (local nomic
+            // inference, or an OpenAI round-trip) vs. the local vector KNN + graph hop.
+            // `embed_query` (not `embed_one`) so asymmetric models — nomic — apply the
+            // `search_query:` prefix rather than the `search_document:` one used at ingest.
             let t0 = Instant::now();
-            let qvec = self.embedder.embed_one(transcript).await?;
+            let qvec = self.embedder.embed_query(transcript).await?;
             let embed_ms = t0.elapsed().as_millis() as u64;
             let t1 = Instant::now();
             let hits = self.helix.recall(qvec, speaker_id, self.k, limit).await?;
