@@ -38,7 +38,10 @@ the `anamanti-weather` frame + the display's full-screen forecast and the ambien
 icon/temperature beside the clock), and
 [`PlacesPlan.md`](./plans/PlacesPlan.md) (places: the `places_lookup` tool over the
 Google Places API + the `anamanti-place` frame + the display's full-screen place card,
-plus the route-only System-1 `place` intent).
+plus the route-only System-1 `place` intent), and
+[`UpdaterPlan.md`](./plans/UpdaterPlan.md) (in-app APK auto-updater: Rust fetch/
+download/SHA-256-verify of a signed APK + `latest.json` from Cloudflare R2, a native
+`PackageInstaller` channel, and the `selfUpdate`/`fdroid` build flavors).
 
 ---
 
@@ -186,10 +189,15 @@ flutter_rust_bridge_codegen generate
 # Build a device APK (cargokit cross-compiles the Rust engine into it).
 # Echo Show 8 (crown) is 32-bit armeabi-v7a — use android-arm, NOT android-arm64
 # (arm64 fails with INSTALL_FAILED_NO_MATCHING_ABIS on this device).
-flutter build apk --release --target-platform android-arm
+#
+# A `distribution` flavor dimension exists (selfUpdate / fdroid — the in-app R2
+# auto-updater, plans/UpdaterPlan.md), so EVERY apk build/run must
+# name a flavor. `selfUpdate` is the normal build (ships the updater); `fdroid`
+# ships without it. The APK is then named app-<flavor>-release.apk.
+flutter build apk --release --flavor selfUpdate --target-platform android-arm
 
 # Run the app on the Echo Show (LineageOS) via adb (path relative to anamanti-display/)
-adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d <echo-show-device>
+adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk   # or: flutter run --flavor selfUpdate -d <echo-show-device>
 ```
 
 - Requires: Flutter SDK, Android SDK + NDK, Rust toolchain, `adb`.

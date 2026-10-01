@@ -16,8 +16,10 @@ import 'package:flutter/services.dart';
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/model_assets.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
+import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_channel_controller.dart';
 import 'package:anamanti_display/src/engine/screen_brightness.dart';
+import 'package:anamanti_display/src/update/updater_channel.dart';
 import 'package:anamanti_display/src/engine/wakeword_config.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
@@ -95,6 +97,11 @@ class _AmbientHomeState extends State<AmbientHome> {
   NotificationController? _notifications;
   WeatherChannelController? _weather;
 
+  /// In-app updater (plans/UpdaterPlan.md). Device-local, created once
+  /// in [_boot] and only on the `selfUpdate` flavor — null on `fdroid`, so no update
+  /// banner or Settings page appears there.
+  UpdateController? _updates;
+
   /// Live access tokens for each Google backend (minted from the persisted refresh
   /// tokens on boot / after a re-link). Null when unlinked/offline → local gradients.
   String? _ambientAccessToken;
@@ -140,6 +147,28 @@ class _AmbientHomeState extends State<AmbientHome> {
       const Duration(minutes: 30),
       (_) => _reloadPhotos(),
     );
+    // In-app updater: only wire it on the selfUpdate flavor (the fdroid flavor
+    // reports false and ships without it). Off the critical path — the kiosk is
+    // fully usable while the first check runs.
+    unawaited(_startUpdater());
+  }
+
+  /// Create and start the updater controller when this build ships the self-updater.
+  Future<void> _startUpdater() async {
+    if (_updates != null) return;
+    final channel = UpdaterChannel();
+    if (!await channel.isSelfUpdateEnabled()) return;
+    final updates = UpdateController(
+      channel: channel,
+      baseUrl: _settings.updateBaseUrl,
+      autoUpdateEnabled: _settings.autoUpdateEnabled,
+    );
+    await updates.start();
+    if (mounted) {
+      setState(() => _updates = updates);
+    } else {
+      updates.dispose();
+    }
   }
 
   /// Refresh the linked Google source in place (re-mint token + re-list). Keeps the
@@ -371,6 +400,11 @@ class _AmbientHomeState extends State<AmbientHome> {
       await _applyPhotoSource();
     }
     if (engineChanged) await _startEngine();
+    // Push the (possibly changed) update base URL / auto-update toggle to the updater.
+    await _updates?.updateConfig(
+      baseUrl: next.updateBaseUrl,
+      autoUpdateEnabled: next.autoUpdateEnabled,
+    );
   }
 
   void _openSettings() {
@@ -383,6 +417,8 @@ class _AmbientHomeState extends State<AmbientHome> {
           onApplied: _onSettingsApplied,
           // The live engine controller powers the Audio Diagnostics page's meters.
           assistant: _assistant,
+          // The updater controller powers the Updates page (null on fdroid).
+          updates: _updates,
         ),
       ),
     );
@@ -394,6 +430,7 @@ class _AmbientHomeState extends State<AmbientHome> {
     _assistant?.dispose();
     _notifications?.dispose();
     _weather?.dispose();
+    _updates?.dispose();
     _slideshow.dispose();
     _brightness.reset();
     super.dispose();
@@ -415,6 +452,7 @@ class _AmbientHomeState extends State<AmbientHome> {
         assistant: assistant,
         slideshow: _slideshow,
         notifications: _notifications,
+        updates: _updates,
         onOpenSettings: _openSettings,
         listeningRingEnabled: _settings.listeningRingEnabled,
         ringReactivity: _settings.ringReactivity,

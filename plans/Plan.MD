@@ -600,6 +600,35 @@ more tool in `Tools`.
 > (107 unit + integration, incl. runtime-key enable + persist tests) + clippy `-D
 > warnings` + fmt.
 
+### In-app APK auto-updater (post-Phase-6, 2026-10-01)
+
+Self-rolled over-the-air updates for the Display, pulling a signed APK +
+`latest.json` from a **Cloudflare R2** custom domain — making updates first-party
+instead of depending on the third-party **Obtainium** app. Full design, release
+runbook, and follow-ups: [`UpdaterPlan.md`](./UpdaterPlan.md).
+
+Decisions (confirmed with the owner this change):
+- **Networking stays in Rust** behind the FRB boundary (honors the "Rust owns
+  networking" locked decision): `check_for_update` fetches `latest.json`,
+  `download_update` streams the APK to the cache dir and verifies a **SHA-256** as
+  bytes arrive (`rust/src/update/`, `rust/src/api/updater.rs`). Client =
+  **`ureq` + rustls/`ring` + `webpki-roots` + `sha2`**, deliberately **not** reqwest
+  (its aws-lc-rs / native-tls don't reliably cross-compile for 32-bit armv7 Android).
+- The **install** is native Kotlin (`PackageInstaller`), via a new
+  `anamanti_display/updater` MethodChannel + `InstallReceiver` — the one capability
+  with no Rust/Dart equivalent. Flutter owns the orchestration + UI
+  (`UpdateController`, the `UpdateBanner`, and a Settings → **Updates** page with the
+  base URL + auto-update toggle).
+- **Keep the existing GitHub Releases + Obtainium path** too for now
+  (`.github/workflows/release.yml`, updated to `--flavor selfUpdate`); retire it once
+  the in-app path is hardware-proven.
+- New **`distribution` build flavors**: `selfUpdate` (ships the updater) and
+  `fdroid` (ships without it — no `REQUEST_INSTALL_PACKAGES`, UI hidden), same key +
+  `applicationId`. **Every APK build/run now names a flavor** (`agents.md` updated).
+- Suites green: Rust `cargo test` + `clippy -D warnings`; `dart analyze` +
+  `flutter test` (incl. `test/update_controller_test.dart`); FRB codegen (pinned
+  2.11.1). **Not yet verified on hardware** — see `UpdaterPlan.md` / `TODO.md`.
+
 ---
 
 ## 4. Resolved Details & Implementation Notes

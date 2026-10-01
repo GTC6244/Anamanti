@@ -28,6 +28,12 @@ const List<String> kAvailableWakeWords = <String>[
   'ok_nabu',
 ];
 
+/// Default base URL the in-app updater fetches `latest.json` and the APK from
+/// (plans/UpdaterPlan.md). A placeholder — point it at your real
+/// Cloudflare R2 custom domain on-device via Settings → Updates, or edit this
+/// constant. No trailing slash; the Rust side appends `/latest.json`.
+const String kDefaultUpdateBaseUrl = 'https://dl.example.com';
+
 @immutable
 class AppSettings {
   const AppSettings({
@@ -61,6 +67,8 @@ class AppSettings {
     this.driveLinked = false,
     this.driveClientId = '',
     this.driveClientSecret = '',
+    this.autoUpdateEnabled = true,
+    this.updateBaseUrl = kDefaultUpdateBaseUrl,
   });
 
   /// Stable selection key (`instance_id` TXT) of the orchestrator this display is
@@ -197,6 +205,15 @@ class AppSettings {
   /// Google Drive OAuth client secret, synced from the orchestrator. TODO: secure storage.
   final String driveClientSecret;
 
+  /// Whether the in-app updater checks for and prompts about new builds
+  /// (plans/UpdaterPlan.md). Device-local; ignored entirely on the
+  /// `fdroid` flavor, which ships without the updater.
+  final bool autoUpdateEnabled;
+
+  /// Base URL the updater fetches `latest.json` + the APK from (your Cloudflare R2
+  /// custom domain). No trailing slash. Defaults to [kDefaultUpdateBaseUrl].
+  final String updateBaseUrl;
+
   /// True when both Drive client credentials are present — the device can mint Drive
   /// access tokens. Runtime replacement for the old build-time `kGoogleDriveConfigured`.
   bool get driveConfigured =>
@@ -233,6 +250,8 @@ class AppSettings {
     bool? driveLinked,
     String? driveClientId,
     String? driveClientSecret,
+    bool? autoUpdateEnabled,
+    String? updateBaseUrl,
   }) {
     return AppSettings(
       orchestratorKey: orchestratorKey ?? this.orchestratorKey,
@@ -265,6 +284,8 @@ class AppSettings {
       driveLinked: driveLinked ?? this.driveLinked,
       driveClientId: driveClientId ?? this.driveClientId,
       driveClientSecret: driveClientSecret ?? this.driveClientSecret,
+      autoUpdateEnabled: autoUpdateEnabled ?? this.autoUpdateEnabled,
+      updateBaseUrl: updateBaseUrl ?? this.updateBaseUrl,
     );
   }
 
@@ -299,6 +320,8 @@ class AppSettings {
     'driveLinked': driveLinked,
     'driveClientId': driveClientId,
     'driveClientSecret': driveClientSecret,
+    'autoUpdateEnabled': autoUpdateEnabled,
+    'updateBaseUrl': updateBaseUrl,
   };
 
   /// Parse from persisted JSON, tolerating missing/invalid keys by falling back to
@@ -412,6 +435,14 @@ class AppSettings {
       driveClientSecret: json['driveClientSecret'] is String
           ? json['driveClientSecret'] as String
           : '',
+      autoUpdateEnabled: json['autoUpdateEnabled'] is bool
+          ? json['autoUpdateEnabled'] as bool
+          : defaults.autoUpdateEnabled,
+      updateBaseUrl:
+          json['updateBaseUrl'] is String &&
+              (json['updateBaseUrl'] as String).trim().isNotEmpty
+          ? (json['updateBaseUrl'] as String).trim()
+          : defaults.updateBaseUrl,
     );
   }
 
@@ -448,7 +479,9 @@ class AppSettings {
       listEquals(driveFolderIds, other.driveFolderIds) &&
       driveLinked == other.driveLinked &&
       driveClientId == other.driveClientId &&
-      driveClientSecret == other.driveClientSecret;
+      driveClientSecret == other.driveClientSecret &&
+      autoUpdateEnabled == other.autoUpdateEnabled &&
+      updateBaseUrl == other.updateBaseUrl;
 
   @override
   int get hashCode => Object.hash(
@@ -485,6 +518,8 @@ class AppSettings {
       ringAttack,
       ringRelease,
       ringDecay,
+      autoUpdateEnabled,
+      updateBaseUrl,
     ),
   );
 }

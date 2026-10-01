@@ -13,3 +13,9 @@
 # so keep it whole or R8 strips the up-call targets ("Method not found: startCamera").
 -keep class com.anamanti.anamanti_display.CameraBridge { *; }
 -keepclassmembers class com.anamanti.anamanti_display.CameraBridge { *; }
+
+# InstallReceiver is the PackageInstaller session-result BroadcastReceiver for the
+# in-app updater (selfUpdate flavor). It is instantiated by the system from the
+# manifest registration; manifest components are normally kept, but keep it
+# explicitly so R8 can't strip/rename it in the shrunk release build.
+-keep class com.anamanti.anamanti_display.InstallReceiver { *; }
