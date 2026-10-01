@@ -79,19 +79,10 @@ impl OpenAiEmbedder {
         dimensions: usize,
     ) -> Self {
         // Reuse one keep-alive connection across the many embedding calls (per-turn
-        // recall + the background ingester share this client). A generous idle
-        // timeout keeps the pooled TLS connection warm between turns, and TCP
-        // keepalive stops a NAT/firewall silently dropping it — both save the
-        // DNS+TLS handshake (~hundreds of ms) on the next request. Falls back to the
-        // default client if the builder ever fails.
-        let client = reqwest::Client::builder()
-            .pool_idle_timeout(std::time::Duration::from_secs(300))
-            .tcp_keepalive(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap_or_else(|e| {
-                log::warn!("pooled embeddings HTTP client build failed ({e}); using default");
-                reqwest::Client::new()
-            });
+        // recall + the background ingester share this client). The shared, keep-alive-
+        // tuned client keeps the pooled TLS connection warm between turns, saving the
+        // DNS+TCP+TLS handshake (~hundreds of ms) on the next request. See `crate::http`.
+        let client = crate::http::shared_client();
         Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_string(),

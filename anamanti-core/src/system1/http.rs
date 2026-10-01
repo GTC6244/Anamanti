@@ -95,12 +95,12 @@ impl HttpDecider {
         min_confidence: f64,
         intents: Vec<String>,
     ) -> Self {
-        // A short client timeout keeps a hung/absent sidecar from blocking the turn —
-        // on any error the caller simply defers to System-2.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(4))
-            .build()
-            .unwrap_or_default();
+        // Shared, keep-alive-tuned client so the pooled connection to the sidecar/
+        // OpenRouter stays warm between turns (skips the DNS+TCP+TLS handshake). The
+        // short 4 s budget — a hung/absent sidecar must not block the turn; on any
+        // error the caller simply defers to System-2 — is applied per-request in
+        // `post()` rather than on the shared client.
+        let client = crate::http::shared_client();
         let url = format!("{}/v1/systemone", base_url.trim_end_matches('/'));
         Self {
             client,
@@ -174,7 +174,11 @@ impl HttpDecider {
     /// POST a `/v1/systemone` body and decode the JSON response, erroring on a non-2xx
     /// status so the caller defers to System-2.
     async fn post(&self, body: &Value) -> Result<Value> {
-        let mut rb = self.client.post(&self.url).json(body);
+        let mut rb = self
+            .client
+            .post(&self.url)
+            .timeout(Duration::from_secs(4))
+            .json(body);
         if let Some(key) = &self.api_key {
             rb = rb.bearer_auth(key);
         }
