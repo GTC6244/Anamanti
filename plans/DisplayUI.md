@@ -326,8 +326,13 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 - The only `Navigator.push` in the app (tap the gear on `AmbientScreen`). A
   two-level master/detail: `_menu()` lists 6 category tiles; selecting one opens
   `_categoryPage`. `enum _SettingsCategory`:
-  - **Assistant** — orchestrator (which Mac) + LLM backend, Anthropic auth
-    (API key vs subscription/OAuth), model, voice. Orchestrator-managed; shows
+  - **Assistant** — **Device name** (device-local text field, key
+    `settings-device-name`; the subtitle shows this display's stable MAC-derived
+    `deviceId`, e.g. `anamanti-140ac5942aca`; the name is sent to the Core in the
+    `anamanti-hello` frame and appears in the Core config page's "Connected devices"
+    list), orchestrator (which Mac) + LLM backend, Anthropic auth (API key vs
+    subscription/OAuth), model, voice. The device-name + orchestrator tiles are
+    device-local (usable offline); the rest are orchestrator-managed and show
     "Contacting…" / "Assistant offline" guard tiles when the Mac is unreachable.
   - **Device Config** — Wake word (word, threshold slider, smoothing window,
     capture gain, "Fire on peak", "AudioRecord capture (far-field)", noise
