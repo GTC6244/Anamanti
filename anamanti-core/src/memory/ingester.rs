@@ -51,6 +51,26 @@ impl MemoryIngester {
         }
     }
 
+    /// Like [`MemoryIngester::new`] but with an explicit offset sidecar path. Used by
+    /// the live-swappable GraphRAG controller to keep a **per-embedding-backend**
+    /// high-water mark (`<log>.<signature>.offset`), so each backend re-ingests the
+    /// chat log independently and switching back resumes where that backend left off.
+    pub fn new_with_offset(
+        chatlog_path: impl Into<PathBuf>,
+        offset_path: impl Into<PathBuf>,
+        helix: Arc<HelixMemory>,
+        embedder: Arc<dyn Embedder>,
+        extractor: Arc<dyn EntityExtractor>,
+    ) -> Self {
+        Self {
+            chatlog_path: chatlog_path.into(),
+            offset_path: offset_path.into(),
+            helix,
+            embedder,
+            extractor,
+        }
+    }
+
     /// Process every chat-log record past the committed offset. Returns how many
     /// new turns were ingested. Safe to call repeatedly.
     pub async fn run_once(&self) -> Result<usize> {
