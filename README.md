@@ -107,16 +107,48 @@ flutter_rust_bridge_codegen generate
 
 # 2. Build a device APK — cargokit cross-compiles the Rust engine into it.
 #    Echo Show 8 (crown) is 32-bit, so target android-arm (armeabi-v7a).
-flutter build apk --release --target-platform android-arm
+#    A `distribution` flavor dimension exists (selfUpdate / fdroid, see below), so
+#    a flavor MUST be named. `selfUpdate` is the normal build.
+flutter build apk --release --flavor selfUpdate --target-platform android-arm
 
 # 3. Deploy to the Echo Show (LineageOS) over adb
-adb install build/app/outputs/flutter-apk/app-release.apk
+adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk
 # ...or, for live development:
-flutter run -d <echo-show-device>
+flutter run --flavor selfUpdate -d <echo-show-device>
 ```
 
 On first launch the device discovers the Mac's Wyoming service via mDNS. No
 static IP configuration is required.
+
+### Releases & in-app updates
+
+The Display can update **itself** over the air: a built-in updater fetches a
+signed APK + a `latest.json` manifest from a **Cloudflare R2** bucket, verifies a
+SHA-256, and installs it via Android's `PackageInstaller`. (A GitHub Releases +
+Obtainium path also still runs — see `.github/workflows/release.yml`.) Full design:
+[`plans/UpdaterPlan.md`](plans/UpdaterPlan.md).
+
+Build flavors (same signing key + app id across both):
+- **`selfUpdate`** — ships the in-app updater (the normal build).
+- **`fdroid`** — ships *without* it (no install permission / UI), for F-Droid.
+
+To cut a release to R2:
+
+```bash
+# One-time: a release keystore (android/key.properties or ANDROID_* env — never
+# commit it; the key must stay constant forever), an R2 bucket + custom domain with
+# a ~60s cache rule on latest.json, and `npx wrangler login`.
+
+# Bump `version:` in anamanti-display/pubspec.yaml first (X.Y.Z+N — the +N build
+# number is the Android versionCode and MUST increase every release). Then:
+R2_BUCKET=anamanti-dl \
+UPDATE_BASE_URL=https://dl.example.com \
+NOTES="Bug fixes" \
+anamanti-display/scripts/release-r2.sh
+```
+
+Point each device at your domain in **Settings → Updates** (the default is a
+placeholder). On the LineageOS kiosk, grant the app "install unknown apps" once.
 
 ### Run the Mac Mini Anamanti Core (the brain)
 
