@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
@@ -34,10 +34,46 @@ use crate::wyoming::{resolve, EndpointCache};
 /// Defense-in-depth cap on a timer (24h); the Mac side already clamps.
 const MAX_TIMER_SECS: u64 = 24 * 60 * 60;
 
-/// One running timer's cancellation handle + label (for label-scoped cancel).
+/// One running timer's cancellation handle + label (for label-scoped cancel) + the
+/// instant it will fire (so the manager can report time-remaining as turn context).
 struct TimerEntry {
     label: Option<String>,
     abort: AbortHandle,
+    /// When this timer fires. Used only to compute remaining time for [`TimerManager::snapshot`];
+    /// the countdown itself is driven by the spawned task's `sleep`.
+    deadline: Instant,
+}
+
+/// A point-in-time summary of the running timers, stamped into each turn's `audio-start`
+/// so the Core (and System-1) can answer "how much time is left?" and route bare
+/// "stop"/"cancel" to the timer. Orthogonal to the foreground widget — a timer counts in
+/// the background regardless of what screen is up. See
+/// `plans/system1-fast-decisions.md` §17/§19.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimerSnapshot {
+    /// How many timers are currently running.
+    pub running: u32,
+    /// Whole seconds until the soonest-to-fire timer (0 if already due), or `None` when
+    /// nothing is running.
+    pub next_remaining_secs: Option<u64>,
+    /// Non-empty labels of the running timers (for future labeled query/cancel).
+    pub labels: Vec<String>,
+}
+
+impl TimerSnapshot {
+    /// Serialize to the `screen.timers` JSON object the device stamps on `audio-start`.
+    /// Byte-shape must match the Core's `protocol::timer_context` parser.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("running".into(), self.running.into());
+        if let Some(secs) = self.next_remaining_secs {
+            obj.insert("next_remaining_secs".into(), secs.into());
+        }
+        if !self.labels.is_empty() {
+            obj.insert("labels".into(), self.labels.clone().into());
+        }
+        serde_json::Value::Object(obj)
+    }
 }
 
 /// Owns all running on-device timers. Cheap to `clone` for the per-turn `on_update`
@@ -142,8 +178,32 @@ impl TimerManager {
             TimerEntry {
                 label,
                 abort: task.abort_handle(),
+                deadline: Instant::now() + Duration::from_secs(secs),
             },
         );
+    }
+
+    /// A snapshot of the running timers for stamping into a turn's `audio-start` context.
+    /// Cheap; takes the registry lock briefly. Remaining time is clamped at 0 for a timer
+    /// that is due but whose firing task hasn't yet removed it.
+    pub fn snapshot(&self) -> TimerSnapshot {
+        let now = Instant::now();
+        let timers = self.inner.timers.lock().unwrap();
+        let running = timers.len() as u32;
+        let next_remaining_secs = timers
+            .values()
+            .map(|e| e.deadline.saturating_duration_since(now).as_secs())
+            .min();
+        let labels = timers
+            .values()
+            .filter_map(|e| e.label.clone())
+            .filter(|l| !l.is_empty())
+            .collect();
+        TimerSnapshot {
+            running,
+            next_remaining_secs,
+            labels,
+        }
     }
 
     fn cancel(&self, label: Option<String>) {
@@ -306,6 +366,32 @@ mod tests {
         assert!(
             ids_matching(entries.iter().map(|(id, l)| (*id, l)), &Some("nope".into())).is_empty()
         );
+    }
+
+    #[test]
+    fn timer_snapshot_to_json_matches_wire_shape() {
+        // Empty snapshot: only `running` (0); no remaining/labels keys.
+        let empty = TimerSnapshot::default();
+        assert_eq!(empty.to_json(), serde_json::json!({ "running": 0 }));
+
+        // Full snapshot: remaining + labels included.
+        let full = TimerSnapshot {
+            running: 2,
+            next_remaining_secs: Some(125),
+            labels: vec!["pasta".into()],
+        };
+        assert_eq!(
+            full.to_json(),
+            serde_json::json!({ "running": 2, "next_remaining_secs": 125, "labels": ["pasta"] })
+        );
+
+        // Running but unlabeled with unknown remaining: labels/remaining omitted.
+        let unlabeled = TimerSnapshot {
+            running: 1,
+            next_remaining_secs: None,
+            labels: vec![],
+        };
+        assert_eq!(unlabeled.to_json(), serde_json::json!({ "running": 1 }));
     }
 
     #[test]

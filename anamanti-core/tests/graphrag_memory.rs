@@ -64,6 +64,7 @@ fn record(id: &str, transcript: &str, reply: &str, memories: &[&str]) -> ChatLog
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     }
 }
 
@@ -124,16 +125,20 @@ async fn full_pipeline_body() {
     // 5. Recall: a music query should surface the jazz turn (vector KNN) and the
     //    jazz memory (graph expansion turn→MENTIONS→Entity→ABOUT→Memory).
     let recall = HelixRecall::new(helix.clone(), embedder.clone(), 6);
-    let hits = recall
+    let res = recall
         .recall("what music do I like", None, 8)
         .await
         .unwrap();
+    let hits = res.hits;
     assert!(
         hits.iter().any(|h| h.to_lowercase().contains("jazz")),
         "recall should surface jazz context, got: {hits:?}"
     );
     // The weather/coffee turns should not dominate a music query's top hit.
     assert!(!hits.is_empty());
+    // GraphRAG reports the embed-vs-search timing split.
+    assert!(res.embed_ms.is_some());
+    assert!(res.search_ms.is_some());
 }
 
 #[test]

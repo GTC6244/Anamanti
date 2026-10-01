@@ -345,6 +345,12 @@ class OrchestratorSettings {
   /// Orchestrator VAD: speech-vs-noise RMS threshold (0 if unknown).
   final double voiceRmsThreshold;
 
+  /// Orchestrator VAD engine label: `energy` or `silero` (empty if unknown).
+  final String vadEngine;
+
+  /// Orchestrator VAD: Silero speech-probability gate, `0.0..1.0` (0 if unknown).
+  final double sileroThreshold;
+
   const OrchestratorSettings({
     required this.ok,
     required this.message,
@@ -354,6 +360,8 @@ class OrchestratorSettings {
     this.ttsVoice,
     required this.endSilenceMs,
     required this.voiceRmsThreshold,
+    required this.vadEngine,
+    required this.sileroThreshold,
   });
 
   @override
@@ -365,7 +373,9 @@ class OrchestratorSettings {
       anthropicAuth.hashCode ^
       ttsVoice.hashCode ^
       endSilenceMs.hashCode ^
-      voiceRmsThreshold.hashCode;
+      voiceRmsThreshold.hashCode ^
+      vadEngine.hashCode ^
+      sileroThreshold.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -379,7 +389,9 @@ class OrchestratorSettings {
           anthropicAuth == other.anthropicAuth &&
           ttsVoice == other.ttsVoice &&
           endSilenceMs == other.endSilenceMs &&
-          voiceRmsThreshold == other.voiceRmsThreshold;
+          voiceRmsThreshold == other.voiceRmsThreshold &&
+          vadEngine == other.vadEngine &&
+          sileroThreshold == other.sileroThreshold;
 }
 
 /// A requested settings change from the screen. Absent fields are left unchanged.
@@ -406,6 +418,12 @@ class SettingsUpdate {
   /// New orchestrator VAD speech RMS threshold, or `None` to leave it.
   final double? voiceRmsThreshold;
 
+  /// New VAD engine label (`energy`/`silero`), or `None` to leave it unchanged.
+  final String? vadEngine;
+
+  /// New Silero speech-probability gate (`0.0..1.0`), or `None` to leave it.
+  final double? sileroThreshold;
+
   const SettingsUpdate({
     this.llmBackend,
     this.llmModel,
@@ -414,6 +432,8 @@ class SettingsUpdate {
     this.ttsVoice,
     this.endSilenceMs,
     this.voiceRmsThreshold,
+    this.vadEngine,
+    this.sileroThreshold,
   });
 
   @override
@@ -424,7 +444,9 @@ class SettingsUpdate {
       setTtsVoice.hashCode ^
       ttsVoice.hashCode ^
       endSilenceMs.hashCode ^
-      voiceRmsThreshold.hashCode;
+      voiceRmsThreshold.hashCode ^
+      vadEngine.hashCode ^
+      sileroThreshold.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -437,7 +459,9 @@ class SettingsUpdate {
           setTtsVoice == other.setTtsVoice &&
           ttsVoice == other.ttsVoice &&
           endSilenceMs == other.endSilenceMs &&
-          voiceRmsThreshold == other.voiceRmsThreshold;
+          voiceRmsThreshold == other.voiceRmsThreshold &&
+          vadEngine == other.vadEngine &&
+          sileroThreshold == other.sileroThreshold;
 }
 
 /// One identified speaker, for the settings "People" list (speaker_id_plan.md

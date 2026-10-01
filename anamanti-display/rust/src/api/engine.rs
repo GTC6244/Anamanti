@@ -15,6 +15,35 @@ pub fn engine_greeting(name: String) -> String {
     format!("Hello {name}, the anamanti-display Rust engine is alive 👋")
 }
 
+/// A stable per-device hardware id derived from the primary network interface's MAC
+/// address, formatted `anamanti-<12 lowercase hex>` (colons stripped) — e.g.
+/// `anamanti-140ac5942aca`. Reading the MAC from `/sys/class/net/<iface>/address`
+/// guarantees uniqueness across devices without any build-time configuration.
+///
+/// Returns an empty string if no usable MAC is found (an unreadable file, or an
+/// all-zero / locked-down `02:00:00:00:00:00` placeholder); the Dart layer then
+/// falls back to a persisted random id so the device still has a stable identity.
+#[flutter_rust_bridge::frb(sync)]
+pub fn device_hardware_id() -> String {
+    for iface in ["wlan0", "eth0"] {
+        let path = format!("/sys/class/net/{iface}/address");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let hex: String = raw
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        // A valid MAC is 12 hex digits and not an all-zero / randomized placeholder.
+        if hex.len() == 12 && hex != "000000000000" && hex != "020000000000" {
+            return format!("anamanti-{hex}");
+        }
+    }
+    String::new()
+}
+
 /// Reports the native engine's version and build target so the device can show
 /// exactly which cross-compiled binary it is running.
 #[flutter_rust_bridge::frb(sync)]
@@ -121,6 +150,15 @@ pub struct WakeWordConfig {
     /// a whole spoken reply so long TTS answers are not truncated when the network
     /// delivers audio faster than real-time playback drains it. A/B-tunable.
     pub playback_buffer_secs: u32,
+    /// Software capture gain in **decibels**, applied to the 16 kHz mono audio right
+    /// after resampling — i.e. to both the wake-word detector input *and* the PCM
+    /// streamed to the Core. `0.0` (default) is unity/no-op. Positive values boost a
+    /// quiet far-field signal; it is the in-app, root-free analogue of the AEC shim's
+    /// `persist.vendor.amznaec.gain_db` makeup gain (which the sandboxed app cannot
+    /// set). Clamped to `[0, 36]` dB and the boosted signal is clamped back into i16
+    /// range so it never overflows the model input. A/B-tunable from the settings
+    /// screen. Applies on both the `cpal` and `AudioRecord` capture paths.
+    pub capture_gain_db: f32,
     /// **Android only.** Use the Kotlin `AudioRecord` capture layer instead of
     /// `cpal`, to reach the HAL's far-field `VOICE_RECOGNITION` source (array
     /// beamforming) + platform audio effects. `false` (default) keeps the `cpal`
@@ -164,7 +202,9 @@ pub enum WakeWordEventKind {
     /// Informational status in `message` (e.g. model loaded, capture-only).
     Status,
     /// Periodic input level in `rms` (~0.0..1.0) — proves capture is live even
-    /// before a wake-word model is present.
+    /// before a wake-word model is present. When a model is loaded it also carries
+    /// the live wake-word diagnostics (`score`, `avg_score`, `threshold`, `gain_db`)
+    /// that drive the audio-diagnostics screen.
     Level,
     /// The wake word fired; `model` and `score` are populated.
     Detected,
@@ -228,6 +268,12 @@ pub enum WakeWordEventKind {
     WeatherCurrent,
     /// Weather mode: dismiss the full-screen weather view and return to idle/ambient.
     DismissWeather,
+    /// Place mode: the orchestrator pushed a place to show full-screen on the place
+    /// card. `place_json` carries the report as a JSON string (name, address, hours[],
+    /// open_now, rating, phone, website, photo_uri, …) which the UI parses into the card.
+    ShowPlace,
+    /// Place mode: dismiss the full-screen place card and return to idle/ambient.
+    DismissPlace,
     /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
     /// (`"overview"` / `"ingredients"` / `"steps"`).
     RecipeNavigate,
@@ -259,8 +305,21 @@ pub struct WakeWordEvent {
     pub channels: u16,
     /// Input RMS level (`Level`).
     pub rms: f32,
-    /// Wake-word confidence in [0, 1] (`Detected`).
+    /// Wake-word confidence in [0, 1] — the raw current-block score (`Level`,
+    /// diagnostics) or the smoothed score that fired (`Detected`).
     pub score: f32,
+    /// The smoothed score the detection gate actually tests (average, or peak in
+    /// peak mode) in [0, 1]. Carried on `Level` events so the audio-diagnostics
+    /// screen can show the value being compared against the threshold; 0 otherwise.
+    pub avg_score: f32,
+    /// The wake-word detection threshold currently in effect in [0, 1] (the idle
+    /// threshold, or the raised active threshold during a turn). Carried on `Level`
+    /// events so the diagnostics meter can draw the firing line; 0 otherwise.
+    pub threshold: f32,
+    /// The software capture gain in dB currently applied to the mic signal. Carried
+    /// on `Level` events so the diagnostics screen reflects live gain changes; 0
+    /// otherwise.
+    pub gain_db: f32,
     /// Wake-word name that fired (`Detected`).
     pub model: String,
     /// Recognized speech (`Transcript`).
@@ -285,6 +344,9 @@ pub struct WakeWordEvent {
     /// for every other kind. The UI decodes it into the weather screen + the ambient
     /// clock indicator.
     pub weather_json: String,
+    /// The place report as a JSON string (`ShowPlace`); empty for every other kind. The
+    /// UI decodes it into the place card.
+    pub place_json: String,
     /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
     /// scroll direction (`RecipeScroll`). Empty for every other kind.
     pub recipe_action: String,
@@ -300,6 +362,9 @@ impl WakeWordEvent {
             channels: 0,
             rms: 0.0,
             score: 0.0,
+            avg_score: 0.0,
+            threshold: 0.0,
+            gain_db: 0.0,
             model: String::new(),
             transcript: String::new(),
             reply: String::new(),
@@ -309,6 +374,7 @@ impl WakeWordEvent {
             present: false,
             recipe_json: String::new(),
             weather_json: String::new(),
+            place_json: String::new(),
             recipe_action: String::new(),
         }
     }
@@ -332,6 +398,23 @@ impl WakeWordEvent {
     pub(crate) fn level(rms: f32) -> Self {
         Self {
             rms,
+            ..Self::base(WakeWordEventKind::Level)
+        }
+    }
+
+    /// A `Level` event enriched with the live wake-word diagnostics — the raw
+    /// current-block `score`, the smoothed `avg_score` the gate tests, the
+    /// `threshold` in effect, and the `gain_db` applied — so the audio-diagnostics
+    /// screen can render the mic meter, the score-vs-threshold meter, and the
+    /// numeric readouts from one stream. Emitted (in place of [`Self::level`]) while
+    /// a wake-word model is loaded.
+    pub(crate) fn level_diag(rms: f32, score: f32, avg_score: f32, threshold: f32, gain_db: f32) -> Self {
+        Self {
+            rms,
+            score,
+            avg_score,
+            threshold,
+            gain_db,
             ..Self::base(WakeWordEventKind::Level)
         }
     }
@@ -452,6 +535,17 @@ impl WakeWordEvent {
         Self::base(WakeWordEventKind::DismissWeather)
     }
 
+    pub(crate) fn show_place(place_json: String) -> Self {
+        Self {
+            place_json,
+            ..Self::base(WakeWordEventKind::ShowPlace)
+        }
+    }
+
+    pub(crate) fn dismiss_place() -> Self {
+        Self::base(WakeWordEventKind::DismissPlace)
+    }
+
     pub(crate) fn recipe_navigate(target: String) -> Self {
         Self {
             recipe_action: target,
@@ -494,6 +588,18 @@ pub fn stop_wake_word_engine() {
 #[frb(sync)]
 pub fn is_wake_word_engine_running() -> bool {
     crate::engine::is_running()
+}
+
+/// Live-adjust the capture gain (dB) and idle wake-word detection threshold on the
+/// **running** engine without restarting it, so the audio-diagnostics screen's
+/// sliders take effect instantly while the user watches the meters. The engine
+/// re-reads both values each audio block. They are re-seeded from [`WakeWordConfig`]
+/// on the next engine start, so persist the chosen values to settings to keep them
+/// across restarts. A harmless no-op when no engine is running. `gain_db` is clamped
+/// to `[0, 36]`; `threshold` to `[0, 1]`.
+#[frb(sync)]
+pub fn update_diagnostics_tuning(gain_db: f32, threshold: f32) {
+    crate::engine::update_tuning(gain_db, threshold);
 }
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
@@ -581,6 +687,27 @@ pub fn set_weather_context(
     crate::engine::set_display_context(screen);
 }
 
+/// Report the place card's state as the device's **display context** so the next voice
+/// turn's `audio-start` carries it to the orchestrator, letting the LLM know a place card
+/// is up (and which place) so it can answer follow-ups in context or close it on request.
+/// The place card's setter for the general display-context mechanism (see
+/// [`set_weather_context`] / [`crate::engine::set_display_context`]).
+///
+/// Flutter calls this when the place card opens or closes. `active == false` clears the
+/// context (idle screen); the other fields are ignored.
+#[frb(sync)]
+pub fn set_place_context(active: bool, name: String, address: String) {
+    let screen = if active {
+        Some(serde_json::json!({
+            "kind": "place",
+            "place": { "name": name, "address": address },
+        }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(screen);
+}
+
 // ---------------------------------------------------------------------------
 // Proactive notifications (Approach A, visual-only). A persistent channel the
 // device dials to the orchestrator and holds open, receiving pushed
@@ -604,6 +731,9 @@ pub struct NotifyConfig {
     /// A stable identifier for this display, sent in the `anamanti-hello` frame so the
     /// orchestrator can key notifications per device (may be empty).
     pub device_id: String,
+    /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+    /// `device_id` in the `anamanti-hello` frame so the Core can name it (may be empty).
+    pub device_name: String,
 }
 
 /// One proactive notification pushed from the orchestrator, streamed to Flutter.
@@ -680,6 +810,7 @@ pub fn start_notify_channel(
                 timeout,
                 key,
                 config.device_id,
+                config.device_name,
                 loop_running,
                 move |note| {
                     sink.add(NotifyEvent {
@@ -732,6 +863,9 @@ pub struct WeatherConfig {
     pub discovery_timeout_secs: u64,
     /// A stable identifier for this display, sent in the `anamanti-hello` frame.
     pub device_id: String,
+    /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+    /// `device_id` in the `anamanti-hello` frame (may be empty).
+    pub device_name: String,
 }
 
 /// One ambient current-conditions push from the orchestrator, streamed to Flutter.
@@ -802,6 +936,7 @@ pub fn start_weather_channel(
                 timeout,
                 key,
                 config.device_id,
+                config.device_name,
                 loop_running,
                 move |report_json| sink.add(WeatherPush { report_json }).is_ok(),
             ));

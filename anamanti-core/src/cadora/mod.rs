@@ -63,7 +63,7 @@ pub struct CadoraVoiceApi {
 impl CadoraVoiceApi {
     pub fn new(base_url: impl Into<String>, link_token: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             link_token: link_token.into(),
         }
@@ -162,7 +162,7 @@ pub async fn redeem_pairing_code(base_url: &str, code: &str) -> Result<String> {
         bail!("enter the 6-digit pairing code shown in the Cadora app");
     }
 
-    let resp = reqwest::Client::new()
+    let resp = crate::http::shared_client()
         .post(format!("{base_url}/voice/links/redeem"))
         .json(&json!({ "code": code }))
         .send()

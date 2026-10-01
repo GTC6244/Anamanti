@@ -4,6 +4,9 @@
 *.pyc
 *.swp
 .DS_Store
+# Local Rust build output (when CARGO_TARGET_DIR isn't on the external drive)
+/target/
+/target-local/
 .atom/
 .build/
 .buildlog/
@@ -83,3 +86,18 @@ anamanti_promptlog.jsonl-*
 
 # Local test-orchestrator run dir (worktree-local; never commit)
 .ambient-test-run/
+
+# Whisper ggml model binaries for the in-process STT engine — large (100s of MB),
+# fetched via anamanti-core/scripts/fetch-whisper-models.sh; never commit.
+/models/
+*.bin
+ggml-*.mlmodelc/
+
+# Anamanti Core model dir — fetched binaries (ggml Whisper, silero_vad.onnx via
+# anamanti-core/scripts/fetch-vad-model.sh); never commit. Scoped to the Core so the
+# device's committed openWakeWord .onnx assets are unaffected.
+/anamanti-core/models/
+
+# Machine-local test configs (absolute paths, per-box); never commit.
+anamanti.*.json
+!anamanti.example.json

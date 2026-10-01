@@ -52,6 +52,12 @@ pub enum DeviceAction {
     ShowWeather(crate::weather::WeatherReport),
     /// Dismiss the weather screen and return to the idle/ambient display.
     DismissWeather,
+    /// Show the full-screen place card on the display (name, address, hours, rating,
+    /// phone, a photo, …). The device owns the resulting screen state until dismissed,
+    /// so this is fire-and-forget like the recipe/weather/timer actions.
+    ShowPlace(crate::places::PlaceReport),
+    /// Dismiss the place card and return to the idle/ambient display.
+    DismissPlace,
     /// Drive the already-open recipe screen by voice — switch tab or scroll a pane.
     /// Fire-and-forget: the device owns the screen state.
     RecipeControl(RecipeNav),

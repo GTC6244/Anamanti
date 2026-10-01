@@ -1,0 +1,16 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- In-app updater (plans/UpdaterPlan.md), selfUpdate flavor only.
+         REQUEST_INSTALL_PACKAGES lets the app launch the system installer for a
+         downloaded APK; the fdroid flavor omits this (and the receiver below) so it
+         ships without the self-updater. On the LineageOS kiosk the matching
+         "install unknown apps" toggle is granted out-of-band (adb / Settings). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+
+    <application>
+        <!-- Receives PackageInstaller session results. Targeted by an explicit
+             Intent from MainActivity.installApk, so it stays unexported. -->
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false"/>
+    </application>
+</manifest>

@@ -22,6 +22,7 @@ WakeWordConfig _cfg() => WakeWordConfig(
       smoothingWindow: 2,
       fireOnPeak: false,
       playbackBufferSecs: 30,
+      captureGainDb: 0,
       useAudiorecord: false,
       micSource: 6,
       platformAec: false,
@@ -41,6 +42,9 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       channels: 0,
       rms: rms,
       score: 0,
+      avgScore: 0,
+      threshold: 0,
+      gainDb: 0,
       model: model,
       transcript: '',
       reply: '',
@@ -50,6 +54,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       present: false,
       recipeJson: '',
       weatherJson: '',
+      placeJson: '',
       recipeAction: '',
     );
 

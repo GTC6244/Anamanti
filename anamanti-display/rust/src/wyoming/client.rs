@@ -69,6 +69,12 @@ pub struct WyomingConnection<R, W> {
     /// drive it (switch tabs / scroll / close). `None` on an idle screen. A general,
     /// per-screen concept — see `plans/architecture.md` §4 ("Display context").
     display_context: Option<serde_json::Value>,
+    /// Active-timer state (running/remaining/labels), stamped as `screen.timers` —
+    /// **orthogonal** to `display_context`: a timer counts in the background regardless of
+    /// which widget is foreground, so this is emitted even on an idle screen. Lets the
+    /// Core answer "how much time is left?" and route bare "stop"/"cancel" to the timer.
+    /// See `plans/system1-fast-decisions.md` §17/§19. `None` when no timer is running.
+    timer_context: Option<serde_json::Value>,
 }
 
 impl WyomingConnection<BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf> {
@@ -104,6 +110,7 @@ where
             followup_depth: 0,
             followup_wait_secs: 0,
             display_context: None,
+            timer_context: None,
         }
     }
 
@@ -112,6 +119,14 @@ where
     /// clears it (idle screen). Call before [`Self::send_audio_start`].
     pub fn set_display_context(&mut self, screen: Option<serde_json::Value>) {
         self.display_context = screen;
+    }
+
+    /// Set the active-timer context stamped as `screen.timers` on this turn's
+    /// `audio-start` (the serialized `TimerManager::snapshot`). `None` when no timer is
+    /// running. Orthogonal to [`Self::set_display_context`] — both may be set. Call before
+    /// [`Self::send_audio_start`].
+    pub fn set_timer_context(&mut self, timers: Option<serde_json::Value>) {
+        self.timer_context = timers;
     }
 
     /// Mark this turn as a **follow-up** (the device auto-opened the mic after a reply,
@@ -135,11 +150,22 @@ where
             self.followup_depth,
             self.followup_wait_secs,
         );
-        // Stamp the current display context (e.g. recipe tab/scroll state) so the
-        // orchestrator's LLM can drive the display this turn. No-op on an idle screen.
-        if let Some(screen) = &self.display_context {
+        // Stamp the turn's `screen` block: the foreground widget context (e.g. recipe
+        // tab/scroll state) so the orchestrator's LLM can drive the display, PLUS the
+        // orthogonal `timers` state so the Core/System-1 can see a background timer. The
+        // block is sent whenever EITHER is present — a running timer must be reported even
+        // on an idle screen (no widget context).
+        let mut screen = self
+            .display_context
+            .as_ref()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        if let Some(timers) = &self.timer_context {
+            screen.insert("timers".into(), timers.clone());
+        }
+        if !screen.is_empty() {
             if let serde_json::Value::Object(map) = &mut ev.data {
-                map.insert("screen".into(), screen.clone());
+                map.insert("screen".into(), serde_json::Value::Object(screen));
             }
         }
         protocol::write_event(&mut self.writer, &ev)
@@ -223,6 +249,10 @@ pub enum TurnUpdate {
     /// UI (the weather screen outlives the turn's socket), so it does not change the
     /// turn's state machine.
     Weather(protocol::WeatherCommand),
+    /// A device-action **place** command relayed from the orchestrator: show a place
+    /// card full-screen, or dismiss it. Handled by the UI (the place card outlives the
+    /// turn's socket), so it does not change the turn's state machine.
+    Place(protocol::PlaceCommand),
     /// The orchestrator asked the device to **listen for a follow-up** after its reply.
     /// The payload is `(depth, wait_secs)`: the chain depth the follow-up turn should
     /// carry, and how long to keep the mic open for input before sleeping (longer after
@@ -433,6 +463,13 @@ where
                 on_update(TurnUpdate::Weather(cmd));
             }
         }
+        // A device action (place show/dismiss) relayed on the voice-turn socket. The
+        // place card is owned by the UI and outlives the turn, so just surface it.
+        types::PLACE => {
+            if let Some(cmd) = event.place_command() {
+                on_update(TurnUpdate::Place(cmd));
+            }
+        }
         // Follow-up-listen request (the reply was a question). Surface it without
         // touching the turn state — it arrives mid-SPEAKING, and the engine reopens
         // the mic only once the reply audio has drained (see engine/net.rs).
@@ -485,6 +522,74 @@ mod tests {
     use crate::wyoming::protocol::{read_event, types};
     use serde_json::json;
     use tokio::io::BufReader as TokioBufReader;
+
+    /// Send an `audio-start` through a duplex pipe and return its parsed frame.
+    async fn audio_start_frame(
+        conn: WyomingConnection<impl AsyncBufRead + Unpin, impl AsyncWrite + Unpin>,
+        server_io: tokio::io::DuplexStream,
+    ) -> WyomingEvent {
+        let mut conn = conn;
+        conn.send_audio_start().await.unwrap();
+        drop(conn); // close writer so the read hits EOF cleanly
+        let (sr, _sw) = tokio::io::split(server_io);
+        let mut server = TokioBufReader::new(sr);
+        let start = read_event(&mut server).await.unwrap().unwrap();
+        assert_eq!(start.event_type, types::AUDIO_START);
+        start
+    }
+
+    fn duplex_conn() -> (
+        WyomingConnection<
+            TokioBufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+            tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        >,
+        tokio::io::DuplexStream,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = tokio::io::split(client_io);
+        (
+            WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default()),
+            server_io,
+        )
+    }
+
+    #[tokio::test]
+    async fn audio_start_stamps_timer_context_even_on_idle_screen() {
+        // A timer running with NO foreground widget: the `screen` block must still be
+        // emitted, carrying only `timers` (orthogonal to `kind`).
+        let (mut conn, server_io) = duplex_conn();
+        conn.set_timer_context(Some(json!({
+            "running": 2, "next_remaining_secs": 90, "labels": ["pasta"]
+        })));
+        let start = audio_start_frame(conn, server_io).await;
+        assert_eq!(start.data["screen"]["timers"]["running"], json!(2));
+        assert_eq!(
+            start.data["screen"]["timers"]["next_remaining_secs"],
+            json!(90)
+        );
+        assert_eq!(start.data["screen"]["timers"]["labels"], json!(["pasta"]));
+        assert!(start.data["screen"].get("kind").is_none());
+    }
+
+    #[tokio::test]
+    async fn audio_start_merges_widget_and_timer_context() {
+        let (mut conn, server_io) = duplex_conn();
+        conn.set_display_context(Some(
+            json!({ "kind": "recipe", "recipe": { "tab": "steps" } }),
+        ));
+        conn.set_timer_context(Some(json!({ "running": 1 })));
+        let start = audio_start_frame(conn, server_io).await;
+        assert_eq!(start.data["screen"]["kind"], json!("recipe"));
+        assert_eq!(start.data["screen"]["recipe"]["tab"], json!("steps"));
+        assert_eq!(start.data["screen"]["timers"]["running"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn audio_start_omits_screen_block_when_no_context() {
+        let (conn, server_io) = duplex_conn();
+        let start = audio_start_frame(conn, server_io).await;
+        assert!(start.data.get("screen").is_none());
+    }
 
     #[tokio::test]
     async fn connection_sends_well_formed_audio_frames() {

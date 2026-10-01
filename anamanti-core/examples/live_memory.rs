@@ -134,6 +134,7 @@ async fn run() -> anyhow::Result<()> {
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     };
     log.append(&mk(
         "l1",
@@ -165,8 +166,13 @@ async fn run() -> anyhow::Result<()> {
 
     let recall = HelixRecall::new(helix.clone(), embedder.clone(), 6);
     let query = "what kind of music am I into";
-    let hits = recall.recall(query, None, 8).await?;
+    let res = recall.recall(query, None, 8).await?;
+    let hits = res.hits;
     println!("   query: {query:?}");
+    println!(
+        "   (embed {:?}ms, graph search {:?}ms)",
+        res.embed_ms, res.search_ms
+    );
     for h in &hits {
         println!("   → {h}");
     }

@@ -68,7 +68,7 @@ See [`architecture.md`](./plans/architecture.md) for the full design and
 | Wake word | `tract-onnx` running an openWakeWord model |
 | Transport | Wyoming Protocol over `tokio` TCP |
 | Discovery | mDNS / Zeroconf (`_wyoming._tcp`) |
-| Mac services | Wyoming STT (Whisper/CoreML) · LLM · Wyoming TTS (Piper) |
+| Mac services | STT — Whisper via Wyoming **or** in-process whisper.cpp (`stt.engine`) · LLM · Wyoming TTS (Piper) |
 
 ## Repository layout
 
@@ -107,16 +107,48 @@ flutter_rust_bridge_codegen generate
 
 # 2. Build a device APK — cargokit cross-compiles the Rust engine into it.
 #    Echo Show 8 (crown) is 32-bit, so target android-arm (armeabi-v7a).
-flutter build apk --release --target-platform android-arm
+#    A `distribution` flavor dimension exists (selfUpdate / fdroid, see below), so
+#    a flavor MUST be named. `selfUpdate` is the normal build.
+flutter build apk --release --flavor selfUpdate --target-platform android-arm
 
 # 3. Deploy to the Echo Show (LineageOS) over adb
-adb install build/app/outputs/flutter-apk/app-release.apk
+adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk
 # ...or, for live development:
-flutter run -d <echo-show-device>
+flutter run --flavor selfUpdate -d <echo-show-device>
 ```
 
 On first launch the device discovers the Mac's Wyoming service via mDNS. No
 static IP configuration is required.
+
+### Releases & in-app updates
+
+The Display can update **itself** over the air: a built-in updater fetches a
+signed APK + a `latest.json` manifest from a **Cloudflare R2** bucket, verifies a
+SHA-256, and installs it via Android's `PackageInstaller`. (A GitHub Releases +
+Obtainium path also still runs — see `.github/workflows/release.yml`.) Full design:
+[`plans/UpdaterPlan.md`](plans/UpdaterPlan.md).
+
+Build flavors (same signing key + app id across both):
+- **`selfUpdate`** — ships the in-app updater (the normal build).
+- **`fdroid`** — ships *without* it (no install permission / UI), for F-Droid.
+
+To cut a release to R2:
+
+```bash
+# One-time: a release keystore (android/key.properties or ANDROID_* env — never
+# commit it; the key must stay constant forever), an R2 bucket + custom domain with
+# a ~60s cache rule on latest.json, and `npx wrangler login`.
+
+# Bump `version:` in anamanti-display/pubspec.yaml first (X.Y.Z+N — the +N build
+# number is the Android versionCode and MUST increase every release). Then:
+R2_BUCKET=anamanti-dl \
+UPDATE_BASE_URL=https://dl.example.com \
+NOTES="Bug fixes" \
+anamanti-display/scripts/release-r2.sh
+```
+
+Point each device at your domain in **Settings → Updates** (the default is a
+placeholder). On the LineageOS kiosk, grant the app "install unknown apps" once.
 
 ### Run the Mac Mini Anamanti Core (the brain)
 
@@ -157,8 +189,10 @@ cargo run --manifest-path anamanti-core/Cargo.toml --release
   that prints a fresh token, default `ant auth print-credentials --access-token`).
   OpenAI is API-key-only (`OPENAI_API_KEY`) — its ChatGPT subscription does not grant
   API access.
-- Whisper and Piper are off-the-shelf Wyoming servers; the Anamanti Core is a
-  client to them. See `anamanti-core/src/config.rs` for all environment variables.
+- Piper (and, by default, Whisper) are off-the-shelf Wyoming servers the Anamanti
+  Core is a client to. STT can instead run **in-process** (whisper.cpp,
+  `stt.engine=whisper-rs`) with no separate server — see
+  `plans/python-to-rust-whisper.md`. See `anamanti-core/src/config.rs` for config.
 - **Multiple displays, one Anamanti Core:** N Echo Shows can share a single
   Anamanti Core — each connection is handled independently and every reply is
   routed back to the display that asked. Memory + settings are one shared
@@ -219,7 +253,7 @@ raised confidence threshold as the interim self-trigger mitigation.
 
 **Phase 4 complete — Mac Mini assistant pipeline.** The new `/mac` Anamanti Core
 (`anamanti_core`) ties the brain together: a Wyoming server to the device
-and a Wyoming client to Whisper (STT, server-side VAD) and Piper (TTS), with a
+and a Wyoming client to Whisper (STT; Core-side VAD — neural Silero by default, energy/RMS fallback) and Piper (TTS), with a
 **pluggable LLM** trait (Ollama / Claude / mock) and a **persistent SQLite + FTS5
 memory** store (explicit "remember…"/"forget…" commands plus inferred fact/pref
 extraction) in the middle. It advertises `_wyoming._tcp` over mDNS and streams the

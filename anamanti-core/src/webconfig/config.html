@@ -83,6 +83,22 @@
     <!-- Fallback (voices unavailable): a free-text Piper voice name. -->
     <input id="tts_voice_text" type="text" placeholder="(default)">
   </label>
+
+  <h2>Voice activity detection</h2>
+  <p class="desc">End-of-speech detection. Switching to Silero needs a build with
+    <code>--features vad-silero</code> and a model present; otherwise it falls back to
+    the energy gate. The threshold applies only to Silero.</p>
+
+  <label>VAD engine
+    <select id="vad_engine">
+      <option value="energy">Energy (RMS threshold)</option>
+      <option value="silero">Silero (neural)</option>
+    </select>
+  </label>
+
+  <label>Silero speech threshold <span class="hint">0.0–1.0; higher = stricter (fewer false triggers, more misses)</span>
+    <input id="silero_threshold" type="number" min="0" max="1" step="0.05" placeholder="0.5">
+  </label>
 </div>
 
 <div class="sticky-actions">
@@ -210,6 +226,8 @@
     $('search_provider').value = v.search_provider || 'duckduckgo';
     $('search_api_key').value = '';
     $('key_state').textContent = v.search_key_set ? '(a key is set)' : '(no key set)';
+    if (v.vad_engine) $('vad_engine').value = v.vad_engine;
+    if (v.silero_threshold != null) $('silero_threshold').value = v.silero_threshold;
   }
 
   async function loadModels() {
@@ -252,6 +270,10 @@
       openai_api_key: $('openai_api_key').value.trim() || undefined,
       anthropic_oauth_token: $('anthropic_oauth_token').value.trim() || undefined,
     };
+    body.vad_engine = $('vad_engine').value;
+    // Silero threshold: send only a valid number so a blank field leaves it unchanged.
+    const st = parseFloat($('silero_threshold').value);
+    if (!Number.isNaN(st)) body.silero_threshold = st;
     try {
       const r = await fetch('/config', {
         method: 'POST',

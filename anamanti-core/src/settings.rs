@@ -68,13 +68,21 @@ impl LlmEngine {
 /// cut end-of-turn latency; A/B-tunable from the device settings screen.
 pub const DEFAULT_END_SILENCE_MS: u64 = 700;
 
-/// Default RMS (i16 units) above which an incoming chunk counts as speech rather
-/// than room noise. Set above the Echo Show's measured far-field idle noise floor
-/// (~100–200 i16), which the original 120 sat *inside* — so every frame read as
-/// speech and end-of-speech never fired, stalling the turn. Speech runs ~1000+, so
-/// 450 cleanly separates the two. Lower it for a very quiet mic, raise it for a
-/// noisy room (A/B-tunable from the device settings screen / config page).
-pub const DEFAULT_VOICE_RMS_THRESHOLD: f64 = 450.0;
+/// Default RMS (i16 units) above which an incoming chunk counts as speech rather than
+/// room noise. This is a compromise across units, expected to be tuned per-device
+/// (A/B-tunable from the device settings screen / config page). Too low (the original 120)
+/// sits inside some Echo Shows' far-field idle noise floor (~100–200 i16), so every frame
+/// reads as speech, end-of-speech never fires, and the turn stalls. Too high (450) discards
+/// genuine but quiet far-field speech: on-device QA found a unit whose speech ran below 450,
+/// so real utterances were dropped as "silence" and the turn returned nothing. 180 clears
+/// the low end of the noise-floor range while still catching quieter speech; raise it in a
+/// noisy room, lower it for a very quiet mic.
+pub const DEFAULT_VOICE_RMS_THRESHOLD: f64 = 180.0;
+
+/// Default Silero speech-probability gate (0.0..1.0). Used when neither the config
+/// file's `vad.silero.threshold` nor a persisted value is present. A frame counts as
+/// speech when its Silero probability is `>= this`.
+pub const DEFAULT_SILERO_THRESHOLD: f32 = 0.5;
 
 fn default_end_silence_ms() -> u64 {
     DEFAULT_END_SILENCE_MS
@@ -264,6 +272,11 @@ pub struct SpotifyConfig {
     /// librespot Connect device to target (default `"Ambient"` when unset).
     #[serde(default)]
     pub device_name: Option<String>,
+    /// OAuth **redirect URL** the consent flow listens on and sends to Spotify. `None`/
+    /// empty ⇒ the built-in default (`http://127.0.0.1:8888/callback`). Must exactly
+    /// match a Redirect URI registered in the Spotify app.
+    #[serde(default)]
+    pub redirect_url: Option<String>,
     /// OAuth scope granted (informational).
     #[serde(default)]
     pub scope: Option<String>,
@@ -291,6 +304,17 @@ impl SpotifyConfig {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("Ambient")
+            .to_string()
+    }
+
+    /// The OAuth redirect URL to use for consent, defaulting to the built-in loopback
+    /// callback ([`crate::spotify_consent::DEFAULT_REDIRECT_URL`]) when unset.
+    pub fn redirect_url_or_default(&self) -> String {
+        self.redirect_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::spotify_consent::DEFAULT_REDIRECT_URL)
             .to_string()
     }
 
@@ -368,6 +392,7 @@ pub struct SpotifyUpdate {
     pub client_secret: Option<Option<String>>,
     pub refresh_token: Option<Option<String>>,
     pub device_name: Option<Option<String>>,
+    pub redirect_url: Option<Option<String>>,
     pub scope: Option<Option<String>>,
 }
 
@@ -499,6 +524,26 @@ pub struct DirectionsUpdate {
     pub mapbox_token: Option<Option<String>>,
 }
 
+/// A requested change to the weather tool config. `provider` selects the forecast
+/// backend (`visualcrossing`/`openmeteo`); `None` leaves it unchanged. `visualcrossing_key`
+/// is tri-state: `None` = leave unchanged; `Some(None)`/`Some(Some(""))` = clear;
+/// `Some(Some(v))` = set. Applied by [`SharedSettings::apply_weather_tool`], which rebuilds
+/// the `weather_lookup` tool and retargets the ambient push live.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WeatherToolUpdate {
+    pub provider: Option<String>,
+    pub visualcrossing_key: Option<Option<String>>,
+}
+
+/// A requested change to the places tool config. `google_places_key` is tri-state:
+/// `None` = leave unchanged; `Some(None)`/`Some(Some(""))` = clear; `Some(Some(v))` =
+/// set. Applied by [`SharedSettings::apply_places_tool`], which rebuilds the backend so
+/// the `places_lookup` tool is advertised/withdrawn live.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlacesToolUpdate {
+    pub google_places_key: Option<Option<String>>,
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -536,6 +581,14 @@ pub struct PersistedSettings {
     /// Speech-vs-noise RMS threshold (VAD). Defaulted for older files.
     #[serde(default = "default_voice_rms_threshold")]
     pub voice_rms_threshold: f64,
+    /// Silero speech-probability gate (neural VAD), `0.0..1.0`. `Option` so an older
+    /// file (absent) keeps the config-file seed rather than forcing a default.
+    #[serde(default)]
+    pub silero_threshold: Option<f32>,
+    /// VAD engine label (`energy`/`silero`). `Option` so an older file (absent) keeps
+    /// the config-file `vad.engine` seed.
+    #[serde(default)]
+    pub vad_engine: Option<String>,
     /// Google Drive photo-slideshow credentials + linkage. Defaulted (empty) for
     /// older files.
     #[serde(default)]
@@ -556,6 +609,46 @@ pub struct PersistedSettings {
     /// Defaulted (empty) for older files.
     #[serde(default)]
     pub appsaid: AppSaidConfig,
+    /// Runtime-set weather provider label (`visualcrossing`/`openmeteo`). Defaulted
+    /// (absent) for older files, which then fall back to the `weather.provider` seed.
+    #[serde(default)]
+    pub weather_provider: Option<String>,
+    /// Runtime-set Visual Crossing API key. Defaulted (absent) for older files, which
+    /// then fall back to the `VISUALCROSSING_API_KEY` env seed. Plaintext (0600 file).
+    #[serde(default)]
+    pub visualcrossing_key: Option<String>,
+    /// Runtime-set Google Places API key for the places tool. Defaulted (absent) for
+    /// older files, which then fall back to the `GOOGLE_PLACES_API_KEY` env seed.
+    /// Plaintext (0600 file).
+    #[serde(default)]
+    pub google_places_key: Option<String>,
+    /// Selected System-1 backend. Defaults to **empty** (not "none") for older files, so
+    /// an old persisted file can't clobber a config-file `system1.backend` seed — the
+    /// overlay only applies when this is non-empty (a save always writes a real label).
+    #[serde(default)]
+    pub system1_backend: String,
+    #[serde(default = "default_system1_base_url")]
+    pub system1_base_url: String,
+    #[serde(default = "default_system1_model")]
+    pub system1_model: String,
+    #[serde(default = "default_system1_min_confidence")]
+    pub system1_min_confidence: f64,
+    #[serde(default)]
+    pub system1_intents: Vec<String>,
+    /// Runtime-set OpenRouter API key (config page). Defaulted (absent) for older files,
+    /// which then fall back to the `OPENROUTER_API_KEY` env seed.
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
+}
+
+fn default_system1_base_url() -> String {
+    DEFAULT_SYSTEM1_BASE_URL.to_string()
+}
+fn default_system1_model() -> String {
+    DEFAULT_SYSTEM1_MODEL.to_string()
+}
+fn default_system1_min_confidence() -> f64 {
+    DEFAULT_SYSTEM1_MIN_CONFIDENCE
 }
 
 /// Load persisted settings, or `None` if the file is absent/unreadable.
@@ -662,12 +755,24 @@ pub struct LlmFactory {
     /// `weather_units` at boot). Kept alongside `directions_provider` for rebuilds.
     pub directions_imperial: bool,
     /// The forecast provider for the `weather_lookup` tool, or `None` when weather is
-    /// disabled. Keyless (Open-Meteo), so present whenever `weather.enabled`; shared
-    /// into every rebuilt backend. The same provider also feeds the ambient push.
+    /// disabled. Built from the live provider label ([`RuntimeSettings::weather_provider`])
+    /// and Visual Crossing key ([`RuntimeSettings::visualcrossing_key`]), refreshed on
+    /// every (re)build — like `directions` — so a provider/key change on the config page
+    /// takes effect live. Shared into every rebuilt backend; the ambient push builds its
+    /// own instance from the same live settings.
     pub weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
     /// Whether weather temperatures are reported in imperial units (°F), from the
     /// household `weather_units` at boot. Mirrors `directions_imperial`.
     pub weather_imperial: bool,
+    /// Whether the weather feature is enabled (`weather.enabled`). Kept so `weather` can
+    /// be rebuilt from a new runtime provider/key without re-reading config; `false`
+    /// forces the provider to `None` regardless of the label/key.
+    pub weather_enabled: bool,
+    /// The Google Places provider for the `places_lookup` tool, or `None` when no key is
+    /// configured. Built from the live key ([`RuntimeSettings::google_places_key`]) and
+    /// refreshed on every (re)build — like `weather`/`directions` — so a key entered on
+    /// the config page advertises the tool live. Shared into every rebuilt backend.
+    pub places: Option<Arc<dyn crate::places::PlacesProvider>>,
 }
 
 impl LlmFactory {
@@ -743,6 +848,7 @@ impl LlmFactory {
                                     self.appsaid.clone(),
                                     self.weather.clone(),
                                     self.weather_imperial,
+                                    self.places.clone(),
                                 ),
                             )?),
                             _ => Arc::new(AnthropicBackend::new(
@@ -793,6 +899,7 @@ impl LlmFactory {
                             self.appsaid.clone(),
                             self.weather.clone(),
                             self.weather_imperial,
+                            self.places.clone(),
                         ),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
@@ -848,6 +955,12 @@ pub struct RuntimeSettings {
     pub end_silence_ms: u64,
     /// RMS (i16 units) above which a chunk counts as speech for the VAD.
     pub voice_rms_threshold: f64,
+    /// Silero speech-probability gate (`0.0..1.0`) for the neural VAD engine.
+    /// A/B-tunable from the device / config page; read from the per-turn snapshot.
+    pub silero_threshold: f32,
+    /// Which VAD engine decides end-of-speech (energy default, or silero). Live-swappable
+    /// from the config page; a swap to silero with no model loaded falls back to energy.
+    pub vad_engine: crate::config::VadEngineKind,
     /// Google Drive photo-slideshow credentials + linkage (orchestrator-owned;
     /// pulled by the device over Wyoming). Orthogonal to the LLM rebuild path.
     pub drive: DriveConfig,
@@ -866,6 +979,90 @@ pub struct RuntimeSettings {
     /// Cadora, a change here rebuilds the backend (via [`AppSaidConfig::messenger`]) so
     /// the `send_phone_message` tool is advertised/withdrawn live.
     pub appsaid: AppSaidConfig,
+    /// The selected weather forecast provider label (`visualcrossing` / `openmeteo`).
+    /// Runtime-settable (config page Tools tab); seeded from `weather.provider` at boot.
+    /// A change rebuilds the `weather_lookup` tool + retargets the ambient push live.
+    pub weather_provider: String,
+    /// Live Visual Crossing API key for the weather provider. Runtime-settable (config
+    /// page Tools tab); seeded from `VISUALCROSSING_API_KEY` at boot. `None` ⇒ the
+    /// Visual Crossing provider falls back to keyless Open-Meteo.
+    pub visualcrossing_key: Option<String>,
+    /// Live Google Places API key for the `places_lookup` tool. Runtime-settable (config
+    /// page Tools tab); seeded from `GOOGLE_PLACES_API_KEY` at boot. `None` ⇒ the tool
+    /// isn't advertised (Google Places has no keyless fallback).
+    pub google_places_key: Option<String>,
+    /// The live System-1 fast-decision selection (plans/system1-fast-decisions.md), read
+    /// from the per-turn snapshot so a config-page swap takes effect between turns.
+    /// Bundled into one field so the widely-constructed `RuntimeSettings` only gains one.
+    pub system1: System1Runtime,
+}
+
+/// Default System-1 HTTP base URL (local `laya-serve`).
+pub const DEFAULT_SYSTEM1_BASE_URL: &str = "http://127.0.0.1:8000";
+/// Default System-1 OpenRouter model id (the `jev` backend).
+pub const DEFAULT_SYSTEM1_MODEL: &str = "typesafe/jev-1.13";
+/// Default System-1 confidence floor.
+pub const DEFAULT_SYSTEM1_MIN_CONFIDENCE: f64 = 0.85;
+
+/// The live System-1 selection: the built engine plus the descriptor needed to rebuild
+/// it on a config-page swap and report the current choice. `Default` = disabled
+/// (`NoDecision`), so a `RuntimeSettings` literal can spell it `System1Runtime::default()`.
+#[derive(Clone)]
+pub struct System1Runtime {
+    /// The live decision engine (`name() == "none"` ⇒ the turn logic skips the stage).
+    pub engine: Arc<dyn crate::system1::DecisionEngine>,
+    /// Selected backend label (`none`/`laya-serve`/`jev`/…).
+    pub backend: String,
+    /// HTTP base URL (`laya-serve` host, or the OpenRouter API root for `jev`).
+    pub base_url: String,
+    /// Model id for the `jev` backend (OpenRouter).
+    pub model: String,
+    /// Confidence floor below which a decision defers to System-2.
+    pub min_confidence: f64,
+    /// Allowed intents (empty = the built-in default set).
+    pub intents: Vec<String>,
+    /// Live OpenRouter API key for `jev`. Runtime-settable (config page); seeded from
+    /// `OPENROUTER_API_KEY` at boot. `None` = unset.
+    pub openrouter_api_key: Option<String>,
+}
+
+impl Default for System1Runtime {
+    fn default() -> Self {
+        Self {
+            engine: crate::system1::none(),
+            backend: "none".to_string(),
+            base_url: DEFAULT_SYSTEM1_BASE_URL.to_string(),
+            model: DEFAULT_SYSTEM1_MODEL.to_string(),
+            min_confidence: DEFAULT_SYSTEM1_MIN_CONFIDENCE,
+            intents: Vec::new(),
+            openrouter_api_key: None,
+        }
+    }
+}
+
+/// A description of the live System-1 selection, for the config page. Never exposes the
+/// OpenRouter key (only whether one is set).
+#[derive(Debug, Clone, PartialEq)]
+pub struct System1View {
+    pub backend: String,
+    pub base_url: String,
+    pub model: String,
+    pub min_confidence: f64,
+    pub openrouter_key_set: bool,
+    pub intents: Vec<String>,
+}
+
+/// A requested System-1 change (config page). Absent fields are left unchanged;
+/// `openrouter_api_key` is tri-state (`None` = keep, `Some(None)` = clear,
+/// `Some(Some(v))` = set).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct System1Update {
+    pub backend: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub min_confidence: Option<f64>,
+    pub openrouter_api_key: Option<Option<String>>,
+    pub intents: Option<Vec<String>>,
 }
 
 /// A description of the settings currently in effect, for reporting back to the
@@ -897,6 +1094,10 @@ pub struct SettingsView {
     pub end_silence_ms: u64,
     /// Speech-vs-noise RMS threshold for the VAD.
     pub voice_rms_threshold: f64,
+    /// Silero speech-probability gate (`0.0..1.0`) for the neural VAD engine.
+    pub silero_threshold: f32,
+    /// The active VAD engine (energy / silero).
+    pub vad_engine: crate::config::VadEngineKind,
 }
 
 /// A requested settings change. Absent fields are left unchanged; a `tts_voice` of
@@ -929,6 +1130,10 @@ pub struct SettingsUpdate {
     pub end_silence_ms: Option<u64>,
     /// New speech-vs-noise RMS threshold for the VAD, or `None` to leave it.
     pub voice_rms_threshold: Option<f64>,
+    /// New Silero speech-probability gate (`0.0..1.0`), or `None` to leave it.
+    pub silero_threshold: Option<f32>,
+    /// Switch the VAD engine (energy / silero), or `None` to leave it unchanged.
+    pub vad_engine: Option<crate::config::VadEngineKind>,
 }
 
 /// Thread-safe holder for the runtime settings plus the factory that rebuilds
@@ -977,11 +1182,22 @@ impl SharedSettings {
             tts_voice: s.tts_voice.clone(),
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
+            silero_threshold: Some(s.silero_threshold),
+            vad_engine: Some(s.vad_engine.as_label().to_string()),
             drive: s.drive.clone(),
             household: s.household.clone(),
             spotify: s.spotify.clone(),
             cadora: s.cadora.clone(),
             appsaid: s.appsaid.clone(),
+            weather_provider: Some(s.weather_provider.clone()),
+            visualcrossing_key: s.visualcrossing_key.clone(),
+            google_places_key: s.google_places_key.clone(),
+            system1_backend: s.system1.backend.clone(),
+            system1_base_url: s.system1.base_url.clone(),
+            system1_model: s.system1.model.clone(),
+            system1_min_confidence: s.system1.min_confidence,
+            system1_intents: s.system1.intents.clone(),
+            openrouter_api_key: s.system1.openrouter_api_key.clone(),
         }
     }
 
@@ -1012,6 +1228,8 @@ impl SharedSettings {
             directions_imperial: false,
             weather: None,
             weather_imperial: false,
+            weather_enabled: false,
+            places: None,
         };
         Self::new(
             factory,
@@ -1031,11 +1249,17 @@ impl SharedSettings {
                 tts_voice,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
         )
     }
@@ -1071,6 +1295,8 @@ impl SharedSettings {
             search_key_set: s.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
             end_silence_ms: s.end_silence_ms,
             voice_rms_threshold: s.voice_rms_threshold,
+            silero_threshold: s.silero_threshold,
+            vad_engine: s.vad_engine,
         }
     }
 
@@ -1146,6 +1372,17 @@ impl SharedSettings {
                 current.mapbox_token.as_deref(),
                 factory.directions_imperial,
             );
+            // Same for the weather tool: rebuild it from the live provider label + Visual
+            // Crossing key so a normal settings change never drops `weather_lookup`.
+            factory.weather = crate::weather::from_config(
+                factory.weather_enabled,
+                &current.weather_provider,
+                current.visualcrossing_key.as_deref(),
+            );
+            // Same for the places tool: rebuild it from the live Google Places key so a
+            // normal settings change never drops `places_lookup`.
+            factory.places =
+                crate::places::from_key("google", current.google_places_key.as_deref());
             (
                 Some(factory.build(
                     target_engine,
@@ -1207,6 +1444,12 @@ impl SharedSettings {
         if let Some(thr) = update.voice_rms_threshold {
             w.voice_rms_threshold = thr.clamp(0.0, 5000.0);
         }
+        if let Some(t) = update.silero_threshold {
+            w.silero_threshold = t.clamp(0.0, 1.0);
+        }
+        if let Some(e) = update.vad_engine {
+            w.vad_engine = e;
+        }
         let view = SettingsView {
             llm_backend: w.llm_backend.clone(),
             llm_model: w.llm_model.clone(),
@@ -1229,6 +1472,8 @@ impl SharedSettings {
             search_key_set: w.search_api_key.as_deref().is_some_and(|k| !k.is_empty()),
             end_silence_ms: w.end_silence_ms,
             voice_rms_threshold: w.voice_rms_threshold,
+            silero_threshold: w.silero_threshold,
+            vad_engine: w.vad_engine,
         };
         // Persist the new state (best-effort) after dropping the write lock so IO
         // never blocks a concurrent turn's snapshot.
@@ -1287,6 +1532,100 @@ impl SharedSettings {
             persist(path, &snap);
         }
         cleaned
+    }
+
+    /// A snapshot of the live System-1 selection for the config page (never the key).
+    pub fn system1_view(&self) -> System1View {
+        let s = self.inner.read().unwrap();
+        System1View {
+            backend: s.system1.backend.clone(),
+            base_url: s.system1.base_url.clone(),
+            model: s.system1.model.clone(),
+            min_confidence: s.system1.min_confidence,
+            openrouter_key_set: s
+                .system1
+                .openrouter_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            intents: s.system1.intents.clone(),
+        }
+    }
+
+    /// Directly install a System-1 engine object (no persist). Used at boot by
+    /// `Pipeline::with_system1` and by tests to inject a scripted engine; the config
+    /// page uses [`apply_system1`](Self::apply_system1) instead.
+    pub fn set_system1(&self, engine: Arc<dyn crate::system1::DecisionEngine>) {
+        let mut w = self.inner.write().unwrap();
+        w.system1.backend = engine.name().to_string();
+        w.system1.engine = engine;
+    }
+
+    /// Apply a System-1 config change: rebuild the engine (before taking the write lock,
+    /// so a failed build leaves settings untouched), swap it in, and persist. Orthogonal
+    /// to the LLM backend. Returns the resulting [`System1View`].
+    pub fn apply_system1(&self, update: &System1Update) -> Result<System1View> {
+        let (backend, base_url, model, min_conf, intents, api_key) = {
+            let current = self.inner.read().unwrap();
+            let s1 = &current.system1;
+            let backend = update.backend.clone().unwrap_or_else(|| s1.backend.clone());
+            let base_url = update
+                .base_url
+                .clone()
+                .unwrap_or_else(|| s1.base_url.clone());
+            let model = update.model.clone().unwrap_or_else(|| s1.model.clone());
+            let min_conf = update
+                .min_confidence
+                .unwrap_or(s1.min_confidence)
+                .clamp(0.0, 1.0);
+            let intents = update.intents.clone().unwrap_or_else(|| s1.intents.clone());
+            let api_key = match &update.openrouter_api_key {
+                None => s1.openrouter_api_key.clone(),
+                Some(k) => k.clone().filter(|s| !s.is_empty()),
+            };
+            (backend, base_url, model, min_conf, intents, api_key)
+        };
+
+        // Build before the write lock so a bad backend can't half-apply.
+        let engine = crate::system1::build(
+            &backend,
+            &base_url,
+            &model,
+            api_key.clone(),
+            min_conf,
+            intents.clone(),
+        )?;
+
+        let mut w = self.inner.write().unwrap();
+        w.system1 = System1Runtime {
+            engine,
+            backend,
+            base_url,
+            model,
+            min_confidence: min_conf,
+            intents,
+            openrouter_api_key: api_key,
+        };
+        let view = System1View {
+            backend: w.system1.backend.clone(),
+            base_url: w.system1.base_url.clone(),
+            model: w.system1.model.clone(),
+            min_confidence: w.system1.min_confidence,
+            openrouter_key_set: w
+                .system1
+                .openrouter_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            intents: w.system1.intents.clone(),
+        };
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        Ok(view)
     }
 
     /// Apply a Drive config change and persist it (best-effort, 0600). Drive is
@@ -1355,6 +1694,9 @@ impl SharedSettings {
         if let Some(v) = &update.device_name {
             target.device_name = v.clone().filter(|s| !s.is_empty());
         }
+        if let Some(v) = &update.redirect_url {
+            target.redirect_url = v.clone().filter(|s| !s.is_empty());
+        }
         if let Some(v) = &update.scope {
             target.scope = v.clone().filter(|s| !s.is_empty());
         }
@@ -1369,6 +1711,19 @@ impl SharedSettings {
         factory.cadora = current.cadora.controller();
         // Keep the AppSaid phone tool live across this rebuild.
         factory.appsaid = current.appsaid.messenger();
+        // Keep the directions + weather tools live across this rebuild.
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
+        // Keep the places tool live across this rebuild.
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1432,6 +1787,19 @@ impl SharedSettings {
         factory.spotify = current.spotify.controller();
         factory.cadora = target.controller();
         factory.appsaid = current.appsaid.messenger();
+        // Keep the directions + weather tools live across this rebuild.
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
+        // Keep the places tool live across this rebuild.
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1575,6 +1943,14 @@ impl SharedSettings {
             target_token.as_deref(),
             factory.directions_imperial,
         );
+        // Keep the weather tool live across this rebuild.
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
+        // Keep the places tool live across this rebuild.
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
         let rebuilt = factory
             .build(
                 current.engine,
@@ -1606,6 +1982,187 @@ impl SharedSettings {
         }
         set
     }
+
+    /// The live weather provider label (`visualcrossing`/`openmeteo`). Read by the
+    /// config-page Tools tab status endpoint.
+    pub fn weather_provider_label(&self) -> String {
+        self.inner.read().unwrap().weather_provider.clone()
+    }
+
+    /// Whether a Visual Crossing API key is set (never the value). Read by the config-page
+    /// Tools tab status endpoint.
+    pub fn visualcrossing_key_set(&self) -> bool {
+        self.inner
+            .read()
+            .unwrap()
+            .visualcrossing_key
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Whether the weather feature is enabled at all (`weather.enabled`). When `false`
+    /// the tool + ambient push are dormant regardless of the provider/key.
+    pub fn weather_enabled(&self) -> bool {
+        self.factory.weather_enabled
+    }
+
+    /// Build a weather provider instance from the *current* live provider label + Visual
+    /// Crossing key. Used by the ambient push each tick so a provider/key change on the
+    /// config page retargets the push without a restart. `None` when weather is disabled.
+    pub fn current_weather_provider(&self) -> Option<Arc<dyn crate::weather::WeatherProvider>> {
+        let w = self.inner.read().unwrap();
+        crate::weather::from_config(
+            self.factory.weather_enabled,
+            &w.weather_provider,
+            w.visualcrossing_key.as_deref(),
+        )
+    }
+
+    /// Apply a weather-tool config change (provider label and/or Visual Crossing key),
+    /// rebuild the LLM so `weather_lookup` reflects the new provider, and persist
+    /// (best-effort, 0600). An empty key is treated as a clear. Like
+    /// [`Self::apply_directions`], the rebuild is best-effort: on failure the new
+    /// provider/key is still stored, so it takes effect on the next successful rebuild or
+    /// restart. The ambient push picks up the change on its next tick via
+    /// [`Self::current_weather_provider`]. Returns `(provider_label, visualcrossing_key_set)`.
+    pub fn apply_weather_tool(&self, update: &WeatherToolUpdate) -> (String, bool) {
+        let current = self.inner.read().unwrap().clone();
+        let target_provider = update
+            .provider
+            .as_ref()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .unwrap_or(current.weather_provider.clone());
+        let target_key = match &update.visualcrossing_key {
+            None => current.visualcrossing_key.clone(),
+            Some(k) => k.clone().filter(|s| !s.is_empty()),
+        };
+
+        // Rebuild the backend so the tool reflects the new provider/key. Build before
+        // taking the write lock; on failure, fall through and still store the change.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.cadora = current.cadora.controller();
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &target_provider,
+            target_key.as_deref(),
+        );
+        // Keep the places tool live across this rebuild.
+        factory.places = crate::places::from_key("google", current.google_places_key.as_deref());
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("weather: applied provider/key but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.weather_provider = target_provider.clone();
+        w.visualcrossing_key = target_key.clone();
+        let key_set = target_key.as_deref().is_some_and(|s| !s.is_empty());
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        (target_provider, key_set)
+    }
+
+    /// Whether a Google Places API key is set (never the value). Read by the config-page
+    /// Tools tab status endpoint.
+    pub fn google_places_key_set(&self) -> bool {
+        self.inner
+            .read()
+            .unwrap()
+            .google_places_key
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Apply a places-tool config change (the Google Places API key), rebuild the LLM so
+    /// `places_lookup` is advertised/withdrawn, and persist (best-effort, 0600). An empty
+    /// key is treated as a clear (the tool is withdrawn — Google Places has no keyless
+    /// fallback). Like [`Self::apply_weather_tool`] the rebuild is best-effort: on failure
+    /// the new key is still stored, so it takes effect on the next successful rebuild or
+    /// restart. Returns whether a key is now set.
+    pub fn apply_places_tool(&self, update: &PlacesToolUpdate) -> bool {
+        let current = self.inner.read().unwrap().clone();
+        let target_key = match &update.google_places_key {
+            None => current.google_places_key.clone(),
+            Some(k) => k.clone().filter(|s| !s.is_empty()),
+        };
+
+        // Rebuild the backend so the tool reflects the new key. Build before taking the
+        // write lock; on failure, fall through and still store the change.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.cadora = current.cadora.controller();
+        factory.directions = crate::directions::from_token(
+            &factory.directions_provider,
+            current.mapbox_token.as_deref(),
+            factory.directions_imperial,
+        );
+        factory.weather = crate::weather::from_config(
+            factory.weather_enabled,
+            &current.weather_provider,
+            current.visualcrossing_key.as_deref(),
+        );
+        factory.places = crate::places::from_key("google", target_key.as_deref());
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("places: applied key but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.google_places_key = target_key.clone();
+        let key_set = target_key.as_deref().is_some_and(|s| !s.is_empty());
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        key_set
+    }
 }
 
 #[cfg(test)]
@@ -1632,6 +2189,8 @@ mod tests {
             directions_imperial: false,
             weather: None,
             weather_imperial: false,
+            weather_enabled: false,
+            places: None,
         }
     }
 
@@ -1669,13 +2228,56 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
         )
+    }
+
+    #[test]
+    fn apply_system1_swaps_and_reports_the_backend() {
+        let s = shared(factory_with_key(None));
+        // Starts disabled.
+        assert_eq!(s.system1_view().backend, "none");
+        assert_eq!(s.snapshot().system1.engine.name(), "none");
+
+        // Swap to the local laya-serve backend (no network needed to construct it).
+        let view = s
+            .apply_system1(&System1Update {
+                backend: Some("laya-serve".to_string()),
+                base_url: Some("http://127.0.0.1:9999".to_string()),
+                min_confidence: Some(0.9),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.backend, "laya-serve");
+        assert!((view.min_confidence - 0.9).abs() < 1e-9);
+        assert_eq!(s.snapshot().system1.engine.name(), "laya-serve");
+
+        // An unknown backend is rejected and leaves the current engine untouched.
+        let err = s.apply_system1(&System1Update {
+            backend: Some("bogus".to_string()),
+            ..Default::default()
+        });
+        assert!(err.is_err());
+        assert_eq!(s.system1_view().backend, "laya-serve");
+
+        // Back to disabled.
+        s.apply_system1(&System1Update {
+            backend: Some("none".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(s.snapshot().system1.engine.name(), "none");
     }
 
     #[test]
@@ -1759,11 +2361,17 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
             Some(path.clone()),
         );
@@ -1781,6 +2389,58 @@ mod tests {
         assert_eq!(p.search_provider, "tavily");
         assert_eq!(p.search_api_key.as_deref(), Some("tvly-secret"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_sets_and_clamps_silero_threshold() {
+        let s = shared(factory_with_key(None));
+        // In range: applied verbatim, reflected in the view and the per-turn snapshot.
+        let view = s
+            .apply(&SettingsUpdate {
+                silero_threshold: Some(0.35),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.silero_threshold, 0.35);
+        assert_eq!(s.snapshot().silero_threshold, 0.35);
+        // Out-of-range values clamp to [0, 1] so a bad request can't wedge the gate.
+        let hi = s
+            .apply(&SettingsUpdate {
+                silero_threshold: Some(9.0),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hi.silero_threshold, 1.0);
+        let lo = s
+            .apply(&SettingsUpdate {
+                silero_threshold: Some(-1.0),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(lo.silero_threshold, 0.0);
+    }
+
+    #[test]
+    fn apply_swaps_the_vad_engine() {
+        use crate::config::VadEngineKind;
+        let s = shared(factory_with_key(None));
+        assert_eq!(s.snapshot().vad_engine, VadEngineKind::Energy);
+        let view = s
+            .apply(&SettingsUpdate {
+                vad_engine: Some(VadEngineKind::Silero),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.vad_engine, VadEngineKind::Silero);
+        assert_eq!(s.snapshot().vad_engine, VadEngineKind::Silero);
+        // And back.
+        let view = s
+            .apply(&SettingsUpdate {
+                vad_engine: Some(VadEngineKind::Energy),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.vad_engine, VadEngineKind::Energy);
     }
 
     #[test]
@@ -1910,11 +2570,17 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
             Some(path.clone()),
         );
@@ -2050,11 +2716,17 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
             Some(path.clone()),
         );
@@ -2120,11 +2792,17 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
             Some(path.clone()),
         );
@@ -2198,11 +2876,17 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
             Some(path.clone()),
         );
@@ -2267,11 +2951,17 @@ mod tests {
                 tts_voice: None,
                 end_silence_ms: DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
             },
             Some(path.clone()),
         );
@@ -2294,5 +2984,56 @@ mod tests {
         let p = load_persisted(&path).expect("settings file written");
         assert_eq!(p.anthropic_oauth_token.as_deref(), Some("oauth-xyz"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_weather_tool_switches_provider_and_key() {
+        let mut factory = factory_with_key(None);
+        factory.weather_enabled = true;
+        let s = shared(factory);
+        // Seed defaults: Visual Crossing selected, no key yet.
+        assert_eq!(s.weather_provider_label(), "visualcrossing");
+        assert!(!s.visualcrossing_key_set());
+        assert!(s.weather_enabled());
+
+        // Set a Visual Crossing key.
+        let (prov, key_set) = s.apply_weather_tool(&WeatherToolUpdate {
+            provider: None,
+            visualcrossing_key: Some(Some("vc-key".into())),
+        });
+        assert_eq!(prov, "visualcrossing");
+        assert!(key_set);
+        assert!(s.visualcrossing_key_set());
+        assert!(s.current_weather_provider().is_some());
+
+        // Switch to Open-Meteo (case-insensitive, trimmed); the key is retained.
+        let (prov, _) = s.apply_weather_tool(&WeatherToolUpdate {
+            provider: Some("  OpenMeteo ".into()),
+            visualcrossing_key: None,
+        });
+        assert_eq!(prov, "openmeteo");
+        assert!(s.visualcrossing_key_set());
+
+        // Clear the key.
+        let (_, key_set) = s.apply_weather_tool(&WeatherToolUpdate {
+            provider: None,
+            visualcrossing_key: Some(None),
+        });
+        assert!(!key_set);
+        assert!(!s.visualcrossing_key_set());
+    }
+
+    #[test]
+    fn disabled_weather_never_builds_a_push_provider() {
+        let mut factory = factory_with_key(None);
+        factory.weather_enabled = false;
+        let s = shared(factory);
+        // Even with a provider/key set, a disabled feature yields no push provider.
+        s.apply_weather_tool(&WeatherToolUpdate {
+            provider: Some("visualcrossing".into()),
+            visualcrossing_key: Some(Some("k".into())),
+        });
+        assert!(!s.weather_enabled());
+        assert!(s.current_weather_provider().is_none());
     }
 }

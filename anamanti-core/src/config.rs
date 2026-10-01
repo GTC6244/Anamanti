@@ -6,7 +6,8 @@
 //!
 //! Only **secrets** remain environment variables: the provider API keys/tokens
 //! (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `MAPBOX_TOKEN`/
-//! `MAPBOX_ACCESS_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`) and the standard `RUST_LOG`.
+//! `MAPBOX_ACCESS_TOKEN`, `VISUALCROSSING_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`) and the
+//! standard `RUST_LOG`.
 //! Everything else — addresses, paths, identity, feature toggles, and the OAuth
 //! *client* credentials for Spotify/Drive — lives in the JSON file.
 
@@ -134,6 +135,12 @@ pub struct Config {
     pub graphrag: GraphRagConfig,
     /// Per-person speaker identification settings (speaker_id_plan.md).
     pub speaker: SpeakerConfig,
+    /// STT engine selection: the downstream Wyoming Whisper server (`stt_addr`) or
+    /// the in-process whisper.cpp engine (`plans/python-to-rust-whisper.md`).
+    pub stt: SttConfig,
+    /// End-of-speech VAD engine: the energy/RMS gate (default) or opt-in Silero
+    /// (`plans/VadSileroPlan.md`).
+    pub vad: VadConfig,
     /// Auto follow-up listening: reopen the mic (no wake word) when a reply is a
     /// question, and feed recent history into that turn's prompt.
     pub follow_up: FollowUpConfig,
@@ -141,6 +148,10 @@ pub struct Config {
     pub music: MusicConfig,
     /// Weather feature settings (the `weather_lookup` tool + the ambient push).
     pub weather: WeatherSettings,
+    /// Places feature settings (the `places_lookup` tool).
+    pub places: PlacesSettings,
+    /// System-1 fast-decision engine selection (plans/system1-fast-decisions.md).
+    pub system1: System1Config,
     /// Where the runtime-swappable settings overlay is persisted (`settings_path` in
     /// the config file), or `None` to keep runtime settings in memory only. Defaults
     /// to `anamanti_settings.json`. This is a **separate** file from the boot config:
@@ -185,6 +196,10 @@ pub struct Config {
     /// secret app token is NOT here — it seeds from `APPSAID_APP_TOKEN`. Overlaid by
     /// the persisted settings file.
     pub appsaid: AppSaidConfig,
+    /// Per-tool response-cache TTLs (`tool_cache` in the file), keyed by tool name (e.g.
+    /// `weather_lookup`, default 3600 s). Installed process-wide at boot; see
+    /// [`crate::cache`]. `0` disables caching for a tool.
+    pub tool_cache: crate::cache::ToolCacheConfig,
 }
 
 /// Speaker-identification configuration. Off by default (`speaker.enabled`); a
@@ -214,6 +229,151 @@ impl Default for SpeakerConfig {
             new_threshold: 0.40,
             min_speech_ms: 1200,
             embed_dims: 192,
+        }
+    }
+}
+
+/// Which STT engine transcribes a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttEngineKind {
+    /// Dial the downstream Wyoming Whisper server at `stt_addr` (historical default).
+    Wyoming,
+    /// In-process whisper.cpp via `whisper-rs` (requires the `stt-whisper-local`
+    /// build feature).
+    WhisperLocal,
+}
+
+impl SttEngineKind {
+    /// Parse the config label. `wyoming` (or `faster-whisper`) → the downstream
+    /// server; `whisper-rs` / `whisper-local` / `local` → in-process.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "wyoming" | "faster-whisper" | "whisper-wyoming" => Some(Self::Wyoming),
+            "whisper-rs" | "whisper-local" | "whisper_local" | "local" => Some(Self::WhisperLocal),
+            _ => None,
+        }
+    }
+}
+
+/// STT engine selection + in-process model settings (`stt` block). See
+/// `plans/python-to-rust-whisper.md`. Note the downstream address lives in the
+/// top-level `stt_addr` (used when `engine = wyoming`).
+#[derive(Debug, Clone)]
+pub struct SttConfig {
+    /// Which engine transcribes (`wyoming` default, or `whisper-rs`).
+    pub engine: SttEngineKind,
+    /// Named model size for the in-process engine: `base` (default) or `small`,
+    /// resolved to `<model_dir>/ggml-<model>.en.bin` unless `model_path` overrides.
+    pub model: String,
+    /// Directory holding the ggml model files (`ggml-base.en.bin`, …).
+    pub model_dir: PathBuf,
+    /// Explicit ggml model file; overrides `model`/`model_dir` when set.
+    pub model_path: Option<PathBuf>,
+    /// Decode language (`Some("en")`); `None` ⇒ auto-detect.
+    pub language: Option<String>,
+    /// Decode thread cap; `0` ⇒ a sensible default from host parallelism.
+    pub num_threads: u32,
+}
+
+impl SttConfig {
+    /// The ggml model file for the in-process engine: `model_path` if set, else
+    /// `<model_dir>/ggml-<model>.en.bin`.
+    pub fn resolved_model_path(&self) -> PathBuf {
+        self.model_path
+            .clone()
+            .unwrap_or_else(|| self.model_dir.join(format!("ggml-{}.en.bin", self.model)))
+    }
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            engine: SttEngineKind::Wyoming,
+            model: "base".to_string(),
+            model_dir: PathBuf::from("models"),
+            model_path: None,
+            language: Some("en".to_string()),
+            num_threads: 0,
+        }
+    }
+}
+
+/// Which end-of-speech VAD engine the Anamanti Core runs (`vad.engine`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VadEngineKind {
+    /// The energy/RMS gate — opt-in since 2026-09-30 (`vad.engine="energy"`). No model,
+    /// no extra deps; also the automatic fallback when a `vad-silero` build has no model
+    /// loaded. Select it (or build `--no-default-features`) for the historical behavior.
+    Energy,
+    /// The neural Silero VAD — the committed default (2026-09-30). Requires the
+    /// `vad-silero` build feature (on by default; onnxruntime via `ort`) and the v4 model
+    /// file on disk; a `silero` boot with no model is a hard error. See
+    /// `plans/VadSileroPlan.md`.
+    Silero,
+}
+
+impl VadEngineKind {
+    /// Parse the config label. `energy`/`rms` → energy; `silero`/`neural` → Silero.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "energy" | "rms" => Some(Self::Energy),
+            "silero" | "neural" => Some(Self::Silero),
+            _ => None,
+        }
+    }
+
+    /// Canonical string label (for JSON relays + persistence).
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Energy => "energy",
+            Self::Silero => "silero",
+        }
+    }
+}
+
+/// Silero neural-VAD settings (`vad.silero` block). Only consulted when
+/// `vad.engine="silero"`.
+#[derive(Debug, Clone)]
+pub struct SileroConfig {
+    /// Path to the Silero **v4** ONNX model (`silero_vad.onnx`), resolved relative to
+    /// the working directory. Provisioned by `scripts/fetch-vad-model.sh` (not
+    /// committed). v4 is used deliberately: the v5 export scores a near-constant ~0
+    /// under onnxruntime and never fires (see `crate::vad::silero` + VadSileroPlan.md).
+    pub model_path: PathBuf,
+    /// Speech-probability gate in `0.0..=1.0`: a frame is voiced when its Silero
+    /// probability is `>= threshold`. 0.5 is the Silero-recommended default.
+    pub threshold: f32,
+}
+
+impl Default for SileroConfig {
+    fn default() -> Self {
+        Self {
+            model_path: PathBuf::from("models/silero_vad.onnx"),
+            threshold: 0.5,
+        }
+    }
+}
+
+/// End-of-speech VAD engine selection + engine settings (`vad` block). The detector
+/// sits behind the `SpeechGate` seam (`crate::vad`); the surrounding onset-debounce /
+/// hangover state machine is engine-independent. See `plans/VadSileroPlan.md`.
+#[derive(Debug, Clone)]
+pub struct VadConfig {
+    /// Which engine decides speech per chunk (`energy` default, or `silero`).
+    pub engine: VadEngineKind,
+    /// Silero engine settings (used only when `engine == Silero`).
+    pub silero: SileroConfig,
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            // Silero is the committed default (2026-09-30; VadSileroPlan.md §5/M3).
+            // A default build (`vad-silero` on) boots on Silero and requires the v4
+            // model on disk (`scripts/fetch-vad-model.sh`); a missing model is a
+            // hard boot error. Set `vad.engine="energy"` to opt back into the RMS gate.
+            engine: VadEngineKind::Silero,
+            silero: SileroConfig::default(),
         }
     }
 }
@@ -320,14 +480,23 @@ impl Default for MusicConfig {
     }
 }
 
-/// Weather feature settings. Weather uses the keyless Open-Meteo API, so there is no
-/// key to configure — just the master switch and how often the ambient indicator (the
-/// icon + temperature beside the idle clock) is refreshed by the background push.
+/// Weather feature settings: the master switch, which forecast provider backs the
+/// `weather_lookup` tool + ambient push, and how often the ambient indicator (the icon +
+/// temperature beside the idle clock) is refreshed by the background push.
+///
+/// The provider is chosen by `weather.provider` (default `visualcrossing`). Visual
+/// Crossing needs the `VISUALCROSSING_API_KEY` secret (read from the environment); when
+/// that key is absent — or `weather.provider` is `openmeteo` — the keyless Open-Meteo
+/// backend is used instead.
 #[derive(Debug, Clone)]
 pub struct WeatherSettings {
     /// Master switch (`weather.enabled`, default on). Off ⇒ the `weather_lookup` tool
     /// is not advertised and the ambient push does not run.
     pub enabled: bool,
+    /// Forecast backend (`weather.provider`): `visualcrossing` (default; needs the
+    /// `VISUALCROSSING_API_KEY` secret) or `openmeteo` (keyless). An unset/empty value
+    /// means Visual Crossing; an unknown value falls back to Open-Meteo.
+    pub provider: String,
     /// How often (seconds) the ambient current-conditions push refreshes
     /// (`weather.refresh_interval_secs`, default 1800 = 30 minutes). Clamped to a sane
     /// floor so a misconfiguration can't hammer the API.
@@ -338,6 +507,7 @@ impl Default for WeatherSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            provider: "visualcrossing".to_string(),
             refresh_interval_secs: 1800,
         }
     }
@@ -347,6 +517,63 @@ impl WeatherSettings {
     /// The refresh interval as a `Duration`, clamped to at least 5 minutes.
     pub fn refresh_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.refresh_interval_secs.max(300))
+    }
+}
+
+/// Places feature settings (the `places_lookup` tool). The Google Places API key is a
+/// secret (`GOOGLE_PLACES_API_KEY`), never stored here.
+#[derive(Debug, Clone)]
+pub struct PlacesSettings {
+    /// Master switch (`places.enabled`, default on). Off ⇒ the `places_lookup` tool is
+    /// not advertised.
+    pub enabled: bool,
+    /// Backend (`places.provider`): `google` (default/only). Unknown ⇒ tool disabled.
+    pub provider: String,
+}
+
+impl Default for PlacesSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: "google".to_string(),
+        }
+    }
+}
+
+/// System-1 fast-decision settings (plans/system1-fast-decisions.md). Selects and
+/// configures the pluggable [`crate::system1::DecisionEngine`] that runs before memory
+/// recall + the LLM. Default `backend = "none"` reproduces today's behavior.
+#[derive(Debug, Clone)]
+pub struct System1Config {
+    /// Which engine: `none` (default, disabled) | `mock` (tests) | `laya-serve` | `jev`
+    /// | `laya-embedded`. The HTTP/embedded backends are wired in M1.
+    pub backend: String,
+    /// Base URL for the HTTP backends (`laya-serve` sidecar or OpenRouter for `jev`).
+    pub base_url: String,
+    /// OpenRouter model id for the `jev` backend.
+    pub openrouter_model: String,
+    /// Compute device for the in-process `laya-embedded` backend (`cpu` | `metal`).
+    pub device: String,
+    /// Checkpoint / Hugging Face repo id for the `laya-embedded` backend.
+    pub model: String,
+    /// Strict confidence floor below which a decision defers to System-2.
+    pub min_confidence: f64,
+    /// The intent labels the router is allowed to resolve (empty = the built-in set,
+    /// filled in as M1+ handlers land).
+    pub intents: Vec<String>,
+}
+
+impl Default for System1Config {
+    fn default() -> Self {
+        Self {
+            backend: "none".to_string(),
+            base_url: "http://127.0.0.1:8000".to_string(),
+            openrouter_model: "typesafe/jev-1.13".to_string(),
+            device: "metal".to_string(),
+            model: "convaiinnovations/laya".to_string(),
+            min_confidence: 0.85,
+            intents: Vec::new(),
+        }
     }
 }
 
@@ -360,15 +587,34 @@ pub enum MemoryBackendChoice {
     Helix,
 }
 
+/// Which text-embedding backend the GraphRAG memory uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbedBackend {
+    /// Local, offline nomic-embed-text-v1.5 run in-process (feature `embed-local`).
+    /// The default: no network, no API key. 768 dims.
+    #[default]
+    Local,
+    /// OpenAI `text-embedding-3-small` over HTTP. Requires `OPENAI_API_KEY`.
+    OpenAi,
+}
+
 /// Settings for the GraphRAG memory (embeddings + background entity extraction).
 /// API keys are read from the environment at wiring time, not stored here.
 #[derive(Debug, Clone)]
 pub struct GraphRagConfig {
+    /// Which embedding backend to use (default [`EmbedBackend::Local`]).
+    pub embed_backend: EmbedBackend,
+    /// Local nomic ONNX model file (`embed_backend = "local"`).
+    pub embed_model_path: PathBuf,
+    /// Directory holding nomic's four tokenizer JSON files (`embed_backend = "local"`):
+    /// `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json`.
+    pub embed_tokenizer_dir: PathBuf,
     /// OpenAI API base (overridable for testing).
     pub openai_base_url: String,
     /// Embedding model (default `text-embedding-3-small`).
     pub embed_model: String,
-    /// Embedding dimensionality (native 1536; reducible via OpenAI's `dimensions`).
+    /// Embedding dimensionality. Local nomic: 768 (reducible via Matryoshka). OpenAI:
+    /// native 1536 (reducible via OpenAI's `dimensions`).
     pub embed_dims: usize,
     /// Anthropic API base for entity extraction.
     pub anthropic_base_url: String,
@@ -383,9 +629,15 @@ pub struct GraphRagConfig {
 impl Default for GraphRagConfig {
     fn default() -> Self {
         Self {
+            embed_backend: EmbedBackend::Local,
+            embed_model_path: PathBuf::from("models/nomic-embed-text-v1.5.onnx"),
+            embed_tokenizer_dir: PathBuf::from("models/nomic-tokenizer"),
             openai_base_url: "https://api.openai.com".to_string(),
             embed_model: "text-embedding-3-small".to_string(),
-            embed_dims: 1536,
+            // 768 is nomic's native width (the default backend). It is also a valid
+            // reduced width for OpenAI's `dimensions`, so an `openai` user who wants the
+            // full 1536 sets `embed_dims` explicitly.
+            embed_dims: 768,
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             extract_model: "claude-haiku-4-5".to_string(),
             ingest_interval: Duration::from_secs(30),
@@ -423,9 +675,13 @@ impl Default for Config {
             helix_path: PathBuf::from("anamanti_helix"),
             graphrag: GraphRagConfig::default(),
             speaker: SpeakerConfig::default(),
+            stt: SttConfig::default(),
+            vad: VadConfig::default(),
             follow_up: FollowUpConfig::default(),
             music: MusicConfig::default(),
             weather: WeatherSettings::default(),
+            places: PlacesSettings::default(),
+            system1: System1Config::default(),
             settings_path: Some(PathBuf::from("anamanti_settings.json")),
             audio_dump_dir: None,
             anthropic_auth: AnthropicAuth::ApiKey,
@@ -446,6 +702,7 @@ impl Default for Config {
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
             appsaid: AppSaidConfig::default(),
+            tool_cache: crate::cache::ToolCacheConfig::default(),
         }
     }
 }
@@ -527,11 +784,19 @@ pub struct FileConfig {
     #[serde(default)]
     pub speaker: FileSpeaker,
     #[serde(default)]
+    pub stt: FileStt,
+    #[serde(default)]
+    pub vad: FileVad,
+    #[serde(default)]
     pub follow_up: FileFollowUp,
     #[serde(default)]
     pub music: FileMusic,
     #[serde(default)]
     pub weather: FileWeather,
+    #[serde(default)]
+    pub places: FilePlaces,
+    #[serde(default)]
+    pub system1: FileSystem1,
     #[serde(default)]
     pub calendar: FileCalendar,
     #[serde(default)]
@@ -544,6 +809,11 @@ pub struct FileConfig {
     pub cadora: FileCadora,
     #[serde(default)]
     pub appsaid: FileAppSaid,
+    /// Per-tool cache TTLs in seconds, keyed by tool name (e.g. `weather_lookup`). A flat
+    /// map so it stays generic; overlaid on the built-in defaults, `0` disables a tool's
+    /// cache. Absent ⇒ defaults only (see [`crate::cache::ToolCacheConfig`]).
+    #[serde(default)]
+    pub tool_cache: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -589,6 +859,9 @@ pub struct FileOpenAi {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileGraphRag {
+    pub embed_backend: Option<String>,
+    pub embed_model_path: Option<PathBuf>,
+    pub embed_tokenizer_dir: Option<PathBuf>,
     pub openai_base_url: Option<String>,
     pub embed_model: Option<String>,
     pub embed_dims: Option<usize>,
@@ -607,6 +880,32 @@ pub struct FileSpeaker {
     pub new_threshold: Option<f32>,
     pub min_speech_ms: Option<u32>,
     pub embed_dims: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileStt {
+    pub engine: Option<String>,
+    pub model: Option<String>,
+    pub model_dir: Option<PathBuf>,
+    pub model_path: Option<PathBuf>,
+    pub language: Option<String>,
+    pub num_threads: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileVad {
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub silero: FileSilero,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSilero {
+    pub model_path: Option<PathBuf>,
+    pub threshold: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -643,7 +942,34 @@ pub struct FileMusic {
 #[serde(deny_unknown_fields)]
 pub struct FileWeather {
     pub enabled: Option<bool>,
+    /// Forecast backend: `visualcrossing` (default) or `openmeteo`.
+    pub provider: Option<String>,
     pub refresh_interval_secs: Option<u64>,
+}
+
+/// The `places` block of the config file (all fields optional; absent → defaults). The
+/// Google Places API key is a secret and lives in `GOOGLE_PLACES_API_KEY`, never here.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilePlaces {
+    pub enabled: Option<bool>,
+    /// Backend: `google` (default/only).
+    pub provider: Option<String>,
+}
+
+/// The `system1` block of the config file (all fields optional; absent → defaults, and
+/// an absent block leaves the engine disabled). See [`System1Config`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSystem1 {
+    pub backend: Option<String>,
+    pub base_url: Option<String>,
+    pub openrouter_model: Option<String>,
+    pub device: Option<String>,
+    pub model: Option<String>,
+    pub min_confidence: Option<f64>,
+    #[serde(default)]
+    pub intents: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -684,6 +1010,10 @@ pub struct FileSpotify {
     pub client_secret: Option<String>,
     pub refresh_token: Option<String>,
     pub device_name: Option<String>,
+    /// OAuth redirect URL for the consent flow (default
+    /// `http://127.0.0.1:8888/callback`). Must match a Redirect URI registered in the
+    /// Spotify app.
+    pub redirect_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -832,6 +1162,24 @@ impl Config {
         };
 
         let mut graphrag = GraphRagConfig::default();
+        if let Some(v) = nonempty(fc.graphrag.embed_backend) {
+            graphrag.embed_backend = match v.to_lowercase().as_str() {
+                "openai" | "oai" => EmbedBackend::OpenAi,
+                "local" | "nomic" => EmbedBackend::Local,
+                other => {
+                    log::warn!(
+                        "unknown graphrag.embed_backend {other:?}; using the default (local nomic)"
+                    );
+                    EmbedBackend::Local
+                }
+            };
+        }
+        if let Some(v) = fc.graphrag.embed_model_path {
+            graphrag.embed_model_path = v;
+        }
+        if let Some(v) = fc.graphrag.embed_tokenizer_dir {
+            graphrag.embed_tokenizer_dir = v;
+        }
         if let Some(v) = nonempty(fc.graphrag.embed_model) {
             graphrag.embed_model = v;
         }
@@ -862,6 +1210,41 @@ impl Config {
             new_threshold: fc.speaker.new_threshold.unwrap_or(sd.new_threshold),
             min_speech_ms: fc.speaker.min_speech_ms.unwrap_or(sd.min_speech_ms),
             embed_dims: fc.speaker.embed_dims.unwrap_or(sd.embed_dims),
+        };
+
+        let sttd = SttConfig::default();
+        let stt = SttConfig {
+            engine: match fc.stt.engine.as_deref() {
+                None => sttd.engine,
+                Some(label) => SttEngineKind::from_label(label).with_context(|| {
+                    format!("unknown stt.engine {label:?} (expected `wyoming` or `whisper-rs`)")
+                })?,
+            },
+            model: nonempty(fc.stt.model).unwrap_or(sttd.model),
+            model_dir: fc.stt.model_dir.unwrap_or(sttd.model_dir),
+            model_path: fc.stt.model_path,
+            // An explicit empty `language` means auto-detect (`None`); absent keeps
+            // the default (`Some("en")`).
+            language: match fc.stt.language {
+                None => sttd.language,
+                Some(s) if s.trim().is_empty() => None,
+                Some(s) => Some(s),
+            },
+            num_threads: fc.stt.num_threads.unwrap_or(sttd.num_threads),
+        };
+
+        let vadd = VadConfig::default();
+        let vad = VadConfig {
+            engine: match fc.vad.engine.as_deref() {
+                None => vadd.engine,
+                Some(label) => VadEngineKind::from_label(label).with_context(|| {
+                    format!("unknown vad.engine {label:?} (expected `energy` or `silero`)")
+                })?,
+            },
+            silero: SileroConfig {
+                model_path: fc.vad.silero.model_path.unwrap_or(vadd.silero.model_path),
+                threshold: fc.vad.silero.threshold.unwrap_or(vadd.silero.threshold),
+            },
         };
 
         let fud = FollowUpConfig::default();
@@ -907,10 +1290,32 @@ impl Config {
         let wd = WeatherSettings::default();
         let weather = WeatherSettings {
             enabled: fc.weather.enabled.unwrap_or(wd.enabled),
+            provider: nonempty(fc.weather.provider).unwrap_or(wd.provider),
             refresh_interval_secs: fc
                 .weather
                 .refresh_interval_secs
                 .unwrap_or(wd.refresh_interval_secs),
+        };
+
+        let pd = PlacesSettings::default();
+        let places = PlacesSettings {
+            enabled: fc.places.enabled.unwrap_or(pd.enabled),
+            provider: nonempty(fc.places.provider).unwrap_or(pd.provider),
+        };
+
+        let s1d = System1Config::default();
+        let system1 = System1Config {
+            backend: nonempty(fc.system1.backend).unwrap_or(s1d.backend),
+            base_url: nonempty(fc.system1.base_url).unwrap_or(s1d.base_url),
+            openrouter_model: nonempty(fc.system1.openrouter_model).unwrap_or(s1d.openrouter_model),
+            device: nonempty(fc.system1.device).unwrap_or(s1d.device),
+            model: nonempty(fc.system1.model).unwrap_or(s1d.model),
+            min_confidence: fc.system1.min_confidence.unwrap_or(s1d.min_confidence),
+            intents: if fc.system1.intents.is_empty() {
+                s1d.intents
+            } else {
+                fc.system1.intents
+            },
         };
 
         // The config page: `off`/`none`/empty disables it, otherwise a host:port.
@@ -968,6 +1373,7 @@ impl Config {
             client_secret: nonempty(fc.spotify.client_secret),
             refresh_token: nonempty(fc.spotify.refresh_token),
             device_name: nonempty(fc.spotify.device_name),
+            redirect_url: nonempty(fc.spotify.redirect_url),
             scope: None,
         };
 
@@ -1039,9 +1445,13 @@ impl Config {
             helix_path: fc.helix_path.unwrap_or(d.helix_path),
             graphrag,
             speaker,
+            stt,
+            vad,
             follow_up,
             music,
             weather,
+            places,
+            system1,
             settings_path,
             audio_dump_dir: fc.audio_dump_dir,
             anthropic_auth: fc
@@ -1073,7 +1483,39 @@ impl Config {
             spotify,
             cadora,
             appsaid,
+            tool_cache: {
+                let mut tc = crate::cache::ToolCacheConfig::default();
+                tc.overlay(fc.tool_cache);
+                tc
+            },
         })
+    }
+
+    /// Build the selected System-1 decision engine (plans/system1-fast-decisions.md),
+    /// mirroring [`Config::build_llm`]. Default `none` reproduces today's behavior.
+    ///
+    /// Build the System-1 engine straight from the config file's `system1` block (the
+    /// OpenRouter key comes from the `OPENROUTER_API_KEY` env secret). The live boot path
+    /// is [`Self::shared_settings`], which also applies the persisted overlay and makes
+    /// the engine runtime-swappable; this helper is kept for direct/one-shot use.
+    pub fn build_system1(&self) -> Result<Arc<dyn crate::system1::DecisionEngine>> {
+        let key = env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if self.system1.backend.eq_ignore_ascii_case("jev") && key.is_none() {
+            log::warn!(
+                "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
+                 rejected until it is provided (env or config page)."
+            );
+        }
+        crate::system1::build(
+            &self.system1.backend,
+            &self.system1.base_url,
+            &self.system1.openrouter_model,
+            key,
+            self.system1.min_confidence,
+            self.system1.intents.clone(),
+        )
     }
 
     /// Build the music ducker when music routing **and** duck-on-speech are both
@@ -1252,10 +1694,16 @@ impl Config {
             ),
             directions_provider: self.directions_provider.clone(),
             directions_imperial: imperial,
-            // Weather is keyless (Open-Meteo), so it's present whenever enabled; the
-            // tool/push still no-op gracefully until a home location is set.
-            weather: crate::weather::from_config(self.weather.enabled),
+            // Weather backend (Visual Crossing by default, keyless Open-Meteo fallback);
+            // present whenever enabled, and the tool/push still no-op gracefully until a
+            // home location is set. Rebuilt from the live provider label + key on every
+            // swap; `weather_enabled` gates it entirely.
+            weather: self.weather_provider(),
             weather_imperial: imperial,
+            weather_enabled: self.weather.enabled,
+            // Places backend (Google Places API New); present only when enabled AND a key
+            // is set (no keyless fallback). Rebuilt from the live key on every swap.
+            places: self.places_provider(),
         }
     }
 
@@ -1302,6 +1750,50 @@ impl Config {
             .or_else(|| env::var("MAPBOX_ACCESS_TOKEN").ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Initial Visual Crossing API key for the weather provider — a secret, seeded from
+    /// `VISUALCROSSING_API_KEY`. Absent/empty ⇒ weather falls back to keyless Open-Meteo.
+    pub fn initial_visualcrossing_key(&self) -> Option<String> {
+        env::var("VISUALCROSSING_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Build the weather forecast provider from the config + the environment secret, or
+    /// `None` when weather is disabled. Defaults to Visual Crossing when
+    /// `VISUALCROSSING_API_KEY` is set; otherwise falls back to keyless Open-Meteo. Used
+    /// by both the `weather_lookup` tool ([`Self::llm_factory`]) and the ambient push
+    /// (`main`).
+    pub fn weather_provider(&self) -> Option<Arc<dyn crate::weather::WeatherProvider>> {
+        crate::weather::from_config(
+            self.weather.enabled,
+            &self.weather.provider,
+            self.initial_visualcrossing_key().as_deref(),
+        )
+    }
+
+    /// Initial Google Places API key for the `places_lookup` tool — a secret, seeded from
+    /// `GOOGLE_PLACES_API_KEY`. Runtime-settable from the Tools tab. Absent ⇒ the tool
+    /// isn't advertised (Google Places has no keyless fallback).
+    pub fn initial_google_places_key(&self) -> Option<String> {
+        env::var("GOOGLE_PLACES_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Build the places provider from the config + the environment secret, or `None` when
+    /// places is disabled or no key is present. Used by [`Self::llm_factory`].
+    pub fn places_provider(&self) -> Option<Arc<dyn crate::places::PlacesProvider>> {
+        if !self.places.enabled {
+            return None;
+        }
+        crate::places::from_key(
+            &self.places.provider,
+            self.initial_google_places_key().as_deref(),
+        )
     }
 
     /// Initial Anthropic subscription OAuth token — a secret, seeded from
@@ -1399,11 +1891,22 @@ impl Config {
         // persisted values below (a value entered on the config page wins).
         let mut anthropic_oauth_token = self.initial_anthropic_oauth_token();
         let mut mapbox_token = self.initial_mapbox_token();
+        // Weather provider label (config-file seed) + Visual Crossing key (env secret),
+        // each overlaid by any persisted value below (a config-page change wins).
+        let mut weather_provider = self.weather.provider.clone();
+        let mut visualcrossing_key = self.initial_visualcrossing_key();
+        // Google Places API key (env secret), overlaid by any persisted value below.
+        let mut google_places_key = self.initial_google_places_key();
         let mut anthropic_auth = self.anthropic_auth;
         let mut tts_voice = self.tts_voice.clone();
 
         let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
         let mut voice_rms_threshold = crate::settings::DEFAULT_VOICE_RMS_THRESHOLD;
+        // Silero neural-VAD threshold: config-file seed (`vad.silero.threshold`),
+        // overlaid by any persisted value below (config page / device win).
+        let mut silero_threshold = self.vad.silero.threshold;
+        // VAD engine selection: config-file seed (`vad.engine`), overlaid by persisted.
+        let mut vad_engine = self.vad.engine;
         // Google Drive photo config: config-file seed (client creds/folders), overlaid
         // by any persisted values below (the refresh token + page-set fields win).
         let mut drive = self.initial_drive();
@@ -1420,6 +1923,16 @@ impl Config {
         // the Mapbox token. Both are then overlaid by any persisted values below.
         let mut appsaid = self.initial_appsaid();
         appsaid.app_token = self.initial_appsaid_app_token();
+        // System-1 fast-decision selection: config-file seed, overlaid by persisted
+        // values below. The OpenRouter key is an env secret seed (like the other keys).
+        let mut system1_backend = self.system1.backend.clone();
+        let mut system1_base_url = self.system1.base_url.clone();
+        let mut system1_model = self.system1.openrouter_model.clone();
+        let mut system1_min_confidence = self.system1.min_confidence;
+        let mut system1_intents = self.system1.intents.clone();
+        let mut openrouter_api_key = env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -1447,10 +1960,31 @@ impl Config {
             if p.mapbox_token.is_some() {
                 mapbox_token = p.mapbox_token;
             }
+            // Same guard for the weather provider/key: only override the seed when the
+            // persisted file actually carries a value.
+            if let Some(prov) = p.weather_provider.filter(|s| !s.trim().is_empty()) {
+                weather_provider = prov;
+            }
+            if p.visualcrossing_key.is_some() {
+                visualcrossing_key = p.visualcrossing_key.filter(|s| !s.is_empty());
+            }
+            if p.google_places_key.is_some() {
+                google_places_key = p.google_places_key.filter(|s| !s.is_empty());
+            }
             anthropic_auth = AnthropicAuth::from_label(&p.anthropic_auth);
             tts_voice = p.tts_voice;
             end_silence_ms = p.end_silence_ms;
             voice_rms_threshold = p.voice_rms_threshold;
+            // Only override the seed when the persisted file carries a value (older
+            // files leave it absent → keep the config-file seed).
+            if let Some(t) = p.silero_threshold {
+                silero_threshold = t;
+            }
+            if let Some(label) = p.vad_engine.as_deref() {
+                if let Some(e) = VadEngineKind::from_label(label) {
+                    vad_engine = e;
+                }
+            }
             // Overlay persisted Drive fields onto the config-file seed: a persisted
             // value wins (refresh token, page-set creds/folders), but keep the seed for
             // any field the persisted file leaves empty so setting a client id in
@@ -1524,6 +2058,20 @@ impl Config {
             if p.appsaid.default_recipient.is_some() {
                 appsaid.default_recipient = p.appsaid.default_recipient;
             }
+            // Overlay persisted System-1 selection onto the config-file seed. Only when
+            // the persisted backend is non-empty (a real save), so an older settings
+            // file — which lacks these fields (serde default "") — can't disable a
+            // `system1.backend` set in anamanti.json.
+            if !p.system1_backend.is_empty() {
+                system1_backend = p.system1_backend;
+                system1_base_url = p.system1_base_url;
+                system1_model = p.system1_model;
+                system1_min_confidence = p.system1_min_confidence;
+                system1_intents = p.system1_intents;
+            }
+            if p.openrouter_api_key.is_some() {
+                openrouter_api_key = p.openrouter_api_key;
+            }
         }
 
         // Seed the directions tool's live default origin from the resolved household
@@ -1559,6 +2107,21 @@ impl Config {
             mapbox_token.as_deref(),
             build_factory.directions_imperial,
         );
+        // Seed the initial weather provider from the resolved provider label + Visual
+        // Crossing key (env overlaid by persisted) so `weather_lookup` is advertised at
+        // boot with the right backend.
+        build_factory.weather = crate::weather::from_config(
+            build_factory.weather_enabled,
+            &weather_provider,
+            visualcrossing_key.as_deref(),
+        );
+        // Seed the initial places provider from the resolved Google Places key (env
+        // overlaid by persisted) so `places_lookup` is advertised at boot with a key set.
+        build_factory.places = if self.places.enabled {
+            crate::places::from_key(&self.places.provider, google_places_key.as_deref())
+        } else {
+            None
+        };
         let (llm, llm_backend, llm_model) = build_factory
             .build(
                 engine,
@@ -1570,6 +2133,22 @@ impl Config {
                 anthropic_auth,
             )
             .context("building the initial LLM backend")?;
+        // Build the initial System-1 engine from the resolved (seed → persisted) config.
+        if system1_backend.eq_ignore_ascii_case("jev") && openrouter_api_key.is_none() {
+            log::warn!(
+                "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
+                 rejected until it is provided (env or config page)."
+            );
+        }
+        let system1 = crate::system1::build(
+            &system1_backend,
+            &system1_base_url,
+            &system1_model,
+            openrouter_api_key.clone(),
+            system1_min_confidence,
+            system1_intents.clone(),
+        )
+        .context("building the initial System-1 engine")?;
         Ok(SharedSettings::new_persistent(
             factory,
             RuntimeSettings {
@@ -1588,11 +2167,25 @@ impl Config {
                 tts_voice,
                 end_silence_ms,
                 voice_rms_threshold,
+                silero_threshold,
+                vad_engine,
                 drive,
                 household,
                 spotify,
                 cadora,
                 appsaid,
+                weather_provider,
+                visualcrossing_key,
+                google_places_key,
+                system1: crate::settings::System1Runtime {
+                    engine: system1,
+                    backend: system1_backend,
+                    base_url: system1_base_url,
+                    model: system1_model,
+                    min_confidence: system1_min_confidence,
+                    intents: system1_intents,
+                    openrouter_api_key,
+                },
             },
             persist_path,
         ))
@@ -1713,6 +2306,113 @@ mod tests {
         assert_eq!(c.drive.scope.as_deref(), Some(DEFAULT_DRIVE_SCOPE));
         assert!(!c.speaker.enabled);
         assert!(c.music.enabled);
+        // STT defaults to the downstream Wyoming engine.
+        assert_eq!(c.stt.engine, SttEngineKind::Wyoming);
+        assert_eq!(c.stt.model, "base");
+        assert_eq!(c.stt.language.as_deref(), Some("en"));
+        // VAD defaults to the neural Silero gate (committed default since 2026-09-30).
+        assert_eq!(c.vad.engine, VadEngineKind::Silero);
+        assert_eq!(c.vad.silero.threshold, 0.5);
+        // No tool_cache block ⇒ built-in defaults (weather cached 60 min).
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn tool_cache_block_overlays_per_tool_ttls() {
+        let c = Config::from_file(parse(
+            r#"{ "tool_cache": { "weather_lookup": 1800, "directions_lookup": 600 } }"#,
+        ))
+        .unwrap();
+        // File entries win; an unmentioned tool stays uncached.
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::from_secs(1800)
+        );
+        assert_eq!(
+            c.tool_cache.ttl("directions_lookup"),
+            std::time::Duration::from_secs(600)
+        );
+        assert_eq!(c.tool_cache.ttl("recipe_lookup"), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn tool_cache_zero_disables_a_defaulted_tool() {
+        let c = Config::from_file(parse(r#"{ "tool_cache": { "weather_lookup": 0 } }"#)).unwrap();
+        assert_eq!(
+            c.tool_cache.ttl("weather_lookup"),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn stt_block_selects_in_process_engine() {
+        let c = Config::from_file(parse(
+            r#"{ "stt": { "engine": "whisper-rs", "model": "small",
+                          "model_dir": "/models", "num_threads": 4 } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.stt.engine, SttEngineKind::WhisperLocal);
+        assert_eq!(c.stt.model, "small");
+        assert_eq!(c.stt.num_threads, 4);
+        assert_eq!(
+            c.stt.resolved_model_path(),
+            std::path::PathBuf::from("/models/ggml-small.en.bin")
+        );
+    }
+
+    #[test]
+    fn vad_block_selects_silero_engine_and_settings() {
+        let c = Config::from_file(parse(
+            r#"{ "vad": { "engine": "silero",
+                          "silero": { "model_path": "/m/silero_vad.onnx", "threshold": 0.35 } } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.vad.engine, VadEngineKind::Silero);
+        assert_eq!(
+            c.vad.silero.model_path,
+            std::path::PathBuf::from("/m/silero_vad.onnx")
+        );
+        assert_eq!(c.vad.silero.threshold, 0.35);
+    }
+
+    #[test]
+    fn vad_unknown_engine_is_a_hard_error() {
+        let err = Config::from_file(parse(r#"{ "vad": { "engine": "webrtc" } }"#)).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown vad.engine"),
+            "expected a clear engine error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn vad_rejects_unknown_keys() {
+        // `deny_unknown_fields` turns a typo into a hard parse error, not a silent default.
+        assert!(
+            serde_json::from_str::<FileConfig>(r#"{ "vad": { "engien": "silero" } }"#).is_err()
+        );
+    }
+
+    #[test]
+    fn stt_model_path_overrides_dir_and_name() {
+        let c = Config::from_file(parse(
+            r#"{ "stt": { "model_path": "/opt/x.bin", "language": "" } }"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            c.stt.resolved_model_path(),
+            std::path::PathBuf::from("/opt/x.bin")
+        );
+        // An explicit empty language means auto-detect.
+        assert_eq!(c.stt.language, None);
+    }
+
+    #[test]
+    fn stt_unknown_engine_is_rejected() {
+        let err = Config::from_file(parse(r#"{ "stt": { "engine": "vosk" } }"#)).unwrap_err();
+        assert!(err.to_string().contains("stt.engine"), "{err}");
     }
 
     #[test]
@@ -1801,6 +2501,46 @@ mod tests {
         assert!(c.drive.refresh_token.is_none());
         assert_eq!(c.spotify.client_id.as_deref(), Some("sid"));
         assert_eq!(c.spotify.refresh_token.as_deref(), Some("rt"));
+    }
+
+    #[test]
+    fn graphrag_embed_backend_defaults_to_local_and_parses() {
+        // Default: local nomic, 768 dims, default on-disk model/tokenizer paths.
+        let d = Config::from_file(parse("{}")).unwrap();
+        assert_eq!(d.graphrag.embed_backend, EmbedBackend::Local);
+        assert_eq!(d.graphrag.embed_dims, 768);
+        assert_eq!(
+            d.graphrag.embed_model_path,
+            std::path::PathBuf::from("models/nomic-embed-text-v1.5.onnx")
+        );
+        assert_eq!(
+            d.graphrag.embed_tokenizer_dir,
+            std::path::PathBuf::from("models/nomic-tokenizer")
+        );
+
+        // Explicit OpenAI backend + custom local paths parse through.
+        let c = Config::from_file(parse(
+            r#"{ "graphrag": {
+                "embed_backend": "openai",
+                "embed_model_path": "/m/x.onnx",
+                "embed_tokenizer_dir": "/m/tok"
+            } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.graphrag.embed_backend, EmbedBackend::OpenAi);
+        assert_eq!(
+            c.graphrag.embed_model_path,
+            std::path::PathBuf::from("/m/x.onnx")
+        );
+        assert_eq!(
+            c.graphrag.embed_tokenizer_dir,
+            std::path::PathBuf::from("/m/tok")
+        );
+
+        // Unknown backend string falls back to the default (local).
+        let u =
+            Config::from_file(parse(r#"{ "graphrag": { "embed_backend": "weirdo" } }"#)).unwrap();
+        assert_eq!(u.graphrag.embed_backend, EmbedBackend::Local);
     }
 
     #[test]

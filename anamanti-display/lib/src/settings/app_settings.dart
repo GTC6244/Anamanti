@@ -28,20 +28,37 @@ const List<String> kAvailableWakeWords = <String>[
   'ok_nabu',
 ];
 
+/// Default base URL the in-app updater fetches `latest.json` and the APK from
+/// (plans/UpdaterPlan.md). A placeholder — point it at your real
+/// Cloudflare R2 custom domain on-device via Settings → Updates, or edit this
+/// constant. No trailing slash; the Rust side appends `/latest.json`.
+const String kDefaultUpdateBaseUrl = 'https://dl.example.com';
+
 @immutable
 class AppSettings {
   const AppSettings({
     this.orchestratorKey = '',
+    this.deviceId = '',
+    this.deviceName = '',
     this.wakeWord = 'hey_jarvis',
     this.threshold = 0.5,
     this.activeThreshold = 0.7,
     this.smoothingWindow = 2,
     this.fireOnPeak = false,
     this.playbackBufferSecs = 30,
+    this.captureGainDb = 0.0,
     this.useAudioRecord = true,
+    this.platformNs = true,
+    this.platformAgc = true,
+    this.platformAec = false,
     this.endpointCueEnabled = true,
     this.endpointSilenceMs = 600,
     this.endpointRmsThreshold = 0.012,
+    this.listeningRingEnabled = true,
+    this.ringReactivity = 1.0,
+    this.ringAttack = 0.65,
+    this.ringRelease = 0.08,
+    this.ringDecay = 0.99,
     this.dimDelaySecs = 300,
     this.photoSource = PhotoSourceKind.local,
     this.ambientRefreshToken = '',
@@ -52,6 +69,8 @@ class AppSettings {
     this.driveLinked = false,
     this.driveClientId = '',
     this.driveClientSecret = '',
+    this.autoUpdateEnabled = true,
+    this.updateBaseUrl = kDefaultUpdateBaseUrl,
   });
 
   /// Stable selection key (`instance_id` TXT) of the orchestrator this display is
@@ -59,6 +78,17 @@ class AppSettings {
   /// Device-local: applied by rebuilding the engine's [WakeWordConfig] and used to
   /// pin the settings-control client to the same Mac.
   final String orchestratorKey;
+
+  /// Stable, globally-unique identifier for this physical display, derived from the
+  /// device's Wi-Fi MAC (`anamanti-<12 hex>`, e.g. `anamanti-140ac5942aca`). Minted
+  /// once on first run (via the Rust `deviceHardwareId()` call, falling back to a
+  /// persisted random id) and sent to the Core in the `anamanti-hello` frame so two
+  /// displays on one Core are distinguishable. Never changes once set.
+  final String deviceId;
+
+  /// Human-friendly label for this display (e.g. "Kitchen"), editable on the Settings
+  /// screen and sent to the Core alongside [deviceId]. Empty until the user names it.
+  final String deviceName;
 
   /// Selected wake-word model name (`<name>.onnx`).
   final String wakeWord;
@@ -83,10 +113,34 @@ class AppSettings {
   /// spoken reply so long TTS answers are not truncated. A/B-tunable.
   final int playbackBufferSecs;
 
+  /// Software capture gain in **decibels** applied to the resampled mic signal (both
+  /// the wake-word detector input and the streamed PCM). `0.0` = unity/no-op. Raise it
+  /// if a quiet far-field mic causes wake-word or speech-onset **misses** — the in-app,
+  /// root-free analogue of the AEC shim's `persist.vendor.amznaec.gain_db`. Engine
+  /// clamps to [0, 36] dB. A/B-tunable.
+  final double captureGainDb;
+
   /// **Android only.** Capture through the Kotlin `AudioRecord` layer
   /// (`VOICE_RECOGNITION` source + platform noise-suppression/AGC) instead of the
   /// default `cpal` path. A/B-tunable on-device to compare far-field pickup.
   final bool useAudioRecord;
+
+  /// **Android only.** Attach the platform `NoiseSuppressor` to the AudioRecord
+  /// session. On by default. Note: aggressive noise suppression can *distort*
+  /// speech and cause wake-word **misses** in a noisy room — turn this off to A/B
+  /// test far-field responsiveness. Only applies on the [useAudioRecord] path.
+  final bool platformNs;
+
+  /// **Android only.** Attach the platform `AutomaticGainControl` to the AudioRecord
+  /// session. On by default; helps the Echo Show's quiet far-field pickup. Only
+  /// applies on the [useAudioRecord] path.
+  final bool platformAgc;
+
+  /// **Android only.** Attach the platform `AcousticEchoCanceler` to the AudioRecord
+  /// session. Off by default — the host-side WebRTC APM does AEC and this device's
+  /// platform AEC was found not to actually cancel (see agents.md). Exposed as an
+  /// experimental lever. Only applies on the [useAudioRecord] path.
+  final bool platformAec;
 
   /// Whether the device shows a local "processing" cue the instant the user stops
   /// speaking, instead of waiting for the Mac's VAD + transcript round trip.
@@ -98,6 +152,29 @@ class AppSettings {
 
   /// Mic RMS level (0..1) below which audio counts as silence for the local cue.
   final double endpointRmsThreshold;
+
+  /// Whether the large glowing "listening" ring pops up while the device listens to
+  /// you (wake word → end-of-speech). Purely presentational; off hides the overlay
+  /// entirely. See [ListeningOverlay].
+  final bool listeningRingEnabled;
+
+  /// How strongly the listening ring reacts to your voice — a multiplier on the
+  /// amplitude-driven swing (thickness/scale/glow). 1.0 = default; higher = more
+  /// dramatic. Presentational.
+  final double ringReactivity;
+
+  /// Listening-ring attack: how quickly it responds as your voice gets louder
+  /// (per-frame ease, 0..1; higher = snappier). Presentational.
+  final double ringAttack;
+
+  /// Listening-ring release: how quickly it settles back as you quiet down
+  /// (per-frame ease, 0..1; lower = more lingering). Presentational.
+  final double ringRelease;
+
+  /// Listening-ring auto-range decay: how fast the ring re-scales to your current
+  /// speaking level (per-frame peak decay, closer to 1 = holds the range longer).
+  /// Presentational.
+  final double ringDecay;
 
   /// How long (seconds) the idle screen stays fully bright after the room goes
   /// quiet before it dims to the calm "away" clock face. Maps to the camera
@@ -141,6 +218,15 @@ class AppSettings {
   /// Google Drive OAuth client secret, synced from the orchestrator. TODO: secure storage.
   final String driveClientSecret;
 
+  /// Whether the in-app updater checks for and prompts about new builds
+  /// (plans/UpdaterPlan.md). Device-local; ignored entirely on the
+  /// `fdroid` flavor, which ships without the updater.
+  final bool autoUpdateEnabled;
+
+  /// Base URL the updater fetches `latest.json` + the APK from (your Cloudflare R2
+  /// custom domain). No trailing slash. Defaults to [kDefaultUpdateBaseUrl].
+  final String updateBaseUrl;
+
   /// True when both Drive client credentials are present — the device can mint Drive
   /// access tokens. Runtime replacement for the old build-time `kGoogleDriveConfigured`.
   bool get driveConfigured =>
@@ -148,16 +234,27 @@ class AppSettings {
 
   AppSettings copyWith({
     String? orchestratorKey,
+    String? deviceId,
+    String? deviceName,
     String? wakeWord,
     double? threshold,
     double? activeThreshold,
     int? smoothingWindow,
     bool? fireOnPeak,
     int? playbackBufferSecs,
+    double? captureGainDb,
     bool? useAudioRecord,
+    bool? platformNs,
+    bool? platformAgc,
+    bool? platformAec,
     bool? endpointCueEnabled,
     int? endpointSilenceMs,
     double? endpointRmsThreshold,
+    bool? listeningRingEnabled,
+    double? ringReactivity,
+    double? ringAttack,
+    double? ringRelease,
+    double? ringDecay,
     int? dimDelaySecs,
     PhotoSourceKind? photoSource,
     String? ambientRefreshToken,
@@ -168,19 +265,32 @@ class AppSettings {
     bool? driveLinked,
     String? driveClientId,
     String? driveClientSecret,
+    bool? autoUpdateEnabled,
+    String? updateBaseUrl,
   }) {
     return AppSettings(
       orchestratorKey: orchestratorKey ?? this.orchestratorKey,
+      deviceId: deviceId ?? this.deviceId,
+      deviceName: deviceName ?? this.deviceName,
       wakeWord: wakeWord ?? this.wakeWord,
       threshold: threshold ?? this.threshold,
       activeThreshold: activeThreshold ?? this.activeThreshold,
       smoothingWindow: smoothingWindow ?? this.smoothingWindow,
       fireOnPeak: fireOnPeak ?? this.fireOnPeak,
       playbackBufferSecs: playbackBufferSecs ?? this.playbackBufferSecs,
+      captureGainDb: captureGainDb ?? this.captureGainDb,
       useAudioRecord: useAudioRecord ?? this.useAudioRecord,
+      platformNs: platformNs ?? this.platformNs,
+      platformAgc: platformAgc ?? this.platformAgc,
+      platformAec: platformAec ?? this.platformAec,
       endpointCueEnabled: endpointCueEnabled ?? this.endpointCueEnabled,
       endpointSilenceMs: endpointSilenceMs ?? this.endpointSilenceMs,
       endpointRmsThreshold: endpointRmsThreshold ?? this.endpointRmsThreshold,
+      listeningRingEnabled: listeningRingEnabled ?? this.listeningRingEnabled,
+      ringReactivity: ringReactivity ?? this.ringReactivity,
+      ringAttack: ringAttack ?? this.ringAttack,
+      ringRelease: ringRelease ?? this.ringRelease,
+      ringDecay: ringDecay ?? this.ringDecay,
       dimDelaySecs: dimDelaySecs ?? this.dimDelaySecs,
       photoSource: photoSource ?? this.photoSource,
       ambientRefreshToken: ambientRefreshToken ?? this.ambientRefreshToken,
@@ -191,21 +301,34 @@ class AppSettings {
       driveLinked: driveLinked ?? this.driveLinked,
       driveClientId: driveClientId ?? this.driveClientId,
       driveClientSecret: driveClientSecret ?? this.driveClientSecret,
+      autoUpdateEnabled: autoUpdateEnabled ?? this.autoUpdateEnabled,
+      updateBaseUrl: updateBaseUrl ?? this.updateBaseUrl,
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'orchestratorKey': orchestratorKey,
+    'deviceId': deviceId,
+    'deviceName': deviceName,
     'wakeWord': wakeWord,
     'threshold': threshold,
     'activeThreshold': activeThreshold,
     'smoothingWindow': smoothingWindow,
     'fireOnPeak': fireOnPeak,
     'playbackBufferSecs': playbackBufferSecs,
+    'captureGainDb': captureGainDb,
     'useAudioRecord': useAudioRecord,
+    'platformNs': platformNs,
+    'platformAgc': platformAgc,
+    'platformAec': platformAec,
     'endpointCueEnabled': endpointCueEnabled,
     'endpointSilenceMs': endpointSilenceMs,
     'endpointRmsThreshold': endpointRmsThreshold,
+    'listeningRingEnabled': listeningRingEnabled,
+    'ringReactivity': ringReactivity,
+    'ringAttack': ringAttack,
+    'ringRelease': ringRelease,
+    'ringDecay': ringDecay,
     'dimDelaySecs': dimDelaySecs,
     'photoSource': photoSource.name,
     'ambientRefreshToken': ambientRefreshToken,
@@ -216,6 +339,8 @@ class AppSettings {
     'driveLinked': driveLinked,
     'driveClientId': driveClientId,
     'driveClientSecret': driveClientSecret,
+    'autoUpdateEnabled': autoUpdateEnabled,
+    'updateBaseUrl': updateBaseUrl,
   };
 
   /// Parse from persisted JSON, tolerating missing/invalid keys by falling back to
@@ -230,6 +355,12 @@ class AppSettings {
       orchestratorKey: json['orchestratorKey'] is String
           ? json['orchestratorKey'] as String
           : defaults.orchestratorKey,
+      deviceId: json['deviceId'] is String
+          ? json['deviceId'] as String
+          : defaults.deviceId,
+      deviceName: json['deviceName'] is String
+          ? json['deviceName'] as String
+          : defaults.deviceName,
       wakeWord:
           json['wakeWord'] is String && (json['wakeWord'] as String).isNotEmpty
           ? json['wakeWord'] as String
@@ -252,9 +383,21 @@ class AppSettings {
         min: 2,
         max: 120,
       ),
+      captureGainDb: json['captureGainDb'] is num
+          ? (json['captureGainDb'] as num).toDouble().clamp(0.0, 36.0)
+          : defaults.captureGainDb,
       useAudioRecord: json['useAudioRecord'] is bool
           ? json['useAudioRecord'] as bool
           : defaults.useAudioRecord,
+      platformNs: json['platformNs'] is bool
+          ? json['platformNs'] as bool
+          : defaults.platformNs,
+      platformAgc: json['platformAgc'] is bool
+          ? json['platformAgc'] as bool
+          : defaults.platformAgc,
+      platformAec: json['platformAec'] is bool
+          ? json['platformAec'] as bool
+          : defaults.platformAec,
       endpointCueEnabled: json['endpointCueEnabled'] is bool
           ? json['endpointCueEnabled'] as bool
           : defaults.endpointCueEnabled,
@@ -268,6 +411,21 @@ class AppSettings {
         json['endpointRmsThreshold'],
         defaults.endpointRmsThreshold,
       ),
+      listeningRingEnabled: json['listeningRingEnabled'] is bool
+          ? json['listeningRingEnabled'] as bool
+          : defaults.listeningRingEnabled,
+      ringReactivity: json['ringReactivity'] is num
+          ? (json['ringReactivity'] as num).toDouble().clamp(0.1, 4.0)
+          : defaults.ringReactivity,
+      ringAttack: json['ringAttack'] is num
+          ? (json['ringAttack'] as num).toDouble().clamp(0.05, 1.0)
+          : defaults.ringAttack,
+      ringRelease: json['ringRelease'] is num
+          ? (json['ringRelease'] as num).toDouble().clamp(0.01, 1.0)
+          : defaults.ringRelease,
+      ringDecay: json['ringDecay'] is num
+          ? (json['ringDecay'] as num).toDouble().clamp(0.5, 0.9999)
+          : defaults.ringDecay,
       dimDelaySecs: asInt(
         json['dimDelaySecs'],
         defaults.dimDelaySecs,
@@ -302,6 +460,14 @@ class AppSettings {
       driveClientSecret: json['driveClientSecret'] is String
           ? json['driveClientSecret'] as String
           : '',
+      autoUpdateEnabled: json['autoUpdateEnabled'] is bool
+          ? json['autoUpdateEnabled'] as bool
+          : defaults.autoUpdateEnabled,
+      updateBaseUrl:
+          json['updateBaseUrl'] is String &&
+              (json['updateBaseUrl'] as String).trim().isNotEmpty
+          ? (json['updateBaseUrl'] as String).trim()
+          : defaults.updateBaseUrl,
     );
   }
 
@@ -310,16 +476,27 @@ class AppSettings {
       other is AppSettings &&
       runtimeType == other.runtimeType &&
       orchestratorKey == other.orchestratorKey &&
+      deviceId == other.deviceId &&
+      deviceName == other.deviceName &&
       wakeWord == other.wakeWord &&
       threshold == other.threshold &&
       activeThreshold == other.activeThreshold &&
       smoothingWindow == other.smoothingWindow &&
       fireOnPeak == other.fireOnPeak &&
       playbackBufferSecs == other.playbackBufferSecs &&
+      captureGainDb == other.captureGainDb &&
       useAudioRecord == other.useAudioRecord &&
+      platformNs == other.platformNs &&
+      platformAgc == other.platformAgc &&
+      platformAec == other.platformAec &&
       endpointCueEnabled == other.endpointCueEnabled &&
       endpointSilenceMs == other.endpointSilenceMs &&
       endpointRmsThreshold == other.endpointRmsThreshold &&
+      listeningRingEnabled == other.listeningRingEnabled &&
+      ringReactivity == other.ringReactivity &&
+      ringAttack == other.ringAttack &&
+      ringRelease == other.ringRelease &&
+      ringDecay == other.ringDecay &&
       dimDelaySecs == other.dimDelaySecs &&
       photoSource == other.photoSource &&
       ambientRefreshToken == other.ambientRefreshToken &&
@@ -329,7 +506,9 @@ class AppSettings {
       listEquals(driveFolderIds, other.driveFolderIds) &&
       driveLinked == other.driveLinked &&
       driveClientId == other.driveClientId &&
-      driveClientSecret == other.driveClientSecret;
+      driveClientSecret == other.driveClientSecret &&
+      autoUpdateEnabled == other.autoUpdateEnabled &&
+      updateBaseUrl == other.updateBaseUrl;
 
   @override
   int get hashCode => Object.hash(
@@ -340,7 +519,15 @@ class AppSettings {
     smoothingWindow,
     fireOnPeak,
     playbackBufferSecs,
-    useAudioRecord,
+    Object.hash(
+      captureGainDb,
+      useAudioRecord,
+      platformNs,
+      platformAgc,
+      platformAec,
+      deviceId,
+      deviceName,
+    ),
     endpointCueEnabled,
     endpointSilenceMs,
     endpointRmsThreshold,
@@ -352,6 +539,16 @@ class AppSettings {
     driveRefreshToken,
     Object.hashAll(driveFolderIds),
     driveLinked,
-    Object.hash(driveClientId, driveClientSecret),
+    Object.hash(
+      driveClientId,
+      driveClientSecret,
+      listeningRingEnabled,
+      ringReactivity,
+      ringAttack,
+      ringRelease,
+      ringDecay,
+      autoUpdateEnabled,
+      updateBaseUrl,
+    ),
   );
 }

@@ -179,6 +179,11 @@ pub mod types {
     /// `"dismiss"`; for `show`/`current`, `weather` is the structured report). Byte-
     /// identical to the orchestrator crate's `types::WEATHER`.
     pub const WEATHER: &str = "anamanti-weather";
+
+    /// orchestrator → device: show/dismiss the full-screen place card (data: `action`
+    /// = `"show"` / `"dismiss"`; for `show`, `place` is the structured report). Byte-
+    /// identical to the orchestrator crate's `types::PLACE`.
+    pub const PLACE: &str = "anamanti-place";
 }
 
 /// A device-action timer command decoded from an `anamanti-timer` frame (Phase 2).
@@ -219,6 +224,17 @@ pub enum WeatherCommand {
     /// Refresh the ambient indicator (icon + temperature) from this report.
     Current(Value),
     /// Dismiss the full-screen weather view and return to the idle/ambient display.
+    Dismiss,
+}
+
+/// A place command decoded from an `anamanti-place` frame. `Show` carries the place
+/// report object (surfaced to Flutter as a JSON string it parses into the card);
+/// `Dismiss` closes the full-screen card.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaceCommand {
+    /// Show this place report full-screen on the place card (voice-triggered).
+    Show(Value),
+    /// Dismiss the full-screen place card and return to the idle/ambient display.
     Dismiss,
 }
 
@@ -405,14 +421,20 @@ impl WyomingEvent {
     }
 
     /// An `anamanti-hello` channel-open frame (device → orchestrator): register the
-    /// persistent notify channel. Byte-identical to the orchestrator's `hello`.
-    pub fn hello(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    /// persistent notify channel. `name` is a human-friendly label for this display
+    /// (may be empty). Byte-identical to the orchestrator's `hello`.
+    pub fn hello(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "notify",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -421,13 +443,18 @@ impl WyomingEvent {
     /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
     /// so the orchestrator registers it with the weather push service. Byte-identical
     /// to the orchestrator's `hello_weather`.
-    pub fn hello_weather(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    pub fn hello_weather(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "weather",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -594,6 +621,32 @@ impl WyomingEvent {
             "show" => report().map(WeatherCommand::Show),
             "current" => report().map(WeatherCommand::Current),
             "dismiss" => Some(WeatherCommand::Dismiss),
+            _ => None,
+        }
+    }
+
+    /// An `anamanti-place` **show** action (used by tests + the mock server; the
+    /// orchestrator emits the wire form directly).
+    pub fn place_show(place: Value) -> Self {
+        Self::with_data(types::PLACE, json!({ "action": "show", "place": place }))
+    }
+
+    /// An `anamanti-place` **dismiss** action.
+    pub fn place_dismiss() -> Self {
+        Self::with_data(types::PLACE, json!({ "action": "dismiss" }))
+    }
+
+    /// Decode an `anamanti-place` frame into a [`PlaceCommand`], or `None` if this is not
+    /// a place frame or its `action` is unrecognized. A `show` with no `place` object is
+    /// rejected (returns `None`).
+    pub fn place_command(&self) -> Option<PlaceCommand> {
+        if self.event_type != types::PLACE {
+            return None;
+        }
+        let report = || self.data.get("place").filter(|v| v.is_object()).cloned();
+        match self.data.get("action").and_then(Value::as_str)? {
+            "show" => report().map(PlaceCommand::Show),
+            "dismiss" => Some(PlaceCommand::Dismiss),
             _ => None,
         }
     }
@@ -830,8 +883,31 @@ mod tests {
         assert_eq!(bad.weather_command(), None);
 
         // The weather hello carries role=weather.
-        let hello = roundtrip(&WyomingEvent::hello_weather("dev", "")).await;
+        let hello = roundtrip(&WyomingEvent::hello_weather("dev", "", "")).await;
         assert_eq!(hello.data["role"], json!("weather"));
+    }
+
+    #[tokio::test]
+    async fn place_frame_roundtrips_and_decodes_command() {
+        let report = json!({
+            "name": "Blue Bottle Coffee",
+            "address": "1 Main St, Austin, TX",
+            "hours": ["Monday: 7:00 AM – 6:00 PM"],
+            "open_now": true,
+            "rating": "4.6",
+        });
+        let show = WyomingEvent::place_show(report.clone());
+        let back = roundtrip(&show).await;
+        assert_eq!(back, show);
+        assert_eq!(back.place_command(), Some(PlaceCommand::Show(report)));
+
+        let dismiss = roundtrip(&WyomingEvent::place_dismiss()).await;
+        assert_eq!(dismiss.place_command(), Some(PlaceCommand::Dismiss));
+
+        // A non-place frame yields nothing; a show missing the report is rejected.
+        assert_eq!(WyomingEvent::interrupt().place_command(), None);
+        let bad = WyomingEvent::with_data(types::PLACE, json!({ "action": "show" }));
+        assert_eq!(bad.place_command(), None);
     }
 
     #[tokio::test]
@@ -904,12 +980,13 @@ mod tests {
 
     #[tokio::test]
     async fn notify_frames_roundtrip() {
-        let hello = WyomingEvent::hello("echo-show-8", "Paul Family");
+        let hello = WyomingEvent::hello("echo-show-8", "Paul Family", "Kitchen");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.event_type, types::ANAMANTI_HELLO);
         assert_eq!(back.data["role"], json!("notify"));
         assert_eq!(back.data["device_id"], json!("echo-show-8"));
+        assert_eq!(back.data["name"], json!("Kitchen"));
 
         let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");
         let back = roundtrip(&note).await;

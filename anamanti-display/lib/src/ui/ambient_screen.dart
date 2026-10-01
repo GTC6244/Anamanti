@@ -18,15 +18,20 @@ import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
+import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
+import 'package:anamanti_display/src/ui/listening_overlay.dart';
 import 'package:anamanti_display/src/ui/notification_banner.dart';
 import 'package:anamanti_display/src/ui/recipe_view.dart';
+import 'package:anamanti_display/src/ui/update_banner.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/ui/status_indicator.dart';
 import 'package:anamanti_display/src/ui/timers_overlay.dart';
 import 'package:anamanti_display/src/ui/weather_icons.dart';
+import 'package:anamanti_display/src/ui/place_view.dart';
+import 'package:anamanti_display/src/ui/seven_day_view.dart';
 import 'package:anamanti_display/src/ui/weather_view.dart';
 
 class AmbientScreen extends StatelessWidget {
@@ -35,15 +40,34 @@ class AmbientScreen extends StatelessWidget {
     required this.assistant,
     required this.slideshow,
     this.notifications,
+    this.updates,
     this.onOpenSettings,
+    this.listeningRingEnabled = true,
+    this.ringReactivity = 1.0,
+    this.ringAttack = 0.65,
+    this.ringRelease = 0.08,
+    this.ringDecay = 0.99,
   });
 
   final AssistantController assistant;
   final SlideshowController slideshow;
 
+  /// Whether the glowing "listening" ring pops up while listening, and its tuning
+  /// (see [ListeningOverlay]) — user-adjustable in Speech Processing settings.
+  /// Purely presentational; defaults keep tests/other callers unchanged.
+  final bool listeningRingEnabled;
+  final double ringReactivity;
+  final double ringAttack;
+  final double ringRelease;
+  final double ringDecay;
+
   /// Proactive notifications pushed by the orchestrator (Approach A). When null (as
   /// in widget tests that only exercise the turn UI) no banner is shown.
   final NotificationController? notifications;
+
+  /// In-app updater (plans/UpdaterPlan.md). When null (widget tests,
+  /// or the fdroid flavor) no update banner is shown.
+  final UpdateController? updates;
 
   /// Opens the settings screen (Phase 6). When null, no settings control is shown
   /// (e.g. in widget tests that only exercise the reactive turn UI).
@@ -68,14 +92,24 @@ class AmbientScreen extends StatelessWidget {
           // Weather mode: the full-screen forecast is on screen. Like recipe mode it
           // takes over the idle presentation but yields to an active voice turn.
           final weatherActive = state.weatherActive;
+          final placeActive = state.placeActive;
           // Any full-screen mode that overlays the idle presentation.
-          final modeActive = recipeActive || weatherActive;
+          final modeActive = recipeActive || weatherActive || placeActive;
           // Away / "off" mode: nobody in front of the display and no active turn.
           // Only the big centered clock shows; everything else fades away. A turn
           // always wins (saying the wake word implies you're here), so off mode is
           // strictly the idle-and-absent case. Recipe/weather mode also imply
           // engagement, so they suppress the away face.
-          final offMode = !state.userPresent && !active && !modeActive;
+          // The inverse of [AssistantState.screenAwake] — the single source of truth
+          // shared with the backlight actuator so the away-face and the physical
+          // brightness always agree (equivalent to `!userPresent && !active &&
+          // !modeActive`).
+          final offMode = !state.screenAwake;
+          // "Listening" cue: the device is actively listening to the user (wake word
+          // or follow-up listen fired, through end-of-speech). Shows the big glowing
+          // blue ring, which reacts to the live mic level. Suppressed when the user
+          // has turned the ring off in settings.
+          final listening = state.listening && listeningRingEnabled;
           return Stack(
             fit: StackFit.expand,
             children: [
@@ -144,8 +178,10 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
-              // Weather mode: a full-screen forecast (today + 7-day row). Same
-              // precedence as recipe mode — above the idle presentation, below the
+              // Weather mode: a full-screen forecast. The default hourly view (today's
+              // big conditions panel + a 10-hour row) or, when the report's layout is
+              // "week", the separate 7-day forecast widget (7 columns of highs/lows).
+              // Same precedence as recipe mode — above the idle presentation, below the
               // conversation panel, so a voice turn still overlays it. Dismissed by
               // voice or the view's own close control.
               AnimatedOpacity(
@@ -154,10 +190,36 @@ class AmbientScreen extends StatelessWidget {
                 child: IgnorePointer(
                   ignoring: !weatherActive,
                   child: weatherActive
-                      ? WeatherView(
-                          key: ValueKey(state.weather!.locationLabel),
-                          weather: state.weather!,
-                          onClose: assistant.dismissWeather,
+                      ? (state.weather!.isWeek
+                            ? SevenDayView(
+                                key: ValueKey(
+                                  'week:${state.weather!.locationLabel}',
+                                ),
+                                weather: state.weather!,
+                                onClose: assistant.dismissWeather,
+                              )
+                            : WeatherView(
+                                key: ValueKey(state.weather!.locationLabel),
+                                weather: state.weather!,
+                                onClose: assistant.dismissWeather,
+                              ))
+                      : const SizedBox.shrink(),
+                ),
+              ),
+
+              // Place mode: a full-screen place card (photo + details). Same precedence
+              // as recipe/weather mode — above the idle presentation, below the
+              // conversation panel. Dismissed by voice or the view's own close control.
+              AnimatedOpacity(
+                opacity: placeActive ? 1 : 0,
+                duration: const Duration(milliseconds: 250),
+                child: IgnorePointer(
+                  ignoring: !placeActive,
+                  child: placeActive
+                      ? PlaceView(
+                          key: ValueKey(state.place!.name),
+                          place: state.place!,
+                          onClose: assistant.dismissPlace,
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -173,6 +235,30 @@ class AmbientScreen extends StatelessWidget {
                     padding: const EdgeInsets.all(28),
                     child: ConversationView(state: state),
                   ),
+                ),
+              ),
+
+              // "Listening" cue: a large glowing blue ring centered on screen while
+              // the device is listening to the user — from the wake word until
+              // end-of-speech — reacting to the live mic level. Draws above the
+              // conversation panel and below the status chip / settings / banner.
+              // Pointer-transparent — a touch should still reach the slideshow /
+              // dismiss controls beneath it. The ring widget only exists while shown
+              // so its pulse controller isn't spinning during the whole idle day.
+              IgnorePointer(
+                child: AnimatedOpacity(
+                  key: const Key('listening-cue'),
+                  opacity: listening ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: listening
+                      ? ListeningOverlay(
+                          level: state.micLevel,
+                          reactivity: ringReactivity,
+                          attack: ringAttack,
+                          release: ringRelease,
+                          decay: ringDecay,
+                        )
+                      : const SizedBox.shrink(),
                 ),
               ),
 
@@ -280,6 +366,38 @@ class AmbientScreen extends StatelessWidget {
                               key: ValueKey(note.id),
                               notification: note,
                               onDismiss: notifications!.dismiss,
+                            ),
+                    );
+                  },
+                ),
+
+              // Update banner, top-most. Rebuilds on its own controller; shows an
+              // "update available" prompt and the download/install progress.
+              if (updates != null)
+                ListenableBuilder(
+                  listenable: updates!,
+                  builder: (context, _) {
+                    final visible = updates!.bannerVisible;
+                    return AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      child: !visible
+                          ? const SizedBox.shrink()
+                          : UpdateBanner(
+                              key: const ValueKey('update-banner'),
+                              controller: updates!,
+                              onAction: () {
+                                switch (updates!.status) {
+                                  case UpdateStatus.available:
+                                    updates!.download();
+                                  case UpdateStatus.readyToInstall:
+                                    updates!.install();
+                                  case UpdateStatus.error:
+                                    updates!.retry();
+                                  default:
+                                    break;
+                                }
+                              },
+                              onDismiss: updates!.dismissBanner,
                             ),
                     );
                   },

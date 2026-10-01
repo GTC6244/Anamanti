@@ -994,6 +994,7 @@ async fn follow_up_turn_includes_recent_history_in_the_prompt() {
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     })
     .unwrap();
 
@@ -1058,6 +1059,7 @@ async fn ordinary_turn_carries_no_history() {
         model: None,
         speaker_id: "household".to_string(),
         speaker_name: None,
+        timing: None,
     })
     .unwrap();
 
@@ -1117,4 +1119,357 @@ async fn explicit_remember_command_short_circuits_the_llm() {
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].content, "I like my coffee black");
     assert_eq!(stored[0].kind, MemoryKind::Preference);
+}
+
+/// System-1 fast path: when the decision engine resolves the `weather` intent, the
+/// pipeline fetches the forecast, shows the full-screen weather widget, and speaks a
+/// templated summary — **without** ever calling the LLM (System-2). A panicking LLM
+/// backend proves the LLM is skipped. (plans/system1-fast-decisions.md, M1)
+#[tokio::test]
+async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
+    use anamanti_core::settings::Household;
+    use anamanti_core::system1::mock::MockDecider;
+    use anamanti_core::weather::{CurrentConditions, WeatherProvider, WeatherReport};
+
+    // Reaching System-2 on a resolved weather turn is a bug — panic loudly if it does.
+    struct PanicLlm;
+    #[async_trait]
+    impl LlmBackend for PanicLlm {
+        fn name(&self) -> &str {
+            "panic"
+        }
+        async fn respond(&self, _turn: LlmTurn) -> Result<ReplyStream> {
+            panic!("System-2 LLM must not run when System-1 resolves the weather intent");
+        }
+    }
+
+    struct FakeWeather;
+    #[async_trait]
+    impl WeatherProvider for FakeWeather {
+        async fn fetch(
+            &self,
+            location: &str,
+            imperial: bool,
+            _when: anamanti_core::weather::ForecastWhen,
+        ) -> Result<WeatherReport> {
+            Ok(WeatherReport {
+                location_label: location.to_string(),
+                units: if imperial {
+                    "imperial".into()
+                } else {
+                    "metric".into()
+                },
+                when_label: String::new(),
+                current: CurrentConditions {
+                    temp: 18,
+                    feels_like: 17,
+                    weather_code: 3,
+                    is_day: true,
+                    high: 21,
+                    low: 12,
+                    description: "Partly cloudy".into(),
+                },
+                hourly: Vec::new(),
+                ..Default::default()
+            })
+        }
+    }
+
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(PanicLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_system1(Arc::new(MockDecider::resolve("weather", 0.99)))
+    .with_weather(Some(Arc::new(FakeWeather)));
+
+    // The weather fast path needs a home location; set it on the live settings.
+    let hh = Household {
+        location: Some("Austin, Texas".to_string()),
+        weather_units: Some("imperial".to_string()),
+        members: Vec::new(),
+    };
+    pipeline.settings().apply_household(&hh);
+
+    let connector = MockConnector::new("what's the weather");
+    let ((transcript, reply, kinds), _events) = run_one_turn(&pipeline, &connector).await;
+
+    assert_eq!(transcript, "what's the weather");
+    // The device was shown the full-screen weather widget.
+    assert!(
+        kinds.iter().any(|k| k == types::WEATHER),
+        "expected an anamanti-weather frame, got {kinds:?}"
+    );
+    // The spoken reply is the templated forecast (a System-2 reply would not name the
+    // location/high, and PanicLlm would have panicked).
+    assert!(reply.contains("Austin, Texas"), "reply was: {reply:?}");
+    assert!(reply.contains("high"), "reply was: {reply:?}");
+    // Exactly the summary was synthesized by Piper.
+    let synths = connector.synthesized.lock().unwrap().clone();
+    assert_eq!(synths.len(), 1, "one TTS chunk, got {synths:?}");
+    assert!(synths[0].contains("Austin, Texas"));
+    // A well-formed turn ends with a single coalesced audio-stop.
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}
+
+/// System-1 fast path: a clear "set a timer for N" resolves on-device (a timer frame +
+/// spoken confirmation) without the LLM; an unclear timer request would defer. A
+/// panicking LLM proves System-2 is skipped. (plans/system1-fast-decisions.md, M3)
+#[tokio::test]
+async fn system1_timer_resolve_starts_timer_and_skips_the_llm() {
+    use anamanti_core::system1::mock::MockDecider;
+
+    struct PanicLlm;
+    #[async_trait]
+    impl LlmBackend for PanicLlm {
+        fn name(&self) -> &str {
+            "panic"
+        }
+        async fn respond(&self, _turn: LlmTurn) -> Result<ReplyStream> {
+            panic!("System-2 LLM must not run when System-1 resolves a clear timer");
+        }
+    }
+
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(PanicLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_system1(Arc::new(MockDecider::resolve("timer", 0.99)));
+
+    let connector = MockConnector::new("set a timer for 10 minutes");
+    let ((transcript, reply, kinds), _events) = run_one_turn(&pipeline, &connector).await;
+
+    assert_eq!(transcript, "set a timer for 10 minutes");
+    assert!(
+        kinds.iter().any(|k| k == types::TIMER),
+        "expected an anamanti-timer frame, got {kinds:?}"
+    );
+    assert_eq!(reply, "Timer set for 10 minutes.");
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}
+
+/// System-1 resolves a `time` clock query entirely from the wall clock: it speaks a
+/// short reply and never runs the LLM. (plans/system1-fast-decisions.md, M5.2)
+#[tokio::test]
+async fn system1_time_resolve_speaks_the_clock_and_skips_the_llm() {
+    use anamanti_core::system1::mock::MockDecider;
+
+    struct PanicLlm;
+    #[async_trait]
+    impl LlmBackend for PanicLlm {
+        fn name(&self) -> &str {
+            "panic"
+        }
+        async fn respond(&self, _turn: LlmTurn) -> Result<ReplyStream> {
+            panic!("System-2 LLM must not run when System-1 resolves a clock query");
+        }
+    }
+
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(PanicLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_system1(Arc::new(MockDecider::resolve("time", 0.99)));
+
+    let connector = MockConnector::new("what time is it");
+    let ((transcript, reply, kinds), _events) = run_one_turn(&pipeline, &connector).await;
+
+    assert_eq!(transcript, "what time is it");
+    assert!(
+        reply.starts_with("It's "),
+        "expected a spoken time reply, got {reply:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == types::AUDIO_START),
+        "expected TTS audio, got {kinds:?}"
+    );
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}
+
+/// An `LlmBackend` that panics if invoked — proves System-2 was skipped.
+struct PanicLlm;
+#[async_trait]
+impl LlmBackend for PanicLlm {
+    fn name(&self) -> &str {
+        "panic"
+    }
+    async fn respond(&self, _turn: LlmTurn) -> Result<ReplyStream> {
+        panic!("System-2 LLM must not run when System-1 resolves");
+    }
+}
+
+/// A pipeline whose System-2 LLM panics and whose System-1 always resolves `intent`.
+fn panic_llm_system1(intent: &str) -> Pipeline {
+    use anamanti_core::system1::mock::MockDecider;
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    Pipeline::new(
+        Arc::new(PanicLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_system1(Arc::new(MockDecider::resolve(intent, 0.99)))
+}
+
+/// Drive a turn stamping an optional `screen` context block (e.g. active timers) on the
+/// audio-start, and report whether a follow-up `listen` frame was seen. Returns
+/// `(transcript, reply_text, tts_kinds, saw_listen)`.
+async fn drive_device_ctx(
+    io: DuplexStream,
+    screen: Option<serde_json::Value>,
+) -> (String, String, Vec<String>, bool) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+
+    let mut start = WyomingEvent::audio_start(fmt, 0);
+    if let (Some(s), serde_json::Value::Object(map)) = (screen, &mut start.data) {
+        map.insert("screen".into(), s);
+    }
+    write_event(&mut writer, &start).await.unwrap();
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
+    )
+    .await
+    .unwrap();
+
+    let ev = read_event(&mut reader).await.unwrap().unwrap();
+    let transcript = ev.transcript_text().unwrap_or_default().to_string();
+    write_event(&mut writer, &WyomingEvent::audio_stop(40))
+        .await
+        .unwrap();
+
+    let mut reply = String::new();
+    let mut kinds = Vec::new();
+    let mut saw_listen = false;
+    while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if let Some(tok) = ev.reply_token_text() {
+            reply.push_str(tok);
+            continue;
+        }
+        if ev.event_type == types::LISTEN {
+            saw_listen = true;
+            continue;
+        }
+        let t = ev.event_type.clone();
+        kinds.push(t.clone());
+        if t == types::AUDIO_STOP {
+            break;
+        }
+    }
+    (transcript, reply, kinds, saw_listen)
+}
+
+/// Run a turn against `pipeline` with a device that stamps `screen` on its audio-start.
+async fn run_turn_with_screen(
+    pipeline: &Pipeline,
+    connector: &MockConnector,
+    screen: Option<serde_json::Value>,
+) -> (String, String, Vec<String>, bool) {
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let task = tokio::spawn(drive_device_ctx(dev_test, screen));
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        pipeline
+            .run_turn(&mut device, connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    task.await.unwrap()
+}
+
+/// `timer_cancel` cancels a running timer (ground truth from the reported context) and
+/// speaks a confirmation, skipping the LLM. (plans/system1-fast-decisions.md, M5.2)
+#[tokio::test]
+async fn system1_timer_cancel_cancels_running_timer_and_skips_the_llm() {
+    let pipeline = panic_llm_system1("timer_cancel");
+    let connector = MockConnector::new("cancel my timer");
+    let screen = json!({ "timers": { "running": 1, "next_remaining_secs": 300 } });
+    let (transcript, reply, kinds, _listen) =
+        run_turn_with_screen(&pipeline, &connector, Some(screen)).await;
+
+    assert_eq!(transcript, "cancel my timer");
+    assert!(
+        kinds.iter().any(|k| k == types::TIMER),
+        "expected an anamanti-timer (cancel) frame, got {kinds:?}"
+    );
+    assert!(reply.contains("cancelled"), "got {reply:?}");
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}
+
+/// `timer_query` answers from the device-reported remaining time. (M5.2)
+#[tokio::test]
+async fn system1_timer_query_answers_from_reported_remaining() {
+    let pipeline = panic_llm_system1("timer_query");
+    let connector = MockConnector::new("how much time is left");
+    let screen = json!({ "timers": { "running": 1, "next_remaining_secs": 120 } });
+    let (_transcript, reply, kinds, _listen) =
+        run_turn_with_screen(&pipeline, &connector, Some(screen)).await;
+
+    assert!(
+        reply.contains("left"),
+        "expected a remaining-time reply, got {reply:?}"
+    );
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}
+
+/// The `stop_dismiss` ladder: a bare "stop" with a running timer cancels the timer. (M5.2)
+#[tokio::test]
+async fn system1_stop_dismiss_ladder_cancels_running_timer() {
+    let pipeline = panic_llm_system1("stop_dismiss");
+    let connector = MockConnector::new("stop");
+    let screen = json!({ "timers": { "running": 1, "next_remaining_secs": 300 } });
+    let (_transcript, _reply, kinds, _listen) =
+        run_turn_with_screen(&pipeline, &connector, Some(screen)).await;
+
+    assert!(
+        kinds.iter().any(|k| k == types::TIMER),
+        "stop with a running timer should cancel it, got {kinds:?}"
+    );
+}
+
+/// `end_session` ends the follow-up chain: a brief ack and NO `listen` frame, so the
+/// device returns to IDLE / wake-word-waiting. (M5.2)
+#[tokio::test]
+async fn system1_end_session_ends_chain_without_listen() {
+    let pipeline = panic_llm_system1("end_session");
+    let connector = MockConnector::new("that's all");
+    let (_transcript, reply, kinds, saw_listen) =
+        run_turn_with_screen(&pipeline, &connector, None).await;
+
+    assert_eq!(reply, "Okay.");
+    assert!(!saw_listen, "end_session must NOT reopen the mic");
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}
+
+/// The ground-truth veto: `stop_dismiss` with nothing active and no follow-up defers to
+/// System-2 rather than guessing. (M5.2)
+#[tokio::test]
+async fn system1_stop_dismiss_defers_when_nothing_active() {
+    use anamanti_core::system1::mock::MockDecider;
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline =
+        build_pipeline(memory).with_system1(Arc::new(MockDecider::resolve("stop_dismiss", 0.99)));
+    let connector = MockConnector::new("stop");
+    let ((transcript, reply, _kinds), _events) = run_one_turn(&pipeline, &connector).await;
+
+    assert_eq!(transcript, "stop");
+    // Veto → System-2 (the MockLlm echo) answers.
+    assert_eq!(reply, "You said: stop");
 }

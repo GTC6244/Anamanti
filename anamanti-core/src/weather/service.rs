@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use serde_json::{to_value as json_to_value, Value};
 
 use crate::directions::LiveHomeLocation;
-use crate::weather::{WeatherProvider, WeatherReport};
+use crate::weather::WeatherReport;
 use crate::wyoming::protocol::WyomingEvent;
 
 /// Serialize a report to the JSON `weather` payload carried in the frame; an empty
@@ -49,7 +49,11 @@ impl WeatherService {
     /// [`deregister`](Self::deregister) on close) and the receiver the connection task
     /// drains to write pushes out. If a report is already cached it is queued
     /// immediately so the device shows conditions without waiting for the next tick.
-    pub fn register(&self, _device_id: &str) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
+    pub fn register(
+        &self,
+        _device_id: &str,
+        _name: &str,
+    ) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         if let Some(report) = self.last.lock().unwrap().as_ref() {
             let _ = tx.send(WyomingEvent::weather_current(to_value(report)));
@@ -88,13 +92,14 @@ impl WeatherService {
 }
 
 /// Spawn the periodic ambient-weather push. Every `interval` it reads the live home
-/// location, fetches current conditions from `provider`, and broadcasts them to all
-/// connected weather channels. No-ops on a tick when no location is set or the fetch
-/// fails (the previous report stays on screen). Returns immediately; the task runs for
-/// the process lifetime.
+/// location, builds the *currently selected* forecast provider from `settings` (so a
+/// config-page provider/key change retargets the push without a restart), fetches current
+/// conditions, and broadcasts them to all connected weather channels. No-ops on a tick
+/// when no location is set, weather is disabled, or the fetch fails (the previous report
+/// stays on screen). Returns immediately; the task runs for the process lifetime.
 pub fn spawn_periodic(
     service: Arc<WeatherService>,
-    provider: Arc<dyn WeatherProvider>,
+    settings: Arc<crate::settings::SharedSettings>,
     home_location: LiveHomeLocation,
     imperial: bool,
     interval: Duration,
@@ -103,8 +108,11 @@ pub fn spawn_periodic(
         // A tiny initial delay lets the device dial its channel before the first push.
         tokio::time::sleep(Duration::from_secs(2)).await;
         loop {
-            match home_location.get() {
-                Some(loc) => match provider.fetch(&loc, imperial).await {
+            match (home_location.get(), settings.current_weather_provider()) {
+                (Some(loc), Some(provider)) => match provider
+                    .fetch(&loc, imperial, crate::weather::ForecastWhen::Now)
+                    .await
+                {
                     Ok(report) => {
                         let n = service.broadcast(&report);
                         log::debug!(
@@ -115,7 +123,8 @@ pub fn spawn_periodic(
                     }
                     Err(e) => log::warn!("weather push: fetch failed: {e:#}"),
                 },
-                None => log::debug!("weather push: no home location set; skipping tick"),
+                (None, _) => log::debug!("weather push: no home location set; skipping tick"),
+                (_, None) => log::debug!("weather push: weather disabled; skipping tick"),
             }
             tokio::time::sleep(interval).await;
         }
@@ -132,12 +141,14 @@ mod tests {
         WeatherReport {
             location_label: "Austin, Texas".into(),
             units: "imperial".into(),
+            when_label: String::new(),
             current: CurrentConditions {
                 temp: 72,
                 description: "partly cloudy".into(),
                 ..Default::default()
             },
-            daily: Vec::new(),
+            hourly: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -146,8 +157,8 @@ mod tests {
         let svc = WeatherService::new();
         assert_eq!(svc.connected(), 0);
 
-        let (id_a, mut rx_a) = svc.register("dev-a");
-        let (_id_b, rx_b) = svc.register("dev-b");
+        let (id_a, mut rx_a) = svc.register("dev-a", "Kitchen");
+        let (_id_b, rx_b) = svc.register("dev-b", "Bedroom");
         assert_eq!(svc.connected(), 2);
 
         drop(rx_b);
@@ -166,7 +177,7 @@ mod tests {
     fn a_new_channel_gets_the_last_report_immediately() {
         let svc = WeatherService::new();
         svc.broadcast(&report()); // caches, nobody connected yet
-        let (_id, mut rx) = svc.register("late");
+        let (_id, mut rx) = svc.register("late", "");
         let got = rx
             .try_recv()
             .expect("late joiner replayed the cached report");

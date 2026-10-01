@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 
-use anamanti_core::config::{Config, MemoryBackendChoice};
+use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind, VadEngineKind};
 use anamanti_core::discovery::MdnsAdvertiser;
 use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
 use anamanti_core::notify::NotificationService;
@@ -50,7 +50,11 @@ fn main() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        // Millisecond timestamps: turn latency is measured in sub-second deltas, so
+        // whole-second stamps hide where a turn actually spends its time.
+        .format_timestamp_millis()
+        .init();
 
     let cli = parse_cli().context("parsing command-line arguments")?;
     let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
@@ -70,6 +74,11 @@ async fn run() -> Result<()> {
     // 404 (transcript shows, no reply). Surface it loudly at boot, and fall back
     // to an installed model so the assistant still responds.
     ensure_ollama_model(&mut config).await;
+
+    // Install the per-tool response-cache TTLs process-wide before any provider is built
+    // or any turn runs, so weather (and future opted-in tools) cache per their configured
+    // TTL (`tool_cache` in the config; weather defaults to 60 min).
+    anamanti_core::cache::set_config(config.tool_cache.clone());
 
     let memory = Arc::new(MemoryStore::open(&config.db_path).context("opening memory store")?);
     log::info!("memory store holds {} entries", memory.count()?);
@@ -121,6 +130,24 @@ async fn run() -> Result<()> {
         }
     }
 
+    // System-1 fast-decision engine (plans/system1-fast-decisions.md). Default `none`
+    // (disabled) reproduces today's behavior; a bad/unimplemented backend fails loudly
+    // at boot rather than silently.
+    // System-1 fast-decision engine was built inside `shared_settings` (config seed +
+    // persisted overlay) and lives in the runtime-swappable settings, so it can be
+    // changed live from the config page. Log the selected backend.
+    log::info!(
+        "system1 decision engine: {}",
+        settings.system1_view().backend
+    );
+
+    // Forecast provider (Visual Crossing by default, keyless Open-Meteo fallback),
+    // built from the live settings so it honors the configured provider + key. Shared
+    // by the System-1 weather fast path (wired onto the pipeline below). `None` when
+    // weather is disabled. The ambient push rebuilds its own provider each tick from
+    // live settings so a config-page provider/key switch retargets it without restart.
+    let weather_provider = settings.current_weather_provider();
+
     let mut pipeline = Pipeline::with_settings(
         settings,
         memory,
@@ -130,7 +157,8 @@ async fn run() -> Result<()> {
     .with_chatlog(chatlog.clone())
     .with_promptlog(promptlog.clone())
     .with_follow_up(config.follow_up.clone())
-    .with_audio_dump(config.audio_dump_dir.clone());
+    .with_audio_dump(config.audio_dump_dir.clone())
+    .with_weather(weather_provider.clone());
     // Home location + household roster are grounded from the runtime settings
     // snapshot each turn (seeded from the config file's home_location at boot, then
     // editable from the config dashboard's Household tab), not fixed onto the pipeline.
@@ -138,14 +166,20 @@ async fn run() -> Result<()> {
     // Read-only handle onto the GraphRAG store for the debug GUI (`/helix`); stays
     // `None` on the SQLite backend or when the graph backend fails to initialize.
     let mut graph_view: Option<Arc<dyn GraphView>> = None;
+    // The live-swappable GraphRAG controller (embedding-backend hot-swap from the
+    // config page). `None` on the SQLite backend or when GraphRAG init fails.
+    let mut graphrag: Option<Arc<anamanti_core::memory::GraphRagController>> = None;
 
     // Memory retrieval backend: SQLite FTS (default) or embedded HelixDB GraphRAG.
     if config.memory_backend == MemoryBackendChoice::Helix {
-        match build_graphrag_recall(&config, &chatlog).await {
-            Ok((recall, graph)) => {
+        match anamanti_core::memory::GraphRagController::start(&config, &chatlog).await {
+            Ok(ctrl) => {
                 log::info!("memory backend: HelixDB GraphRAG (embedded, in-process)");
-                pipeline = pipeline.with_recall(recall);
-                graph_view = Some(graph);
+                // The orchestrator and the debug GUI hold swappable proxies, so a
+                // config-page backend switch retargets them without a restart.
+                pipeline = pipeline.with_recall(ctrl.recall());
+                graph_view = Some(ctrl.graph_view());
+                graphrag = Some(ctrl);
             }
             Err(e) => {
                 log::error!("GraphRAG init failed ({e:#}); falling back to SQLite FTS recall");
@@ -168,6 +202,87 @@ async fn run() -> Result<()> {
         }
     }
 
+    // STT engine selection (plans/python-to-rust-whisper.md). Default: the downstream
+    // Wyoming Whisper server dialed via the connector below. `whisper-rs` loads
+    // whisper.cpp in-process and needs the `stt-whisper-local` build feature.
+    match config.stt.engine {
+        SttEngineKind::Wyoming => {
+            log::info!(
+                "STT engine: wyoming (downstream Whisper at {})",
+                config.stt_addr
+            );
+        }
+        SttEngineKind::WhisperLocal => {
+            #[cfg(feature = "stt-whisper-local")]
+            {
+                let model = config.stt.resolved_model_path();
+                let model_str = model.to_string_lossy().into_owned();
+                let engine = anamanti_core::stt::WhisperEngine::open(
+                    &model_str,
+                    config.stt.language.clone(),
+                    config.stt.num_threads as i32,
+                )
+                .with_context(|| format!("loading in-process Whisper model {model_str}"))?;
+                log::info!(
+                    "STT engine: whisper-rs (in-process; model {model_str}, {} threads)",
+                    config.stt.num_threads
+                );
+                pipeline = pipeline
+                    .with_stt_engine(Arc::new(anamanti_core::stt::WhisperSttEngine::new(engine)));
+            }
+            #[cfg(not(feature = "stt-whisper-local"))]
+            {
+                anyhow::bail!(
+                    "config selects stt.engine = whisper-rs, but this binary was built \
+                     without the `stt-whisper-local` feature; rebuild with \
+                     `--features stt-whisper-local`"
+                );
+            }
+        }
+    }
+
+    // End-of-speech VAD engine (plans/VadSileroPlan.md). The engine is runtime-swappable
+    // from the config page / device (energy ⇄ silero), so on a `vad-silero` build we load
+    // the Silero model whenever it's available — even when the boot engine is energy — so
+    // a later swap works without a restart. `silero` needs the `vad-silero` feature + a
+    // model file; loading is fatal only when the *seeded* engine is already silero (a
+    // misconfigured production start should fail loud, not silently run energy). The
+    // seeded engine already reflects the config seed overlaid by any persisted value.
+    let seeded_vad = pipeline.settings().snapshot().vad_engine;
+    #[cfg(feature = "vad-silero")]
+    {
+        let model_path = config.vad.silero.model_path.clone();
+        let want_silero = matches!(seeded_vad, VadEngineKind::Silero);
+        match anamanti_core::vad::SileroModel::load(&model_path) {
+            Ok(model) => {
+                log::info!(
+                    "Silero VAD model loaded ({}); engine is live-swappable",
+                    model_path.display()
+                );
+                pipeline = pipeline.with_silero(model);
+            }
+            Err(e) if want_silero => {
+                return Err(e)
+                    .with_context(|| format!("loading Silero VAD model {}", model_path.display()));
+            }
+            Err(e) => {
+                log::warn!(
+                    "Silero VAD model unavailable ({e:#}); energy VAD only — a runtime swap \
+                     to silero will fall back until a model exists at {}",
+                    model_path.display()
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "vad-silero"))]
+    if matches!(seeded_vad, VadEngineKind::Silero) {
+        anyhow::bail!(
+            "vad.engine = silero, but this binary was built without the `vad-silero` \
+             feature; rebuild with `--features vad-silero`"
+        );
+    }
+    log::info!("VAD engine (boot): {}", seeded_vad.as_label());
+
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
         stt_addr: config.stt_addr,
         tts_addr: config.tts_addr,
@@ -186,24 +301,28 @@ async fn run() -> Result<()> {
     // config page (whose "Notify" tab can push a test notification).
     let notify = Arc::new(NotificationService::new());
 
-    // Ambient weather push (keyless Open-Meteo): the registry of persistent weather
-    // channels the device dials, plus a periodic task that fetches current conditions
-    // for the household location and fans them out so the icon + temperature beside the
-    // idle clock stay fresh. Dormant (no task) when weather is disabled in the config.
+    // Ambient weather push: the registry of persistent weather channels the device
+    // dials, plus a periodic task that fetches current conditions for the household
+    // location and fans them out so the icon + temperature beside the idle clock stay
+    // fresh. The provider is Visual Crossing by default (keyless Open-Meteo fallback).
+    // Dormant (no task) when weather is disabled in the config.
     let weather_svc = Arc::new(WeatherService::new());
-    if let Some(provider) = anamanti_core::weather::from_config(config.weather.enabled) {
+    if config.weather.enabled {
         let imperial =
             anamanti_core::directions::units_are_imperial(config.weather_units.as_deref());
+        // The push builds its provider from the live settings each tick, so a config-page
+        // provider/key switch retargets it without a restart.
         anamanti_core::weather::service::spawn_periodic(
             weather_svc.clone(),
-            provider,
+            pipeline.settings().clone(),
             pipeline.settings().home_location(),
             imperial,
             config.weather.refresh_interval(),
         );
         log::info!(
-            "weather push: every {}s (imperial={imperial})",
-            config.weather.refresh_interval().as_secs()
+            "weather push: every {}s (imperial={imperial}, provider={})",
+            config.weather.refresh_interval().as_secs(),
+            config.weather.provider,
         );
     }
 
@@ -214,6 +333,7 @@ async fn run() -> Result<()> {
         let voices_dir = config.tts_voices_dir.clone();
         let music = music_hub.clone();
         let notify = notify.clone();
+        let graphrag = graphrag.clone();
         let debug = DebugSources {
             memory: pipeline.memory().clone(),
             chatlog_path: config.chatlog_path.clone(),
@@ -237,6 +357,7 @@ async fn run() -> Result<()> {
                 tokio::spawn(async move {
                     if let Err(e) = webconfig::serve(
                         listener, settings, catalog, connector, voices_dir, debug, music, notify,
+                        graphrag,
                     )
                     .await
                     {
@@ -373,72 +494,4 @@ async fn ensure_ollama_model(config: &mut Config) {
              (turns will fail if it isn't installed)"
         ),
     }
-}
-
-/// Build the HelixDB GraphRAG recall backend and spawn the background ingester.
-/// Requires `OPENAI_API_KEY` (embeddings); `ANTHROPIC_API_KEY` enables Claude
-/// Haiku entity extraction (absent → pure-vector recall).
-async fn build_graphrag_recall(
-    config: &Config,
-    chatlog: &Arc<ChatLog>,
-) -> Result<(Arc<dyn anamanti_core::memory::Recall>, Arc<dyn GraphView>)> {
-    use anamanti_core::memory::embed::{Embedder, OpenAiEmbedder};
-    use anamanti_core::memory::entity::{
-        AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor,
-    };
-    use anamanti_core::memory::helix::HelixMemory;
-    use anamanti_core::memory::ingester::MemoryIngester;
-    use anamanti_core::memory::HelixRecall;
-
-    let g = &config.graphrag;
-    let openai_key = std::env::var("OPENAI_API_KEY")
-        .context("memory_backend=\"helix\" requires OPENAI_API_KEY for embeddings")?;
-    let embedder: Arc<dyn Embedder> = Arc::new(OpenAiEmbedder::new(
-        g.openai_base_url.clone(),
-        openai_key,
-        g.embed_model.clone(),
-        g.embed_dims,
-    ));
-
-    let helix = Arc::new(
-        HelixMemory::open_disk(config.helix_path.clone(), "ambient", embedder.dimensions())
-            .await
-            .context("opening embedded HelixDB store")?,
-    );
-    log::info!(
-        "HelixDB store at {} ({} nodes)",
-        config.helix_path.display(),
-        helix.node_count().await.unwrap_or(0)
-    );
-
-    let extractor: Arc<dyn EntityExtractor> = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => Arc::new(AnthropicEntityExtractor::new(
-            g.anthropic_base_url.clone(),
-            key,
-            g.extract_model.clone(),
-        )),
-        _ => {
-            log::warn!(
-                "ANTHROPIC_API_KEY absent; entity extraction disabled (recall is pure vector KNN)"
-            );
-            Arc::new(NoopEntityExtractor)
-        }
-    };
-
-    let ingester = Arc::new(MemoryIngester::new(
-        chatlog.path().to_path_buf(),
-        helix.clone(),
-        embedder.clone(),
-        extractor,
-    ));
-    ingester.spawn(g.ingest_interval);
-    log::info!(
-        "background memory ingester running every {}s",
-        g.ingest_interval.as_secs()
-    );
-
-    let recall: Arc<dyn anamanti_core::memory::Recall> =
-        Arc::new(HelixRecall::new(helix.clone(), embedder, g.recall_k));
-    let graph: Arc<dyn GraphView> = helix;
-    Ok((recall, graph))
 }

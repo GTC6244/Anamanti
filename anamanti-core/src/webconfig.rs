@@ -40,15 +40,17 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::config::EmbedBackend;
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
-use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
+use crate::memory::{chatlog, promptlog, GraphRagController, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
 use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
-    LlmEngine, SettingsUpdate, SharedSettings, SpotifyUpdate,
+    LlmEngine, PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update,
+    WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -164,6 +166,11 @@ fn sidebar_html(active: &str) -> String {
                     r##"<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>"##,
                 ),
                 (
+                    "/system1",
+                    "System-1",
+                    r##"<path d="M13 2L3 14h9l-1 8 10-12h-9z"/>"##,
+                ),
+                (
                     "/notifications",
                     "Notify",
                     r##"<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>"##,
@@ -183,6 +190,11 @@ fn sidebar_html(active: &str) -> String {
         (
             "Memory",
             &[
+                (
+                    "/embeddings",
+                    "Embeddings",
+                    r##"<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5L19 19M19 5l-2.5 2.5M7.5 16.5L5 19"/>"##,
+                ),
                 (
                     "/sqlite",
                     "SQLite",
@@ -297,6 +309,8 @@ const NOTIFY_BODY: &str = include_str!("webconfig/notifications.html");
 /// people who live here with their emails + phone numbers. A full-record save. Uses
 /// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
 const HOUSEHOLD_BODY: &str = include_str!("webconfig/household.html");
+const SYSTEM1_BODY: &str = include_str!("webconfig/system1.html");
+const EMBEDDINGS_BODY: &str = include_str!("webconfig/embeddings.html");
 
 /// Cap on request bytes we buffer before the body — a config request is tiny; this
 /// just bounds a misbehaving/hostile client on the (unauthenticated) socket.
@@ -314,6 +328,7 @@ pub async fn serve(
     debug: DebugSources,
     music: Option<MusicHub>,
     notify: Arc<NotificationService>,
+    graphrag: Option<Arc<GraphRagController>>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -324,9 +339,10 @@ pub async fn serve(
         let debug = debug.clone();
         let music = music.clone();
         let notify = notify.clone();
+        let graphrag = graphrag.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(
-                stream, settings, catalog, connector, voices_dir, debug, music, notify,
+                stream, settings, catalog, connector, voices_dir, debug, music, notify, graphrag,
             )
             .await
             {
@@ -348,6 +364,7 @@ async fn handle(
     debug: DebugSources,
     music: Option<MusicHub>,
     notify: Arc<NotificationService>,
+    graphrag: Option<Arc<GraphRagController>>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
@@ -438,11 +455,90 @@ async fn handle(
         )
         .await;
     }
+    // Weather tool status — the selected provider + whether a Visual Crossing key is set
+    // (never the key), and whether the weather feature is enabled at all.
+    if method == "GET" && path == "/tools/weather/status.json" {
+        let payload = weather_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the weather provider + Visual Crossing key (rebuilds the tool + retargets the
+    // ambient push live).
+    if method == "POST" && path == "/tools/weather/save" {
+        let payload = weather_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Places tool status — whether a Google Places key is set (never the key).
+    if method == "GET" && path == "/tools/places/status.json" {
+        let payload = places_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the Google Places key for the places tool (rebuilds the tool set live).
+    if method == "POST" && path == "/tools/places/save" {
+        let payload = places_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+
+    // System-1 fast-decision engine: current selection + a live swap (rebuilds the
+    // engine, persists, takes effect on the next turn).
+    if method == "GET" && path == "/system1/status.json" {
+        let payload = system1_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    if method == "POST" && path == "/system1/save" {
+        let payload = system1_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+
+    // Embedding backend: current selection + a live hot-swap (rebuilds the embedder +
+    // per-backend HelixDB store + ingester and swaps them in with no restart). Needs the
+    // async controller, so handled here rather than in the pure `route` function.
+    if method == "GET" && path == "/embeddings/status.json" {
+        let payload = embeddings_status_json(graphrag.as_ref()).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    if method == "POST" && path == "/embeddings/switch" {
+        let payload = embeddings_switch_json(graphrag.as_ref(), &body).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
 
     // Proactive notifications: how many device notify channels are connected, and a
     // button to push a test notification down them (Approach A, visual-only).
     if method == "GET" && path == "/notifications/status.json" {
-        let payload = json!({ "connected": notify.connected() }).to_string();
+        let payload = json!({
+            "connected": notify.connected(),
+            "devices": notify.connected_devices(),
+        })
+        .to_string();
         return write_response(
             &mut stream,
             "200 OK",
@@ -895,6 +991,154 @@ fn directions_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     directions_status_json(settings)
 }
 
+/// `GET /tools/weather/status.json` — the weather tool state for the `/tools` page.
+/// Reports the selected provider, whether a Visual Crossing key is set (never the key),
+/// whether weather is enabled, and whether Visual Crossing is effectively active (it is
+/// selected and a key is present; otherwise the tool falls back to keyless Open-Meteo).
+fn weather_status_json(settings: &SharedSettings) -> String {
+    let provider = settings.weather_provider_label();
+    let key_set = settings.visualcrossing_key_set();
+    let enabled = settings.weather_enabled();
+    // Which backend actually serves requests, mirroring `weather::from_config`.
+    let effective = if !enabled {
+        "disabled"
+    } else if provider == "openmeteo" || provider == "open-meteo" || provider == "open_meteo" {
+        "openmeteo"
+    } else if key_set {
+        "visualcrossing"
+    } else {
+        "openmeteo" // visualcrossing selected but no key → keyless fallback
+    };
+    json!({
+        "ok": true,
+        "provider": provider,
+        "key_set": key_set,
+        "enabled": enabled,
+        "effective": effective,
+    })
+    .to_string()
+}
+
+/// Current System-1 selection for the config page. Never returns the OpenRouter key,
+/// only whether one is set.
+fn system1_status_json(settings: &SharedSettings) -> String {
+    let v = settings.system1_view();
+    json!({
+        "ok": true,
+        "backend": v.backend,
+        "base_url": v.base_url,
+        "model": v.model,
+        "min_confidence": v.min_confidence,
+        "openrouter_key_set": v.openrouter_key_set,
+        "intents": v.intents,
+        "active": v.backend != "none",
+    })
+    .to_string()
+}
+
+/// `POST /tools/weather/save` — set the weather provider and/or Visual Crossing key.
+/// `provider` (when present) switches the backend; a blank/absent `visualcrossing_key` is
+/// left unchanged (a page reload never wipes the stored key), while an explicit
+/// `"clear": true` clears it. Rebuilds the tool + retargets the ambient push live.
+fn weather_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let provider = data
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let clear = data.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let visualcrossing_key = if clear {
+        Some(None)
+    } else {
+        match data.get("visualcrossing_key").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+            _ => None,
+        }
+    };
+    settings.apply_weather_tool(&WeatherToolUpdate {
+        provider,
+        visualcrossing_key,
+    });
+    weather_status_json(settings)
+}
+
+/// `GET /tools/places/status.json` — the places tool state for the `/tools` page.
+/// Reports only whether a Google Places key is set (never the key) and whether the
+/// `places_lookup` tool is therefore active (no keyless fallback).
+fn places_status_json(settings: &SharedSettings) -> String {
+    let key_set = settings.google_places_key_set();
+    json!({
+        "ok": true,
+        "key_set": key_set,
+        "tool_active": key_set,
+    })
+    .to_string()
+}
+
+/// `POST /tools/places/save` — set the Google Places key for the places tool. A
+/// blank/absent key is left unchanged (a page reload never wipes the stored key), while an
+/// explicit `"clear": true` clears it (withdrawing the tool). Rebuilds the backend so
+/// `places_lookup` activates/withdraws live.
+fn places_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let clear = data.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let google_places_key = if clear {
+        Some(None)
+    } else {
+        match data.get("google_places_key").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+            _ => None,
+        }
+    };
+    settings.apply_places_tool(&PlacesToolUpdate { google_places_key });
+    places_status_json(settings)
+}
+
+/// Apply a System-1 selection from the config page (rebuilds the engine live + persists).
+/// A blank `openrouter_api_key` means "leave unchanged" (never shown back). On a build
+/// failure (e.g. unknown backend) the current engine is left untouched and the error is
+/// returned.
+fn system1_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let opt_str = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+    };
+    let update = System1Update {
+        backend: opt_str("backend").filter(|s| !s.is_empty()),
+        base_url: opt_str("base_url").filter(|s| !s.is_empty()),
+        model: opt_str("model").filter(|s| !s.is_empty()),
+        min_confidence: data.get("min_confidence").and_then(Value::as_f64),
+        // Blank = keep the current key (it is never echoed back to the page).
+        openrouter_api_key: match data.get("openrouter_api_key").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+            _ => None,
+        },
+        intents: None,
+    };
+    match settings.apply_system1(&update) {
+        Ok(_) => system1_status_json(settings),
+        Err(e) => json!({ "ok": false, "message": format!("{e:#}") }).to_string(),
+    }
+}
+
 /// `GET /household/status.json` — the canonical household record (home location +
 /// units + roster). Contact details are shown so they can be edited on the page;
 /// this surface is loopback + unauthenticated by design (same as the rest).
@@ -1221,13 +1465,15 @@ fn spotify_status_json(settings: &SharedSettings) -> String {
         "client_secret_set": s.client_secret.as_deref().is_some_and(|v| !v.is_empty()),
         "has_refresh_token": s.refresh_token.as_deref().is_some_and(|v| !v.is_empty()),
         "device_name": s.device_label(),
+        "redirect_url": s.redirect_url_or_default(),
     })
     .to_string()
 }
 
-/// `POST /spotify/save` — set the Spotify app client id/secret and device name. A
-/// blank or absent credential is left unchanged (a page reload never wipes a stored
-/// secret). Applying rebuilds the LLM so the `spotify_control` tool tracks linkage.
+/// `POST /spotify/save` — set the Spotify app client id/secret, device name, and OAuth
+/// redirect URL. A blank or absent value is left unchanged (a page reload never wipes a
+/// stored secret). Applying rebuilds the LLM so the `spotify_control` tool tracks
+/// linkage.
 fn spotify_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     let data: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -1244,6 +1490,7 @@ fn spotify_save_json(settings: &SharedSettings, body: &[u8]) -> String {
         client_id: opt_set("client_id"),
         client_secret: opt_set("client_secret"),
         device_name: opt_set("device_name"),
+        redirect_url: opt_set("redirect_url"),
         ..Default::default()
     });
     spotify_status_json(settings)
@@ -1251,8 +1498,9 @@ fn spotify_save_json(settings: &SharedSettings, body: &[u8]) -> String {
 
 /// `POST /spotify/link` — run the one-time Spotify OAuth consent using the stored
 /// client credentials (opens a browser on the Mac) and store the refresh token.
-/// Requires the redirect `http://127.0.0.1:8888/callback` to be registered in the
-/// Spotify app. On success the `spotify_control` tool activates immediately.
+/// Requires the configured redirect URL (default `http://127.0.0.1:8888/callback`) to
+/// be registered in the Spotify app. On success the `spotify_control` tool activates
+/// immediately.
 async fn spotify_link_json(settings: &SharedSettings) -> String {
     let s = settings.spotify();
     let (Some(cid), Some(secret)) = (
@@ -1265,10 +1513,11 @@ async fn spotify_link_json(settings: &SharedSettings) -> String {
         })
         .to_string();
     };
+    let redirect_url = s.redirect_url_or_default();
     let outcome = match crate::spotify_consent::run_consent(
         &cid,
         &secret,
-        crate::spotify_consent::DEFAULT_CONSENT_PORT,
+        &redirect_url,
         crate::spotify_consent::SPOTIFY_SCOPE,
         std::time::Duration::from_secs(180),
     )
@@ -1476,6 +1725,63 @@ fn appsaid_token_json(settings: &SharedSettings, body: &[u8]) -> String {
 
 /// Pure request router: maps `(method, target, body)` to a response. Kept free of
 /// I/O so it is unit-testable against a [`SharedSettings`].
+/// Current embedding-backend status for the Embeddings page. `available:false` when
+/// GraphRAG memory isn't active (SQLite backend, or init failed at boot).
+async fn embeddings_status_json(graphrag: Option<&Arc<GraphRagController>>) -> String {
+    match graphrag {
+        None => json!({
+            "available": false,
+            "reason": "GraphRAG memory is not active (memory_backend is sqlite, or init failed at boot)",
+        })
+        .to_string(),
+        Some(ctrl) => embed_status_payload(true, &ctrl.status().await, None),
+    }
+}
+
+/// Hot-swap the embedding backend from a `{ "backend": "local"|"openai" }` body.
+async fn embeddings_switch_json(graphrag: Option<&Arc<GraphRagController>>, body: &[u8]) -> String {
+    let Some(ctrl) = graphrag else {
+        return json!({ "ok": false, "error": "GraphRAG memory is not active" }).to_string();
+    };
+    let backend = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v["backend"].as_str().map(str::to_string));
+    let target = match backend.as_deref() {
+        Some("local") | Some("nomic") => EmbedBackend::Local,
+        Some("openai") => EmbedBackend::OpenAi,
+        Some(other) => {
+            return json!({ "ok": false, "error": format!("unknown backend {other:?}") })
+                .to_string()
+        }
+        None => {
+            return json!({ "ok": false, "error": "missing 'backend' (local|openai)" }).to_string()
+        }
+    };
+    match ctrl.switch(target).await {
+        Ok(status) => embed_status_payload(true, &status, Some(true)),
+        Err(e) => json!({ "ok": false, "error": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// Shared JSON shape for the status + switch responses.
+fn embed_status_payload(
+    available: bool,
+    s: &crate::memory::EmbedStatus,
+    ok: Option<bool>,
+) -> String {
+    let mut v = json!({
+        "available": available,
+        "active": s.active,
+        "dims": s.dims,
+        "local": { "available": s.local_available, "detail": s.local_detail.clone() },
+        "openai": { "available": s.openai_available, "detail": s.openai_detail.clone() },
+    });
+    if let Some(ok) = ok {
+        v["ok"] = json!(ok);
+    }
+    v.to_string()
+}
+
 fn route(
     method: &str,
     target: &str,
@@ -1513,6 +1819,16 @@ fn route(
             "200 OK",
             "text/html; charset=utf-8",
             page("/tools", "Tools", TOOLS_BODY).into_bytes(),
+        ),
+        ("GET", "/system1") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/system1", "System-1", SYSTEM1_BODY).into_bytes(),
+        ),
+        ("GET", "/embeddings") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/embeddings", "Embeddings", EMBEDDINGS_BODY).into_bytes(),
         ),
         ("GET", "/notifications") => (
             "200 OK",
@@ -1604,6 +1920,8 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "search_key_set": v.search_key_set,
         "end_silence_ms": v.end_silence_ms,
         "voice_rms_threshold": v.voice_rms_threshold,
+        "silero_threshold": v.silero_threshold,
+        "vad_engine": v.vad_engine.as_label(),
     })
     .to_string()
 }
@@ -1669,6 +1987,14 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         search_api_key,
         end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
         voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
+        silero_threshold: data
+            .get("silero_threshold")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
+        vad_engine: data
+            .get("vad_engine")
+            .and_then(Value::as_str)
+            .and_then(crate::config::VadEngineKind::from_label),
     }
 }
 
@@ -1961,6 +2287,21 @@ mod tests {
     }
 
     #[test]
+    fn get_system1_page_renders_with_nav_and_status_reports_default() {
+        let s = settings();
+        let (status, ctype, body) = route("GET", "/system1", b"", &s);
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Decision engine"), "system1 page body");
+        assert!(html.contains("href=\"/system1\""), "nav links system1");
+        // The status endpoint reports the default disabled engine.
+        let json = system1_status_json(&s);
+        assert!(json.contains("\"backend\":\"none\""), "status: {json}");
+        assert!(json.contains("\"active\":false"), "status: {json}");
+    }
+
+    #[test]
     fn drive_status_reports_unconfigured_by_default() {
         let v: Value = serde_json::from_str(&drive_status_json(&settings())).unwrap();
         assert_eq!(v["ok"], true);
@@ -2069,6 +2410,44 @@ mod tests {
         // A page reload posting a blank token must not wipe the stored one.
         directions_save_json(&s, br#"{"mapbox_token":""}"#);
         assert!(s.mapbox_token_set());
+    }
+
+    #[test]
+    fn weather_save_switches_provider_and_hides_the_key() {
+        let s = settings();
+        let before: Value = serde_json::from_str(&weather_status_json(&s)).unwrap();
+        assert_eq!(before["provider"], "visualcrossing");
+        assert_eq!(before["key_set"], false);
+
+        // Set a Visual Crossing key — never echoed back.
+        let out = weather_save_json(
+            &s,
+            br#"{"provider":"visualcrossing","visualcrossing_key":"vc-secret"}"#,
+        );
+        assert!(!out.contains("vc-secret"), "key leaked: {out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["provider"], "visualcrossing");
+        assert_eq!(v["key_set"], true);
+        assert!(s.visualcrossing_key_set());
+
+        // Switch provider to Open-Meteo; the key is retained (blank field = keep).
+        let v: Value =
+            serde_json::from_str(&weather_save_json(&s, br#"{"provider":"openmeteo"}"#)).unwrap();
+        assert_eq!(v["provider"], "openmeteo");
+        assert!(s.visualcrossing_key_set());
+
+        // A page reload posting a blank key must not wipe the stored one.
+        weather_save_json(&s, br#"{"provider":"openmeteo","visualcrossing_key":""}"#);
+        assert!(s.visualcrossing_key_set());
+
+        // Explicit clear removes it.
+        let v: Value = serde_json::from_str(&weather_save_json(
+            &s,
+            br#"{"provider":"visualcrossing","clear":true}"#,
+        ))
+        .unwrap();
+        assert_eq!(v["key_set"], false);
+        assert!(!s.visualcrossing_key_set());
     }
 
     #[test]
@@ -2272,6 +2651,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();
@@ -2402,6 +2782,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();
@@ -2441,6 +2822,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();
@@ -2489,6 +2871,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();

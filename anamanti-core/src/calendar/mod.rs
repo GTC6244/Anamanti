@@ -93,7 +93,7 @@ impl IcalSubscription {
 
     /// Like [`new`](Self::new) but with an explicit cache TTL.
     pub fn with_ttl(specs: Vec<CalendarSpec>, ttl: StdDuration) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http::tuned_builder()
             .timeout(StdDuration::from_secs(10))
             .user_agent("anamanti-core/0.1 (calendar)")
             .build()

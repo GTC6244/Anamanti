@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level_diag`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`, `WeatherHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
 
@@ -16,6 +16,17 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 /// library loaded and the FRB bridge is live on the device.
 String engineGreeting({required String name}) =>
     RustLib.instance.api.crateApiEngineEngineGreeting(name: name);
+
+/// A stable per-device hardware id derived from the primary network interface's MAC
+/// address, formatted `anamanti-<12 lowercase hex>` (colons stripped) — e.g.
+/// `anamanti-140ac5942aca`. Reading the MAC from `/sys/class/net/<iface>/address`
+/// guarantees uniqueness across devices without any build-time configuration.
+///
+/// Returns an empty string if no usable MAC is found (an unreadable file, or an
+/// all-zero / locked-down `02:00:00:00:00:00` placeholder); the Dart layer then
+/// falls back to a persisted random id so the device still has a stable identity.
+String deviceHardwareId() =>
+    RustLib.instance.api.crateApiEngineDeviceHardwareId();
 
 /// Reports the native engine's version and build target so the device can show
 /// exactly which cross-compiled binary it is running.
@@ -33,6 +44,21 @@ Future<void> stopWakeWordEngine() =>
 /// Whether the wake-word engine is currently running.
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
+
+/// Live-adjust the capture gain (dB) and idle wake-word detection threshold on the
+/// **running** engine without restarting it, so the audio-diagnostics screen's
+/// sliders take effect instantly while the user watches the meters. The engine
+/// re-reads both values each audio block. They are re-seeded from [`WakeWordConfig`]
+/// on the next engine start, so persist the chosen values to settings to keep them
+/// across restarts. A harmless no-op when no engine is running. `gain_db` is clamped
+/// to `[0, 36]`; `threshold` to `[0, 1]`.
+void updateDiagnosticsTuning({
+  required double gainDb,
+  required double threshold,
+}) => RustLib.instance.api.crateApiEngineUpdateDiagnosticsTuning(
+  gainDb: gainDb,
+  threshold: threshold,
+);
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
 /// — so it resets the screen-dim countdown (and brightens the screen if it had
@@ -96,6 +122,24 @@ void setWeatherContext({
   description: description,
 );
 
+/// Report the place card's state as the device's **display context** so the next voice
+/// turn's `audio-start` carries it to the orchestrator, letting the LLM know a place card
+/// is up (and which place) so it can answer follow-ups in context or close it on request.
+/// The place card's setter for the general display-context mechanism (see
+/// [`set_weather_context`] / [`crate::engine::set_display_context`]).
+///
+/// Flutter calls this when the place card opens or closes. `active == false` clears the
+/// context (idle screen); the other fields are ignored.
+void setPlaceContext({
+  required bool active,
+  required String name,
+  required String address,
+}) => RustLib.instance.api.crateApiEngineSetPlaceContext(
+  active: active,
+  name: name,
+  address: address,
+);
+
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
 /// restarted when the pinned orchestrator changes). The channel dials the pinned
@@ -135,17 +179,23 @@ class NotifyConfig {
   /// orchestrator can key notifications per device (may be empty).
   final String deviceId;
 
+  /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+  /// `device_id` in the `anamanti-hello` frame so the Core can name it (may be empty).
+  final String deviceName;
+
   const NotifyConfig({
     required this.orchestratorKey,
     required this.discoveryTimeoutSecs,
     required this.deviceId,
+    required this.deviceName,
   });
 
   @override
   int get hashCode =>
       orchestratorKey.hashCode ^
       discoveryTimeoutSecs.hashCode ^
-      deviceId.hashCode;
+      deviceId.hashCode ^
+      deviceName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -154,7 +204,8 @@ class NotifyConfig {
           runtimeType == other.runtimeType &&
           orchestratorKey == other.orchestratorKey &&
           discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
-          deviceId == other.deviceId;
+          deviceId == other.deviceId &&
+          deviceName == other.deviceName;
 }
 
 /// One proactive notification pushed from the orchestrator, streamed to Flutter.
@@ -256,6 +307,16 @@ class WakeWordConfig {
   /// delivers audio faster than real-time playback drains it. A/B-tunable.
   final int playbackBufferSecs;
 
+  /// Software capture gain in **decibels**, applied to the 16 kHz mono audio right
+  /// after resampling — i.e. to both the wake-word detector input *and* the PCM
+  /// streamed to the Core. `0.0` (default) is unity/no-op. Positive values boost a
+  /// quiet far-field signal; it is the in-app, root-free analogue of the AEC shim's
+  /// `persist.vendor.amznaec.gain_db` makeup gain (which the sandboxed app cannot
+  /// set). Clamped to `[0, 36]` dB and the boosted signal is clamped back into i16
+  /// range so it never overflows the model input. A/B-tunable from the settings
+  /// screen. Applies on both the `cpal` and `AudioRecord` capture paths.
+  final double captureGainDb;
+
   /// **Android only.** Use the Kotlin `AudioRecord` capture layer instead of
   /// `cpal`, to reach the HAL's far-field `VOICE_RECOGNITION` source (array
   /// beamforming) + platform audio effects. `false` (default) keeps the `cpal`
@@ -309,6 +370,7 @@ class WakeWordConfig {
     required this.smoothingWindow,
     required this.fireOnPeak,
     required this.playbackBufferSecs,
+    required this.captureGainDb,
     required this.useAudiorecord,
     required this.micSource,
     required this.platformAec,
@@ -333,6 +395,7 @@ class WakeWordConfig {
       smoothingWindow.hashCode ^
       fireOnPeak.hashCode ^
       playbackBufferSecs.hashCode ^
+      captureGainDb.hashCode ^
       useAudiorecord.hashCode ^
       micSource.hashCode ^
       platformAec.hashCode ^
@@ -359,6 +422,7 @@ class WakeWordConfig {
           smoothingWindow == other.smoothingWindow &&
           fireOnPeak == other.fireOnPeak &&
           playbackBufferSecs == other.playbackBufferSecs &&
+          captureGainDb == other.captureGainDb &&
           useAudiorecord == other.useAudiorecord &&
           micSource == other.micSource &&
           platformAec == other.platformAec &&
@@ -392,8 +456,24 @@ class WakeWordEvent {
   /// Input RMS level (`Level`).
   final double rms;
 
-  /// Wake-word confidence in [0, 1] (`Detected`).
+  /// Wake-word confidence in [0, 1] — the raw current-block score (`Level`,
+  /// diagnostics) or the smoothed score that fired (`Detected`).
   final double score;
+
+  /// The smoothed score the detection gate actually tests (average, or peak in
+  /// peak mode) in [0, 1]. Carried on `Level` events so the audio-diagnostics
+  /// screen can show the value being compared against the threshold; 0 otherwise.
+  final double avgScore;
+
+  /// The wake-word detection threshold currently in effect in [0, 1] (the idle
+  /// threshold, or the raised active threshold during a turn). Carried on `Level`
+  /// events so the diagnostics meter can draw the firing line; 0 otherwise.
+  final double threshold;
+
+  /// The software capture gain in dB currently applied to the mic signal. Carried
+  /// on `Level` events so the diagnostics screen reflects live gain changes; 0
+  /// otherwise.
+  final double gainDb;
 
   /// Wake-word name that fired (`Detected`).
   final String model;
@@ -428,6 +508,10 @@ class WakeWordEvent {
   /// clock indicator.
   final String weatherJson;
 
+  /// The place report as a JSON string (`ShowPlace`); empty for every other kind. The
+  /// UI decodes it into the place card.
+  final String placeJson;
+
   /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
   /// scroll direction (`RecipeScroll`). Empty for every other kind.
   final String recipeAction;
@@ -440,6 +524,9 @@ class WakeWordEvent {
     required this.channels,
     required this.rms,
     required this.score,
+    required this.avgScore,
+    required this.threshold,
+    required this.gainDb,
     required this.model,
     required this.transcript,
     required this.reply,
@@ -449,6 +536,7 @@ class WakeWordEvent {
     required this.present,
     required this.recipeJson,
     required this.weatherJson,
+    required this.placeJson,
     required this.recipeAction,
   });
 
@@ -461,6 +549,9 @@ class WakeWordEvent {
       channels.hashCode ^
       rms.hashCode ^
       score.hashCode ^
+      avgScore.hashCode ^
+      threshold.hashCode ^
+      gainDb.hashCode ^
       model.hashCode ^
       transcript.hashCode ^
       reply.hashCode ^
@@ -470,6 +561,7 @@ class WakeWordEvent {
       present.hashCode ^
       recipeJson.hashCode ^
       weatherJson.hashCode ^
+      placeJson.hashCode ^
       recipeAction.hashCode;
 
   @override
@@ -484,6 +576,9 @@ class WakeWordEvent {
           channels == other.channels &&
           rms == other.rms &&
           score == other.score &&
+          avgScore == other.avgScore &&
+          threshold == other.threshold &&
+          gainDb == other.gainDb &&
           model == other.model &&
           transcript == other.transcript &&
           reply == other.reply &&
@@ -493,6 +588,7 @@ class WakeWordEvent {
           present == other.present &&
           recipeJson == other.recipeJson &&
           weatherJson == other.weatherJson &&
+          placeJson == other.placeJson &&
           recipeAction == other.recipeAction;
 }
 
@@ -506,7 +602,9 @@ enum WakeWordEventKind {
   status,
 
   /// Periodic input level in `rms` (~0.0..1.0) — proves capture is live even
-  /// before a wake-word model is present.
+  /// before a wake-word model is present. When a model is loaded it also carries
+  /// the live wake-word diagnostics (`score`, `avg_score`, `threshold`, `gain_db`)
+  /// that drive the audio-diagnostics screen.
   level,
 
   /// The wake word fired; `model` and `score` are populated.
@@ -590,6 +688,14 @@ enum WakeWordEventKind {
   /// Weather mode: dismiss the full-screen weather view and return to idle/ambient.
   dismissWeather,
 
+  /// Place mode: the orchestrator pushed a place to show full-screen on the place
+  /// card. `place_json` carries the report as a JSON string (name, address, hours[],
+  /// open_now, rating, phone, website, photo_uri, …) which the UI parses into the card.
+  showPlace,
+
+  /// Place mode: dismiss the full-screen place card and return to idle/ambient.
+  dismissPlace,
+
   /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
   /// (`"overview"` / `"ingredients"` / `"steps"`).
   recipeNavigate,
@@ -619,17 +725,23 @@ class WeatherConfig {
   /// A stable identifier for this display, sent in the `anamanti-hello` frame.
   final String deviceId;
 
+  /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+  /// `device_id` in the `anamanti-hello` frame (may be empty).
+  final String deviceName;
+
   const WeatherConfig({
     required this.orchestratorKey,
     required this.discoveryTimeoutSecs,
     required this.deviceId,
+    required this.deviceName,
   });
 
   @override
   int get hashCode =>
       orchestratorKey.hashCode ^
       discoveryTimeoutSecs.hashCode ^
-      deviceId.hashCode;
+      deviceId.hashCode ^
+      deviceName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -638,7 +750,8 @@ class WeatherConfig {
           runtimeType == other.runtimeType &&
           orchestratorKey == other.orchestratorKey &&
           discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
-          deviceId == other.deviceId;
+          deviceId == other.deviceId &&
+          deviceName == other.deviceName;
 }
 
 /// One ambient current-conditions push from the orchestrator, streamed to Flutter.

@@ -7,10 +7,11 @@
 //!
 //! **Key difference from Google:** Spotify requires the redirect URI to be an
 //! **exact, pre-registered** value — it does not allow an arbitrary loopback port.
-//! So consent binds a **fixed** port (default 8888) and the operator must add
-//! `http://127.0.0.1:<port>/callback` to their Spotify app's Redirect URIs. If the
-//! port is busy, consent fails with a clear message rather than silently using a
-//! different (unregistered) port.
+//! So consent uses a **fixed redirect URL** (default
+//! [`DEFAULT_REDIRECT_URL`], configurable via [`crate::settings::SpotifyConfig`]) and
+//! the operator must add that exact value to their Spotify app's Redirect URIs. The
+//! consent listener binds the URL's own host+port; if it is busy, consent fails with a
+//! clear message rather than silently using a different (unregistered) port.
 //!
 //! Requires **Spotify Premium** to actually play, though consent itself works on
 //! any account.
@@ -31,6 +32,11 @@ pub const SPOTIFY_SCOPE: &str = "user-modify-playback-state user-read-playback-s
 /// Default loopback port for the consent redirect. The operator registers
 /// `http://127.0.0.1:8888/callback` in the Spotify app.
 pub const DEFAULT_CONSENT_PORT: u16 = 8888;
+
+/// Default loopback redirect URL, used when the operator hasn't configured one
+/// (`SpotifyConfig::redirect_url`). Its host+port is where the consent listener binds,
+/// and this exact string must be registered in the Spotify app's Redirect URIs.
+pub const DEFAULT_REDIRECT_URL: &str = "http://127.0.0.1:8888/callback";
 
 /// The result of a successful consent: a long-lived refresh token and the granted
 /// scope.
@@ -86,35 +92,52 @@ fn open_browser(url: &str) {
     }
 }
 
-/// Run the full loopback consent flow on a **fixed** port (must match a Redirect URI
-/// registered in the Spotify app): bind the loopback redirect, open the browser,
-/// wait (up to `timeout`) for Spotify to redirect back with the authorization code,
-/// then exchange it for a refresh token.
+/// Parse the loopback `redirect_url` into the `(host, port)` the consent listener
+/// must bind so it actually receives Spotify's callback. The full URL string is what
+/// gets sent as `redirect_uri` (it must exactly match a registered Redirect URI); this
+/// only derives *where to listen*.
+fn redirect_bind_target(redirect_url: &str) -> Result<(String, u16)> {
+    let parsed = url::Url::parse(redirect_url)
+        .with_context(|| format!("parsing Spotify redirect URL {redirect_url:?}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("redirect URL {redirect_url:?} has no host"))?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("redirect URL {redirect_url:?} has no port"))?;
+    Ok((host, port))
+}
+
+/// Run the full loopback consent flow against a **fixed** redirect URL (must match a
+/// Redirect URI registered in the Spotify app): bind the loopback redirect on that
+/// URL's host+port, open the browser, wait (up to `timeout`) for Spotify to redirect
+/// back with the authorization code, then exchange it for a refresh token.
 pub async fn run_consent(
     client_id: &str,
     client_secret: &str,
-    port: u16,
+    redirect_url: &str,
     scope: &str,
     timeout: Duration,
 ) -> Result<ConsentOutcome> {
     if client_id.is_empty() || client_secret.is_empty() {
         bail!("Spotify client id/secret are not set");
     }
+    let (host, port) = redirect_bind_target(redirect_url)?;
     let (verifier, challenge) = pkce_pair();
-    let listener = TcpListener::bind(("127.0.0.1", port))
+    let listener = TcpListener::bind((host.as_str(), port))
         .await
         .with_context(|| {
             format!(
-            "binding loopback redirect on 127.0.0.1:{port} (is another consent or app using it?)"
-        )
+                "binding loopback redirect on {host}:{port} (is another consent or app using it?)"
+            )
         })?;
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let url = auth_url(client_id, &redirect_uri, scope, &challenge)?;
+    let url = auth_url(client_id, redirect_url, scope, &challenge)?;
 
     open_browser(&url);
     log::info!(
         "spotify consent: approve access in the browser (or open {url}); \
-         redirect {redirect_uri} must be registered in the Spotify app"
+         redirect {redirect_url} must be registered in the Spotify app"
     );
 
     let code = tokio::time::timeout(timeout, wait_for_code(&listener))
@@ -126,7 +149,7 @@ pub async fn run_consent(
         client_secret,
         &code,
         &verifier,
-        &redirect_uri,
+        redirect_url,
         scope,
     )
     .await
@@ -253,6 +276,24 @@ mod tests {
         assert_ne!(verifier, challenge);
         let (v2, _) = pkce_pair();
         assert_ne!(verifier, v2);
+    }
+
+    #[test]
+    fn redirect_bind_target_parses_host_and_port() {
+        assert_eq!(
+            redirect_bind_target("http://127.0.0.1:8888/callback").unwrap(),
+            ("127.0.0.1".to_string(), 8888)
+        );
+        assert_eq!(
+            redirect_bind_target("http://127.0.0.1:9099/cb").unwrap(),
+            ("127.0.0.1".to_string(), 9099)
+        );
+        // No explicit port falls back to the scheme's default.
+        assert_eq!(
+            redirect_bind_target("http://127.0.0.1/callback").unwrap(),
+            ("127.0.0.1".to_string(), 80)
+        );
+        assert!(redirect_bind_target("not a url").is_err());
     }
 
     #[test]

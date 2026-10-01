@@ -1,9 +1,10 @@
 //! The assistant pipeline (Plan.MD Phase 4). Given a device-facing Wyoming
 //! connection, one [`Pipeline::run_turn`] drives a full voice turn:
 //!
-//! 1. **STT** — forward the device's streamed PCM to the downstream Whisper
-//!    service and wait for its `transcript` (server-side VAD end-of-speech), then
-//!    relay that transcript back to the device.
+//! 1. **STT** — forward the device's streamed PCM to the STT engine (downstream
+//!    Wyoming Whisper or in-process whisper.cpp, behind the [`crate::stt::Transcriber`]
+//!    seam), detect end-of-speech with the Core's energy VAD, finalize, then relay
+//!    the `transcript` back to the device.
 //! 2. **Memory + LLM** — apply explicit memory commands ("remember…"/"forget…")
 //!    or auto-infer facts, build memory context, and stream a reply from the
 //!    pluggable [`LlmBackend`].
@@ -34,8 +35,9 @@ use crate::memory::{
 };
 use crate::settings::{Household, HouseholdMember, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
+use crate::stt::{SttEngine, SttEvent, Transcriber, WyomingTranscriber};
+use crate::vad::SpeechGate;
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
-use crate::wyoming::stt::SttSession;
 use crate::wyoming::tts::TtsSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
@@ -44,6 +46,14 @@ use crate::wyoming::{DynConnection, DynRead, DynWrite};
 /// turn timeout. A follow-up turn overrides this with its `follow_up.*_wait_secs`
 /// listen window (see [`Pipeline::run_turn_after_start`]).
 const DEFAULT_NO_SPEECH_FINALIZE: Duration = Duration::from_secs(6);
+
+/// Wall-clock budget for the System-1 weather fetch on the *fast* path. The provider's
+/// own client timeout (10 s) bounds a single request, but a fast-path fetch can chain a
+/// geocode *then* a forecast call — up to ~20 s of dead air before it gives up. That
+/// defeats the point of the fast path: a slow/flaky Open-Meteo should fail over to
+/// System-2 promptly, not stall the user. Bound the whole fetch here; on timeout we
+/// defer, exactly as we do on any other fetch error.
+const SYSTEM1_WEATHER_BUDGET: Duration = Duration::from_millis(2500);
 
 /// Minimum span of *consecutive* voiced audio (chunks above `voice_rms_threshold`)
 /// required before we latch `speech_started` and switch a turn's finalize clock from
@@ -142,6 +152,20 @@ pub struct Pipeline {
     /// reopen the mic (no wake word) and feed recent history into that turn's prompt.
     /// Defaults to [`FollowUpConfig::default`] (enabled) until `with_follow_up` sets it.
     follow_up: FollowUpConfig,
+    /// Forecast provider for the System-1 `weather` fast path (keyless Open-Meteo),
+    /// shared with the ambient push. `None` when weather is disabled — the weather
+    /// intent then defers to System-2. Set via `with_weather`.
+    weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
+    /// STT engine used to transcribe each turn. `None` keeps the historical path:
+    /// dial the downstream Wyoming Whisper server via the per-turn
+    /// [`ServiceConnector`]. `Some` (e.g. the in-process whisper.cpp engine) supplies
+    /// a session directly and the connector's `connect_stt` is never called.
+    stt_engine: Option<Arc<dyn SttEngine>>,
+    /// Shared, pre-loaded Silero VAD model (feature `vad-silero`). `Some` selects the
+    /// neural gate for every turn; `None` keeps the energy gate. Loaded once at boot
+    /// (`with_silero`) and cloned into each per-turn [`crate::vad::SileroGate`].
+    #[cfg(feature = "vad-silero")]
+    silero: Option<Arc<crate::vad::SileroModel>>,
 }
 
 impl Pipeline {
@@ -166,7 +190,21 @@ impl Pipeline {
             system_prompt: system_prompt.into(),
             turn_timeout,
             follow_up: FollowUpConfig::default(),
+            weather: None,
+            stt_engine: None,
+            #[cfg(feature = "vad-silero")]
+            silero: None,
         }
+    }
+
+    /// Select the neural Silero VAD engine, using a model loaded once at boot. When
+    /// set, every turn's end-of-speech decision runs through Silero instead of the
+    /// energy gate. Only available with the `vad-silero` feature. See
+    /// `plans/VadSileroPlan.md`.
+    #[cfg(feature = "vad-silero")]
+    pub fn with_silero(mut self, model: Arc<crate::vad::SileroModel>) -> Self {
+        self.silero = Some(model);
+        self
     }
 
     /// Set the debug-only per-turn audio capture directory (AEC corpus). `None`
@@ -211,6 +249,34 @@ impl Pipeline {
         self
     }
 
+    /// Install a System-1 fast-decision engine (plans/system1-fast-decisions.md) into the
+    /// live settings, so the per-turn snapshot picks it up. The boot path builds the
+    /// engine from config in [`SharedSettings`]; this is a convenience for tests and
+    /// callers holding an already-built engine. The config page swaps it at runtime via
+    /// [`SharedSettings::apply_system1`].
+    pub fn with_system1(self, system1: Arc<dyn crate::system1::DecisionEngine>) -> Self {
+        self.settings.set_system1(system1);
+        self
+    }
+
+    /// Provide the forecast provider used by the System-1 `weather` fast path (shared
+    /// with the ambient push). Without it, the weather intent defers to System-2.
+    pub fn with_weather(
+        mut self,
+        weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
+    ) -> Self {
+        self.weather = weather;
+        self
+    }
+
+    /// Attach an in-process STT engine (e.g. whisper.cpp). Without this the pipeline
+    /// dials the downstream Wyoming Whisper server via the per-turn
+    /// [`ServiceConnector`] (the historical default).
+    pub fn with_stt_engine(mut self, engine: Arc<dyn SttEngine>) -> Self {
+        self.stt_engine = Some(engine);
+        self
+    }
+
     /// The speaker service, if enabled (the Phase-C control handler lists/renames
     /// its registry).
     pub fn speaker(&self) -> Option<&Arc<SpeakerService>> {
@@ -252,14 +318,14 @@ impl Pipeline {
     ) -> Result<TurnOutcome> {
         // 1. Wait for the device's `audio-start`; a clean close before that just
         //    ends the connection.
-        let (format, followup_depth, followup_wait_secs, screen) = loop {
+        let (format, followup_depth, followup_wait_secs, device_ctx) = loop {
             match device.read().await? {
                 Some(ev) if ev.event_type == types::AUDIO_START => {
                     break (
                         protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO),
                         protocol::followup_depth(&ev.data),
                         protocol::followup_wait_secs(&ev.data),
-                        protocol::display_context(&ev.data),
+                        protocol::device_context(&ev.data),
                     );
                 }
                 Some(_) => continue, // ignore stray pre-turn frames
@@ -272,7 +338,7 @@ impl Pipeline {
             format,
             followup_depth,
             followup_wait_secs,
-            screen,
+            device_ctx,
             on_event,
         )
         .await
@@ -290,7 +356,7 @@ impl Pipeline {
         format: AudioFormat,
         followup_depth: u32,
         followup_wait_secs: u32,
-        screen: Option<protocol::DisplayContext>,
+        device_ctx: protocol::DeviceContext,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<TurnOutcome> {
         // Take one settings snapshot for the whole turn so a concurrent control
@@ -302,12 +368,25 @@ impl Pipeline {
         let dump = TurnAudioDump::for_turn(self.audio_dump_dir.as_deref());
 
         // 2. Open the STT stream and pump device PCM into it until the transcript.
-        let stt_conn = connector.connect_stt().await?;
-        let mut stt = SttSession::begin(stt_conn, format).await?;
+        //    The concrete engine sits behind the `Transcriber` seam
+        //    (`plans/python-to-rust-whisper.md`): an attached in-process engine (e.g.
+        //    whisper.cpp) supplies a session directly; otherwise dial the downstream
+        //    Wyoming Whisper server via the connector (the historical default).
+        let mut stt: Box<dyn Transcriber> = match self.stt_engine.as_ref() {
+            Some(engine) => engine.begin(format).await?,
+            None => {
+                let stt_conn = connector.connect_stt().await?;
+                Box::new(WyomingTranscriber::begin(stt_conn, format).await?)
+            }
+        };
         on_event(TurnEvent::Streaming);
 
         let end_silence = Duration::from_millis(runtime.end_silence_ms);
-        let voice_rms_threshold = runtime.voice_rms_threshold;
+        // The per-chunk speech decision runs behind the `SpeechGate` seam (energy gate
+        // by default; see `crate::vad` + `plans/VadSileroPlan.md`). Built per-turn from
+        // the live settings snapshot and reset before the pump loop.
+        let mut gate = self.build_speech_gate(&runtime);
+        gate.reset();
         // How long to wait for the user to *start* speaking before finalizing (and, on
         // silence, sleeping). A follow-up turn (the device auto-opened the mic, no wake
         // word) uses the window the reply that triggered it chose — 10 s after a
@@ -318,13 +397,13 @@ impl Pipeline {
         } else {
             DEFAULT_NO_SPEECH_FINALIZE
         };
-        let Some((transcript, voiced_pcm)) = self
+        let Some((transcript, voiced_pcm, stt_dur)) = self
             .stream_to_transcript(
                 device,
-                &mut stt,
+                stt.as_mut(),
                 end_silence,
                 no_speech_finalize,
-                voice_rms_threshold,
+                gate.as_mut(),
                 format.rate,
                 dump.as_ref(),
             )
@@ -334,17 +413,25 @@ impl Pipeline {
             let _ = stt.finish().await;
             return Ok(TurnOutcome::Completed);
         };
-        let _ = stt.finish().await; // close the STT audio stream (post server-VAD)
+        // Per-turn latency breakdown (persisted with the chat-log record, surfaced in
+        // the `/chatlog` UI). Anchored at end-of-speech: `stt_dur` is that instant →
+        // transcript; the processing timer below measures transcript → reply.
+        let mut timing = crate::memory::TurnTiming {
+            stt_ms: Some(stt_dur.as_millis() as u64),
+            ..Default::default()
+        };
+        let processing_start = Instant::now();
+        let _ = stt.finish().await; // idempotent finalize (VAD already sent audio-stop)
         if let Some(d) = dump.as_ref() {
             d.set_transcript(&transcript);
         }
         on_event(TurnEvent::Transcript(transcript.clone()));
 
-        // Relay the transcript to the device (renders on screen; ends its input).
-        device
-            .send(&WyomingEvent::transcript(&transcript))
-            .await
-            .ok();
+        // NOTE: the transcript is already relayed to the device inside
+        // `stream_to_transcript`, the instant STT returns it (before the VAD gate /
+        // System-1 / System-2) — see the diagnostic echo there. Re-sending here would
+        // duplicate it, and on a no-speech finalize would overwrite the raw text with an
+        // empty string, hiding what STT actually heard.
 
         if transcript.trim().is_empty() {
             // No speech within the listen window: sleep. Send an `audio-stop` so the
@@ -374,9 +461,10 @@ impl Pipeline {
                 device,
                 connector,
                 followup_depth,
-                screen.as_ref(),
+                &device_ctx,
                 on_event,
                 dump.as_ref(),
+                &mut timing,
             )
             .await?;
         if let Some(d) = dump.as_ref() {
@@ -384,12 +472,54 @@ impl Pipeline {
         }
         on_event(TurnEvent::Reply(reply.clone()));
 
+        // Whole server-side turn: end-of-speech → reply ready (STT finalize + processing).
+        timing.total_ms =
+            Some(stt_dur.as_millis() as u64 + processing_start.elapsed().as_millis() as u64);
+
         // Record the completed turn for the background GraphRAG ingester. Never
         // let a logging failure break the turn.
-        self.log_turn(&runtime, &speaker, &transcript, &reply, memories_written);
+        self.log_turn(
+            &runtime,
+            &speaker,
+            &transcript,
+            &reply,
+            memories_written,
+            timing,
+        );
 
         on_event(TurnEvent::Finished);
         Ok(TurnOutcome::Completed)
+    }
+
+    /// Build the per-turn end-of-speech VAD gate from the live settings snapshot.
+    /// The detector sits behind the [`SpeechGate`](crate::vad::SpeechGate) seam so it
+    /// can be swapped without touching the pump loop's state machine. The engine is
+    /// chosen live from `runtime.vad_engine` (config-page/device swap, no restart); a
+    /// swap to Silero when no model is loaded (feature off or model absent) falls back
+    /// to the energy gate with a warning. See `plans/VadSileroPlan.md`.
+    fn build_speech_gate(&self, runtime: &crate::settings::RuntimeSettings) -> Box<dyn SpeechGate> {
+        #[cfg(feature = "vad-silero")]
+        if matches!(runtime.vad_engine, crate::config::VadEngineKind::Silero) {
+            match &self.silero {
+                Some(model) => {
+                    return Box::new(crate::vad::SileroGate::new(
+                        model.clone(),
+                        runtime.silero_threshold,
+                    ));
+                }
+                None => log::warn!(
+                    "vad.engine=silero but no Silero model is loaded; using the energy VAD"
+                ),
+            }
+        }
+        #[cfg(not(feature = "vad-silero"))]
+        if matches!(runtime.vad_engine, crate::config::VadEngineKind::Silero) {
+            log::warn!(
+                "vad.engine=silero but this binary was built without the `vad-silero` \
+                 feature; using the energy VAD"
+            );
+        }
+        Box::new(crate::vad::EnergyGate::new(runtime.voice_rms_threshold))
     }
 
     /// Pump loop: forward device `audio-chunk`s to STT, detect end-of-speech, and
@@ -399,28 +529,28 @@ impl Pipeline {
     /// wyoming-faster-whisper does **not** do streaming VAD — it transcribes the
     /// buffered utterance only once it receives `audio-stop`. The device, meanwhile,
     /// streams continuously and waits for the transcript before it stops. So the
-    /// orchestrator is the only party that can close the loop: it runs a simple
-    /// energy VAD over the incoming PCM and, once speech has been followed by a
-    /// short trailing silence, sends `audio-stop` to STT to finalize the transcript.
-    /// Returns the transcript together with the utterance's **voiced** PCM (the
-    /// chunks that passed the energy gate), so the caller can compute a speaker
-    /// embedding without re-reading the socket. `None` on disconnect/timeout.
+    /// orchestrator is the only party that can close the loop: it runs its VAD gate
+    /// ([`SpeechGate`](crate::vad::SpeechGate)) over the incoming PCM and, once speech
+    /// has been followed by a short trailing silence, sends `audio-stop` to STT to
+    /// finalize the transcript. Returns the transcript together with the utterance's
+    /// **voiced** PCM (the chunks the gate marked as speech), so the caller can compute
+    /// a speaker embedding without re-reading the socket. `None` on disconnect/timeout.
     #[allow(clippy::too_many_arguments)]
     async fn stream_to_transcript(
         &self,
         device: &mut DynConnection,
-        stt: &mut SttSession<crate::wyoming::DynRead, crate::wyoming::DynWrite>,
+        stt: &mut dyn Transcriber,
         end_silence: std::time::Duration,
         no_speech_finalize: std::time::Duration,
-        voice_rms_threshold: f64,
+        gate: &mut dyn SpeechGate,
         mic_rate: u32,
         dump: Option<&TurnAudioDump>,
-    ) -> Result<Option<(String, Vec<i16>)>> {
-        // `voice_rms_threshold`: RMS (i16 units) above which a chunk counts as speech
-        // rather than room noise. The Echo's far-field pickup is quiet (~50 idle,
-        // several hundred+ while speaking). `end_silence`: trailing silence after
-        // speech that marks end-of-utterance. Both come from the per-turn settings
-        // snapshot so they are A/B-tunable from the device without a restart.
+    ) -> Result<Option<(String, Vec<i16>, Duration)>> {
+        // `gate`: the per-chunk speech decision (energy/RMS by default). The energy
+        // gate is A/B-tunable via `voice_rms_threshold`; the Echo's far-field pickup is
+        // quiet (~50 idle, several hundred+ while speaking). `end_silence`: trailing
+        // silence after speech that marks end-of-utterance, from the per-turn settings
+        // snapshot so it is A/B-tunable from the device without a restart.
         //
         // If no speech is ever detected, still finalize after `no_speech_finalize` so a
         // silent or too-quiet utterance ends the turn instead of hanging to
@@ -437,6 +567,9 @@ impl Pipeline {
         let mut voiced_run = Duration::ZERO;
         // True once we've sent `audio-stop` to STT and are just awaiting the result.
         let mut finalized = false;
+        // When end-of-speech was detected (audio-stop sent). Used to measure the STT
+        // finalize latency (end-of-speech → transcript) for the per-turn timing record.
+        let mut finalized_at: Option<Instant> = None;
         // Accumulated voiced PCM (samples from chunks above the energy gate), used
         // for the speaker embedding once the transcript arrives.
         let mut voiced_pcm: Vec<i16> = Vec::new();
@@ -473,7 +606,7 @@ impl Pipeline {
                                 }
                                 if !finalized {
                                     let now = Instant::now();
-                                    let voiced = rms_i16_le(&pcm) > voice_rms_threshold;
+                                    let voiced = gate.push(&pcm, mic_rate);
                                     if voiced {
                                         last_voice = now;
                                         // Keep the voiced samples for speaker ID.
@@ -511,11 +644,13 @@ impl Pipeline {
                                     };
                                     if ended {
                                         log::info!(
-                                            "VAD: end-of-speech (speech_started={speech_started}); \
-                                             finalizing STT"
+                                            "VAD: end-of-speech (speech_started={speech_started}, \
+                                             prob={:.2}); finalizing STT",
+                                            gate.prob()
                                         );
                                         stt.finish().await?;
                                         finalized = true;
+                                        finalized_at = Some(Instant::now());
                                     }
                                 }
                                 // After finalizing, drop further mic chunks: STT has
@@ -532,8 +667,11 @@ impl Pipeline {
                 sev = stt.read_event() => {
                     deadline = Instant::now() + self.turn_timeout;
                     match sev? {
-                        Some(ev) if ev.is_transcript() => {
-                            let text = ev.transcript_text().unwrap_or_default().to_string();
+                        Some(SttEvent::Transcript(text)) => {
+                            log::info!(
+                                "STT transcript {text:?} (speech_started={speech_started})"
+                            );
+
                             // Guard against STT hallucinations on silence. If our energy
                             // VAD never latched `speech_started`, this turn finalized on
                             // the no-speech timeout: everything we forwarded to Whisper
@@ -546,10 +684,12 @@ impl Pipeline {
                             // already treats as "no speech": sleep, send `audio-stop`,
                             // and end the follow-up chain (no `ambient-listen`). This
                             // stops the self-perpetuating phantom-reply loop in a quiet
-                            // room. The trade-off is that a genuine utterance too quiet
-                            // to clear `voice_rms_threshold` for `MIN_SPEECH_ONSET` is
-                            // also dropped — consistent with the existing no-speech
-                            // finalize, which already treats too-quiet audio as silence.
+                            // room. Crucially, a discarded hallucination is NEVER relayed
+                            // to the device (no phantom transcript on screen). The trade-off
+                            // is that a genuine utterance too quiet to clear
+                            // `voice_rms_threshold` for `MIN_SPEECH_ONSET` is also dropped —
+                            // consistent with the existing no-speech finalize, which already
+                            // treats too-quiet audio as silence.
                             if !speech_started {
                                 if !text.trim().is_empty() {
                                     log::info!(
@@ -558,11 +698,20 @@ impl Pipeline {
                                          Whisper hallucination on silence)"
                                     );
                                 }
-                                return Ok(Some((String::new(), Vec::new())));
+                                return Ok(Some((String::new(), Vec::new(), Duration::ZERO)));
                             }
-                            return Ok(Some((text, std::mem::take(&mut voiced_pcm))));
+
+                            // Diagnostic echo (#1): relay exactly what STT produced to the
+                            // device the instant it clears the VAD gate — BEFORE System-1 or
+                            // System-2 — so the device confirms STT is alive regardless of
+                            // any downstream gating/decision. This is the only place the raw
+                            // (pre-decision) transcript is emitted; the caller no longer
+                            // re-sends it.
+                            device.send(&WyomingEvent::transcript(&text)).await.ok();
+                            let stt_dur = finalized_at.map(|t| t.elapsed()).unwrap_or_default();
+                            return Ok(Some((text, std::mem::take(&mut voiced_pcm), stt_dur)));
                         }
-                        Some(_) => {} // voice-started / voice-stopped etc.
+                        Some(SttEvent::Other) => {} // voice-started / voice-stopped etc.
                         None => anyhow::bail!("STT service closed before returning a transcript"),
                     }
                 }
@@ -591,9 +740,10 @@ impl Pipeline {
         device: &mut DynConnection,
         connector: &dyn ServiceConnector,
         followup_depth: u32,
-        screen: Option<&protocol::DisplayContext>,
+        device_ctx: &protocol::DeviceContext,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
         dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
     ) -> Result<(String, Vec<String>)> {
         // Memory entries written this turn (for the chat log / ingester).
         let mut memories_written = Vec::new();
@@ -603,6 +753,7 @@ impl Pipeline {
         // Explicit command → apply, confirm, and speak the confirmation in one
         // chunk, skipping the LLM. (Instant, so it is not barge-in-interruptible.)
         if let Some(cmd) = parse_command(transcript) {
+            timing.path = Some("command".to_string());
             match &cmd {
                 MemoryCommand::Remember { content, .. } => memories_written.push(content.clone()),
                 MemoryCommand::NameSpeaker(name) => {
@@ -628,6 +779,95 @@ impl Pipeline {
             return Ok((reply, memories_written));
         }
 
+        // System-1 fast-decision fork (plans/system1-fast-decisions.md; Plan.MD
+        // 2026-09-25). Runs *before* memory recall + the LLM. Skipped entirely for the
+        // default `none` engine, so ordinary builds are unaffected. On a confident
+        // Resolve with a matching handler, the turn is answered here — skipping the
+        // GraphRAG embedding round-trip (#3) and the rig+tools full completion (#1) —
+        // and returns; otherwise it falls through to System-2 below.
+        if runtime.system1.engine.name() != "none" {
+            let req = crate::system1::DecisionRequest {
+                transcript: transcript.to_string(),
+                // The foreground widget label ("recipe"/"weather"), so screen-relative
+                // commands can route; `None` on an idle display.
+                screen: device_ctx.widget_label().map(str::to_string),
+                history: Vec::new(), // M5: recent turns for follow-up disambiguation
+                // Home location grounds location-dependent intents (weather): the HTTP
+                // engine retries an otherwise-deferred turn with this folded into the query.
+                location: self.settings.home_location().get(),
+                // Background timer state (running/remaining/labels), ground truth for the
+                // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
+                timers: device_ctx.timers.clone(),
+            };
+            let engine = runtime.system1.engine.name().to_string();
+            log::info!("system1 ({engine}) call: deciding on {transcript:?}");
+            let t0 = Instant::now();
+            let decision = runtime.system1.engine.decide(&req).await;
+            let ms = t0.elapsed().as_millis();
+            timing.system1_ms = Some(ms as u64);
+            match decision {
+                Ok(crate::system1::Decision::Resolve(r)) => {
+                    timing.system1_intent = Some(r.intent.clone());
+                    timing.system1_confidence = Some(r.confidence);
+                    log::info!(
+                        "system1 ({engine}) RESOLVE intent `{}` (conf {:.2}) in {ms}ms",
+                        r.intent,
+                        r.confidence,
+                    );
+                    if let Some(reply) = self
+                        .handle_system1_intent(
+                            &r,
+                            runtime,
+                            transcript,
+                            device,
+                            connector,
+                            device_ctx,
+                            followup_depth,
+                            on_event,
+                            dump,
+                            timing,
+                        )
+                        .await
+                    {
+                        // Fully handled on the fast path (widget + spoken reply +
+                        // follow-up). The caller still logs the turn to the chat log.
+                        timing.path = Some("system1".to_string());
+                        timing.system1_outcome = Some("resolve".to_string());
+                        log::info!(
+                            "system1 ({engine}) handled intent `{}` on the fast path",
+                            r.intent
+                        );
+                        return Ok((reply, memories_written));
+                    }
+                    timing.system1_outcome = Some("no-handler".to_string());
+                    log::info!(
+                        "system1 ({engine}) intent `{}` has no fast-path handler; \
+                         deferring to System-2",
+                        r.intent
+                    );
+                }
+                Ok(crate::system1::Decision::Defer) => {
+                    timing.system1_outcome = Some("defer".to_string());
+                    log::info!("system1 ({engine}) DEFER in {ms}ms; falling through to System-2");
+                }
+                Err(e) => {
+                    timing.system1_outcome = Some("error".to_string());
+                    log::warn!(
+                        "system1 ({engine}) decide FAILED in {ms}ms ({e:#}); deferring to System-2"
+                    );
+                }
+            }
+        }
+
+        // ---- System-2 path (memory recall + full LLM completion) ----
+        let sys2_start = Instant::now();
+        timing.path = Some("system2".to_string());
+        log::info!(
+            "system2 ({}/{}) call: memory recall + LLM completion for {transcript:?}",
+            runtime.llm_backend,
+            runtime.llm_model.as_deref().unwrap_or("?"),
+        );
+
         // Inferred capture from an ordinary turn — attributed to this speaker.
         for (kind, content) in infer_memories(transcript) {
             self.memory
@@ -639,13 +879,46 @@ impl Pipeline {
         // Build per-person memory context and stream the LLM reply. A recall
         // failure (e.g. a transient GraphRAG backend error) must not sink the turn —
         // proceed with no memory context rather than erroring.
-        let context = self
+        let recall_start = Instant::now();
+        let recalled = self
             .build_context(transcript, scope)
             .await
             .unwrap_or_else(|e| {
                 log::warn!("memory recall failed; answering without context: {e:#}");
-                String::new()
+                crate::memory::RecallResult::default()
             });
+        let recall_ms = recall_start.elapsed().as_millis() as u64;
+        let context = recalled
+            .hits
+            .iter()
+            .map(|c| format!("- {c}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        timing.recall_ms = Some(recall_ms);
+        // Record which backend actually answered (the boot fallback is silent, so this
+        // is the only per-turn proof that a helix-configured instance ran GraphRAG vs
+        // fell back to FTS) and whether it paid the OpenAI embedding round-trip that
+        // dominates recall latency. When Helix runs, also record the embed-vs-search
+        // split so the chatlog page shows the network embedding separately from the
+        // local graph search.
+        let recall_backend = self.recall.backend();
+        let recall_embedded = self.recall.embeds_query();
+        timing.recall_backend = Some(recall_backend.to_string());
+        timing.recall_embedded = Some(recall_embedded);
+        timing.recall_embedder = self.recall.embedder_label().map(str::to_string);
+        timing.recall_embed_ms = recalled.embed_ms;
+        timing.recall_search_ms = recalled.search_ms;
+        log::info!(
+            "system2: memory recall in {recall_ms}ms via {recall_backend} \
+             (embed {:?}ms, search {:?}ms, {} ctx chars)",
+            recalled.embed_ms,
+            recalled.search_ms,
+            context.len(),
+        );
+
+        // Prompt assembly (system prompt + grounding + recalled context). Timed
+        // separately from recall and the LLM round trips.
+        let prompt_start = Instant::now();
         // Ground "here" and who lives here from the canonical household record (live
         // per-turn snapshot, so config-page edits take effect without a restart).
         let household = &runtime.household;
@@ -678,7 +951,7 @@ impl Pipeline {
         // Tell the model what the display is currently showing (its "display context"),
         // so it can drive that screen by voice with the matching tool. Absent on an idle
         // display. Extensible per screen kind — see `display_context_line`.
-        if let Some(screen) = screen {
+        if let Some(screen) = device_ctx.widget.as_ref() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&display_context_line(screen));
         }
@@ -701,6 +974,24 @@ impl Pipeline {
             Vec::new()
         };
 
+        let prompt_ms = prompt_start.elapsed().as_millis() as u64;
+        timing.prompt_ms = Some(prompt_ms);
+        log::info!(
+            "system2: prompt build in {prompt_ms}ms ({} prompt chars, {} history msgs)",
+            system_prompt.len(),
+            history.len(),
+        );
+
+        // The LLM round trips + tool calls happen inside the backend as this stream is
+        // polled (rig.rs logs each round/tool with its own elapsed ms). `respond`
+        // itself only builds the lazy stream, so it returns near-instantly.
+        // Timing (surfaced in `/chatlog`): LLM + TTS interleave in the streaming path, so
+        // we capture two clean anchors instead of an overlapping split — `llm_ms` = time
+        // to the first reply token (LLM latency before streaming), `tts_ms` = the first
+        // TTS chunk's synthesis. Declared out here so the `drive` future can fill them.
+        let gen_start = Instant::now();
+        let mut first_token_ms: Option<u64> = None;
+        let mut first_tts_ms: Option<u64> = None;
         let mut stream = runtime
             .llm
             .respond(
@@ -743,6 +1034,9 @@ impl Pipeline {
                     // device as they arrive, before rendering more of the reply.
                     drain_device_actions(&mut action_rx, writer).await;
                     let tok = tok?;
+                    if first_token_ms.is_none() {
+                        first_token_ms = Some(gen_start.elapsed().as_millis() as u64);
+                    }
                     reply.push_str(&tok);
                     pending.push_str(&tok);
                     protocol::write_event(writer, &WyomingEvent::reply_token(&tok))
@@ -756,7 +1050,8 @@ impl Pipeline {
                             on_event(TurnEvent::Speaking);
                             speaking = true;
                         }
-                        if !self
+                        let tts_t0 = Instant::now();
+                        let spoke = self
                             .speak_chunk(
                                 writer,
                                 runtime,
@@ -765,8 +1060,11 @@ impl Pipeline {
                                 &mut audio_started,
                                 dump,
                             )
-                            .await?
-                        {
+                            .await?;
+                        if first_tts_ms.is_none() {
+                            first_tts_ms = Some(tts_t0.elapsed().as_millis() as u64);
+                        }
+                        if !spoke {
                             // Device closed mid-relay; stop generating.
                             return Ok::<(), anyhow::Error>(());
                         }
@@ -780,42 +1078,25 @@ impl Pipeline {
                     if !speaking {
                         on_event(TurnEvent::Speaking);
                     }
+                    let tts_t0 = Instant::now();
                     self.speak_chunk(writer, runtime, connector, &rest, &mut audio_started, dump)
                         .await?;
+                    if first_tts_ms.is_none() {
+                        first_tts_ms = Some(tts_t0.elapsed().as_millis() as u64);
+                    }
                 }
-                // Follow-up listen: after EVERY reply, ask the device to reopen the mic
-                // (no wake word) for more input, then sleep if none comes. The listen
-                // window is longer after a question (`question_wait_secs`) than after a
-                // plain reply (`reply_wait_secs`); the device echoes it back so this
-                // orchestrator sizes the follow-up turn's no-speech window to match.
-                // This MUST be sent before the final `audio-stop` — the device ends its
-                // turn on the first `audio-stop`, so a frame after it would arrive on a
-                // closing socket. `max_chain` (0 = unlimited) is an optional safety
-                // ceiling; the loop normally ends on silence. Reaching here means the
-                // reply completed (a barge-in would have dropped this whole future), so
-                // we never reopen over an interruption.
-                let within_cap =
-                    self.follow_up.max_chain == 0 || followup_depth < self.follow_up.max_chain;
-                if self.follow_up.enabled && audio_started && within_cap {
-                    let next_depth = followup_depth + 1;
-                    let wait_secs = if reply_is_question(&reply) {
-                        self.follow_up.question_wait_secs
-                    } else {
-                        self.follow_up.reply_wait_secs
-                    };
-                    log::info!(
-                        "follow-up: asking device to listen for {wait_secs}s (depth {next_depth})"
-                    );
-                    protocol::write_event(writer, &WyomingEvent::listen(next_depth, wait_secs))
-                        .await
-                        .ok();
-                }
-                // Close the single coalesced device-facing audio stream.
-                if audio_started {
-                    protocol::write_event(writer, &WyomingEvent::audio_stop(0))
-                        .await
-                        .ok();
-                }
+                // Follow-up listen (after EVERY reply) + the final `audio-stop`. Shared
+                // with the System-1 fast path via `emit_follow_up_and_stop`. Reaching
+                // here means the reply completed (a barge-in would have dropped this
+                // whole future), so we never reopen over an interruption.
+                emit_follow_up_and_stop(
+                    writer,
+                    &self.follow_up,
+                    audio_started,
+                    &reply,
+                    followup_depth,
+                )
+                .await;
                 Ok(())
             };
             tokio::pin!(drive);
@@ -840,8 +1121,17 @@ impl Pipeline {
         if interrupted {
             log::info!("barge-in: aborting in-flight LLM generation + TTS for this turn");
         }
+        timing.llm_ms = first_token_ms;
+        timing.tts_ms = first_tts_ms;
 
-        Ok((reply.trim().to_string(), memories_written))
+        let reply = reply.trim().to_string();
+        log::info!(
+            "system2 complete in {}ms ({} chars{})",
+            sys2_start.elapsed().as_millis(),
+            reply.len(),
+            if interrupted { ", barged-in" } else { "" },
+        );
+        Ok((reply, memories_written))
     }
 
     /// Append the completed turn to the chat log, if one is attached. A failure is
@@ -853,6 +1143,7 @@ impl Pipeline {
         transcript: &str,
         reply: &str,
         memories_written: Vec<String>,
+        timing: crate::memory::TurnTiming,
     ) {
         let Some(log) = &self.chatlog else {
             return;
@@ -869,6 +1160,7 @@ impl Pipeline {
             model: runtime.llm_model.clone(),
             speaker_id: speaker.speaker_id.clone(),
             speaker_name: speaker.name.clone(),
+            timing: Some(timing),
         };
         if let Err(e) = log.append(&record) {
             log::warn!("failed to append chat log record: {e:#}");
@@ -949,16 +1241,17 @@ impl Pipeline {
         })
     }
 
-    /// Gather memory entries relevant to the transcript as prompt context for this
-    /// speaker (their own entries plus shared), via the configured recall backend
-    /// (SQLite FTS by default; HelixDB GraphRAG when set).
-    async fn build_context(&self, transcript: &str, speaker_id: Option<&str>) -> Result<String> {
-        let hits = self.recall.recall(transcript, speaker_id, 8).await?;
-        Ok(hits
-            .iter()
-            .map(|c| format!("- {c}"))
-            .collect::<Vec<_>>()
-            .join("\n"))
+    /// Recall memory entries relevant to the transcript for this speaker (their own
+    /// entries plus shared), via the configured recall backend (SQLite FTS by default;
+    /// HelixDB GraphRAG when set). Returns the raw [`RecallResult`] — hits plus the
+    /// optional embed/search timing split — so the caller can both format the context
+    /// and record the per-stage latencies.
+    async fn build_context(
+        &self,
+        transcript: &str,
+        speaker_id: Option<&str>,
+    ) -> Result<crate::memory::RecallResult> {
+        self.recall.recall(transcript, speaker_id, 8).await
     }
 
     /// The recent conversation, as `(user, assistant)` pairs oldest-first, for a
@@ -1017,6 +1310,591 @@ impl Pipeline {
     /// stop (e.g. the Phase-3 client that ends on transcript, or a barge-in that
     /// dropped the socket), not a turn failure — and `Ok(true)` otherwise. An
     /// empty/whitespace chunk is a no-op that returns `Ok(true)`.
+    /// Dispatch a System-1 [`Resolution`](crate::system1::Resolution) to its handler.
+    /// Returns `Some(reply)` when the turn was fully answered on the fast path (so the
+    /// caller returns without touching recall/the LLM), or `None` to defer to System-2
+    /// (unknown intent, or a handler precondition that failed *before* anything was sent
+    /// to the device — so deferring can't double-speak).
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_system1_intent(
+        &self,
+        r: &crate::system1::Resolution,
+        runtime: &crate::settings::RuntimeSettings,
+        _transcript: &str,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        match r.intent.as_str() {
+            "weather" => {
+                self.handle_weather(
+                    runtime,
+                    device,
+                    connector,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "timer" => {
+                self.handle_timer(
+                    runtime,
+                    _transcript,
+                    device,
+                    connector,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "time" | "date" => {
+                // Clock queries answer from the wall clock (no tool, no network, no
+                // widget). Always resolvable → always commit.
+                let reply = spoken_clock_reply(&r.intent);
+                self.speak_fast_reply(
+                    runtime,
+                    device,
+                    connector,
+                    None,
+                    &reply,
+                    followup_depth,
+                    false,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "timer_cancel" => {
+                self.handle_timer_cancel(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "timer_query" => {
+                self.handle_timer_query(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "weather_dismiss" | "recipe_dismiss" => {
+                self.handle_screen_dismiss(
+                    &r.intent,
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "end_session" => {
+                self.handle_end_session(
+                    runtime,
+                    device,
+                    connector,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            "stop_dismiss" => {
+                self.handle_stop_dismiss(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await
+            }
+            _ => None, // no fast-path handler yet → defer
+        }
+    }
+
+    /// Commit a fully-formed fast-path reply and close the turn: optionally send a
+    /// device-action `frame` first (a timer/dismiss action), relay the reply token,
+    /// synthesize it with Piper, then close. With `end_session` the turn ends on a bare
+    /// `audio-stop` (no follow-up `listen`), so the device returns to IDLE / wake-word;
+    /// otherwise the follow-up listen window is emitted like any other reply. Returns
+    /// `Some(reply)` — callers use this only once they have committed to owning the turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn speak_fast_reply(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        frame: Option<WyomingEvent>,
+        reply: &str,
+        followup_depth: u32,
+        end_session: bool,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let (_reader, writer) = device.split_mut();
+        if let Some(frame) = &frame {
+            protocol::write_event(writer, frame).await.ok();
+        }
+        on_event(TurnEvent::ReplyToken(reply.to_string()));
+        protocol::write_event(writer, &WyomingEvent::reply_token(reply))
+            .await
+            .ok();
+        on_event(TurnEvent::Speaking);
+        let mut audio_started = false;
+        let tts_start = Instant::now();
+        if let Err(e) = self
+            .speak_chunk(writer, runtime, connector, reply, &mut audio_started, dump)
+            .await
+        {
+            log::warn!("system1 fast reply: TTS failed ({e:#}); text still sent");
+        }
+        timing.tts_ms = Some(tts_start.elapsed().as_millis() as u64);
+        if end_session {
+            // End the follow-up chain: no `listen` frame, just close the audio stream so
+            // the device leaves SPEAKING and returns to IDLE / wake-word-waiting.
+            if audio_started {
+                protocol::write_event(writer, &WyomingEvent::audio_stop(0))
+                    .await
+                    .ok();
+            }
+        } else {
+            emit_follow_up_and_stop(
+                writer,
+                &self.follow_up,
+                audio_started,
+                reply,
+                followup_depth,
+            )
+            .await;
+        }
+        Some(reply.to_string())
+    }
+
+    /// The System-1 `timer_cancel` fast path: cancel all running timers and confirm.
+    /// **Precondition (ground truth):** a timer must actually be running — otherwise there
+    /// is nothing to cancel, so defer to System-2 (which can tell the user there are no
+    /// timers). Only unlabeled "cancel all" resolves here; a labeled cancel needs a
+    /// free-form slot and stays on System-2.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_timer_cancel(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        if !device_ctx.timers.any_running() {
+            return None; // nothing to cancel → defer
+        }
+        let reply = if device_ctx.timers.running > 1 {
+            "Okay, I've cancelled your timers.".to_string()
+        } else {
+            "Okay, I've cancelled your timer.".to_string()
+        };
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            Some(WyomingEvent::timer_cancel(None)),
+            &reply,
+            followup_depth,
+            false,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `timer_query` fast path: answer "how much time is left?" from the
+    /// device-reported remaining time. **Precondition:** a timer must be running (else
+    /// defer). Labeled queries need a free-form slot and stay on System-2.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_timer_query(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        if !device_ctx.timers.any_running() {
+            return None; // no timer → defer
+        }
+        let reply = match device_ctx.timers.next_remaining_secs {
+            Some(secs) if secs > 0 => format!("You have {} left.", human_duration(secs)),
+            _ => "Your timer is just about up.".to_string(),
+        };
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            None,
+            &reply,
+            followup_depth,
+            false,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `weather_dismiss` / `recipe_dismiss` fast path: close the named
+    /// screen and give a brief ack. **Precondition:** that screen must actually be the
+    /// foreground widget (ground truth from `device_ctx`), else defer — "close the recipe"
+    /// with no recipe up is meaningless and better handled by System-2.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_screen_dismiss(
+        &self,
+        intent: &str,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let frame = match intent {
+            "weather_dismiss" => {
+                if !matches!(
+                    device_ctx.widget,
+                    Some(protocol::DisplayContext::Weather(_))
+                ) {
+                    return None;
+                }
+                WyomingEvent::weather_dismiss()
+            }
+            "recipe_dismiss" => {
+                if !matches!(device_ctx.widget, Some(protocol::DisplayContext::Recipe(_))) {
+                    return None;
+                }
+                WyomingEvent::recipe_dismiss()
+            }
+            "place_dismiss" => {
+                if !matches!(device_ctx.widget, Some(protocol::DisplayContext::Place(_))) {
+                    return None;
+                }
+                WyomingEvent::place_dismiss()
+            }
+            _ => return None,
+        };
+        let reply = "Okay.".to_string();
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            Some(frame),
+            &reply,
+            followup_depth,
+            false,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `end_session` fast path: the user signalled they are done, so give a
+    /// brief acknowledgement and **end the follow-up chain** — `speak_fast_reply` with
+    /// `end_session = true` closes on a bare `audio-stop` (no `listen`), returning the
+    /// device to IDLE / wake-word-waiting. Always resolvable (a fresh "goodbye" turn just
+    /// ends cleanly).
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_end_session(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let reply = "Okay.".to_string();
+        self.speak_fast_reply(
+            runtime,
+            device,
+            connector,
+            None,
+            &reply,
+            followup_depth,
+            true,
+            on_event,
+            dump,
+            timing,
+        )
+        .await
+    }
+
+    /// The System-1 `stop_dismiss` fast path: a bare "stop"/"cancel"/"never mind" whose
+    /// target is not named. The **deterministic priority ladder** picks the referent from
+    /// live device state (ground truth) — the classifier never chooses it (§17). A rung
+    /// with no valid target falls through; if nothing matches, return `None` (the
+    /// **ground-truth veto**) so the turn defers to System-2 rather than guessing.
+    ///
+    /// Rung 1 (alarm *ringing*) and rung 3 (media *playing*) are parked until those
+    /// signals are reported (§19.7); rung 2 (running timer), rung 4 (open screen), and
+    /// rung 5 (end an active follow-up) are live.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_stop_dismiss(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        device_ctx: &protocol::DeviceContext,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        // Rung 2: a running timer → cancel it.
+        if device_ctx.timers.any_running() {
+            return self
+                .handle_timer_cancel(
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await;
+        }
+        // Rung 4: an open screen → dismiss it.
+        let dismiss_intent = match device_ctx.widget {
+            Some(protocol::DisplayContext::Weather(_)) => Some("weather_dismiss"),
+            Some(protocol::DisplayContext::Recipe(_)) => Some("recipe_dismiss"),
+            Some(protocol::DisplayContext::Place(_)) => Some("place_dismiss"),
+            None => None,
+        };
+        if let Some(intent) = dismiss_intent {
+            return self
+                .handle_screen_dismiss(
+                    intent,
+                    runtime,
+                    device,
+                    connector,
+                    device_ctx,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await;
+        }
+        // Rung 5: mid-conversation with nothing active → end the follow-up chain.
+        if followup_depth > 0 {
+            return self
+                .handle_end_session(
+                    runtime,
+                    device,
+                    connector,
+                    followup_depth,
+                    on_event,
+                    dump,
+                    timing,
+                )
+                .await;
+        }
+        // Ground-truth veto: nothing to act on → defer to System-2.
+        None
+    }
+
+    /// The System-1 `timer` fast path: parse an unambiguous duration from the transcript,
+    /// start the timer on the device, and speak a confirmation — skipping the LLM. Returns
+    /// `None` (defer) when no clear duration is present (e.g. "cancel my timer", or a
+    /// free-form request), so the robust System-2 timer tool still handles those.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_timer(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        transcript: &str,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let secs = crate::system1::parse_duration_secs(transcript)?; // unclear → defer
+                                                                     // Guard rails: ignore absurd durations (>24h) — defer to System-2.
+        if secs == 0 || secs > 24 * 3600 {
+            log::debug!("system1 timer: duration {secs}s out of range; deferring to System-2");
+            return None;
+        }
+
+        // Committed: own the turn from here (never fall through → no double-speak).
+        let reply = format!("Timer set for {}.", human_duration(secs));
+        let (_reader, writer) = device.split_mut();
+        protocol::write_event(writer, &WyomingEvent::timer_start(secs, None))
+            .await
+            .ok();
+        on_event(TurnEvent::ReplyToken(reply.clone()));
+        protocol::write_event(writer, &WyomingEvent::reply_token(&reply))
+            .await
+            .ok();
+        on_event(TurnEvent::Speaking);
+        let mut audio_started = false;
+        let tts_start = Instant::now();
+        if let Err(e) = self
+            .speak_chunk(writer, runtime, connector, &reply, &mut audio_started, dump)
+            .await
+        {
+            log::warn!("system1 timer: TTS failed ({e:#}); timer started, text still sent");
+        }
+        timing.tts_ms = Some(tts_start.elapsed().as_millis() as u64);
+        emit_follow_up_and_stop(
+            writer,
+            &self.follow_up,
+            audio_started,
+            &reply,
+            followup_depth,
+        )
+        .await;
+        Some(reply)
+    }
+
+    /// The System-1 `weather` fast path: fetch the forecast (keyless Open-Meteo), open
+    /// the full-screen weather widget *before* speaking, then speak a short templated
+    /// summary and invite a follow-up. Skips memory recall + the LLM entirely. Returns
+    /// `None` (defer) only on a precondition that fails before anything is emitted (no
+    /// provider, no home location, or the fetch errors).
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_weather(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        device: &mut DynConnection,
+        connector: &dyn ServiceConnector,
+        followup_depth: u32,
+        on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        dump: Option<&TurnAudioDump>,
+        timing: &mut crate::memory::TurnTiming,
+    ) -> Option<String> {
+        let provider = self.weather.as_ref()?; // weather disabled → defer
+        let location = runtime.household.location.clone().unwrap_or_default();
+        if location.trim().is_empty() {
+            log::debug!("system1 weather: no home location configured; deferring to System-2");
+            return None;
+        }
+        let imperial =
+            crate::directions::units_are_imperial(runtime.household.weather_units.as_deref());
+        let t0 = Instant::now();
+        let report = match tokio::time::timeout(
+            SYSTEM1_WEATHER_BUDGET,
+            provider.fetch(&location, imperial, crate::weather::ForecastWhen::Now),
+        )
+        .await
+        {
+            Ok(Ok(report)) => {
+                timing.fetch_ms = Some(t0.elapsed().as_millis() as u64);
+                log::info!(
+                    "system1 weather: fetch OK in {}ms (location {location:?})",
+                    t0.elapsed().as_millis(),
+                );
+                report
+            }
+            Ok(Err(e)) => {
+                log::warn!(
+                    "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
+                    t0.elapsed().as_millis(),
+                );
+                return None; // nothing emitted yet — safe to defer
+            }
+            Err(_) => {
+                log::warn!(
+                    "system1 weather fetch exceeded {}ms budget; deferring to System-2",
+                    SYSTEM1_WEATHER_BUDGET.as_millis(),
+                );
+                return None; // nothing emitted yet — safe to defer
+            }
+        };
+
+        // Committed: from here we own the turn and must not fall through (that would
+        // double-speak). Best-effort writes mirror the normal reply path.
+        let reply = weather_summary(&report);
+        let (_reader, writer) = device.split_mut();
+        // Widget first, so the screen changes the instant the intent resolves.
+        protocol::write_event(
+            writer,
+            &WyomingEvent::weather_show(
+                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+            ),
+        )
+        .await
+        .ok();
+        on_event(TurnEvent::ReplyToken(reply.clone()));
+        protocol::write_event(writer, &WyomingEvent::reply_token(&reply))
+            .await
+            .ok();
+        on_event(TurnEvent::Speaking);
+        let mut audio_started = false;
+        let tts_start = Instant::now();
+        if let Err(e) = self
+            .speak_chunk(writer, runtime, connector, &reply, &mut audio_started, dump)
+            .await
+        {
+            log::warn!("system1 weather: TTS failed ({e:#}); widget + text still sent");
+        }
+        timing.tts_ms = Some(tts_start.elapsed().as_millis() as u64);
+        log::info!(
+            "system1 weather: TTS in {}ms ({} reply chars)",
+            tts_start.elapsed().as_millis(),
+            reply.len(),
+        );
+        emit_follow_up_and_stop(
+            writer,
+            &self.follow_up,
+            audio_started,
+            &reply,
+            followup_depth,
+        )
+        .await;
+        Some(reply)
+    }
+
     async fn speak_chunk(
         &self,
         writer: &mut DynWrite,
@@ -1249,6 +2127,16 @@ fn sanitize_for_tts(text: &str) -> String {
 /// about the time/date, and must not volunteer it otherwise. Without that guard the
 /// prominently-stated clock became the most salient fact in context, so on a vague or
 /// mis-transcribed request the model would default to reciting the time.
+/// A short spoken reply for the System-1 `time` / `date` clock intents, formatted from
+/// the device's wall clock. `time` → "It's 3:45 PM."; anything else → today's date.
+fn spoken_clock_reply(intent: &str) -> String {
+    let now = chrono::Local::now();
+    match intent {
+        "time" => format!("It's {}.", now.format("%-I:%M %p")),
+        _ => format!("Today is {}.", now.format("%A, %B %-d")),
+    }
+}
+
 fn current_datetime_line() -> String {
     let now = chrono::Local::now();
     format!(
@@ -1332,7 +2220,24 @@ fn display_context_line(ctx: &protocol::DisplayContext) -> String {
     match ctx {
         protocol::DisplayContext::Recipe(screen) => recipe_screen_line(screen),
         protocol::DisplayContext::Weather(screen) => weather_screen_line(screen),
+        protocol::DisplayContext::Place(screen) => place_screen_line(screen),
     }
+}
+
+/// The prompt line for the place card: names the place on screen so the model can answer
+/// follow-ups in context ("is it open on Sunday?" → `places_lookup` for the same place)
+/// or `close_places` when the user says to close it.
+fn place_screen_line(screen: &protocol::PlaceScreen) -> String {
+    let name = screen.name.trim();
+    let which = if name.is_empty() {
+        "a place".to_string()
+    } else {
+        name.to_string()
+    };
+    format!(
+        "The place card is currently open on the display, showing {which}. Use the \
+         `places_lookup` tool to look up another place and `close_places` to close it."
+    )
 }
 
 /// The prompt line for the weather screen: names what the forecast currently shows, so
@@ -1397,6 +2302,92 @@ fn recipe_screen_line(screen: &protocol::RecipeScreen) -> String {
 /// only takes actions already queued (a tool's `invoke` runs synchronously during
 /// the LLM turn, so its action is enqueued before we get here). Write failures are
 /// swallowed — the device dropping mid-turn is handled by the surrounding turn logic.
+/// Close out a spoken turn: send the follow-up `anamanti-listen` frame (when enabled,
+/// audio was produced, and the chain cap allows it) **before** the final `audio-stop`
+/// (the device ends its turn on the first stop). Shared by the normal reply path and the
+/// System-1 fast path so both invite follow-ups identically.
+async fn emit_follow_up_and_stop<W>(
+    writer: &mut W,
+    follow_up: &FollowUpConfig,
+    audio_started: bool,
+    reply: &str,
+    followup_depth: u32,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let within_cap = follow_up.max_chain == 0 || followup_depth < follow_up.max_chain;
+    if follow_up.enabled && audio_started && within_cap {
+        let next_depth = followup_depth + 1;
+        let wait_secs = if reply_is_question(reply) {
+            follow_up.question_wait_secs
+        } else {
+            follow_up.reply_wait_secs
+        };
+        log::info!("follow-up: asking device to listen for {wait_secs}s (depth {next_depth})");
+        protocol::write_event(writer, &WyomingEvent::listen(next_depth, wait_secs))
+            .await
+            .ok();
+    }
+    // Close the single coalesced device-facing audio stream.
+    if audio_started {
+        protocol::write_event(writer, &WyomingEvent::audio_stop(0))
+            .await
+            .ok();
+    }
+}
+
+/// A speakable duration, e.g. `600` → "10 minutes", `5400` → "1 hour 30 minutes",
+/// `90` → "1 minute 30 seconds". Used in the System-1 timer confirmation.
+fn human_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let mut parts = Vec::new();
+    let unit = |n: u64, singular: &str| {
+        if n == 1 {
+            format!("1 {singular}")
+        } else {
+            format!("{n} {singular}s")
+        }
+    };
+    if h > 0 {
+        parts.push(unit(h, "hour"));
+    }
+    if m > 0 {
+        parts.push(unit(m, "minute"));
+    }
+    if s > 0 {
+        parts.push(unit(s, "second"));
+    }
+    if parts.is_empty() {
+        return "0 seconds".to_string();
+    }
+    parts.join(" ")
+}
+
+/// A short, speakable one-line summary of a forecast for the System-1 weather fast path
+/// (the full detail is on the widget). Metric/imperial follows the report's units.
+fn weather_summary(report: &crate::weather::WeatherReport) -> String {
+    let deg = if report.units == "imperial" {
+        "°F"
+    } else {
+        "°C"
+    };
+    let c = &report.current;
+    let lead = {
+        let d = c.description.trim();
+        if d.is_empty() {
+            String::new()
+        } else {
+            format!("{d}, ")
+        }
+    };
+    format!(
+        "{lead}it's {}{deg} in {}. Today's high is {}{deg}, low {}{deg}.",
+        c.temp, report.location_label, c.high, c.low
+    )
+}
+
 async fn drain_device_actions<W>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<DeviceAction>,
     writer: &mut W,
@@ -1418,6 +2409,10 @@ async fn drain_device_actions<W>(
                 serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
             ),
             DeviceAction::DismissWeather => WyomingEvent::weather_dismiss(),
+            DeviceAction::ShowPlace(report) => WyomingEvent::place_show(
+                serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+            ),
+            DeviceAction::DismissPlace => WyomingEvent::place_dismiss(),
             DeviceAction::RecipeControl(nav) => match nav {
                 RecipeNav::TabOverview => WyomingEvent::recipe_navigate("overview"),
                 RecipeNav::TabIngredients => WyomingEvent::recipe_navigate("ingredients"),
@@ -1445,24 +2440,6 @@ fn reply_is_question(reply: &str) -> bool {
         c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '}' | '”' | '’' | '»')
     });
     trimmed.ends_with('?') || trimmed.ends_with('？')
-}
-
-/// Root-mean-square amplitude (in `i16` units) of a little-endian PCM16 buffer,
-/// used by the turn's energy VAD to tell speech from room noise. A trailing odd
-/// byte (never expected from a well-formed frame) is ignored.
-fn rms_i16_le(pcm: &[u8]) -> f64 {
-    let mut sum_sq = 0f64;
-    let mut n = 0u64;
-    for c in pcm.chunks_exact(2) {
-        let s = i16::from_le_bytes([c[0], c[1]]) as f64;
-        sum_sq += s * s;
-        n += 1;
-    }
-    if n == 0 {
-        0.0
-    } else {
-        (sum_sq / n as f64).sqrt()
-    }
 }
 
 /// Wall-clock duration of one i16-LE mono PCM chunk of `byte_len` bytes at
@@ -1609,27 +2586,10 @@ mod household_tests {
 
 #[cfg(test)]
 mod vad_tests {
-    use super::{chunk_duration, rms_i16_le, voiced_onset_step, MIN_SPEECH_ONSET};
+    // RMS-gate tests moved with `rms_i16_le` to `crate::vad` (the `EnergyGate` seam);
+    // this module now covers only the orchestrator-owned onset-debounce state machine.
+    use super::{chunk_duration, voiced_onset_step, MIN_SPEECH_ONSET};
     use std::time::Duration;
-
-    fn pcm(samples: &[i16]) -> Vec<u8> {
-        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
-    }
-
-    #[test]
-    fn rms_of_silence_is_zero() {
-        assert_eq!(rms_i16_le(&pcm(&[0, 0, 0, 0])), 0.0);
-        assert_eq!(rms_i16_le(&[]), 0.0);
-    }
-
-    #[test]
-    fn rms_tracks_amplitude() {
-        // A constant ±1000 signal has RMS 1000; loud speech reads far above the
-        // 120-unit voice threshold while a quiet ±30 noise floor stays below it.
-        assert!((rms_i16_le(&pcm(&[1000, -1000, 1000, -1000])) - 1000.0).abs() < 1e-6);
-        assert!(rms_i16_le(&pcm(&[30, -30, 25, -20])) < 120.0);
-        assert!(rms_i16_le(&pcm(&[800, -600, 700, -900])) > 120.0);
-    }
 
     #[test]
     fn chunk_duration_is_bytes_over_rate() {

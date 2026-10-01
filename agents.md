@@ -4,6 +4,12 @@ Build guidance for AI coding agents (and humans) working in this repository.
 Read this together with [`architecture.md`](./plans/architecture.md) (the design) and
 [`Plan.MD`](./plans/Plan.MD) (phases, confirmed decisions, open questions).
 
+> **Display UI inventory.** [`DisplayUI.md`](./plans/DisplayUI.md) is the canonical,
+> category-by-category catalog of everything that can appear on the Anamanti Display
+> screen — backgrounds/idle, overlays, widgets, banners, full-screen views, status
+> indicators, and settings — with file paths and how each is triggered. When you add,
+> remove, or restructure any on-screen UI, update `DisplayUI.md` in the same change.
+
 > **Naming.** The project is **Anamanti** (from the Irish *anam an tí*, "soul of
 > the home"; pronounced **"AN-um un TEE"** — formerly "Easy Home"/"Ambient"). It
 > has two halves: **Anamanti Core**, the Mac-side brain (formerly "the
@@ -29,7 +35,13 @@ Feature-specific plans branch off these — e.g.
 the `anamanti-recipe` frame + the display's 3-tab recipe screen), and
 [`WeatherPlan.md`](./plans/WeatherPlan.md) (weather: the `weather_lookup` tool +
 the `anamanti-weather` frame + the display's full-screen forecast and the ambient
-icon/temperature beside the clock).
+icon/temperature beside the clock), and
+[`PlacesPlan.md`](./plans/PlacesPlan.md) (places: the `places_lookup` tool over the
+Google Places API + the `anamanti-place` frame + the display's full-screen place card,
+plus the route-only System-1 `place` intent), and
+[`UpdaterPlan.md`](./plans/UpdaterPlan.md) (in-app APK auto-updater: Rust fetch/
+download/SHA-256-verify of a signed APK + `latest.json` from Cloudflare R2, a native
+`PackageInstaller` channel, and the `selfUpdate`/`fdroid` build flavors).
 
 ---
 
@@ -67,23 +79,46 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **Playback:** Rust (`cpal`/`oboe`), symmetric with capture.
 - **Barge-in:** wake word stays active during playback; saying it again flushes
   playback immediately and starts a fresh turn, and sends an `anamanti-interrupt`
-  frame so the Anamanti Core aborts the in-flight LLM + TTS. **AEC is not shipped**
-  (investigated on hardware — see below; self-triggering during loud playback is a
-  known, accepted limitation).
-- **VAD:** off-device — the **Anamanti Core** decides end-of-speech (energy VAD;
-  faster-whisper has no streaming VAD, so the Mac sends `audio-stop`). The device
-  never runs its own VAD.
+  frame so the Anamanti Core aborts the in-flight LLM + TTS. **In-app AEC is not part
+  of this build**, but echo cancellation *is* provided at the device layer by a
+  required audio-HAL shim (`libamznaec_shim.so` — SpeexDSP linear AEC against the Echo
+  Show's DAC loopback, ~16 dB, talker-preserving), so barge-in over playback yields
+  clean transcripts. See the AEC-interim decision + risk section below, architecture.md
+  §4, and TODO.md §2.
+- **VAD:** off-device — the **Anamanti Core** decides end-of-speech (neither STT
+  engine has streaming VAD, so the Mac sends `audio-stop`). The device never runs
+  its own VAD. The detector is **pluggable behind a `SpeechGate` seam**
+  (`anamanti-core/src/vad/`). **As of 2026-09-30 the neural Silero engine is the
+  committed default** (`vad.engine="silero"`, `VadConfig::default()`; the `vad-silero`
+  build feature is **on by default**) — an energy/RMS gate is more robust to background
+  noise's amplitude-vs-speech ambiguity than the old energy default. Consequences of the
+  flip: a default `cargo build` pulls onnxruntime and a default boot **requires the
+  Silero v4 model on disk** (`anamanti-core/scripts/fetch-vad-model.sh <dir>`) — a
+  `silero` boot with no model is a **hard error** (fail-loud). The **energy/RMS gate**
+  is now the opt-in fallback (`vad.engine="energy"`, or an energy-only
+  `cargo build --no-default-features`) and the automatic fallback when a `vad-silero`
+  build has no model loaded. See `plans/VadSileroPlan.md`.
 - **Memory:** persistent **SQLite** on the Mac is the store of record for
   **explicit + inferred** facts (writes + the settings list + voice
   "remember…"/"forget that"). **Retrieval/recall defaults to the embedded HelixDB
   GraphRAG backend** (in-process, no server/Docker) — every completed turn is
   appended to `anamanti_chatlog.jsonl` and a background ingester embeds it into the
-  graph. GraphRAG needs `OPENAI_API_KEY` (embeddings); if it's absent or init
+  graph. **Embeddings default to a local, offline model** — nomic-embed-text-v1.5 run
+  in-process via `fastembed`/onnxruntime (`graphrag.embed_backend="local"`, feature
+  `embed-local`, ON by default); it needs no network and no API key, only the ONNX +
+  tokenizer on disk (`scripts/fetch-embed-model.sh`). `graphrag.embed_backend="openai"`
+  is the opt-in cloud path and then needs `OPENAI_API_KEY`. The backend is **hot-swappable
+  live** from the config page (Memory → Embeddings) with no restart; each backend keeps its
+  **own per-signature store** (`helix_path/<label>-<dims>/`) so switching is lossless (the
+  durable SQLite facts + chat log are never touched — only the derived vector index differs).
+  If the chosen embedder init
   fails, recall **falls back to SQLite FTS** (writes are unaffected). Override with
-  `memory_backend: "sqlite"` in `anamanti.json` for pure FTS recall. The HelixDB
-  engine, the rig agent framework, and the ECAPA-TDNN speaker embedder are **always
-  compiled in** (no longer feature-gated); speaker ID is selected purely at runtime
-  via `speaker.enabled` / `speaker.model_path`.
+  `memory_backend: "sqlite"` in `anamanti.json` for pure FTS recall. (Pure-Rust `tract`
+  cannot load the nomic graph — its rotary `Range` op does not lower to a typed model —
+  so the local embedder runs on onnxruntime via `ort`, the same pin as `vad-silero`.)
+  The HelixDB engine, the rig agent framework, and the ECAPA-TDNN speaker embedder are
+  **always compiled in** (no longer feature-gated); speaker ID is selected purely at
+  runtime via `speaker.enabled` / `speaker.model_path`.
 - **Idle screen:** photo slideshow from a Google Photos/Drive folder; keeps running
   when disconnected. Google Photos (Ambient) links via **on-device OAuth**
   (device-code/QR); **Google Drive links on the Anamanti Core** (consent on the Mac,
@@ -91,10 +126,13 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **Resilience:** **auto-reconnect** with backoff via mDNS + a subtle
   disconnected indicator; wake words queue until reconnected.
 - **AEC interim:** raise the wake-word confidence **threshold during playback** to
-  suppress self-triggers. Real AEC was attempted on hardware and deferred — the
+  suppress self-triggers. In-app AEC was attempted on hardware and deferred — the
   `VOICE_COMMUNICATION` preset doesn't cancel on this device, and software AEC is
-  net-negative for flush-on-wake barge-in (no simultaneous echo to cancel). See the
-  risk section below.
+  net-negative for flush-on-wake barge-in (no simultaneous echo to cancel). Echo
+  cancellation is instead delivered **outside this build** by a required device-side
+  audio-HAL shim (`libamznaec_shim.so`, SpeexDSP, ~16 dB) — see the risk section below,
+  architecture.md §4, and TODO.md §2. The raised threshold remains the in-app
+  mitigation layered on top.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
 - **Proactive notifications (Approach A):** the Anamanti Core can push **visual**
@@ -124,7 +162,8 @@ anamanti-core/      Anamanti Core — everything that runs on the Mac (crate
                     client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory,
                     mDNS.
 plans/              Design + planning docs: architecture.md (design, source of
-                    truth), Plan.MD (phases + decision table), TODO.md, the
+                    truth), Plan.MD (phases + decision table), TODO.md,
+                    DisplayUI.md (the Display's on-screen UI catalog), the
                     *_plan / rollout notes, and MusicPlan.md.
 agents.md           This file (repo root).
 CLAUDE.md           Harness entry point; points here (repo root).
@@ -160,17 +199,29 @@ flutter_rust_bridge_codegen generate
 # Build a device APK (cargokit cross-compiles the Rust engine into it).
 # Echo Show 8 (crown) is 32-bit armeabi-v7a — use android-arm, NOT android-arm64
 # (arm64 fails with INSTALL_FAILED_NO_MATCHING_ABIS on this device).
-flutter build apk --release --target-platform android-arm
+#
+# A `distribution` flavor dimension exists (selfUpdate / fdroid — the in-app R2
+# auto-updater, plans/UpdaterPlan.md), so EVERY apk build/run must
+# name a flavor. `selfUpdate` is the normal build (ships the updater); `fdroid`
+# ships without it. The APK is then named app-<flavor>-release.apk.
+flutter build apk --release --flavor selfUpdate --target-platform android-arm
 
 # Run the app on the Echo Show (LineageOS) via adb (path relative to anamanti-display/)
-adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d <echo-show-device>
+adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk   # or: flutter run --flavor selfUpdate -d <echo-show-device>
 ```
 
 - Requires: Flutter SDK, Android SDK + NDK, Rust toolchain, `adb`.
-- Mac side: a Wyoming STT server (Whisper/CoreML) and Piper TTS on the LAN.
+- Mac side: Piper TTS on the LAN, plus **STT** — either the external
+  `wyoming-faster-whisper` server (default, `stt.engine=wyoming`) **or** the
+  in-process whisper.cpp engine (`stt.engine=whisper-rs`, built with
+  `--features stt-whisper-local`; no Python STT server). See
+  `plans/python-to-rust-whisper.md`.
 
 ```bash
 # Mac Mini Anamanti Core (the "brain"). Runs on the Mac, not the device.
+# Toolchain: pinned to rustc 1.92 via the repo-root `rust-toolchain.toml` (the embedded
+# HelixDB stack — foyer/crc-fast/roaring — requires >= 1.91). rustup auto-installs it on
+# first build; `rustup default 1.88` alone will fail dependency resolution.
 cargo test  --manifest-path anamanti-core/Cargo.toml           # unit + pipeline integration tests
 cargo clippy --manifest-path anamanti-core/Cargo.toml --all-targets -- -D warnings
 cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyoming._tcp, serves turns
@@ -187,16 +238,24 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 # is a BOOT SEED: it is also settable at runtime from the loopback config page (masked,
 # never echoed back) and then persisted to settings_path, so a headless host needs no
 # shell env at all.
-#   ANTHROPIC_API_KEY / OPENAI_API_KEY  (anthropic/openai backends and, for
-#     OPENAI_API_KEY, the helix GraphRAG embeddings; UI: Config tab)
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY  (anthropic/openai backends; OPENAI_API_KEY is
+#     needed for the helix GraphRAG embeddings ONLY when graphrag.embed_backend="openai"
+#     — the default "local" nomic embedder is offline and needs no key; UI: Config tab)
 #   TAVILY_API_KEY                       (real web search when llm.search_provider=tavily;
 #     UI: Config tab)
 #   MAPBOX_TOKEN (or MAPBOX_ACCESS_TOKEN) (the directions_lookup provider token;
 #     UI: Tools tab → /tools)
 #   APPSAID_APP_TOKEN                    (the send_phone_message sender app token for
 #     AppSaid HTML-push; UI: Household tab → /household)
+#   VISUALCROSSING_API_KEY               (the weather provider key when weather.provider=
+#     visualcrossing, the default; UI: Tools tab → /tools. Absent ⇒ weather falls back to
+#     keyless Open-Meteo)
+#   GOOGLE_PLACES_API_KEY                (the places_lookup provider key — Google Places API
+#     New; UI: Tools tab → /tools. Absent ⇒ the tool is not advertised, no keyless fallback)
 #   ANTHROPIC_OAUTH_TOKEN                (Claude subscription token from `claude setup-token`;
 #     UI: Config tab when Anthropic auth = subscription)
+#   OPENROUTER_API_KEY                   (the System-1 `jev` decision backend on OpenRouter;
+#     UI: System-1 tab → /system1. Only needed when system1.backend=jev)
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
 #     process start, so it has no config-page control)
 #
@@ -210,24 +269,50 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #   db_path / chatlog_path / promptlog_path / helix_path / settings_path / audio_dump_dir
 #     (settings_path is the runtime OVERLAY file — see below; "off"/"none" disables persistence)
 #   system_prompt / home_location / weather_units / turn_timeout_secs / memory_backend
-#     (helix|sqlite; helix needs OPENAI_API_KEY and falls back to sqlite FTS if absent)
+#     (helix|sqlite; helix embeds locally by default — graphrag.embed_backend="openai"
+#     is the opt-in cloud path and needs OPENAI_API_KEY, falling back to sqlite FTS if absent)
 #   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig),
 #     llm.anthropic_auth (apikey|subscription), llm.anthropic_token_cmd (default `ant`),
 #     llm.web_search, llm.search_provider (duckduckgo|tavily, default tavily — needs
 #     the TAVILY_API_KEY secret; duckduckgo is keyless), and the per-provider
 #     sub-blocks llm.ollama{url,model} / llm.anthropic{model,max_tokens} / llm.openai{…}
+#   graphrag{embed_backend (local|openai, default local), embed_model_path,
+#     embed_tokenizer_dir, embed_model, embed_dims, extract_model, …}. The default
+#     local nomic-embed-text-v1.5 embedder needs its ONNX+tokenizer on disk — provision
+#     with anamanti-core/scripts/fetch-embed-model.sh (never committed; see /models/).
+#     The backend is hot-swappable live from the config page (Memory → Embeddings); the
+#     choice persists in helix_path/active_backend. Each backend keeps its OWN store +
+#     ingest offset under helix_path/<label>-<dims>/ (e.g. nomic-768, openai-1536), so
+#     switching is lossless and never re-embeds an already-built backend — durable SQLite
+#     facts + the chat log (source of truth) are untouched.
 #   graphrag{…}, speaker{…}, music{…} (music.enabled defaults to true, so the
 #     Anamanti Core ducks the music group while it speaks and — with music.autostart,
 #     also default on — supervises snapserver/librespot/mpv at boot; see
 #     anamanti.example.json for the full shape)
+#   system1{backend,base_url,openrouter_model,device,model,min_confidence,intents} — the
+#     pluggable System-1 fast-decision engine (plans/system1-fast-decisions.md). backend
+#     default "none" (disabled); "laya-serve" (local Laya-Decision sidecar on base_url,
+#     `/v1/systemone`) or "jev" (OpenRouter, needs OPENROUTER_API_KEY). Runtime-swappable
+#     + persisted; UI: System-1 tab → /system1. Resolves weather/timer before the LLM.
 #   calendar.subscriptions=[{name,url}], calendar.cache_ttl_secs (read-only web .ics;
 #     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised)
 #   directions.provider="mapbox" (+ the MAPBOX_TOKEN secret, set via env or the Tools
 #     tab) → the directions_lookup tool
+#   weather{enabled,provider,refresh_interval_secs} → the weather_lookup tool + ambient
+#     push. provider="visualcrossing" (default; + the VISUALCROSSING_API_KEY secret, set
+#     via env or the Tools tab) or "openmeteo" (keyless). Provider + key are runtime-
+#     settable on the Tools tab (persisted, rebuilds the tool + retargets the push live);
+#     visualcrossing with no key falls back to keyless Open-Meteo
+#   places{enabled,provider} → the places_lookup tool (Google Places API New) + the
+#     anamanti-place frame + the display's place card. provider="google" (default/only) +
+#     the GOOGLE_PLACES_API_KEY secret, set via env or the Tools tab (runtime-settable,
+#     rebuilds the tool live). No keyless fallback — no key ⇒ the tool is not advertised
 #   drive{client_id,client_secret,folder_ids,scope} (Google Drive photo slideshow OAuth
 #     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
-#   spotify{client_id,client_secret,refresh_token,device_name} (spotify_control tool;
-#     Premium; easiest setup is config page → Music tab → "Connect Spotify")
+#   spotify{client_id,client_secret,refresh_token,device_name,redirect_url} (spotify_control
+#     tool; Premium; easiest setup is config page → Music tab → "Connect Spotify". redirect_url
+#     is the OAuth callback the consent flow binds + registers, default
+#     http://127.0.0.1:8888/callback)
 #   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
 #     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
 #     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
@@ -239,6 +324,10 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     The sender app token is a SECRET (env APPSAID_APP_TOKEN or config page → Household
 #     tab, stored 0600, NEVER in the JSON). The tool is advertised only when worker_url +
 #     the app token + at least one recipient are all present)
+#   tool_cache{"<tool>": <seconds>, …} — per-tool response-cache TTLs, a flat map keyed by
+#     tool name, overlaid on built-in defaults; `0` disables a tool's cache. Generic
+#     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults
+#     to 3600s (60 min). Read once at boot (not runtime-settable). Mutating tools uncached.
 #
 # home_location/weather_units, drive, spotify, cadora, appsaid, the tts_voice, and the llm engine/
 # backend/model/web_search/search_provider fields only SEED the live settings at boot:
@@ -294,6 +383,21 @@ export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-t
 PROD="/Volumes/External/DeveloperSupport/Anamanti Core"
 
 # 1. Build the release binary from the branch you want to ship.
+#    VAD: `vad-silero` is a DEFAULT feature (2026-09-30), so this build compiles in
+#    onnxruntime and the Core boots on Silero. That REQUIRES the Silero v4 model in the
+#    prod folder — fetch it once (idempotent; skips if present):
+#      anamanti-core/scripts/fetch-vad-model.sh "$PROD/models"      # silero_vad.onnx (v4)
+#    A `silero` boot with no model is a HARD ERROR. To ship the old energy-only Core
+#    instead, build `--no-default-features` (re-add any features you want) and set
+#    "vad": { "engine": "energy" } in "$PROD/anamanti.json".
+#    Default STT dials the external wyoming-faster-whisper server. To ship the
+#    in-process whisper.cpp engine instead (no Python STT server), add the feature
+#    and pre-fetch the models (see plans/python-to-rust-whisper.md):
+#      anamanti-core/scripts/fetch-whisper-models.sh "$PROD/models"   # base + small
+#      cargo build --release --features stt-whisper-metal --manifest-path anamanti-core/Cargo.toml
+#    then set "stt": { "engine": "whisper-rs", "model": "base", "model_dir": "models" }
+#    in "$PROD/anamanti.json". (Metal = Apple-GPU accel; plain stt-whisper-local = CPU.)
+anamanti-core/scripts/fetch-vad-model.sh "$PROD/models"
 cargo build --release --manifest-path anamanti-core/Cargo.toml
 
 # 2. Stop the running production copy — the process LISTENING on :10700. Do NOT
@@ -337,7 +441,10 @@ Notes:
   folder.
 - Persistence: the process is detached but does **not** survive a reboot — running
   it under launchd is the open item in `TODO.md §4`.
-- **⚠️ One-time migration for an existing (pre-rename) production install.** The
+- **⚠️ One-time migration for an existing (pre-rename) production install.**
+  **Status: DONE for the local production install (2026-09-29)** — the folder, data
+  files, config paths, and identity were migrated and the running Core + the Echo Show
+  are on the new names (kept here as reference for any other pre-rename install). The
   Anamanti rename changed the on-disk names the binary looks for, so migrate the
   existing prod install **once** or it will start with fresh, empty state:
   ```bash
@@ -353,10 +460,18 @@ Notes:
   # also rename the sidecar files if present: anamanti_chatlog.jsonl.offset / -* etc.
   ```
   Then in `~/.zshenv` rename the provider/secret env vars from `AMBIENT_*` to
-  `ANAMANTI_*` (e.g. `AMBIENT_INSTANCE_ID`→`ANAMANTI_INSTANCE_ID`,
-  `AMBIENT_SPOTIFY_*`→`ANAMANTI_SPOTIFY_*`). Skipping any of these silently loses the
-  corresponding state (memory/settings) because the renamed binary creates new empty
-  files at the new default paths.
+  `ANAMANTI_*` (e.g. `AMBIENT_INSTANCE_ID`→`ANAMANTI_INSTANCE_ID`). (Spotify creds are
+  **not** environment variables — they live in the `spotify` block of `anamanti.json`
+  and in `anamanti_settings.json`, migrated by the settings-file rename above.)
+  Skipping any of these silently loses the corresponding state (memory/settings)
+  because the renamed binary creates new empty files at the new default paths.
+  For a **full identity rename** (optional — the `instance_id` is otherwise an opaque
+  stable key), also set `service_name`/`instance_id` in `anamanti.json` to
+  `"Anamanti Core"`/`"anamanti-core"` **and** re-pin the device to match: the Echo Show
+  stores its pinned Core id as `orchestratorKey` in `/data/data/com.anamanti.anamanti_display/files/settings.json`
+  (a **strict** pin — it stays offline rather than switching Macs), so update that value
+  (or set it to Auto) or the device will stop connecting. This is what the 2026-09-29
+  local-prod migration did.
 - **Redeploy Core and Display together.** The Wyoming frame names (`anamanti-*`), the
   mDNS TXT role (`role=core`), the config filename, env vars, and data-file names all
   changed, so a new Core will not interoperate with an old Display build (or vice
@@ -381,7 +496,9 @@ Notes:
 - When you make or discover a design decision, record it in `Plan.MD` (decision
   table) and reflect structural changes in `architecture.md`.
 - Keep the three docs consistent: `README.md` (overview), `architecture.md`
-  (design), `Plan.MD` (delivery). If you change behavior, update all three.
+  (design), `Plan.MD` (delivery). If you change behavior, update all three. When the
+  change touches the Display's on-screen UI, also update
+  [`plans/DisplayUI.md`](./plans/DisplayUI.md) (the UI catalog).
 - Do not add a second audio path, a second interop mechanism, or an IP-based
   discovery fallback without confirmation — these violate locked decisions.
 - Respect the memory budget: avoid large models, unbounded buffers, or holding
@@ -393,8 +510,10 @@ Notes:
 
 - IDLE: wake-word scoring only; socket dormant; photo slideshow on screen.
 - TRIGGERED: open TCP, send `audio-start`.
-- STREAMING: send PCM frames; read `transcript` events; the **Anamanti Core's energy
-  VAD** detects end-of-speech and sends `audio-stop` to STT (device runs no VAD).
+- STREAMING: send PCM frames; read `transcript` events; the **Anamanti Core's VAD**
+  (neural Silero by default since 2026-09-30; pluggable `SpeechGate`, energy/RMS is the
+  opt-in fallback — see `plans/VadSileroPlan.md`) detects end-of-speech and sends
+  `audio-stop` to STT (device runs no VAD).
 - THINKING: LLM (with persistent memory) streams reply tokens (render live).
 - THINKING→SPEAKING: the Anamanti Core segments the LLM stream into sentences and
   synthesizes each with Piper as it forms (streaming TTS), coalesced into one
@@ -428,7 +547,15 @@ Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
 
 ## Remaining risk to watch (see Plan.MD §4)
 
-**AEC (echo cancellation) — investigated on hardware, not shipped.** Findings:
+**AEC (echo cancellation) — SOLVED at the device layer (2026-09), not in-app.** A
+vendor audio-HAL shim (`libamznaec_shim.so`, `LD_PRELOAD`ed into
+`android.hardware.audio.service`) runs SpeexDSP linear AEC against the Echo Show's
+sample-aligned DAC loopback, giving ~16 dB talker-preserving cancellation before
+`AudioRecord` ever sees the mic — so barge-in over playback now produces clean
+transcripts. It is a **device prerequisite**, not part of this build (source +
+reversible install: <https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim>;
+architecture.md §4, TODO.md §2). Live-verified present + loaded on hardware
+(2026-09-28). The in-app approaches below were investigated and **not** shipped:
 - Platform AEC via the AAudio `VOICE_COMMUNICATION` input preset is reachable and does
   **not** break the wake word (on a release build), but it does **not actually cancel**
   the device's own playback here (measured mic RMS ~0.1 during playback vs ~0.003 idle)
@@ -441,8 +568,9 @@ Full diagram and wire format: [`architecture.md`](./plans/architecture.md) §4.
   cancel echo, VAD-detect the user) with a production AEC (AEC3/speexdsp + double-talk
   detector + residual suppressor), or coordinate the platform audio mode
   (`MODE_IN_COMMUNICATION` + routed output) so the hardware AEC references the render
-  stream. For now the shipping mitigation is the raised wake-word threshold during
-  playback, and self-triggering over loud playback is an accepted limitation.
+  stream — which is exactly what the device-side HAL shim above now does. The raised
+  wake-word threshold during playback remains the in-app mitigation for self-triggering,
+  layered on top of the shim's cancellation.
 - **On-device testing MUST use `--release` APKs** — debug Rust makes tract-onnx
   inference ~3.6× slower on the 32-bit device, which starves the wake-word loop and
   masquerades as unrelated audio bugs.

@@ -42,13 +42,32 @@ impl Notification {
     }
 }
 
+/// One live notify channel: the sender feeding its write pump plus the identity the
+/// device announced in its `anamanti-hello` frame (so the config page can list which
+/// displays are connected, and a future phase can target a push per device).
+struct Conn {
+    tx: mpsc::UnboundedSender<WyomingEvent>,
+    device_id: String,
+    name: String,
+}
+
+/// A connected display's identity, for the config page's "Connected devices" list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ConnectedDevice {
+    /// The stable `device_id` the display announced (MAC-derived, e.g.
+    /// `anamanti-140ac5942aca`).
+    pub device_id: String,
+    /// The human-friendly name the display announced (may be empty).
+    pub name: String,
+}
+
 /// Registry of connected notify channels. Cheap to share behind an `Arc`; construct
 /// once at boot and hand a clone to both the device-facing server (which registers
 /// live channels) and the config page (which enqueues test notifications).
 #[derive(Default)]
 pub struct NotificationService {
-    /// conn_id → the sender feeding that connection's write pump.
-    conns: Mutex<HashMap<u64, mpsc::UnboundedSender<WyomingEvent>>>,
+    /// conn_id → that connection's write-pump sender + announced identity.
+    conns: Mutex<HashMap<u64, Conn>>,
     /// Monotonic connection-handle allocator.
     next_conn: AtomicU64,
     /// Monotonic per-process notification sequence (for id minting).
@@ -63,10 +82,21 @@ impl NotificationService {
     /// Register a newly-opened notify channel. Returns a connection handle (used to
     /// [`deregister`](Self::deregister) on close) and the receiver the connection
     /// task drains to write pushes out to the device.
-    pub fn register(&self, _device_id: &str) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
+    pub fn register(
+        &self,
+        device_id: &str,
+        name: &str,
+    ) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        self.conns.lock().unwrap().insert(conn_id, tx);
+        self.conns.lock().unwrap().insert(
+            conn_id,
+            Conn {
+                tx,
+                device_id: device_id.to_string(),
+                name: name.to_string(),
+            },
+        );
         (conn_id, rx)
     }
 
@@ -80,6 +110,28 @@ impl NotificationService {
         self.conns.lock().unwrap().len()
     }
 
+    /// The identities (device_id + name) of every connected display, de-duplicated by
+    /// `device_id` and sorted by name then id — for the config page's device list. A
+    /// device holds one notify channel, so this is the canonical "who's connected" view.
+    pub fn connected_devices(&self) -> Vec<ConnectedDevice> {
+        let conns = self.conns.lock().unwrap();
+        let mut seen = std::collections::BTreeMap::new();
+        for conn in conns.values() {
+            seen.entry(conn.device_id.clone())
+                .or_insert_with(|| ConnectedDevice {
+                    device_id: conn.device_id.clone(),
+                    name: conn.name.clone(),
+                });
+        }
+        let mut out: Vec<ConnectedDevice> = seen.into_values().collect();
+        out.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.device_id.cmp(&b.device_id))
+        });
+        out
+    }
+
     /// Push `note` to every connected device. Dead channels (receiver dropped) are
     /// pruned. Returns how many channels the notification was delivered to.
     ///
@@ -89,7 +141,7 @@ impl NotificationService {
         let event = note.to_event();
         let mut conns = self.conns.lock().unwrap();
         let mut delivered = 0usize;
-        conns.retain(|_, tx| match tx.send(event.clone()) {
+        conns.retain(|_, conn| match conn.tx.send(event.clone()) {
             Ok(()) => {
                 delivered += 1;
                 true
@@ -131,9 +183,24 @@ mod tests {
         assert_eq!(svc.connected(), 0);
         assert_eq!(svc.notify(&note()), 0); // nobody connected
 
-        let (id_a, mut rx_a) = svc.register("dev-a");
-        let (_id_b, rx_b) = svc.register("dev-b");
+        let (id_a, mut rx_a) = svc.register("dev-a", "Kitchen");
+        let (_id_b, rx_b) = svc.register("dev-b", "Bedroom");
         assert_eq!(svc.connected(), 2);
+
+        // The connected-devices list reports both identities, sorted by name.
+        assert_eq!(
+            svc.connected_devices(),
+            vec![
+                ConnectedDevice {
+                    device_id: "dev-b".into(),
+                    name: "Bedroom".into()
+                },
+                ConnectedDevice {
+                    device_id: "dev-a".into(),
+                    name: "Kitchen".into()
+                },
+            ]
+        );
 
         // Drop one receiver → it is pruned on the next push, and only the live one
         // receives the frame.
@@ -147,6 +214,7 @@ mod tests {
 
         svc.deregister(id_a);
         assert_eq!(svc.connected(), 0);
+        assert!(svc.connected_devices().is_empty());
     }
 
     #[test]

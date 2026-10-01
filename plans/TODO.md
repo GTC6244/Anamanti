@@ -10,13 +10,36 @@ hardware. Grouped by priority.
 Everything below the UI is in place and unit/integration-tested with mocks; the
 full loop has not been exercised against real services on the device.
 
-- [ ] Stand up the Mac services on the LAN: **wyoming-faster-whisper** (STT, 10300),
-      **wyoming-piper** (TTS, 10200), and **Ollama** (11434) — all off-the-shelf.
+- [ ] Stand up the Mac services on the LAN: **wyoming-piper** (TTS, 10200) and
+      **Ollama** (11434) — off-the-shelf. **STT** is either **wyoming-faster-whisper**
+      (STT, 10300; default `stt.engine=wyoming`) or the **in-process whisper.cpp**
+      engine (`stt.engine=whisper-rs`, `--features stt-whisper-local`, no separate
+      process — see `plans/python-to-rust-whisper.md`).
+- [ ] **STT cutover (gated on M4 validation):** the in-process `whisper-rs` engine is
+      built, wired, and **functionally validated on real device audio** (M1 Max dev
+      box: two live Echo Show turns transcribed correctly over Wyoming/Metal, mock
+      LLM, no Piper). Remaining before the flip: run on the **M4 Mac Mini** for the
+      decode-latency number, a full turn with Piper + Anthropic, then flip the
+      committed default from `wyoming` to `whisper-rs` (make the native build default
+      in the same change) per the Stage 5 checklist in
+      `plans/python-to-rust-whisper.md`; retire the Wyoming path one cycle later.
 - [ ] Run the Anamanti Core: `cargo run --manifest-path anamanti-core/Cargo.toml --release`
       (advertises `_wyoming._tcp`; env in `anamanti-core/src/config.rs`).
 - [ ] Install the release APK on the Echo Show and run one full turn:
       wake word → STT → LLM → TTS playback, with the transcript/reply rendered live.
 - [ ] Confirm **mDNS discovery** works across the real network (no hardcoded IP).
+- [ ] Verify **discovery survives interface change + sleep/wake** on hardware (the
+      "mDNS bites daily / only a Core restart fixes it" failure). macOS now registers
+      via the OS `mDNSResponder` (`DNSServiceRegister`/`astro-dnssd`), which owns
+      address refresh, multicast rejoin, and sleep/wake recovery — so no in-process
+      re-advertise is needed. Tests: (a) with the device connected, switch the Mac's
+      active LAN (unplug Ethernet → Wi-Fi failover, or force a DHCP renew) and confirm
+      the device reconnects without a Core restart; (b) let the Mac sleep overnight (or
+      `pmset sleepnow`), wake it, and confirm the device rediscovers/reconnects without
+      a restart. (`anamanti-core/src/discovery.rs`; device-side reachable-address pick
+      in `anamanti-display/rust/src/wyoming/discovery.rs`.) Residual: if `mDNSResponder`
+      itself restarts, `astro-dnssd`'s poll thread exits and the record is lost until the
+      Core restarts — rare; revisit if observed.
 - [x] Exercise **barge-in** (wake word during playback) on-device — works: a wake word
       mid-reply flushes playback and starts a fresh turn (flush-on-wake + the
       `anamanti-interrupt` frame aborts the Anamanti Core's in-flight LLM+TTS). Detection
@@ -84,6 +107,34 @@ far end — transparent to `AudioRecord`/AudioFlinger.
       Core's `voice_rms_threshold` instead of raising device gain.
 - [ ] **Set `persist.vendor.amznaec.log 0`** on this device for daily use — telemetry
       is currently on (`log 1`) from the install. (Same as follow-up #1 below.)
+
+### Re-verified live on hardware (2026-09-28)
+
+- [x] Confirmed on the connected Echo Show (serial `G0918309009403GL`): the shim
+      `/system/vendor/lib/libamznaec_shim.so` is present **and loaded** —
+      `LD_PRELOAD=libamznaec_shim.so` in the live `android.hardware.audio.service`
+      (pid 249) environ and the `.so` mapped in with an executable segment. Props:
+      `persist.vendor.amznaec.enable=1`, `persist.vendor.amznaec.log=1`. Engine =
+      Speex (no `persist.vendor.amznaec.engine`/`gain_db`/`spx_filter_ms` overrides set
+      → shim defaults, i.e. makeup `gain_db=20`, **not** the production unit's tuned 34).
+- [x] **Two gain levers for the low-mic-level / missed-onset problem** (2026-09-28):
+  - **Shim makeup gain (device-side, correct layer):** `persist.vendor.amznaec.gain_db`
+    is a root-only vendor prop the sandboxed app **cannot** set. Provision it with the
+    new **`anamanti-display/scripts/set-aec-gain.sh [GAIN_DB] [SERIAL]`** (default 34;
+    `adb root` + `setprop` + audio-HAL restart, revert with `… 20`).
+  - **In-app "Capture gain (dB)" setting (app-side, root-free analogue):** a new
+    device-local `AppSettings.captureGainDb` (0–36 dB, default 0 = no-op) applied in the
+    Rust engine to the resampled 16 kHz block **before** both the wake-word detector and
+    the streamed PCM (`engine/mod.rs`; `WakeWordConfig.capture_gain_db`). Settings →
+    Speech & detection → "Capture gain (dB)". Works on any unit, no root. Prefer tuning
+    the shim (device-wide, pre-AEC-independent) where you have adb; use the in-app gain
+    as the portable fallback. **Don't stack both aggressively** — double-boosting clips.
+  - **Visual tuning aid (in-app):** Settings → **Audio Diagnostics** (`AudioDiagnosticsView`,
+    see `plans/DisplayUI.md §8`) turns the mic monitor on and shows a live RMS meter (dBFS),
+    a wake-word score meter with the firing threshold line, a detection flash + history, and
+    numeric readouts — with **live** capture-gain + sensitivity sliders that apply to the
+    running engine without a restart (`update_diagnostics_tuning`). Use it to dial the idle
+    RMS to ~0.003 and watch the wake-word score climb past the threshold when you speak.
 
 **Remaining AEC follow-ups (device-side; not in this repo's build):**
 
@@ -233,7 +284,15 @@ steers both the voice-turn path and the settings/control path. SQLite opens WAL.
 ## 4. Ops & deployment polish
 
 - [ ] Run the Anamanti Core as a managed service on the Mac (launchd/login item) so it
-      survives restarts.
+      survives restarts. **Also covers the one mDNS residual** from the
+      2026-09-30 native-Bonjour switch (see Plan.MD decision table): macOS now
+      advertises via the OS `mDNSResponder` (`DNSServiceRegister`/`astro-dnssd`),
+      which handles sleep/wake + interface changes itself — but if `mDNSResponder`
+      *itself* restarts, `astro-dnssd`'s poll thread exits and the service record is
+      lost until the Core process restarts. Rare, but a launchd `KeepAlive` that
+      restarts the Core (and ideally a `caffeinate`/`ProcessType` that keeps the Mac
+      awake) auto-recovers it. Revisit `discovery.rs` to re-register on
+      `kDNSServiceErr_ServiceNotRunning` only if it's still observed after launchd.
 - [ ] Document the concrete LAN setup (server versions, ports, Piper voice, model
       choices) in `README.md` from a real deployment.
 - [ ] Confirm auto-reconnect/backoff behavior end-to-end when the Mac goes away and
@@ -391,6 +450,17 @@ actions".
       ask, and shows a **small icon + current temperature beside the idle clock** kept
       fresh by an always-on periodic push (`WeatherService` → the persistent
       `role=weather` channel). Suites green; **pending on-device QA** (§4 of the plan).
+- [x] **Places tool + display** (2026-09-28, see `PlacesPlan.md`): the `places_lookup` /
+      `close_places` rig tools query the **Google Places API (New)** (behind a
+      `PlacesProvider` trait, `GOOGLE_PLACES_API_KEY` secret, runtime-settable on the Tools
+      tab; no keyless fallback) and push a place card over a new **`anamanti-place`** frame.
+      The device renders a full-screen **place card** (`PlaceView`: photo + name, address,
+      hours + open-now, rating, phone, website). Ambiguous queries disambiguate over the
+      follow-up loop; a **route-only System-1 `place` intent** classifies then defers to
+      System-2. Suites green (Core lib 320+places, device-rust 96, Flutter 107); clippy +
+      `dart analyze` clean; FRB codegen clean. **Pending on-device QA** (§4 of the plan):
+      release APK, set `GOOGLE_PLACES_API_KEY` + a `home_location`, ask "what are the hours
+      for <cafe>" → card with photo + hours; confirm disambiguation and voice/touch close.
 - [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
       tool returns real distance, travel time, and **live traffic** between two places
       (`driving`/`walking`/`cycling`). Lives in `anamanti-core/src/directions/` behind a
@@ -445,3 +515,40 @@ actions".
       recipe" and confirm the screen reacts and the model reliably calls
       `recipe_control` / `close_recipe` (needs the Mac Anamanti Core + a spoken turn;
       not drivable headlessly).
+
+## 8. In-app APK auto-updater (shipped 2026-10-01 — verify on hardware)
+
+Self-rolled OTA updates from Cloudflare R2, replacing reliance on Obtainium (kept in
+parallel for now). Code + tests landed (see [`UpdaterPlan.md`](./UpdaterPlan.md) and
+Plan.MD): Rust fetch/stream-download/SHA-256-verify (`ureq`+rustls, `rust/src/update/`
++ `rust/src/api/updater.rs`), a native `anamanti_display/updater` MethodChannel +
+`InstallReceiver` (`PackageInstaller`), the Flutter `UpdateController` + `UpdateBanner`
++ Settings → Updates, and the `selfUpdate`/`fdroid` build flavors. Suites green (Rust
+`cargo test`/clippy, `dart analyze`, `flutter test` incl. `update_controller_test.dart`,
+FRB codegen pinned 2.11.1). **Not yet run on real hardware.**
+
+One-time ops (owner; not in this repo):
+- [ ] Generate + **back up** the one release keystore (`keytool`); never commit it.
+      Keep the key + `applicationId` constant forever (a self-update needs a matching
+      signature).
+- [ ] Create the R2 bucket, attach the custom domain (e.g. `dl.example.com`), add a
+      ~60 s edge-cache rule on `latest.json` (or purge each release). `npx wrangler login`.
+- [ ] On the Echo Show, grant this app "install unknown apps" once (adb / Settings).
+
+Remaining:
+- [ ] **Build-risk gate first:** `flutter build apk --release --flavor selfUpdate
+      --target-platform android-arm` must succeed — proves `ring` cross-compiles for
+      32-bit armv7 via cargokit/NDK (the one real build risk). (`cargo ndk -t
+      armeabi-v7a -p 30 build --release` is a faster Rust-only pre-check.)
+- [ ] **End-to-end on hardware:** set a real `updateBaseUrl` (Settings → Updates),
+      publish a higher-`versionCode` signed APK + `latest.json` via
+      `anamanti-display/scripts/release-r2.sh`, then confirm: banner appears → download
+      with progress → SHA-256 passes → unknown-sources prompt → system install →
+      relaunch at the new version. Also confirm a **bad sha256** aborts + cleans up.
+- [ ] **Confirm the `fdroid` flavor** (`flutter build apk --release --flavor fdroid`)
+      has no Updates UI/banner and no `REQUEST_INSTALL_PACKAGES` in its merged manifest.
+- [ ] Later: **retire Obtainium** + the GitHub Releases workflow once the in-app path
+      is proven; actually publish the F-Droid build.
+- [ ] Follow-up (security, shared with §3/§6a): the `latest.json`/APK ride plain HTTPS
+      from an owner-controlled host, integrity-pinned by SHA-256 — fine today; revisit
+      if the distribution host isn't trusted.

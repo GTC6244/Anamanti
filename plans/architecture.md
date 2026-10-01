@@ -45,7 +45,7 @@ service is located via mDNS, so neither node hardcodes an IP.
                                │ TCP · Wyoming Protocol · newline JSON + PCM
                                ▼
 ┌─────────────────────────── M4 Mac Mini ───────────────────────────┐
-│  Wyoming STT (Whisper / CoreML)  · Anamanti Core energy VAD        │
+│  Wyoming STT (Whisper / CoreML)  · Anamanti Core VAD (silero dflt) │
 │        │ final transcript                                          │
 │        ▼                                                           │
 │  LLM backend  (trait-based, pluggable)  ◄─► Persistent Memory      │
@@ -95,6 +95,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 ### 2.2 Flutter UI (Echo Show)
 
+> **Full on-screen UI inventory:** [`DisplayUI.md`](./DisplayUI.md) is the canonical
+> catalog of every element that can appear on the Display — backgrounds, overlays,
+> widgets, banners, full-screen views, status indicators, and settings — grouped by
+> category with file paths and triggers. Keep it updated when you add or change UI.
+
 - Always-on landscape layout tuned for the 8-inch display.
 - Consumes FRB-generated `StreamSink` events; no polling.
 - Primary states: **idle/ambient**, **live transcript**, **thinking**,
@@ -115,8 +120,17 @@ predictable memory use and no GC pauses under the 1 GB limit.
 
 ### 2.3 Mac Mini services
 
-- **Wyoming STT** — Whisper (CoreML-accelerated on the M4) exposed via the
-  Wyoming Protocol; emits partial and final transcripts.
+- **STT (Whisper)** — two interchangeable engines behind the
+  `anamanti-core/src/stt/` `Transcriber` seam (`plans/python-to-rust-whisper.md`),
+  selected by the `stt.engine` config key:
+  - **`wyoming`** (default) — the external `wyoming-faster-whisper` Python server
+    over the Wyoming Protocol (`stt_addr`, port 10300).
+  - **`whisper-rs`** — **in-process** whisper.cpp (`stt-whisper-local` build
+    feature; optional `metal`/`coreml` accel). No separate process, no Python: the
+    Core loads a ggml model (`base`/`small`) and transcribes in a `spawn_blocking`
+    task. This is the deploy-simplification path, not a speed change.
+  Either way the transcript is the same Whisper-class text; end-of-speech is the
+  Core's VAD (below; Silero by default since 2026-09-30, pluggable), never the engine.
 - **LLM backend** — a trait/interface with a streaming
   `respond(transcript) -> token stream`. Two interchangeable implementations:
   local (Ollama/llama.cpp) and cloud (Claude/OpenAI). Selection is config-driven.
@@ -138,13 +152,23 @@ predictable memory use and no GC pauses under the 1 GB limit.
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
   memory writes/recall and the prompt to that person (a shared "household" scope is
   the floor); see `speaker_id_plan.md`.
-- **End-of-speech / VAD** — runs in the **Anamanti Core**, not the STT server:
-  `wyoming-faster-whisper` has no streaming VAD and only transcribes once it
-  receives `audio-stop`, so the Anamanti Core scores per-chunk RMS energy over the
-  incoming PCM and, after speech followed by ~900 ms of trailing silence (or a 6 s
-  no-speech fallback), sends `audio-stop` to STT to finalize (`anamanti-core/src/orchestrator.rs`,
-  `stream_to_transcript`). The Echo Show device still runs **no VAD of its own** —
-  it streams continuously and waits for the transcript.
+- **End-of-speech / VAD** — runs in the **Anamanti Core**, for **both** STT engines
+  (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
+  `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The
+  per-chunk speech decision is **pluggable behind a `SpeechGate` seam**
+  (`anamanti-core/src/vad/`): the **committed default is the neural Silero gate since
+  2026-09-30** (`SileroGate`, `vad.engine="silero"`; the `vad-silero` feature is on by
+  default and a default boot requires the v4 model on disk — a `silero` boot with no
+  model is a hard error). The **energy/RMS gate** (`EnergyGate` — score per-chunk RMS,
+  voiced when above `voice_rms_threshold`) is now the opt-in fallback
+  (`vad.engine="energy"` or a `--no-default-features` build) and the auto-fallback when
+  no model is loaded — see `plans/VadSileroPlan.md`. The surrounding state machine is
+  engine-independent:
+  after speech (a 250 ms onset debounce) followed by ~700 ms of trailing silence (or a
+  6 s no-speech fallback), it finalizes the transcriber
+  (`anamanti-core/src/orchestrator.rs`, `stream_to_transcript`). The Echo Show device
+  still runs **no VAD of its own** — it streams continuously and waits for the
+  transcript.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
   to the device.
 
@@ -174,6 +198,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
     Modeled as a flat struct tagged by a unit-only `WakeWordEventKind` enum
     (payload fields carry neutral defaults when not relevant), so the boundary needs
     no `freezed` codegen and there is exactly one stream to manage.
+  - The periodic `level` event carries the mic **RMS** and, while a wake-word model
+    is loaded, the live wake-word diagnostics (`score`, `avg_score`, `threshold`,
+    `gain_db`) that drive the **Audio Diagnostics** settings page's meters +
+    readouts (`WakeWordEvent::level_diag`). That page also live-tunes the running
+    engine's capture gain + idle threshold **without a restart** via the small
+    `#[frb(sync)]` `update_diagnostics_tuning(gain_db, threshold)` call (the loop
+    re-reads two atomics each block; they re-seed from `WakeWordConfig` on restart).
   - The UI split (transcript vs. reply vs. phase) happens **Dart-side**, not on the
     boundary. `AssistantController` (`anamanti-display/lib/src/engine/assistant_controller.dart`)
     folds this single event stream into an observable `AssistantState` / `TurnPhase`
@@ -252,7 +283,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   the HelixDB GraphRAG node stats + a sample of nodes (behind the read-only
   `memory::GraphView` seam; reports "disabled" on the SQLite backend). Each has a
   `*.json` data endpoint the page fetches. No auth — keep the config address on a
-  trusted network.
+  trusted network. On `/chatlog`, each turn is **click-to-expand**: the orchestrator
+  records a per-turn latency breakdown (`memory::TurnTiming` — STT finalize, System-1
+  decision + intent/confidence, fast-path fetch, System-2 recall/prompt/LLM-first-token,
+  TTS first chunk, and the end-of-speech→reply total) onto the `ChatLogRecord`, and the
+  row expands to show the stages that actually ran. Optional + `skip_serializing_if`, so
+  pre-feature log lines parse fine and render "no timing recorded".
 - **Household / home context** (`settings::Household`, editable at `GET /household`
   on the config page): a persisted record of the home **location + units** and a
   **roster of people** (name, emails, phones, relationship). Location/units seed from
@@ -297,8 +333,28 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **TRIGGERED** — wake word fires; open TCP, send Wyoming `audio-start` header.
 - **STREAMING** — send raw PCM chunks in Wyoming frames; concurrently read
   `transcript` events on the same socket. The device streams continuously and runs
-  no VAD; **the Anamanti Core detects end-of-speech** (energy VAD over the PCM) and
-  sends `audio-stop` to the STT server, which then returns the final transcript.
+  no VAD; **the Anamanti Core detects end-of-speech** (its `SpeechGate` VAD over the
+  PCM — Silero by default since 2026-09-30, energy/RMS opt-in; see `plans/VadSileroPlan.md`) and sends
+  `audio-stop` to the STT server, which then returns the final transcript.
+- **STREAMING → (optional) System-1 fast decision:** once the transcript is final, an
+  **optional pluggable System-1 decision engine** may run on the Anamanti Core *before* THINKING
+  (before memory recall and the LLM). It scores a fixed routing question set in a single
+  non-autoregressive forward pass and either **Resolves** a common intent or **Defers**:
+  - **Resolve** (confident, closed intent): drive the matching **existing `DeviceAction`** and
+    speak a short templated line via Piper, then finish the turn — **skipping memory recall and the
+    LLM entirely**. Implemented intents: **weather** (Open-Meteo → `DeviceAction::ShowWeather`, so
+    the widget opens *before* speech) and **timer** (a conservative duration parser →
+    `DeviceAction::StartTimer`; cancels/free-form defer). Resolved replies are **not**
+    wake-word-interruptible in v1 (sub-second line). Chat-log write, inferred memory, and the
+    follow-up `listen` window still happen (the fast path shares `emit_follow_up_and_stop` with the
+    normal reply path). Because the engine is a *typed classifier* (intent label, no free-form
+    slots), only intents with defaulted/parseable arguments are eligible; the rest defer.
+  - **Defer** (ambiguous, open-ended, low confidence, disabled, or error): fall through to THINKING
+    unchanged.
+  The engine is pluggable behind a trait (like the LLM) and shares the `/v1/systemone` wire
+  contract, so a local **`laya-serve`** sidecar (default) or **Jev/OpenRouter** (cloud fallback)
+  are swappable from config. Default is off (`system1.backend = none`), reproducing today's flow.
+  Full design: [`system1-fast-decisions.md`](./system1-fast-decisions.md).
 - **THINKING** — STT final transcript handed to the LLM backend (which
   consults persistent memory); reply tokens stream back and render.
 - **THINKING → SPEAKING (streaming TTS):** the Anamanti Core does **not** buffer the
@@ -390,14 +446,45 @@ predictable memory use and no GC pauses under the 1 GB limit.
   dismissed by voice (`close_recipe`) or touch. See `RecipePlan.md`.
 - **`anamanti-weather`** (Anamanti Core → device): a project-local **device-action** frame
   (`data.action` = `show`/`current`/`dismiss`; for `show`/`current`, `data.weather` is the
-  structured `WeatherReport` — `location_label`, `units`, `current{…}`, `daily[7]`). It
+  structured `WeatherReport` — `location_label`, `units`, `when_label`, `current{…}`,
+  `hourly[10]`, `daily[7]`, `layout`). It
   rides **two transports**: `show`/`dismiss` on the per-turn voice socket, emitted by the
   `weather_lookup` / `close_weather` tools (`DeviceAction::{ShowWeather,DismissWeather}`),
-  drive the **full-screen forecast** (today's conditions + a 7-day row); `current` is
+  drive the **full-screen forecast** (a conditions panel + a 10-hour hourly row; the
+  optional `weather_lookup` `when` arg targets a future day, whose row starts at 08:00 and
+  whose panel shows that day's summary). The optional `weather_lookup` **`layout`** arg
+  (`"week"`) instead selects a **separate 7-day forecast widget** (`SevenDayView`: the
+  screen split into 7 vertical columns of daily high/low + icon + precip), chosen on the
+  device by `WeatherData.isWeek` — same frame and `AssistantState.weather` slot, so no wire
+  change. `current` is
   broadcast periodically on the persistent channel (below) by the Anamanti Core's
   `WeatherService` to refresh the **small icon + temperature beside the idle clock**
-  without a voice turn. Data comes from the keyless **Open-Meteo** API behind a
-  `WeatherProvider` trait. See `WeatherPlan.md`.
+  without a voice turn. Data comes from **Visual Crossing** (default) or keyless
+  **Open-Meteo** behind a `WeatherProvider` trait. Every provider built by
+  `weather::from_config` is wrapped in a shared **`cache::ToolCache`** (a generic,
+  TTL-bounded tool-response cache keyed on the outgoing call data — here `(location,
+  units)`), so a repeated forecast within the TTL is served locally instead of re-hitting
+  the API. The cache is process-wide, so the System-1 fast path, the `weather_lookup`
+  tool, and the ambient push all share hits. **TTL is per tool type and configurable** via
+  the `tool_cache` config block (`{ "<tool>": <seconds> }`, overlaid on defaults; `0`
+  disables a tool's cache), installed process-wide at boot via `cache::set_config`;
+  `weather_lookup` defaults to **3600 s (60 min)**. `ToolCache` is generic — its entries
+  carry their own TTL, so other read-only tools can opt in at their own TTL; mutating tools
+  (timers, shopping-list) must not. See `WeatherPlan.md`.
+- **`anamanti-place`** (Anamanti Core → device): a project-local **device-action** frame
+  (`data.action` = `show`/`dismiss`; for `show`, `data.place` is the structured
+  `PlaceReport` — `name`, `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`,
+  `category`, `price_level`, `photo_uri`). Rides the per-turn voice socket only (no ambient
+  push), emitted by the `places_lookup` / `close_places` tools
+  (`DeviceAction::{ShowPlace,DismissPlace}` → `drain_device_actions` → `TurnUpdate::Place`
+  → FRB `WakeWordEvent::{show,dismiss}_place`), driving the **full-screen place card**
+  (`PlaceView`). Data comes from the **Google Places API (New)** behind a `PlacesProvider`
+  trait (Text Search + Place Details; the hero photo is resolved to a **keyless** `photoUri`
+  via `skipHttpRedirect=true`, so the device fetches it directly and the APK stays
+  credential-free). The `GOOGLE_PLACES_API_KEY` secret is required — **no keyless fallback**,
+  so without it the tool is not advertised. A place query is also a **route-only System-1
+  `place` intent** (classified, then deferred to System-2 which owns the free-form
+  place-name slot). See `PlacesPlan.md`.
 - **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
   `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's
@@ -475,9 +562,15 @@ mDNS + `instance_id` pin the voice path uses):
   independent of the voice engine). This is a *sidecar* — the per-turn voice socket and
   its state machine are untouched.
 - **`anamanti-hello`** (device → Anamanti Core): sent right after the notify socket
-  opens (`data.role="notify"`, `data.device_id`). It registers the connection with the
-  Anamanti Core's `NotificationService`, which parks the read loop and holds the socket
-  to push down.
+  opens (`data.role="notify"`, `data.device_id`, `data.name`). It registers the connection
+  with the Anamanti Core's `NotificationService`, which parks the read loop and holds the
+  socket to push down. `device_id` is a **stable, globally-unique** identifier the display
+  mints once from its Wi-Fi MAC (`anamanti-<12 hex>`, e.g. `anamanti-140ac5942aca`; a
+  persisted random id is the fallback when the MAC can't be read — `api::engine::device_hardware_id`),
+  so two displays on one Core are distinguishable; `name` is the human-friendly label set on
+  the device's Settings screen. The Core stores both per connection and lists the connected
+  displays (id + name) on the config page's **Notify** tab (`GET /notifications/status.json`
+  → `devices[]`). (Older devices that predate the field simply send no `name`.)
 - **`anamanti-notify`** (Anamanti Core → device): a proactive notification
   (`data.id`, `data.priority` = `info`|`reminder`|`alert`, `data.title`, `data.body`).
   The device decodes it to a `NotifyEvent` on a dedicated FRB stream; Flutter's
@@ -504,6 +597,37 @@ Deferred (see `TODO.md`): spoken notifications + barge-in, ack/store-and-forward
 per-device targeting, quiet hours, and a paired/TLS control channel (the LAN hop is
 currently unauthenticated, so this widens the same attack surface the voice/control
 frames already have).
+
+### In-app APK auto-updater (Cloudflare R2)
+
+Separate from Wyoming entirely: the Display can update **itself** over HTTPS from a
+Cloudflare R2 bucket, instead of relying on the third-party Obtainium app. Full
+design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
+
+- **Rust owns the network half** (behind FRB, like all networking):
+  `check_for_update(base_url)` GETs `{base_url}/latest.json`
+  (`{versionCode, versionName, apkUrl, sha256, notes}`); `download_update(...)`
+  streams the APK to the cache dir on a dedicated thread, computing a **SHA-256** as
+  bytes arrive and deleting the file on mismatch/cancel, emitting `DownloadProgress`
+  over a `StreamSink` (`rust/src/update/`, `rust/src/api/updater.rs`). The client is
+  **`ureq` + rustls/`ring` + `webpki-roots`** — this is the project's **one HTTPS
+  client**; it does not touch the Wyoming TCP path. This is the only place the device
+  reaches a host *other* than its pinned Core, over plain HTTPS to a domain the owner
+  controls, integrity-pinned by the SHA-256.
+- **The install is native Kotlin**, since `PackageInstaller` /
+  `canRequestPackageInstalls` have no Rust or Dart equivalent: a minimal
+  `anamanti_display/updater` MethodChannel on `MainActivity` (versionCode,
+  unknown-sources redirect, `PackageInstaller` session) + an `InstallReceiver` that
+  launches the system prompt and reports the result back. This is the second
+  platform channel (alongside `anamanti_display/brightness`); it is kept minimal and
+  the networking stays in Rust, consistent with the interop boundary (§3).
+- **Flutter owns orchestration + presentation**: `UpdateController` (a
+  `ChangeNotifier` sidecar) checks on boot + every 6 h, compares versionCodes,
+  drives the `UpdateBanner` and the Settings → Updates page, and triggers
+  download/install.
+- **Build flavors** `selfUpdate` (ships it) / `fdroid` (ships without it) keep the
+  same signing key + `applicationId`; the key must never change (a self-update needs
+  a matching signature). See key design decisions (§7) and `agents.md`.
 
 ---
 
@@ -532,8 +656,9 @@ frames already have).
 - **Multiple Anamanti Cores → device picks one**: a display can run a "production"
   Anamanti Core plus short-lived test instances (each launched with a distinct
   `ANAMANTI_SERVICE_NAME` / `ANAMANTI_INSTANCE_ID` / `ANAMANTI_BIND_ADDR` /
-  `ANAMANTI_CONFIG_ADDR`; `mdns-sd` does not auto-rename on collision, so the names
-  must differ). The settings screen shows a device-local **Anamanti Core** dropdown
+  `ANAMANTI_CONFIG_ADDR`; give each a distinct `service_name` — on macOS
+  `mDNSResponder` auto-renames a colliding instance, but the device still keys off
+  the stable `instance_id` TXT regardless). The settings screen shows a device-local **Anamanti Core** dropdown
   (populated by a full-window mDNS enumeration, `list_orchestrators`), persisted
   by stable `instance_id` key in `AppSettings`. The selection is **strict**: a
   display pinned to one Anamanti Core resolves *only* that `instance_id` and stays
@@ -549,6 +674,26 @@ frames already have).
   Mac is unreachable. The idle photo slideshow keeps running; a subtle
   **disconnected** indicator reflects status; wake words queue until the socket
   is restored.
+- **Advertisement backend — OS `mDNSResponder` on macOS**: the Core registers
+  `_wyoming._tcp` through Apple's **system `mDNSResponder`** via `DNSServiceRegister`
+  (the `astro-dnssd` wrapper in `anamanti-core/src/discovery.rs`). The OS daemon —
+  not the Core process — owns the live advertisement: address records, multicast-
+  group membership, sleep/wake recovery, interface-change refresh (Wi-Fi↔Ethernet
+  failover, DHCP renew, en0↔en1), and name-collision probing/auto-rename. This
+  replaced a hand-rolled in-process pure-Rust responder (`mdns-sd`) that had to pin
+  a single routable IPv4 and re-register on `IpAdd`/`IpDel` monitor events within a
+  ~30 s interface-poll window, and could not reliably rejoin multicast groups after
+  the Mac slept — so an overnight sleep/wake left a zombie record that answered
+  nothing until the Core was **restarted** (the recurring "mDNS bites daily" failure).
+  Delegating to `mDNSResponder` removes that whole class of staleness. *(Off macOS —
+  dev/CI only — the crate falls back to the old `mdns-sd` pinned-IPv4 advertiser.)*
+- **Device picks a reachable address**: because `mDNSResponder` advertises *all* of
+  the host's addresses (it no longer pins one IPv4), a resolve returns the full set —
+  including loopback and IPv6 link-locals (`fe80::…`). The device's browser
+  (`endpoint_from` / `choose_address` in `anamanti-display/rust/src/wyoming/discovery.rs`)
+  skips loopback/unspecified/link-local entries and prefers a routable IPv4 over
+  global IPv6, so it always dials a reachable endpoint instead of an arbitrary set
+  member — the correctness the Core-side single-IPv4 pin used to guarantee.
 
 ---
 
@@ -576,10 +721,12 @@ frames already have).
 | Multiple displays share one Anamanti Core | Per-connection reply routing already isolates devices; one shared household memory/settings pool (speaker ID scopes per person) |
 | openWakeWord via tract-onnx | Pre-trained models, minimal deps, offline |
 | Pluggable LLM behind a trait | Swap local/cloud without touching the pipeline |
+| Optional System-1 fast-decision stage (pluggable, before recall+LLM) | Resolves common intents in one non-autoregressive forward pass, skipping the blocking embedding recall and the rig+tools full-completion; defers hard turns to System-2. Same trait pattern as the LLM; shared `/v1/systemone` contract serves local `laya-serve` (default) or Jev/OpenRouter (fallback); default off. See [`system1-fast-decisions.md`](./system1-fast-decisions.md) |
 | Rust-side playback | One audio layer, symmetric with capture |
 | Wake-word barge-in (flush-on-wake + `anamanti-interrupt`) | Natural interruption without full-duplex complexity; in-app AEC deferred, but a **required device-side HAL AEC shim** delivers echo cancellation on Echo Show 8 gen-1 (see §4) |
 | Streaming sentence-chunked TTS | First-audio at first-sentence latency, not full-reply; coalesced to one device audio stream |
-| VAD in the Anamanti Core | Device does no VAD; faster-whisper has no streaming VAD, so the Mac runs energy VAD and sends `audio-stop` |
+| VAD in the Anamanti Core (pluggable `SpeechGate`) | Device does no VAD; neither STT engine does streaming VAD, so the Mac runs its own VAD and finalizes the transcriber — **neural Silero gate by default since 2026-09-30** (`vad-silero` feature on, needs the v4 model on disk), energy/RMS gate the opt-in fallback (`plans/VadSileroPlan.md`) |
+| STT engine behind a `Transcriber` seam (`wyoming` \| `whisper-rs`) | Default dials `wyoming-faster-whisper`; `whisper-rs` runs whisper.cpp **in-process** (no Python STT server) for deploy simplicity — same Whisper-class text, engine chosen by config (`plans/python-to-rust-whisper.md`) |
 | SQLite is the memory store of record | Simple, debuggable; holds explicit+inferred facts and the settings-list/voice management |
 | Recall defaults to embedded HelixDB GraphRAG | Vector KNN + graph hop beats keyword FTS for context; in-process (no server/Docker); needs `OPENAI_API_KEY`, falls back to SQLite FTS if absent |
 | Per-person speaker ID (local, opt-in) | Local ECAPA voiceprint (passive + auto-cluster) keeps voice on the LAN and scopes memory + prompt per person for better context; no raw audio leaves the device |
@@ -587,6 +734,7 @@ frames already have).
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |
 | Idle photo slideshow (Google) | Ambient value when idle; user picks the folder |
 | Proactive notifications via a persistent **device-dialed** channel (Approach A) | Mac reaches the display unprompted while keeping the device the dialer — reuses the existing mDNS + `instance_id` pin and the blessed auto-reconnect model; avoids a reverse connection / device listener / new trust direction. A doorbell (device advertises, Mac nudges) was considered but only wins idle-socket cost, which is free on a mains-powered display, at the price of lossy triggers. Shipped visual-only first (see §4) |
+| In-app APK auto-updater over Cloudflare R2 (Rust download/verify + native `PackageInstaller`), with `selfUpdate`/`fdroid` flavors | First-party, hands-off updates for a headless kiosk without depending on the third-party Obtainium app; networking stays in Rust (ureq+rustls, the one HTTPS client) and only the unavoidable install is a native channel; SHA-256 pins integrity; flavors let F-Droid ship without the self-updater. Keep Obtainium in parallel until hardware-proven. See §4 + [`UpdaterPlan.md`](./UpdaterPlan.md) |
 
 ---
 

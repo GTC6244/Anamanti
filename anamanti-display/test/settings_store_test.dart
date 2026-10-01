@@ -39,6 +39,15 @@ void main() {
       wakeWord: 'hey_jarvis',
       threshold: 0.4,
       activeThreshold: 0.8,
+      captureGainDb: 12.0,
+      platformNs: false,
+      platformAgc: false,
+      platformAec: true,
+      listeningRingEnabled: false,
+      ringReactivity: 1.8,
+      ringAttack: 0.4,
+      ringRelease: 0.2,
+      ringDecay: 0.95,
       dimDelaySecs: 45,
       photoSource: PhotoSourceKind.drive,
       ambientRefreshToken: 'refresh-abc',
@@ -92,6 +101,35 @@ void main() {
     expect(AppSettings.fromJson({'dimDelaySecs': 'nope'}).dimDelaySecs, 300);
     // A legacy file with no dim delay keeps the default.
     expect(AppSettings.fromJson({'wakeWord': 'hey_jarvis'}).dimDelaySecs, 300);
+  });
+
+  test('listening-ring settings default and clamp/round-trip', () {
+    const defaults = AppSettings();
+    expect(defaults.listeningRingEnabled, true);
+    expect(defaults.ringReactivity, 1.0);
+    expect(defaults.ringAttack, 0.65);
+    expect(defaults.ringRelease, 0.08);
+    expect(defaults.ringDecay, 0.99);
+
+    // A legacy file with none of the ring keys keeps the defaults.
+    final legacy = AppSettings.fromJson({'wakeWord': 'hey_jarvis'});
+    expect(legacy.listeningRingEnabled, true);
+    expect(legacy.ringReactivity, 1.0);
+
+    // Out-of-range / non-numeric values clamp or fall back to defaults.
+    expect(AppSettings.fromJson({'ringReactivity': 99}).ringReactivity, 4.0);
+    expect(AppSettings.fromJson({'ringReactivity': 'x'}).ringReactivity, 1.0);
+    expect(AppSettings.fromJson({'ringAttack': 5}).ringAttack, 1.0);
+    expect(AppSettings.fromJson({'ringDecay': 2}).ringDecay, 0.9999);
+    expect(AppSettings.fromJson({'listeningRingEnabled': 'no'}).listeningRingEnabled,
+        true);
+
+    // A non-default value survives a JSON round trip.
+    final rt = AppSettings.fromJson(
+      const AppSettings(listeningRingEnabled: false, ringReactivity: 1.5).toJson(),
+    );
+    expect(rt.listeningRingEnabled, false);
+    expect(rt.ringReactivity, 1.5);
   });
 
   test('copyWith changes only the given fields', () {

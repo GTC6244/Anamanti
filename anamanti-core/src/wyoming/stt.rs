@@ -1,11 +1,16 @@
 //! Downstream **Wyoming STT** (Whisper/CoreML) client (Plan.MD Phase 4, bullet 1).
 //!
-//! The orchestrator is a Wyoming *client* to the Whisper service: it opens the
-//! stream, forwards the PCM the Echo Show is streaming in, and waits for the
-//! server's `transcript`. End-of-speech is **server-side VAD** — the Whisper
-//! service decides when the utterance ends and emits the final `transcript`; only
-//! then does the orchestrator send `audio-stop`. This mirrors the device's own
-//! turn driver (`rust/src/wyoming/client.rs`) so both ends share one contract.
+//! One of two STT engines behind the [`Transcriber`](crate::stt::Transcriber) seam
+//! (`plans/python-to-rust-whisper.md`); the other is the in-process whisper.cpp
+//! engine. This is the client to an external `wyoming-faster-whisper` server: it
+//! opens the stream, forwards the PCM the Echo Show is streaming in, and waits for
+//! the server's `transcript`.
+//!
+//! **End-of-speech is decided by the Anamanti Core, not the server.**
+//! `wyoming-faster-whisper` does no streaming VAD — it transcribes only after it
+//! receives `audio-stop` — so the orchestrator runs an energy VAD over the incoming
+//! PCM and sends `audio-stop` to finalize (`orchestrator::stream_to_transcript`).
+//! The device streams continuously and runs no VAD of its own.
 
 use anyhow::Result;
 
@@ -59,7 +64,8 @@ where
         self.conn.read().await
     }
 
-    /// Close the outbound audio stream after the server signalled end-of-speech.
+    /// Send `audio-stop` to finalize once the Core's energy VAD detected
+    /// end-of-speech (this is what makes faster-whisper emit the `transcript`).
     pub async fn finish(&mut self) -> Result<()> {
         self.conn
             .send(&WyomingEvent::audio_stop(self.timestamp_ms))

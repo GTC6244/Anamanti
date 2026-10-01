@@ -14,7 +14,7 @@
 //! the engine just raises the confidence bar while a turn is active to suppress
 //! self-triggers (the AEC-interim mitigation, Plan.MD §4).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -85,6 +85,11 @@ const PROXIMITY_FPS: i32 = 5;
 /// climbing toward the wake word without flooding (one line per drained block).
 const SCORE_LOG_FLOOR: f32 = 0.05;
 
+/// Upper bound (dB) on the software capture gain applied to the resampled mic
+/// signal. Caps how much a quiet far-field mic can be boosted in-app; beyond this
+/// the boosted signal is mostly amplified noise and clipping.
+const MAX_CAPTURE_GAIN_DB: f32 = 36.0;
+
 struct EngineHandle {
     running: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -94,6 +99,34 @@ static ENGINE: OnceLock<Mutex<Option<EngineHandle>>> = OnceLock::new();
 
 fn slot() -> &'static Mutex<Option<EngineHandle>> {
     ENGINE.get_or_init(|| Mutex::new(None))
+}
+
+/// Live-tunable capture gain (dB) and idle wake-word threshold, stored as `f32`
+/// bits so the audio-diagnostics screen can adjust them on the running engine
+/// **without a restart** (`update_tuning`, exposed to Dart as
+/// `update_diagnostics_tuning`). The run loop re-reads both each audio block and
+/// re-seeds them from the [`WakeWordConfig`] every time the engine starts, so a
+/// persisted settings value always wins on the next launch.
+static TUNE_GAIN_DB: AtomicU32 = AtomicU32::new(0);
+static TUNE_THRESHOLD: AtomicU32 = AtomicU32::new(0);
+
+fn set_tuning(gain_db: f32, threshold: f32) {
+    TUNE_GAIN_DB.store(gain_db.to_bits(), Ordering::Relaxed);
+    TUNE_THRESHOLD.store(threshold.to_bits(), Ordering::Relaxed);
+}
+
+fn load_tuning() -> (f32, f32) {
+    (
+        f32::from_bits(TUNE_GAIN_DB.load(Ordering::Relaxed)),
+        f32::from_bits(TUNE_THRESHOLD.load(Ordering::Relaxed)),
+    )
+}
+
+/// Live-adjust the capture gain (dB) and idle detection threshold on the running
+/// engine without restarting it (the audio-diagnostics screen). Clamped to sane
+/// ranges. The values are re-seeded from config on the next engine start.
+pub fn update_tuning(gain_db: f32, threshold: f32) {
+    set_tuning(gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB), threshold.clamp(0.0, 1.0));
 }
 
 /// The display context — what the device is currently showing (e.g. the recipe screen's
@@ -421,6 +454,23 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // when nothing crosses the detection threshold.
     let mut diag_peak: f32 = 0.0;
 
+    // Software capture gain (dB → linear multiplier), applied to every resampled
+    // block below. The root-free, in-app analogue of the AEC shim's makeup gain
+    // (`persist.vendor.amznaec.gain_db`, which the sandboxed app cannot set): boosts
+    // a quiet far-field signal so both the wake-word detector and the streamed PCM
+    // clear the level the models/VAD expect. `0.0` dB = unity (no-op).
+    let capture_gain_db = config.capture_gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB);
+    if capture_gain_db > 0.0 {
+        log::info!(
+            "capture gain: {capture_gain_db:.1} dB (×{:.2})",
+            10f32.powf(capture_gain_db / 20.0)
+        );
+    }
+    // Seed the live-tunable knobs (capture gain + idle threshold) from config so the
+    // audio-diagnostics screen can adjust them on the running engine without a restart
+    // (`update_tuning`); the loop re-reads them each block below.
+    set_tuning(capture_gain_db, idle_threshold);
+
     while running.load(Ordering::SeqCst) {
         let n = consumer.pop_slice(&mut scratch);
         if n == 0 {
@@ -436,6 +486,24 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
 
         if resampled.is_empty() {
             continue;
+        }
+
+        // Read the live-tunable capture gain + idle threshold (adjustable from the
+        // audio-diagnostics screen without restarting the engine).
+        let (gain_db, idle_thr) = load_tuning();
+        let capture_gain = if gain_db > 0.0 {
+            10f32.powf(gain_db / 20.0)
+        } else {
+            1.0
+        };
+
+        // Apply the software capture gain once, before either consumer sees the block,
+        // so wake-word scoring and the streamed PCM stay in sync. Clamp back into i16
+        // range so a boosted signal never overflows the model input / the i16 stream.
+        if capture_gain != 1.0 {
+            for s in resampled.iter_mut() {
+                *s = (*s * capture_gain).clamp(i16::MIN as f32, i16::MAX as f32);
+            }
         }
 
         // While a turn is active, forward this 16 kHz block to the Wyoming client
@@ -456,10 +524,12 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         match detector.as_mut() {
             Some(d) => match d.push_audio(&resampled) {
                 Ok(Some(score)) => {
+                    // While a turn is active keep the raised active-threshold floor, but
+                    // never below the live idle threshold the user may be tuning.
                     let threshold = if turn_active {
-                        active_threshold
+                        active_threshold.max(idle_thr)
                     } else {
-                        idle_threshold
+                        idle_thr
                     };
 
                     // Periodic diagnostic + live mic level. The RMS is emitted as a
@@ -471,7 +541,20 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                     block_counter = block_counter.wrapping_add(1);
                     if block_counter.is_multiple_of(LEVEL_EVERY_N_BLOCKS) {
                         let rms = capture::rms_level(&resampled);
-                        if sink.add(WakeWordEvent::level(rms)).is_err() {
+                        // Enrich the level event with the live wake-word diagnostics
+                        // (raw score, the smoothed value the gate tests, the threshold
+                        // in effect, and the gain applied) so the audio-diagnostics
+                        // screen renders its meters + readouts from this one stream.
+                        if sink
+                            .add(WakeWordEvent::level_diag(
+                                rms,
+                                score,
+                                gate.avg(),
+                                threshold,
+                                gain_db,
+                            ))
+                            .is_err()
+                        {
                             break;
                         }
                         // Log the rolling peak on a coarser cadence than the level

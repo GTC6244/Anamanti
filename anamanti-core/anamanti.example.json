@@ -50,6 +50,23 @@
     "embed_dims": 192
   },
 
+  "stt": {
+    "engine": "wyoming",
+    "model": "base",
+    "model_dir": "models",
+    "model_path": null,
+    "language": "en",
+    "num_threads": 0
+  },
+
+  "vad": {
+    "engine": "silero",
+    "silero": {
+      "model_path": "models/silero_vad.onnx",
+      "threshold": 0.5
+    }
+  },
+
   "follow_up": {
     "enabled": true,
     "max_chain": 0,
@@ -86,7 +103,23 @@
 
   "weather": {
     "enabled": true,
+    "provider": "visualcrossing",
     "refresh_interval_secs": 1800
+  },
+
+  "places": {
+    "enabled": true,
+    "provider": "google"
+  },
+
+  "system1": {
+    "backend": "none",
+    "base_url": "http://127.0.0.1:8000",
+    "openrouter_model": "typesafe/jev-1.13",
+    "device": "metal",
+    "model": "convaiinnovations/laya",
+    "min_confidence": 0.85,
+    "intents": []
   },
 
   "drive": {
@@ -100,7 +133,8 @@
     "client_id": null,
     "client_secret": null,
     "refresh_token": null,
-    "device_name": "Ambient"
+    "device_name": "Ambient",
+    "redirect_url": "http://127.0.0.1:8888/callback"
   },
 
   "cadora": {
@@ -115,5 +149,9 @@
       "Dad": "u_public_key_for_dad"
     },
     "default_recipient": "Mom"
+  },
+
+  "tool_cache": {
+    "weather_lookup": 3600
   }
 }

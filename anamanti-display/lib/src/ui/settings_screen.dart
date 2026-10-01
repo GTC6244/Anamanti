@@ -1,29 +1,38 @@
 // Settings screen (Plan.MD §3, Phase 6).
 //
-// Exposes the four configurable areas from the plan:
-//  * Wake word (+ detection thresholds) — device-local, applied by restarting the
-//    native engine with a new config.
-//  * LLM backend, model, and TTS voice — orchestrator-managed, read/changed over
-//    the Wyoming control protocol.
-//  * Photo source — local ambient gradients or a linked Google folder (on-device
-//    OAuth seam).
-//  * Memory management — a link into the view/delete list ([MemoryScreen]).
+// A paged settings surface: the root shows a menu of categories, and tapping one
+// opens that category's page (back returns to the menu). The categories are:
+//  * Assistant — orchestrator pin + LLM backend, model, and TTS voice
+//    (orchestrator-managed, read/changed over the Wyoming control protocol).
+//  * Device Config (Wake word & Display) — wake word, detection thresholds +
+//    capture tuning, and the idle-dim delay (device-local; restarts the engine).
+//  * Speech Processing — playback buffer and the local end-of-speech "processing"
+//    cue (device-local).
+//  * Speech Detection — the Anamanti Core's end-of-speech VAD: engine (energy /
+//    Silero), silence window, voice-level threshold, Silero probability threshold
+//    (orchestrator-managed).
+//  * Background — idle-screen photo source (local gradients or a linked Google
+//    folder, on-device OAuth seam).
 //
 // Device-local settings are persisted with [SettingsStore]; remote settings are
-// applied on the Mac. Both happen when the user taps Save; the parent is notified
-// via [onApplied] so it can restart the engine and refresh the slideshow.
+// applied on the Mac. Both happen when the user taps Save (available from every
+// page); the parent is notified via [onApplied] so it can restart the engine and
+// refresh the slideshow.
 
 import 'package:flutter/material.dart';
 
 import 'package:qr_flutter/qr_flutter.dart';
 
+import 'package:anamanti_display/src/engine/assistant_controller.dart';
+import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 import 'package:anamanti_display/src/settings/settings_store.dart';
 import 'package:anamanti_display/src/slideshow/ambient_photos.dart';
 import 'package:anamanti_display/src/slideshow/drive_photos.dart';
-import 'package:anamanti_display/src/ui/memory_screen.dart';
-import 'package:anamanti_display/src/ui/people_screen.dart';
+import 'package:anamanti_display/src/ui/audio_diagnostics_view.dart';
+import 'package:anamanti_display/src/rust/api/engine.dart'
+    show updateDiagnosticsTuning;
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
 /// is the orchestrator's backend label.
@@ -43,6 +52,23 @@ const Set<String> _kCloudBackends = {'anthropic', 'openai'};
 /// these presets rather than sweeping a continuous range. Kept in ascending order.
 const List<int> _kDimDelayPresets = <int>[30, 60, 120, 300, 600, 900, 1800, 3600];
 
+/// The top-level settings categories, shown as a menu; selecting one opens its
+/// page. Order matches the menu order.
+enum _SettingsCategory {
+  assistant('Assistant'),
+  deviceConfig('Device Config'),
+  audioDiagnostics('Audio Diagnostics'),
+  speechProcessing('Speech Processing'),
+  speechDetection('Speech Detection'),
+  background('Background'),
+  updates('Updates');
+
+  const _SettingsCategory(this.title);
+
+  /// The page's AppBar title.
+  final String title;
+}
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
@@ -50,6 +76,8 @@ class SettingsScreen extends StatefulWidget {
     required this.store,
     required this.client,
     required this.onApplied,
+    this.assistant,
+    this.updates,
   });
 
   /// The current device-local settings to edit.
@@ -65,6 +93,15 @@ class SettingsScreen extends StatefulWidget {
   /// can restart the engine (wake word/thresholds) and refresh the slideshow.
   final ValueChanged<AppSettings> onApplied;
 
+  /// The live wake-word engine controller, for the Audio Diagnostics page's real-time
+  /// meters. Null in contexts without a running engine (e.g. some tests); the page
+  /// then shows an "engine unavailable" note.
+  final AssistantController? assistant;
+
+  /// The in-app updater controller (plans/UpdaterPlan.md). Null on the
+  /// `fdroid` flavor / in tests, which hides the Updates category entirely.
+  final UpdateController? updates;
+
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
@@ -75,6 +112,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _modelController = TextEditingController();
   final TextEditingController _voiceController = TextEditingController();
   final TextEditingController _folderController = TextEditingController();
+  final TextEditingController _updateUrlController = TextEditingController();
+  late final TextEditingController _deviceNameController = TextEditingController(
+    text: widget.initial.deviceName,
+  );
 
   String _backend = 'ollama';
   // Anthropic auth mode: 'apikey' or 'subscription' (Claude OAuth).
@@ -82,6 +123,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _remoteLoading = true;
   String? _remoteError;
   bool _saving = false;
+
+  /// The open category page, or null while the top-level menu is shown.
+  _SettingsCategory? _category;
 
   // Ambient-link QR dialog state: whether a QR dialog is showing, and whether the
   // user cancelled (so a late-completing poll doesn't apply a link they aborted).
@@ -103,11 +147,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Orchestrator-side VAD tuning (loaded from the Mac, applied on Save).
   int _endSilenceMs = 700;
   double _voiceRmsThreshold = 120;
+  // VAD engine (energy | silero) and the Silero speech-probability gate.
+  String _vadEngine = 'energy';
+  double _sileroThreshold = 0.5;
 
   @override
   void initState() {
     super.initState();
     _folderController.text = _settings.driveFolderIds.join(', ');
+    _updateUrlController.text = _settings.updateBaseUrl;
     _loadRemote();
   }
 
@@ -116,6 +164,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelController.dispose();
     _voiceController.dispose();
     _folderController.dispose();
+    _updateUrlController.dispose();
+    _deviceNameController.dispose();
     super.dispose();
   }
 
@@ -169,6 +219,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         if (remote.voiceRmsThreshold > 0) {
           _voiceRmsThreshold = remote.voiceRmsThreshold;
         }
+        if (remote.vadEngine.isNotEmpty) _vadEngine = remote.vadEngine;
+        if (remote.sileroThreshold > 0) _sileroThreshold = remote.sileroThreshold;
         _remoteLoading = false;
       });
     } catch (e) {
@@ -435,8 +487,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _saving = true);
 
     // 1. Persist + apply the device-local settings (wake word, thresholds, photo).
+    final updateUrl = _updateUrlController.text.trim();
     final local = _settings.copyWith(
       driveFolderIds: _parseFolderIds(_folderController.text),
+      updateBaseUrl: updateUrl.isEmpty ? _settings.updateBaseUrl : updateUrl,
     );
     await widget.store.save(local);
     widget.onApplied(local);
@@ -457,6 +511,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               : _voiceController.text.trim(),
           endSilenceMs: _endSilenceMs,
           voiceRmsThreshold: _voiceRmsThreshold,
+          vadEngine: _vadEngine,
+          sileroThreshold: _sileroThreshold,
         );
         if (!result.ok) remoteNote = 'Assistant: ${result.message}';
       } catch (e) {
@@ -481,82 +537,307 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Settings'),
-        actions: [
-          _saving
-              ? const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              : TextButton(
-                  key: const Key('settings-save'),
-                  onPressed: _save,
-                  child: const Text('Save'),
+    final category = _category;
+    final atMenu = category == null;
+    return PopScope(
+      // At the menu, let the route pop (leave settings). On a category page,
+      // intercept the pop and return to the menu instead.
+      canPop: atMenu,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !atMenu) setState(() => _category = null);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          leading: atMenu
+              ? null
+              : IconButton(
+                  key: const Key('settings-back-to-menu'),
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'Settings',
+                  onPressed: () => setState(() => _category = null),
                 ),
-        ],
+          title: Text(atMenu ? 'Settings' : category.title),
+          actions: [
+            _saving
+                ? const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                : TextButton(
+                    key: const Key('settings-save'),
+                    onPressed: _save,
+                    child: const Text('Save'),
+                  ),
+          ],
+        ),
+        body: atMenu ? _menu() : _categoryPage(category),
       ),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        children: [
-          _section('Wake word'),
-          _wakeWordTile(),
-          _thresholdTile(),
-          const Divider(),
-          _section('Assistant'),
+    );
+  }
+
+  /// The top-level category menu.
+  Widget _menu() {
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        _menuTile(
+          _SettingsCategory.assistant,
+          Icons.smart_toy_outlined,
+          'LLM backend, model, and voice',
+        ),
+        _menuTile(
+          _SettingsCategory.deviceConfig,
+          Icons.tune,
+          'Wake word & display',
+        ),
+        _menuTile(
+          _SettingsCategory.audioDiagnostics,
+          Icons.equalizer,
+          'Live mic meter & wake-word tuning',
+        ),
+        _menuTile(
+          _SettingsCategory.speechProcessing,
+          Icons.graphic_eq,
+          'Playback buffer & processing cue',
+        ),
+        _menuTile(
+          _SettingsCategory.speechDetection,
+          Icons.record_voice_over,
+          'End-of-speech VAD & thresholds',
+        ),
+        _menuTile(
+          _SettingsCategory.background,
+          Icons.photo_library_outlined,
+          'Idle photo slideshow',
+        ),
+        // Only on the selfUpdate flavor (the controller is null on fdroid).
+        if (widget.updates != null)
+          _menuTile(
+            _SettingsCategory.updates,
+            Icons.system_update_alt,
+            'In-app app updates',
+          ),
+      ],
+    );
+  }
+
+  Widget _menuTile(_SettingsCategory category, IconData icon, String subtitle) {
+    return ListTile(
+      key: Key('settings-menu-${category.name}'),
+      leading: Icon(icon),
+      title: Text(category.title),
+      subtitle: Text(subtitle),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => setState(() => _category = category),
+    );
+  }
+
+  /// The body for a single category page.
+  Widget _categoryPage(_SettingsCategory category) {
+    // Audio Diagnostics is a full custom page (live meters), not a tile list.
+    if (category == _SettingsCategory.audioDiagnostics) {
+      return _audioDiagnosticsPage();
+    }
+    // Updates is a full custom page (live download/install state).
+    if (category == _SettingsCategory.updates) {
+      return _updatesPage();
+    }
+    final List<Widget> children;
+    switch (category) {
+      case _SettingsCategory.assistant:
+        children = [
+          // Device-local identity: this display's name (sent to the Core) + its
+          // stable, MAC-derived id. Shown first so it's usable even when the
+          // selected orchestrator is offline.
+          _deviceNameTile(),
           // Device-local: which orchestrator this display talks to. Shown above
           // (and outside) the orchestrator-fetched tiles so it stays usable even
           // when the selected orchestrator is offline.
           _orchestratorTile(),
           ..._assistantTiles(),
-          const Divider(),
-          _section('Idle photos'),
-          ..._photoTiles(),
+        ];
+      case _SettingsCategory.deviceConfig:
+        children = [
+          _section('Wake word'),
+          _wakeWordTile(),
+          _thresholdTile(),
+          ..._detectionTuningTiles(),
           const Divider(),
           _section('Display'),
           ..._displayTiles(),
-          const Divider(),
-          _section('Speech & detection'),
-          ..._detectionTuningTiles(),
-          ..._speechTiles(),
-          const Divider(),
-          _section('Memory'),
-          ListTile(
-            key: const Key('settings-memory'),
-            leading: const Icon(Icons.psychology_outlined),
-            title: const Text('Manage remembered facts'),
-            subtitle: const Text(
-              'View and delete what the assistant remembers',
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => MemoryScreen(client: widget.client),
-              ),
+        ];
+      case _SettingsCategory.audioDiagnostics:
+        // Handled by the early return above; keep the switch exhaustive.
+        children = const [];
+      case _SettingsCategory.speechProcessing:
+        children = _speechTiles();
+      case _SettingsCategory.speechDetection:
+        children = _vadTiles();
+      case _SettingsCategory.background:
+        children = _photoTiles();
+      case _SettingsCategory.updates:
+        // Handled by the early return above; keep the switch exhaustive.
+        children = const [];
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [...children, const SizedBox(height: 24)],
+    );
+  }
+
+  /// The Audio Diagnostics page: live mic + wake-word meters with live-applied
+  /// tuning. Needs the running engine controller; without one (e.g. the Mac-less
+  /// test harness) it shows a short unavailable note.
+  Widget _audioDiagnosticsPage() {
+    final assistant = widget.assistant;
+    if (assistant == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Microphone engine is not running yet — open this page once the '
+            'display has started listening.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+    return AudioDiagnosticsView(
+      key: const Key('audio-diagnostics-view'),
+      controller: assistant,
+      settings: _settings,
+      onChanged: (next) => setState(() => _settings = next),
+      onTune: (gain, threshold) =>
+          updateDiagnosticsTuning(gainDb: gain, threshold: threshold),
+    );
+  }
+
+  /// The Updates page (plans/UpdaterPlan.md): the auto-update toggle +
+  /// base URL (saved with the device-local settings on Save), the current version,
+  /// and a live "Check now / Update / Install" area driven by the updater controller.
+  Widget _updatesPage() {
+    final updates = widget.updates;
+    if (updates == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'The in-app updater is not available in this build.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        SwitchListTile(
+          key: const Key('settings-auto-update'),
+          secondary: const Icon(Icons.autorenew),
+          title: const Text('Automatic update checks'),
+          subtitle: const Text('Check for new versions on launch and periodically'),
+          value: _settings.autoUpdateEnabled,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(autoUpdateEnabled: v)),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: TextField(
+            key: const Key('settings-update-url'),
+            controller: _updateUrlController,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Update URL',
+              helperText: 'Base URL hosting latest.json + the APK (no trailing slash). '
+                  'Save to apply before checking.',
+              border: OutlineInputBorder(),
             ),
           ),
-          const Divider(),
-          _section('People'),
-          ListTile(
-            key: const Key('settings-people'),
-            leading: const Icon(Icons.groups_outlined),
-            title: const Text('Manage people'),
-            subtitle: const Text('Name the voices the assistant recognizes'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => PeopleScreen(client: widget.client),
-              ),
-            ),
+        ),
+        const Divider(),
+        AnimatedBuilder(
+          animation: updates,
+          builder: (context, _) => _updateStatusTile(updates),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _updateStatusTile(UpdateController updates) {
+    final manifest = updates.manifest;
+    final busy = updates.status == UpdateStatus.checking ||
+        updates.status == UpdateStatus.downloading ||
+        updates.status == UpdateStatus.installing;
+
+    final String statusLine = switch (updates.status) {
+      UpdateStatus.idle => 'Not checked yet.',
+      UpdateStatus.checking => 'Checking…',
+      UpdateStatus.upToDate => 'You’re up to date.',
+      UpdateStatus.available => manifest == null
+          ? 'An update is available.'
+          : 'Version ${manifest.versionName.isNotEmpty ? manifest.versionName : manifest.versionCode} is available.',
+      UpdateStatus.downloading => updates.progress == null
+          ? 'Downloading…'
+          : 'Downloading… ${(updates.progress! * 100).round()}%',
+      UpdateStatus.readyToInstall => 'Downloaded — ready to install.',
+      UpdateStatus.installing => 'Installing…',
+      UpdateStatus.error => updates.errorMessage,
+    };
+
+    final (String? actionLabel, VoidCallback? action) = switch (updates.status) {
+      UpdateStatus.available => ('Download & install', updates.download),
+      UpdateStatus.readyToInstall => ('Install', updates.install),
+      UpdateStatus.error => ('Retry', updates.retry),
+      _ => (null, null),
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          leading: const Icon(Icons.info_outline),
+          title: Text('Installed version code: ${updates.currentVersionCode}'),
+          subtitle: Text(statusLine),
+        ),
+        if (updates.status == UpdateStatus.available &&
+            manifest != null &&
+            manifest.notes.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(manifest.notes),
           ),
-          const SizedBox(height: 24),
-        ],
-      ),
+        if (updates.status == UpdateStatus.downloading)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: LinearProgressIndicator(value: updates.progress),
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Row(
+            children: [
+              OutlinedButton.icon(
+                key: const Key('settings-check-update'),
+                onPressed: busy ? null : updates.checkNow,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Check now'),
+              ),
+              const SizedBox(width: 12),
+              if (actionLabel != null)
+                FilledButton(
+                  key: const Key('settings-update-action'),
+                  onPressed: busy ? null : action,
+                  child: Text(actionLabel),
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -570,6 +851,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ),
   );
+
+  /// Device-local editor for this display's friendly name, sent to the Core in the
+  /// `anamanti-hello` frame so two displays on one Core are distinguishable (and shown
+  /// in the Core config page's "Connected devices" list). The subtitle shows the stable
+  /// MAC-derived [AppSettings.deviceId]. Persisted via [SettingsStore]; a change
+  /// restarts the engine so the channels re-announce (see `main.dart`).
+  Widget _deviceNameTile() {
+    return ListTile(
+      leading: const Icon(Icons.devices_other),
+      title: const Text('Device name'),
+      subtitle: Text(
+        _settings.deviceId.isEmpty
+            ? 'A name for this display, shown on the Core'
+            : 'ID: ${_settings.deviceId}',
+      ),
+      trailing: SizedBox(
+        width: 160,
+        child: TextField(
+          key: const Key('settings-device-name'),
+          controller: _deviceNameController,
+          textAlign: TextAlign.end,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(hintText: 'e.g. Kitchen'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(deviceName: v)),
+        ),
+      ),
+    );
+  }
 
   /// Device-local picker for which orchestrator this display connects to. "Auto"
   /// (empty key) uses the first available orchestrator; selecting a specific one
@@ -724,6 +1034,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
           () => _settings = _settings.copyWith(smoothingWindow: v.round()),
         ),
       ),
+      _rangeSlider(
+        label: 'Capture gain (dB)',
+        value: _settings.captureGainDb,
+        min: 0,
+        max: 36,
+        divisions: 36,
+        format: (v) => '${v.round()} dB',
+        sliderKey: const Key('settings-capture-gain'),
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(captureGainDb: v.roundToDouble()),
+        ),
+      ),
       SwitchListTile(
         key: const Key('settings-fire-on-peak'),
         secondary: const Icon(Icons.bolt),
@@ -746,6 +1068,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
         onChanged: (v) =>
             setState(() => _settings = _settings.copyWith(useAudioRecord: v)),
       ),
+      if (_settings.useAudioRecord) ...[
+        SwitchListTile(
+          key: const Key('settings-platform-ns'),
+          secondary: const Icon(Icons.noise_control_off),
+          title: const Text('Noise suppression'),
+          subtitle: const Text(
+            'Platform NoiseSuppressor. On by default — but if the wake word is '
+            'missed in a noisy room, try turning this OFF (aggressive NS can '
+            'distort speech and hurt detection)',
+          ),
+          value: _settings.platformNs,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(platformNs: v)),
+        ),
+        SwitchListTile(
+          key: const Key('settings-platform-agc'),
+          secondary: const Icon(Icons.graphic_eq),
+          title: const Text('Automatic gain control'),
+          subtitle: const Text(
+            'Platform AutomaticGainControl — boosts quiet far-field speech',
+          ),
+          value: _settings.platformAgc,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(platformAgc: v)),
+        ),
+        SwitchListTile(
+          key: const Key('settings-platform-aec'),
+          secondary: const Icon(Icons.hearing),
+          title: const Text('Echo cancellation'),
+          subtitle: const Text(
+            'Platform AcousticEchoCanceler. Off by default — the Mac does AEC and '
+            'this device\'s platform AEC was found not to actually cancel',
+          ),
+          value: _settings.platformAec,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(platformAec: v)),
+        ),
+      ],
     ];
   }
 
@@ -803,10 +1163,74 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       ],
+      // Listening ring: the glowing blue overlay shown while listening, which reacts
+      // to your voice. A master on/off plus its reactivity/attack/release/auto-range
+      // dials. Purely presentational — applied instantly on Save, no engine restart.
+      SwitchListTile(
+        key: const Key('settings-listening-ring'),
+        secondary: const Icon(Icons.blur_circular),
+        title: const Text('Listening ring'),
+        subtitle: const Text(
+          'Show a glowing ring while listening that reacts to your voice',
+        ),
+        value: _settings.listeningRingEnabled,
+        onChanged: (v) => setState(
+          () => _settings = _settings.copyWith(listeningRingEnabled: v),
+        ),
+      ),
+      if (_settings.listeningRingEnabled) ...[
+        _rangeSlider(
+          label: 'Ring reactivity',
+          value: _settings.ringReactivity,
+          min: 0.25,
+          max: 2.5,
+          divisions: 45,
+          format: (v) => '${v.toStringAsFixed(2)}×',
+          sliderKey: const Key('settings-ring-reactivity'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringReactivity: v)),
+        ),
+        _rangeSlider(
+          label: 'Ring attack',
+          value: _settings.ringAttack,
+          min: 0.1,
+          max: 1.0,
+          divisions: 18,
+          format: (v) => v.toStringAsFixed(2),
+          sliderKey: const Key('settings-ring-attack'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringAttack: v)),
+        ),
+        _rangeSlider(
+          label: 'Ring release',
+          value: _settings.ringRelease,
+          min: 0.02,
+          max: 0.5,
+          divisions: 48,
+          format: (v) => v.toStringAsFixed(2),
+          sliderKey: const Key('settings-ring-release'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringRelease: v)),
+        ),
+        _rangeSlider(
+          label: 'Ring auto-range',
+          value: _settings.ringDecay,
+          min: 0.90,
+          max: 0.999,
+          divisions: 99,
+          format: (v) => v.toStringAsFixed(3),
+          sliderKey: const Key('settings-ring-decay'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(ringDecay: v)),
+        ),
+      ],
     ];
   }
 
-  List<Widget> _assistantTiles() {
+  /// Placeholder tiles shown for the orchestrator-managed sections (Assistant,
+  /// Speech Detection) while the Mac is being contacted or is unreachable. Returns
+  /// null once the remote settings have loaded, so the caller renders its controls.
+  List<Widget>? _remoteGuardTiles() {
     if (_remoteLoading) {
       return const [
         ListTile(
@@ -825,7 +1249,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           leading: const Icon(Icons.cloud_off),
           title: const Text('Assistant offline'),
           subtitle: const Text(
-            'LLM and voice settings need the Mac to be reachable.',
+            'These settings need the Mac to be reachable.',
           ),
           trailing: TextButton(
             onPressed: _loadRemote,
@@ -834,6 +1258,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ];
     }
+    return null;
+  }
+
+  List<Widget> _assistantTiles() {
+    final guard = _remoteGuardTiles();
+    if (guard != null) return guard;
     return [
       ListTile(
         leading: const Icon(Icons.smart_toy_outlined),
@@ -859,9 +1289,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _authField(),
       _modelField(),
       _voiceField(),
-      // Orchestrator-side end-of-speech VAD tuning (applied on the Mac). Shortening
-      // the silence window cuts the wait before the reply; lowering the level helps
-      // a quiet far-field mic register as speech instead of hitting the slow timeout.
+    ];
+  }
+
+  /// Speech Detection: the Anamanti Core's end-of-speech VAD tuning, applied on the
+  /// Mac (orchestrator-managed). Shortening the silence window cuts the wait before
+  /// the reply; lowering the level helps a quiet far-field mic register as speech
+  /// instead of hitting the slow timeout. Also selects the VAD engine (energy vs
+  /// Silero) and, for Silero, its speech-probability threshold.
+  List<Widget> _vadTiles() {
+    final guard = _remoteGuardTiles();
+    if (guard != null) return guard;
+    return [
+      // VAD engine selection (applied on the Mac; the energy⇄silero swap takes effect
+      // without a restart). Silero is a neural detector — more robust to noise, but it
+      // needs a Core built with the `vad-silero` feature + a model, else it falls back
+      // to energy. Its probability threshold is shown only when Silero is selected.
+      ListTile(
+        leading: const Icon(Icons.graphic_eq),
+        title: const Text('VAD engine'),
+        subtitle: const Text('Energy (RMS) or Silero (neural)'),
+        trailing: DropdownButton<String>(
+          key: const Key('settings-vad-engine'),
+          value: _vadEngine == 'silero' ? 'silero' : 'energy',
+          items: const [
+            DropdownMenuItem(value: 'energy', child: Text('Energy')),
+            DropdownMenuItem(value: 'silero', child: Text('Silero')),
+          ],
+          onChanged: (v) {
+            if (v == null || v == _vadEngine) return;
+            setState(() => _vadEngine = v);
+          },
+        ),
+      ),
+      if (_vadEngine == 'silero')
+        _rangeSlider(
+          label: 'Silero speech threshold',
+          value: _sileroThreshold,
+          min: 0.0,
+          max: 1.0,
+          divisions: 20,
+          format: (v) => v.toStringAsFixed(2),
+          sliderKey: const Key('settings-vad-silero-threshold'),
+          onChanged: (v) => setState(() => _sileroThreshold = v),
+        ),
       _rangeSlider(
         label: 'End-of-speech wait (ms)',
         value: _endSilenceMs.toDouble(),

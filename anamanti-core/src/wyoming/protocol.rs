@@ -189,6 +189,12 @@ pub mod types {
     /// `weather` is the structured report — `location_label`, `units`, `current{…}`,
     /// `daily[]`). Byte-identical to the device crate's `types::WEATHER`.
     pub const WEATHER: &str = "anamanti-weather";
+
+    /// orchestrator → device: show/dismiss the full-screen place card (data: `action`
+    /// = `"show"` / `"dismiss"`; for `show`, `place` is the structured report — `name`,
+    /// `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`, `photo_uri`, …).
+    /// Byte-identical to the device crate's `types::PLACE`.
+    pub const PLACE: &str = "anamanti-place";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -416,6 +422,24 @@ impl WyomingEvent {
         self.event_type == types::WEATHER
     }
 
+    /// An `anamanti-place` **show** action (orchestrator → device): render `place`
+    /// (a serialized [`crate::places::PlaceReport`]) full-screen on the place card.
+    /// Voice-triggered by the `places_lookup` tool.
+    pub fn place_show(place: Value) -> Self {
+        Self::with_data(types::PLACE, json!({ "action": "show", "place": place }))
+    }
+
+    /// An `anamanti-place` **dismiss** action (orchestrator → device): close the
+    /// full-screen place card and return to the idle/ambient display.
+    pub fn place_dismiss() -> Self {
+        Self::with_data(types::PLACE, json!({ "action": "dismiss" }))
+    }
+
+    /// True if this is an `anamanti-place` frame.
+    pub fn is_place(&self) -> bool {
+        self.event_type == types::PLACE
+    }
+
     /// An `anamanti-speak` request (device → orchestrator): please synthesize `text`
     /// and stream its audio back. Mirror of the device crate's `speak` constructor.
     pub fn speak(text: impl Into<String>) -> Self {
@@ -471,14 +495,20 @@ impl WyomingEvent {
     }
 
     /// An `anamanti-hello` channel-open frame (device → orchestrator): register the
-    /// persistent notify channel. Mirror of the device crate's `hello` constructor.
-    pub fn hello(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    /// persistent notify channel. `name` is a human-friendly label for the display
+    /// (may be empty). Mirror of the device crate's `hello` constructor.
+    pub fn hello(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "notify",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -487,13 +517,18 @@ impl WyomingEvent {
     /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
     /// so the server registers it with the weather push service rather than the notify
     /// service. Byte-identical to the device crate's `hello_weather`.
-    pub fn hello_weather(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    pub fn hello_weather(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "weather",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -502,6 +537,17 @@ impl WyomingEvent {
     pub fn hello_device_id(&self) -> Option<&str> {
         if self.event_type == types::ANAMANTI_HELLO {
             self.data.get("device_id").and_then(Value::as_str)
+        } else {
+            None
+        }
+    }
+
+    /// The human-friendly `name` from an `anamanti-hello` frame's `data.name`
+    /// (`None` when the frame is a different type or carries no name — older devices
+    /// that predate the field).
+    pub fn hello_name(&self) -> Option<&str> {
+        if self.event_type == types::ANAMANTI_HELLO {
+            self.data.get("name").and_then(Value::as_str)
         } else {
             None
         }
@@ -692,6 +738,8 @@ pub enum DisplayContext {
     Recipe(RecipeScreen),
     /// The weather forecast screen is up (`kind: "weather"`).
     Weather(WeatherScreen),
+    /// The place card is up (`kind: "place"`).
+    Place(PlaceScreen),
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
@@ -723,6 +771,17 @@ pub struct WeatherScreen {
     pub description: String,
 }
 
+/// The place card's state, as carried in a [`DisplayContext::Place`]. Tells the model a
+/// place card is on screen (and for which place), so it can answer follow-ups ("is it
+/// open on Sunday?") or `close_places` on "close it".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlaceScreen {
+    /// The place shown (e.g. "Blue Bottle Coffee").
+    pub name: String,
+    /// Its one-line address.
+    pub address: String,
+}
+
 /// Pull the display context out of an `audio-start` data block's `screen` object, or
 /// `None` when the display reports nothing (an idle screen, or a device that doesn't
 /// stamp context). Dispatches on `screen.kind`; an unknown kind (e.g. a newer device
@@ -736,7 +795,104 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         "weather" => {
             parse_weather_screen(screen.get("weather")?.as_object()?).map(DisplayContext::Weather)
         }
+        "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
         _ => None,
+    }
+}
+
+/// Active-timer state the device reports on **every** turn, **orthogonal to the
+/// foreground widget** (`DisplayContext`): a timer can be counting down while a recipe,
+/// the weather, or the idle slideshow is front-and-center, so this rides as a `timers`
+/// sibling of `kind` inside the `screen` block rather than as a `kind` variant. The
+/// device owns timers (countdown + alarm), so this is the Core's only view of them — it
+/// unblocks the System-1 `timer_query` / `timer_cancel` / `stop_dismiss` decisions
+/// (plans/system1-fast-decisions.md §17, §19). `ringing` is intentionally absent in this
+/// phase (today's alarm is a finite bell that self-removes — see §19.7).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TimerContext {
+    /// How many timers are currently running (0 = none).
+    pub running: u32,
+    /// Whole seconds until the *soonest-to-fire* timer, so "how much time is left?" can
+    /// be answered without any Core-side timer state. `None` when nothing is running.
+    pub next_remaining_secs: Option<u64>,
+    /// Labels of the running timers (only the non-empty ones), for future labeled
+    /// query/cancel. May be empty even when `running > 0` (unlabeled timers).
+    pub labels: Vec<String>,
+}
+
+impl TimerContext {
+    /// Whether any timer is currently running.
+    pub fn any_running(&self) -> bool {
+        self.running > 0
+    }
+}
+
+/// The full device context for a turn: the foreground widget (if any) **plus** the
+/// orthogonal background state (active timers now; media later). Parsed once from the
+/// `audio-start` data via [`device_context`]. Keeping [`display_context`] separate lets
+/// the System-2 prompt line stay widget-only while System-1 sees the superset.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeviceContext {
+    /// The foreground widget, discriminated by `screen.kind`. `None` on an idle screen.
+    pub widget: Option<DisplayContext>,
+    /// Background timer state, reported regardless of `widget`.
+    pub timers: TimerContext,
+}
+
+impl DeviceContext {
+    /// A short label for the foreground widget (`"recipe"` / `"weather"`), or `None` on
+    /// an idle screen — the compact form System-1 routes on.
+    pub fn widget_label(&self) -> Option<&'static str> {
+        match self.widget {
+            Some(DisplayContext::Recipe(_)) => Some("recipe"),
+            Some(DisplayContext::Weather(_)) => Some("weather"),
+            Some(DisplayContext::Place(_)) => Some("place"),
+            None => None,
+        }
+    }
+}
+
+/// Parse the active-timer state from an `audio-start` data block's `screen.timers`
+/// object. Missing/absent → an empty [`TimerContext`] (older device, or no timers),
+/// **independently of `screen.kind`** — so a timer running behind another widget (or an
+/// idle screen with no `kind`) is still seen, which [`display_context`] alone would drop.
+pub fn timer_context(data: &Value) -> TimerContext {
+    let Some(timers) = data
+        .as_object()
+        .and_then(|o| o.get("screen"))
+        .and_then(Value::as_object)
+        .and_then(|s| s.get("timers"))
+        .and_then(Value::as_object)
+    else {
+        return TimerContext::default();
+    };
+    let running = timers.get("running").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let next_remaining_secs = timers.get("next_remaining_secs").and_then(Value::as_u64);
+    let labels = timers
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    TimerContext {
+        running,
+        next_remaining_secs,
+        labels,
+    }
+}
+
+/// Parse the full [`DeviceContext`] (foreground widget + background timers) from an
+/// `audio-start` data block. The turn pipeline uses this so System-1 sees background
+/// timers; [`display_context`] remains for the System-2 prompt line.
+pub fn device_context(data: &Value) -> DeviceContext {
+    DeviceContext {
+        widget: display_context(data),
+        timers: timer_context(data),
     }
 }
 
@@ -756,6 +912,22 @@ fn parse_weather_screen(weather: &Map<String, Value>) -> Option<WeatherScreen> {
         temp: weather.get("temp").and_then(Value::as_i64).unwrap_or(0) as i32,
         description: weather
             .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// Parse the `place` sub-object of a `screen` block into a [`PlaceScreen`].
+fn parse_place_screen(place: &Map<String, Value>) -> Option<PlaceScreen> {
+    Some(PlaceScreen {
+        name: place
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        address: place
+            .get("address")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
@@ -911,13 +1083,14 @@ mod tests {
 
     #[tokio::test]
     async fn weather_hello_carries_role() {
-        let hello = WyomingEvent::hello_weather("dev-1", "core-1");
+        let hello = WyomingEvent::hello_weather("dev-1", "core-1", "Bedroom");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.hello_role(), "weather");
         assert_eq!(back.hello_device_id(), Some("dev-1"));
+        assert_eq!(back.hello_name(), Some("Bedroom"));
         // The default notify hello reports the notify role.
-        assert_eq!(WyomingEvent::hello("d", "c").hello_role(), "notify");
+        assert_eq!(WyomingEvent::hello("d", "c", "").hello_role(), "notify");
     }
 
     #[tokio::test]
@@ -996,6 +1169,57 @@ mod tests {
         assert_eq!(display_context(&other), None);
     }
 
+    #[test]
+    fn timer_context_parses_orthogonally_to_widget_kind() {
+        // No screen block at all → empty timer context.
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        assert_eq!(timer_context(&plain.data), TimerContext::default());
+        assert!(!timer_context(&plain.data).any_running());
+
+        // A screen block with a widget but no timers → still empty.
+        let widget_only = json!({ "screen": { "kind": "recipe" } });
+        assert_eq!(timer_context(&widget_only), TimerContext::default());
+
+        // Timers reported WITHOUT any `kind` (idle screen, timer in background) must
+        // still be seen — this is exactly what display_context() alone would drop.
+        let idle_with_timer = json!({
+            "screen": { "timers": { "running": 2, "next_remaining_secs": 125, "labels": ["pasta", ""] } }
+        });
+        assert_eq!(
+            timer_context(&idle_with_timer),
+            TimerContext {
+                running: 2,
+                next_remaining_secs: Some(125),
+                labels: vec!["pasta".to_string()], // the empty label is filtered out
+            }
+        );
+        // display_context sees nothing here (no `kind`), proving orthogonality.
+        assert_eq!(display_context(&idle_with_timer), None);
+
+        // Timers reported ALONGSIDE a foreground widget: device_context carries both.
+        let recipe_plus_timer = json!({
+            "screen": {
+                "kind": "weather",
+                "weather": { "location": "Austin", "units": "imperial", "temp": 90, "description": "sunny" },
+                "timers": { "running": 1, "next_remaining_secs": 30 }
+            }
+        });
+        let dev = device_context(&recipe_plus_timer);
+        assert_eq!(dev.widget_label(), Some("weather"));
+        assert_eq!(dev.timers.running, 1);
+        assert_eq!(dev.timers.next_remaining_secs, Some(30));
+        assert!(dev.timers.labels.is_empty());
+    }
+
+    #[test]
+    fn device_context_defaults_when_empty() {
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        let dev = device_context(&plain.data);
+        assert_eq!(dev, DeviceContext::default());
+        assert_eq!(dev.widget_label(), None);
+        assert!(!dev.timers.any_running());
+    }
+
     #[tokio::test]
     async fn speak_frame_roundtrips_and_extracts_text() {
         let ev = WyomingEvent::speak("Time's up for pasta");
@@ -1041,14 +1265,16 @@ mod tests {
     #[tokio::test]
     async fn notify_frames_roundtrip() {
         // hello (device → orchestrator)
-        let hello = WyomingEvent::hello("echo-show-8", "Paul Family");
+        let hello = WyomingEvent::hello("echo-show-8", "Paul Family", "Kitchen");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.event_type, types::ANAMANTI_HELLO);
         assert_eq!(back.hello_device_id(), Some("echo-show-8"));
+        assert_eq!(back.hello_name(), Some("Kitchen"));
         assert_eq!(back.data["role"], json!("notify"));
-        // A non-hello frame yields no device id.
+        // A non-hello frame yields no device id or name.
         assert_eq!(WyomingEvent::audio_stop(0).hello_device_id(), None);
+        assert_eq!(WyomingEvent::audio_stop(0).hello_name(), None);
 
         // notify (orchestrator → device)
         let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");

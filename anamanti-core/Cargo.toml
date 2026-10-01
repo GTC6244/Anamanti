@@ -23,6 +23,15 @@ name = "aec_spike"
 required-features = ["aec"]
 
 [features]
+# `vad-silero` is ON by default (2026-09-30): the neural Silero VAD is the committed
+# end-of-speech engine (`VadConfig::default().engine == Silero`), so a plain
+# `cargo build --release` compiles it in and a plain run boots on Silero. This pulls a
+# prebuilt onnxruntime binary at build time and REQUIRES the Silero v4 model on disk
+# (`scripts/fetch-vad-model.sh <dir>`) — a `silero` boot with no model is a HARD ERROR
+# (fail-loud). To build the old energy-only Core (no onnxruntime, no model needed), use
+# `--no-default-features` (add back any other features you want). See VadSileroPlan.md §5 (M3).
+default = ["vad-silero", "embed-local"]
+
 # The embedded HelixDB GraphRAG memory backend (deps `db`/`helix-ast`), the
 # rig-core agent framework (`rig-core`, powering the LLM tool/web-search path), and
 # the ECAPA-TDNN ONNX voiceprint embedder (pure-Rust `tract-onnx`; speaker_id_plan.md
@@ -37,6 +46,41 @@ required-features = ["aec"]
 # `ninja`, `pkg-config`, and the `llvm-tools` rustup component (for `rust-objcopy`).
 # See the Phase 0 spike + `src/aec/mod.rs`.
 aec = ["dep:webrtc-audio-processing"]
+
+# `stt-whisper-local` compiles the in-process Whisper STT engine (whisper.cpp via
+# `whisper-rs`), replacing the out-of-process `wyoming-faster-whisper` Python server
+# (see `plans/python-to-rust-whisper.md`). Off by default because it triggers a heavy
+# native build (whisper.cpp/ggml via cmake + a C/C++ toolchain). CPU-only here;
+# CoreML/Metal acceleration are separate whisper-rs features wired in a later stage.
+stt-whisper-local = ["dep:whisper-rs"]
+
+# Acceleration variants, additive over `stt-whisper-local`. `metal` runs whisper.cpp
+# on the Apple GPU — a pure build flag, no extra model assets — and is the
+# recommended accel on the M4. `coreml` runs the encoder on the ANE but requires a
+# separately generated CoreML encoder model (`*-encoder.mlmodelc`), which today is
+# produced by a Python (torch/coremltools) conversion step — re-introducing a Python
+# build dependency this project is otherwise removing — so it is offered but not the
+# default recommendation. See `plans/python-to-rust-whisper.md` (Stage 4).
+stt-whisper-metal = ["stt-whisper-local", "whisper-rs/metal"]
+stt-whisper-coreml = ["stt-whisper-local", "whisper-rs/coreml"]
+
+# `vad-silero` compiles the neural Silero VAD engine (onnxruntime via `ort`). ON by
+# default (see the `default` line above): it pulls a prebuilt onnxruntime binary at build
+# time and Silero is now the committed runtime default. Disable with
+# `--no-default-features` for an energy-only build (no onnxruntime, no model file needed).
+# See `plans/VadSileroPlan.md`.
+vad-silero = ["dep:ort"]
+
+# `embed-local` compiles the local, offline text-embedding backend for the GraphRAG
+# memory: nomic-embed-text-v1.5 run in-process via `fastembed` (onnxruntime through
+# `ort` — the SAME `ort` pin as `vad-silero`, so no second runtime). ON by default —
+# `graphrag.embed_backend` defaults to `local`, so a plain build embeds memory on the
+# device with no network and no `OPENAI_API_KEY`. The ONNX model + tokenizer files must
+# be on disk (`scripts/fetch-embed-model.sh <dir>`); the OpenAI embedder stays available
+# via `graphrag.embed_backend = "openai"`. Pure-Rust `tract` cannot load this model (its
+# rotary-embedding `Range` op does not lower to a typed graph), hence onnxruntime here.
+# Disable with `--no-default-features` for a build with neither onnxruntime nor fastembed.
+embed-local = ["dep:fastembed"]
 
 [dependencies]
 # Embedded HelixDB engine (always compiled). Pinned to the spike-verified commit.
@@ -66,7 +110,6 @@ ical = "0.11"
 rrule = "0.14"
 futures-util = "0.3"
 log = "0.4.34"
-mdns-sd = "0.11"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
@@ -97,6 +140,41 @@ tokio = { version = "1.34", features = [
 webrtc-audio-processing = { version = "2.1", features = [
     "bundled",
 ], optional = true }
+# In-process Whisper STT (feature `stt-whisper-local`). whisper.cpp bindings; builds
+# the vendored whisper.cpp/ggml from source (cmake + C/C++ toolchain). CPU-only:
+# default-features are off so no GPU/accel backend is pulled here.
+whisper-rs = { version = "0.14", default-features = false, optional = true }
+# Neural Silero VAD engine (feature `vad-silero`). onnxruntime via `ort` — stock
+# Silero v4/v5 use ONNX `If` control-flow that pure-Rust tract cannot translate, so
+# the neural gate runs on onnxruntime (Core/Mac-side only; not the device). ort
+# fetches a prebuilt onnxruntime binary at build time. See `plans/VadSileroPlan.md`.
+ort = { version = "=2.0.0-rc.13", optional = true }
+# Local text embeddings (feature `embed-local`). Runs nomic-embed-text-v1.5 in-process
+# on onnxruntime via `ort` (pinned to the exact `=2.0.0-rc.13` above, so the two deps
+# share one onnxruntime). `default-features = false` drops fastembed's HF-hub downloader,
+# image models, and candle backends — we load the ONNX + tokenizer from local files
+# (`UserDefinedEmbeddingModel`) for an offline, fail-loud build; `ort-download-binaries`
+# matches how `vad-silero` provisions the onnxruntime binary at build time.
+fastembed = { version = "7", default-features = false, features = [
+    "ort-download-binaries",
+], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.34", features = ["test-util"] }
+# WAV fixture parsing for the in-process Whisper integration test (pure Rust).
+hound = "3.5"
+
+# --- mDNS advertisement backend (see src/discovery.rs) --------------------------
+# macOS (production): register the Wyoming service through Apple's system daemon
+# `mDNSResponder` via `DNSServiceRegister`. The OS daemon — not this process —
+# owns address advertisement, multicast-group membership, sleep/wake recovery,
+# interface-change refresh, and name-collision probing, which eliminates the
+# stale-record failures that previously required restarting the Core. astro-dnssd
+# links only the always-present system `libSystem`/dns_sd; no extra system deps.
+[target.'cfg(target_os = "macos")'.dependencies]
+astro-dnssd = "0.3"
+
+# Other platforms (dev/CI): keep the pure-Rust `mdns-sd` responder so the crate
+# still self-advertises off macOS.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+mdns-sd = "0.11"

@@ -14,7 +14,8 @@ use anamanti_core::memory::{MemoryKind, MemorySource, MemoryStore};
 use anamanti_core::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
 use anamanti_core::settings::{
     AppSaidConfig, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
-    SharedSettings, SpotifyConfig, DEFAULT_END_SILENCE_MS, DEFAULT_VOICE_RMS_THRESHOLD,
+    SharedSettings, SpotifyConfig, DEFAULT_END_SILENCE_MS, DEFAULT_SILERO_THRESHOLD,
+    DEFAULT_VOICE_RMS_THRESHOLD,
 };
 use anamanti_core::wyoming::protocol::{read_event, types, write_event, WyomingEvent};
 use serde_json::json;
@@ -44,6 +45,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         directions_imperial: false,
         weather: None,
         weather_imperial: false,
+        weather_enabled: false,
+        places: None,
     };
     let (llm, backend, model) = factory
         .build(
@@ -74,11 +77,17 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             tts_voice: None,
             end_silence_ms: DEFAULT_END_SILENCE_MS,
             voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+            silero_threshold: DEFAULT_SILERO_THRESHOLD,
+            vad_engine: anamanti_core::config::VadEngineKind::Energy,
             drive: DriveConfig::default(),
             household: Household::default(),
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
             appsaid: AppSaidConfig::default(),
+            weather_provider: "visualcrossing".to_string(),
+            visualcrossing_key: None,
+            google_places_key: None,
+            system1: anamanti_core::settings::System1Runtime::default(),
         },
     );
     let pipeline = Pipeline::with_settings(

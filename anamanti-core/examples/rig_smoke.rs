@@ -44,6 +44,7 @@ fn smoke_tools(web_search: bool) -> Option<Arc<Tools>> {
         None,
         None,
         false,
+        None,
     )
 }
 

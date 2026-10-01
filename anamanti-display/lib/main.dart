@@ -8,6 +8,7 @@
 // the slideshow, while assistant/memory settings are applied on the Mac.
 
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -16,8 +17,10 @@ import 'package:flutter/services.dart';
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/model_assets.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
+import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_channel_controller.dart';
 import 'package:anamanti_display/src/engine/screen_brightness.dart';
+import 'package:anamanti_display/src/update/updater_channel.dart';
 import 'package:anamanti_display/src/engine/wakeword_config.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
@@ -33,7 +36,9 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
     show
         NotifyConfig,
         WeatherConfig,
+        deviceHardwareId,
         noteUserActivity,
+        setPlaceContext,
         setRecipeContext,
         setWeatherContext;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
@@ -80,9 +85,10 @@ class _AmbientHomeState extends State<AmbientHome> {
   OrchestratorClient _client = const FrbOrchestratorClient();
   final SlideshowController _slideshow = SlideshowController();
 
-  /// Actuates the window backlight from the camera proximity sensor's presence
-  /// state (Plan.MD §5). Long-lived across engine restarts so it only crosses the
-  /// platform channel when the target brightness actually changes.
+  /// Actuates the window backlight from whether the screen is awake
+  /// ([AssistantState.screenAwake]) — camera presence, an active voice turn, or a
+  /// full-screen mode (Plan.MD §5). Long-lived across engine restarts so it only
+  /// crosses the platform channel when the target brightness actually changes.
   final ScreenBrightnessController _brightness = ScreenBrightnessController();
 
   AppSettings _settings = const AppSettings();
@@ -92,6 +98,11 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// it re-pins to the selected orchestrator when that changes.
   NotificationController? _notifications;
   WeatherChannelController? _weather;
+
+  /// In-app updater (plans/UpdaterPlan.md). Device-local, created once
+  /// in [_boot] and only on the `selfUpdate` flavor — null on `fdroid`, so no update
+  /// banner or Settings page appears there.
+  UpdateController? _updates;
 
   /// Live access tokens for each Google backend (minted from the persisted refresh
   /// tokens on boot / after a re-link). Null when unlinked/offline → local gradients.
@@ -112,6 +123,10 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   Future<void> _boot() async {
     _settings = await _store.load();
+    // Ensure this display has a stable, globally-unique identity before any channel
+    // dials the Core (so two displays on one Core are distinguishable). Minted once
+    // from the Wi-Fi MAC, persisted, and reused on every later boot.
+    _settings = await _ensureDeviceId(_settings);
     // Pin the control client to the persisted orchestrator selection.
     _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
     // Unpack the bundled wake-word models to the filesystem before the native
@@ -138,6 +153,53 @@ class _AmbientHomeState extends State<AmbientHome> {
       const Duration(minutes: 30),
       (_) => _reloadPhotos(),
     );
+    // In-app updater: only wire it on the selfUpdate flavor (the fdroid flavor
+    // reports false and ships without it). Off the critical path — the kiosk is
+    // fully usable while the first check runs.
+    unawaited(_startUpdater());
+  }
+
+  /// Create and start the updater controller when this build ships the self-updater.
+  Future<void> _startUpdater() async {
+    if (_updates != null) return;
+    final channel = UpdaterChannel();
+    if (!await channel.isSelfUpdateEnabled()) return;
+    final updates = UpdateController(
+      channel: channel,
+      baseUrl: _settings.updateBaseUrl,
+      autoUpdateEnabled: _settings.autoUpdateEnabled,
+    );
+    await updates.start();
+    if (mounted) {
+      setState(() => _updates = updates);
+    } else {
+      updates.dispose();
+    }
+  }
+
+  /// Mint and persist this display's stable [AppSettings.deviceId] on first run.
+  /// Prefers the Wi-Fi MAC-derived id from the Rust engine (`anamanti-<12 hex>`);
+  /// if the MAC can't be read it falls back to a persisted random id so the device
+  /// still has a stable, unique identity. A no-op once an id is already stored.
+  Future<AppSettings> _ensureDeviceId(AppSettings s) async {
+    if (s.deviceId.isNotEmpty) return s;
+    var id = '';
+    try {
+      id = deviceHardwareId();
+    } catch (_) {
+      id = '';
+    }
+    if (id.isEmpty) {
+      final rnd = Random.secure();
+      final hex = List<int>.generate(
+        12,
+        (_) => rnd.nextInt(16),
+      ).map((n) => n.toRadixString(16)).join();
+      id = 'anamanti-$hex';
+    }
+    final next = s.copyWith(deviceId: id);
+    await _store.save(next);
+    return next;
   }
 
   /// Refresh the linked Google source in place (re-mint token + re-list). Keeps the
@@ -262,6 +324,7 @@ class _AmbientHomeState extends State<AmbientHome> {
       // can drive it by voice — switch tabs, scroll, close.
       setRecipeContext: setRecipeContext,
       setWeatherContext: setWeatherContext,
+      setPlaceContext: setPlaceContext,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
       // flip to a "processing" indicator the instant the user stops talking.
       endpointCueEnabled: _settings.endpointCueEnabled,
@@ -286,9 +349,12 @@ class _AmbientHomeState extends State<AmbientHome> {
         }
       },
     )..start();
-    // Actuate the screen backlight whenever the proximity sensor's presence flips.
-    // The old controller (if any) was just disposed, dropping its listeners.
-    assistant.addListener(() => _brightness.apply(assistant.state.userPresent));
+    // Actuate the screen backlight whenever the screen wakes or sleeps. Driven by
+    // `screenAwake` (not `userPresent` alone) so a camera approach, a voice turn, or
+    // a full-screen mode all restore full brightness — matching exactly when the
+    // away-face blackout lifts. The old controller (if any) was just disposed,
+    // dropping its listeners.
+    assistant.addListener(() => _brightness.apply(assistant.state.screenAwake));
 
     // Proactive-notification channel: a persistent, device-dialed connection to the
     // pinned orchestrator that receives pushed visual notifications (Approach A).
@@ -299,7 +365,8 @@ class _AmbientHomeState extends State<AmbientHome> {
       config: NotifyConfig(
         orchestratorKey: _settings.orchestratorKey,
         discoveryTimeoutSecs: BigInt.zero,
-        deviceId: 'anamanti-display',
+        deviceId: _settings.deviceId,
+        deviceName: _settings.deviceName,
       ),
     )..start();
 
@@ -313,7 +380,8 @@ class _AmbientHomeState extends State<AmbientHome> {
       config: WeatherConfig(
         orchestratorKey: _settings.orchestratorKey,
         discoveryTimeoutSecs: BigInt.zero,
-        deviceId: 'anamanti-display',
+        deviceId: _settings.deviceId,
+        deviceName: _settings.deviceName,
       ),
       onReport: assistant.applyWeatherPush,
     )..start();
@@ -332,6 +400,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   Future<void> _onSettingsApplied(AppSettings next) async {
     final engineChanged =
         next.orchestratorKey != _settings.orchestratorKey ||
+        next.deviceName != _settings.deviceName ||
         next.wakeWord != _settings.wakeWord ||
         next.threshold != _settings.threshold ||
         next.activeThreshold != _settings.activeThreshold ||
@@ -351,15 +420,25 @@ class _AmbientHomeState extends State<AmbientHome> {
         !listEquals(next.driveFolderIds, _settings.driveFolderIds) ||
         next.driveLinked != _settings.driveLinked;
 
-    _settings = next;
-    // Re-pin the control client to the (possibly new) orchestrator selection.
-    _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
+    // setState so purely-presentational changes (e.g. the listening-ring toggle and
+    // its reactivity/attack/release/decay dials) repaint AmbientScreen even when
+    // neither the engine nor the photo source changed.
+    setState(() {
+      _settings = next;
+      // Re-pin the control client to the (possibly new) orchestrator selection.
+      _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
+    });
     if (photoChanged) {
       // A new/changed link means new refresh tokens: re-mint before rebuilding.
       await _refreshGoogleTokens();
       await _applyPhotoSource();
     }
     if (engineChanged) await _startEngine();
+    // Push the (possibly changed) update base URL / auto-update toggle to the updater.
+    await _updates?.updateConfig(
+      baseUrl: next.updateBaseUrl,
+      autoUpdateEnabled: next.autoUpdateEnabled,
+    );
   }
 
   void _openSettings() {
@@ -370,6 +449,10 @@ class _AmbientHomeState extends State<AmbientHome> {
           store: _store,
           client: _client,
           onApplied: _onSettingsApplied,
+          // The live engine controller powers the Audio Diagnostics page's meters.
+          assistant: _assistant,
+          // The updater controller powers the Updates page (null on fdroid).
+          updates: _updates,
         ),
       ),
     );
@@ -381,6 +464,7 @@ class _AmbientHomeState extends State<AmbientHome> {
     _assistant?.dispose();
     _notifications?.dispose();
     _weather?.dispose();
+    _updates?.dispose();
     _slideshow.dispose();
     _brightness.reset();
     super.dispose();
@@ -402,16 +486,29 @@ class _AmbientHomeState extends State<AmbientHome> {
         assistant: assistant,
         slideshow: _slideshow,
         notifications: _notifications,
+        updates: _updates,
         onOpenSettings: _openSettings,
+        listeningRingEnabled: _settings.listeningRingEnabled,
+        ringReactivity: _settings.ringReactivity,
+        ringAttack: _settings.ringAttack,
+        ringRelease: _settings.ringRelease,
+        ringDecay: _settings.ringDecay,
       );
     }
-    // A screen touch counts as user activity: reset the dim countdown (and brighten
-    // a dimmed screen). Translucent so it observes every touch without stealing it
-    // from the widgets below (settings control, timer chips, notification banner).
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: (_) => noteUserActivity(),
-      child: content,
+    // Kiosk guard: never let the hardware/gesture Back button pop the root route,
+    // which would drop the whole app to the Android launcher (it looked like the app
+    // "died"). Pushed routes like SettingsScreen still pop normally — this only
+    // blocks exiting the app from the ambient home screen.
+    return PopScope(
+      canPop: false,
+      // A screen touch counts as user activity: reset the dim countdown (and brighten
+      // a dimmed screen). Translucent so it observes every touch without stealing it
+      // from the widgets below (settings control, timer chips, notification banner).
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (_) => noteUserActivity(),
+        child: content,
+      ),
     );
   }
 }

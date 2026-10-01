@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 518702162;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1961382115;
 
 // Section: executor
 
@@ -45,6 +45,75 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
+fn wire__crate__api__updater__cancel_download_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "cancel_download",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::updater::cancel_download();
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__updater__check_for_update_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "check_for_update",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::updater::check_for_update(api_base_url)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__settings__clear_memories_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -158,6 +227,81 @@ fn wire__crate__api__settings__delete_speaker_impl(
                             api_orchestrator_key,
                             api_id,
                             api_discovery_timeout_secs,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__engine__device_hardware_id_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "device_hardware_id",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::engine::device_hardware_id())?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__updater__download_update_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "download_update",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_apk_url = <String>::sse_decode(&mut deserializer);
+            let api_expected_sha256 = <String>::sse_decode(&mut deserializer);
+            let api_dest_path = <String>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                crate::api::updater::DownloadProgress,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::updater::download_update(
+                            api_apk_url,
+                            api_expected_sha256,
+                            api_dest_path,
+                            api_sink,
                         )?;
                         Ok(output_ok)
                     })(),
@@ -676,6 +820,40 @@ fn wire__crate__api__engine__note_user_activity_impl(
         },
     )
 }
+fn wire__crate__api__engine__set_place_context_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_place_context",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_active = <bool>::sse_decode(&mut deserializer);
+            let api_name = <String>::sse_decode(&mut deserializer);
+            let api_address = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::set_place_context(api_active, api_name, api_address);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__engine__set_recipe_context_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -986,6 +1164,39 @@ fn wire__crate__api__engine__stop_weather_channel_impl(
         },
     )
 }
+fn wire__crate__api__engine__update_diagnostics_tuning_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_diagnostics_tuning",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_gain_db = <f32>::sse_decode(&mut deserializer);
+            let api_threshold = <f32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::update_diagnostics_tuning(api_gain_db, api_threshold);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__settings__update_orchestrator_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1039,6 +1250,19 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
 }
 
 impl SseDecode
+    for StreamSink<
+        crate::api::updater::DownloadProgress,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
+impl SseDecode
     for StreamSink<crate::api::engine::NotifyEvent, flutter_rust_bridge::for_generated::SseCodec>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1080,6 +1304,22 @@ impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_u8().unwrap() != 0
+    }
+}
+
+impl SseDecode for crate::api::updater::DownloadProgress {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_downloaded = <i64>::sse_decode(deserializer);
+        let mut var_total = <i64>::sse_decode(deserializer);
+        let mut var_done = <bool>::sse_decode(deserializer);
+        let mut var_error = <String>::sse_decode(deserializer);
+        return crate::api::updater::DownloadProgress {
+            downloaded: var_downloaded,
+            total: var_total,
+            done: var_done,
+            error: var_error,
+        };
     }
 }
 
@@ -1261,10 +1501,12 @@ impl SseDecode for crate::api::engine::NotifyConfig {
         let mut var_orchestratorKey = <String>::sse_decode(deserializer);
         let mut var_discoveryTimeoutSecs = <u64>::sse_decode(deserializer);
         let mut var_deviceId = <String>::sse_decode(deserializer);
+        let mut var_deviceName = <String>::sse_decode(deserializer);
         return crate::api::engine::NotifyConfig {
             orchestrator_key: var_orchestratorKey,
             discovery_timeout_secs: var_discoveryTimeoutSecs,
             device_id: var_deviceId,
+            device_name: var_deviceName,
         };
     }
 }
@@ -1345,6 +1587,8 @@ impl SseDecode for crate::api::settings::OrchestratorSettings {
         let mut var_ttsVoice = <Option<String>>::sse_decode(deserializer);
         let mut var_endSilenceMs = <u32>::sse_decode(deserializer);
         let mut var_voiceRmsThreshold = <f64>::sse_decode(deserializer);
+        let mut var_vadEngine = <String>::sse_decode(deserializer);
+        let mut var_sileroThreshold = <f64>::sse_decode(deserializer);
         return crate::api::settings::OrchestratorSettings {
             ok: var_ok,
             message: var_message,
@@ -1354,6 +1598,8 @@ impl SseDecode for crate::api::settings::OrchestratorSettings {
             tts_voice: var_ttsVoice,
             end_silence_ms: var_endSilenceMs,
             voice_rms_threshold: var_voiceRmsThreshold,
+            vad_engine: var_vadEngine,
+            silero_threshold: var_sileroThreshold,
         };
     }
 }
@@ -1368,6 +1614,8 @@ impl SseDecode for crate::api::settings::SettingsUpdate {
         let mut var_ttsVoice = <Option<String>>::sse_decode(deserializer);
         let mut var_endSilenceMs = <Option<u32>>::sse_decode(deserializer);
         let mut var_voiceRmsThreshold = <Option<f64>>::sse_decode(deserializer);
+        let mut var_vadEngine = <Option<String>>::sse_decode(deserializer);
+        let mut var_sileroThreshold = <Option<f64>>::sse_decode(deserializer);
         return crate::api::settings::SettingsUpdate {
             llm_backend: var_llmBackend,
             llm_model: var_llmModel,
@@ -1376,6 +1624,8 @@ impl SseDecode for crate::api::settings::SettingsUpdate {
             tts_voice: var_ttsVoice,
             end_silence_ms: var_endSilenceMs,
             voice_rms_threshold: var_voiceRmsThreshold,
+            vad_engine: var_vadEngine,
+            silero_threshold: var_sileroThreshold,
         };
     }
 }
@@ -1431,6 +1681,24 @@ impl SseDecode for () {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
 }
 
+impl SseDecode for crate::api::updater::UpdateManifest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_versionCode = <i64>::sse_decode(deserializer);
+        let mut var_versionName = <String>::sse_decode(deserializer);
+        let mut var_apkUrl = <String>::sse_decode(deserializer);
+        let mut var_sha256 = <String>::sse_decode(deserializer);
+        let mut var_notes = <String>::sse_decode(deserializer);
+        return crate::api::updater::UpdateManifest {
+            version_code: var_versionCode,
+            version_name: var_versionName,
+            apk_url: var_apkUrl,
+            sha256: var_sha256,
+            notes: var_notes,
+        };
+    }
+}
+
 impl SseDecode for crate::api::settings::VoiceInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1460,6 +1728,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_smoothingWindow = <u32>::sse_decode(deserializer);
         let mut var_fireOnPeak = <bool>::sse_decode(deserializer);
         let mut var_playbackBufferSecs = <u32>::sse_decode(deserializer);
+        let mut var_captureGainDb = <f32>::sse_decode(deserializer);
         let mut var_useAudiorecord = <bool>::sse_decode(deserializer);
         let mut var_micSource = <u32>::sse_decode(deserializer);
         let mut var_platformAec = <bool>::sse_decode(deserializer);
@@ -1481,6 +1750,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
             smoothing_window: var_smoothingWindow,
             fire_on_peak: var_fireOnPeak,
             playback_buffer_secs: var_playbackBufferSecs,
+            capture_gain_db: var_captureGainDb,
             use_audiorecord: var_useAudiorecord,
             mic_source: var_micSource,
             platform_aec: var_platformAec,
@@ -1503,6 +1773,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_channels = <u16>::sse_decode(deserializer);
         let mut var_rms = <f32>::sse_decode(deserializer);
         let mut var_score = <f32>::sse_decode(deserializer);
+        let mut var_avgScore = <f32>::sse_decode(deserializer);
+        let mut var_threshold = <f32>::sse_decode(deserializer);
+        let mut var_gainDb = <f32>::sse_decode(deserializer);
         let mut var_model = <String>::sse_decode(deserializer);
         let mut var_transcript = <String>::sse_decode(deserializer);
         let mut var_reply = <String>::sse_decode(deserializer);
@@ -1512,6 +1785,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_present = <bool>::sse_decode(deserializer);
         let mut var_recipeJson = <String>::sse_decode(deserializer);
         let mut var_weatherJson = <String>::sse_decode(deserializer);
+        let mut var_placeJson = <String>::sse_decode(deserializer);
         let mut var_recipeAction = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
@@ -1521,6 +1795,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             channels: var_channels,
             rms: var_rms,
             score: var_score,
+            avg_score: var_avgScore,
+            threshold: var_threshold,
+            gain_db: var_gainDb,
             model: var_model,
             transcript: var_transcript,
             reply: var_reply,
@@ -1530,6 +1807,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             present: var_present,
             recipe_json: var_recipeJson,
             weather_json: var_weatherJson,
+            place_json: var_placeJson,
             recipe_action: var_recipeAction,
         };
     }
@@ -1562,9 +1840,11 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             19 => crate::api::engine::WakeWordEventKind::ShowWeather,
             20 => crate::api::engine::WakeWordEventKind::WeatherCurrent,
             21 => crate::api::engine::WakeWordEventKind::DismissWeather,
-            22 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
-            23 => crate::api::engine::WakeWordEventKind::RecipeScroll,
-            24 => crate::api::engine::WakeWordEventKind::Presence,
+            22 => crate::api::engine::WakeWordEventKind::ShowPlace,
+            23 => crate::api::engine::WakeWordEventKind::DismissPlace,
+            24 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
+            25 => crate::api::engine::WakeWordEventKind::RecipeScroll,
+            26 => crate::api::engine::WakeWordEventKind::Presence,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -1576,10 +1856,12 @@ impl SseDecode for crate::api::engine::WeatherConfig {
         let mut var_orchestratorKey = <String>::sse_decode(deserializer);
         let mut var_discoveryTimeoutSecs = <u64>::sse_decode(deserializer);
         let mut var_deviceId = <String>::sse_decode(deserializer);
+        let mut var_deviceName = <String>::sse_decode(deserializer);
         return crate::api::engine::WeatherConfig {
             orchestrator_key: var_orchestratorKey,
             discovery_timeout_secs: var_discoveryTimeoutSecs,
             device_id: var_deviceId,
+            device_name: var_deviceName,
         };
     }
 }
@@ -1603,43 +1885,46 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__settings__clear_memories_impl(port, ptr, rust_vec_len, data_len),
-        2 => wire__crate__api__settings__delete_memory_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__settings__delete_speaker_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__settings__fetch_orchestrator_settings_impl(
+        1 => wire__crate__api__updater__cancel_download_impl(port, ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__updater__check_for_update_impl(port, ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__settings__clear_memories_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__settings__delete_memory_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__settings__delete_speaker_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__updater__download_update_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__settings__fetch_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        7 => wire__crate__api__settings__get_drive_token_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
-        12 => {
+        11 => wire__crate__api__settings__get_drive_token_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
+        16 => {
             wire__crate__api__settings__list_orchestrators_impl(port, ptr, rust_vec_len, data_len)
         }
-        13 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        20 => {
+        17 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
+        25 => {
             wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        21 => {
+        26 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        22 => {
+        27 => {
             wire__crate__api__engine__start_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
-        24 => {
+        28 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        29 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        25 => {
+        30 => {
             wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        26 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        32 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -1657,20 +1942,46 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        4 => wire__crate__api__engine__engine_greeting_impl(ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__engine__engine_version_impl(ptr, rust_vec_len, data_len),
-        9 => {
+        6 => wire__crate__api__engine__device_hardware_id_impl(ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__engine__engine_greeting_impl(ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__engine__engine_version_impl(ptr, rust_vec_len, data_len),
+        13 => {
             wire__crate__api__engine__is_wake_word_engine_running_impl(ptr, rust_vec_len, data_len)
         }
-        17 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
 
 // Section: rust2dart
 
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::updater::DownloadProgress {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.downloaded.into_into_dart().into_dart(),
+            self.total.into_into_dart().into_dart(),
+            self.done.into_into_dart().into_dart(),
+            self.error.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::updater::DownloadProgress
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::updater::DownloadProgress>
+    for crate::api::updater::DownloadProgress
+{
+    fn into_into_dart(self) -> crate::api::updater::DownloadProgress {
+        self
+    }
+}
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::settings::DriveToken {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
@@ -1750,6 +2061,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::NotifyConfig {
             self.orchestrator_key.into_into_dart().into_dart(),
             self.discovery_timeout_secs.into_into_dart().into_dart(),
             self.device_id.into_into_dart().into_dart(),
+            self.device_name.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1823,6 +2135,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::settings::OrchestratorSetting
             self.tts_voice.into_into_dart().into_dart(),
             self.end_silence_ms.into_into_dart().into_dart(),
             self.voice_rms_threshold.into_into_dart().into_dart(),
+            self.vad_engine.into_into_dart().into_dart(),
+            self.silero_threshold.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1849,6 +2163,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::settings::SettingsUpdate {
             self.tts_voice.into_into_dart().into_dart(),
             self.end_silence_ms.into_into_dart().into_dart(),
             self.voice_rms_threshold.into_into_dart().into_dart(),
+            self.vad_engine.into_into_dart().into_dart(),
+            self.silero_threshold.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1885,6 +2201,30 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::settings::SpeakerInfo>
     for crate::api::settings::SpeakerInfo
 {
     fn into_into_dart(self) -> crate::api::settings::SpeakerInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::updater::UpdateManifest {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.version_code.into_into_dart().into_dart(),
+            self.version_name.into_into_dart().into_dart(),
+            self.apk_url.into_into_dart().into_dart(),
+            self.sha256.into_into_dart().into_dart(),
+            self.notes.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::updater::UpdateManifest
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::updater::UpdateManifest>
+    for crate::api::updater::UpdateManifest
+{
+    fn into_into_dart(self) -> crate::api::updater::UpdateManifest {
         self
     }
 }
@@ -1926,6 +2266,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.smoothing_window.into_into_dart().into_dart(),
             self.fire_on_peak.into_into_dart().into_dart(),
             self.playback_buffer_secs.into_into_dart().into_dart(),
+            self.capture_gain_db.into_into_dart().into_dart(),
             self.use_audiorecord.into_into_dart().into_dart(),
             self.mic_source.into_into_dart().into_dart(),
             self.platform_aec.into_into_dart().into_dart(),
@@ -1960,6 +2301,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.channels.into_into_dart().into_dart(),
             self.rms.into_into_dart().into_dart(),
             self.score.into_into_dart().into_dart(),
+            self.avg_score.into_into_dart().into_dart(),
+            self.threshold.into_into_dart().into_dart(),
+            self.gain_db.into_into_dart().into_dart(),
             self.model.into_into_dart().into_dart(),
             self.transcript.into_into_dart().into_dart(),
             self.reply.into_into_dart().into_dart(),
@@ -1969,6 +2313,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.present.into_into_dart().into_dart(),
             self.recipe_json.into_into_dart().into_dart(),
             self.weather_json.into_into_dart().into_dart(),
+            self.place_json.into_into_dart().into_dart(),
             self.recipe_action.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -2011,9 +2356,11 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::ShowWeather => 19.into_dart(),
             Self::WeatherCurrent => 20.into_dart(),
             Self::DismissWeather => 21.into_dart(),
-            Self::RecipeNavigate => 22.into_dart(),
-            Self::RecipeScroll => 23.into_dart(),
-            Self::Presence => 24.into_dart(),
+            Self::ShowPlace => 22.into_dart(),
+            Self::DismissPlace => 23.into_dart(),
+            Self::RecipeNavigate => 24.into_dart(),
+            Self::RecipeScroll => 25.into_dart(),
+            Self::Presence => 26.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -2036,6 +2383,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WeatherConfig {
             self.orchestrator_key.into_into_dart().into_dart(),
             self.discovery_timeout_secs.into_into_dart().into_dart(),
             self.device_id.into_into_dart().into_dart(),
+            self.device_name.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2077,6 +2425,18 @@ impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
 }
 
 impl SseEncode
+    for StreamSink<
+        crate::api::updater::DownloadProgress,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
+impl SseEncode
     for StreamSink<crate::api::engine::NotifyEvent, flutter_rust_bridge::for_generated::SseCodec>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2114,6 +2474,16 @@ impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::updater::DownloadProgress {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.downloaded, serializer);
+        <i64>::sse_encode(self.total, serializer);
+        <bool>::sse_encode(self.done, serializer);
+        <String>::sse_encode(self.error, serializer);
     }
 }
 
@@ -2254,6 +2624,7 @@ impl SseEncode for crate::api::engine::NotifyConfig {
         <String>::sse_encode(self.orchestrator_key, serializer);
         <u64>::sse_encode(self.discovery_timeout_secs, serializer);
         <String>::sse_encode(self.device_id, serializer);
+        <String>::sse_encode(self.device_name, serializer);
     }
 }
 
@@ -2318,6 +2689,8 @@ impl SseEncode for crate::api::settings::OrchestratorSettings {
         <Option<String>>::sse_encode(self.tts_voice, serializer);
         <u32>::sse_encode(self.end_silence_ms, serializer);
         <f64>::sse_encode(self.voice_rms_threshold, serializer);
+        <String>::sse_encode(self.vad_engine, serializer);
+        <f64>::sse_encode(self.silero_threshold, serializer);
     }
 }
 
@@ -2331,6 +2704,8 @@ impl SseEncode for crate::api::settings::SettingsUpdate {
         <Option<String>>::sse_encode(self.tts_voice, serializer);
         <Option<u32>>::sse_encode(self.end_silence_ms, serializer);
         <Option<f64>>::sse_encode(self.voice_rms_threshold, serializer);
+        <Option<String>>::sse_encode(self.vad_engine, serializer);
+        <Option<f64>>::sse_encode(self.silero_threshold, serializer);
     }
 }
 
@@ -2378,6 +2753,17 @@ impl SseEncode for () {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
 }
 
+impl SseEncode for crate::api::updater::UpdateManifest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.version_code, serializer);
+        <String>::sse_encode(self.version_name, serializer);
+        <String>::sse_encode(self.apk_url, serializer);
+        <String>::sse_encode(self.sha256, serializer);
+        <String>::sse_encode(self.notes, serializer);
+    }
+}
+
 impl SseEncode for crate::api::settings::VoiceInfo {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2402,6 +2788,7 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <u32>::sse_encode(self.smoothing_window, serializer);
         <bool>::sse_encode(self.fire_on_peak, serializer);
         <u32>::sse_encode(self.playback_buffer_secs, serializer);
+        <f32>::sse_encode(self.capture_gain_db, serializer);
         <bool>::sse_encode(self.use_audiorecord, serializer);
         <u32>::sse_encode(self.mic_source, serializer);
         <bool>::sse_encode(self.platform_aec, serializer);
@@ -2423,6 +2810,9 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <u16>::sse_encode(self.channels, serializer);
         <f32>::sse_encode(self.rms, serializer);
         <f32>::sse_encode(self.score, serializer);
+        <f32>::sse_encode(self.avg_score, serializer);
+        <f32>::sse_encode(self.threshold, serializer);
+        <f32>::sse_encode(self.gain_db, serializer);
         <String>::sse_encode(self.model, serializer);
         <String>::sse_encode(self.transcript, serializer);
         <String>::sse_encode(self.reply, serializer);
@@ -2432,6 +2822,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <bool>::sse_encode(self.present, serializer);
         <String>::sse_encode(self.recipe_json, serializer);
         <String>::sse_encode(self.weather_json, serializer);
+        <String>::sse_encode(self.place_json, serializer);
         <String>::sse_encode(self.recipe_action, serializer);
     }
 }
@@ -2463,9 +2854,11 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::ShowWeather => 19,
                 crate::api::engine::WakeWordEventKind::WeatherCurrent => 20,
                 crate::api::engine::WakeWordEventKind::DismissWeather => 21,
-                crate::api::engine::WakeWordEventKind::RecipeNavigate => 22,
-                crate::api::engine::WakeWordEventKind::RecipeScroll => 23,
-                crate::api::engine::WakeWordEventKind::Presence => 24,
+                crate::api::engine::WakeWordEventKind::ShowPlace => 22,
+                crate::api::engine::WakeWordEventKind::DismissPlace => 23,
+                crate::api::engine::WakeWordEventKind::RecipeNavigate => 24,
+                crate::api::engine::WakeWordEventKind::RecipeScroll => 25,
+                crate::api::engine::WakeWordEventKind::Presence => 26,
                 _ => {
                     unimplemented!("");
                 }
@@ -2481,6 +2874,7 @@ impl SseEncode for crate::api::engine::WeatherConfig {
         <String>::sse_encode(self.orchestrator_key, serializer);
         <u64>::sse_encode(self.discovery_timeout_secs, serializer);
         <String>::sse_encode(self.device_id, serializer);
+        <String>::sse_encode(self.device_name, serializer);
     }
 }
 

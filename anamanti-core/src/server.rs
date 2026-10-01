@@ -101,10 +101,11 @@ async fn handle_connection(
                 // both back as 0.
                 let followup_depth = protocol::followup_depth(&ev.data);
                 let followup_wait_secs = protocol::followup_wait_secs(&ev.data);
-                // What the display is currently showing (its "display context", e.g. an
-                // open recipe screen), so the LLM knows it can drive the screen by voice
-                // this turn.
-                let screen = protocol::display_context(&ev.data);
+                // The turn's device context: what the display is currently showing (its
+                // "display context", e.g. an open recipe screen) plus orthogonal
+                // background state like active timers, so the LLM can drive the screen by
+                // voice and System-1 can route timer/stop commands this turn.
+                let device_ctx = protocol::device_context(&ev.data);
                 // Best-effort music ducking: lower the music group's volume while
                 // the assistant speaks and restore it when the turn ends. Fired on
                 // a spawned task so it never blocks (or fails) the turn; `duck`/
@@ -140,7 +141,7 @@ async fn handle_connection(
                         format,
                         followup_depth,
                         followup_wait_secs,
-                        screen,
+                        device_ctx,
                         &mut on_event,
                     )
                     .await?
@@ -167,6 +168,7 @@ async fn handle_connection(
             // takes over this task until the device closes it.
             Some(ev) if ev.event_type == types::ANAMANTI_HELLO => {
                 let device_id = ev.hello_device_id().unwrap_or_default().to_string();
+                let device_name = ev.hello_name().unwrap_or_default().to_string();
                 // The persistent channel serves either proactive notifications
                 // (`role=notify`, the default) or the ambient weather push
                 // (`role=weather`); the write pump below is identical for both — it
@@ -174,13 +176,13 @@ async fn handle_connection(
                 let is_weather = ev.hello_role() == "weather";
                 let channel = if is_weather { "weather" } else { "notify" };
                 log::info!(
-                    "[{}] {channel} channel opened (device_id={device_id:?})",
+                    "[{}] {channel} channel opened (device_id={device_id:?}, name={device_name:?})",
                     peer_str(peer.as_ref())
                 );
                 let (conn_id, mut rx) = if is_weather {
-                    weather.register(&device_id)
+                    weather.register(&device_id, &device_name)
                 } else {
-                    notify.register(&device_id)
+                    notify.register(&device_id, &device_name)
                 };
                 let (reader, writer) = device.split_mut();
                 // Pump enqueued pushes out to the device while watching the read half

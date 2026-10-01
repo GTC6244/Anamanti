@@ -123,8 +123,21 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              Whenever the user asks about the weather, the temperature, the forecast, or \
              whether it will rain/snow/be hot or cold, you MUST call `weather_lookup` (omit \
              `location` to use home) and relay its short spoken confirmation — never guess at \
-             conditions or say you can't check the weather. Use `close_weather` when they ask \
-             to close/dismiss the weather.",
+             conditions or say you can't check the weather. When they ask about a future day \
+             (\"tomorrow\", \"this weekend\", \"Saturday\"), pass `when`. Use `close_weather` \
+             when they ask to close/dismiss the weather.",
+        );
+    }
+    if has(PLACES_LOOKUP) {
+        parts.push(
+            "You can pull up information about a place on the display with the \
+             `places_lookup` tool. Whenever the user asks where a business or landmark is, \
+             when it's open, its hours, phone number, rating, or to tell them about a \
+             specific restaurant, shop, cafe, or attraction, you MUST call `places_lookup` \
+             with their phrasing as `query` — never guess at an address or hours. If it \
+             returns several options, ask the user which one they mean and call again with \
+             the same `query` plus the chosen `place_id`. Relay the tool's short spoken \
+             confirmation. Use `close_places` when they ask to close/dismiss it.",
         );
     }
     if has(ShoppingListControl::NAME) {
@@ -221,7 +234,7 @@ impl DuckDuckGoSearch {
     /// tests).
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into(),
         }
     }
@@ -295,7 +308,7 @@ impl TavilySearch {
 
     pub fn with_base_url(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }
@@ -1428,6 +1441,15 @@ struct WeatherArgs {
     /// location when omitted, so "what's the weather" works with no place named).
     #[serde(default)]
     location: Option<String>,
+    /// When to get the forecast for (optional; defaults to right now). Accepts
+    /// `today`/`now`, `tomorrow`, a weekday name ("Saturday"), or `YYYY-MM-DD`.
+    #[serde(default)]
+    when: Option<String>,
+    /// Which display layout to show (optional; defaults to the hourly view). `"hourly"`
+    /// shows the big-conditions panel + 10-hour row; `"week"` shows the separate 7-day
+    /// forecast widget (7 columns of daily highs/lows).
+    #[serde(default)]
+    layout: Option<String>,
 }
 
 /// The weather tool: fetches current conditions + a 7-day forecast for a place
@@ -1458,11 +1480,15 @@ impl WeatherLookup {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: WEATHER_LOOKUP.to_string(),
-            description: "Get the current weather and a 7-day forecast and show it on the \
-                          display's weather screen. Use whenever the user asks about the \
-                          weather, temperature, forecast, or how hot/cold/rainy it is. If the \
-                          user names no place, omit `location` — it defaults to home. Returns a \
-                          short spoken confirmation to relay."
+            description: "Get the weather and show it on the display's weather screen. Use \
+                          whenever the user asks about the weather, temperature, forecast, or \
+                          how hot/cold/rainy it is. If the user names no place, omit `location` \
+                          — it defaults to home. For a future day (e.g. \"weather on \
+                          Saturday\", \"will it rain tomorrow\") pass `when`; omit it for right \
+                          now. Set `layout` to \"week\" for a multi-day/weekly request (e.g. \
+                          \"7-day forecast\", \"what's the week look like\", \"forecast for the \
+                          rest of the week\") to show the 7-day view; otherwise omit it for the \
+                          default hourly view. Returns a short spoken confirmation to relay."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -1471,6 +1497,20 @@ impl WeatherLookup {
                         "type": "string",
                         "description": "The place to get the weather for, e.g. \"Paris\" or \
                                         \"Denver, Colorado\". Omit for the user's home location."
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "The day to forecast: \"today\"/\"now\", \"tomorrow\", a \
+                                        weekday name like \"Saturday\", or a date \"YYYY-MM-DD\". \
+                                        Omit for right now."
+                    },
+                    "layout": {
+                        "type": "string",
+                        "enum": ["hourly", "week"],
+                        "description": "The display layout: \"hourly\" (default) for the \
+                                        big-conditions panel + 10-hour row, or \"week\" for the \
+                                        7-day forecast view. Use \"week\" for weekly/multi-day \
+                                        requests; omit otherwise."
                     }
                 }
             }),
@@ -1484,18 +1524,34 @@ impl WeatherLookup {
         let args: WeatherArgs = serde_json::from_value(arguments.clone())
             .context("parsing weather_lookup arguments")?;
         let sink = actions.context("no display is connected to show the weather on right now")?;
-        let location = args
+        // An omitted/empty `location` means "use home" — the device's own location, which
+        // gets the plain confirmation phrasing (no place name, no "on the screen" trailer).
+        let explicit = args
             .location
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty());
+        let is_home = explicit.is_none();
+        let location = explicit
             .or_else(|| self.home_location.get())
             .context("no location was given and no home location is set")?;
-        let report = self
+        let when = crate::weather::resolve_when(args.when.as_deref(), Local::now())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut report = self
             .provider
-            .fetch(&location, self.imperial)
+            .fetch(&location, self.imperial, when)
             .await
             .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-        let confirmation = crate::weather::render_confirmation(&report);
+        // A "week" request switches the display to the 7-day forecast widget; anything
+        // else (including an omitted/unknown value) keeps the default hourly view.
+        if args
+            .layout
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|l| l.eq_ignore_ascii_case("week"))
+        {
+            report.layout = "week".to_string();
+        }
+        let confirmation = crate::weather::render_confirmation(&report, is_home);
         sink.send(DeviceAction::ShowWeather(report)).map_err(|_| {
             anyhow::anyhow!("the display disconnected before the weather could show")
         })?;
@@ -1522,6 +1578,158 @@ fn close_weather_invoke(actions: Option<&ActionSink>) -> Result<String> {
 }
 
 // ===========================================================================
+// Places tool (look up a place, show its card on the display)
+// ===========================================================================
+
+/// Tool name for looking up a place and showing its card on the display.
+pub const PLACES_LOOKUP: &str = "places_lookup";
+/// Tool name for dismissing the place card.
+pub const CLOSE_PLACES: &str = "close_places";
+
+/// Typed arguments for [`PlacesLookup`].
+#[derive(Debug, Deserialize)]
+struct PlacesArgs {
+    /// The place to look up, e.g. "the Louvre" or "coffee shop downtown". Optional only
+    /// so the model can re-call with just a `place_id` after disambiguating.
+    #[serde(default)]
+    query: Option<String>,
+    /// A specific candidate id from a prior ambiguous lookup. When set, the tool skips
+    /// the search and shows that exact place.
+    #[serde(default)]
+    place_id: Option<String>,
+}
+
+/// The places tool: text-searches the Google Places API for a business/point of interest
+/// (biased toward the household home location), and — when the match is unambiguous —
+/// pushes its full details to the display as a [`DeviceAction::ShowPlace`] and returns a
+/// short spoken confirmation. When several comparable candidates match it returns a
+/// spoken candidate list **without** showing anything, so the model asks the user which
+/// one and re-calls with the chosen `place_id`. The provider is injected so it's testable
+/// offline (see `crate::places`).
+pub struct PlacesLookup {
+    provider: Arc<dyn crate::places::PlacesProvider>,
+    home_location: LiveHomeLocation,
+}
+
+impl PlacesLookup {
+    pub fn new(
+        provider: Arc<dyn crate::places::PlacesProvider>,
+        home_location: LiveHomeLocation,
+    ) -> Self {
+        Self {
+            provider,
+            home_location,
+        }
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: PLACES_LOOKUP.to_string(),
+            description: "Look up a business or point of interest (its address, opening \
+                          hours, rating, phone number, website) and show a card for it on \
+                          the display. Use whenever the user asks where a place is, when \
+                          it's open, its hours/phone/rating, or to tell them about a \
+                          specific business, restaurant, shop, landmark, or attraction. \
+                          Pass the user's phrasing as `query`. If the tool returns several \
+                          options, ask the user which one they mean, then call again with \
+                          the same `query` plus the chosen `place_id`. Returns a short \
+                          spoken line to relay."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The place to look up, e.g. \"the Louvre\" or \
+                                        \"coffee shop downtown\". Include any location the \
+                                        user mentioned."
+                    },
+                    "place_id": {
+                        "type": "string",
+                        "description": "Only when re-calling after the user picked one of \
+                                        the options this tool returned: copy that option's \
+                                        EXACT place_id from the list (an opaque id like \
+                                        \"ChIJ…\" or \"places/…\"). Never invent or guess \
+                                        an id from the name/address."
+                    }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    /// Execute the tool: either show a pinned candidate (`place_id`), or search and — on a
+    /// single match — show it, else return the candidate list for the model to
+    /// disambiguate. Failures and a missing device surface as the tool result so the
+    /// model apologizes aloud.
+    async fn invoke(&self, arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+        let args: PlacesArgs =
+            serde_json::from_value(arguments.clone()).context("parsing places_lookup arguments")?;
+        let sink = actions.context("no display is connected to show a place on right now")?;
+
+        // Second call: the model pinned a specific candidate → show it directly.
+        if let Some(place_id) = args
+            .place_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return self.show(place_id, sink).await;
+        }
+
+        let query = args
+            .query
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .context("no place to look up was given")?;
+        let bias = self.home_location.get();
+        let candidates = self
+            .provider
+            .search(&query, bias.as_deref())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        match candidates.as_slice() {
+            [] => Ok(format!("I couldn't find anything matching \"{query}\".")),
+            [only] => self.show(&only.place_id, sink).await,
+            // Ambiguous: ask which one (no card shown yet). The model re-calls with a
+            // `place_id` from this list.
+            many => Ok(crate::places::render_candidates(many)),
+        }
+    }
+
+    /// Fetch a place's details, push the card, and return the spoken confirmation.
+    async fn show(&self, place_id: &str, sink: &ActionSink) -> Result<String> {
+        let report = self
+            .provider
+            .details(place_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        let confirmation = crate::places::render_confirmation(&report);
+        sink.send(DeviceAction::ShowPlace(report))
+            .map_err(|_| anyhow::anyhow!("the display disconnected before the place could show"))?;
+        Ok(confirmation)
+    }
+}
+
+fn close_places_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CLOSE_PLACES.to_string(),
+        description: "Close the place card on the display and return to the idle screen. \
+                      Use when the user asks to close/dismiss the place."
+            .to_string(),
+        parameters: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// Execute `close_places`: emit a [`DeviceAction::DismissPlace`] on the per-turn sink.
+fn close_places_invoke(actions: Option<&ActionSink>) -> Result<String> {
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::DismissPlace)
+        .map_err(|_| anyhow::anyhow!("the display disconnected before the place could close"))?;
+    Ok("Okay, closing that.".to_string())
+}
+
+// ===========================================================================
 // Tool set
 // ===========================================================================
 
@@ -1543,6 +1751,7 @@ pub struct Tools {
     appsaid: Option<Arc<SendPhoneMessage>>,
     recipe: Option<Arc<RecipeLookup>>,
     weather: Option<Arc<WeatherLookup>>,
+    places: Option<Arc<PlacesLookup>>,
 }
 
 impl Tools {
@@ -1560,6 +1769,7 @@ impl Tools {
         appsaid: Option<Arc<dyn PhoneMessenger>>,
         recipe: Option<Arc<dyn RecipeProvider>>,
         weather: Option<crate::weather::WeatherConfig>,
+        places: Option<crate::places::PlacesConfig>,
     ) -> Self {
         let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
@@ -1609,6 +1819,11 @@ impl Tools {
             definitions.push(w.definition());
             definitions.push(close_weather_definition());
         }
+        let places = places.map(|cfg| Arc::new(PlacesLookup::new(cfg.provider, cfg.home_location)));
+        if let Some(p) = &places {
+            definitions.push(p.definition());
+            definitions.push(close_places_definition());
+        }
         Self {
             definitions,
             search,
@@ -1619,6 +1834,7 @@ impl Tools {
             appsaid,
             recipe,
             weather,
+            places,
         }
     }
 
@@ -1674,6 +1890,14 @@ impl Tools {
                 Some(_) => close_weather_invoke(actions),
                 None => anyhow::bail!("weather lookup is not enabled"),
             },
+            PLACES_LOOKUP => match &self.places {
+                Some(places) => places.invoke(arguments, actions).await,
+                None => anyhow::bail!("places lookup is not enabled"),
+            },
+            CLOSE_PLACES => match &self.places {
+                Some(_) => close_places_invoke(actions),
+                None => anyhow::bail!("places lookup is not enabled"),
+            },
             RECIPE_CONTROL => match &self.recipe {
                 Some(_) => recipe_control_invoke(arguments, actions),
                 None => anyhow::bail!("recipe lookup is not enabled"),
@@ -1728,6 +1952,7 @@ pub fn tools_from_config(
     appsaid: Option<Arc<dyn PhoneMessenger>>,
     weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
     weather_imperial: bool,
+    places: Option<Arc<dyn crate::places::PlacesProvider>>,
 ) -> Option<Arc<Tools>> {
     let search = web_search.then(|| build_search_provider(provider, api_key));
     // The recipe tool needs real web search to find a source page, so it rides the
@@ -1746,6 +1971,13 @@ pub fn tools_from_config(
         home_location: home_location.clone(),
         imperial: weather_imperial,
     });
+    // Places biases its search toward the same live home location; clone the shared
+    // handle before it's moved into the directions config below. `None` → the
+    // places_lookup tool isn't advertised (no Google Places key).
+    let places = places.map(|provider| crate::places::PlacesConfig {
+        provider,
+        home_location: home_location.clone(),
+    });
     let directions = directions.map(|(provider, imperial)| DirectionsConfig {
         provider,
         home_location,
@@ -1759,7 +1991,7 @@ pub fn tools_from_config(
     // AppSaid (phone push) is passed in from the live settings (`AppSaidConfig::
     // messenger`); `None` → the send_phone_message tool isn't advertised.
     Some(Arc::new(Tools::new(
-        search, calendar, directions, spotify, grocery, appsaid, recipe, weather,
+        search, calendar, directions, spotify, grocery, appsaid, recipe, weather, places,
     )))
 }
 
@@ -1785,10 +2017,29 @@ pub struct RigBackend {
     tools: Option<Arc<Tools>>,
 }
 
+/// A keep-alive-tuned HTTP client in **rig's** reqwest version.
+///
+/// rig-core 0.42 pulls reqwest 0.13, a different major than the crate-wide
+/// reqwest 0.12 behind `crate::http`, so the shared client cannot be injected
+/// into rig's builders (their `HttpClientExt` bound is on rig's reqwest type).
+/// We build an equivalently tuned client from rig's own re-exported reqwest
+/// (`rig_core::http_client::ReqwestClient`) so the default/primary LLM path gets
+/// the same warm-connection / handshake-avoidance policy as everything else.
+fn rig_tuned_client() -> rig_core::http_client::ReqwestClient {
+    rig_core::http_client::ReqwestClient::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(300))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .http2_keep_alive_while_idle(true)
+        .build()
+        .unwrap_or_default()
+}
+
 impl RigBackend {
     /// Local Ollama via rig. `base_url` is the Ollama root (no API key).
     pub fn ollama(base_url: &str, model: &str, tools: Option<Arc<Tools>>) -> Result<Self> {
         let client = ollama::Client::builder()
+            .http_client(rig_tuned_client())
             .api_key(ollama::OllamaApiKey::default())
             .base_url(base_url)
             .build()
@@ -1810,6 +2061,7 @@ impl RigBackend {
         tools: Option<Arc<Tools>>,
     ) -> Result<Self> {
         let client = anthropic::Client::builder()
+            .http_client(rig_tuned_client())
             .api_key(anthropic::client::AnthropicKey::from(api_key))
             .base_url(base_url)
             .anthropic_version(anthropic::completion::ANTHROPIC_VERSION_LATEST)
@@ -1975,16 +2227,31 @@ impl LlmBackend for RigBackend {
         if tool_defs.is_empty() {
             let stream = async_stream::try_stream! {
                 let messages = seed_messages(turn.history, turn.user_message);
+                // One streamed LLM round trip. Report time-to-first-token (the
+                // latency the user actually feels before audio starts) and total.
+                let rt_start = std::time::Instant::now();
                 let response =
                     open_stream(&model, &system_prompt, &messages, &tool_defs, max_tokens).await?;
                 futures_util::pin_mut!(response);
+                let mut first_token = true;
                 while let Some(part) = response.next().await {
                     if let StreamedAssistantContent::Text(text) = part? {
                         if !text.text.is_empty() {
+                            if first_token {
+                                log::info!(
+                                    "rig LLM stream: first token in {}ms",
+                                    rt_start.elapsed().as_millis(),
+                                );
+                                first_token = false;
+                            }
                             yield text.text;
                         }
                     }
                 }
+                log::info!(
+                    "rig LLM stream: complete in {}ms",
+                    rt_start.elapsed().as_millis(),
+                );
             };
             return Ok(Box::pin(stream));
         }
@@ -1999,10 +2266,21 @@ impl LlmBackend for RigBackend {
         let stream = async_stream::try_stream! {
             let mut messages: Vec<Message> = seed_messages(turn.history, turn.user_message);
 
-            for _round in 0..MAX_TOOL_ROUNDS {
+            for round in 0..MAX_TOOL_ROUNDS {
+                // One Anthropic/Ollama round trip: request (prompt + prior tool
+                // results) → full completion. Isolated so a slow LLM leg is visible
+                // apart from tool execution.
+                let rt_start = std::time::Instant::now();
                 let (text, calls) =
                     open_completion(&model, &system_prompt, &messages, &tool_defs, max_tokens)
                         .await?;
+                log::info!(
+                    "rig LLM round {} round-trip in {}ms ({} reply chars, {} tool call(s))",
+                    round + 1,
+                    rt_start.elapsed().as_millis(),
+                    text.len(),
+                    calls.len(),
+                );
 
                 if !text.is_empty() {
                     yield text;
@@ -2028,12 +2306,16 @@ impl LlmBackend for RigBackend {
                         call.function.name,
                         call.function.arguments
                     );
+                    // Isolate each tool's own execution time (network fetch, DB, etc.).
+                    let tool_start = std::time::Instant::now();
                     let result = tools
                         .dispatch(&call.function.name, &call.function.arguments, actions.as_ref())
                         .await
                         .unwrap_or_else(|e| format!("tool error: {e:#}"));
                     log::info!(
-                        "rig tool result ({} chars): {}",
+                        "rig tool result: {} in {}ms ({} chars): {}",
+                        call.function.name,
+                        tool_start.elapsed().as_millis(),
                         result.len(),
                         result.chars().take(200).collect::<String>()
                     );
@@ -2281,6 +2563,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2321,6 +2604,7 @@ mod tests {
         let tools = Some(Arc::new(Tools::new(
             None,
             Some(Arc::new(StaticCalendar(vec![event]))),
+            None,
             None,
             None,
             None,
@@ -2368,6 +2652,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2388,7 +2673,7 @@ mod tests {
 
     #[test]
     fn directions_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2404,6 +2689,7 @@ mod tests {
                 home_location: LiveHomeLocation::default(),
                 imperial: false,
             }),
+            None,
             None,
             None,
             None,
@@ -2448,7 +2734,7 @@ mod tests {
 
     #[test]
     fn spotify_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2465,6 +2751,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(with
             .definitions
@@ -2474,7 +2761,7 @@ mod tests {
 
     #[test]
     fn shopping_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2491,6 +2778,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(with
             .definitions
@@ -2500,7 +2788,7 @@ mod tests {
 
     #[test]
     fn phone_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2515,6 +2803,7 @@ mod tests {
             Some(Arc::new(StaticPhone {
                 last: std::sync::Mutex::new(None),
             })),
+            None,
             None,
             None,
         );
@@ -2544,6 +2833,7 @@ mod tests {
             None,
             None,
             Some(messenger.clone()),
+            None,
             None,
             None,
         )));
@@ -2643,6 +2933,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2683,6 +2974,7 @@ mod tests {
             None,
             None,
             Some(controller.clone()),
+            None,
             None,
             None,
             None,
@@ -2767,9 +3059,75 @@ mod tests {
         );
     }
 
+    /// A canned weather provider that returns a fixed report (with a daily forecast) so
+    /// the `weather_lookup` tool's layout handling can be tested without any network.
+    struct StaticWeather;
+    #[async_trait]
+    impl crate::weather::WeatherProvider for StaticWeather {
+        async fn fetch(
+            &self,
+            location: &str,
+            imperial: bool,
+            _when: crate::weather::ForecastWhen,
+        ) -> Result<crate::weather::WeatherReport> {
+            Ok(crate::weather::WeatherReport {
+                location_label: location.to_string(),
+                units: if imperial { "imperial" } else { "metric" }.to_string(),
+                daily: vec![crate::weather::DailyForecast {
+                    weekday: "Mon".into(),
+                    high: 80,
+                    low: 60,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+        }
+    }
+
+    fn static_weather_tool() -> WeatherLookup {
+        WeatherLookup::new(
+            Arc::new(StaticWeather),
+            LiveHomeLocation::new(Some("Austin, TX".to_string())),
+            true,
+        )
+    }
+
+    #[tokio::test]
+    async fn weather_lookup_defaults_to_hourly_layout_and_passes_daily_through() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        static_weather_tool()
+            .invoke(&json!({}), Some(&tx))
+            .await
+            .unwrap();
+        match rx.try_recv().unwrap() {
+            DeviceAction::ShowWeather(report) => {
+                // No `layout` argument → the default hourly view.
+                assert_eq!(report.layout, "");
+                // The provider's daily forecast rides through for the 7-day widget.
+                assert_eq!(report.daily.len(), 1);
+                assert_eq!(report.daily[0].high, 80);
+            }
+            other => panic!("expected ShowWeather, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn weather_lookup_week_layout_selects_the_7_day_widget() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        static_weather_tool()
+            .invoke(&json!({ "layout": "Week" }), Some(&tx))
+            .await
+            .unwrap();
+        match rx.try_recv().unwrap() {
+            // Case-insensitive: "Week" → the 7-day layout.
+            DeviceAction::ShowWeather(report) => assert_eq!(report.layout, "week"),
+            other => panic!("expected ShowWeather, got {other:?}"),
+        }
+    }
+
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None, None, None, None, None, None, None);
+        let tools = Tools::new(None, None, None, None, None, None, None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
@@ -2787,7 +3145,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
         let tools = Some(Arc::new(Tools::new(
-            None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend

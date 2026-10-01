@@ -251,6 +251,14 @@ fn parse_update(data: &Value) -> SettingsUpdate {
         search_api_key,
         end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
         voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
+        silero_threshold: data
+            .get("silero_threshold")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
+        vad_engine: data
+            .get("vad_engine")
+            .and_then(Value::as_str)
+            .and_then(crate::config::VadEngineKind::from_label),
     }
 }
 
@@ -276,6 +284,8 @@ fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> Wyom
             "search_key_set": v.search_key_set,
             "end_silence_ms": v.end_silence_ms,
             "voice_rms_threshold": v.voice_rms_threshold,
+            "silero_threshold": v.silero_threshold,
+            "vad_engine": v.vad_engine.as_label(),
         }),
     )
 }
@@ -462,6 +472,8 @@ mod tests {
                 directions_imperial: false,
                 weather: None,
                 weather_imperial: false,
+                weather_enabled: false,
+                places: None,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -479,11 +491,17 @@ mod tests {
                 tts_voice: Some("amy".into()),
                 end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
                 voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: crate::settings::DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
                 drive: crate::settings::DriveConfig::default(),
                 household: crate::settings::Household::default(),
                 spotify: crate::settings::SpotifyConfig::default(),
                 cadora: crate::settings::CadoraConfig::default(),
                 appsaid: crate::settings::AppSaidConfig::default(),
+                weather_provider: "visualcrossing".into(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: crate::settings::System1Runtime::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();
