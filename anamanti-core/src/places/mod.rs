@@ -108,7 +108,7 @@ impl GooglePlaces {
 
     /// Point the client at a specific API root (for tests).
     pub fn with_base_url(base: impl Into<String>, api_key: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http::tuned_builder()
             .timeout(StdDuration::from_secs(10))
             .user_agent("anamanti-core/0.1 (places)")
             .build()

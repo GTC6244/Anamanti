@@ -23,6 +23,7 @@ pub mod control;
 pub mod directions;
 pub mod discovery;
 pub mod drive_consent;
+pub mod http;
 pub mod llm;
 pub mod memory;
 pub mod music;

@@ -145,7 +145,7 @@ impl MapboxDirections {
 
     /// Point the client at a specific API root (overridable for tests).
     pub fn with_base_url(base_url: impl Into<String>, token: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http::tuned_builder()
             .timeout(StdDuration::from_secs(10))
             .user_agent("anamanti-core/0.1 (directions)")
             .build()
