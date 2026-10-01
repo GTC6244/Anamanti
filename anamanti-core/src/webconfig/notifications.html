@@ -1,6 +1,12 @@
 <p class="sub">Push a proactive notification to the display. The device holds a persistent "notify" channel open to the orchestrator; anything sent here appears on the idle screen without the user speaking. Visual-only for now — no spoken output.</p>
 
 <div class="card">
+  <h2>Connected devices</h2>
+  <p class="desc">Displays currently holding a notify channel open, with the name each one announced. Names and ids are set on the device's Settings screen (the id is derived from the device's Wi-Fi MAC).</p>
+  <ul id="devices" class="devices"><li class="muted">Loading…</li></ul>
+</div>
+
+<div class="card">
   <h2>Send a test notification</h2>
   <p class="desc" id="statusline">Loading…</p>
 
@@ -36,6 +42,25 @@
       $('statusline').textContent = n === 1
         ? '1 device notify channel connected ✓'
         : n + ' device notify channels connected' + (n === 0 ? ' — a test will be dropped until a device connects' : '');
+      const devs = Array.isArray(j.devices) ? j.devices : [];
+      const list = $('devices');
+      if(devs.length === 0){
+        list.innerHTML = '<li class="muted">No devices connected.</li>';
+      } else {
+        list.innerHTML = '';
+        for(const d of devs){
+          const li = document.createElement('li');
+          const name = (d.name && d.name.trim()) ? d.name : '(unnamed)';
+          const nameEl = document.createElement('strong');
+          nameEl.textContent = name;
+          const idEl = document.createElement('code');
+          idEl.textContent = d.device_id || '';
+          li.appendChild(nameEl);
+          li.appendChild(document.createTextNode(' '));
+          li.appendChild(idEl);
+          list.appendChild(li);
+        }
+      }
     }catch(e){ show(false, 'Could not load status: ' + e); }
   }
   async function send(){

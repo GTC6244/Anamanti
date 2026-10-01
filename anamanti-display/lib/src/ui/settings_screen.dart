@@ -105,6 +105,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _modelController = TextEditingController();
   final TextEditingController _voiceController = TextEditingController();
   final TextEditingController _folderController = TextEditingController();
+  late final TextEditingController _deviceNameController = TextEditingController(
+    text: widget.initial.deviceName,
+  );
 
   String _backend = 'ollama';
   // Anthropic auth mode: 'apikey' or 'subscription' (Claude OAuth).
@@ -152,6 +155,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelController.dispose();
     _voiceController.dispose();
     _folderController.dispose();
+    _deviceNameController.dispose();
     super.dispose();
   }
 
@@ -623,6 +627,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     switch (category) {
       case _SettingsCategory.assistant:
         children = [
+          // Device-local identity: this display's name (sent to the Core) + its
+          // stable, MAC-derived id. Shown first so it's usable even when the
+          // selected orchestrator is offline.
+          _deviceNameTile(),
           // Device-local: which orchestrator this display talks to. Shown above
           // (and outside) the orchestrator-fetched tiles so it stays usable even
           // when the selected orchestrator is offline.
@@ -692,6 +700,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ),
   );
+
+  /// Device-local editor for this display's friendly name, sent to the Core in the
+  /// `anamanti-hello` frame so two displays on one Core are distinguishable (and shown
+  /// in the Core config page's "Connected devices" list). The subtitle shows the stable
+  /// MAC-derived [AppSettings.deviceId]. Persisted via [SettingsStore]; a change
+  /// restarts the engine so the channels re-announce (see `main.dart`).
+  Widget _deviceNameTile() {
+    return ListTile(
+      leading: const Icon(Icons.devices_other),
+      title: const Text('Device name'),
+      subtitle: Text(
+        _settings.deviceId.isEmpty
+            ? 'A name for this display, shown on the Core'
+            : 'ID: ${_settings.deviceId}',
+      ),
+      trailing: SizedBox(
+        width: 160,
+        child: TextField(
+          key: const Key('settings-device-name'),
+          controller: _deviceNameController,
+          textAlign: TextAlign.end,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(hintText: 'e.g. Kitchen'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(deviceName: v)),
+        ),
+      ),
+    );
+  }
 
   /// Device-local picker for which orchestrator this display connects to. "Auto"
   /// (empty key) uses the first available orchestrator; selecting a specific one

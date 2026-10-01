@@ -8,6 +8,7 @@
 // the slideshow, while assistant/memory settings are applied on the Mac.
 
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -33,6 +34,7 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
     show
         NotifyConfig,
         WeatherConfig,
+        deviceHardwareId,
         noteUserActivity,
         setPlaceContext,
         setRecipeContext,
@@ -114,6 +116,10 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   Future<void> _boot() async {
     _settings = await _store.load();
+    // Ensure this display has a stable, globally-unique identity before any channel
+    // dials the Core (so two displays on one Core are distinguishable). Minted once
+    // from the Wi-Fi MAC, persisted, and reused on every later boot.
+    _settings = await _ensureDeviceId(_settings);
     // Pin the control client to the persisted orchestrator selection.
     _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
     // Unpack the bundled wake-word models to the filesystem before the native
@@ -140,6 +146,31 @@ class _AmbientHomeState extends State<AmbientHome> {
       const Duration(minutes: 30),
       (_) => _reloadPhotos(),
     );
+  }
+
+  /// Mint and persist this display's stable [AppSettings.deviceId] on first run.
+  /// Prefers the Wi-Fi MAC-derived id from the Rust engine (`anamanti-<12 hex>`);
+  /// if the MAC can't be read it falls back to a persisted random id so the device
+  /// still has a stable, unique identity. A no-op once an id is already stored.
+  Future<AppSettings> _ensureDeviceId(AppSettings s) async {
+    if (s.deviceId.isNotEmpty) return s;
+    var id = '';
+    try {
+      id = deviceHardwareId();
+    } catch (_) {
+      id = '';
+    }
+    if (id.isEmpty) {
+      final rnd = Random.secure();
+      final hex = List<int>.generate(
+        12,
+        (_) => rnd.nextInt(16),
+      ).map((n) => n.toRadixString(16)).join();
+      id = 'anamanti-$hex';
+    }
+    final next = s.copyWith(deviceId: id);
+    await _store.save(next);
+    return next;
   }
 
   /// Refresh the linked Google source in place (re-mint token + re-list). Keeps the
@@ -305,7 +336,8 @@ class _AmbientHomeState extends State<AmbientHome> {
       config: NotifyConfig(
         orchestratorKey: _settings.orchestratorKey,
         discoveryTimeoutSecs: BigInt.zero,
-        deviceId: 'anamanti-display',
+        deviceId: _settings.deviceId,
+        deviceName: _settings.deviceName,
       ),
     )..start();
 
@@ -319,7 +351,8 @@ class _AmbientHomeState extends State<AmbientHome> {
       config: WeatherConfig(
         orchestratorKey: _settings.orchestratorKey,
         discoveryTimeoutSecs: BigInt.zero,
-        deviceId: 'anamanti-display',
+        deviceId: _settings.deviceId,
+        deviceName: _settings.deviceName,
       ),
       onReport: assistant.applyWeatherPush,
     )..start();
@@ -338,6 +371,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   Future<void> _onSettingsApplied(AppSettings next) async {
     final engineChanged =
         next.orchestratorKey != _settings.orchestratorKey ||
+        next.deviceName != _settings.deviceName ||
         next.wakeWord != _settings.wakeWord ||
         next.threshold != _settings.threshold ||
         next.activeThreshold != _settings.activeThreshold ||

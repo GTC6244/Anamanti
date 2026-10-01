@@ -524,7 +524,11 @@ async fn handle(
     // Proactive notifications: how many device notify channels are connected, and a
     // button to push a test notification down them (Approach A, visual-only).
     if method == "GET" && path == "/notifications/status.json" {
-        let payload = json!({ "connected": notify.connected() }).to_string();
+        let payload = json!({
+            "connected": notify.connected(),
+            "devices": notify.connected_devices(),
+        })
+        .to_string();
         return write_response(
             &mut stream,
             "200 OK",

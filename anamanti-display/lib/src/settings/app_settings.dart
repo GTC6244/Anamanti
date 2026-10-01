@@ -32,6 +32,8 @@ const List<String> kAvailableWakeWords = <String>[
 class AppSettings {
   const AppSettings({
     this.orchestratorKey = '',
+    this.deviceId = '',
+    this.deviceName = '',
     this.wakeWord = 'hey_jarvis',
     this.threshold = 0.5,
     this.activeThreshold = 0.7,
@@ -68,6 +70,17 @@ class AppSettings {
   /// Device-local: applied by rebuilding the engine's [WakeWordConfig] and used to
   /// pin the settings-control client to the same Mac.
   final String orchestratorKey;
+
+  /// Stable, globally-unique identifier for this physical display, derived from the
+  /// device's Wi-Fi MAC (`anamanti-<12 hex>`, e.g. `anamanti-140ac5942aca`). Minted
+  /// once on first run (via the Rust `deviceHardwareId()` call, falling back to a
+  /// persisted random id) and sent to the Core in the `anamanti-hello` frame so two
+  /// displays on one Core are distinguishable. Never changes once set.
+  final String deviceId;
+
+  /// Human-friendly label for this display (e.g. "Kitchen"), editable on the Settings
+  /// screen and sent to the Core alongside [deviceId]. Empty until the user names it.
+  final String deviceName;
 
   /// Selected wake-word model name (`<name>.onnx`).
   final String wakeWord;
@@ -204,6 +217,8 @@ class AppSettings {
 
   AppSettings copyWith({
     String? orchestratorKey,
+    String? deviceId,
+    String? deviceName,
     String? wakeWord,
     double? threshold,
     double? activeThreshold,
@@ -236,6 +251,8 @@ class AppSettings {
   }) {
     return AppSettings(
       orchestratorKey: orchestratorKey ?? this.orchestratorKey,
+      deviceId: deviceId ?? this.deviceId,
+      deviceName: deviceName ?? this.deviceName,
       wakeWord: wakeWord ?? this.wakeWord,
       threshold: threshold ?? this.threshold,
       activeThreshold: activeThreshold ?? this.activeThreshold,
@@ -270,6 +287,8 @@ class AppSettings {
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'orchestratorKey': orchestratorKey,
+    'deviceId': deviceId,
+    'deviceName': deviceName,
     'wakeWord': wakeWord,
     'threshold': threshold,
     'activeThreshold': activeThreshold,
@@ -313,6 +332,12 @@ class AppSettings {
       orchestratorKey: json['orchestratorKey'] is String
           ? json['orchestratorKey'] as String
           : defaults.orchestratorKey,
+      deviceId: json['deviceId'] is String
+          ? json['deviceId'] as String
+          : defaults.deviceId,
+      deviceName: json['deviceName'] is String
+          ? json['deviceName'] as String
+          : defaults.deviceName,
       wakeWord:
           json['wakeWord'] is String && (json['wakeWord'] as String).isNotEmpty
           ? json['wakeWord'] as String
@@ -420,6 +445,8 @@ class AppSettings {
       other is AppSettings &&
       runtimeType == other.runtimeType &&
       orchestratorKey == other.orchestratorKey &&
+      deviceId == other.deviceId &&
+      deviceName == other.deviceName &&
       wakeWord == other.wakeWord &&
       threshold == other.threshold &&
       activeThreshold == other.activeThreshold &&
@@ -465,6 +492,8 @@ class AppSettings {
       platformNs,
       platformAgc,
       platformAec,
+      deviceId,
+      deviceName,
     ),
     endpointCueEnabled,
     endpointSilenceMs,

@@ -81,6 +81,7 @@ pub async fn run<F>(
     discovery_timeout: Duration,
     orchestrator_key: Option<String>,
     device_id: String,
+    device_name: String,
     running: Arc<AtomicBool>,
     mut on_notification: F,
 ) where
@@ -93,6 +94,7 @@ pub async fn run<F>(
             discovery_timeout,
             orchestrator_key.as_deref(),
             &device_id,
+            &device_name,
             &running,
             &mut on_notification,
         )
@@ -134,6 +136,7 @@ async fn connect_and_listen<F>(
     discovery_timeout: Duration,
     orchestrator_key: Option<&str>,
     device_id: &str,
+    device_name: &str,
     running: &Arc<AtomicBool>,
     on_notification: &mut F,
 ) -> Result<ListenEnd>
@@ -152,8 +155,8 @@ where
     let mut writer = write_half;
 
     // Register this connection as the device's notify channel. `instance_id` is left
-    // empty — the orchestrator only needs the role + device id.
-    protocol::write_event(&mut writer, &WyomingEvent::hello(device_id, ""))
+    // empty — the orchestrator only needs the role + device id + friendly name.
+    protocol::write_event(&mut writer, &WyomingEvent::hello(device_id, "", device_name))
         .await
         .context("sending anamanti-hello")?;
     log::info!("notify channel connected to {endpoint}");
