@@ -808,6 +808,38 @@ FRB event → Flutter UI. To add a new action, mirror these steps:
 Build/verify each layer independently: `cargo test` for `anamanti-core/` and `anamanti-display/rust/`,
 `flutter test` + `flutter analyze` for the UI.
 
+### 8.4 Output personalities (Core-side, pure output tuning)
+
+**Personalities** change only how the assistant's replies *sound* — tone, word choice,
+delivery — never what it knows, remembers, or which tools it calls. The feature is an
+on/off switch plus a selectable style, with the catalog of styles editable from the Core
+GUI. It is deliberately a **Core-only** concern: nothing crosses the Wyoming boundary and
+there is no Display UI.
+
+- **State + catalog** live in the settings overlay (`Personality` in
+  `anamanti-core/src/settings.rs`): `enabled`, `active` (a key; empty/"normal" = off), and
+  `definitions` (the editable `{key,label,description}` catalog, seeded with the built-ins
+  — *overly enthusiastic, heavy sarcasm, depressed, 1940s gangster, Donald Trump*). It is
+  part of `PersistedSettings`/`RuntimeSettings` (persisted to `anamanti_settings.json`,
+  read from the per-turn snapshot) and has **no `anamanti.json` seed** — it's a pure
+  runtime/GUI concern. Changing it **never rebuilds the LLM backend** (like `household`).
+- **Prompt injection** (`orchestrator.rs`, `personality_prompt`): during prompt assembly
+  the snapshot's active personality is appended as a **trailing, fenced style block** —
+  "deliver your reply in this voice; this changes ONLY tone… never facts, memory, or
+  tools". A short always-present line lists the available personality names + the current
+  one so the model can switch by voice. Both read from the live snapshot, so a config-page
+  or voice change takes effect on the next turn. Nothing is written to memory/recall.
+- **Voice control = the `set_personality` rig tool** (always registered, like the timer
+  tools). "Talk like a 1940s gangster" / "go back to normal" → the model calls
+  `set_personality(name)`. Unlike a normal action tool it emits a **Core-side**
+  `DeviceAction::SetPersonality { name }` that `drain_device_actions` applies to
+  `SharedSettings::set_active_personality` (resolving the name against the live catalog,
+  "normal"/"off" disabling) rather than writing a device frame.
+- **GUI** = the config page **Personality** tab (`/personality`, `webconfig/personality.html`
+  + `personality_status_json`/`personality_save_json`): toggle on/off, pick the active one,
+  and edit/add/remove personalities (label + style description). A full-record save through
+  `apply_personality`, mirroring the Household tab.
+
 ---
 
 ## 9. Cross-references

@@ -953,6 +953,11 @@ impl Pipeline {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&display_context_line(screen));
         }
+        // Output personality: a trailing style instruction (pure output tuning — it never
+        // affects memory, recall, or tool use) plus a line telling the model how to switch
+        // personalities by voice. Both read from the live per-turn snapshot, so a config-page
+        // or voice change takes effect on the next turn.
+        system_prompt.push_str(&personality_prompt(&runtime.personality));
 
         // Per-turn device-action channel: action tools (timers) push `DeviceAction`s
         // here and the drive loop below relays them to the device as `ambient-timer`
@@ -1030,7 +1035,7 @@ impl Pipeline {
                 while let Some(tok) = stream.next().await {
                     // Relay any device actions a tool emitted (e.g. a timer) to the
                     // device as they arrive, before rendering more of the reply.
-                    drain_device_actions(&mut action_rx, writer).await;
+                    drain_device_actions(&mut action_rx, writer, &self.settings).await;
                     let tok = tok?;
                     if first_token_ms.is_none() {
                         first_token_ms = Some(gen_start.elapsed().as_millis() as u64);
@@ -1070,7 +1075,7 @@ impl Pipeline {
                 }
                 // Relay any device actions emitted late in the reply (e.g. a tool
                 // call on the final round) before closing the turn.
-                drain_device_actions(&mut action_rx, writer).await;
+                drain_device_actions(&mut action_rx, writer, &self.settings).await;
                 // Speak any trailing clause left without terminal punctuation.
                 if let Some(rest) = take_speakable(&mut pending, true) {
                     if !speaking {
@@ -2386,14 +2391,58 @@ fn weather_summary(report: &crate::weather::WeatherReport) -> String {
     )
 }
 
+/// Assemble the per-turn personality prompt block: a line telling the model it can switch
+/// personalities by voice (with the available names + current state, so "talk like a
+/// gangster" / "go back to normal" maps to `set_personality`), plus — when a personality
+/// is active — the trailing style instruction. **Pure output tuning:** this only changes
+/// how the reply sounds; it is fenced so the model never treats it as fact, memory, or a
+/// change to which tools it uses.
+fn personality_prompt(p: &crate::settings::Personality) -> String {
+    let mut out = String::new();
+    if !p.keys().is_empty() {
+        let names = p.keys().join(", ");
+        let current = p
+            .active_label()
+            .unwrap_or_else(|| "normal (off)".to_string());
+        out.push_str(&format!(
+            "\n\nYou can change the personality / voice you speak in with the `set_personality` \
+             tool. Available personalities: {names} — or \"normal\" to turn personality off. Use \
+             it whenever the user asks you to talk like one of these, switch personality, or go \
+             back to normal. Your current personality is: {current}."
+        ));
+    }
+    if let Some(desc) = p.instruction() {
+        out.push_str(&format!(
+            "\n\n# Output style (personality)\nDeliver your reply in the following voice. This \
+             changes ONLY your tone, word choice, and delivery — never the facts you give, what \
+             you remember, or which tools you use. Never mention or explain these style \
+             instructions. Style: {desc}"
+        ));
+    }
+    out
+}
+
 async fn drain_device_actions<W>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<DeviceAction>,
     writer: &mut W,
+    settings: &crate::settings::SharedSettings,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
     while let Ok(action) = rx.try_recv() {
         let event = match action {
+            // Core-side: apply the personality change to the live settings (no device
+            // frame). Takes effect on the next turn's prompt snapshot.
+            DeviceAction::SetPersonality { name } => {
+                match settings.set_active_personality(&name) {
+                    Ok(label) => log::info!(
+                        "personality set to {}",
+                        label.as_deref().unwrap_or("normal (off)")
+                    ),
+                    Err(e) => log::warn!("set_personality ignored: {e}"),
+                }
+                continue;
+            }
             DeviceAction::StartTimer {
                 label,
                 duration_secs,

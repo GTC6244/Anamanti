@@ -73,6 +73,15 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              timers. There can be any number of timers running at once.",
         );
     }
+    if has(SET_PERSONALITY) {
+        parts.push(
+            "You can change the personality / voice style you speak in with the `set_personality` \
+             tool (pure output tuning — it changes only how you sound, not what you know or do). \
+             Call it whenever the user asks you to talk like one of the available personalities, \
+             switch personality, or go back to normal. The turn's instructions list the available \
+             personality names and which one is active; pass \"normal\" to turn it off.",
+        );
+    }
     if has(CalendarLookup::NAME) {
         parts.push(
             "You have a `calendar_lookup` tool that reads the user's real connected calendars. \
@@ -502,6 +511,68 @@ fn cancel_timer_definition() -> ToolDefinition {
             }
         }),
     }
+}
+
+// ===========================================================================
+// Personality tool (Core-side output tuning)
+// ===========================================================================
+
+/// Tool name: switch the assistant's output personality (voice style), or turn it off.
+pub const SET_PERSONALITY: &str = "set_personality";
+
+/// Typed args for [`SET_PERSONALITY`].
+#[derive(Debug, Deserialize)]
+struct SetPersonalityArgs {
+    /// The personality to switch to (one of the names listed in the turn instructions),
+    /// or "normal"/"off" to turn personality off.
+    name: String,
+}
+
+fn set_personality_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: SET_PERSONALITY.to_string(),
+        description:
+            "Change the personality / voice style you speak in. This is PURE OUTPUT TUNING — it \
+             changes only how your replies sound, never what you know, remember, or do. Call it \
+             when the user asks you to talk like one of the available personalities, switch \
+             personality, or go back to normal. The current turn's instructions list the \
+             available personality names and which one is active; pass \"normal\" to turn it off."
+                .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The personality name to switch to (one of the names in the \
+                                    turn instructions), or \"normal\" to turn personality off."
+                }
+            },
+            "required": ["name"]
+        }),
+    }
+}
+
+/// Execute `set_personality`: emit a [`DeviceAction::SetPersonality`] on the per-turn sink
+/// (the orchestrator resolves it against the live catalog and applies it to the settings;
+/// it takes effect on the next turn) and return a speakable confirmation for the model.
+fn set_personality_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+    let args: SetPersonalityArgs =
+        serde_json::from_value(arguments.clone()).context("parsing set_personality arguments")?;
+    let sink = actions.context("no device is connected right now")?;
+    let name = args.name.trim().to_string();
+    let off = name.is_empty()
+        || name.eq_ignore_ascii_case("normal")
+        || name.eq_ignore_ascii_case("off")
+        || name.eq_ignore_ascii_case("none");
+    sink.send(DeviceAction::SetPersonality { name: name.clone() })
+        .map_err(|_| {
+            anyhow::anyhow!("the device disconnected before the personality could change")
+        })?;
+    Ok(if off {
+        "Okay, going back to my normal voice.".to_string()
+    } else {
+        format!("Okay — switching to the {name} personality.")
+    })
 }
 
 /// Render a whole-second duration as a short, speakable phrase ("5 minutes",
@@ -1632,7 +1703,11 @@ impl Tools {
         weather: Option<crate::weather::WeatherConfig>,
         places: Option<crate::places::PlacesConfig>,
     ) -> Self {
-        let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
+        let mut definitions = vec![
+            set_timer_definition(),
+            cancel_timer_definition(),
+            set_personality_definition(),
+        ];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
         if let Some(s) = &search {
             definitions.push(s.definition());
@@ -1706,6 +1781,7 @@ impl Tools {
         match name {
             SET_TIMER => set_timer_invoke(arguments, actions),
             CANCEL_TIMER => cancel_timer_invoke(arguments, actions),
+            SET_PERSONALITY => set_personality_invoke(arguments, actions),
             InternetSearch::NAME => match &self.search {
                 Some(search) => search.invoke(arguments).await,
                 None => anyhow::bail!("web search is not enabled"),
@@ -2766,6 +2842,39 @@ mod tests {
         );
         assert!(out.contains("5 minutes"));
         assert!(out.contains("pasta"));
+    }
+
+    #[test]
+    fn set_personality_emits_action_and_confirms() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // A named personality → emit the raw name for the orchestrator to resolve.
+        let out = set_personality_invoke(&json!({ "name": "gangster" }), Some(&tx)).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::SetPersonality {
+                name: "gangster".to_string()
+            }
+        );
+        assert!(out.to_lowercase().contains("gangster"));
+
+        // "normal" turns it off with the normal-voice confirmation.
+        let off = set_personality_invoke(&json!({ "name": "normal" }), Some(&tx)).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::SetPersonality {
+                name: "normal".to_string()
+            }
+        );
+        assert!(off.to_lowercase().contains("normal"));
+
+        // No device attached → the tool reports an error the model can relay.
+        assert!(set_personality_invoke(&json!({ "name": "trump" }), None).is_err());
+    }
+
+    #[test]
+    fn set_personality_is_always_advertised() {
+        let tools = Tools::new(None, None, None, None, None, None, None, None);
+        assert!(tools.definitions.iter().any(|d| d.name == SET_PERSONALITY));
     }
 
     #[test]

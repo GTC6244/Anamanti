@@ -33,8 +33,8 @@ use crate::music::{
     SnapcastClient,
 };
 use crate::settings::{
-    load_persisted, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
-    SharedSettings, SpotifyConfig,
+    load_persisted, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, Personality,
+    RuntimeSettings, SharedSettings, SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -1821,6 +1821,10 @@ impl Config {
         let mut openrouter_api_key = env::var("OPENROUTER_API_KEY")
             .ok()
             .filter(|s| !s.is_empty());
+        // Output personality (on/off + selection + catalog). No config-file seed — it's a
+        // pure runtime/GUI concern — so it starts at the built-in default catalog (off) and
+        // is overlaid by any persisted value below.
+        let mut personality = Personality::default();
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -1944,6 +1948,9 @@ impl Config {
             if p.openrouter_api_key.is_some() {
                 openrouter_api_key = p.openrouter_api_key;
             }
+            // Personality is a pure runtime/GUI concern (no config-file seed), so the
+            // persisted value always wins when present.
+            personality = p.personality;
         }
 
         // Seed the directions tool's live default origin from the resolved household
@@ -2054,6 +2061,7 @@ impl Config {
                     intents: system1_intents,
                     openrouter_api_key,
                 },
+                personality,
             },
             persist_path,
         ))

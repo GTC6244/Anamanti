@@ -122,6 +122,17 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   mitigation layered on top.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
+- **Output personalities:** the assistant can speak in a selectable **personality**
+  (overly enthusiastic, heavy sarcasm, depressed, 1940s gangster, Donald Trump; normal =
+  off). **Pure output tuning** — it changes only how a reply *sounds*, never memory,
+  recall, facts, or tool use. On/off + selection are drivable **by voice** via the
+  always-on **`set_personality`** rig tool, which emits a **Core-side**
+  `DeviceAction::SetPersonality` the orchestrator applies to `SharedSettings` (no device
+  frame); the orchestrator appends a fenced style block to each turn's prompt from the
+  snapshot. State + the **editable catalog** live in the settings overlay (`Personality`
+  in `settings.rs`, persisted to `anamanti_settings.json`, no `anamanti.json` seed) and
+  are edited on the Core GUI **Personality tab** (`/personality`). Core-only; no Display
+  UI. See architecture.md §8.4 and the Plan.MD decision row.
 - **Proactive notifications (Approach A):** the Anamanti Core can push **visual**
   notifications to the display *unprompted* (no voice turn) over a **persistent,
   device-dialed** Wyoming channel (`anamanti-hello` → `anamanti-notify`), separate from

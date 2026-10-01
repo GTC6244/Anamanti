@@ -47,8 +47,8 @@ use crate::music::{ManagedProc, MusicHub};
 use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
-    CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine,
-    PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update,
+    CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine, Personality,
+    PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update,
     WeatherToolUpdate,
 };
 
@@ -158,6 +158,11 @@ fn sidebar_html(active: &str) -> String {
                     "/household",
                     "Household",
                     r##"<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>"##,
+                ),
+                (
+                    "/personality",
+                    "Personality",
+                    r##"<path d="M12 2a5 5 0 0 1 5 5c0 2-1 3-1 5H8c0-2-1-3-1-5a5 5 0 0 1 5-5z"/><path d="M9 17h6M10 21h4"/>"##,
                 ),
                 (
                     "/tools",
@@ -304,6 +309,12 @@ const NOTIFY_BODY: &str = include_str!("webconfig/notifications.html");
 /// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
 const HOUSEHOLD_BODY: &str = include_str!("webconfig/household.html");
 const SYSTEM1_BODY: &str = include_str!("webconfig/system1.html");
+
+/// `/personality` body — toggle the output personality on/off, pick the active one, and
+/// edit the catalog of personalities (label + style description). Pure output tuning: it
+/// only changes how replies sound. A full-record save. Uses a private `apiJSON` helper
+/// (not the shell's GET-only `getJSON`).
+const PERSONALITY_BODY: &str = include_str!("webconfig/personality.html");
 
 /// Cap on request bytes we buffer before the body — a config request is tiny; this
 /// just bounds a misbehaving/hostile client on the (unauthenticated) socket.
@@ -1147,6 +1158,66 @@ fn household_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     household_status_json(settings)
 }
 
+/// `GET /personality/status.json` — the live personality state + editable catalog.
+fn personality_status_json(settings: &SharedSettings) -> String {
+    let p = settings.personality();
+    let definitions: Vec<Value> = p
+        .definitions
+        .iter()
+        .map(|d| {
+            json!({
+                "key": d.key,
+                "label": d.label,
+                "description": d.description,
+            })
+        })
+        .collect();
+    json!({
+        "ok": true,
+        "enabled": p.enabled,
+        "active": p.active,
+        "definitions": definitions,
+    })
+    .to_string()
+}
+
+/// `POST /personality/save` — replace the whole personality record (on/off, active
+/// selection, catalog). Sanitized on apply (trim, drop blank entries, de-dupe keys).
+fn personality_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let str_field = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let definitions = data
+        .get("definitions")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|d| PersonalityDef {
+                    key: str_field(d.get("key")),
+                    label: str_field(d.get("label")),
+                    description: str_field(d.get("description")),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let personality = Personality {
+        enabled: data.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+        active: str_field(data.get("active")),
+        definitions,
+    };
+    settings.apply_personality(&personality);
+    personality_status_json(settings)
+}
+
 /// `POST /music/proc` — body `{ proc, action }` starts/stops a managed process.
 async fn music_proc_json(music: Option<&MusicHub>, body: &[u8]) -> String {
     let Some(hub) = music else {
@@ -1606,6 +1677,21 @@ fn route(
             "200 OK",
             "application/json",
             household_save_json(settings, body).into_bytes(),
+        ),
+        ("GET", "/personality") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/personality", "Personality", PERSONALITY_BODY).into_bytes(),
+        ),
+        ("GET", "/personality/status.json") => (
+            "200 OK",
+            "application/json",
+            personality_status_json(settings).into_bytes(),
+        ),
+        ("POST", "/personality/save") => (
+            "200 OK",
+            "application/json",
+            personality_save_json(settings, body).into_bytes(),
         ),
         ("GET", "/drive") => (
             "200 OK",

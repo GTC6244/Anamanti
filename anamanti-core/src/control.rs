@@ -500,6 +500,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: crate::settings::System1Runtime::default(),
+                personality: crate::settings::Personality::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();

@@ -1,0 +1,109 @@
+<p class="sub">Give the assistant a speaking personality. This is <b>pure output tuning</b> — it only changes how replies <i>sound</i>, never what the assistant knows, remembers, or does. Turn it on or off (and switch personalities) by voice too: just say "talk like a 1940s gangster" or "go back to normal". Changes apply live, no restart.</p>
+
+<div class="card">
+  <h2>Status</h2>
+  <p class="desc">The master switch and which personality is active. Saying "go back to normal" (or picking <b>Normal (off)</b>) turns it off.</p>
+  <label class="row" style="display:flex;align-items:center;gap:0.6rem;">
+    <input id="enabled" type="checkbox">
+    <span>Personality enabled</span>
+  </label>
+  <label>Active personality
+    <select id="active">
+      <option value="">Normal (off)</option>
+    </select>
+  </label>
+</div>
+
+<div class="card">
+  <h2>Personalities</h2>
+  <p class="desc">The catalog the assistant can speak in. The <b>key</b> is the short name used by voice ("talk like a <code>gangster</code>"); the <b>style instruction</b> is appended to the prompt to shape the voice. Edit freely — have fun with it.</p>
+  <div id="defs"></div>
+  <div class="toolbar"><button id="add">+ Add personality</button></div>
+</div>
+
+<div class="card danger-zone">
+  <h2>Danger zone</h2>
+  <div class="callout">
+    <span class="ico">⚠</span>
+    <div>Removing a personality and clicking <b>Save</b> permanently deletes it. If you delete the one that's currently active, the assistant falls back to its normal voice.</div>
+  </div>
+</div>
+
+<div class="sticky-actions">
+  <div id="status" class="status"></div>
+  <button id="save" class="primary">Save</button>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function defRow(d){
+    d = d || {};
+    const div = document.createElement('div');
+    div.className = 'member';
+    div.innerHTML =
+      '<div class="row"><label>Key <span class="hint">short name, e.g. gangster</span></label><button type="button" class="rm danger">Remove</button></div>' +
+      '<input class="d-key" type="text" placeholder="key" value="'+esc(d.key)+'">' +
+      '<label>Display name</label>' +
+      '<input class="d-label" type="text" placeholder="Display name" value="'+esc(d.label)+'">' +
+      '<label>Style instruction <span class="hint">how the reply should sound</span></label>' +
+      '<textarea class="d-desc" rows="3" placeholder="Respond in the style of…">'+esc(d.description)+'</textarea>';
+    div.querySelector('.rm').addEventListener('click', () => { div.remove(); refreshActiveOptions(); });
+    div.querySelector('.d-key').addEventListener('input', refreshActiveOptions);
+    div.querySelector('.d-label').addEventListener('input', refreshActiveOptions);
+    return div;
+  }
+
+  // Rebuild the "Active personality" dropdown from the current catalog rows, preserving
+  // the current selection when still present.
+  function refreshActiveOptions(){
+    const sel = $('active');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">Normal (off)</option>';
+    document.querySelectorAll('#defs .member').forEach(d => {
+      const key = d.querySelector('.d-key').value.trim();
+      if(!key) return;
+      const label = d.querySelector('.d-label').value.trim() || key;
+      const opt = document.createElement('option');
+      opt.value = key; opt.textContent = label + ' (' + key + ')';
+      sel.appendChild(opt);
+    });
+    sel.value = [...sel.options].some(o => o.value === prev) ? prev : '';
+  }
+
+  async function load(){
+    try{
+      const j = await apiJSON('/personality/status.json');
+      $('enabled').checked = !!j.enabled;
+      const box = $('defs'); box.innerHTML = '';
+      (j.definitions||[]).forEach(d => box.appendChild(defRow(d)));
+      refreshActiveOptions();
+      $('active').value = j.active || '';
+    }catch(e){ show(false, 'Could not load: ' + e); }
+  }
+
+  async function save(){
+    const definitions = [...document.querySelectorAll('#defs .member')].map(d => ({
+      key: d.querySelector('.d-key').value.trim(),
+      label: d.querySelector('.d-label').value.trim(),
+      description: d.querySelector('.d-desc').value.trim(),
+    })).filter(d => d.key && d.label);
+    const body = {
+      enabled: $('enabled').checked,
+      active: $('active').value || '',
+      definitions,
+    };
+    try{
+      const j = await apiJSON('/personality/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+
+  $('add').addEventListener('click', () => { $('defs').appendChild(defRow({})); refreshActiveOptions(); });
+  $('save').addEventListener('click', save);
+  load();
+</script>
