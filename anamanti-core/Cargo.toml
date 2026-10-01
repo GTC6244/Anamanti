@@ -30,7 +30,7 @@ required-features = ["aec"]
 # (`scripts/fetch-vad-model.sh <dir>`) — a `silero` boot with no model is a HARD ERROR
 # (fail-loud). To build the old energy-only Core (no onnxruntime, no model needed), use
 # `--no-default-features` (add back any other features you want). See VadSileroPlan.md §5 (M3).
-default = ["vad-silero"]
+default = ["vad-silero", "embed-local"]
 
 # The embedded HelixDB GraphRAG memory backend (deps `db`/`helix-ast`), the
 # rig-core agent framework (`rig-core`, powering the LLM tool/web-search path), and
@@ -70,6 +70,17 @@ stt-whisper-coreml = ["stt-whisper-local", "whisper-rs/coreml"]
 # `--no-default-features` for an energy-only build (no onnxruntime, no model file needed).
 # See `plans/VadSileroPlan.md`.
 vad-silero = ["dep:ort"]
+
+# `embed-local` compiles the local, offline text-embedding backend for the GraphRAG
+# memory: nomic-embed-text-v1.5 run in-process via `fastembed` (onnxruntime through
+# `ort` — the SAME `ort` pin as `vad-silero`, so no second runtime). ON by default —
+# `graphrag.embed_backend` defaults to `local`, so a plain build embeds memory on the
+# device with no network and no `OPENAI_API_KEY`. The ONNX model + tokenizer files must
+# be on disk (`scripts/fetch-embed-model.sh <dir>`); the OpenAI embedder stays available
+# via `graphrag.embed_backend = "openai"`. Pure-Rust `tract` cannot load this model (its
+# rotary-embedding `Range` op does not lower to a typed graph), hence onnxruntime here.
+# Disable with `--no-default-features` for a build with neither onnxruntime nor fastembed.
+embed-local = ["dep:fastembed"]
 
 [dependencies]
 # Embedded HelixDB engine (always compiled). Pinned to the spike-verified commit.
@@ -138,6 +149,15 @@ whisper-rs = { version = "0.14", default-features = false, optional = true }
 # the neural gate runs on onnxruntime (Core/Mac-side only; not the device). ort
 # fetches a prebuilt onnxruntime binary at build time. See `plans/VadSileroPlan.md`.
 ort = { version = "=2.0.0-rc.13", optional = true }
+# Local text embeddings (feature `embed-local`). Runs nomic-embed-text-v1.5 in-process
+# on onnxruntime via `ort` (pinned to the exact `=2.0.0-rc.13` above, so the two deps
+# share one onnxruntime). `default-features = false` drops fastembed's HF-hub downloader,
+# image models, and candle backends — we load the ONNX + tokenizer from local files
+# (`UserDefinedEmbeddingModel`) for an offline, fail-loud build; `ort-download-binaries`
+# matches how `vad-silero` provisions the onnxruntime binary at build time.
+fastembed = { version = "7", default-features = false, features = [
+    "ort-download-binaries",
+], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.34", features = ["test-util"] }

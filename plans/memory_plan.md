@@ -11,8 +11,11 @@ existing Mac-side Rust brain (`anamanti_core`, `/mac`).
 **Built & tested (56 tests green, clippy clean, both feature configs build):**
 - **Goal 2 — chat log:** `anamanti-core/src/memory/chatlog.rs` — append-only JSONL, one
   record per turn, written by `orchestrator.rs::log_turn`. Always on.
-- **Goal 3 — embeddings:** `anamanti-core/src/memory/embed.rs` — `Embedder` trait,
-  `OpenAiEmbedder` (`text-embedding-3-small`), `MockEmbedder` (offline tests).
+- **Goal 3 — embeddings:** `anamanti-core/src/memory/embed.rs` — `Embedder` trait
+  (`embed` for stored documents, `embed_query` for recall — nomic is asymmetric),
+  `LocalNomicEmbedder` (nomic-embed-text-v1.5 via fastembed/onnxruntime, the default,
+  offline), `OpenAiEmbedder` (`text-embedding-3-small`, opt-in cloud),
+  `MockEmbedder` (offline tests).
   `anamanti-core/src/memory/ingester.rs` — background batch ingester (drains JSONL →
   batch-embed → extract → upsert → commit offset sidecar).
 - **Goal 1 — GraphRAG store:** `anamanti-core/src/memory/helix.rs` — embedded HelixDB
@@ -67,9 +70,21 @@ plus `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
 
 ## Decisions locked (2026-09-15)
 
-1. **Embeddings:** OpenAI `text-embedding-3-small` is the sole embedder. Cloud
-   calls are accepted; **no local/offline fallback in v1.** (Owner accepts that
-   conversation text leaves the device for embedding.)
+1. **Embeddings:** ~~OpenAI `text-embedding-3-small` is the sole embedder; no
+   local/offline fallback in v1.~~ **Superseded (2026-10-01):** the default is now a
+   **local, offline embedder** — nomic-embed-text-v1.5 run in-process via
+   `fastembed`/onnxruntime (`graphrag.embed_backend="local"`, 768 dims), so
+   conversation text no longer leaves the device for embedding. OpenAI
+   `text-embedding-3-small` stays available as the opt-in cloud path
+   (`graphrag.embed_backend="openai"`, needs `OPENAI_API_KEY`). (Pure-Rust `tract`
+   can't load the nomic ONNX graph — its rotary `Range` op doesn't lower to a typed
+   model — so the local path uses onnxruntime via `ort`, the same pin as `vad-silero`.)
+   The backend is **hot-swappable live** from the config page (Memory → Embeddings,
+   no restart) via `memory::GraphRagController`, which holds swappable recall/graph
+   proxies and restarts the ingester on switch. Each backend keeps its **own store +
+   ingest offset** keyed by an embedding signature (`helix_path/<label>-<dims>/`), so
+   switching is lossless and re-embeds a backend only once. Different models live in
+   different vector spaces, so the stores can't be shared even at equal dimensionality.
 2. **Coexistence:** HelixDB runs **alongside** SQLite behind a new
    `MemoryBackend` trait. SQLite stays the default; Helix is opt-in via
    `ANAMANTI_MEMORY_BACKEND=helix`.

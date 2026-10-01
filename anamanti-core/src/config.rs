@@ -583,15 +583,34 @@ pub enum MemoryBackendChoice {
     Helix,
 }
 
+/// Which text-embedding backend the GraphRAG memory uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbedBackend {
+    /// Local, offline nomic-embed-text-v1.5 run in-process (feature `embed-local`).
+    /// The default: no network, no API key. 768 dims.
+    #[default]
+    Local,
+    /// OpenAI `text-embedding-3-small` over HTTP. Requires `OPENAI_API_KEY`.
+    OpenAi,
+}
+
 /// Settings for the GraphRAG memory (embeddings + background entity extraction).
 /// API keys are read from the environment at wiring time, not stored here.
 #[derive(Debug, Clone)]
 pub struct GraphRagConfig {
+    /// Which embedding backend to use (default [`EmbedBackend::Local`]).
+    pub embed_backend: EmbedBackend,
+    /// Local nomic ONNX model file (`embed_backend = "local"`).
+    pub embed_model_path: PathBuf,
+    /// Directory holding nomic's four tokenizer JSON files (`embed_backend = "local"`):
+    /// `tokenizer.json`, `config.json`, `special_tokens_map.json`, `tokenizer_config.json`.
+    pub embed_tokenizer_dir: PathBuf,
     /// OpenAI API base (overridable for testing).
     pub openai_base_url: String,
     /// Embedding model (default `text-embedding-3-small`).
     pub embed_model: String,
-    /// Embedding dimensionality (native 1536; reducible via OpenAI's `dimensions`).
+    /// Embedding dimensionality. Local nomic: 768 (reducible via Matryoshka). OpenAI:
+    /// native 1536 (reducible via OpenAI's `dimensions`).
     pub embed_dims: usize,
     /// Anthropic API base for entity extraction.
     pub anthropic_base_url: String,
@@ -606,9 +625,15 @@ pub struct GraphRagConfig {
 impl Default for GraphRagConfig {
     fn default() -> Self {
         Self {
+            embed_backend: EmbedBackend::Local,
+            embed_model_path: PathBuf::from("models/nomic-embed-text-v1.5.onnx"),
+            embed_tokenizer_dir: PathBuf::from("models/nomic-tokenizer"),
             openai_base_url: "https://api.openai.com".to_string(),
             embed_model: "text-embedding-3-small".to_string(),
-            embed_dims: 1536,
+            // 768 is nomic's native width (the default backend). It is also a valid
+            // reduced width for OpenAI's `dimensions`, so an `openai` user who wants the
+            // full 1536 sets `embed_dims` explicitly.
+            embed_dims: 768,
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             extract_model: "claude-haiku-4-5".to_string(),
             ingest_interval: Duration::from_secs(30),
@@ -827,6 +852,9 @@ pub struct FileOpenAi {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileGraphRag {
+    pub embed_backend: Option<String>,
+    pub embed_model_path: Option<PathBuf>,
+    pub embed_tokenizer_dir: Option<PathBuf>,
     pub openai_base_url: Option<String>,
     pub embed_model: Option<String>,
     pub embed_dims: Option<usize>,
@@ -1111,6 +1139,24 @@ impl Config {
         };
 
         let mut graphrag = GraphRagConfig::default();
+        if let Some(v) = nonempty(fc.graphrag.embed_backend) {
+            graphrag.embed_backend = match v.to_lowercase().as_str() {
+                "openai" | "oai" => EmbedBackend::OpenAi,
+                "local" | "nomic" => EmbedBackend::Local,
+                other => {
+                    log::warn!(
+                        "unknown graphrag.embed_backend {other:?}; using the default (local nomic)"
+                    );
+                    EmbedBackend::Local
+                }
+            };
+        }
+        if let Some(v) = fc.graphrag.embed_model_path {
+            graphrag.embed_model_path = v;
+        }
+        if let Some(v) = fc.graphrag.embed_tokenizer_dir {
+            graphrag.embed_tokenizer_dir = v;
+        }
         if let Some(v) = nonempty(fc.graphrag.embed_model) {
             graphrag.embed_model = v;
         }
@@ -2367,6 +2413,46 @@ mod tests {
         assert!(c.drive.refresh_token.is_none());
         assert_eq!(c.spotify.client_id.as_deref(), Some("sid"));
         assert_eq!(c.spotify.refresh_token.as_deref(), Some("rt"));
+    }
+
+    #[test]
+    fn graphrag_embed_backend_defaults_to_local_and_parses() {
+        // Default: local nomic, 768 dims, default on-disk model/tokenizer paths.
+        let d = Config::from_file(parse("{}")).unwrap();
+        assert_eq!(d.graphrag.embed_backend, EmbedBackend::Local);
+        assert_eq!(d.graphrag.embed_dims, 768);
+        assert_eq!(
+            d.graphrag.embed_model_path,
+            std::path::PathBuf::from("models/nomic-embed-text-v1.5.onnx")
+        );
+        assert_eq!(
+            d.graphrag.embed_tokenizer_dir,
+            std::path::PathBuf::from("models/nomic-tokenizer")
+        );
+
+        // Explicit OpenAI backend + custom local paths parse through.
+        let c = Config::from_file(parse(
+            r#"{ "graphrag": {
+                "embed_backend": "openai",
+                "embed_model_path": "/m/x.onnx",
+                "embed_tokenizer_dir": "/m/tok"
+            } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.graphrag.embed_backend, EmbedBackend::OpenAi);
+        assert_eq!(
+            c.graphrag.embed_model_path,
+            std::path::PathBuf::from("/m/x.onnx")
+        );
+        assert_eq!(
+            c.graphrag.embed_tokenizer_dir,
+            std::path::PathBuf::from("/m/tok")
+        );
+
+        // Unknown backend string falls back to the default (local).
+        let u =
+            Config::from_file(parse(r#"{ "graphrag": { "embed_backend": "weirdo" } }"#)).unwrap();
+        assert_eq!(u.graphrag.embed_backend, EmbedBackend::Local);
     }
 
     #[test]
