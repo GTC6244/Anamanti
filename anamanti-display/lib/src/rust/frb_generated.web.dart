@@ -8,6 +8,7 @@
 
 import 'api/engine.dart';
 import 'api/settings.dart';
+import 'api/updater.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -23,6 +24,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<DownloadProgress> dco_decode_StreamSink_download_progress_Sse(
+    dynamic raw,
+  );
 
   @protected
   RustStreamSink<MusicPush> dco_decode_StreamSink_music_push_Sse(dynamic raw);
@@ -71,6 +77,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WeatherConfig dco_decode_box_autoadd_weather_config(dynamic raw);
+
+  @protected
+  DownloadProgress dco_decode_download_progress(dynamic raw);
 
   @protected
   DriveToken dco_decode_drive_token(dynamic raw);
@@ -166,6 +175,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  UpdateManifest dco_decode_update_manifest(dynamic raw);
+
+  @protected
   VoiceInfo dco_decode_voice_info(dynamic raw);
 
   @protected
@@ -185,6 +197,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
+  RustStreamSink<DownloadProgress> sse_decode_StreamSink_download_progress_Sse(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RustStreamSink<MusicPush> sse_decode_StreamSink_music_push_Sse(
@@ -243,6 +260,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WeatherConfig sse_decode_box_autoadd_weather_config(
     SseDeserializer deserializer,
   );
+
+  @protected
+  DownloadProgress sse_decode_download_progress(SseDeserializer deserializer);
 
   @protected
   DriveToken sse_decode_drive_token(SseDeserializer deserializer);
@@ -342,6 +362,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
+  UpdateManifest sse_decode_update_manifest(SseDeserializer deserializer);
+
+  @protected
   VoiceInfo sse_decode_voice_info(SseDeserializer deserializer);
 
   @protected
@@ -364,6 +387,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_download_progress_Sse(
+    RustStreamSink<DownloadProgress> self,
     SseSerializer serializer,
   );
 
@@ -436,6 +465,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_weather_config(
     WeatherConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_download_progress(
+    DownloadProgress self,
     SseSerializer serializer,
   );
 
@@ -561,6 +596,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_update_manifest(
+    UpdateManifest self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_voice_info(VoiceInfo self, SseSerializer serializer);

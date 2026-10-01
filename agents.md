@@ -38,7 +38,10 @@ the `anamanti-weather` frame + the display's full-screen forecast and the ambien
 icon/temperature beside the clock), and
 [`PlacesPlan.md`](./plans/PlacesPlan.md) (places: the `places_lookup` tool over the
 Google Places API + the `anamanti-place` frame + the display's full-screen place card,
-plus the route-only System-1 `place` intent).
+plus the route-only System-1 `place` intent), and
+[`UpdaterPlan.md`](./plans/UpdaterPlan.md) (in-app APK auto-updater: Rust fetch/
+download/SHA-256-verify of a signed APK + `latest.json` from Cloudflare R2, a native
+`PackageInstaller` channel, and the `selfUpdate`/`fdroid` build flavors).
 
 ---
 
@@ -100,12 +103,22 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   "remember…"/"forget that"). **Retrieval/recall defaults to the embedded HelixDB
   GraphRAG backend** (in-process, no server/Docker) — every completed turn is
   appended to `anamanti_chatlog.jsonl` and a background ingester embeds it into the
-  graph. GraphRAG needs `OPENAI_API_KEY` (embeddings); if it's absent or init
+  graph. **Embeddings default to a local, offline model** — nomic-embed-text-v1.5 run
+  in-process via `fastembed`/onnxruntime (`graphrag.embed_backend="local"`, feature
+  `embed-local`, ON by default); it needs no network and no API key, only the ONNX +
+  tokenizer on disk (`scripts/fetch-embed-model.sh`). `graphrag.embed_backend="openai"`
+  is the opt-in cloud path and then needs `OPENAI_API_KEY`. The backend is **hot-swappable
+  live** from the config page (Memory → Embeddings) with no restart; each backend keeps its
+  **own per-signature store** (`helix_path/<label>-<dims>/`) so switching is lossless (the
+  durable SQLite facts + chat log are never touched — only the derived vector index differs).
+  If the chosen embedder init
   fails, recall **falls back to SQLite FTS** (writes are unaffected). Override with
-  `memory_backend: "sqlite"` in `anamanti.json` for pure FTS recall. The HelixDB
-  engine, the rig agent framework, and the ECAPA-TDNN speaker embedder are **always
-  compiled in** (no longer feature-gated); speaker ID is selected purely at runtime
-  via `speaker.enabled` / `speaker.model_path`.
+  `memory_backend: "sqlite"` in `anamanti.json` for pure FTS recall. (Pure-Rust `tract`
+  cannot load the nomic graph — its rotary `Range` op does not lower to a typed model —
+  so the local embedder runs on onnxruntime via `ort`, the same pin as `vad-silero`.)
+  The HelixDB engine, the rig agent framework, and the ECAPA-TDNN speaker embedder are
+  **always compiled in** (no longer feature-gated); speaker ID is selected purely at
+  runtime via `speaker.enabled` / `speaker.model_path`.
 - **Idle screen:** photo slideshow from a Google Photos/Drive folder; keeps running
   when disconnected. Google Photos (Ambient) links via **on-device OAuth**
   (device-code/QR); **Google Drive links on the Anamanti Core** (consent on the Mac,
@@ -186,10 +199,15 @@ flutter_rust_bridge_codegen generate
 # Build a device APK (cargokit cross-compiles the Rust engine into it).
 # Echo Show 8 (crown) is 32-bit armeabi-v7a — use android-arm, NOT android-arm64
 # (arm64 fails with INSTALL_FAILED_NO_MATCHING_ABIS on this device).
-flutter build apk --release --target-platform android-arm
+#
+# A `distribution` flavor dimension exists (selfUpdate / fdroid — the in-app R2
+# auto-updater, plans/UpdaterPlan.md), so EVERY apk build/run must
+# name a flavor. `selfUpdate` is the normal build (ships the updater); `fdroid`
+# ships without it. The APK is then named app-<flavor>-release.apk.
+flutter build apk --release --flavor selfUpdate --target-platform android-arm
 
 # Run the app on the Echo Show (LineageOS) via adb (path relative to anamanti-display/)
-adb install build/app/outputs/flutter-apk/app-release.apk   # or: flutter run -d <echo-show-device>
+adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk   # or: flutter run --flavor selfUpdate -d <echo-show-device>
 ```
 
 - Requires: Flutter SDK, Android SDK + NDK, Rust toolchain, `adb`.
@@ -220,8 +238,9 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 # is a BOOT SEED: it is also settable at runtime from the loopback config page (masked,
 # never echoed back) and then persisted to settings_path, so a headless host needs no
 # shell env at all.
-#   ANTHROPIC_API_KEY / OPENAI_API_KEY  (anthropic/openai backends and, for
-#     OPENAI_API_KEY, the helix GraphRAG embeddings; UI: Config tab)
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY  (anthropic/openai backends; OPENAI_API_KEY is
+#     needed for the helix GraphRAG embeddings ONLY when graphrag.embed_backend="openai"
+#     — the default "local" nomic embedder is offline and needs no key; UI: Config tab)
 #   TAVILY_API_KEY                       (real web search when llm.search_provider=tavily;
 #     UI: Config tab)
 #   MAPBOX_TOKEN (or MAPBOX_ACCESS_TOKEN) (the directions_lookup provider token;
@@ -248,12 +267,22 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #   db_path / chatlog_path / promptlog_path / helix_path / settings_path / audio_dump_dir
 #     (settings_path is the runtime OVERLAY file — see below; "off"/"none" disables persistence)
 #   system_prompt / home_location / weather_units / turn_timeout_secs / memory_backend
-#     (helix|sqlite; helix needs OPENAI_API_KEY and falls back to sqlite FTS if absent)
+#     (helix|sqlite; helix embeds locally by default — graphrag.embed_backend="openai"
+#     is the opt-in cloud path and needs OPENAI_API_KEY, falling back to sqlite FTS if absent)
 #   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig),
 #     llm.anthropic_auth (apikey|subscription), llm.anthropic_token_cmd (default `ant`),
 #     llm.web_search, llm.search_provider (duckduckgo|tavily, default tavily — needs
 #     the TAVILY_API_KEY secret; duckduckgo is keyless), and the per-provider
 #     sub-blocks llm.ollama{url,model} / llm.anthropic{model,max_tokens} / llm.openai{…}
+#   graphrag{embed_backend (local|openai, default local), embed_model_path,
+#     embed_tokenizer_dir, embed_model, embed_dims, extract_model, …}. The default
+#     local nomic-embed-text-v1.5 embedder needs its ONNX+tokenizer on disk — provision
+#     with anamanti-core/scripts/fetch-embed-model.sh (never committed; see /models/).
+#     The backend is hot-swappable live from the config page (Memory → Embeddings); the
+#     choice persists in helix_path/active_backend. Each backend keeps its OWN store +
+#     ingest offset under helix_path/<label>-<dims>/ (e.g. nomic-768, openai-1536), so
+#     switching is lossless and never re-embeds an already-built backend — durable SQLite
+#     facts + the chat log (source of truth) are untouched.
 #   graphrag{…}, speaker{…}, music{…} (music.enabled defaults to true, so the
 #     Anamanti Core ducks the music group while it speaks and — with music.autostart,
 #     also default on — supervises snapserver/librespot/mpv at boot; see

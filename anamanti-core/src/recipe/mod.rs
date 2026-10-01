@@ -88,7 +88,7 @@ impl TavilyRecipeProvider {
 
     /// Point Tavily at a specific API root (overridable for tests).
     pub fn with_base_url(base_url: impl Into<String>, tavily_key: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http::tuned_builder()
             .timeout(StdDuration::from_secs(12))
             .user_agent("anamanti-core/0.1 (recipe)")
             .build()

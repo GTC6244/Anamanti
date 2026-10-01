@@ -17,6 +17,17 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 String engineGreeting({required String name}) =>
     RustLib.instance.api.crateApiEngineEngineGreeting(name: name);
 
+/// A stable per-device hardware id derived from the primary network interface's MAC
+/// address, formatted `anamanti-<12 lowercase hex>` (colons stripped) — e.g.
+/// `anamanti-140ac5942aca`. Reading the MAC from `/sys/class/net/<iface>/address`
+/// guarantees uniqueness across devices without any build-time configuration.
+///
+/// Returns an empty string if no usable MAC is found (an unreadable file, or an
+/// all-zero / locked-down `02:00:00:00:00:00` placeholder); the Dart layer then
+/// falls back to a persisted random id so the device still has a stable identity.
+String deviceHardwareId() =>
+    RustLib.instance.api.crateApiEngineDeviceHardwareId();
+
 /// Reports the native engine's version and build target so the device can show
 /// exactly which cross-compiled binary it is running.
 String engineVersion() => RustLib.instance.api.crateApiEngineEngineVersion();
@@ -258,17 +269,23 @@ class NotifyConfig {
   /// orchestrator can key notifications per device (may be empty).
   final String deviceId;
 
+  /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+  /// `device_id` in the `anamanti-hello` frame so the Core can name it (may be empty).
+  final String deviceName;
+
   const NotifyConfig({
     required this.orchestratorKey,
     required this.discoveryTimeoutSecs,
     required this.deviceId,
+    required this.deviceName,
   });
 
   @override
   int get hashCode =>
       orchestratorKey.hashCode ^
       discoveryTimeoutSecs.hashCode ^
-      deviceId.hashCode;
+      deviceId.hashCode ^
+      deviceName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -277,7 +294,8 @@ class NotifyConfig {
           runtimeType == other.runtimeType &&
           orchestratorKey == other.orchestratorKey &&
           discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
-          deviceId == other.deviceId;
+          deviceId == other.deviceId &&
+          deviceName == other.deviceName;
 }
 
 /// One proactive notification pushed from the orchestrator, streamed to Flutter.
@@ -808,17 +826,23 @@ class WeatherConfig {
   /// A stable identifier for this display, sent in the `anamanti-hello` frame.
   final String deviceId;
 
+  /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+  /// `device_id` in the `anamanti-hello` frame (may be empty).
+  final String deviceName;
+
   const WeatherConfig({
     required this.orchestratorKey,
     required this.discoveryTimeoutSecs,
     required this.deviceId,
+    required this.deviceName,
   });
 
   @override
   int get hashCode =>
       orchestratorKey.hashCode ^
       discoveryTimeoutSecs.hashCode ^
-      deviceId.hashCode;
+      deviceId.hashCode ^
+      deviceName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -827,7 +851,8 @@ class WeatherConfig {
           runtimeType == other.runtimeType &&
           orchestratorKey == other.orchestratorKey &&
           discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
-          deviceId == other.deviceId;
+          deviceId == other.deviceId &&
+          deviceName == other.deviceName;
 }
 
 /// One ambient current-conditions push from the orchestrator, streamed to Flutter.

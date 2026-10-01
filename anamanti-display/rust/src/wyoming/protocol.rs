@@ -452,14 +452,20 @@ impl WyomingEvent {
     }
 
     /// An `anamanti-hello` channel-open frame (device → orchestrator): register the
-    /// persistent notify channel. Byte-identical to the orchestrator's `hello`.
-    pub fn hello(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    /// persistent notify channel. `name` is a human-friendly label for this display
+    /// (may be empty). Byte-identical to the orchestrator's `hello`.
+    pub fn hello(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "notify",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -468,13 +474,18 @@ impl WyomingEvent {
     /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
     /// so the orchestrator registers it with the weather push service. Byte-identical
     /// to the orchestrator's `hello_weather`.
-    pub fn hello_weather(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    pub fn hello_weather(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "weather",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -971,7 +982,7 @@ mod tests {
         assert_eq!(bad.weather_command(), None);
 
         // The weather hello carries role=weather.
-        let hello = roundtrip(&WyomingEvent::hello_weather("dev", "")).await;
+        let hello = roundtrip(&WyomingEvent::hello_weather("dev", "", "")).await;
         assert_eq!(hello.data["role"], json!("weather"));
     }
 
@@ -1068,12 +1079,13 @@ mod tests {
 
     #[tokio::test]
     async fn notify_frames_roundtrip() {
-        let hello = WyomingEvent::hello("echo-show-8", "Paul Family");
+        let hello = WyomingEvent::hello("echo-show-8", "Paul Family", "Kitchen");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.event_type, types::ANAMANTI_HELLO);
         assert_eq!(back.data["role"], json!("notify"));
         assert_eq!(back.data["device_id"], json!("echo-show-8"));
+        assert_eq!(back.data["name"], json!("Kitchen"));
 
         let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");
         let back = roundtrip(&note).await;

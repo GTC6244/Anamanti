@@ -44,7 +44,7 @@ impl AnthropicBackend {
         max_tokens: u32,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             auth: AnthropicAuth::ApiKey,
             api_key: api_key.into(),
@@ -62,7 +62,7 @@ impl AnthropicBackend {
         max_tokens: u32,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             auth: AnthropicAuth::Subscription,
             api_key: String::new(),

@@ -10,6 +10,7 @@ NotifyConfig _config() => NotifyConfig(
       orchestratorKey: '',
       discoveryTimeoutSecs: BigInt.zero,
       deviceId: 'test',
+      deviceName: 'Test Device',
     );
 
 NotifyEvent _event(String id) =>

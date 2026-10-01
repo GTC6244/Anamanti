@@ -562,9 +562,15 @@ mDNS + `instance_id` pin the voice path uses):
   independent of the voice engine). This is a *sidecar* — the per-turn voice socket and
   its state machine are untouched.
 - **`anamanti-hello`** (device → Anamanti Core): sent right after the notify socket
-  opens (`data.role="notify"`, `data.device_id`). It registers the connection with the
-  Anamanti Core's `NotificationService`, which parks the read loop and holds the socket
-  to push down.
+  opens (`data.role="notify"`, `data.device_id`, `data.name`). It registers the connection
+  with the Anamanti Core's `NotificationService`, which parks the read loop and holds the
+  socket to push down. `device_id` is a **stable, globally-unique** identifier the display
+  mints once from its Wi-Fi MAC (`anamanti-<12 hex>`, e.g. `anamanti-140ac5942aca`; a
+  persisted random id is the fallback when the MAC can't be read — `api::engine::device_hardware_id`),
+  so two displays on one Core are distinguishable; `name` is the human-friendly label set on
+  the device's Settings screen. The Core stores both per connection and lists the connected
+  displays (id + name) on the config page's **Notify** tab (`GET /notifications/status.json`
+  → `devices[]`). (Older devices that predate the field simply send no `name`.)
 - **`anamanti-notify`** (Anamanti Core → device): a proactive notification
   (`data.id`, `data.priority` = `info`|`reminder`|`alert`, `data.title`, `data.body`).
   The device decodes it to a `NotifyEvent` on a dedicated FRB stream; Flutter's
@@ -608,6 +614,37 @@ Deferred (see `TODO.md`): spoken notifications + barge-in, ack/store-and-forward
 per-device targeting, quiet hours, and a paired/TLS control channel (the LAN hop is
 currently unauthenticated, so this widens the same attack surface the voice/control
 frames already have).
+
+### In-app APK auto-updater (Cloudflare R2)
+
+Separate from Wyoming entirely: the Display can update **itself** over HTTPS from a
+Cloudflare R2 bucket, instead of relying on the third-party Obtainium app. Full
+design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
+
+- **Rust owns the network half** (behind FRB, like all networking):
+  `check_for_update(base_url)` GETs `{base_url}/latest.json`
+  (`{versionCode, versionName, apkUrl, sha256, notes}`); `download_update(...)`
+  streams the APK to the cache dir on a dedicated thread, computing a **SHA-256** as
+  bytes arrive and deleting the file on mismatch/cancel, emitting `DownloadProgress`
+  over a `StreamSink` (`rust/src/update/`, `rust/src/api/updater.rs`). The client is
+  **`ureq` + rustls/`ring` + `webpki-roots`** — this is the project's **one HTTPS
+  client**; it does not touch the Wyoming TCP path. This is the only place the device
+  reaches a host *other* than its pinned Core, over plain HTTPS to a domain the owner
+  controls, integrity-pinned by the SHA-256.
+- **The install is native Kotlin**, since `PackageInstaller` /
+  `canRequestPackageInstalls` have no Rust or Dart equivalent: a minimal
+  `anamanti_display/updater` MethodChannel on `MainActivity` (versionCode,
+  unknown-sources redirect, `PackageInstaller` session) + an `InstallReceiver` that
+  launches the system prompt and reports the result back. This is the second
+  platform channel (alongside `anamanti_display/brightness`); it is kept minimal and
+  the networking stays in Rust, consistent with the interop boundary (§3).
+- **Flutter owns orchestration + presentation**: `UpdateController` (a
+  `ChangeNotifier` sidecar) checks on boot + every 6 h, compares versionCodes,
+  drives the `UpdateBanner` and the Settings → Updates page, and triggers
+  download/install.
+- **Build flavors** `selfUpdate` (ships it) / `fdroid` (ships without it) keep the
+  same signing key + `applicationId`; the key must never change (a self-update needs
+  a matching signature). See key design decisions (§7) and `agents.md`.
 
 ---
 
@@ -714,6 +751,7 @@ frames already have).
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |
 | Idle photo slideshow (Google) | Ambient value when idle; user picks the folder |
 | Proactive notifications via a persistent **device-dialed** channel (Approach A) | Mac reaches the display unprompted while keeping the device the dialer — reuses the existing mDNS + `instance_id` pin and the blessed auto-reconnect model; avoids a reverse connection / device listener / new trust direction. A doorbell (device advertises, Mac nudges) was considered but only wins idle-socket cost, which is free on a mains-powered display, at the price of lossy triggers. Shipped visual-only first (see §4) |
+| In-app APK auto-updater over Cloudflare R2 (Rust download/verify + native `PackageInstaller`), with `selfUpdate`/`fdroid` flavors | First-party, hands-off updates for a headless kiosk without depending on the third-party Obtainium app; networking stays in Rust (ureq+rustls, the one HTTPS client) and only the unavoidable install is a native channel; SHA-256 pins integrity; flavors let F-Droid ship without the self-updater. Keep Obtainium in parallel until hardware-proven. See §4 + [`UpdaterPlan.md`](./UpdaterPlan.md) |
 
 ---
 

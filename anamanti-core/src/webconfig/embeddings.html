@@ -1,0 +1,62 @@
+<p class="sub">The text-embedding backend for GraphRAG memory. Switching is <strong>live</strong> (no restart) and <strong>lossless</strong>: each backend keeps its own vector index, and your durable memories (SQLite facts + the chat log) are never touched. The first switch to a backend rebuilds its index from the chat log in the background; switching back reuses it.</p>
+
+<div class="card">
+  <h2>Embedding backend</h2>
+  <p class="desc"><strong>Local (nomic-embed-text-v1.5)</strong> runs on-device — offline, no API key, 768-dim. <strong>OpenAI (text-embedding-3-small)</strong> sends memory text to OpenAI and needs <code>OPENAI_API_KEY</code>. The two use different vector spaces, so each has a separate store.</p>
+  <p class="desc" id="statusline">Loading…</p>
+
+  <label><input type="radio" name="backend" id="pick_local" value="local"> Local — nomic-embed-text-v1.5 <span class="hint" id="local_hint"></span></label>
+  <label><input type="radio" name="backend" id="pick_openai" value="openai"> OpenAI — text-embedding-3-small <span class="hint" id="openai_hint"></span></label>
+
+  <div class="card-actions">
+    <div id="status" class="status"></div>
+    <button id="save" class="primary">Switch</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+
+  function applyStatus(j){
+    if(j.available === false){
+      $('statusline').textContent = j.reason || 'GraphRAG memory is not active.';
+      $('pick_local').disabled = true; $('pick_openai').disabled = true; $('save').disabled = true;
+      return;
+    }
+    $('statusline').textContent = 'active: ' + j.active + ' (' + j.dims + '-dim) ✓';
+    // Local option
+    $('pick_local').disabled = !j.local.available;
+    $('local_hint').textContent = j.local.available ? '' : ('— unavailable: ' + j.local.detail);
+    // OpenAI option
+    $('pick_openai').disabled = !j.openai.available;
+    $('openai_hint').textContent = j.openai.available ? '' : ('— unavailable: ' + j.openai.detail);
+    // Reflect the active selection
+    if(j.active === 'local') $('pick_local').checked = true;
+    if(j.active === 'openai') $('pick_openai').checked = true;
+    $('save').disabled = false;
+  }
+
+  async function load(){
+    try{ applyStatus(await apiJSON('/embeddings/status.json')); }
+    catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+
+  async function save(){
+    const picked = document.querySelector('input[name="backend"]:checked');
+    if(!picked){ show(false, 'Pick a backend first.'); return; }
+    show(true, 'Switching… (first switch to a backend rebuilds its index in the background)');
+    $('save').disabled = true;
+    try{
+      const j = await apiJSON('/embeddings/switch', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({backend: picked.value})});
+      if(j.ok === false){ show(false, j.error || 'Switch rejected.'); }
+      else { show(true, 'Switched to ' + j.active + '.'); applyStatus(j); }
+    }catch(e){ show(false, 'Request failed: ' + e); }
+    finally { $('save').disabled = false; }
+  }
+
+  $('save').addEventListener('click', save);
+  load();
+</script>

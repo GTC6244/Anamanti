@@ -8,6 +8,7 @@
 // the slideshow, while assistant/memory settings are applied on the Mac.
 
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -17,8 +18,10 @@ import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/model_assets.dart';
 import 'package:anamanti_display/src/engine/music_channel_controller.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
+import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_channel_controller.dart';
 import 'package:anamanti_display/src/engine/screen_brightness.dart';
+import 'package:anamanti_display/src/update/updater_channel.dart';
 import 'package:anamanti_display/src/engine/wakeword_config.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
@@ -35,6 +38,7 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         MusicConfig,
         NotifyConfig,
         WeatherConfig,
+        deviceHardwareId,
         noteUserActivity,
         setMusicContext,
         setPlaceContext,
@@ -100,6 +104,11 @@ class _AmbientHomeState extends State<AmbientHome> {
   WeatherChannelController? _weather;
   MusicChannelController? _music;
 
+  /// In-app updater (plans/UpdaterPlan.md). Device-local, created once
+  /// in [_boot] and only on the `selfUpdate` flavor — null on `fdroid`, so no update
+  /// banner or Settings page appears there.
+  UpdateController? _updates;
+
   /// Live access tokens for each Google backend (minted from the persisted refresh
   /// tokens on boot / after a re-link). Null when unlinked/offline → local gradients.
   String? _ambientAccessToken;
@@ -119,6 +128,10 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   Future<void> _boot() async {
     _settings = await _store.load();
+    // Ensure this display has a stable, globally-unique identity before any channel
+    // dials the Core (so two displays on one Core are distinguishable). Minted once
+    // from the Wi-Fi MAC, persisted, and reused on every later boot.
+    _settings = await _ensureDeviceId(_settings);
     // Pin the control client to the persisted orchestrator selection.
     _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
     // Unpack the bundled wake-word models to the filesystem before the native
@@ -145,6 +158,53 @@ class _AmbientHomeState extends State<AmbientHome> {
       const Duration(minutes: 30),
       (_) => _reloadPhotos(),
     );
+    // In-app updater: only wire it on the selfUpdate flavor (the fdroid flavor
+    // reports false and ships without it). Off the critical path — the kiosk is
+    // fully usable while the first check runs.
+    unawaited(_startUpdater());
+  }
+
+  /// Create and start the updater controller when this build ships the self-updater.
+  Future<void> _startUpdater() async {
+    if (_updates != null) return;
+    final channel = UpdaterChannel();
+    if (!await channel.isSelfUpdateEnabled()) return;
+    final updates = UpdateController(
+      channel: channel,
+      baseUrl: _settings.updateBaseUrl,
+      autoUpdateEnabled: _settings.autoUpdateEnabled,
+    );
+    await updates.start();
+    if (mounted) {
+      setState(() => _updates = updates);
+    } else {
+      updates.dispose();
+    }
+  }
+
+  /// Mint and persist this display's stable [AppSettings.deviceId] on first run.
+  /// Prefers the Wi-Fi MAC-derived id from the Rust engine (`anamanti-<12 hex>`);
+  /// if the MAC can't be read it falls back to a persisted random id so the device
+  /// still has a stable, unique identity. A no-op once an id is already stored.
+  Future<AppSettings> _ensureDeviceId(AppSettings s) async {
+    if (s.deviceId.isNotEmpty) return s;
+    var id = '';
+    try {
+      id = deviceHardwareId();
+    } catch (_) {
+      id = '';
+    }
+    if (id.isEmpty) {
+      final rnd = Random.secure();
+      final hex = List<int>.generate(
+        12,
+        (_) => rnd.nextInt(16),
+      ).map((n) => n.toRadixString(16)).join();
+      id = 'anamanti-$hex';
+    }
+    final next = s.copyWith(deviceId: id);
+    await _store.save(next);
+    return next;
   }
 
   /// Refresh the linked Google source in place (re-mint token + re-list). Keeps the
@@ -331,7 +391,8 @@ class _AmbientHomeState extends State<AmbientHome> {
       config: NotifyConfig(
         orchestratorKey: _settings.orchestratorKey,
         discoveryTimeoutSecs: BigInt.zero,
-        deviceId: 'anamanti-display',
+        deviceId: _settings.deviceId,
+        deviceName: _settings.deviceName,
       ),
     )..start();
 
@@ -345,7 +406,8 @@ class _AmbientHomeState extends State<AmbientHome> {
       config: WeatherConfig(
         orchestratorKey: _settings.orchestratorKey,
         discoveryTimeoutSecs: BigInt.zero,
-        deviceId: 'anamanti-display',
+        deviceId: _settings.deviceId,
+        deviceName: _settings.deviceName,
       ),
       onReport: assistant.applyWeatherPush,
     )..start();
@@ -379,6 +441,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   Future<void> _onSettingsApplied(AppSettings next) async {
     final engineChanged =
         next.orchestratorKey != _settings.orchestratorKey ||
+        next.deviceName != _settings.deviceName ||
         next.wakeWord != _settings.wakeWord ||
         next.threshold != _settings.threshold ||
         next.activeThreshold != _settings.activeThreshold ||
@@ -412,6 +475,11 @@ class _AmbientHomeState extends State<AmbientHome> {
       await _applyPhotoSource();
     }
     if (engineChanged) await _startEngine();
+    // Push the (possibly changed) update base URL / auto-update toggle to the updater.
+    await _updates?.updateConfig(
+      baseUrl: next.updateBaseUrl,
+      autoUpdateEnabled: next.autoUpdateEnabled,
+    );
   }
 
   void _openSettings() {
@@ -424,6 +492,8 @@ class _AmbientHomeState extends State<AmbientHome> {
           onApplied: _onSettingsApplied,
           // The live engine controller powers the Audio Diagnostics page's meters.
           assistant: _assistant,
+          // The updater controller powers the Updates page (null on fdroid).
+          updates: _updates,
         ),
       ),
     );
@@ -436,6 +506,7 @@ class _AmbientHomeState extends State<AmbientHome> {
     _notifications?.dispose();
     _weather?.dispose();
     _music?.dispose();
+    _updates?.dispose();
     _slideshow.dispose();
     _brightness.reset();
     super.dispose();
@@ -457,6 +528,7 @@ class _AmbientHomeState extends State<AmbientHome> {
         assistant: assistant,
         slideshow: _slideshow,
         notifications: _notifications,
+        updates: _updates,
         onOpenSettings: _openSettings,
         listeningRingEnabled: _settings.listeningRingEnabled,
         ringReactivity: _settings.ringReactivity,

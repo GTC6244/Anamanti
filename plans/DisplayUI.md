@@ -32,10 +32,10 @@ events; nothing here touches audio buffers or sockets directly.
 | **Overlays (timers)** | `TimersOverlay` — big (idle) + compact (in-turn) |
 | **Overlays (music)** | `MusicControlOverlay` — compact transport bar while a track plays |
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
-| **Banners** | `NotificationBanner` (proactive push from Core) |
+| **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView`, `NowPlayingView`, `NextUpView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background), `AudioDiagnosticsView` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Updates), `AudioDiagnosticsView` |
 | **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
@@ -100,7 +100,8 @@ events; nothing here touches audio buffers or sockets directly.
     turn is active.
 14. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
     `open-settings`; fades out during a turn and in away mode.
-15. `NotificationBanner` — top layer; shows even in away mode.
+15. `NotificationBanner` — shows even in away mode.
+16. `UpdateBanner` — top layer; in-app updater prompt/progress (selfUpdate flavor).
 
 ---
 
@@ -296,6 +297,20 @@ Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_contro
   a `ChangeNotifier` independent of the voice-turn lifecycle. Shows even in away
   mode. Design: `architecture.md §4`; follow-ups: `TODO.md §6a`.
 
+**`UpdateBanner`** — `lib/src/ui/update_banner.dart`
+- Top-center card (same styling as `NotificationBanner`, blue `system_update_alt`
+  icon) for the in-app updater. Shows when a newer build is **available** (title +
+  version + an **Update** button) and through the user-initiated download (a
+  `LinearProgressIndicator` + percentage), **Ready to install** (an **Install**
+  button), **Installing…**, and download/install **errors** (a **Retry** button);
+  `x` dismisses. Silent background *check* failures never raise it.
+- Driven by `UpdateController` (`lib/src/engine/update_controller.dart`): a
+  `ChangeNotifier` sidecar that calls the Rust updater FRB
+  (`check_for_update`/`download_update`) and the native `anamanti_display/updater`
+  channel (`PackageInstaller` install). Rendered as the top Stack layer in
+  `AmbientScreen`; only present on the `selfUpdate` flavor (null → hidden on
+  `fdroid`). Design: `plans/UpdaterPlan.md`, `architecture.md §4`.
+
 ---
 
 ## 7. Conversation UI
@@ -378,10 +393,15 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 **`SettingsScreen` / `_SettingsScreenState`** — `lib/src/ui/settings_screen.dart`
 - The only `Navigator.push` in the app (tap the gear on `AmbientScreen`). A
-  two-level master/detail: `_menu()` lists 6 category tiles; selecting one opens
+  two-level master/detail: `_menu()` lists the category tiles; selecting one opens
   `_categoryPage`. `enum _SettingsCategory`:
-  - **Assistant** — orchestrator (which Mac) + LLM backend, Anthropic auth
-    (API key vs subscription/OAuth), model, voice. Orchestrator-managed; shows
+  - **Assistant** — **Device name** (device-local text field, key
+    `settings-device-name`; the subtitle shows this display's stable MAC-derived
+    `deviceId`, e.g. `anamanti-140ac5942aca`; the name is sent to the Core in the
+    `anamanti-hello` frame and appears in the Core config page's "Connected devices"
+    list), orchestrator (which Mac) + LLM backend, Anthropic auth (API key vs
+    subscription/OAuth), model, voice. The device-name + orchestrator tiles are
+    device-local (usable offline); the rest are orchestrator-managed and show
     "Contacting…" / "Assistant offline" guard tiles when the Mac is unreachable.
   - **Device Config** — Wake word (word, threshold slider, smoothing window,
     capture gain, "Fire on peak", "AudioRecord capture (far-field)", noise
@@ -398,6 +418,14 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
     [`VadSileroPlan.md`](./VadSileroPlan.md)).
   - **Background** — photo source; Google Photos (Ambient) link via QR; Google
     Drive link via the orchestrator config page + Sync; folder-id field.
+  - **Updates** — in-app app updates (only shown on the `selfUpdate` flavor, i.e.
+    when `SettingsScreen.updates` is non-null). A full custom page
+    (`_updatesPage()`): an "Automatic update checks" switch (`autoUpdateEnabled`), an
+    **Update URL** field (`updateBaseUrl`, the Cloudflare R2 base), the installed
+    versionCode, a live status line, **Check now**, and a **Download & install** /
+    **Install** / **Retry** action — driven by `UpdateController`. The URL + toggle
+    persist with the device-local settings on Save. See
+    [`UpdaterPlan.md`](./UpdaterPlan.md).
 - On Save → `onApplied(next)` in `main.dart` restarts the engine (wake/threshold
   changes) and/or refreshes the slideshow (photo-source changes); assistant / VAD
   settings apply on the Mac.

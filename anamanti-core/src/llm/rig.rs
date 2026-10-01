@@ -232,7 +232,7 @@ impl DuckDuckGoSearch {
     /// tests).
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into(),
         }
     }
@@ -306,7 +306,7 @@ impl TavilySearch {
 
     pub fn with_base_url(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }
@@ -1941,10 +1941,29 @@ pub struct RigBackend {
     tools: Option<Arc<Tools>>,
 }
 
+/// A keep-alive-tuned HTTP client in **rig's** reqwest version.
+///
+/// rig-core 0.42 pulls reqwest 0.13, a different major than the crate-wide
+/// reqwest 0.12 behind `crate::http`, so the shared client cannot be injected
+/// into rig's builders (their `HttpClientExt` bound is on rig's reqwest type).
+/// We build an equivalently tuned client from rig's own re-exported reqwest
+/// (`rig_core::http_client::ReqwestClient`) so the default/primary LLM path gets
+/// the same warm-connection / handshake-avoidance policy as everything else.
+fn rig_tuned_client() -> rig_core::http_client::ReqwestClient {
+    rig_core::http_client::ReqwestClient::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(300))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .http2_keep_alive_while_idle(true)
+        .build()
+        .unwrap_or_default()
+}
+
 impl RigBackend {
     /// Local Ollama via rig. `base_url` is the Ollama root (no API key).
     pub fn ollama(base_url: &str, model: &str, tools: Option<Arc<Tools>>) -> Result<Self> {
         let client = ollama::Client::builder()
+            .http_client(rig_tuned_client())
             .api_key(ollama::OllamaApiKey::default())
             .base_url(base_url)
             .build()
@@ -1966,6 +1985,7 @@ impl RigBackend {
         tools: Option<Arc<Tools>>,
     ) -> Result<Self> {
         let client = anthropic::Client::builder()
+            .http_client(rig_tuned_client())
             .api_key(anthropic::client::AnthropicKey::from(api_key))
             .base_url(base_url)
             .anthropic_version(anthropic::completion::ANTHROPIC_VERSION_LATEST)

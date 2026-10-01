@@ -167,14 +167,20 @@ async fn run() -> Result<()> {
     // Read-only handle onto the GraphRAG store for the debug GUI (`/helix`); stays
     // `None` on the SQLite backend or when the graph backend fails to initialize.
     let mut graph_view: Option<Arc<dyn GraphView>> = None;
+    // The live-swappable GraphRAG controller (embedding-backend hot-swap from the
+    // config page). `None` on the SQLite backend or when GraphRAG init fails.
+    let mut graphrag: Option<Arc<anamanti_core::memory::GraphRagController>> = None;
 
     // Memory retrieval backend: SQLite FTS (default) or embedded HelixDB GraphRAG.
     if config.memory_backend == MemoryBackendChoice::Helix {
-        match build_graphrag_recall(&config, &chatlog).await {
-            Ok((recall, graph)) => {
+        match anamanti_core::memory::GraphRagController::start(&config, &chatlog).await {
+            Ok(ctrl) => {
                 log::info!("memory backend: HelixDB GraphRAG (embedded, in-process)");
-                pipeline = pipeline.with_recall(recall);
-                graph_view = Some(graph);
+                // The orchestrator and the debug GUI hold swappable proxies, so a
+                // config-page backend switch retargets them without a restart.
+                pipeline = pipeline.with_recall(ctrl.recall());
+                graph_view = Some(ctrl.graph_view());
+                graphrag = Some(ctrl);
             }
             Err(e) => {
                 log::error!("GraphRAG init failed ({e:#}); falling back to SQLite FTS recall");
@@ -347,6 +353,7 @@ async fn run() -> Result<()> {
         let voices_dir = config.tts_voices_dir.clone();
         let music = music_hub.clone();
         let notify = notify.clone();
+        let graphrag = graphrag.clone();
         let debug = DebugSources {
             memory: pipeline.memory().clone(),
             chatlog_path: config.chatlog_path.clone(),
@@ -370,6 +377,7 @@ async fn run() -> Result<()> {
                 tokio::spawn(async move {
                     if let Err(e) = webconfig::serve(
                         listener, settings, catalog, connector, voices_dir, debug, music, notify,
+                        graphrag,
                     )
                     .await
                     {
@@ -508,70 +516,3 @@ async fn ensure_ollama_model(config: &mut Config) {
     }
 }
 
-/// Build the HelixDB GraphRAG recall backend and spawn the background ingester.
-/// Requires `OPENAI_API_KEY` (embeddings); `ANTHROPIC_API_KEY` enables Claude
-/// Haiku entity extraction (absent → pure-vector recall).
-async fn build_graphrag_recall(
-    config: &Config,
-    chatlog: &Arc<ChatLog>,
-) -> Result<(Arc<dyn anamanti_core::memory::Recall>, Arc<dyn GraphView>)> {
-    use anamanti_core::memory::embed::{Embedder, OpenAiEmbedder};
-    use anamanti_core::memory::entity::{
-        AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor,
-    };
-    use anamanti_core::memory::helix::HelixMemory;
-    use anamanti_core::memory::ingester::MemoryIngester;
-    use anamanti_core::memory::HelixRecall;
-
-    let g = &config.graphrag;
-    let openai_key = std::env::var("OPENAI_API_KEY")
-        .context("memory_backend=\"helix\" requires OPENAI_API_KEY for embeddings")?;
-    let embedder: Arc<dyn Embedder> = Arc::new(OpenAiEmbedder::new(
-        g.openai_base_url.clone(),
-        openai_key,
-        g.embed_model.clone(),
-        g.embed_dims,
-    ));
-
-    let helix = Arc::new(
-        HelixMemory::open_disk(config.helix_path.clone(), "ambient", embedder.dimensions())
-            .await
-            .context("opening embedded HelixDB store")?,
-    );
-    log::info!(
-        "HelixDB store at {} ({} nodes)",
-        config.helix_path.display(),
-        helix.node_count().await.unwrap_or(0)
-    );
-
-    let extractor: Arc<dyn EntityExtractor> = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => Arc::new(AnthropicEntityExtractor::new(
-            g.anthropic_base_url.clone(),
-            key,
-            g.extract_model.clone(),
-        )),
-        _ => {
-            log::warn!(
-                "ANTHROPIC_API_KEY absent; entity extraction disabled (recall is pure vector KNN)"
-            );
-            Arc::new(NoopEntityExtractor)
-        }
-    };
-
-    let ingester = Arc::new(MemoryIngester::new(
-        chatlog.path().to_path_buf(),
-        helix.clone(),
-        embedder.clone(),
-        extractor,
-    ));
-    ingester.spawn(g.ingest_interval);
-    log::info!(
-        "background memory ingester running every {}s",
-        g.ingest_interval.as_secs()
-    );
-
-    let recall: Arc<dyn anamanti_core::memory::Recall> =
-        Arc::new(HelixRecall::new(helix.clone(), embedder, g.recall_k));
-    let graph: Arc<dyn GraphView> = helix;
-    Ok((recall, graph))
-}

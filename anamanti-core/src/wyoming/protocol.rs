@@ -570,14 +570,20 @@ impl WyomingEvent {
     }
 
     /// An `anamanti-hello` channel-open frame (device → orchestrator): register the
-    /// persistent notify channel. Mirror of the device crate's `hello` constructor.
-    pub fn hello(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    /// persistent notify channel. `name` is a human-friendly label for the display
+    /// (may be empty). Mirror of the device crate's `hello` constructor.
+    pub fn hello(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "notify",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -586,13 +592,18 @@ impl WyomingEvent {
     /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
     /// so the server registers it with the weather push service rather than the notify
     /// service. Byte-identical to the device crate's `hello_weather`.
-    pub fn hello_weather(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    pub fn hello_weather(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "weather",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -601,6 +612,17 @@ impl WyomingEvent {
     pub fn hello_device_id(&self) -> Option<&str> {
         if self.event_type == types::ANAMANTI_HELLO {
             self.data.get("device_id").and_then(Value::as_str)
+        } else {
+            None
+        }
+    }
+
+    /// The human-friendly `name` from an `anamanti-hello` frame's `data.name`
+    /// (`None` when the frame is a different type or carries no name — older devices
+    /// that predate the field).
+    pub fn hello_name(&self) -> Option<&str> {
+        if self.event_type == types::ANAMANTI_HELLO {
+            self.data.get("name").and_then(Value::as_str)
         } else {
             None
         }
@@ -1181,13 +1203,14 @@ mod tests {
 
     #[tokio::test]
     async fn weather_hello_carries_role() {
-        let hello = WyomingEvent::hello_weather("dev-1", "core-1");
+        let hello = WyomingEvent::hello_weather("dev-1", "core-1", "Bedroom");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.hello_role(), "weather");
         assert_eq!(back.hello_device_id(), Some("dev-1"));
+        assert_eq!(back.hello_name(), Some("Bedroom"));
         // The default notify hello reports the notify role.
-        assert_eq!(WyomingEvent::hello("d", "c").hello_role(), "notify");
+        assert_eq!(WyomingEvent::hello("d", "c", "").hello_role(), "notify");
     }
 
     #[tokio::test]
@@ -1397,14 +1420,16 @@ mod tests {
     #[tokio::test]
     async fn notify_frames_roundtrip() {
         // hello (device → orchestrator)
-        let hello = WyomingEvent::hello("echo-show-8", "Paul Family");
+        let hello = WyomingEvent::hello("echo-show-8", "Paul Family", "Kitchen");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.event_type, types::ANAMANTI_HELLO);
         assert_eq!(back.hello_device_id(), Some("echo-show-8"));
+        assert_eq!(back.hello_name(), Some("Kitchen"));
         assert_eq!(back.data["role"], json!("notify"));
-        // A non-hello frame yields no device id.
+        // A non-hello frame yields no device id or name.
         assert_eq!(WyomingEvent::audio_stop(0).hello_device_id(), None);
+        assert_eq!(WyomingEvent::audio_stop(0).hello_name(), None);
 
         // notify (orchestrator → device)
         let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");

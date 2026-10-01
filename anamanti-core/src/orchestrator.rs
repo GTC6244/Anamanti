@@ -901,6 +901,7 @@ impl Pipeline {
         let recall_embedded = self.recall.embeds_query();
         timing.recall_backend = Some(recall_backend.to_string());
         timing.recall_embedded = Some(recall_embedded);
+        timing.recall_embedder = self.recall.embedder_label().map(str::to_string);
         timing.recall_embed_ms = recalled.embed_ms;
         timing.recall_search_ms = recalled.search_ms;
         log::info!(

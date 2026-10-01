@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
+import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
@@ -27,6 +28,7 @@ import 'package:anamanti_display/src/ui/next_up_view.dart';
 import 'package:anamanti_display/src/ui/notification_banner.dart';
 import 'package:anamanti_display/src/ui/now_playing_view.dart';
 import 'package:anamanti_display/src/ui/recipe_view.dart';
+import 'package:anamanti_display/src/ui/update_banner.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/ui/status_indicator.dart';
 import 'package:anamanti_display/src/ui/timers_overlay.dart';
@@ -41,6 +43,7 @@ class AmbientScreen extends StatelessWidget {
     required this.assistant,
     required this.slideshow,
     this.notifications,
+    this.updates,
     this.onOpenSettings,
     this.listeningRingEnabled = true,
     this.ringReactivity = 1.0,
@@ -64,6 +67,10 @@ class AmbientScreen extends StatelessWidget {
   /// Proactive notifications pushed by the orchestrator (Approach A). When null (as
   /// in widget tests that only exercise the turn UI) no banner is shown.
   final NotificationController? notifications;
+
+  /// In-app updater (plans/UpdaterPlan.md). When null (widget tests,
+  /// or the fdroid flavor) no update banner is shown.
+  final UpdateController? updates;
 
   /// Opens the settings screen (Phase 6). When null, no settings control is shown
   /// (e.g. in widget tests that only exercise the reactive turn UI).
@@ -458,6 +465,38 @@ class AmbientScreen extends StatelessWidget {
                               key: ValueKey(note.id),
                               notification: note,
                               onDismiss: notifications!.dismiss,
+                            ),
+                    );
+                  },
+                ),
+
+              // Update banner, top-most. Rebuilds on its own controller; shows an
+              // "update available" prompt and the download/install progress.
+              if (updates != null)
+                ListenableBuilder(
+                  listenable: updates!,
+                  builder: (context, _) {
+                    final visible = updates!.bannerVisible;
+                    return AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      child: !visible
+                          ? const SizedBox.shrink()
+                          : UpdateBanner(
+                              key: const ValueKey('update-banner'),
+                              controller: updates!,
+                              onAction: () {
+                                switch (updates!.status) {
+                                  case UpdateStatus.available:
+                                    updates!.download();
+                                  case UpdateStatus.readyToInstall:
+                                    updates!.install();
+                                  case UpdateStatus.error:
+                                    updates!.retry();
+                                  default:
+                                    break;
+                                }
+                              },
+                              onDismiss: updates!.dismissBanner,
                             ),
                     );
                   },
