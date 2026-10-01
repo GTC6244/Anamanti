@@ -67,6 +67,13 @@ pub trait Recall: Send + Sync {
     fn embeds_query(&self) -> bool {
         false
     }
+
+    /// Which embedder produced the query vector (`"local"`, `"openai"`, `"mock"`), or
+    /// `None` for backends that don't embed (SQLite FTS). Recorded per turn so the
+    /// `/chatlog` timing view labels the embedding stage with the real backend.
+    fn embedder_label(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// SQLite FTS recall — the default backend (unchanged Phase-4 behavior).
@@ -153,6 +160,10 @@ mod helix_recall {
 
         fn embeds_query(&self) -> bool {
             true
+        }
+
+        fn embedder_label(&self) -> Option<&'static str> {
+            Some(self.embedder.label())
         }
     }
 }
