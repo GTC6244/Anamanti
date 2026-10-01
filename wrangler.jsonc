@@ -1,0 +1,18 @@
+{
+  // Cloudflare Workers config for the Anamanti marketing site.
+  //
+  // The only Cloudflare-deployed content in this repo is the static marketing
+  // page at `marketing/index.html`. This is an "assets-only" Worker: it has no
+  // server code, it just serves that directory as static files.
+  //
+  // Deployment is driven by GitHub Actions, not Cloudflare's Git integration:
+  // see .github/workflows/deploy-marketing.yml, which runs `wrangler deploy`
+  // only when the marketing site changes land on `main`. The old Cloudflare
+  // "Workers Builds" Git integration (which ran on every push and failed on
+  // PRs that never touched marketing/) should be disabled in the dashboard.
+  "name": "anamanti",
+  "compatibility_date": "2025-10-01",
+  "assets": {
+    "directory": "./marketing"
+  }
+}
