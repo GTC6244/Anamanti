@@ -562,9 +562,15 @@ mDNS + `instance_id` pin the voice path uses):
   independent of the voice engine). This is a *sidecar* — the per-turn voice socket and
   its state machine are untouched.
 - **`anamanti-hello`** (device → Anamanti Core): sent right after the notify socket
-  opens (`data.role="notify"`, `data.device_id`). It registers the connection with the
-  Anamanti Core's `NotificationService`, which parks the read loop and holds the socket
-  to push down.
+  opens (`data.role="notify"`, `data.device_id`, `data.name`). It registers the connection
+  with the Anamanti Core's `NotificationService`, which parks the read loop and holds the
+  socket to push down. `device_id` is a **stable, globally-unique** identifier the display
+  mints once from its Wi-Fi MAC (`anamanti-<12 hex>`, e.g. `anamanti-140ac5942aca`; a
+  persisted random id is the fallback when the MAC can't be read — `api::engine::device_hardware_id`),
+  so two displays on one Core are distinguishable; `name` is the human-friendly label set on
+  the device's Settings screen. The Core stores both per connection and lists the connected
+  displays (id + name) on the config page's **Notify** tab (`GET /notifications/status.json`
+  → `devices[]`). (Older devices that predate the field simply send no `name`.)
 - **`anamanti-notify`** (Anamanti Core → device): a proactive notification
   (`data.id`, `data.priority` = `info`|`reminder`|`alert`, `data.title`, `data.body`).
   The device decodes it to a `NotifyEvent` on a dedicated FRB stream; Flutter's
