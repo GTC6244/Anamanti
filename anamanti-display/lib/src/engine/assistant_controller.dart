@@ -24,6 +24,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:anamanti_display/src/engine/recipe_data.dart';
 import 'package:anamanti_display/src/engine/place_data.dart';
+import 'package:anamanti_display/src/engine/music_data.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 
@@ -76,6 +77,42 @@ typedef PlaceContextSink =
 /// round-trip (mDNS discover + connect); tests inject a fake. When left null the
 /// offline poll is disabled.
 typedef OrchestratorProbe = Future<bool> Function();
+
+/// Sends a music transport/volume command from the on-screen controls to the Core.
+/// `action` ∈ `pause`/`resume`/`next`/`previous`/`volume`; `value` is the 0–100 percent
+/// for `volume`. Production wires the native [musicControl] (a short-lived control
+/// round-trip); null (the default, for tests) disables it so taps are no-ops.
+typedef MusicControlSink = void Function({required String action, int? value});
+
+/// Pushes the current music-screen state down to the native engine, so the next voice
+/// turn's `audio-start` tells the orchestrator a music screen is up (what's playing + which
+/// view) and the LLM can drive it by voice (`music_screen` show/queue/close) or answer
+/// "what's this song?". Production wires the native [setMusicContext]; null (the default,
+/// for tests) disables it. Only a full music screen counts as context — the compact overlay
+/// does not, so it never steals the context from a recipe/weather/place screen.
+typedef MusicContextSink = void Function({
+  required bool active,
+  required bool playing,
+  required String title,
+  required String artist,
+  required String screen,
+});
+
+/// Which music surface is currently shown, independent of whether music is playing
+/// (`music != null`). While playing, the compact [MusicControlOverlay] rides the ambient
+/// screen; tapping it opens the full now-playing screen, from which the up-next list is
+/// reachable. Closing a full screen returns to [hidden] (the overlay) — it never stops
+/// playback.
+enum MusicScreen {
+  /// No full music screen — only the compact control overlay (when music is playing).
+  hidden,
+
+  /// The full-screen now-playing view (artwork, transport, volume).
+  nowPlaying,
+
+  /// The full-screen up-next queue list.
+  nextUp,
+}
 
 /// Where the current voice turn is, from the UI's point of view.
 enum TurnPhase {
@@ -173,6 +210,8 @@ class AssistantState {
     this.weather,
     this.weatherCurrent,
     this.place,
+    this.music,
+    this.musicScreen = MusicScreen.hidden,
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
@@ -308,6 +347,23 @@ class AssistantState {
   /// Whether the full-screen place card is currently on screen.
   bool get placeActive => place != null;
 
+  /// The current music now-playing snapshot pushed by the Core over the persistent music
+  /// channel, or `null` when nothing is playing (a `dismiss` push). Independent of the
+  /// voice turn — music plays and updates during idle. Drives the compact control overlay
+  /// and the full music screens.
+  final MusicData? music;
+
+  /// Which music surface is shown (see [MusicScreen]). Only meaningful while [musicActive].
+  final MusicScreen musicScreen;
+
+  /// Whether music is currently playing (there is a now-playing snapshot). The compact
+  /// [MusicControlOverlay] rides the ambient screen whenever this is true and no full
+  /// music screen / mode / turn is up.
+  bool get musicActive => music != null;
+
+  /// Whether a full-screen music view (now-playing or up-next) is currently on screen.
+  bool get musicScreenActive => musicActive && musicScreen != MusicScreen.hidden;
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -335,7 +391,12 @@ class AssistantState {
   /// camera-presence flip. (Historically the backlight tracked only [userPresent],
   /// so a turn/mode that woke the display left the backlight stuck dim.)
   bool get screenAwake =>
-      userPresent || displayActive || recipeActive || weatherActive || placeActive;
+      userPresent ||
+      displayActive ||
+      recipeActive ||
+      weatherActive ||
+      placeActive ||
+      musicScreenActive;
 
   AssistantState copyWith({
     TurnPhase? phase,
@@ -366,6 +427,9 @@ class AssistantState {
     WeatherData? weatherCurrent,
     PlaceData? place,
     bool clearPlace = false,
+    MusicData? music,
+    bool clearMusic = false,
+    MusicScreen? musicScreen,
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
@@ -396,6 +460,8 @@ class AssistantState {
       weather: clearWeather ? null : (weather ?? this.weather),
       weatherCurrent: weatherCurrent ?? this.weatherCurrent,
       place: clearPlace ? null : (place ?? this.place),
+      music: clearMusic ? null : (music ?? this.music),
+      musicScreen: musicScreen ?? this.musicScreen,
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
@@ -422,6 +488,8 @@ class AssistantController extends ChangeNotifier {
     RecipeContextSink? setRecipeContext,
     WeatherContextSink? setWeatherContext,
     PlaceContextSink? setPlaceContext,
+    MusicControlSink? musicControl,
+    MusicContextSink? setMusicContext,
   })  : _config = config,
         _onUserActivity = onUserActivity,
         _weatherAutoClose = weatherAutoClose,
@@ -429,6 +497,8 @@ class AssistantController extends ChangeNotifier {
         _setRecipeContext = setRecipeContext,
         _setWeatherContext = setWeatherContext,
         _setPlaceContext = setPlaceContext,
+        _musicControl = musicControl,
+        _setMusicContext = setMusicContext,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -492,6 +562,15 @@ class AssistantController extends ChangeNotifier {
   /// Sink for pushing place-card context to the native engine (see [PlaceContextSink]);
   /// null disables it (tests with no native library).
   final PlaceContextSink? _setPlaceContext;
+
+  /// Sink for sending music transport/volume commands to the Core (see
+  /// [MusicControlSink]); null disables it (tests with no native library), so taps are
+  /// no-ops.
+  final MusicControlSink? _musicControl;
+
+  /// Sink for pushing music-screen display context to the native engine (see
+  /// [MusicContextSink]); null disables it (tests with no native library).
+  final MusicContextSink? _setMusicContext;
 
   /// The active recipe pane's latest scroll position, tracked so recipe context
   /// pushes carry it. `_recipeAtTop` starts true (a freshly opened tab is at the top);
@@ -743,7 +822,11 @@ class AssistantController extends ChangeNotifier {
           _recipeAtTop = true;
           _recipeAtBottom = false;
           _emit(_state.copyWith(
-              recipe: recipe, recipeTab: 0, clearWeather: true, clearPlace: true));
+              recipe: recipe,
+              recipeTab: 0,
+              clearWeather: true,
+              clearPlace: true,
+              musicScreen: MusicScreen.hidden));
           _pushRecipeContext();
           _pushPlaceContext();
         }
@@ -767,6 +850,7 @@ class AssistantController extends ChangeNotifier {
               clearRecipe: true,
               clearPlace: true,
               recipeTab: 0,
+              musicScreen: MusicScreen.hidden,
             ),
           );
           _scheduleWeatherAutoClose();
@@ -794,7 +878,11 @@ class AssistantController extends ChangeNotifier {
           _recipeAtTop = true;
           _recipeAtBottom = false;
           _emit(_state.copyWith(
-              place: place, clearRecipe: true, clearWeather: true, recipeTab: 0));
+              place: place,
+              clearRecipe: true,
+              clearWeather: true,
+              recipeTab: 0,
+              musicScreen: MusicScreen.hidden));
           _schedulePlaceAutoClose();
           _pushRecipeContext();
           _pushWeatherContext();
@@ -821,6 +909,10 @@ class AssistantController extends ChangeNotifier {
             ),
           );
         }
+      case WakeWordEventKind.musicScreen:
+        // Voice `music_screen` command ("show me what's playing" / "what's up next" /
+        // "hide the music"). Routed through the same methods a touch uses.
+        _applyMusicScreen(e.musicScreen);
     }
   }
 
@@ -926,6 +1018,108 @@ class AssistantController extends ChangeNotifier {
       _pushPlaceContext();
     }
   }
+
+  /// Fold a music now-playing push (from the persistent music channel) into state. An
+  /// empty/blank payload is a `dismiss` (nothing playing) → clear music and hide any
+  /// full music screen; otherwise parse the snapshot and keep whatever music screen the
+  /// user has open. A malformed non-empty payload is ignored (keeps the last snapshot)
+  /// rather than crashing. Called by the app shell's music-channel subscription.
+  void applyMusicPush(String nowPlayingJson) {
+    if (nowPlayingJson.trim().isEmpty) {
+      if (_state.music != null) {
+        _emit(_state.copyWith(clearMusic: true, musicScreen: MusicScreen.hidden));
+        _pushMusicContext();
+      }
+      return;
+    }
+    final music = MusicData.tryParse(nowPlayingJson);
+    if (music != null) {
+      _emit(_state.copyWith(music: music));
+      // If a full music screen is open, refresh its context (the track may have changed).
+      if (_state.musicScreen != MusicScreen.hidden) _pushMusicContext();
+    }
+  }
+
+  /// Open the full-screen now-playing view (the user tapped the compact control overlay,
+  /// or said "show me what's playing"). No-op when nothing is playing.
+  void openNowPlaying() {
+    if (_state.musicActive && _state.musicScreen != MusicScreen.nowPlaying) {
+      _emit(_state.copyWith(musicScreen: MusicScreen.nowPlaying));
+      _pushMusicContext();
+    }
+  }
+
+  /// Show the full-screen up-next queue (from the now-playing view, or "what's up next").
+  /// No-op when nothing is playing.
+  void showMusicQueue() {
+    if (_state.musicActive && _state.musicScreen != MusicScreen.nextUp) {
+      _emit(_state.copyWith(musicScreen: MusicScreen.nextUp));
+      _pushMusicContext();
+    }
+  }
+
+  /// Return from the up-next list to the now-playing view.
+  void backToNowPlaying() => openNowPlaying();
+
+  /// Close any full music screen and return to the compact control overlay (music keeps
+  /// playing — this never stops playback).
+  void closeMusicScreen() {
+    if (_state.musicScreen != MusicScreen.hidden) {
+      _emit(_state.copyWith(musicScreen: MusicScreen.hidden));
+      _pushMusicContext();
+    }
+  }
+
+  /// Apply a voice `music_screen` command (from the engine stream) by routing it through
+  /// the same methods a touch uses. `screen` ∈ `now_playing` / `up_next` / `hidden`.
+  void _applyMusicScreen(String screen) {
+    switch (screen) {
+      case 'now_playing':
+        openNowPlaying();
+      case 'up_next':
+        showMusicQueue();
+      default:
+        closeMusicScreen();
+    }
+  }
+
+  /// Push the current music-screen context to the native engine (see [MusicContextSink]).
+  /// Only a *full* music screen is reported as context — the compact overlay is a
+  /// background affordance, so it never claims the display context from a recipe/weather/
+  /// place screen. A no-op when no sink is wired (tests).
+  void _pushMusicContext() {
+    final sink = _setMusicContext;
+    if (sink == null) return;
+    final m = _state.music;
+    if (m == null || _state.musicScreen == MusicScreen.hidden) {
+      sink(active: false, playing: false, title: '', artist: '', screen: 'hidden');
+      return;
+    }
+    sink(
+      active: true,
+      playing: m.playing,
+      title: m.trackTitle,
+      artist: m.artist,
+      screen: _state.musicScreen == MusicScreen.nextUp ? 'up_next' : 'now_playing',
+    );
+  }
+
+  /// Toggle play/pause from the on-screen controls. The device knows the current state
+  /// from the last push, so it sends the explicit `pause`/`resume` the Core maps 1:1.
+  void playPauseMusic() {
+    final playing = _state.music?.playing ?? false;
+    _musicControl?.call(action: playing ? 'pause' : 'resume');
+  }
+
+  /// Skip to the next track.
+  void nextTrack() => _musicControl?.call(action: 'next');
+
+  /// Go back to the previous track.
+  void previousTrack() => _musicControl?.call(action: 'previous');
+
+  /// Set the music volume (0–100 percent).
+  void setMusicVolume(int percent) =>
+      _musicControl?.call(action: 'volume', value: percent.clamp(0, 100));
 
   /// Fold an ambient weather push (from the weather channel) into the indicator state.
   /// Called by the app shell's weather-channel subscription. Never opens the full

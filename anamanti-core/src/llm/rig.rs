@@ -37,7 +37,7 @@ use rig_core::tool::PortableTool;
 
 use chrono::Local;
 
-use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
+use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, MusicNav, RecipeNav, ReplyStream};
 use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsConfig, DirectionsProvider, LiveHomeLocation, TravelMode};
@@ -99,6 +99,17 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              or a song/artist/album/playlist, you MUST call `spotify_control` — never say you \
              cannot play music. For \"play some <artist>\" or a mood/genre use action=play with \
              kind=artist or kind=playlist; for one named song use kind=track.",
+        );
+    }
+    if has(MUSIC_SCREEN) {
+        parts.push(
+            "You can also control what the music player SHOWS on the display with the \
+             `music_screen` tool (separate from `spotify_control`, which changes playback). \
+             Call `music_screen` with action=show when the user says things like \"show me \
+             what's playing\" or \"pull up the music\", action=show_queue for \"what's up \
+             next\" or \"show the queue\", and action=close for \"hide the music\" or \"close \
+             the player\". The turn context will tell you when the music screen is already \
+             open and what's on it. Relay its short spoken confirmation.",
         );
     }
     if has(RECIPE_LOOKUP) {
@@ -1135,6 +1146,8 @@ pub const RECIPE_LOOKUP: &str = "recipe_lookup";
 pub const CLOSE_RECIPE: &str = "close_recipe";
 /// Tool name for navigating the already-open recipe screen (switch tab / scroll).
 pub const RECIPE_CONTROL: &str = "recipe_control";
+/// Tool name for driving the on-screen music player (show now-playing / up-next / close).
+pub const MUSIC_SCREEN: &str = "music_screen";
 
 /// Typed arguments for [`RecipeLookup`].
 #[derive(Debug, Deserialize)]
@@ -1285,6 +1298,61 @@ fn recipe_control_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Res
     let sink = actions.context("no display is connected right now")?;
     sink.send(DeviceAction::RecipeControl(nav))
         .map_err(|_| anyhow::anyhow!("the display disconnected before the recipe could update"))?;
+    Ok(confirmation.to_string())
+}
+
+/// Typed arguments for [`music_screen_invoke`].
+#[derive(Debug, Deserialize)]
+struct MusicScreenArgs {
+    /// One of the fixed screen actions (see [`music_screen_definition`]).
+    action: String,
+}
+
+fn music_screen_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: MUSIC_SCREEN.to_string(),
+        description: "Control what the music player shows on the display: open the full \
+                      now-playing screen, open the up-next queue, or close the player back \
+                      to the ambient screen. Use this for requests like \"show me what's \
+                      playing\", \"show the queue / what's up next\", or \"hide the music\". \
+                      This only changes the SCREEN — to play/pause/skip/change volume use \
+                      spotify_control instead."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["show", "show_queue", "close"],
+                    "description": "The screen action: `show` opens the now-playing view, \
+                                    `show_queue` opens the up-next list, `close` returns to \
+                                    the ambient display."
+                }
+            },
+            "required": ["action"]
+        }),
+    }
+}
+
+/// Execute `music_screen`: map the action to a [`DeviceAction::MusicScreen`] and emit it on
+/// the per-turn sink. Screen-only — the device decides whether anything is playing.
+fn music_screen_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+    let args: MusicScreenArgs =
+        serde_json::from_value(arguments.clone()).context("parsing music_screen arguments")?;
+    let (nav, confirmation) = match args.action.as_str() {
+        "show" | "now_playing" | "show_now_playing" => {
+            (MusicNav::NowPlaying, "Here's what's playing.")
+        }
+        "show_queue" | "queue" | "up_next" | "whats_next" => {
+            (MusicNav::Queue, "Here's what's up next.")
+        }
+        "close" | "hide" | "dismiss" => (MusicNav::Close, "Closing the music player."),
+        other => anyhow::bail!("unknown music_screen action `{other}`"),
+    };
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::MusicScreen(nav)).map_err(|_| {
+        anyhow::anyhow!("the display disconnected before the music screen could update")
+    })?;
     Ok(confirmation.to_string())
 }
 
@@ -1654,6 +1722,9 @@ impl Tools {
         let spotify = spotify.map(|c| Arc::new(SpotifyControl::new(c)));
         if let Some(s) = &spotify {
             definitions.push(s.definition());
+            // The on-screen music player is driven by voice wherever Spotify control is
+            // available (screen-only; transport stays on `spotify_control`).
+            definitions.push(music_screen_definition());
         }
         let grocery = grocery.map(|c| Arc::new(ShoppingListControl::new(c)));
         if let Some(g) = &grocery {
@@ -1753,6 +1824,10 @@ impl Tools {
             RECIPE_CONTROL => match &self.recipe {
                 Some(_) => recipe_control_invoke(arguments, actions),
                 None => anyhow::bail!("recipe lookup is not enabled"),
+            },
+            MUSIC_SCREEN => match &self.spotify {
+                Some(_) => music_screen_invoke(arguments, actions),
+                None => anyhow::bail!("music control is not enabled"),
             },
             other => anyhow::bail!("model called unknown tool `{other}`"),
         }
@@ -2903,6 +2978,31 @@ mod tests {
             }
         );
         server.await.unwrap();
+    }
+
+    #[test]
+    fn music_screen_invoke_maps_actions_and_emits_device_actions() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        music_screen_invoke(&json!({ "action": "show" }), Some(&tx)).unwrap();
+        music_screen_invoke(&json!({ "action": "show_queue" }), Some(&tx)).unwrap();
+        music_screen_invoke(&json!({ "action": "close" }), Some(&tx)).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::MusicScreen(MusicNav::NowPlaying)
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::MusicScreen(MusicNav::Queue)
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::MusicScreen(MusicNav::Close)
+        );
+
+        // An unknown action errors (and emits nothing).
+        assert!(music_screen_invoke(&json!({ "action": "teleport" }), Some(&tx)).is_err());
+        // With no sink wired, a valid action reports no display is connected.
+        assert!(music_screen_invoke(&json!({ "action": "show" }), None).is_err());
     }
 
     /// Without tools, a turn still streams straight through in one pass.

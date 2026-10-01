@@ -26,7 +26,7 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
-use crate::llm::{DeviceAction, LlmBackend, LlmTurn, RecipeNav};
+use crate::llm::{DeviceAction, LlmBackend, LlmTurn, MusicNav, RecipeNav};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
@@ -36,8 +36,8 @@ use crate::memory::{
 use crate::settings::{Household, HouseholdMember, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
 use crate::stt::{SttEngine, SttEvent, Transcriber, WyomingTranscriber};
-use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::vad::SpeechGate;
+use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::tts::TtsSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
@@ -497,10 +497,7 @@ impl Pipeline {
     /// chosen live from `runtime.vad_engine` (config-page/device swap, no restart); a
     /// swap to Silero when no model is loaded (feature off or model absent) falls back
     /// to the energy gate with a warning. See `plans/VadSileroPlan.md`.
-    fn build_speech_gate(
-        &self,
-        runtime: &crate::settings::RuntimeSettings,
-    ) -> Box<dyn SpeechGate> {
+    fn build_speech_gate(&self, runtime: &crate::settings::RuntimeSettings) -> Box<dyn SpeechGate> {
         #[cfg(feature = "vad-silero")]
         if matches!(runtime.vad_engine, crate::config::VadEngineKind::Silero) {
             match &self.silero {
@@ -1706,6 +1703,9 @@ impl Pipeline {
             Some(protocol::DisplayContext::Weather(_)) => Some("weather_dismiss"),
             Some(protocol::DisplayContext::Recipe(_)) => Some("recipe_dismiss"),
             Some(protocol::DisplayContext::Place(_)) => Some("place_dismiss"),
+            // Music close isn't a System-1 fast-path intent — defer to the LLM's
+            // `music_screen` tool, which also handles show/queue.
+            Some(protocol::DisplayContext::Music(_)) => None,
             None => None,
         };
         if let Some(intent) = dismiss_intent {
@@ -2219,7 +2219,34 @@ fn display_context_line(ctx: &protocol::DisplayContext) -> String {
         protocol::DisplayContext::Recipe(screen) => recipe_screen_line(screen),
         protocol::DisplayContext::Weather(screen) => weather_screen_line(screen),
         protocol::DisplayContext::Place(screen) => place_screen_line(screen),
+        protocol::DisplayContext::Music(screen) => music_screen_line(screen),
     }
+}
+
+/// The prompt line for the music player: names the track on screen and which music view is
+/// open, so the model can drive it with `music_screen` (show now-playing / up-next / close)
+/// and answer "what's this song?". Transport stays on `spotify_control`.
+fn music_screen_line(screen: &protocol::MusicScreen) -> String {
+    let title = screen.title.trim();
+    let artist = screen.artist.trim();
+    let track = if title.is_empty() {
+        "a track".to_string()
+    } else if artist.is_empty() {
+        format!("\"{title}\"")
+    } else {
+        format!("\"{title}\" by {artist}")
+    };
+    let state = if screen.playing { "playing" } else { "paused" };
+    let view = match screen.screen.as_str() {
+        "now_playing" => "the now-playing screen is open",
+        "up_next" => "the up-next queue is open",
+        _ => "only the compact control bar is showing",
+    };
+    format!(
+        "The music player is on the display ({view}), {state} {track}. Use the \
+         `music_screen` tool to show the now-playing view, show the up-next queue, or close \
+         it, and `spotify_control` to play/pause/skip or change the volume."
+    )
 }
 
 /// The prompt line for the place card: names the place on screen so the model can answer
@@ -2419,6 +2446,11 @@ async fn drain_device_actions<W>(
                 RecipeNav::ScrollDown => WyomingEvent::recipe_scroll("down"),
                 RecipeNav::ScrollTop => WyomingEvent::recipe_scroll("top"),
                 RecipeNav::ScrollBottom => WyomingEvent::recipe_scroll("bottom"),
+            },
+            DeviceAction::MusicScreen(nav) => match nav {
+                MusicNav::NowPlaying => WyomingEvent::music_screen("now_playing"),
+                MusicNav::Queue => WyomingEvent::music_screen("up_next"),
+                MusicNav::Close => WyomingEvent::music_screen("hidden"),
             },
         };
         if let Err(e) = protocol::write_event(writer, &event).await {

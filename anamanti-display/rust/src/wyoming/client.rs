@@ -253,6 +253,11 @@ pub enum TurnUpdate {
     /// card full-screen, or dismiss it. Handled by the UI (the place card outlives the
     /// turn's socket), so it does not change the turn's state machine.
     Place(protocol::PlaceCommand),
+    /// A device-action **music screen** command relayed from the orchestrator's
+    /// `music_screen` tool: which music screen to show (`"now_playing"` / `"up_next"` /
+    /// `"hidden"`). Handled by the UI (the music player outlives the turn's socket), so it
+    /// does not change the turn's state machine.
+    Music(String),
     /// The orchestrator asked the device to **listen for a follow-up** after its reply.
     /// The payload is `(depth, wait_secs)`: the chain depth the follow-up turn should
     /// carry, and how long to keep the mic open for input before sleeping (longer after
@@ -468,6 +473,15 @@ where
         types::PLACE => {
             if let Some(cmd) = event.place_command() {
                 on_update(TurnUpdate::Place(cmd));
+            }
+        }
+        // A voice `music_screen` command relayed on the voice-turn socket (show/hide the
+        // now-playing / up-next screens). Only `screen` commands arrive here; the
+        // now_playing/dismiss pushes ride the persistent music channel. The music player
+        // is owned by the UI and outlives the turn, so just surface it.
+        types::MUSIC => {
+            if let Some(protocol::MusicCommand::Screen(screen)) = event.music_command() {
+                on_update(TurnUpdate::Music(screen));
             }
         }
         // Follow-up-listen request (the reply was a question). Surface it without

@@ -251,6 +251,9 @@ pub enum WakeWordEventKind {
     /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
     /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
     RecipeScroll,
+    /// Music mode: a voice `music_screen` command. `music_screen` is the target screen
+    /// (`"now_playing"` / `"up_next"` / `"hidden"`). Only acts when music is playing.
+    MusicScreen,
     /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
     /// is `true` when someone has approached the display (brighten) and `false` when
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
@@ -321,6 +324,9 @@ pub struct WakeWordEvent {
     /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
     /// scroll direction (`RecipeScroll`). Empty for every other kind.
     pub recipe_action: String,
+    /// The music screen target for a `MusicScreen` voice command (`"now_playing"` /
+    /// `"up_next"` / `"hidden"`). Empty for every other kind.
+    pub music_screen: String,
 }
 
 impl WakeWordEvent {
@@ -347,6 +353,7 @@ impl WakeWordEvent {
             weather_json: String::new(),
             place_json: String::new(),
             recipe_action: String::new(),
+            music_screen: String::new(),
         }
     }
 
@@ -379,7 +386,13 @@ impl WakeWordEvent {
     /// screen can render the mic meter, the score-vs-threshold meter, and the
     /// numeric readouts from one stream. Emitted (in place of [`Self::level`]) while
     /// a wake-word model is loaded.
-    pub(crate) fn level_diag(rms: f32, score: f32, avg_score: f32, threshold: f32, gain_db: f32) -> Self {
+    pub(crate) fn level_diag(
+        rms: f32,
+        score: f32,
+        avg_score: f32,
+        threshold: f32,
+        gain_db: f32,
+    ) -> Self {
         Self {
             rms,
             score,
@@ -531,6 +544,13 @@ impl WakeWordEvent {
         }
     }
 
+    pub(crate) fn music_screen(screen: String) -> Self {
+        Self {
+            music_screen: screen,
+            ..Self::base(WakeWordEventKind::MusicScreen)
+        }
+    }
+
     // Constructed only by the Android camera bridge; on host builds it's unused.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn presence(present: bool) -> Self {
@@ -677,6 +697,38 @@ pub fn set_place_context(active: bool, name: String, address: String) {
         None
     };
     crate::engine::set_display_context(screen);
+}
+
+/// Push the music player's current state as this turn's display context (see
+/// [`set_place_context`]), so the next turn's `audio-start` tells the orchestrator a music
+/// screen is up (what's playing + which view) and the LLM can drive it with `music_screen`
+/// (show now-playing / up-next / close) and answer "what's this song?".
+///
+/// Flutter calls this when a full music screen opens/closes or the track changes while one
+/// is open. `active == false` clears the context (so another screen or the idle state wins);
+/// the other fields are ignored then. `screen` ∈ `"now_playing"` / `"up_next"`.
+#[frb(sync)]
+pub fn set_music_context(
+    active: bool,
+    playing: bool,
+    title: String,
+    artist: String,
+    screen: String,
+) {
+    let value = if active {
+        Some(serde_json::json!({
+            "kind": "music",
+            "music": {
+                "playing": playing,
+                "title": title,
+                "artist": artist,
+                "screen": screen,
+            },
+        }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -916,6 +968,118 @@ pub fn start_weather_channel(
 pub fn stop_weather_channel() {
     use std::sync::atomic::Ordering;
     let handle = weather_slot().lock().unwrap().take();
+    if let Some(mut h) = handle {
+        h.running.store(false, Ordering::SeqCst);
+        if let Some(join) = h.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Music now-playing channel. A persistent channel the device dials to the
+// orchestrator (twin of the weather channel), receiving `anamanti-music` pushes
+// *without* a voice turn, so the music screen reflects the current track + up-next
+// queue live. Rust owns the socket + reconnect/backoff; Flutter consumes
+// `MusicPush`es. Transport/volume button taps go back the other way via
+// [`music_control`] (a short-lived control round-trip, not this channel).
+// ---------------------------------------------------------------------------
+
+/// Config for the persistent music channel. Mirrors [`WeatherConfig`]; the orchestrator
+/// is discovered over mDNS at connect time.
+pub struct MusicConfig {
+    /// Stable selection key (`instance_id` TXT) of the pinned orchestrator; empty =
+    /// "Auto". Mirrors [`WakeWordConfig::orchestrator_key`].
+    pub orchestrator_key: String,
+    /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+    /// (0 = built-in default).
+    pub discovery_timeout_secs: u64,
+    /// A stable identifier for this display, sent in the `anamanti-hello` frame.
+    pub device_id: String,
+}
+
+/// One now-playing push from the orchestrator, streamed to Flutter. `now_playing_json`
+/// is the serialized snapshot (track_title, artist, album, artwork_uri, position_secs,
+/// duration_secs, volume_percent, next_up[]); an **empty string** means "dismiss"
+/// (nothing is playing — close the music screen). Flat struct so the FRB boundary stays
+/// dependency-free.
+#[derive(Clone)]
+pub struct MusicPush {
+    pub now_playing_json: String,
+}
+
+struct MusicHandle {
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+static MUSIC: std::sync::OnceLock<std::sync::Mutex<Option<MusicHandle>>> =
+    std::sync::OnceLock::new();
+
+fn music_slot() -> &'static std::sync::Mutex<Option<MusicHandle>> {
+    MUSIC.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Open the persistent music now-playing channel and stream pushed snapshots to Dart.
+/// Replaces any channel already running (so it can be restarted when the pinned
+/// orchestrator changes). Dials the pinned orchestrator and reconnects with backoff for
+/// the life of the subscription.
+pub fn start_music_channel(config: MusicConfig, sink: StreamSink<MusicPush>) -> anyhow::Result<()> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    stop_music_channel();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let loop_running = running.clone();
+    let join = std::thread::Builder::new()
+        .name("music-channel".to_string())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::error!("music channel: could not build runtime: {e:#}");
+                    return;
+                }
+            };
+            let timeout = if config.discovery_timeout_secs == 0 {
+                crate::wyoming::DEFAULT_DISCOVERY_TIMEOUT
+            } else {
+                std::time::Duration::from_secs(config.discovery_timeout_secs)
+            };
+            let key = {
+                let k = config.orchestrator_key.trim();
+                if k.is_empty() {
+                    None
+                } else {
+                    Some(k.to_string())
+                }
+            };
+            let cache = crate::wyoming::EndpointCache::new();
+            rt.block_on(crate::wyoming::music::run(
+                &cache,
+                timeout,
+                key,
+                config.device_id,
+                loop_running,
+                move |now_playing_json| sink.add(MusicPush { now_playing_json }).is_ok(),
+            ));
+        })?;
+
+    *music_slot().lock().unwrap() = Some(MusicHandle {
+        running,
+        join: Some(join),
+    });
+    Ok(())
+}
+
+/// Stop the music now-playing channel (if any) and join its thread. Idempotent.
+pub fn stop_music_channel() {
+    use std::sync::atomic::Ordering;
+    let handle = music_slot().lock().unwrap().take();
     if let Some(mut h) = handle {
         h.running.store(false, Ordering::SeqCst);
         if let Some(join) = h.join.take() {

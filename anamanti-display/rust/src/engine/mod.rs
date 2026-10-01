@@ -126,7 +126,10 @@ fn load_tuning() -> (f32, f32) {
 /// engine without restarting it (the audio-diagnostics screen). Clamped to sane
 /// ranges. The values are re-seeded from config on the next engine start.
 pub fn update_tuning(gain_db: f32, threshold: f32) {
-    set_tuning(gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB), threshold.clamp(0.0, 1.0));
+    set_tuning(
+        gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB),
+        threshold.clamp(0.0, 1.0),
+    );
 }
 
 /// The display context — what the device is currently showing (e.g. the recipe screen's

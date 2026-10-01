@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 957648075;
+  int get rustContentHash => 1365569795;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -144,6 +144,13 @@ abstract class RustLibApi extends BaseApi {
     required BigInt discoveryTimeoutSecs,
   });
 
+  Future<String> crateApiSettingsMusicControl({
+    required String orchestratorKey,
+    required String action,
+    PlatformInt64? value,
+    required BigInt discoveryTimeoutSecs,
+  });
+
   Future<bool> crateApiSettingsNameSpeaker({
     required String orchestratorKey,
     required String id,
@@ -152,6 +159,14 @@ abstract class RustLibApi extends BaseApi {
   });
 
   void crateApiEngineNoteUserActivity();
+
+  void crateApiEngineSetMusicContext({
+    required bool active,
+    required bool playing,
+    required String title,
+    required String artist,
+    required String screen,
+  });
 
   void crateApiEngineSetPlaceContext({
     required bool active,
@@ -177,6 +192,10 @@ abstract class RustLibApi extends BaseApi {
     required String description,
   });
 
+  Stream<MusicPush> crateApiEngineStartMusicChannel({
+    required MusicConfig config,
+  });
+
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
     required NotifyConfig config,
   });
@@ -188,6 +207,8 @@ abstract class RustLibApi extends BaseApi {
   Stream<WeatherPush> crateApiEngineStartWeatherChannel({
     required WeatherConfig config,
   });
+
+  Future<void> crateApiEngineStopMusicChannel();
 
   Future<void> crateApiEngineStopNotifyChannel();
 
@@ -702,6 +723,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> crateApiSettingsMusicControl({
+    required String orchestratorKey,
+    required String action,
+    PlatformInt64? value,
+    required BigInt discoveryTimeoutSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(orchestratorKey, serializer);
+          sse_encode_String(action, serializer);
+          sse_encode_opt_box_autoadd_i_64(value, serializer);
+          sse_encode_u_64(discoveryTimeoutSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 16,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSettingsMusicControlConstMeta,
+        argValues: [orchestratorKey, action, value, discoveryTimeoutSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSettingsMusicControlConstMeta =>
+      const TaskConstMeta(
+        debugName: "music_control",
+        argNames: [
+          "orchestratorKey",
+          "action",
+          "value",
+          "discoveryTimeoutSecs",
+        ],
+      );
+
+  @override
   Future<bool> crateApiSettingsNameSpeaker({
     required String orchestratorKey,
     required String id,
@@ -719,7 +784,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 17,
             port: port_,
           );
         },
@@ -746,7 +811,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -763,6 +828,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "note_user_activity", argNames: []);
 
   @override
+  void crateApiEngineSetMusicContext({
+    required bool active,
+    required bool playing,
+    required String title,
+    required String artist,
+    required String screen,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(active, serializer);
+          sse_encode_bool(playing, serializer);
+          sse_encode_String(title, serializer);
+          sse_encode_String(artist, serializer);
+          sse_encode_String(screen, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineSetMusicContextConstMeta,
+        argValues: [active, playing, title, artist, screen],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineSetMusicContextConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_music_context",
+        argNames: ["active", "playing", "title", "artist", "screen"],
+      );
+
+  @override
   void crateApiEngineSetPlaceContext({
     required bool active,
     required String name,
@@ -775,7 +876,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_bool(active, serializer);
           sse_encode_String(name, serializer);
           sse_encode_String(address, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -815,7 +916,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_bool(atBottom, serializer);
           sse_encode_u_32(ingredientCount, serializer);
           sse_encode_u_32(stepCount, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -867,7 +968,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(units, serializer);
           sse_encode_i_32(temp, serializer);
           sse_encode_String(description, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 22)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -887,6 +988,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Stream<MusicPush> crateApiEngineStartMusicChannel({
+    required MusicConfig config,
+  }) {
+    final sink = RustStreamSink<MusicPush>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_box_autoadd_music_config(config, serializer);
+            sse_encode_StreamSink_music_push_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 23,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_AnyhowException,
+          ),
+          constMeta: kCrateApiEngineStartMusicChannelConstMeta,
+          argValues: [config, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiEngineStartMusicChannelConstMeta =>
+      const TaskConstMeta(
+        debugName: "start_music_channel",
+        argNames: ["config", "sink"],
+      );
+
+  @override
   Stream<NotifyEvent> crateApiEngineStartNotifyChannel({
     required NotifyConfig config,
   }) {
@@ -901,7 +1040,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 21,
+              funcId: 24,
               port: port_,
             );
           },
@@ -939,7 +1078,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 22,
+              funcId: 25,
               port: port_,
             );
           },
@@ -977,7 +1116,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 23,
+              funcId: 26,
               port: port_,
             );
           },
@@ -1001,6 +1140,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiEngineStopMusicChannel() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 27,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineStopMusicChannelConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineStopMusicChannelConstMeta =>
+      const TaskConstMeta(debugName: "stop_music_channel", argNames: []);
+
+  @override
   Future<void> crateApiEngineStopNotifyChannel() {
     return handler.executeNormal(
       NormalTask(
@@ -1009,7 +1175,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1036,7 +1202,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 29,
             port: port_,
           );
         },
@@ -1063,7 +1229,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 30,
             port: port_,
           );
         },
@@ -1092,7 +1258,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_f_32(gainDb, serializer);
           sse_encode_f_32(threshold, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 27)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1127,7 +1293,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 32,
             port: port_,
           );
         },
@@ -1152,6 +1318,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return AnyhowException(raw as String);
+  }
+
+  @protected
+  RustStreamSink<MusicPush> dco_decode_StreamSink_music_push_Sse(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
   }
 
   @protected
@@ -1194,6 +1366,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   double dco_decode_box_autoadd_f_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as double;
+  }
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_i_64(raw);
+  }
+
+  @protected
+  MusicConfig dco_decode_box_autoadd_music_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_music_config(raw);
   }
 
   @protected
@@ -1338,6 +1522,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MusicConfig dco_decode_music_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return MusicConfig(
+      orchestratorKey: dco_decode_String(arr[0]),
+      discoveryTimeoutSecs: dco_decode_u_64(arr[1]),
+      deviceId: dco_decode_String(arr[2]),
+    );
+  }
+
+  @protected
+  MusicPush dco_decode_music_push(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return MusicPush(nowPlayingJson: dco_decode_String(arr[0]));
+  }
+
+  @protected
   NotifyConfig dco_decode_notify_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -1374,6 +1580,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   double? dco_decode_opt_box_autoadd_f_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_f_64(raw);
+  }
+
+  @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_i_64(raw);
   }
 
   @protected
@@ -1528,8 +1740,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 21)
-      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
+    if (arr.length != 22)
+      throw Exception('unexpected arr length: expect 22 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -1552,6 +1764,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       weatherJson: dco_decode_String(arr[18]),
       placeJson: dco_decode_String(arr[19]),
       recipeAction: dco_decode_String(arr[20]),
+      musicScreen: dco_decode_String(arr[21]),
     );
   }
 
@@ -1588,6 +1801,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_String(deserializer);
     return AnyhowException(inner);
+  }
+
+  @protected
+  RustStreamSink<MusicPush> sse_decode_StreamSink_music_push_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
   }
 
   @protected
@@ -1631,6 +1852,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   double sse_decode_box_autoadd_f_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_f_64(deserializer));
+  }
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_i_64(deserializer));
+  }
+
+  @protected
+  MusicConfig sse_decode_box_autoadd_music_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_music_config(deserializer));
   }
 
   @protected
@@ -1824,6 +2059,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MusicConfig sse_decode_music_config(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_orchestratorKey = sse_decode_String(deserializer);
+    var var_discoveryTimeoutSecs = sse_decode_u_64(deserializer);
+    var var_deviceId = sse_decode_String(deserializer);
+    return MusicConfig(
+      orchestratorKey: var_orchestratorKey,
+      discoveryTimeoutSecs: var_discoveryTimeoutSecs,
+      deviceId: var_deviceId,
+    );
+  }
+
+  @protected
+  MusicPush sse_decode_music_push(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_nowPlayingJson = sse_decode_String(deserializer);
+    return MusicPush(nowPlayingJson: var_nowPlayingJson);
+  }
+
+  @protected
   NotifyConfig sse_decode_notify_config(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_orchestratorKey = sse_decode_String(deserializer);
@@ -1868,6 +2123,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_f_64(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_i_64(deserializer));
     } else {
       return null;
     }
@@ -2081,6 +2347,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_weatherJson = sse_decode_String(deserializer);
     var var_placeJson = sse_decode_String(deserializer);
     var var_recipeAction = sse_decode_String(deserializer);
+    var var_musicScreen = sse_decode_String(deserializer);
     return WakeWordEvent(
       kind: var_kind,
       message: var_message,
@@ -2103,6 +2370,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       weatherJson: var_weatherJson,
       placeJson: var_placeJson,
       recipeAction: var_recipeAction,
+      musicScreen: var_musicScreen,
     );
   }
 
@@ -2142,6 +2410,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_StreamSink_music_push_Sse(
+    RustStreamSink<MusicPush> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_music_push,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
   }
 
   @protected
@@ -2211,6 +2496,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_box_autoadd_f_64(double self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_f_64(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_music_config(
+    MusicConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_music_config(self, serializer);
   }
 
   @protected
@@ -2389,6 +2692,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_music_config(MusicConfig self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.orchestratorKey, serializer);
+    sse_encode_u_64(self.discoveryTimeoutSecs, serializer);
+    sse_encode_String(self.deviceId, serializer);
+  }
+
+  @protected
+  void sse_encode_music_push(MusicPush self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.nowPlayingJson, serializer);
+  }
+
+  @protected
   void sse_encode_notify_config(NotifyConfig self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.orchestratorKey, serializer);
@@ -2422,6 +2739,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_f_64(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_i_64(self, serializer);
     }
   }
 
@@ -2585,6 +2915,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.weatherJson, serializer);
     sse_encode_String(self.placeJson, serializer);
     sse_encode_String(self.recipeAction, serializer);
+    sse_encode_String(self.musicScreen, serializer);
   }
 
   @protected

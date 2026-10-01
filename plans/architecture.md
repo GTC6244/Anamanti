@@ -581,6 +581,23 @@ mDNS + `instance_id` pin the voice path uses):
   then pushes `anamanti-weather` `current` frames down it on a timer; the device surfaces
   them as a `WeatherPush` FRB stream that refreshes the clock's weather indicator. Same
   dialer/backoff/pin model as notify — see `WeatherPlan.md`.
+- The **music now-playing push** reuses the same design again: the device opens a *fourth*
+  long-lived connection (`rust/src/wyoming/music.rs`, started by `start_music_channel`)
+  with `anamanti-hello` `data.role="music"`, which the server registers with the
+  `NowPlayingService`. A periodic task reads the current Spotify playback + up-next queue
+  (`SpotifyController::now_playing`) and pushes `anamanti-music` `now_playing` / `dismiss`
+  frames down it; the device surfaces them as a `MusicPush` FRB stream folded into
+  `AssistantState.music`, rendering the compact control overlay + the `NowPlayingView` /
+  `NextUpView` full screens. On-screen controls go the other way as a short-lived
+  **`anamanti-music-control`** request/response (a control frame like the settings/memory
+  ones, handled by `control::music_control_response` → the `spotify_control` controller),
+  **not** on the persistent channel. Gated behind `music.enabled` + a linked Spotify; see
+  `MusicPlan.md` (P6) and `DisplayUI.md` §4b.
+- The music screen is also **voice-controllable** via the "Display context" mechanism
+  below: the device stamps a `DisplayContext::Music` block (`set_music_context`) on
+  `audio-start` when a music screen is open, and the Core's `music_screen` rig tool emits a
+  `DeviceAction::MusicScreen` relayed as an `anamanti-music` `screen` frame on the per-turn
+  socket (show now-playing / up-next / close). Playback transport stays on `spotify_control`.
 
 Producers enqueue via `NotificationService::notify`, which fans a notification out to
 every connected device and prunes dead channels. The first producer is the config

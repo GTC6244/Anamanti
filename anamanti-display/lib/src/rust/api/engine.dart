@@ -6,9 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level_diag`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`, `WeatherHandle`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level_diag`, `level`, `listening_followup`, `music_screen`, `music_slot`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `MusicHandle`, `NotifyHandle`, `WeatherHandle`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
 ///
@@ -129,6 +129,28 @@ void setPlaceContext({
   address: address,
 );
 
+/// Push the music player's current state as this turn's display context (see
+/// [`set_place_context`]), so the next turn's `audio-start` tells the orchestrator a music
+/// screen is up (what's playing + which view) and the LLM can drive it with `music_screen`
+/// (show now-playing / up-next / close) and answer "what's this song?".
+///
+/// Flutter calls this when a full music screen opens/closes or the track changes while one
+/// is open. `active == false` clears the context (so another screen or the idle state wins);
+/// the other fields are ignored then. `screen` ∈ `"now_playing"` / `"up_next"`.
+void setMusicContext({
+  required bool active,
+  required bool playing,
+  required String title,
+  required String artist,
+  required String screen,
+}) => RustLib.instance.api.crateApiEngineSetMusicContext(
+  active: active,
+  playing: playing,
+  title: title,
+  artist: artist,
+  screen: screen,
+);
+
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
 /// restarted when the pinned orchestrator changes). The channel dials the pinned
@@ -150,6 +172,74 @@ Stream<WeatherPush> startWeatherChannel({required WeatherConfig config}) =>
 /// Stop the ambient-weather channel (if any) and join its thread. Idempotent.
 Future<void> stopWeatherChannel() =>
     RustLib.instance.api.crateApiEngineStopWeatherChannel();
+
+/// Open the persistent music now-playing channel and stream pushed snapshots to Dart.
+/// Replaces any channel already running (so it can be restarted when the pinned
+/// orchestrator changes). Dials the pinned orchestrator and reconnects with backoff for
+/// the life of the subscription.
+Stream<MusicPush> startMusicChannel({required MusicConfig config}) =>
+    RustLib.instance.api.crateApiEngineStartMusicChannel(config: config);
+
+/// Stop the music now-playing channel (if any) and join its thread. Idempotent.
+Future<void> stopMusicChannel() =>
+    RustLib.instance.api.crateApiEngineStopMusicChannel();
+
+/// Config for the persistent music channel. Mirrors [`WeatherConfig`]; the orchestrator
+/// is discovered over mDNS at connect time.
+class MusicConfig {
+  /// Stable selection key (`instance_id` TXT) of the pinned orchestrator; empty =
+  /// "Auto". Mirrors [`WakeWordConfig::orchestrator_key`].
+  final String orchestratorKey;
+
+  /// Seconds to browse `_wyoming._tcp` before falling back to the cached host
+  /// (0 = built-in default).
+  final BigInt discoveryTimeoutSecs;
+
+  /// A stable identifier for this display, sent in the `anamanti-hello` frame.
+  final String deviceId;
+
+  const MusicConfig({
+    required this.orchestratorKey,
+    required this.discoveryTimeoutSecs,
+    required this.deviceId,
+  });
+
+  @override
+  int get hashCode =>
+      orchestratorKey.hashCode ^
+      discoveryTimeoutSecs.hashCode ^
+      deviceId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MusicConfig &&
+          runtimeType == other.runtimeType &&
+          orchestratorKey == other.orchestratorKey &&
+          discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
+          deviceId == other.deviceId;
+}
+
+/// One now-playing push from the orchestrator, streamed to Flutter. `now_playing_json`
+/// is the serialized snapshot (track_title, artist, album, artwork_uri, position_secs,
+/// duration_secs, volume_percent, next_up[]); an **empty string** means "dismiss"
+/// (nothing is playing — close the music screen). Flat struct so the FRB boundary stays
+/// dependency-free.
+class MusicPush {
+  final String nowPlayingJson;
+
+  const MusicPush({required this.nowPlayingJson});
+
+  @override
+  int get hashCode => nowPlayingJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MusicPush &&
+          runtimeType == other.runtimeType &&
+          nowPlayingJson == other.nowPlayingJson;
+}
 
 /// Config for the persistent notify channel. The orchestrator is discovered over
 /// mDNS at connect time (same as the voice path), so only the pin, the browse
@@ -498,6 +588,10 @@ class WakeWordEvent {
   /// scroll direction (`RecipeScroll`). Empty for every other kind.
   final String recipeAction;
 
+  /// The music screen target for a `MusicScreen` voice command (`"now_playing"` /
+  /// `"up_next"` / `"hidden"`). Empty for every other kind.
+  final String musicScreen;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -520,6 +614,7 @@ class WakeWordEvent {
     required this.weatherJson,
     required this.placeJson,
     required this.recipeAction,
+    required this.musicScreen,
   });
 
   @override
@@ -544,7 +639,8 @@ class WakeWordEvent {
       recipeJson.hashCode ^
       weatherJson.hashCode ^
       placeJson.hashCode ^
-      recipeAction.hashCode;
+      recipeAction.hashCode ^
+      musicScreen.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -571,7 +667,8 @@ class WakeWordEvent {
           recipeJson == other.recipeJson &&
           weatherJson == other.weatherJson &&
           placeJson == other.placeJson &&
-          recipeAction == other.recipeAction;
+          recipeAction == other.recipeAction &&
+          musicScreen == other.musicScreen;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -685,6 +782,10 @@ enum WakeWordEventKind {
   /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
   /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
   recipeScroll,
+
+  /// Music mode: a voice `music_screen` command. `music_screen` is the target screen
+  /// (`"now_playing"` / `"up_next"` / `"hidden"`). Only acts when music is playing.
+  musicScreen,
 
   /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
   /// is `true` when someone has approached the display (brighten) and `false` when

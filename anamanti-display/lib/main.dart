@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/engine/model_assets.dart';
+import 'package:anamanti_display/src/engine/music_channel_controller.dart';
 import 'package:anamanti_display/src/engine/notification_controller.dart';
 import 'package:anamanti_display/src/engine/weather_channel_controller.dart';
 import 'package:anamanti_display/src/engine/screen_brightness.dart';
@@ -31,12 +32,15 @@ import 'package:anamanti_display/src/ui/settings_screen.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart'
     show
+        MusicConfig,
         NotifyConfig,
         WeatherConfig,
         noteUserActivity,
+        setMusicContext,
         setPlaceContext,
         setRecipeContext,
         setWeatherContext;
+import 'package:anamanti_display/src/rust/api/settings.dart' show musicControl;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -94,6 +98,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// it re-pins to the selected orchestrator when that changes.
   NotificationController? _notifications;
   WeatherChannelController? _weather;
+  MusicChannelController? _music;
 
   /// Live access tokens for each Google backend (minted from the persisted refresh
   /// tokens on boot / after a re-link). Null when unlinked/offline → local gradients.
@@ -265,6 +270,27 @@ class _AmbientHomeState extends State<AmbientHome> {
       setRecipeContext: setRecipeContext,
       setWeatherContext: setWeatherContext,
       setPlaceContext: setPlaceContext,
+      // On-screen music transport/volume → a short-lived control round-trip to the
+      // pinned Core (fire-and-forget; errors are logged, never surfaced to the UI).
+      musicControl: ({required String action, int? value}) {
+        unawaited(
+          musicControl(
+            orchestratorKey: _settings.orchestratorKey,
+            action: action,
+            value: value,
+            discoveryTimeoutSecs: BigInt.zero,
+          ).then(
+            (msg) {
+              if (msg.isNotEmpty) debugPrint('music control: $msg');
+            },
+            onError: (Object e, StackTrace _) =>
+                debugPrint('music control error: $e'),
+          ),
+        );
+      },
+      // Tell the orchestrator what the music screen is showing (track + which view) so it
+      // can drive it by voice (`music_screen`) and answer "what's this song?".
+      setMusicContext: setMusicContext,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
       // flip to a "processing" indicator the instant the user stops talking.
       endpointCueEnabled: _settings.endpointCueEnabled,
@@ -324,10 +350,25 @@ class _AmbientHomeState extends State<AmbientHome> {
       onReport: assistant.applyWeatherPush,
     )..start();
 
+    // Music now-playing channel: a persistent, device-dialed connection to the pinned
+    // orchestrator that streams the current track + up-next queue (independent of the
+    // voice engine). Each push updates the compact control overlay / full music screens;
+    // an empty push dismisses them. Re-pinned here on an orchestrator change.
+    _music?.dispose();
+    final music = MusicChannelController(
+      config: MusicConfig(
+        orchestratorKey: _settings.orchestratorKey,
+        discoveryTimeoutSecs: BigInt.zero,
+        deviceId: 'anamanti-display',
+      ),
+      onPush: assistant.applyMusicPush,
+    )..start();
+
     setState(() {
       _assistant = assistant;
       _notifications = notifications;
       _weather = weather;
+      _music = music;
     });
   }
 
@@ -394,6 +435,7 @@ class _AmbientHomeState extends State<AmbientHome> {
     _assistant?.dispose();
     _notifications?.dispose();
     _weather?.dispose();
+    _music?.dispose();
     _slideshow.dispose();
     _brightness.reset();
     super.dispose();

@@ -347,6 +347,30 @@ pub fn clear_memories(orchestrator_key: String, discovery_timeout_secs: u64) -> 
     })
 }
 
+/// Issue a music transport/volume command from the display's on-screen controls
+/// (`action` = `pause`/`resume`/`next`/`previous`/`volume`). Returns the orchestrator's
+/// short confirmation; an in-band failure (Spotify not linked, device asleep, unknown
+/// action) surfaces as an `Err`. `value` is the 0–100 percent for `"volume"` and ignored
+/// otherwise.
+pub fn music_control(
+    orchestrator_key: String,
+    action: String,
+    value: Option<i64>,
+    discovery_timeout_secs: u64,
+) -> Result<String> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::music_control(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &action,
+            value,
+        )
+        .await
+    })
+}
+
 /// List the identified speakers (settings "People" view).
 pub fn list_speakers(
     orchestrator_key: String,

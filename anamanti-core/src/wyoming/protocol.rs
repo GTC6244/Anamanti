@@ -195,6 +195,24 @@ pub mod types {
     /// `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`, `photo_uri`, …).
     /// Byte-identical to the device crate's `types::PLACE`.
     pub const PLACE: &str = "anamanti-place";
+
+    /// orchestrator → device: push the music now-playing screen (data: `action` =
+    /// `"now_playing"` (the `music` object carries `playing`, `track_title`, `artist`,
+    /// `album`, `artwork_uri`, `position_secs`, `duration_secs`, `volume_percent`, and a
+    /// `next_up[]` queue) / `"dismiss"` (nothing is playing — close the screen)). Fanned
+    /// out over the persistent `role="music"` channel so it stays fresh while idle.
+    /// Byte-identical to the device crate's `types::MUSIC`.
+    pub const MUSIC: &str = "anamanti-music";
+
+    /// device → orchestrator: a music transport/volume command from the on-screen
+    /// controls (data: `action` = `"pause"`/`"resume"`/`"next"`/`"previous"`/`"volume"`,
+    /// with `value` the 0–100 percent for `"volume"`). Answered with [`MUSIC_RESULT`].
+    /// Byte-identical to the device crate's `types::MUSIC_CONTROL`.
+    pub const MUSIC_CONTROL: &str = "anamanti-music-control";
+
+    /// orchestrator → device: the result of a [`MUSIC_CONTROL`] command (data: `ok`
+    /// bool + a short `message`). Byte-identical to the device crate's `types::MUSIC_RESULT`.
+    pub const MUSIC_RESULT: &str = "anamanti-music-result";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -438,6 +456,63 @@ impl WyomingEvent {
     /// True if this is an `anamanti-place` frame.
     pub fn is_place(&self) -> bool {
         self.event_type == types::PLACE
+    }
+
+    /// An `anamanti-music` **now_playing** push (orchestrator → device): render the
+    /// music screen from `music` (a serialized [`crate::music::NowPlaying`]). Fanned out
+    /// over the persistent `role="music"` channel so it stays fresh while idle.
+    pub fn music_now_playing(music: Value) -> Self {
+        Self::with_data(
+            types::MUSIC,
+            json!({ "action": "now_playing", "music": music }),
+        )
+    }
+
+    /// An `anamanti-music` **dismiss** push (orchestrator → device): nothing is playing,
+    /// so close the music screen and return to the idle/ambient display.
+    pub fn music_dismiss() -> Self {
+        Self::with_data(types::MUSIC, json!({ "action": "dismiss" }))
+    }
+
+    /// An `anamanti-music` **screen** action (orchestrator → device): drive which music
+    /// screen is shown by voice — `screen` ∈ `"now_playing"` / `"up_next"` / `"hidden"`.
+    /// Relayed on the per-turn socket by the `music_screen` tool (distinct from the
+    /// `now_playing`/`dismiss` pushes on the persistent channel).
+    pub fn music_screen(screen: &str) -> Self {
+        Self::with_data(
+            types::MUSIC,
+            json!({ "action": "screen", "screen": screen }),
+        )
+    }
+
+    /// An `anamanti-music-control` command (device → orchestrator): a transport/volume
+    /// action from the on-screen controls. `value` is the 0–100 percent for `"volume"`.
+    /// Mirror of the device crate's `music_control` constructor.
+    pub fn music_control(action: impl Into<String>, value: Option<i64>) -> Self {
+        Self::with_data(
+            types::MUSIC_CONTROL,
+            json!({ "action": action.into(), "value": value }),
+        )
+    }
+
+    /// Decode an `anamanti-music-control` frame into `(action, value)`; `None` for a
+    /// frame of another type or with no `action`.
+    pub fn music_control_command(&self) -> Option<(String, Option<i64>)> {
+        if self.event_type != types::MUSIC_CONTROL {
+            return None;
+        }
+        let action = self.data.get("action").and_then(Value::as_str)?.to_string();
+        let value = self.data.get("value").and_then(Value::as_i64);
+        Some((action, value))
+    }
+
+    /// An `anamanti-music-result` response (orchestrator → device): the outcome of a
+    /// [`music_control`](Self::music_control) command.
+    pub fn music_result(ok: bool, message: impl Into<String>) -> Self {
+        Self::with_data(
+            types::MUSIC_RESULT,
+            json!({ "ok": ok, "message": message.into() }),
+        )
     }
 
     /// An `anamanti-speak` request (device → orchestrator): please synthesize `text`
@@ -718,6 +793,8 @@ pub enum DisplayContext {
     Weather(WeatherScreen),
     /// The place card is up (`kind: "place"`).
     Place(PlaceScreen),
+    /// The music player is up (`kind: "music"`).
+    Music(MusicScreen),
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
@@ -760,6 +837,22 @@ pub struct PlaceScreen {
     pub address: String,
 }
 
+/// The music player's state, as carried in a [`DisplayContext::Music`]. Tells the model
+/// a music screen is up (and what's on it), so it can drive it with `music_screen`
+/// (show now-playing / show up-next / close) and answer "what's this song?".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MusicScreen {
+    /// Whether playback is currently running (vs. paused).
+    pub playing: bool,
+    /// The current track title (empty if unknown).
+    pub title: String,
+    /// The current track's artist (empty if unknown).
+    pub artist: String,
+    /// Which music screen is open: `"now_playing"` / `"up_next"` / `"hidden"` (the
+    /// compact overlay only).
+    pub screen: String,
+}
+
 /// Pull the display context out of an `audio-start` data block's `screen` object, or
 /// `None` when the display reports nothing (an idle screen, or a device that doesn't
 /// stamp context). Dispatches on `screen.kind`; an unknown kind (e.g. a newer device
@@ -774,6 +867,7 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
             parse_weather_screen(screen.get("weather")?.as_object()?).map(DisplayContext::Weather)
         }
         "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
+        "music" => parse_music_screen(screen.get("music")?.as_object()?).map(DisplayContext::Music),
         _ => None,
     }
 }
@@ -825,6 +919,7 @@ impl DeviceContext {
             Some(DisplayContext::Recipe(_)) => Some("recipe"),
             Some(DisplayContext::Weather(_)) => Some("weather"),
             Some(DisplayContext::Place(_)) => Some("place"),
+            Some(DisplayContext::Music(_)) => Some("music"),
             None => None,
         }
     }
@@ -909,6 +1004,31 @@ fn parse_place_screen(place: &Map<String, Value>) -> Option<PlaceScreen> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+    })
+}
+
+/// Parse the `music` sub-object of a `screen` block into a [`MusicScreen`].
+fn parse_music_screen(music: &Map<String, Value>) -> Option<MusicScreen> {
+    let s = |k: &str| {
+        music
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let screen = music
+        .get("screen")
+        .and_then(Value::as_str)
+        .unwrap_or("hidden")
+        .to_string();
+    Some(MusicScreen {
+        playing: music
+            .get("playing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        title: s("title"),
+        artist: s("artist"),
+        screen,
     })
 }
 
@@ -1141,9 +1261,44 @@ mod tests {
             }))
         );
 
+        // A device with the music screen up stamps a `music` block.
+        let music = json!({
+            "screen": {
+                "kind": "music",
+                "music": {
+                    "playing": true,
+                    "title": "Paranoid Android",
+                    "artist": "Radiohead",
+                    "screen": "now_playing",
+                },
+            },
+        });
+        assert_eq!(
+            display_context(&music),
+            Some(DisplayContext::Music(MusicScreen {
+                playing: true,
+                title: "Paranoid Android".to_string(),
+                artist: "Radiohead".to_string(),
+                screen: "now_playing".to_string(),
+            }))
+        );
+
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
-        let other = json!({ "screen": { "kind": "music" } });
+        let other = json!({ "screen": { "kind": "photos" } });
         assert_eq!(display_context(&other), None);
+    }
+
+    #[test]
+    fn music_screen_frame_roundtrips_and_decodes() {
+        let ev = WyomingEvent::music_screen("up_next");
+        assert_eq!(ev.event_type, types::MUSIC);
+        assert_eq!(ev.data["action"], json!("screen"));
+        assert_eq!(ev.data["screen"], json!("up_next"));
+        // widget_label reflects the music screen.
+        let ctx = device_context(&json!({
+            "screen": { "kind": "music", "music": { "playing": false, "screen": "up_next" } }
+        }));
+        assert_eq!(ctx.widget_label(), Some("music"));
     }
 
     #[test]

@@ -76,6 +76,7 @@ WakeWordEvent _event(
     weatherJson: '',
     placeJson: '',
     recipeAction: '',
+    musicScreen: '',
   );
 }
 

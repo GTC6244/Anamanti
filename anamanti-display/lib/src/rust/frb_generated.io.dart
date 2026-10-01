@@ -23,6 +23,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
+  RustStreamSink<MusicPush> dco_decode_StreamSink_music_push_Sse(dynamic raw);
+
+  @protected
   RustStreamSink<NotifyEvent> dco_decode_StreamSink_notify_event_Sse(
     dynamic raw,
   );
@@ -45,6 +48,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double dco_decode_box_autoadd_f_64(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  MusicConfig dco_decode_box_autoadd_music_config(dynamic raw);
 
   @protected
   NotifyConfig dco_decode_box_autoadd_notify_config(dynamic raw);
@@ -104,6 +113,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ModelInfo dco_decode_model_info(dynamic raw);
 
   @protected
+  MusicConfig dco_decode_music_config(dynamic raw);
+
+  @protected
+  MusicPush dco_decode_music_push(dynamic raw);
+
+  @protected
   NotifyConfig dco_decode_notify_config(dynamic raw);
 
   @protected
@@ -114,6 +129,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double? dco_decode_opt_box_autoadd_f_64(dynamic raw);
+
+  @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
@@ -167,6 +185,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
+  RustStreamSink<MusicPush> sse_decode_StreamSink_music_push_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RustStreamSink<NotifyEvent> sse_decode_StreamSink_notify_event_Sse(
     SseDeserializer deserializer,
   );
@@ -189,6 +212,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double sse_decode_box_autoadd_f_64(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  MusicConfig sse_decode_box_autoadd_music_config(SseDeserializer deserializer);
 
   @protected
   NotifyConfig sse_decode_box_autoadd_notify_config(
@@ -258,6 +287,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ModelInfo sse_decode_model_info(SseDeserializer deserializer);
 
   @protected
+  MusicConfig sse_decode_music_config(SseDeserializer deserializer);
+
+  @protected
+  MusicPush sse_decode_music_push(SseDeserializer deserializer);
+
+  @protected
   NotifyConfig sse_decode_notify_config(SseDeserializer deserializer);
 
   @protected
@@ -268,6 +303,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
@@ -328,6 +366,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_music_push_Sse(
+    RustStreamSink<MusicPush> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_notify_event_Sse(
     RustStreamSink<NotifyEvent> self,
     SseSerializer serializer,
@@ -353,6 +397,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_f_64(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_music_config(
+    MusicConfig self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_notify_config(
@@ -442,6 +498,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_model_info(ModelInfo self, SseSerializer serializer);
 
   @protected
+  void sse_encode_music_config(MusicConfig self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_music_push(MusicPush self, SseSerializer serializer);
+
+  @protected
   void sse_encode_notify_config(NotifyConfig self, SseSerializer serializer);
 
   @protected
@@ -452,6 +514,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_f_64(double? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);

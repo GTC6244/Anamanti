@@ -10,6 +10,12 @@
 > ship on top of PR 38's Snapcast transport + `librespot` supervisor. Remaining:
 > just a Premium account + a one-time click-through consent. No Spotify audio flows
 > through the Wyoming TTS pipeline or the device — the tool is control-only.
+>
+> **Update (now-playing UI, P6 — done):** the display now has a full music UI — a
+> compact control overlay plus `NowPlayingView` / `NextUpView` full screens — fed by a
+> persistent `role="music"` channel (`anamanti-music` now-playing/dismiss pushes) and
+> driving the controls back over `anamanti-music-control`. Still control-only; no audio
+> on the device. See §5 P6 and [`DisplayUI.md`](./DisplayUI.md) §4b.
 
 This plan reads together with [`Plan.MD`](./Plan.MD) (the tool-calling / rig
 engine decisions), [`architecture.md`](./architecture.md) (the design), and the
@@ -160,8 +166,25 @@ who started playback — no extra work here.
    Spotify-specific work needed (the group volume covers the librespot stream).
 5. **P5 (optional) — Echo Show as snapclient.** ⏳ PR 38 gates it behind
    `ANAMANTI_MUSIC_INCLUDE_DEVICE` (default off). No control-plane change.
-6. **P6 (nice-to-have) — Now-playing UI.** Not started. Push current track/artist
-   to the device via a state stream and render on the idle/active screen.
+6. **P6 — Now-playing UI.** ✅ **Done.** The Core reads current playback +
+   up-next queue from the Spotify Web API (`SpotifyController::now_playing` over
+   `GET /v1/me/player` + `/queue`) and a periodic `NowPlayingService` fans it out over a
+   **persistent `role="music"` channel** as `anamanti-music` frames (the twin of the
+   ambient weather push; gated behind `music.enabled`, no-ops until Spotify is linked,
+   poll interval `music.nowplaying_refresh_secs`, default 5). The display renders three
+   surfaces — a compact `MusicControlOverlay` that rides the ambient screen while a track
+   plays, a full `NowPlayingView` (artwork + transport + volume), and a `NextUpView`
+   queue list — folded from `AssistantState.music`. On-screen controls go **device→Core**
+   as a short-lived `anamanti-music-control` request/response (play/pause/next/previous/
+   volume) handled by `control::music_control_response`, which drives the same
+   `spotify_control` controller. See [`DisplayUI.md`](./DisplayUI.md) §4b.
+   **Voice control (done):** the music screen is drivable by voice too — a new
+   `music_screen` rig tool (show now-playing / show up-next / close) emits a
+   `DeviceAction::MusicScreen` → `anamanti-music` `screen` frame → device
+   `WakeWordEventKind.musicScreen`, and the device stamps a `DisplayContext::Music`
+   block (`set_music_context`) on `audio-start` so the LLM knows what's on the music
+   screen. Playback-by-voice remains the existing `spotify_control` tool. Mirrors the
+   recipe voice-nav pattern (Plan.MD 2026-09-25).
 
 ---
 

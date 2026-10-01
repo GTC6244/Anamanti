@@ -22,7 +22,10 @@ import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
 import 'package:anamanti_display/src/ui/listening_overlay.dart';
+import 'package:anamanti_display/src/ui/music_control_overlay.dart';
+import 'package:anamanti_display/src/ui/next_up_view.dart';
 import 'package:anamanti_display/src/ui/notification_banner.dart';
+import 'package:anamanti_display/src/ui/now_playing_view.dart';
 import 'package:anamanti_display/src/ui/recipe_view.dart';
 import 'package:anamanti_display/src/ui/slideshow_view.dart';
 import 'package:anamanti_display/src/ui/status_indicator.dart';
@@ -86,8 +89,21 @@ class AmbientScreen extends StatelessWidget {
           // takes over the idle presentation but yields to an active voice turn.
           final weatherActive = state.weatherActive;
           final placeActive = state.placeActive;
+          // Core-pushed full-screen modes (recipe/weather/place). These win over the
+          // device-toggled music screen, which is suppressed while one is up.
+          final coreMode = recipeActive || weatherActive || placeActive;
+          // Music: `musicActive` means a track is playing (the compact control overlay
+          // rides the ambient screen); a full music screen (now-playing / up-next) opens
+          // only when the user taps the overlay, and yields to a Core-pushed mode.
+          final showNowPlaying = state.musicScreen == MusicScreen.nowPlaying &&
+              state.musicActive &&
+              !coreMode;
+          final showNextUp = state.musicScreen == MusicScreen.nextUp &&
+              state.musicActive &&
+              !coreMode;
+          final musicFullScreen = showNowPlaying || showNextUp;
           // Any full-screen mode that overlays the idle presentation.
-          final modeActive = recipeActive || weatherActive || placeActive;
+          final modeActive = coreMode || musicFullScreen;
           // Away / "off" mode: nobody in front of the display and no active turn.
           // Only the big centered clock shows; everything else fades away. A turn
           // always wins (saying the wake word implies you're here), so off mode is
@@ -98,6 +114,14 @@ class AmbientScreen extends StatelessWidget {
           // brightness always agree (equivalent to `!userPresent && !active &&
           // !modeActive`).
           final offMode = !state.screenAwake;
+          // The compact music control overlay rides the ambient screen when a track is
+          // playing, no full music screen is up, no Core mode is up, no turn is active,
+          // and someone is present.
+          final musicOverlayVisible = state.musicActive &&
+              !musicFullScreen &&
+              !coreMode &&
+              !active &&
+              !offMode;
           // "Listening" cue: the device is actively listening to the user (wake word
           // or follow-up listen fired, through end-of-speech). Shows the big glowing
           // blue ring, which reacts to the live mic level. Suppressed when the user
@@ -218,6 +242,50 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
+              // Music now-playing: a full-screen view (artwork + transport + volume),
+              // opened by tapping the compact control overlay. Same precedence as the
+              // Core-pushed modes — above the idle presentation, below the conversation
+              // panel — and suppressed while a Core mode is up. The close control returns
+              // to the overlay (music keeps playing).
+              AnimatedOpacity(
+                opacity: showNowPlaying ? 1 : 0,
+                duration: const Duration(milliseconds: 250),
+                child: IgnorePointer(
+                  ignoring: !showNowPlaying,
+                  child: showNowPlaying
+                      ? NowPlayingView(
+                          key: ValueKey('now-playing:${state.music!.trackTitle}'),
+                          music: state.music!,
+                          onClose: assistant.closeMusicScreen,
+                          onPlayPause: assistant.playPauseMusic,
+                          onNext: assistant.nextTrack,
+                          onPrevious: assistant.previousTrack,
+                          onVolume: assistant.setMusicVolume,
+                          onShowQueue: assistant.showMusicQueue,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+
+              // Music up-next: the full-screen queue list, reached from the now-playing
+              // view's "Up next" control. Back returns to now-playing; close returns to
+              // the overlay.
+              AnimatedOpacity(
+                opacity: showNextUp ? 1 : 0,
+                duration: const Duration(milliseconds: 250),
+                child: IgnorePointer(
+                  ignoring: !showNextUp,
+                  child: showNextUp
+                      ? NextUpView(
+                          key: const ValueKey('next-up'),
+                          music: state.music!,
+                          onClose: assistant.closeMusicScreen,
+                          onBack: assistant.backToNowPlaying,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+
               // The live conversation panel fades in for the duration of a turn.
               AnimatedOpacity(
                 opacity: active ? 1 : 0,
@@ -252,6 +320,37 @@ class AmbientScreen extends StatelessWidget {
                           decay: ringDecay,
                         )
                       : const SizedBox.shrink(),
+                ),
+              ),
+
+              // Compact music control overlay, bottom-center — the lightweight transport
+              // (artwork + title + prev/play-pause/next + volume) that rides the ambient
+              // screen while a track plays. Tapping it opens the full now-playing screen.
+              // Hidden during a turn, in away mode, and while any full screen is up.
+              Positioned(
+                left: 120,
+                right: 120,
+                bottom: 18,
+                child: AnimatedOpacity(
+                  key: const Key('music-overlay'),
+                  opacity: musicOverlayVisible ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !musicOverlayVisible,
+                    child: musicOverlayVisible
+                        ? Align(
+                            alignment: Alignment.bottomCenter,
+                            child: MusicControlOverlay(
+                              music: state.music!,
+                              onPlayPause: assistant.playPauseMusic,
+                              onNext: assistant.nextTrack,
+                              onPrevious: assistant.previousTrack,
+                              onVolume: assistant.setMusicVolume,
+                              onTap: assistant.openNowPlaying,
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
                 ),
               ),
 

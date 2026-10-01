@@ -425,6 +425,10 @@ async fn run_turn_task(
                     WakeWordEvent::dismiss_place()
                 }
             },
+            TurnUpdate::Music(screen) => {
+                log::info!("turn: music screen -> {screen}");
+                WakeWordEvent::music_screen(screen)
+            }
             // Record the request to reopen the mic after this reply. Acted on only after
             // this turn's reply audio drains (drain watcher below), so the follow-up mic
             // never records the tail of the TTS. Nothing to add here.

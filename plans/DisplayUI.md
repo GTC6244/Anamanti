@@ -30,10 +30,11 @@ events; nothing here touches audio buffers or sockets directly.
 | **Overlays (always-on)** | idle `_AmbientClock` + weather-beside-clock chip, `StatusIndicator`, settings gear |
 | **Overlays (listening cue)** | `ListeningOverlay` — big glowing blue ring (hollow) that reacts to mic level while listening |
 | **Overlays (timers)** | `TimersOverlay` — big (idle) + compact (in-turn) |
+| **Overlays (music)** | `MusicControlOverlay` — compact transport bar while a track plays |
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
 | **Banners** | `NotificationBanner` (proactive push from Core) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
-| **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
+| **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView`, `NowPlayingView`, `NextUpView` |
 | **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background), `AudioDiagnosticsView` |
 | **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
@@ -79,11 +80,18 @@ events; nothing here touches audio buffers or sockets directly.
 6. `WeatherView` **or** `SevenDayView` (weatherActive) — chosen by
    `state.weather!.isWeek`.
 7. `PlaceView` (placeActive).
+7a. `NowPlayingView` (`showNowPlaying`) / `NextUpView` (`showNextUp`) — the
+    device-toggled music full screens, 250 ms fade; gated so a Core-pushed mode
+    (recipe/weather/place) suppresses them.
 8. `ConversationView` — live transcript + reply, 300 ms fade, padded 28.
 9. `ListeningOverlay` — big glowing blue ring (hollow), centered, 250 ms fade;
    `IgnorePointer`, shown only while `state.listening` (wake word / follow-up listen
    → end-of-speech). Reacts to `state.micLevel`. Mounted only while shown so its
    pulse controller isn't spinning during idle.
+9a. `MusicControlOverlay` — compact transport bar, `Positioned(bottom: 18)`,
+    centered, 250 ms fade; shown while `musicOverlayVisible` (a track is playing and
+    no full music screen / Core mode / turn is up and someone is present). Tappable
+    (opens `NowPlayingView`).
 10. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
     hidden during a turn, off mode, any full-screen mode, or when timers exist.
 11. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
@@ -209,6 +217,52 @@ Core-owned path).
   `resolveTimerNames` labels unnamed timers "Timer" / "Timer N".
 
 ---
+
+## 4b. Music — now-playing screens + control overlay
+
+The music UI (see [`MusicPlan.md`](./MusicPlan.md) P6) is driven by a now-playing
+snapshot the **Anamanti Core** pushes over a **separate persistent channel**
+(`role="music"`, frame `anamanti-music`) — the twin of the ambient weather channel,
+**not** the per-turn `WakeWordEvent` stream. `MusicChannelController`
+(`lib/src/engine/music_channel_controller.dart`) subscribes to `startMusicChannel` and
+forwards each push's JSON to `AssistantController.applyMusicPush`, which folds it into
+`AssistantState.music` (a tolerant `MusicData`, `lib/src/engine/music_data.dart`); an
+empty payload is a `dismiss` (nothing playing). Because "Flutter owns presentation,"
+**the device decides what's on screen** — a push only provides data; the full screens
+open on a tap, not on a Core command.
+
+Presentation (`AssistantState.musicScreen` ∈ `hidden` / `nowPlaying` / `nextUp`):
+- **`MusicControlOverlay`** — `lib/src/ui/music_control_overlay.dart`. The compact
+  transport bar (artwork + title/artist + prev / play-pause / next + volume) that rides
+  the ambient screen whenever a track is playing and no full music screen / Core mode /
+  turn is up. Keys: `music-overlay-open` / `-previous` / `-play-pause` / `-next` /
+  `-volume` (+ `-volume-up`). Tapping it → `openNowPlaying`.
+- **`NowPlayingView`** — `lib/src/ui/now_playing_view.dart`. Full-screen now-playing:
+  album artwork (graceful network fallback), title/artist/album, a progress bar, the
+  transport row, and a volume slider. Keys: `music-close`, `music-previous`,
+  `music-play-pause`, `music-next`, `music-volume`, `music-show-queue`. Opened by tapping
+  the overlay; the close control returns to the overlay (**never stops playback**).
+- **`NextUpView`** — `lib/src/ui/next_up_view.dart`. Full-screen up-next queue list
+  (`music.nextUp`), reached from the now-playing view's "Up next" control. Keys:
+  `next-up-close`, `next-up-back`. Empty queue shows "Nothing queued".
+
+Controls route back to the Core device→Core: `AssistantController` holds a
+`MusicControlSink` (`main.dart` wires it to the FRB `musicControl`), which issues a
+short-lived `anamanti-music-control` request/response round-trip (play/pause→the device
+sends the explicit `pause`/`resume`, plus `next`/`previous`/`volume`) that the Core maps
+to the `spotify_control` controller. See `agents.md` + `MusicPlan.md`.
+
+**Voice control** (mirrors the recipe voice-nav pattern): the music screen is drivable by
+voice. Whenever the music full screen is open, `AssistantController` pushes a
+`DisplayContext::Music` block on the turn's `audio-start` via the FRB `setMusicContext`
+(playing / title / artist / which view), so the LLM knows what's on screen. The Core's
+**`music_screen`** rig tool (advertised alongside `spotify_control`) emits
+`DeviceAction::MusicScreen` → an `anamanti-music` `screen` frame on the per-turn socket →
+`WakeWordEventKind.musicScreen` → `AssistantController._applyMusicScreen`, which routes
+"show me what's playing" → `openNowPlaying`, "what's up next" → `showMusicQueue`, and "hide
+the music" → `closeMusicScreen` (the same methods touch uses). A Core-pushed mode
+(recipe/weather/place) sets `musicScreen: hidden` so the music full screen yields to it.
+Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_control` tool.
 
 ## 5. Overlays — away / off mode
 

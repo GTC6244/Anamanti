@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::control;
 use crate::llm::catalog::ModelCatalog;
-use crate::music::MusicDucker;
+use crate::music::{MusicDucker, NowPlayingService};
 use crate::notify::NotificationService;
 use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome};
 use crate::weather::WeatherService;
@@ -30,6 +30,7 @@ pub async fn serve(
     ducker: Option<Arc<MusicDucker>>,
     notify: Arc<NotificationService>,
     weather: Arc<WeatherService>,
+    music: Arc<NowPlayingService>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -41,9 +42,10 @@ pub async fn serve(
         let ducker = ducker.clone();
         let notify = notify.clone();
         let weather = weather.clone();
+        let music = music.clone();
         tokio::spawn(async move {
             match handle_connection(
-                stream, pipeline, connector, catalog, voices_dir, ducker, notify, weather,
+                stream, pipeline, connector, catalog, voices_dir, ducker, notify, weather, music,
             )
             .await
             {
@@ -69,6 +71,7 @@ async fn handle_connection(
     ducker: Option<Arc<MusicDucker>>,
     notify: Arc<NotificationService>,
     weather: Arc<WeatherService>,
+    music: Arc<NowPlayingService>,
 ) -> Result<()> {
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
@@ -168,20 +171,23 @@ async fn handle_connection(
             // takes over this task until the device closes it.
             Some(ev) if ev.event_type == types::ANAMANTI_HELLO => {
                 let device_id = ev.hello_device_id().unwrap_or_default().to_string();
-                // The persistent channel serves either proactive notifications
-                // (`role=notify`, the default) or the ambient weather push
-                // (`role=weather`); the write pump below is identical for both — it
-                // just drains whichever service's receiver.
-                let is_weather = ev.hello_role() == "weather";
-                let channel = if is_weather { "weather" } else { "notify" };
+                // The persistent channel serves proactive notifications (`role=notify`,
+                // the default), the ambient weather push (`role=weather`), or the music
+                // now-playing push (`role=music`); the write pump below is identical for
+                // all three — it just drains whichever service's receiver.
+                let channel = match ev.hello_role() {
+                    "weather" => "weather",
+                    "music" => "music",
+                    _ => "notify",
+                };
                 log::info!(
                     "[{}] {channel} channel opened (device_id={device_id:?})",
                     peer_str(peer.as_ref())
                 );
-                let (conn_id, mut rx) = if is_weather {
-                    weather.register(&device_id)
-                } else {
-                    notify.register(&device_id)
+                let (conn_id, mut rx) = match channel {
+                    "weather" => weather.register(&device_id),
+                    "music" => music.register(&device_id),
+                    _ => notify.register(&device_id),
                 };
                 let (reader, writer) = device.split_mut();
                 // Pump enqueued pushes out to the device while watching the read half
@@ -210,10 +216,10 @@ async fn handle_connection(
                         }
                     }
                 }
-                if is_weather {
-                    weather.deregister(conn_id);
-                } else {
-                    notify.deregister(conn_id);
+                match channel {
+                    "weather" => weather.deregister(conn_id),
+                    "music" => music.deregister(conn_id),
+                    _ => notify.deregister(conn_id),
                 }
                 log::info!("[{}] {channel} channel closed", peer_str(peer.as_ref()));
                 return Ok(());

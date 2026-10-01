@@ -73,6 +73,7 @@ WakeWordEvent _ev(
   weatherJson: weatherJson,
   placeJson: placeJson,
   recipeAction: '',
+  musicScreen: '',
 );
 
 void main() {

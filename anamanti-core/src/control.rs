@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::MemoryStore;
+use crate::music::SpotifyCommand;
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 use crate::speaker::SpeakerRegistry;
@@ -44,6 +45,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MODELS
             | types::LIST_VOICES
             | types::GET_DRIVE_TOKEN
+            | types::MUSIC_CONTROL
     )
 }
 
@@ -66,10 +68,46 @@ pub async fn handle_control(
         models_response(catalog).await
     } else if request.event_type == types::LIST_VOICES {
         voices_response(connector, voices_dir).await
+    } else if request.event_type == types::MUSIC_CONTROL {
+        music_control_response(request, settings).await
     } else {
         respond(request, memory, settings, speaker)
     };
     device.send(&response).await
+}
+
+/// Handle an `anamanti-music-control` command from the display's on-screen transport
+/// controls: map the action to a [`SpotifyCommand`] and issue it against the live
+/// controller. Answered in-band (`ok`/`message`) so a failure (not linked, device
+/// asleep, bad action) never drops the device connection — mirroring the other control
+/// responses. The spoken confirmation `command` returns is surfaced as the `message`.
+pub async fn music_control_response(
+    request: &WyomingEvent,
+    settings: &SharedSettings,
+) -> WyomingEvent {
+    let Some((action, value)) = request.music_control_command() else {
+        return WyomingEvent::music_result(false, "music-control request missing `action`");
+    };
+    let cmd = match action.to_lowercase().as_str() {
+        "pause" | "stop" => SpotifyCommand::Pause,
+        "resume" | "play" => SpotifyCommand::Resume,
+        "next" | "skip" | "forward" => SpotifyCommand::Next,
+        "previous" | "prev" | "back" => SpotifyCommand::Previous,
+        "volume" | "set_volume" => {
+            let percent = value.unwrap_or(0).clamp(0, 100) as u8;
+            SpotifyCommand::SetVolume { percent }
+        }
+        other => {
+            return WyomingEvent::music_result(false, format!("unknown music action `{other}`"));
+        }
+    };
+    let Some(controller) = settings.spotify().controller() else {
+        return WyomingEvent::music_result(false, "Spotify isn't linked on the orchestrator");
+    };
+    match controller.command(cmd).await {
+        Ok(msg) => WyomingEvent::music_result(true, msg),
+        Err(e) => WyomingEvent::music_result(false, format!("{e:#}")),
+    }
 }
 
 /// Build the `ambient-voices` response: Piper's advertised voice catalog, filtered
@@ -643,8 +681,38 @@ mod tests {
         assert!(is_control_request(types::DELETE_SPEAKER));
         assert!(is_control_request(types::LIST_MODELS));
         assert!(is_control_request(types::LIST_VOICES));
+        assert!(is_control_request(types::MUSIC_CONTROL));
         assert!(!is_control_request(types::AUDIO_START));
         assert!(!is_control_request(types::TRANSCRIPT));
+    }
+
+    #[tokio::test]
+    async fn music_control_reports_unlinked_in_band() {
+        // The fixture settings have no Spotify link, so any valid action is answered
+        // ok:false with a speakable reason rather than dropping the connection.
+        let s = settings();
+        let resp = music_control_response(&WyomingEvent::music_control("pause", None), &s).await;
+        assert_eq!(resp.event_type, types::MUSIC_RESULT);
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data["message"].as_str().unwrap().contains("linked"));
+    }
+
+    #[tokio::test]
+    async fn music_control_rejects_missing_and_unknown_actions() {
+        let s = settings();
+        // Missing action.
+        let resp = music_control_response(
+            &WyomingEvent::with_data(types::MUSIC_CONTROL, json!({ "value": 50 })),
+            &s,
+        )
+        .await;
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data["message"].as_str().unwrap().contains("action"));
+
+        // Unknown action (recognized before the link check, so it reports the action).
+        let resp = music_control_response(&WyomingEvent::music_control("teleport", None), &s).await;
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data["message"].as_str().unwrap().contains("teleport"));
     }
 
     #[test]

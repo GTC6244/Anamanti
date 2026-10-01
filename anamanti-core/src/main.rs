@@ -23,6 +23,7 @@ use tokio::net::TcpListener;
 use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind, VadEngineKind};
 use anamanti_core::discovery::MdnsAdvertiser;
 use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
+use anamanti_core::music::NowPlayingService;
 use anamanti_core::notify::NotificationService;
 use anamanti_core::orchestrator::{self, Pipeline, TcpConnector};
 use anamanti_core::server;
@@ -256,9 +257,8 @@ async fn run() -> Result<()> {
                 pipeline = pipeline.with_silero(model);
             }
             Err(e) if want_silero => {
-                return Err(e).with_context(|| {
-                    format!("loading Silero VAD model {}", model_path.display())
-                });
+                return Err(e)
+                    .with_context(|| format!("loading Silero VAD model {}", model_path.display()));
             }
             Err(e) => {
                 log::warn!(
@@ -318,6 +318,25 @@ async fn run() -> Result<()> {
             "weather push: every {}s (imperial={imperial}, provider={})",
             config.weather.refresh_interval().as_secs(),
             config.weather.provider,
+        );
+    }
+
+    // Ambient music now-playing push: the registry of persistent `role="music"` channels
+    // the device dials, plus a periodic task that reads the current Spotify playback
+    // (track + up-next queue) from the live settings and fans it out so the display's
+    // music screen stays fresh without a voice turn. The poll no-ops while Spotify isn't
+    // linked, so a later config-page relink activates it with no restart. Dormant (no
+    // task) when music is disabled in the config.
+    let music_svc = Arc::new(NowPlayingService::new());
+    if config.music.enabled {
+        anamanti_core::music::nowplaying_service::spawn_periodic(
+            music_svc.clone(),
+            pipeline.settings().clone(),
+            config.music.nowplaying_refresh(),
+        );
+        log::info!(
+            "music now-playing push: every {}s",
+            config.music.nowplaying_refresh().as_secs(),
         );
     }
 
@@ -401,7 +420,7 @@ async fn run() -> Result<()> {
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     let outcome = tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker, notify, weather_svc) => {
+        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker, notify, weather_svc, music_svc) => {
             res.context("device-facing server stopped")
         }
         _ = tokio::signal::ctrl_c() => {

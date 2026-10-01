@@ -475,6 +475,44 @@ pub async fn merge_speakers(
     speaker_ok(&resp)
 }
 
+/// Issue a music transport/volume command (play/pause/next/previous/volume) from the
+/// display's on-screen controls. Returns the orchestrator's short spoken confirmation;
+/// an in-band failure (Spotify not linked, device asleep, unknown action) surfaces as an
+/// error so the caller can log it. `value` is the 0–100 percent for `"volume"`.
+pub async fn music_control(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    action: &str,
+    value: Option<i64>,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::music_control(action, value)).await?;
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let message = resp
+        .data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if ok {
+        Ok(message)
+    } else {
+        Err(anyhow!(
+            "{}",
+            if message.is_empty() {
+                "music control failed".to_string()
+            } else {
+                message
+            }
+        ))
+    }
+}
+
 /// Delete a speaker profile; returns whether one was removed.
 pub async fn delete_speaker(
     cache: &EndpointCache,
@@ -899,6 +937,45 @@ mod tests {
         assert_eq!(request.event_type, types::NAME_SPEAKER);
         assert_eq!(request.data["id"], json!("spk-2"));
         assert_eq!(request.data["name"], json!("Dana"));
+    }
+
+    #[tokio::test]
+    async fn music_control_sends_action_and_value_and_returns_message() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::MUSIC_RESULT,
+            json!({ "ok": true, "message": "Set the volume to 40 percent." }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let msg = music_control(&cache, Duration::from_millis(0), None, "volume", Some(40))
+            .await
+            .unwrap();
+        assert_eq!(msg, "Set the volume to 40 percent.");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::MUSIC_CONTROL);
+        assert_eq!(request.data["action"], json!("volume"));
+        assert_eq!(request.data["value"], json!(40));
+    }
+
+    #[tokio::test]
+    async fn music_control_surfaces_in_band_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::MUSIC_RESULT,
+            json!({ "ok": false, "message": "Spotify isn't linked on the orchestrator" }),
+        );
+        serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = music_control(&cache, Duration::from_millis(0), None, "pause", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("linked"));
     }
 
     #[tokio::test]

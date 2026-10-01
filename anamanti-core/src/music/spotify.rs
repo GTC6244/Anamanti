@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -97,11 +98,50 @@ pub enum SpotifyCommand {
     },
 }
 
+/// One queued track ("up next"), as the display's Next Up list renders it. Field
+/// names are the snake_case JSON keys the device's `QueueTrack.tryParse` expects.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct QueueItem {
+    pub track_title: String,
+    pub artist: String,
+    pub album: String,
+    pub artwork_uri: String,
+}
+
+/// A snapshot of the current playback, pushed to the display's now-playing screen.
+/// Field names are the snake_case JSON keys the device's `MusicData.tryParse` expects.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct NowPlaying {
+    /// Whether playback is currently running (vs. paused on a loaded track).
+    pub playing: bool,
+    pub track_title: String,
+    pub artist: String,
+    pub album: String,
+    /// URL of the album artwork (largest image Spotify offers), or empty.
+    pub artwork_uri: String,
+    /// Playback position within the current track, in whole seconds.
+    pub position_secs: u64,
+    /// The current track's total length, in whole seconds.
+    pub duration_secs: u64,
+    /// The target Connect device's volume (0–100), or 0 when unknown.
+    pub volume_percent: u8,
+    /// The up-next queue (capped), oldest-first.
+    pub next_up: Vec<QueueItem>,
+}
+
 /// The control seam the `spotify_control` rig tool depends on. Returns a short,
 /// speakable confirmation the model relays to the user.
 #[async_trait]
 pub trait SpotifyController: Send + Sync {
     async fn command(&self, cmd: SpotifyCommand) -> Result<String>;
+
+    /// Read the current playback snapshot (now-playing track + up-next queue) for the
+    /// display's music screen. `Ok(None)` means nothing is loaded/playing. The default
+    /// returns `Ok(None)` so test fakes that only exercise `command` need not implement
+    /// it.
+    async fn now_playing(&self) -> Result<Option<NowPlaying>> {
+        Ok(None)
+    }
 }
 
 /// A resolved search hit: the URI to play and a speakable label.
@@ -317,6 +357,103 @@ impl SpotifyWebApi {
             .with_context(|| format!("Spotify player endpoint {path} returned an error"))?;
         Ok(())
     }
+
+    /// GET a player endpoint, returning the parsed body — or `Ok(None)` for a `204 No
+    /// Content` (nothing playing) or an empty body. `path` is appended to
+    /// `/v1/me/player`. These reads are account-wide, so (unlike [`player_call`]) they
+    /// take no `device_id`.
+    async fn player_get(&self, token: &str, path: &str) -> Result<Option<Value>> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/me/player{path}", self.api_base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .with_context(|| format!("Spotify player read {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Spotify player read {path} returned an error"))?;
+        if resp.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let body = resp
+            .text()
+            .await
+            .with_context(|| format!("reading Spotify player {path} body"))?;
+        if body.trim().is_empty() {
+            return Ok(None);
+        }
+        let value: Value = serde_json::from_str(&body)
+            .with_context(|| format!("parsing Spotify player {path} response"))?;
+        Ok(Some(value))
+    }
+
+    /// Fetch the up-next queue (capped at [`QUEUE_LIMIT`]); best-effort, so a failure
+    /// yields an empty list rather than failing the whole now-playing read.
+    async fn fetch_queue(&self, token: &str) -> Vec<QueueItem> {
+        match self.player_get(token, "/queue").await {
+            Ok(Some(v)) => v
+                .get("queue")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(QUEUE_LIMIT)
+                        .map(|item| {
+                            let t = track_fields(item);
+                            QueueItem {
+                                track_title: t.0,
+                                artist: t.1,
+                                album: t.2,
+                                artwork_uri: t.3,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                log::debug!("spotify queue read failed: {e:#}");
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// Maximum number of up-next tracks surfaced to the display.
+const QUEUE_LIMIT: usize = 20;
+
+/// Extract `(title, artist, album, artwork_uri)` from a Spotify track object (the
+/// shape shared by `/me/player`'s `item` and `/me/player/queue`'s entries).
+fn track_fields(item: &Value) -> (String, String, String, String) {
+    let title = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let artist = item
+        .get("artists")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|a| a.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let album_obj = item.get("album");
+    let album = album_obj
+        .and_then(|a| a.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    // Spotify lists images largest-first; take the first url.
+    let artwork_uri = album_obj
+        .and_then(|a| a.get("images"))
+        .and_then(Value::as_array)
+        .and_then(|imgs| imgs.first())
+        .and_then(|img| img.get("url"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    (title, artist, album, artwork_uri)
 }
 
 /// Build a speakable label for a search hit ("Karma Police by Radiohead",
@@ -426,6 +563,45 @@ impl SpotifyController for SpotifyWebApi {
             }
         }
     }
+
+    async fn now_playing(&self) -> Result<Option<NowPlaying>> {
+        let token = self.access_token().await?;
+        let Some(state) = self.player_get(&token, "").await? else {
+            return Ok(None); // 204 / empty body → nothing loaded
+        };
+        let Some(item) = state.get("item").filter(|v| v.is_object()) else {
+            return Ok(None); // playing an ad / local file with no track object
+        };
+        let (track_title, artist, album, artwork_uri) = track_fields(item);
+        let playing = state
+            .get("is_playing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let position_secs = state
+            .get("progress_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            / 1000;
+        let duration_secs = item.get("duration_ms").and_then(Value::as_u64).unwrap_or(0) / 1000;
+        let volume_percent = state
+            .get("device")
+            .and_then(|d| d.get("volume_percent"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(100) as u8;
+        let next_up = self.fetch_queue(&token).await;
+        Ok(Some(NowPlaying {
+            playing,
+            track_title,
+            artist,
+            album,
+            artwork_uri,
+            position_secs,
+            duration_secs,
+            volume_percent,
+            next_up,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -487,6 +663,12 @@ mod tests {
                         r#"{"access_token":"tok-123","expires_in":3600}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player/devices") {
                         r#"{"devices":[{"id":"dev-1","name":"Ambient"},{"id":"other","name":"Phone"}]}"#.to_string()
+                    } else if first.starts_with("GET /v1/me/player/queue") {
+                        r#"{"queue":[{"name":"Let Down","artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/let-down.jpg"}]}}]}"#.to_string()
+                    } else if first.starts_with("GET /v1/me/player ")
+                        || first.starts_with("GET /v1/me/player?")
+                    {
+                        r#"{"is_playing":true,"progress_ms":73000,"device":{"volume_percent":65},"item":{"name":"Paranoid Android","duration_ms":383000,"artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/ok-computer.jpg"}]}}}"#.to_string()
                     } else if first.starts_with("GET /v1/search") {
                         r#"{"tracks":{"items":[{"uri":"spotify:track:abc","name":"Karma Police","artists":[{"name":"Radiohead"}]}]}}"#.to_string()
                     } else {
@@ -572,5 +754,36 @@ mod tests {
             .filter(|c| c.starts_with("POST /api/token"))
             .count();
         assert_eq!(token_calls, 1, "token fetched once and reused");
+    }
+
+    #[tokio::test]
+    async fn now_playing_reads_track_and_queue() {
+        let (base, seen) = spawn_fake_spotify().await;
+        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+
+        let np = api
+            .now_playing()
+            .await
+            .unwrap()
+            .expect("something is playing");
+        assert!(np.playing);
+        assert_eq!(np.track_title, "Paranoid Android");
+        assert_eq!(np.artist, "Radiohead");
+        assert_eq!(np.album, "OK Computer");
+        assert_eq!(np.artwork_uri, "http://img/ok-computer.jpg");
+        assert_eq!(np.position_secs, 73);
+        assert_eq!(np.duration_secs, 383);
+        assert_eq!(np.volume_percent, 65);
+        assert_eq!(np.next_up.len(), 1);
+        assert_eq!(np.next_up[0].track_title, "Let Down");
+        assert_eq!(np.next_up[0].artwork_uri, "http://img/let-down.jpg");
+
+        let calls = seen.lock().await;
+        assert!(calls.iter().any(|c| c.starts_with("GET /v1/me/player ")
+            || c.starts_with("GET /v1/me/player?")
+            || c == "GET /v1/me/player"));
+        assert!(calls
+            .iter()
+            .any(|c| c.starts_with("GET /v1/me/player/queue")));
     }
 }

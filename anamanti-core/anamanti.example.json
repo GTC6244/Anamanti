@@ -89,7 +89,8 @@
     "log_dir": "/opt/homebrew/var/log",
     "conf": "/opt/homebrew/etc/snapserver.conf",
     "spotify_device_name": "Ambient",
-    "autostart": true
+    "autostart": true,
+    "nowplaying_refresh_secs": 5
   },
 
   "calendar": {

@@ -56,6 +56,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       weatherJson: '',
       placeJson: '',
       recipeAction: '',
+      musicScreen: '',
     );
 
 void main() {

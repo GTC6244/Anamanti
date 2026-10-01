@@ -61,6 +61,24 @@ pub enum DeviceAction {
     /// Drive the already-open recipe screen by voice — switch tab or scroll a pane.
     /// Fire-and-forget: the device owns the screen state.
     RecipeControl(RecipeNav),
+    /// Drive the music screen by voice — open the now-playing view, open the up-next
+    /// queue, or close back to the ambient display. Fire-and-forget: the device owns the
+    /// screen state (and whether anything is playing). Transport (play/pause/skip/volume)
+    /// is the separate `spotify_control` tool, not this.
+    MusicScreen(MusicNav),
+}
+
+/// A voice command for the music screen (relayed as an `anamanti-music` `screen` frame).
+/// Emitted by the `music_screen` tool. Screen navigation only — playback transport is
+/// `spotify_control`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusicNav {
+    /// Open the full-screen now-playing view.
+    NowPlaying,
+    /// Open the up-next queue list.
+    Queue,
+    /// Close any music screen and return to the compact overlay / ambient display.
+    Close,
 }
 
 /// A voice navigation command for the open recipe screen (relayed as an
