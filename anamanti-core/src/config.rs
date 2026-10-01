@@ -32,8 +32,8 @@ use crate::music::{
     SnapcastClient,
 };
 use crate::settings::{
-    load_persisted, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
-    SharedSettings, SpotifyConfig,
+    load_persisted, AppSaidConfig, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory,
+    RuntimeSettings, SharedSettings, SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -181,6 +181,10 @@ pub struct Config {
     /// Cadora shopping-list seed (base URL + voice-link token). The token is normally
     /// minted by the config-page pairing flow. Overlaid by the persisted settings file.
     pub cadora: CadoraConfig,
+    /// AppSaid phone-push seed (worker URL + recipients + default recipient). The
+    /// secret app token is NOT here — it seeds from `APPSAID_APP_TOKEN`. Overlaid by
+    /// the persisted settings file.
+    pub appsaid: AppSaidConfig,
 }
 
 /// Speaker-identification configuration. Off by default (`speaker.enabled`); a
@@ -441,6 +445,7 @@ impl Default for Config {
             },
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
+            appsaid: AppSaidConfig::default(),
         }
     }
 }
@@ -537,6 +542,8 @@ pub struct FileConfig {
     pub spotify: FileSpotify,
     #[serde(default)]
     pub cadora: FileCadora,
+    #[serde(default)]
+    pub appsaid: FileAppSaid,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -687,6 +694,22 @@ pub struct FileCadora {
     /// A `vl_…` voice-link token, if seeded directly (normally minted via the
     /// config-page pairing flow instead).
     pub link_token: Option<String>,
+}
+
+/// The `appsaid` block of the config file. The secret sender app token is
+/// deliberately NOT a field here — it is env-only (`APPSAID_APP_TOKEN`) and
+/// config-page settable, never written to `anamanti.json` (the secrets-are-env-only
+/// convention).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileAppSaid {
+    /// AppSaid worker base URL (e.g. `https://appsaid.you.workers.dev`).
+    pub worker_url: Option<String>,
+    /// Recipients: family-member name → AppSaid `user_key`.
+    #[serde(default)]
+    pub recipients: std::collections::BTreeMap<String, String>,
+    /// Optional default recipient name used when the model omits `recipient`.
+    pub default_recipient: Option<String>,
 }
 
 /// Trim a config string and drop it when empty.
@@ -953,6 +976,23 @@ impl Config {
             link_token: nonempty(fc.cadora.link_token),
         };
 
+        let appsaid = AppSaidConfig {
+            // Trim a trailing slash so the client can join `/v1/messages` cleanly.
+            worker_url: nonempty(fc.appsaid.worker_url)
+                .map(|s| s.trim_end_matches('/').to_string()),
+            // The sender app token is a SECRET: never seeded from the JSON config. It
+            // seeds from `APPSAID_APP_TOKEN` in `shared_settings` instead.
+            app_token: None,
+            recipients: fc
+                .appsaid
+                .recipients
+                .into_iter()
+                .map(|(name, key)| (name.trim().to_string(), key.trim().to_string()))
+                .filter(|(name, key)| !name.is_empty() && !key.is_empty())
+                .collect(),
+            default_recipient: nonempty(fc.appsaid.default_recipient),
+        };
+
         let ollama_url = match &llm {
             LlmChoice::Ollama { url, .. } => url.clone(),
             _ => fc
@@ -1032,6 +1072,7 @@ impl Config {
             drive,
             spotify,
             cadora,
+            appsaid,
         })
     }
 
@@ -1195,6 +1236,9 @@ impl Config {
             // Seeded per-build from the resolved Cadora config in `shared_settings`
             // (and refreshed by `apply`/`apply_cadora`).
             cadora: None,
+            // Seeded per-build from the resolved AppSaid config in `shared_settings`
+            // (and refreshed by `apply`/`apply_appsaid`).
+            appsaid: None,
             // Prebuilt from the config: the calendar source (web .ics) and the
             // directions provider (Mapbox). The Mapbox token is seeded from the env
             // secret here but is runtime-settable (Tools tab) — `shared_settings`
@@ -1307,6 +1351,23 @@ impl Config {
         self.cadora.clone()
     }
 
+    /// Initial AppSaid phone-push config seeded from the config file's `appsaid` block
+    /// (worker URL + recipients + default recipient). The secret app token is not here —
+    /// see [`Self::initial_appsaid_app_token`]. A persisted file overlays these at boot
+    /// (see [`Self::shared_settings`]).
+    pub fn initial_appsaid(&self) -> AppSaidConfig {
+        self.appsaid.clone()
+    }
+
+    /// Initial AppSaid sender app token — a secret, seeded from `APPSAID_APP_TOKEN`.
+    /// Runtime-settable from the config page; persisted to the settings file (0600).
+    pub fn initial_appsaid_app_token(&self) -> Option<String> {
+        env::var("APPSAID_APP_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
@@ -1354,6 +1415,11 @@ impl Config {
         let mut spotify = self.initial_spotify();
         // Cadora shopping-list config: same seed-then-persist-overlay pattern.
         let mut cadora = self.initial_cadora();
+        // AppSaid phone-push config: worker URL + recipients + default seed from the
+        // config file; the secret app token seeds from `APPSAID_APP_TOKEN` (env), like
+        // the Mapbox token. Both are then overlaid by any persisted values below.
+        let mut appsaid = self.initial_appsaid();
+        appsaid.app_token = self.initial_appsaid_app_token();
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -1442,6 +1508,22 @@ impl Config {
             if p.cadora.link_token.is_some() {
                 cadora.link_token = p.cadora.link_token;
             }
+            // Overlay persisted AppSaid fields onto the config-file/env seed (same rule).
+            // Guard the app token like the Mapbox token: only override the env seed when
+            // the persisted file actually carries one, so an older file (field absent →
+            // serde default `None`) can't wipe a working `APPSAID_APP_TOKEN`.
+            if p.appsaid.worker_url.is_some() {
+                appsaid.worker_url = p.appsaid.worker_url;
+            }
+            if p.appsaid.app_token.is_some() {
+                appsaid.app_token = p.appsaid.app_token;
+            }
+            if !p.appsaid.recipients.is_empty() {
+                appsaid.recipients = p.appsaid.recipients;
+            }
+            if p.appsaid.default_recipient.is_some() {
+                appsaid.default_recipient = p.appsaid.default_recipient;
+            }
         }
 
         // Seed the directions tool's live default origin from the resolved household
@@ -1467,6 +1549,9 @@ impl Config {
         // Seed the initial Cadora controller so the `shopping_list_add` tool is
         // advertised at boot when the shopping list is already linked.
         build_factory.cadora = cadora.controller();
+        // Seed the initial AppSaid messenger so the `send_phone_message` tool is
+        // advertised at boot when the worker URL + app token + a recipient are all set.
+        build_factory.appsaid = appsaid.messenger();
         // Seed the initial directions provider from the resolved Mapbox token so the
         // `directions_lookup` tool is advertised at boot when a token is present.
         build_factory.directions = crate::directions::from_token(
@@ -1507,6 +1592,7 @@ impl Config {
                 household,
                 spotify,
                 cadora,
+                appsaid,
             },
             persist_path,
         ))

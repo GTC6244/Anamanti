@@ -455,6 +455,7 @@ mod tests {
                 home_location: crate::directions::LiveHomeLocation::default(),
                 spotify: None,
                 cadora: None,
+                appsaid: None,
                 calendar: None,
                 directions: None,
                 directions_provider: String::new(),
@@ -482,6 +483,7 @@ mod tests {
                 household: crate::settings::Household::default(),
                 spotify: crate::settings::SpotifyConfig::default(),
                 cadora: crate::settings::CadoraConfig::default(),
+                appsaid: crate::settings::AppSaidConfig::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();

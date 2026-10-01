@@ -13,8 +13,8 @@ use anamanti_core::llm::anthropic_auth::AnthropicAuth;
 use anamanti_core::memory::{MemoryKind, MemorySource, MemoryStore};
 use anamanti_core::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
 use anamanti_core::settings::{
-    CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
-    SpotifyConfig, DEFAULT_END_SILENCE_MS, DEFAULT_VOICE_RMS_THRESHOLD,
+    AppSaidConfig, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
+    SharedSettings, SpotifyConfig, DEFAULT_END_SILENCE_MS, DEFAULT_VOICE_RMS_THRESHOLD,
 };
 use anamanti_core::wyoming::protocol::{read_event, types, write_event, WyomingEvent};
 use serde_json::json;
@@ -37,6 +37,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         home_location: anamanti_core::directions::LiveHomeLocation::default(),
         spotify: None,
         cadora: None,
+        appsaid: None,
         calendar: None,
         directions: None,
         directions_provider: String::new(),
@@ -77,6 +78,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             household: Household::default(),
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
+            appsaid: AppSaidConfig::default(),
         },
     );
     let pipeline = Pipeline::with_settings(

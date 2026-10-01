@@ -193,6 +193,8 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     UI: Config tab)
 #   MAPBOX_TOKEN (or MAPBOX_ACCESS_TOKEN) (the directions_lookup provider token;
 #     UI: Tools tab → /tools)
+#   APPSAID_APP_TOKEN                    (the send_phone_message sender app token for
+#     AppSaid HTML-push; UI: Household tab → /household)
 #   ANTHROPIC_OAUTH_TOKEN                (Claude subscription token from `claude setup-token`;
 #     UI: Config tab when Anthropic auth = subscription)
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
@@ -232,8 +234,13 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     Voice & Integrations, enter it on the config page → Household tab → "Shopping list
 #     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)
+#   appsaid{worker_url,recipients{name:user_key},default_recipient} (send_phone_message
+#     tool → push a message / Google Maps link to a family member's phone via AppSaid.
+#     The sender app token is a SECRET (env APPSAID_APP_TOKEN or config page → Household
+#     tab, stored 0600, NEVER in the JSON). The tool is advertised only when worker_url +
+#     the app token + at least one recipient are all present)
 #
-# home_location/weather_units, drive, spotify, cadora, the tts_voice, and the llm engine/
+# home_location/weather_units, drive, spotify, cadora, appsaid, the tts_voice, and the llm engine/
 # backend/model/web_search/search_provider fields only SEED the live settings at boot:
 # they are then editable from the config page and persisted to settings_path
 # (anamanti_settings.json), and a PERSISTED value wins over the JSON seed at the next boot.

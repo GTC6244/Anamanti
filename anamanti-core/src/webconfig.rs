@@ -47,8 +47,8 @@ use crate::music::{ManagedProc, MusicHub};
 use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
-    CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine,
-    SettingsUpdate, SharedSettings, SpotifyUpdate,
+    AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
+    LlmEngine, SettingsUpdate, SharedSettings, SpotifyUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -597,6 +597,34 @@ async fn handle(
     // returns — fine for a single admin request.
     if method == "POST" && path == "/cadora/link" {
         let payload = cadora_link_json(&settings, &body).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // AppSaid phone-push status (worker URL + recipient names + token/tool state; never
+    // the token value).
+    if method == "GET" && path == "/appsaid/status.json" {
+        let payload = appsaid_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Set the AppSaid worker URL and/or default recipient (no token change).
+    if method == "POST" && path == "/appsaid/save" {
+        let payload = appsaid_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Set the secret AppSaid sender app token (masked, never echoed back).
+    if method == "POST" && path == "/appsaid/token" {
+        let payload = appsaid_token_json(&settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -1366,6 +1394,86 @@ async fn cadora_link_json(settings: &SharedSettings, body: &[u8]) -> String {
     .to_string()
 }
 
+/// `GET /appsaid/status.json` — the AppSaid phone-push state for the `/household`
+/// page. Reports the worker URL, the configured recipient names, and whether the app
+/// token is set + the `send_phone_message` tool is therefore active. The token value
+/// is never included.
+fn appsaid_status_json(settings: &SharedSettings) -> String {
+    let a = settings.appsaid();
+    json!({
+        "ok": true,
+        "worker_url": a.worker_url.clone().unwrap_or_default(),
+        "recipients": a.recipient_names(),
+        "default_recipient": a.default_recipient.clone().unwrap_or_default(),
+        "token_set": a.token_set(),
+        "tool_active": a.active(),
+    })
+    .to_string()
+}
+
+/// `POST /appsaid/save` — set the AppSaid worker URL and/or default recipient. A blank
+/// value clears the field; an absent field is left unchanged. Applying rebuilds the LLM
+/// so the tool tracks state. Recipients themselves come from the JSON config's
+/// `appsaid.recipients` block.
+fn appsaid_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    // A present field (even blank → clear) updates it; absent leaves it unchanged.
+    let opt = |key: &str| {
+        data.get(key).and_then(Value::as_str).map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.trim_end_matches('/').to_string())
+            }
+        })
+    };
+    let worker_url = opt("worker_url");
+    let default_recipient = data
+        .get("default_recipient")
+        .and_then(Value::as_str)
+        .map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        });
+    settings.apply_appsaid(&AppSaidUpdate {
+        worker_url,
+        default_recipient,
+        ..Default::default()
+    });
+    appsaid_status_json(settings)
+}
+
+/// `POST /appsaid/token` — set the secret AppSaid sender app token. A blank/absent
+/// token is left unchanged (a page reload never wipes the stored token); a non-empty
+/// value sets it and rebuilds the backend so `send_phone_message` activates live.
+fn appsaid_token_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let app_token = match data.get("app_token").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+        _ => None,
+    };
+    settings.apply_appsaid(&AppSaidUpdate {
+        app_token,
+        ..Default::default()
+    });
+    appsaid_status_json(settings)
+}
+
 /// Pure request router: maps `(method, target, body)` to a response. Kept free of
 /// I/O so it is unit-testable against a [`SharedSettings`].
 fn route(
@@ -2038,6 +2146,43 @@ mod tests {
         assert!(s.cadora().linked());
         // The token must never appear in the response.
         assert!(!out.contains("vl_pasted"));
+    }
+
+    #[test]
+    fn appsaid_status_reports_unconfigured_by_default() {
+        let v: Value = serde_json::from_str(&appsaid_status_json(&settings())).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["token_set"], false);
+        assert_eq!(v["tool_active"], false);
+    }
+
+    #[test]
+    fn appsaid_token_save_sets_it_without_leaking_it() {
+        let s = settings();
+        assert!(!s.appsaid_token_set());
+        let out = appsaid_token_json(&s, br#"{"app_token":"appsaid-secret"}"#);
+        assert!(s.appsaid_token_set());
+        // The token must never appear in the status payload.
+        assert!(!out.contains("appsaid-secret"));
+        // A blank re-save keeps the stored token (a page reload never wipes it).
+        appsaid_token_json(&s, br#"{"app_token":""}"#);
+        assert!(s.appsaid_token_set());
+    }
+
+    #[test]
+    fn appsaid_save_sets_worker_url_and_default_recipient() {
+        let s = settings();
+        appsaid_save_json(
+            &s,
+            br#"{"worker_url":"https://appsaid.example.workers.dev/","default_recipient":"Mom"}"#,
+        );
+        let a = s.appsaid();
+        // Trailing slash trimmed.
+        assert_eq!(
+            a.worker_url.as_deref(),
+            Some("https://appsaid.example.workers.dev")
+        );
+        assert_eq!(a.default_recipient.as_deref(), Some("Mom"));
     }
 
     #[test]

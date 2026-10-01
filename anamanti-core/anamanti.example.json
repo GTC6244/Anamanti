@@ -106,5 +106,14 @@
   "cadora": {
     "base_url": "https://cadora-server.fly.dev",
     "link_token": null
+  },
+
+  "appsaid": {
+    "worker_url": "https://appsaid.you.workers.dev",
+    "recipients": {
+      "Mom": "u_public_key_for_mom",
+      "Dad": "u_public_key_for_dad"
+    },
+    "default_recipient": "Mom"
   }
 }
