@@ -29,10 +29,11 @@ const List<String> kAvailableWakeWords = <String>[
 ];
 
 /// Default base URL the in-app updater fetches `latest.json` and the APK from
-/// (plans/UpdaterPlan.md). A placeholder — point it at your real
-/// Cloudflare R2 custom domain on-device via Settings → Updates, or edit this
-/// constant. No trailing slash; the Rust side appends `/latest.json`.
-const String kDefaultUpdateBaseUrl = 'https://dl.example.com';
+/// (plans/UpdaterPlan.md). Points at the Anamanti subpath of the shared Cloudflare
+/// R2 bucket (`immediacy-releases`, custom domain `releases.immediacy.app`).
+/// Overridable on-device via Settings → Updates. No trailing slash; the Rust side
+/// appends `/latest.json`.
+const String kDefaultUpdateBaseUrl = 'https://releases.immediacy.app/anamanti';
 
 @immutable
 class AppSettings {

@@ -237,4 +237,45 @@ mod tests {
 
         let _ = server.join();
     }
+
+    #[test]
+    fn cancel_flag_polarity_true_means_abort() {
+        // Pins the contract between this module and `api::updater`: the shared flag is
+        // a CANCEL flag — `true` aborts, `false` proceeds. The FRB layer must create
+        // it as `false` (run) and flip it to `true` to stop. A regression that inits
+        // it the other way makes every real download bail instantly with "download
+        // cancelled" (the bug fixed in api/updater.rs).
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        let body = vec![7u8; 64 * 1024]; // >1 READ_BUF so the loop iterates
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body_vec = body.clone();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let mut scratch = [0u8; 1024];
+                let _ = stream.read(&mut scratch);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_vec.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(&body_vec);
+            }
+        });
+
+        let url = format!("http://{addr}/app.apk");
+        let dest = std::env::temp_dir().join(format!("anamanti-cancel-{}.apk", std::process::id()));
+
+        // cancel = true → aborts on the first loop iteration, partial file removed.
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let err = download_and_verify(&url, &"0".repeat(64), &dest, &cancelled, |_| {});
+        assert!(err.is_err());
+        assert!(format!("{:#}", err.unwrap_err()).contains("cancelled"));
+        assert!(!dest.exists());
+
+        let _ = server.join();
+    }
 }
