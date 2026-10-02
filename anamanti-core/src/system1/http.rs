@@ -213,8 +213,11 @@ fn intent_description(intent: &str) -> &str {
         }
         "end_session" => {
             "the user is finished and wants no more replies — a sign-off or dismissal \
-             like \"that's all\", \"nothing else\", or \"goodbye\"; NOT stopping a timer \
-             or music"
+             like \"that's all\", \"nothing else\", or \"goodbye\", including a bare \
+             standalone thanks used to close the conversation in any language \
+             (\"thank you\", \"thanks\", \"gracias\", \"merci\"); NOT stopping a timer \
+             or music, and NOT a thanks that is part of a continuing request \
+             (e.g. \"thanks, now what's the weather\")"
         }
         "stop_dismiss" => {
             "a bare \"stop\", \"cancel\", \"never mind\", or \"dismiss\" with no named \
@@ -223,7 +226,10 @@ fn intent_description(intent: &str) -> &str {
         "recipe_nav" => "navigate or scroll the recipe already on screen",
         "music" => "play, pause, skip, or change music volume",
         "shopping_add" => "add an item to the shopping list",
-        "smalltalk" => "a greeting, thanks, or acknowledgement needing no data",
+        "smalltalk" => {
+            "a greeting or acknowledgement needing no data (a bare sign-off thanks \
+             like \"thank you\" is end_session, not this)"
+        }
         _ => "",
     }
 }
