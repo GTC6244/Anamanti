@@ -235,7 +235,15 @@ predictable memory use and no GC pauses under the 1 GB limit.
   reads a per-turn snapshot of runtime-swappable `SharedSettings`, so a
   backend/voice change takes effect on the next turn with no restart; the accept
   loop routes control frames to `control::handle_control` and audio-start frames to
-  a turn. Backends are `ollama` (local), `anthropic` and `openai` (cloud), and
+  a turn. The turn's **base system prompt is the active persona** — one bundled
+  `RuntimeSettings.personas: PersonaSettings { roster, active }` field (seeded from
+  `personas`/`active_persona` in `anamanti.json`, persisted to `anamanti_settings.json`),
+  read from that same per-turn snapshot. The roster is config-page editable (full CRUD via
+  `POST /personas`), the active persona is switchable from the Config-tab dropdown or **by
+  voice** (`orchestrator::detect_persona_switch` resolves "switch to the <name> persona"
+  before the LLM and speaks a canned confirmation), and `PersonaSettings::sanitized`
+  guarantees `active` always names a real roster entry so prompt assembly can't be wedged;
+  `system_prompt` is the fallback + the seed for a synthesized `Default` persona. Backends are `ollama` (local), `anthropic` and `openai` (cloud), and
   `mock`; selecting a cloud backend needs its API key (`ANTHROPIC_API_KEY` /
   `OPENAI_API_KEY`), else the change is rejected in-band (never dropping the
   connection). The key can come from the environment at boot **or** be entered at

@@ -135,6 +135,19 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   mitigation layered on top.
 - **Settings:** LLM backend, TTS voice, wake word, photo source, and memory
   management are configurable.
+- **Personas (selectable system prompt):** the assistant's base system prompt is a named
+  **persona**. A roster of personas (`personas: [{name,prompt}]`) is config-seeded but
+  **runtime-editable (full CRUD)** from the config-page **Config** tab, and the **active**
+  persona (`active_persona`) is switchable live — from that tab's dropdown or **by voice**
+  ("switch to the Jeeves persona" / "become Jeeves" — a deterministic pre-LLM intent in
+  `orchestrator::detect_persona_switch` that matches a trigger phrase + a roster name,
+  flips the active persona, and speaks a canned confirmation). The roster + active
+  selection persist to `settings_path` and are read from the per-turn settings snapshot
+  (`RuntimeSettings.personas: PersonaSettings`), so a switch applies on the **next turn**
+  with no restart. `system_prompt` remains the fallback and the seed for a synthesized
+  `Default` persona when the roster is empty. (This supersedes the earlier "the system
+  prompt lives only in Core config" framing — the *roster* is still Core-owned, but the
+  active selection and the prompt text are now live-editable + persisted.)
 - **Proactive notifications (Approach A):** the Anamanti Core can push **visual**
   notifications to the display *unprompted* (no voice turn) over a **persistent,
   device-dialed** Wyoming channel (`anamanti-hello` → `anamanti-notify`), separate from
@@ -268,7 +281,14 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     files means memory_backend="sqlite" — two processes can't share an embedded Helix graph.)
 #   db_path / chatlog_path / promptlog_path / helix_path / settings_path / audio_dump_dir
 #     (settings_path is the runtime OVERLAY file — see below; "off"/"none" disables persistence)
-#   system_prompt / home_location / weather_units / turn_timeout_secs / memory_backend
+#   system_prompt / personas / active_persona / home_location / weather_units /
+#     turn_timeout_secs / memory_backend
+#     (personas = [{name,prompt}] is the selectable-persona roster; active_persona names
+#     the live one. system_prompt is the fallback + the seed for a synthesized `Default`
+#     persona when personas is empty. The roster + active selection are config-page
+#     editable (full CRUD, Config tab) AND voice-switchable ("switch to the Jeeves
+#     persona"), persisted to settings_path, and read from the per-turn snapshot — so a
+#     change takes effect on the next turn, no restart. See "Persona" note below.)
 #     (helix|sqlite; helix embeds locally by default — graphrag.embed_backend="openai"
 #     is the opt-in cloud path and needs OPENAI_API_KEY, falling back to sqlite FTS if absent)
 #   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig),
@@ -329,10 +349,11 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults
 #     to 3600s (60 min). Read once at boot (not runtime-settable). Mutating tools uncached.
 #
-# home_location/weather_units, drive, spotify, cadora, appsaid, the tts_voice, and the llm engine/
-# backend/model/web_search/search_provider fields only SEED the live settings at boot:
-# they are then editable from the config page and persisted to settings_path
-# (anamanti_settings.json), and a PERSISTED value wins over the JSON seed at the next boot.
+# home_location/weather_units, drive, spotify, cadora, appsaid, personas/active_persona,
+# the tts_voice, and the llm engine/backend/model/web_search/search_provider fields only
+# SEED the live settings at boot: they are then editable from the config page and persisted
+# to settings_path (anamanti_settings.json), and a PERSISTED value wins over the JSON seed
+# at the next boot.
 # Provider API keys must never appear in either JSON file — they stay in the environment.
 ```
 - **Do not bump the Android toolchain past AGP 8 / Gradle 8.** The bundled

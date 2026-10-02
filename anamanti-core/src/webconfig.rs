@@ -49,8 +49,8 @@ use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
-    LlmEngine, PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update,
-    WeatherToolUpdate,
+    LlmEngine, Persona, PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate,
+    System1Update, WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -1892,6 +1892,26 @@ fn route(
                     .into_bytes(),
             ),
         },
+        // Replace the whole persona roster + active selection (config-page CRUD). The
+        // settings layer sanitizes the input, so this never fails on a malformed edit.
+        ("POST", "/personas") => match serde_json::from_slice::<Value>(body) {
+            Ok(data) => {
+                let (roster, active) = parse_personas(&data);
+                settings.apply_personas(roster, active);
+                (
+                    "200 OK",
+                    "application/json",
+                    view_json(settings, true, Some("personas saved")).into_bytes(),
+                )
+            }
+            Err(e) => (
+                "400 Bad Request",
+                "application/json",
+                json!({ "ok": false, "message": format!("invalid JSON: {e}") })
+                    .to_string()
+                    .into_bytes(),
+            ),
+        },
         _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
     }
 }
@@ -1922,8 +1942,36 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
         "voice_rms_threshold": v.voice_rms_threshold,
         "silero_threshold": v.silero_threshold,
         "vad_engine": v.vad_engine.as_label(),
+        "personas": v.personas,
+        "active_persona": v.active_persona,
     })
     .to_string()
+}
+
+/// Parse a persona roster + active selection from a `POST /personas` body
+/// (`{ "personas": [{ "name", "prompt" }], "active": "<name>" }`). Entries missing a
+/// name or prompt are dropped here; the settings layer sanitizes further (trim, de-dup,
+/// non-empty guarantee, active resolution).
+fn parse_personas(data: &Value) -> (Vec<Persona>, String) {
+    let roster = data
+        .get("personas")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let name = p.get("name").and_then(Value::as_str)?.to_string();
+                    let prompt = p.get("prompt").and_then(Value::as_str)?.to_string();
+                    Some(Persona { name, prompt })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let active = data
+        .get("active")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    (roster, active)
 }
 
 /// Parse a [`SettingsUpdate`] from a JSON object. Identical semantics to the
@@ -2159,6 +2207,21 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["llm_backend"], "mock");
+    }
+
+    #[test]
+    fn post_personas_replaces_roster_and_sets_active() {
+        let s = settings();
+        let body = br#"{"personas":[{"name":"Default","prompt":"d"},{"name":"Jeeves","prompt":"be dry"}],"active":"Jeeves"}"#;
+        let (status, ctype, out) = route("POST", "/personas", body, &s);
+        assert_eq!(status, "200 OK");
+        assert_eq!(ctype, "application/json");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["active_persona"], "Jeeves");
+        assert_eq!(v["personas"][1]["name"], "Jeeves");
+        // The live snapshot now resolves the active persona's prompt.
+        assert_eq!(s.snapshot().personas.system_prompt(), "be dry");
     }
 
     #[test]

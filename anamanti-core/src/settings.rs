@@ -639,6 +639,14 @@ pub struct PersistedSettings {
     /// which then fall back to the `OPENROUTER_API_KEY` env seed.
     #[serde(default)]
     pub openrouter_api_key: Option<String>,
+    /// The full persona roster (name + prompt), edited on the config page. Defaulted
+    /// (empty) for older files — an empty persisted roster keeps the config-file seed.
+    #[serde(default)]
+    pub personas: Vec<Persona>,
+    /// The active persona's name. Defaulted (absent) for older files, which then keep
+    /// the config-file `active_persona` seed.
+    #[serde(default)]
+    pub active_persona: Option<String>,
 }
 
 fn default_system1_base_url() -> String {
@@ -915,6 +923,102 @@ impl LlmFactory {
     }
 }
 
+/// A named persona: a label plus the base system prompt it installs. The prompt text
+/// is not a secret, but it lives in the `0600` settings file alongside the keys, so
+/// treat the file as trusted. Edited freely from the config page (full CRUD).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Persona {
+    /// Display + selection key (unique within a roster after sanitizing).
+    pub name: String,
+    /// The base system prompt this persona installs as the per-turn prompt's preamble.
+    pub prompt: String,
+}
+
+/// The built-in persona name used as the always-present fallback entry.
+pub const DEFAULT_PERSONA_NAME: &str = "Default";
+
+/// The live persona selection: the full editable roster plus the active name. Bundled
+/// into one [`RuntimeSettings`] field (like [`System1Runtime`]) so the widely-constructed
+/// `RuntimeSettings` only gains one field. Always sanitized to a non-empty roster whose
+/// `active` names a real entry, so [`Self::system_prompt`] never falls back silently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonaSettings {
+    /// All defined personas. Always contains at least one entry after [`Self::sanitized`].
+    pub roster: Vec<Persona>,
+    /// The selected persona's name; always matches a roster entry after [`Self::sanitized`].
+    pub active: String,
+}
+
+impl Default for PersonaSettings {
+    fn default() -> Self {
+        Self {
+            roster: vec![Persona {
+                name: DEFAULT_PERSONA_NAME.to_string(),
+                prompt: crate::config::DEFAULT_SYSTEM_PROMPT.to_string(),
+            }],
+            active: DEFAULT_PERSONA_NAME.to_string(),
+        }
+    }
+}
+
+impl PersonaSettings {
+    /// Build from a seed roster + active name, then sanitize.
+    pub fn new(roster: Vec<Persona>, active: impl Into<String>) -> Self {
+        Self {
+            roster,
+            active: active.into(),
+        }
+        .sanitized()
+    }
+
+    /// The active persona's prompt. Guaranteed to resolve after [`Self::sanitized`];
+    /// falls back to the first entry, then the built-in default, defensively.
+    pub fn system_prompt(&self) -> &str {
+        self.roster
+            .iter()
+            .find(|p| p.name == self.active)
+            .or_else(|| self.roster.first())
+            .map(|p| p.prompt.as_str())
+            .unwrap_or(crate::config::DEFAULT_SYSTEM_PROMPT)
+    }
+
+    /// Normalize: trim names, drop entries with an empty name or prompt, de-dup by name
+    /// (last wins, preserving order), guarantee at least one entry (the built-in
+    /// `Default`), and resolve `active` to a real entry (unknown → the first one).
+    pub fn sanitized(mut self) -> Self {
+        let mut seen: Vec<String> = Vec::new();
+        let mut cleaned: Vec<Persona> = Vec::new();
+        for p in self.roster.drain(..) {
+            let name = p.name.trim().to_string();
+            let prompt = p.prompt.trim().to_string();
+            if name.is_empty() || prompt.is_empty() {
+                continue;
+            }
+            if let Some(idx) = seen.iter().position(|n| n == &name) {
+                // Last definition of a name wins, keeping its original position.
+                cleaned[idx].prompt = prompt;
+            } else {
+                seen.push(name.clone());
+                cleaned.push(Persona { name, prompt });
+            }
+        }
+        if cleaned.is_empty() {
+            cleaned.push(Persona {
+                name: DEFAULT_PERSONA_NAME.to_string(),
+                prompt: crate::config::DEFAULT_SYSTEM_PROMPT.to_string(),
+            });
+        }
+        let active = self.active.trim();
+        self.active = if cleaned.iter().any(|p| p.name == active) {
+            active.to_string()
+        } else {
+            cleaned[0].name.clone()
+        };
+        self.roster = cleaned;
+        self
+    }
+}
+
 /// The live, swappable settings the pipeline reads each turn.
 #[derive(Clone)]
 pub struct RuntimeSettings {
@@ -995,6 +1099,11 @@ pub struct RuntimeSettings {
     /// from the per-turn snapshot so a config-page swap takes effect between turns.
     /// Bundled into one field so the widely-constructed `RuntimeSettings` only gains one.
     pub system1: System1Runtime,
+    /// The live persona selection (roster + active). Read per-turn via
+    /// [`PersonaSettings::system_prompt`] as the prompt preamble, so a config-page switch
+    /// or edit takes effect on the next turn. Config-seeded, config-page editable (CRUD),
+    /// and persisted. Bundled into one field like [`System1Runtime`].
+    pub personas: PersonaSettings,
 }
 
 /// Default System-1 HTTP base URL (local `laya-serve`).
@@ -1098,6 +1207,11 @@ pub struct SettingsView {
     pub silero_threshold: f32,
     /// The active VAD engine (energy / silero).
     pub vad_engine: crate::config::VadEngineKind,
+    /// The full persona roster (name + prompt). The prompt text is shown in the config
+    /// page editor, so it's included here (unlike secret keys, which only report `*_set`).
+    pub personas: Vec<Persona>,
+    /// The active persona's name.
+    pub active_persona: String,
 }
 
 /// A requested settings change. Absent fields are left unchanged; a `tts_voice` of
@@ -1198,6 +1312,8 @@ impl SharedSettings {
             system1_min_confidence: s.system1.min_confidence,
             system1_intents: s.system1.intents.clone(),
             openrouter_api_key: s.system1.openrouter_api_key.clone(),
+            personas: s.personas.roster.clone(),
+            active_persona: Some(s.personas.active.clone()),
         }
     }
 
@@ -1260,6 +1376,7 @@ impl SharedSettings {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
         )
     }
@@ -1297,6 +1414,8 @@ impl SharedSettings {
             voice_rms_threshold: s.voice_rms_threshold,
             silero_threshold: s.silero_threshold,
             vad_engine: s.vad_engine,
+            personas: s.personas.roster.clone(),
+            active_persona: s.personas.active.clone(),
         }
     }
 
@@ -1474,6 +1593,8 @@ impl SharedSettings {
             voice_rms_threshold: w.voice_rms_threshold,
             silero_threshold: w.silero_threshold,
             vad_engine: w.vad_engine,
+            personas: w.personas.roster.clone(),
+            active_persona: w.personas.active.clone(),
         };
         // Persist the new state (best-effort) after dropping the write lock so IO
         // never blocks a concurrent turn's snapshot.
@@ -1532,6 +1653,62 @@ impl SharedSettings {
             persist(path, &snap);
         }
         cleaned
+    }
+
+    /// A snapshot of the live persona selection (roster + active). Read by the config
+    /// page and the `switch_persona` voice tool. Cheap clone.
+    pub fn personas(&self) -> PersonaSettings {
+        self.inner.read().unwrap().personas.clone()
+    }
+
+    /// Replace the whole persona roster + active selection (config-page CRUD). The input
+    /// is sanitized (trimmed, de-duped, non-empty guaranteed, `active` resolved) before
+    /// it is stored, so a malformed edit can never wedge prompt assembly. Returns the
+    /// stored selection and persists it. Mirrors [`apply_household`](Self::apply_household).
+    pub fn apply_personas(
+        &self,
+        roster: Vec<Persona>,
+        active: impl Into<String>,
+    ) -> PersonaSettings {
+        let cleaned = PersonaSettings::new(roster, active);
+        let mut w = self.inner.write().unwrap();
+        w.personas = cleaned.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        cleaned
+    }
+
+    /// Switch only the active persona by name, leaving the roster unchanged (the config
+    /// page dropdown + the `switch_persona` voice tool). Case-insensitive. Returns the
+    /// new selection, or `None` if no persona has that name (the caller reports the miss).
+    /// Persists on success.
+    pub fn set_active_persona(&self, name: &str) -> Option<PersonaSettings> {
+        let name = name.trim();
+        let mut w = self.inner.write().unwrap();
+        // Resolve to the roster's exact casing so `active` always matches an entry.
+        let exact = w
+            .personas
+            .roster
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.name.clone())?;
+        w.personas.active = exact;
+        let result = w.personas.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        Some(result)
     }
 
     /// A snapshot of the live System-1 selection for the config page (never the key).
@@ -2239,6 +2416,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
         )
     }
@@ -2372,6 +2550,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
             Some(path.clone()),
         );
@@ -2581,6 +2760,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
             Some(path.clone()),
         );
@@ -2727,6 +2907,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
             Some(path.clone()),
         );
@@ -2803,6 +2984,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
             Some(path.clone()),
         );
@@ -2887,6 +3069,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
             Some(path.clone()),
         );
@@ -2962,6 +3145,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personas: PersonaSettings::default(),
             },
             Some(path.clone()),
         );
@@ -3035,5 +3219,75 @@ mod tests {
         });
         assert!(!s.weather_enabled());
         assert!(s.current_weather_provider().is_none());
+    }
+
+    fn persona(name: &str, prompt: &str) -> Persona {
+        Persona {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+        }
+    }
+
+    #[test]
+    fn persona_settings_sanitize_trims_dedups_and_resolves_active() {
+        let s = PersonaSettings::new(
+            vec![
+                persona(" Jeeves ", " be dry "),  // trimmed
+                persona("Jeeves", "be VERY dry"), // dup name, last prompt wins, keeps order
+                persona("", "no name"),           // dropped
+                persona("Blank", "   "),          // empty prompt dropped
+                persona("Ada", "be warm"),
+            ],
+            "nope", // unknown active → first entry
+        );
+        assert_eq!(
+            s.roster,
+            vec![persona("Jeeves", "be VERY dry"), persona("Ada", "be warm")]
+        );
+        assert_eq!(s.active, "Jeeves");
+        assert_eq!(s.system_prompt(), "be VERY dry");
+    }
+
+    #[test]
+    fn persona_settings_empty_roster_falls_back_to_default() {
+        let s = PersonaSettings::new(Vec::new(), "whatever");
+        assert_eq!(s.roster.len(), 1);
+        assert_eq!(s.active, DEFAULT_PERSONA_NAME);
+        assert_eq!(s.system_prompt(), crate::config::DEFAULT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn set_active_persona_switches_case_insensitively_and_rejects_unknown() {
+        let s = shared(factory_with_key(None));
+        s.apply_personas(
+            vec![persona("Default", "d"), persona("Jeeves", "j")],
+            "Default",
+        );
+        // Case-insensitive match resolves to the roster's exact casing.
+        let sel = s.set_active_persona("JEEVES").expect("known persona");
+        assert_eq!(sel.active, "Jeeves");
+        assert_eq!(s.snapshot().personas.system_prompt(), "j");
+        // Unknown name leaves the selection unchanged.
+        assert!(s.set_active_persona("Batman").is_none());
+        assert_eq!(s.snapshot().personas.active, "Jeeves");
+    }
+
+    #[test]
+    fn apply_personas_replaces_roster_and_is_reflected_in_the_view() {
+        let s = shared(factory_with_key(None));
+        s.apply_personas(
+            vec![persona("Ada", "warm"), persona("Jeeves", "dry")],
+            "Ada",
+        );
+        let v = s.view();
+        assert_eq!(v.active_persona, "Ada");
+        assert_eq!(
+            v.personas,
+            vec![persona("Ada", "warm"), persona("Jeeves", "dry")]
+        );
+        // A malformed replacement (all blank) can't wedge the roster.
+        let cleaned = s.apply_personas(vec![persona("", "")], "");
+        assert_eq!(cleaned.roster.len(), 1);
+        assert_eq!(cleaned.active, DEFAULT_PERSONA_NAME);
     }
 }

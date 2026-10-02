@@ -29,6 +29,36 @@
 </div>
 
 <div class="card">
+  <h2>Persona</h2>
+  <p class="desc">The assistant's base system prompt. Switch the active persona live, or
+    edit the roster (full add / edit / delete). Keep replies one or two short spoken
+    sentences with no markdown, lists, or emoji — they're spoken aloud and shown on the
+    display.</p>
+
+  <label>Active persona
+    <select id="persona_active"></select>
+  </label>
+
+  <label>Edit persona
+    <select id="persona_edit"></select>
+  </label>
+
+  <label>Name
+    <input id="persona_name" type="text" placeholder="e.g. Jeeves">
+  </label>
+
+  <label>System prompt
+    <textarea id="persona_prompt" rows="5" placeholder="You are …"></textarea>
+  </label>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+    <button id="persona_add" type="button">Add new</button>
+    <button id="persona_delete" type="button">Delete this</button>
+    <button id="persona_save" class="primary" type="button">Save personas</button>
+  </div>
+</div>
+
+<div class="card">
   <h2>Provider credentials</h2>
   <p class="desc">Keys are stored on the orchestrator and never shown back. Leave a field blank to keep the current secret.</p>
 
@@ -228,7 +258,104 @@
     $('key_state').textContent = v.search_key_set ? '(a key is set)' : '(no key set)';
     if (v.vad_engine) $('vad_engine').value = v.vad_engine;
     if (v.silero_threshold != null) $('silero_threshold').value = v.silero_threshold;
+    initPersonas(v);
   }
+
+  // --- Personas ---------------------------------------------------------------
+  // Index-based model so renaming a persona never desyncs the active/edit selects.
+  let PERSONAS = [];   // [{name, prompt}]
+  let EDIT_IDX = 0;    // which persona the editor fields are bound to
+  let ACTIVE_IDX = 0;  // which persona is the live one
+
+  function renderPersonaSelectors() {
+    const act = $('persona_active');
+    const ed = $('persona_edit');
+    act.innerHTML = '';
+    ed.innerHTML = '';
+    PERSONAS.forEach((p, i) => {
+      const label = p.name && p.name.trim() ? p.name : '(unnamed)';
+      const o1 = document.createElement('option');
+      o1.value = String(i); o1.textContent = label;
+      if (i === ACTIVE_IDX) o1.selected = true;
+      act.appendChild(o1);
+      const o2 = document.createElement('option');
+      o2.value = String(i); o2.textContent = label;
+      if (i === EDIT_IDX) o2.selected = true;
+      ed.appendChild(o2);
+    });
+  }
+
+  function loadEditFields() {
+    const p = PERSONAS[EDIT_IDX] || { name: '', prompt: '' };
+    $('persona_name').value = p.name;
+    $('persona_prompt').value = p.prompt;
+  }
+
+  // Write the editor fields back into the model (so switching rows keeps edits).
+  function commitFields() {
+    const p = PERSONAS[EDIT_IDX];
+    if (!p) return;
+    p.name = $('persona_name').value;
+    p.prompt = $('persona_prompt').value;
+  }
+
+  function initPersonas(v) {
+    PERSONAS = (v.personas || []).map((p) => ({ name: p.name, prompt: p.prompt }));
+    if (!PERSONAS.length) PERSONAS = [{ name: 'Default', prompt: '' }];
+    const ai = PERSONAS.findIndex((p) => p.name === v.active_persona);
+    ACTIVE_IDX = ai >= 0 ? ai : 0;
+    EDIT_IDX = ACTIVE_IDX;
+    renderPersonaSelectors();
+    loadEditFields();
+  }
+
+  async function savePersonas() {
+    commitFields();
+    const active = (PERSONAS[ACTIVE_IDX] || PERSONAS[0]).name;
+    try {
+      const r = await fetch('/personas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ personas: PERSONAS, active }),
+      });
+      const v = await r.json();
+      if (v.ok) { fill(v); show(true, v.message || 'Personas saved.'); }
+      else { show(false, v.message || 'Rejected.'); }
+    } catch (e) {
+      show(false, 'Request failed: ' + e);
+    }
+  }
+
+  $('persona_active').addEventListener('change', (e) => {
+    ACTIVE_IDX = parseInt(e.target.value, 10) || 0;
+  });
+  $('persona_edit').addEventListener('change', (e) => {
+    commitFields();
+    EDIT_IDX = parseInt(e.target.value, 10) || 0;
+    renderPersonaSelectors();
+    loadEditFields();
+  });
+  $('persona_name').addEventListener('input', commitFields);
+  $('persona_prompt').addEventListener('input', commitFields);
+  // Refresh the selector labels once a rename is committed.
+  $('persona_name').addEventListener('change', renderPersonaSelectors);
+  $('persona_add').addEventListener('click', () => {
+    commitFields();
+    PERSONAS.push({ name: 'New persona', prompt: '' });
+    EDIT_IDX = PERSONAS.length - 1;
+    renderPersonaSelectors();
+    loadEditFields();
+  });
+  $('persona_delete').addEventListener('click', () => {
+    commitFields();
+    PERSONAS.splice(EDIT_IDX, 1);
+    if (!PERSONAS.length) PERSONAS = [{ name: 'Default', prompt: '' }];
+    EDIT_IDX = Math.min(EDIT_IDX, PERSONAS.length - 1);
+    ACTIVE_IDX = Math.min(ACTIVE_IDX, PERSONAS.length - 1);
+    renderPersonaSelectors();
+    loadEditFields();
+  });
+  $('persona_save').addEventListener('click', savePersonas);
 
   async function loadModels() {
     try {

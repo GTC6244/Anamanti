@@ -14,6 +14,11 @@
   "settings_path": "anamanti_settings.json",
   "audio_dump_dir": null,
   "system_prompt": null,
+  "personas": [
+    { "name": "Default", "prompt": "You are a friendly, concise voice assistant for a home ambient display. Answer in one or two short spoken sentences. Do not use markdown, lists, or emoji. If you don't know, say so briefly." },
+    { "name": "Jeeves", "prompt": "You are Jeeves, a dry, unflappable British butler. Answer in one or two short spoken sentences, no markdown, lists, or emoji." }
+  ],
+  "active_persona": "Default",
   "home_location": "Austin, Texas",
   "weather_units": "imperial",
   "turn_timeout_secs": 30,

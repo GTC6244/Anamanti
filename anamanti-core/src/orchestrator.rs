@@ -26,14 +26,14 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
-use crate::llm::{DeviceAction, LlmBackend, LlmTurn, RecipeNav};
+use crate::llm::{DeviceAction, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
     infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemoryKind, MemorySource,
     MemoryStore, PromptLog, Recall, SqliteRecall,
 };
-use crate::settings::{Household, HouseholdMember, SharedSettings};
+use crate::settings::{Household, HouseholdMember, PersonaSettings, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
 use crate::stt::{SttEngine, SttEvent, Transcriber, WyomingTranscriber};
 use crate::vad::SpeechGate;
@@ -927,9 +927,21 @@ impl Pipeline {
         // address the person by name / apply the right person's memory. When the
         // identified speaker matches a household member, the line notes who they are.
         let identity = speaker_identity_line(speaker, household);
+        // The base preamble is the active persona's prompt (live per-turn snapshot, so a
+        // config-page switch/edit or a `switch_persona` voice tool call takes effect on the
+        // next turn). `self.system_prompt` is a defensive fallback only — the sanitized
+        // roster guarantees a resolvable active persona.
+        let persona_prompt = {
+            let p = runtime.personas.system_prompt();
+            if p.is_empty() {
+                self.system_prompt.as_str()
+            } else {
+                p
+            }
+        };
         let mut system_prompt = format!(
             "{}\n\n{}\n\n{}",
-            self.system_prompt,
+            persona_prompt,
             current_datetime_line(),
             identity
         );
@@ -992,15 +1004,31 @@ impl Pipeline {
         let gen_start = Instant::now();
         let mut first_token_ms: Option<u64> = None;
         let mut first_tts_ms: Option<u64> = None;
-        let mut stream = runtime
-            .llm
-            .respond(
-                LlmTurn::new(system_prompt, transcript)
-                    .with_actions(action_tx)
-                    .with_history(history),
-            )
-            .await
-            .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?;
+        // Persona-switch voice intent: a deterministic fast path handled before the LLM.
+        // The pipeline already holds the live `SharedSettings`, so a recognized "switch
+        // persona" utterance flips the active persona in place and speaks a canned
+        // confirmation (a one-item reply stream), skipping the model entirely. The new
+        // persona's prompt applies from the next turn's snapshot.
+        let mut stream = if let Some(target) = detect_persona_switch(transcript, &runtime.personas)
+        {
+            let confirm = match self.settings.set_active_persona(&target) {
+                Some(sel) => format!("Okay, I'm now using the {} persona.", sel.active),
+                None => format!("I don't have a persona called {target}."),
+            };
+            log::info!("persona switch intent: → {target}");
+            let s: ReplyStream = Box::pin(futures_util::stream::once(async move { Ok(confirm) }));
+            s
+        } else {
+            runtime
+                .llm
+                .respond(
+                    LlmTurn::new(system_prompt, transcript)
+                        .with_actions(action_tx)
+                        .with_history(history),
+                )
+                .await
+                .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?
+        };
 
         let mut reply = String::new();
         let mut pending = String::new();
@@ -2212,6 +2240,43 @@ fn household_line(members: &[HouseholdMember]) -> Option<String> {
     Some(block)
 }
 
+/// Recognize a "switch persona" voice command and return the target persona's name
+/// (its exact roster casing), or `None` when the utterance isn't a persona switch.
+///
+/// Deterministic and conservative: it fires only when the utterance both contains a
+/// switch *trigger* phrase (so ordinary speech like "be nice" never matches) *and* names
+/// a persona that actually exists in the live roster. Roster names are matched
+/// case-insensitively, longest first, so a more specific name wins over a shorter one it
+/// contains. This is the fast-path "persona intent" — handled before the LLM.
+fn detect_persona_switch(transcript: &str, personas: &PersonaSettings) -> Option<String> {
+    let t = transcript.to_lowercase();
+    const TRIGGERS: &[&str] = &[
+        "persona",
+        "personality",
+        "switch to",
+        "change to",
+        "become",
+        "talk like",
+        "act like",
+        "speak like",
+        "pretend to be",
+        "pretend you're",
+    ];
+    if !TRIGGERS.iter().any(|k| t.contains(k)) {
+        return None;
+    }
+    // Prefer the longest matching name so "Default Plus" wins over "Default".
+    let mut names: Vec<&crate::settings::Persona> = personas.roster.iter().collect();
+    names.sort_by_key(|p| std::cmp::Reverse(p.name.len()));
+    for p in names {
+        let n = p.name.trim().to_lowercase();
+        if !n.is_empty() && t.contains(&n) {
+            return Some(p.name.clone());
+        }
+    }
+    None
+}
+
 /// A prompt line describing what the display is currently showing (its "display
 /// context"), so the model can drive that screen by voice. Dispatches per screen kind;
 /// add an arm here (plus a device-side setter and a `DisplayContext` variant) when a new
@@ -2710,5 +2775,59 @@ mod segmenter_tests {
         );
         assert_eq!(sanitize_for_tts("# Heading"), " Heading");
         assert_eq!(sanitize_for_tts("plain text, ok."), "plain text, ok.");
+    }
+}
+
+#[cfg(test)]
+mod persona_switch_tests {
+    use super::detect_persona_switch;
+    use crate::settings::{Persona, PersonaSettings};
+
+    fn roster() -> PersonaSettings {
+        PersonaSettings::new(
+            vec![
+                Persona {
+                    name: "Default".into(),
+                    prompt: "d".into(),
+                },
+                Persona {
+                    name: "Jeeves".into(),
+                    prompt: "j".into(),
+                },
+            ],
+            "Default",
+        )
+    }
+
+    #[test]
+    fn recognizes_a_switch_with_a_trigger_and_a_known_name() {
+        let p = roster();
+        assert_eq!(
+            detect_persona_switch("switch to the jeeves persona", &p),
+            Some("Jeeves".to_string())
+        );
+        assert_eq!(
+            detect_persona_switch("become Jeeves", &p),
+            Some("Jeeves".to_string())
+        );
+        // Case-insensitive name match, exact roster casing returned.
+        assert_eq!(
+            detect_persona_switch("change your personality to JEEVES", &p),
+            Some("Jeeves".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_ordinary_speech_and_unknown_names() {
+        let p = roster();
+        // A trigger word but no known persona named.
+        assert_eq!(
+            detect_persona_switch("switch to the kitchen light", &p),
+            None
+        );
+        // A known name but no switch trigger — must not fire.
+        assert_eq!(detect_persona_switch("is jeeves a butler?", &p), None);
+        // Plain speech.
+        assert_eq!(detect_persona_switch("what's the weather today?", &p), None);
     }
 }

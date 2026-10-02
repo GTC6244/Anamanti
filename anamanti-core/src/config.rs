@@ -34,7 +34,7 @@ use crate::music::{
 };
 use crate::settings::{
     load_persisted, AppSaidConfig, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory,
-    RuntimeSettings, SharedSettings, SpotifyConfig,
+    Persona, PersonaSettings, RuntimeSettings, SharedSettings, SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -111,8 +111,16 @@ pub struct Config {
     pub llm: LlmChoice,
     /// SQLite memory database path.
     pub db_path: PathBuf,
-    /// Base system prompt/persona.
+    /// Base system prompt/persona. Used as the fallback and as the seed for the built-in
+    /// `Default` persona when `personas` is empty.
     pub system_prompt: String,
+    /// Seed persona roster (name + prompt). Empty ⇒ a single `Default` persona is
+    /// synthesized from `system_prompt`. Overlaid by the persisted roster at boot (the
+    /// config page edits it live via full CRUD).
+    pub personas: Vec<Persona>,
+    /// Seed active-persona name. `None` ⇒ the first roster entry. Overlaid by the
+    /// persisted active selection at boot.
+    pub active_persona: Option<String>,
     /// The device's physical home location (e.g. "Austin, Texas"), injected into the
     /// prompt so location-relative questions (weather, sunset, nearby places) resolve
     /// an unqualified "here". `None` omits the location grounding. Set via the config
@@ -666,6 +674,8 @@ impl Default for Config {
             },
             db_path: PathBuf::from("anamanti_memory.sqlite"),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            personas: Vec::new(),
+            active_persona: None,
             home_location: None,
             weather_units: None,
             turn_timeout: Duration::from_secs(30),
@@ -773,6 +783,9 @@ pub struct FileConfig {
     pub settings_path: Option<String>,
     pub audio_dump_dir: Option<PathBuf>,
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub personas: Vec<Persona>,
+    pub active_persona: Option<String>,
     pub home_location: Option<String>,
     pub weather_units: Option<String>,
     pub turn_timeout_secs: Option<u64>,
@@ -1433,6 +1446,8 @@ impl Config {
             llm,
             db_path: fc.db_path.unwrap_or(d.db_path),
             system_prompt: nonempty(fc.system_prompt).unwrap_or(d.system_prompt),
+            personas: fc.personas,
+            active_persona: nonempty(fc.active_persona),
             home_location: nonempty(fc.home_location),
             weather_units: nonempty(fc.weather_units),
             turn_timeout: fc
@@ -1827,6 +1842,24 @@ impl Config {
         }
     }
 
+    /// Initial persona selection seeded from the config file's `personas` / `active_persona`
+    /// (falling back to a single `Default` persona built from `system_prompt` when the
+    /// roster is empty). A persisted roster overlays this at boot (see
+    /// [`Self::shared_settings`]); the config page then edits it live (full CRUD). The
+    /// result is sanitized, so `active` always names a real entry.
+    pub fn initial_personas(&self) -> PersonaSettings {
+        let roster = if self.personas.is_empty() {
+            vec![Persona {
+                name: crate::settings::DEFAULT_PERSONA_NAME.to_string(),
+                prompt: self.system_prompt.clone(),
+            }]
+        } else {
+            self.personas.clone()
+        };
+        let active = self.active_persona.clone().unwrap_or_default();
+        PersonaSettings::new(roster, active)
+    }
+
     /// Initial Spotify voice-control config seeded from the config file's `spotify`
     /// block. Any of these may instead be set (or overridden) at runtime by the
     /// config-page consent flow; a persisted file overlays these at boot (see
@@ -1914,6 +1947,9 @@ impl Config {
         // weather_units), overlaid by any persisted values below so a location fixed on
         // the config page — and the dashboard-only member roster — win.
         let mut household = self.initial_household();
+        // Persona roster + active selection: config-file seed (or a synthesized `Default`
+        // from `system_prompt`), overlaid by any persisted roster/active below.
+        let mut personas = self.initial_personas();
         // Spotify voice-control config: same seed-then-persist-overlay pattern.
         let mut spotify = self.initial_spotify();
         // Cadora shopping-list config: same seed-then-persist-overlay pattern.
@@ -2072,6 +2108,17 @@ impl Config {
             if p.openrouter_api_key.is_some() {
                 openrouter_api_key = p.openrouter_api_key;
             }
+            // Overlay the persisted persona roster + active selection. The roster is
+            // config-page-owned (full CRUD), so a non-empty persisted roster replaces the
+            // seed wholesale; an empty one keeps the config-file seed. A persisted active
+            // name wins. The result is re-sanitized below so `active` names a real entry.
+            if !p.personas.is_empty() {
+                personas.roster = p.personas;
+            }
+            if let Some(a) = p.active_persona.filter(|s| !s.trim().is_empty()) {
+                personas.active = a;
+            }
+            personas = personas.sanitized();
         }
 
         // Seed the directions tool's live default origin from the resolved household
@@ -2186,6 +2233,7 @@ impl Config {
                     intents: system1_intents,
                     openrouter_api_key,
                 },
+                personas,
             },
             persist_path,
         ))
