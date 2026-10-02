@@ -735,8 +735,8 @@ knee where the ✗ set is ~100% deferred. These double as `mock`/golden-decision
 - ✗ defer: close the recipe *when no recipe screen is up* · go back to the ingredients *(→ recipe_nav)*
 
 **`end_session`** (safest when `followup_depth > 0`)
-- ✓ that's all · I'm done · nothing else · goodbye · go to sleep · you can go now · we're good
-- ✗ defer: stop *(bare — ladder territory)* · stop the timer *(→ timer_cancel)* · pause *(→ media)*
+- ✓ that's all · I'm done · nothing else · goodbye · go to sleep · you can go now · we're good · thank you · thanks · gracias · merci *(a bare standalone sign-off thanks, any language)*
+- ✗ defer: stop *(bare — ladder territory)* · stop the timer *(→ timer_cancel)* · pause *(→ media)* · thanks, now what's the weather *(thanks mid-request → the real intent, not end_session)*
 
 **`stop_dismiss`** (referent from device context)
 - ✓ (timer running) stop · cancel that · that's enough → `timer_cancel`
