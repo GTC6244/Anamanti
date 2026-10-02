@@ -779,7 +779,16 @@ There are **two flavors** of tool:
   the config page (Household tab) and the Anamanti Core redeems it
   (`/voice/links/redeem`) for a durable voice-link token stored in the 0600 settings
   file. It never touches Supabase directly — Cadora owns list creation, member
-  attribution, and dedupe.
+  attribution, and dedupe. The **`send_phone_message`** tool has the same external
+  shape: it holds an injected `Arc<dyn PhoneMessenger>` (`anamanti-core/src/appsaid/`)
+  and pushes a message — often a Google Maps link — to a named family member's phone
+  via **AppSaid** (a self-hosted HTML-push worker), one `POST {worker_url}/v1/messages`
+  per recipient. It resolves the spoken name to the recipient's AppSaid `user_key`
+  (from `appsaid.recipients` in the config), builds a Maps link from a `place` when no
+  explicit `url` is given, and speaks back a short confirmation. The sender app token is
+  a secret (`APPSAID_APP_TOKEN` / config page, 0600), never in the JSON config; the tool
+  is advertised only when the worker URL + app token + at least one recipient are all
+  present, and relinks/withdraws live like `spotify_control`.
 - **Action tool** — additionally causes an effect on the Echo Show (e.g.
   `set_timer`). The tool cannot reach the device directly (it runs inside the LLM
   loop, which has no socket), so it emits a **`DeviceAction`** onto a per-turn

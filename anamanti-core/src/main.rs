@@ -262,9 +262,8 @@ async fn run() -> Result<()> {
                 pipeline = pipeline.with_silero(model);
             }
             Err(e) if want_silero => {
-                return Err(e).with_context(|| {
-                    format!("loading Silero VAD model {}", model_path.display())
-                });
+                return Err(e)
+                    .with_context(|| format!("loading Silero VAD model {}", model_path.display()));
             }
             Err(e) => {
                 log::warn!(
@@ -496,4 +495,3 @@ async fn ensure_ollama_model(config: &mut Config) {
         ),
     }
 }
-

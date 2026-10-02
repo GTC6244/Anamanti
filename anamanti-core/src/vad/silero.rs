@@ -199,7 +199,11 @@ mod tests {
             "prob out of range: {}",
             gate.prob()
         );
-        assert!(gate.prob() < 0.5, "silence must score low, got {}", gate.prob());
+        assert!(
+            gate.prob() < 0.5,
+            "silence must score low, got {}",
+            gate.prob()
+        );
     }
 
     #[test]

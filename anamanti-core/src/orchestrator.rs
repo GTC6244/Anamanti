@@ -36,8 +36,8 @@ use crate::memory::{
 use crate::settings::{Household, HouseholdMember, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
 use crate::stt::{SttEngine, SttEvent, Transcriber, WyomingTranscriber};
-use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::vad::SpeechGate;
+use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::tts::TtsSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
@@ -497,10 +497,7 @@ impl Pipeline {
     /// chosen live from `runtime.vad_engine` (config-page/device swap, no restart); a
     /// swap to Silero when no model is loaded (feature off or model absent) falls back
     /// to the energy gate with a warning. See `plans/VadSileroPlan.md`.
-    fn build_speech_gate(
-        &self,
-        runtime: &crate::settings::RuntimeSettings,
-    ) -> Box<dyn SpeechGate> {
+    fn build_speech_gate(&self, runtime: &crate::settings::RuntimeSettings) -> Box<dyn SpeechGate> {
         #[cfg(feature = "vad-silero")]
         if matches!(runtime.vad_engine, crate::config::VadEngineKind::Silero) {
             match &self.silero {
@@ -671,15 +668,9 @@ impl Pipeline {
                     deadline = Instant::now() + self.turn_timeout;
                     match sev? {
                         Some(SttEvent::Transcript(text)) => {
-                            // Diagnostic echo (#1): relay exactly what STT produced to the
-                            // device the instant it arrives — BEFORE the VAD gate, System-1,
-                            // or System-2 — so the device confirms STT is alive regardless of
-                            // any downstream gating/decision. This is the only place the raw
-                            // (pre-gate) transcript is emitted; the caller no longer re-sends it.
                             log::info!(
                                 "STT transcript {text:?} (speech_started={speech_started})"
                             );
-                            device.send(&WyomingEvent::transcript(&text)).await.ok();
 
                             // Guard against STT hallucinations on silence. If our energy
                             // VAD never latched `speech_started`, this turn finalized on
@@ -693,10 +684,12 @@ impl Pipeline {
                             // already treats as "no speech": sleep, send `audio-stop`,
                             // and end the follow-up chain (no `ambient-listen`). This
                             // stops the self-perpetuating phantom-reply loop in a quiet
-                            // room. The trade-off is that a genuine utterance too quiet
-                            // to clear `voice_rms_threshold` for `MIN_SPEECH_ONSET` is
-                            // also dropped — consistent with the existing no-speech
-                            // finalize, which already treats too-quiet audio as silence.
+                            // room. Crucially, a discarded hallucination is NEVER relayed
+                            // to the device (no phantom transcript on screen). The trade-off
+                            // is that a genuine utterance too quiet to clear
+                            // `voice_rms_threshold` for `MIN_SPEECH_ONSET` is also dropped —
+                            // consistent with the existing no-speech finalize, which already
+                            // treats too-quiet audio as silence.
                             if !speech_started {
                                 if !text.trim().is_empty() {
                                     log::info!(
@@ -707,6 +700,14 @@ impl Pipeline {
                                 }
                                 return Ok(Some((String::new(), Vec::new(), Duration::ZERO)));
                             }
+
+                            // Diagnostic echo (#1): relay exactly what STT produced to the
+                            // device the instant it clears the VAD gate — BEFORE System-1 or
+                            // System-2 — so the device confirms STT is alive regardless of
+                            // any downstream gating/decision. This is the only place the raw
+                            // (pre-decision) transcript is emitted; the caller no longer
+                            // re-sends it.
+                            device.send(&WyomingEvent::transcript(&text)).await.ok();
                             let stt_dur = finalized_at.map(|t| t.elapsed()).unwrap_or_default();
                             return Ok(Some((text, std::mem::take(&mut voiced_pcm), stt_dur)));
                         }

@@ -117,13 +117,18 @@ impl NotificationService {
         let conns = self.conns.lock().unwrap();
         let mut seen = std::collections::BTreeMap::new();
         for conn in conns.values() {
-            seen.entry(conn.device_id.clone()).or_insert_with(|| ConnectedDevice {
-                device_id: conn.device_id.clone(),
-                name: conn.name.clone(),
-            });
+            seen.entry(conn.device_id.clone())
+                .or_insert_with(|| ConnectedDevice {
+                    device_id: conn.device_id.clone(),
+                    name: conn.name.clone(),
+                });
         }
         let mut out: Vec<ConnectedDevice> = seen.into_values().collect();
-        out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.device_id.cmp(&b.device_id)));
+        out.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.device_id.cmp(&b.device_id))
+        });
         out
     }
 
@@ -186,8 +191,14 @@ mod tests {
         assert_eq!(
             svc.connected_devices(),
             vec![
-                ConnectedDevice { device_id: "dev-b".into(), name: "Bedroom".into() },
-                ConnectedDevice { device_id: "dev-a".into(), name: "Kitchen".into() },
+                ConnectedDevice {
+                    device_id: "dev-b".into(),
+                    name: "Bedroom".into()
+                },
+                ConnectedDevice {
+                    device_id: "dev-a".into(),
+                    name: "Kitchen".into()
+                },
             ]
         );
 

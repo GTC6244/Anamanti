@@ -175,9 +175,8 @@ impl GraphRagController {
                         label(initial),
                         label(configured)
                     );
-                    let b =
-                        build_backend(&cfg, &helix_base, &chatlog_path, &extractor, configured)
-                            .await?;
+                    let b = build_backend(&cfg, &helix_base, &chatlog_path, &extractor, configured)
+                        .await?;
                     (configured, b)
                 }
                 Err(e) => return Err(e),
@@ -411,7 +410,10 @@ fn local_availability(cfg: &GraphRagConfig) -> (bool, String) {
     #[cfg(not(feature = "embed-local"))]
     {
         let _ = cfg;
-        return (false, "not compiled (build without `embed-local`)".to_string());
+        return (
+            false,
+            "not compiled (build without `embed-local`)".to_string(),
+        );
     }
     #[cfg(feature = "embed-local")]
     {

@@ -571,6 +571,18 @@ more tool in `Tools`.
   `cadora{base_url,link_token}` (base_url defaults to `https://cadora-server.fly.dev`).
   The tool is advertised only when linked; a change relinks/withdraws it live (no
   restart), exactly like `spotify_control`.
+- **Phone messages (AppSaid) — `send_phone_message`:** pushes a message — often a
+  Google Maps link — to a named family member's phone via **AppSaid**, a self-hosted
+  HTML-push service (`anamanti-core/src/appsaid/`, `PhoneMessenger` trait, mirroring
+  `GroceryController`). Each send is one `POST {worker_url}/v1/messages` with
+  `{token, user, title, body, url, url_title}`: the tool resolves the spoken recipient
+  name (case-insensitive) to that person's AppSaid `user_key`, builds a Maps link from a
+  `place` when no explicit `url` is given, and speaks back `Sent to <name>.` Config seed
+  `appsaid{worker_url, recipients{name:user_key}, default_recipient}`; the sender **app
+  token is a SECRET** (`APPSAID_APP_TOKEN` env or config page → Household tab, stored
+  0600, never in the JSON). The tool is advertised only when the worker URL + app token +
+  at least one recipient are all present; a change re-advertises/withdraws it live (no
+  restart), exactly like `spotify_control`.
 - **Device actions (implemented, on-device):** the `set_timer` / `cancel_timer`
   tools emit a `DeviceAction` onto a per-turn `ActionSink` (`LlmTurn.actions`); the
   Anamanti Core's reply loop drains it (`drain_device_actions`) and relays an

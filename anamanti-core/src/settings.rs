@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::appsaid::{AppSaidClient, PhoneMessenger};
 use crate::cadora::{
     CadoraVoiceApi, GroceryController, DEFAULT_BASE_URL as CADORA_DEFAULT_BASE_URL,
 };
@@ -404,6 +405,116 @@ pub struct CadoraUpdate {
     pub link_token: Option<Option<String>>,
 }
 
+/// AppSaid phone-push linkage, owned by the orchestrator.
+///
+/// Drives the rig-engine `send_phone_message` tool (`crate::llm::rig`) over AppSaid's
+/// HTML-push API (`crate::appsaid`). The orchestrator holds the worker URL, the
+/// recipient roster (family-member name → AppSaid `user_key`), an optional default
+/// recipient, and the secret sender **app token**. Like Spotify/Cadora, a change here
+/// rebuilds the backend so the tool is advertised/withdrawn live.
+///
+/// The recipients + worker URL + default seed from the config file's `appsaid` block;
+/// the `app_token` is a SECRET seeded from `APPSAID_APP_TOKEN` (never from the JSON
+/// config), config-page settable, and persisted here in plaintext (0600 settings
+/// file) — keep it on a trusted machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppSaidConfig {
+    /// AppSaid worker base URL (e.g. `https://appsaid.you.workers.dev`). `None`/empty
+    /// ⇒ the tool isn't advertised.
+    #[serde(default)]
+    pub worker_url: Option<String>,
+    /// Secret sender app token. Seeded from `APPSAID_APP_TOKEN`, config-page settable,
+    /// persisted 0600. Never seeded from `anamanti.json`.
+    #[serde(default)]
+    pub app_token: Option<String>,
+    /// Recipients: display name → AppSaid `user_key`. Ordered for stable output;
+    /// lookups are case-insensitive.
+    #[serde(default)]
+    pub recipients: std::collections::BTreeMap<String, String>,
+    /// Optional default recipient name used when the model omits `recipient`.
+    #[serde(default)]
+    pub default_recipient: Option<String>,
+}
+
+impl AppSaidConfig {
+    fn non_empty(v: &Option<String>) -> bool {
+        v.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// True once a sender app token is present.
+    pub fn token_set(&self) -> bool {
+        Self::non_empty(&self.app_token)
+    }
+
+    /// The cleaned recipient roster as `(display_name, user_key)` pairs, dropping
+    /// blanks. Preserves the configured casing for the spoken confirmation.
+    fn clean_recipients(&self) -> Vec<(String, String)> {
+        self.recipients
+            .iter()
+            .filter_map(|(name, key)| {
+                let name = name.trim();
+                let key = key.trim();
+                (!name.is_empty() && !key.is_empty()).then(|| (name.to_string(), key.to_string()))
+            })
+            .collect()
+    }
+
+    /// The configured recipient display names (for status readouts).
+    pub fn recipient_names(&self) -> Vec<String> {
+        self.clean_recipients()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// True when the tool would be advertised: worker URL + app token + at least one
+    /// recipient all present.
+    pub fn active(&self) -> bool {
+        self.messenger().is_some()
+    }
+
+    /// Build the live messenger when fully configured (worker URL + app token + at
+    /// least one recipient), else `None` (so the `send_phone_message` tool simply
+    /// isn't advertised).
+    pub fn messenger(&self) -> Option<Arc<dyn PhoneMessenger>> {
+        let worker_url = self
+            .worker_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let token = self
+            .app_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let recipients = self.clean_recipients();
+        if recipients.is_empty() {
+            return None;
+        }
+        let default = self
+            .default_recipient
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Some(Arc::new(AppSaidClient::new(
+            worker_url, token, recipients, default,
+        )))
+    }
+}
+
+/// A requested change to the AppSaid config (tri-state per field, like
+/// [`CadoraUpdate`]). Applied by [`SharedSettings::apply_appsaid`], which rebuilds the
+/// backend so the `send_phone_message` tool is advertised/withdrawn live. `recipients`
+/// replaces the whole roster when `Some`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AppSaidUpdate {
+    pub worker_url: Option<Option<String>>,
+    pub app_token: Option<Option<String>>,
+    pub default_recipient: Option<Option<String>>,
+    pub recipients: Option<std::collections::BTreeMap<String, String>>,
+}
+
 /// A requested change to the directions tool config. `mapbox_token` is tri-state:
 /// `None` = leave unchanged; `Some(None)`/`Some(Some(""))` = clear; `Some(Some(v))` =
 /// set. Applied by [`SharedSettings::apply_directions`], which rebuilds the backend so
@@ -494,6 +605,10 @@ pub struct PersistedSettings {
     /// files.
     #[serde(default)]
     pub cadora: CadoraConfig,
+    /// AppSaid phone-push linkage (worker URL + recipients + secret app token).
+    /// Defaulted (empty) for older files.
+    #[serde(default)]
+    pub appsaid: AppSaidConfig,
     /// Runtime-set weather provider label (`visualcrossing`/`openmeteo`). Defaulted
     /// (absent) for older files, which then fall back to the `weather.provider` seed.
     #[serde(default)]
@@ -620,6 +735,10 @@ pub struct LlmFactory {
     /// shopping list isn't linked. Set from the current [`CadoraConfig`] on every
     /// (re)build so the tool reflects the latest linkage.
     pub cadora: Option<Arc<dyn GroceryController>>,
+    /// The live AppSaid messenger for the `send_phone_message` tool, or `None` when it
+    /// isn't fully configured. Set from the current [`AppSaidConfig`] on every
+    /// (re)build so the tool reflects the latest linkage.
+    pub appsaid: Option<Arc<dyn PhoneMessenger>>,
     /// The web-calendar source for the `calendar_lookup` tool, or `None` when no
     /// subscriptions are configured. Prebuilt once from the config file's `calendar`
     /// block so a rebuild never re-parses config; shared into every rebuilt backend.
@@ -726,6 +845,7 @@ impl LlmFactory {
                                     self.calendar.clone(),
                                     self.directions.clone(),
                                     self.cadora.clone(),
+                                    self.appsaid.clone(),
                                     self.weather.clone(),
                                     self.weather_imperial,
                                     self.places.clone(),
@@ -776,6 +896,7 @@ impl LlmFactory {
                             self.calendar.clone(),
                             self.directions.clone(),
                             self.cadora.clone(),
+                            self.appsaid.clone(),
                             self.weather.clone(),
                             self.weather_imperial,
                             self.places.clone(),
@@ -854,6 +975,10 @@ pub struct RuntimeSettings {
     /// (via [`CadoraConfig::controller`]) so the `shopping_list_add` tool is
     /// advertised/withdrawn live.
     pub cadora: CadoraConfig,
+    /// AppSaid phone-push linkage (worker URL + recipients + secret app token). Like
+    /// Cadora, a change here rebuilds the backend (via [`AppSaidConfig::messenger`]) so
+    /// the `send_phone_message` tool is advertised/withdrawn live.
+    pub appsaid: AppSaidConfig,
     /// The selected weather forecast provider label (`visualcrossing` / `openmeteo`).
     /// Runtime-settable (config page Tools tab); seeded from `weather.provider` at boot.
     /// A change rebuilds the `weather_lookup` tool + retargets the ambient push live.
@@ -955,6 +1080,8 @@ pub struct SettingsView {
     pub anthropic_oauth_token_set: bool,
     /// Whether a Mapbox token (directions tool) is configured. Never exposed.
     pub mapbox_token_set: bool,
+    /// Whether an AppSaid sender app token is configured. Never exposed.
+    pub appsaid_token_set: bool,
     /// Anthropic auth mode (API key vs subscription OAuth).
     pub anthropic_auth: AnthropicAuth,
     pub tts_voice: Option<String>,
@@ -1061,6 +1188,7 @@ impl SharedSettings {
             household: s.household.clone(),
             spotify: s.spotify.clone(),
             cadora: s.cadora.clone(),
+            appsaid: s.appsaid.clone(),
             weather_provider: Some(s.weather_provider.clone()),
             visualcrossing_key: s.visualcrossing_key.clone(),
             google_places_key: s.google_places_key.clone(),
@@ -1093,6 +1221,7 @@ impl SharedSettings {
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
             cadora: None,
+            appsaid: None,
             calendar: None,
             directions: None,
             directions_provider: String::new(),
@@ -1126,6 +1255,7 @@ impl SharedSettings {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -1156,6 +1286,7 @@ impl SharedSettings {
                 .as_deref()
                 .is_some_and(|k| !k.is_empty()),
             mapbox_token_set: s.mapbox_token.as_deref().is_some_and(|k| !k.is_empty()),
+            appsaid_token_set: s.appsaid.token_set(),
             anthropic_auth: s.anthropic_auth,
             tts_voice: s.tts_voice.clone(),
             engine: s.engine,
@@ -1231,6 +1362,9 @@ impl SharedSettings {
             // Same for the Cadora shopping-list tool: keep the live controller so a
             // normal settings change never drops `shopping_list_add`.
             factory.cadora = current.cadora.controller();
+            // Same for the AppSaid phone tool: keep the live messenger so a normal
+            // settings change never drops `send_phone_message`.
+            factory.appsaid = current.appsaid.messenger();
             // Same for the directions tool: rebuild it from the live Mapbox token so a
             // normal settings change never drops `directions_lookup`.
             factory.directions = crate::directions::from_token(
@@ -1329,6 +1463,7 @@ impl SharedSettings {
                 .as_deref()
                 .is_some_and(|k| !k.is_empty()),
             mapbox_token_set: w.mapbox_token.as_deref().is_some_and(|k| !k.is_empty()),
+            appsaid_token_set: w.appsaid.token_set(),
             anthropic_auth: w.anthropic_auth,
             tts_voice: w.tts_voice.clone(),
             engine: w.engine,
@@ -1574,6 +1709,8 @@ impl SharedSettings {
         factory.spotify = target.controller();
         // Keep the Cadora shopping-list tool live across this rebuild.
         factory.cadora = current.cadora.controller();
+        // Keep the AppSaid phone tool live across this rebuild.
+        factory.appsaid = current.appsaid.messenger();
         // Keep the directions + weather tools live across this rebuild.
         factory.directions = crate::directions::from_token(
             &factory.directions_provider,
@@ -1649,6 +1786,7 @@ impl SharedSettings {
         factory.openai_api_key = current.openai_api_key.clone();
         factory.spotify = current.spotify.controller();
         factory.cadora = target.controller();
+        factory.appsaid = current.appsaid.messenger();
         // Keep the directions + weather tools live across this rebuild.
         factory.directions = crate::directions::from_token(
             &factory.directions_provider,
@@ -1693,6 +1831,81 @@ impl SharedSettings {
         target
     }
 
+    /// A snapshot of the live AppSaid config (worker URL + recipients + default; never
+    /// the app token value). Read by the config-page status endpoint.
+    pub fn appsaid(&self) -> AppSaidConfig {
+        self.inner.read().unwrap().appsaid.clone()
+    }
+
+    /// A snapshot of the live AppSaid app-token presence (never the value). Read by the
+    /// config-page status endpoint.
+    pub fn appsaid_token_set(&self) -> bool {
+        self.inner.read().unwrap().appsaid.token_set()
+    }
+
+    /// Apply an AppSaid config change, rebuild the LLM so the `send_phone_message` tool
+    /// is advertised/withdrawn to match, and persist (best-effort, 0600). Empty-string
+    /// sets are treated as clears; `recipients`, when present, replaces the whole
+    /// roster. Returns the resulting [`AppSaidConfig`].
+    ///
+    /// Like [`Self::apply_cadora`], the rebuild is best-effort: if it fails the new
+    /// config is still stored and persisted, so the tool activates on the next
+    /// successful rebuild or restart — linkage is never lost to a transient error.
+    pub fn apply_appsaid(&self, update: &AppSaidUpdate) -> AppSaidConfig {
+        let current = self.inner.read().unwrap().clone();
+        let mut target = current.appsaid.clone();
+        if let Some(v) = &update.worker_url {
+            target.worker_url = v.clone().filter(|s| !s.trim().is_empty());
+        }
+        if let Some(v) = &update.app_token {
+            target.app_token = v.clone().filter(|s| !s.trim().is_empty());
+        }
+        if let Some(v) = &update.default_recipient {
+            target.default_recipient = v.clone().filter(|s| !s.trim().is_empty());
+        }
+        if let Some(r) = &update.recipients {
+            target.recipients = r.clone();
+        }
+
+        // Rebuild the backend so the tool set reflects the new linkage. Build before
+        // taking the write lock; on failure, fall through and still store the config.
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.cadora = current.cadora.controller();
+        factory.appsaid = target.messenger();
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("appsaid: applied config but LLM rebuild failed: {e:#}"))
+            .ok();
+
+        let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
+        w.appsaid = target.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        target
+    }
+
     /// A snapshot of the live Mapbox token presence (never the value). Read by the
     /// config-page Tools tab status endpoint.
     pub fn mapbox_token_set(&self) -> bool {
@@ -1724,6 +1937,7 @@ impl SharedSettings {
         factory.openai_api_key = current.openai_api_key.clone();
         factory.spotify = current.spotify.controller();
         factory.cadora = current.cadora.controller();
+        factory.appsaid = current.appsaid.messenger();
         factory.directions = crate::directions::from_token(
             &factory.directions_provider,
             target_token.as_deref(),
@@ -1968,6 +2182,7 @@ mod tests {
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
             cadora: None,
+            appsaid: None,
             calendar: None,
             directions: None,
             directions_provider: String::new(),
@@ -2019,6 +2234,7 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -2151,6 +2367,7 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -2359,6 +2576,7 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -2504,6 +2722,7 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -2579,6 +2798,7 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -2662,6 +2882,7 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -2736,6 +2957,7 @@ mod tests {
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
