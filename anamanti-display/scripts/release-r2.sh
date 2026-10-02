@@ -41,6 +41,13 @@ NOTES="${NOTES:-Bug fixes and improvements}"
 WRANGLER="${WRANGLER:-npx wrangler}"
 UPDATE_BASE_URL="${UPDATE_BASE_URL%/}" # strip any trailing slash
 
+# Derive the R2 key prefix from any path component of UPDATE_BASE_URL. The bucket
+# is shared across products (e.g. immediacy-releases), so Anamanti lives under a
+# per-product subpath like .../anamanti → objects are uploaded as `anamanti/…`.
+# A bare domain (no path) yields an empty prefix (bucket root).
+R2_PREFIX="$(printf '%s' "$UPDATE_BASE_URL" | sed -E 's#^https?://[^/]+##; s#^/##')"
+[ -n "$R2_PREFIX" ] && R2_PREFIX="${R2_PREFIX}/"
+
 # --- read version + versionCode from pubspec.yaml (version: X.Y.Z+N) ---
 VERSION_LINE="$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//')"
 VERSION_NAME="${VERSION_LINE%%+*}"
@@ -85,12 +92,15 @@ cat "$OUT_DIR/latest.json"
 
 # --- upload: APK first, then latest.json (so the manifest never points at a
 #     not-yet-uploaded APK) ---
-echo "Uploading APK → r2://$R2_BUCKET/$APK_NAME"
-$WRANGLER r2 object put "$R2_BUCKET/$APK_NAME" --file "$OUT_DIR/$APK_NAME" \
-  --content-type application/vnd.android.package-archive
-echo "Uploading manifest → r2://$R2_BUCKET/latest.json"
-$WRANGLER r2 object put "$R2_BUCKET/latest.json" --file "$OUT_DIR/latest.json" \
-  --content-type application/json
+# NOTE: --remote is REQUIRED. Without it, wrangler v3+ writes to a LOCAL simulator
+# store ("Resource location: local") and nothing is published to the real bucket —
+# the device then keeps 404ing. Always target the remote R2 instance.
+echo "Uploading APK → r2://$R2_BUCKET/${R2_PREFIX}$APK_NAME"
+$WRANGLER r2 object put "$R2_BUCKET/${R2_PREFIX}$APK_NAME" --file "$OUT_DIR/$APK_NAME" \
+  --content-type application/vnd.android.package-archive --remote
+echo "Uploading manifest → r2://$R2_BUCKET/${R2_PREFIX}latest.json"
+$WRANGLER r2 object put "$R2_BUCKET/${R2_PREFIX}latest.json" --file "$OUT_DIR/latest.json" \
+  --content-type application/json --remote
 
 echo
 echo "Done. Devices will pick up versionCode $VERSION_CODE on their next check"

@@ -101,3 +101,6 @@ ggml-*.mlmodelc/
 # Machine-local test configs (absolute paths, per-box); never commit.
 anamanti.*.json
 !anamanti.example.json
+
+# Wrangler local miniflare state (R2/cache dev store) — never commit
+.wrangler/
