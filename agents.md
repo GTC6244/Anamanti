@@ -41,7 +41,10 @@ Google Places API + the `anamanti-place` frame + the display's full-screen place
 plus the route-only System-1 `place` intent), and
 [`UpdaterPlan.md`](./plans/UpdaterPlan.md) (in-app APK auto-updater: Rust fetch/
 download/SHA-256-verify of a signed APK + `latest.json` from Cloudflare R2, a native
-`PackageInstaller` channel, and the `selfUpdate`/`fdroid` build flavors).
+`PackageInstaller` channel, and the `selfUpdate`/`fdroid` build flavors), and
+[`FontScalePlan.md`](./plans/FontScalePlan.md) (voice "increase/decrease font": a global
+device-wide `TextScaler` on all ambient text, the `adjust_font` tool + the `anamanti-font`
+frame, and the orthogonal `screen.font` display-context sibling that gates it).
 
 ---
 

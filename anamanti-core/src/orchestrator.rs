@@ -26,7 +26,7 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
-use crate::llm::{DeviceAction, LlmBackend, LlmTurn, RecipeNav};
+use crate::llm::{DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
@@ -798,6 +798,9 @@ impl Pipeline {
                 // Background timer state (running/remaining/labels), ground truth for the
                 // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
                 timers: device_ctx.timers.clone(),
+                // Font-scaling state, ground truth for the optional font_increase/decrease
+                // fast intents (resolve only when a resizable surface is on screen).
+                font: device_ctx.font.clone(),
             };
             let engine = runtime.system1.engine.name().to_string();
             log::info!("system1 ({engine}) call: deciding on {transcript:?}");
@@ -954,6 +957,15 @@ impl Pipeline {
         if let Some(screen) = device_ctx.widget.as_ref() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&display_context_line(screen));
+        }
+        // Tell the model whether the on-screen text can be resized right now (the gate for
+        // the `adjust_font` tool). Added only when a resizable surface is present, so the
+        // model declines a bare "increase font" with nothing on screen; it also states the
+        // current scale + whether it is already at the max/min so the model can say so
+        // instead of a no-op call.
+        if device_ctx.font.scalable {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&font_context_line(&device_ctx.font));
         }
 
         // Per-turn device-action channel: action tools (timers) push `DeviceAction`s
@@ -2224,6 +2236,25 @@ fn display_context_line(ctx: &protocol::DisplayContext) -> String {
     }
 }
 
+/// A prompt line, added only when a resizable text surface is on screen, telling the model
+/// it may resize the display text with `adjust_font` and whether the scale is already at the
+/// max/min — so it can say so instead of a no-op call. Mirrors `display_context_line` as the
+/// per-turn gate for the font tool.
+fn font_context_line(font: &protocol::FontContext) -> String {
+    let pct = (font.scale() * 100.0).round() as i32;
+    let bound = if font.at_max {
+        " The text is already at the maximum size, so decline a request to increase it."
+    } else if font.at_min {
+        " The text is already at the minimum size, so decline a request to decrease it."
+    } else {
+        ""
+    };
+    format!(
+        "The on-screen text is resizable (currently {pct}% of normal). Use the `adjust_font` \
+         tool to make it bigger or smaller when the user asks.{bound}"
+    )
+}
+
 /// The prompt line for the place card: names the place on screen so the model can answer
 /// follow-ups in context ("is it open on Sunday?" → `places_lookup` for the same place)
 /// or `close_places` when the user says to close it.
@@ -2422,6 +2453,10 @@ async fn drain_device_actions<W>(
                 RecipeNav::ScrollTop => WyomingEvent::recipe_scroll("top"),
                 RecipeNav::ScrollBottom => WyomingEvent::recipe_scroll("bottom"),
             },
+            DeviceAction::AdjustFont(dir) => WyomingEvent::font_adjust(match dir {
+                FontDirection::Increase => "increase",
+                FontDirection::Decrease => "decrease",
+            }),
         };
         if let Err(e) = protocol::write_event(writer, &event).await {
             log::warn!("failed to relay device action to the device: {e:#}");

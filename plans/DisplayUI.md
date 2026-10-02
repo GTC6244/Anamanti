@@ -60,6 +60,13 @@ events; nothing here touches audio buffers or sockets directly.
   `Stack(fit: expand)` driven by an `AnimatedBuilder` on `AssistantController`.
   Composes the background, away face, full-screen modes, conversation panel, and
   all always-on overlays, cross-fading them by state.
+- **Global font scale.** `main.dart` wraps `AmbientScreen` in a single
+  `MediaQuery` whose `textScaler` is `TextScaler.linear(AppSettings.fontScale)`, so
+  the voice commands *"increase font"* / *"decrease font"* scale **all** ambient text
+  at once (every `Text` reads the ambient `textScaler`; no per-widget sizes change).
+  The scale is device-local + persisted, clamped `[0.85, 1.6]`, stepped `0.1`. The
+  pushed `SettingsScreen` route is **outside** this subtree, so it stays at the
+  default size. See [`FontScalePlan.md`](./FontScalePlan.md).
 - Derived flags: `active = state.displayActive` (turn in flight **or** reply audio
   still playing); `recipeActive` / `weatherActive` / `placeActive`;
   `modeActive = any full-screen mode`; `offMode = !userPresent && !active &&
@@ -352,7 +359,8 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
   - **Device Config** — Wake word (word, threshold slider, smoothing window,
     capture gain, "Fire on peak", "AudioRecord capture (far-field)", noise
     suppression / AGC / echo cancellation switches) + Display ("Dim screen after"
-    preset slider, 30 s…1 h).
+    preset slider, 30 s…1 h; **"Font size"** slider, key `settings-font-scale`,
+    85 %…160 % — the manual override of the voice font scale, applied on Save).
   - **Audio Diagnostics** — a full custom page (`AudioDiagnosticsView`, not a tile
     list) for visually tuning the mic. See its own section below.
   - **Speech Processing** — playback buffer, "Instant processing cue", endpoint
