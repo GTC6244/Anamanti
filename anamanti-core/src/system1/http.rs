@@ -459,6 +459,7 @@ mod tests {
             history: Vec::new(),
             location: None,
             timers: TimerContext::default(),
+            font: Default::default(),
         };
         assert!(device_state_fields(&bare).is_empty());
 
@@ -473,6 +474,7 @@ mod tests {
                 next_remaining_secs: Some(90),
                 labels: vec![],
             },
+            font: Default::default(),
         };
         let fields = device_state_fields(&ctx);
         assert_eq!(fields.get("screen"), Some(&json!("recipe")));

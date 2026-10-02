@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level_diag`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`, `WeatherHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
 
@@ -138,6 +138,24 @@ void setPlaceContext({
   active: active,
   name: name,
   address: address,
+);
+
+/// Report the device's **font-scaling context** so the next voice turn's `audio-start`
+/// carries it to the orchestrator as the `screen.font` sibling (orthogonal to the
+/// foreground widget, like `screen.timers`). Lets "increase font" / "decrease font"
+/// resolve only when a resizable surface is on screen (`scalable`), and lets the assistant
+/// say when the text is already at the maximum/minimum. `scale` is the current global
+/// multiplier (1.0 = unscaled). Flutter calls this at startup and after each adjustment.
+void setFontContext({
+  required bool scalable,
+  required double scale,
+  required bool atMin,
+  required bool atMax,
+}) => RustLib.instance.api.crateApiEngineSetFontContext(
+  scalable: scalable,
+  scale: scale,
+  atMin: atMin,
+  atMax: atMax,
 );
 
 /// Open the persistent proactive-notification channel and stream pushed
@@ -703,6 +721,12 @@ enum WakeWordEventKind {
   /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
   /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
   recipeScroll,
+
+  /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
+  /// command. The direction (`"increase"` / `"decrease"`) rides the generic
+  /// `recipe_action` field (the same string carrier as `RecipeScroll`). The UI bumps the
+  /// global font scale and persists it.
+  fontAdjust,
 
   /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
   /// is `true` when someone has approached the display (brighten) and `false` when

@@ -157,6 +157,31 @@ pub fn display_context() -> Option<serde_json::Value> {
     display_slot().lock().unwrap().clone()
 }
 
+/// The font-scaling context — whether a resizable text surface is on screen and the
+/// current global font scale — stamped as the `screen.font` sibling of every turn's
+/// `audio-start` (orthogonal to the foreground widget, exactly like `screen.timers`).
+/// Lets the orchestrator resolve "increase font" / "decrease font" only when there is
+/// something to resize, and report when it is already at the max/min. The UI sets it via
+/// `api::engine::set_font_context`; held globally so it survives across turns and restarts.
+static FONT_CONTEXT: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+
+fn font_slot() -> &'static Mutex<Option<serde_json::Value>> {
+    FONT_CONTEXT.get_or_init(|| Mutex::new(None))
+}
+
+/// Set (or clear, with `None`) the font context stamped on subsequent turns'
+/// `audio-start` frames. Called from the FRB layer whenever the global font scale changes
+/// or a resizable surface opens/closes.
+pub fn set_font_context(font: Option<serde_json::Value>) {
+    *font_slot().lock().unwrap() = font;
+}
+
+/// The current font context to stamp on a starting turn's `audio-start`, or `None` when
+/// it has never been set.
+pub fn font_context() -> Option<serde_json::Value> {
+    font_slot().lock().unwrap().clone()
+}
+
 /// True while a wake-word engine thread is active.
 pub fn is_running() -> bool {
     slot()

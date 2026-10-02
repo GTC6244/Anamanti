@@ -379,6 +379,43 @@ void main() {
     expect(store.value.dimDelaySecs, 120);
   });
 
+  testWidgets('font-size slider renders as a percentage and Save preserves it',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient();
+    AppSettings? applied;
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        // A non-default font scale (130%) so we can see it rendered + saved.
+        initial: const AppSettings(fontScale: 1.3),
+        store: store,
+        client: client,
+        onApplied: (s) => applied = s,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await openCategory(tester, 'deviceConfig');
+    final scrollable = find.byType(Scrollable).first;
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('settings-font-scale')),
+      200,
+      scrollable: scrollable,
+    );
+    await tester.ensureVisible(find.byKey(const Key('settings-font-scale')));
+    await tester.pumpAndSettle();
+    expect(find.text('130%'), findsOneWidget);
+
+    // Saving persists the device-local font scale and surfaces it to the parent.
+    await tester.tap(find.byKey(const Key('settings-save')));
+    await tester.pumpAndSettle();
+
+    expect(applied, isNotNull);
+    expect(applied!.fontScale, 1.3);
+    expect(store.value.fontScale, 1.3);
+  });
+
   testWidgets(
       'listening-ring controls render, the toggle hides the dials, and Save persists',
       (tester) async {

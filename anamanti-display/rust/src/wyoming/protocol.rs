@@ -184,6 +184,13 @@ pub mod types {
     /// = `"show"` / `"dismiss"`; for `show`, `place` is the structured report). Byte-
     /// identical to the orchestrator crate's `types::PLACE`.
     pub const PLACE: &str = "anamanti-place";
+
+    /// orchestrator → device: adjust the global on-screen font scale (data: `action` =
+    /// `"adjust"`, `direction` = `"increase"` / `"decrease"`). Driven by the orchestrator's
+    /// `adjust_font` tool / System-1 intent when the turn's `screen.font` context says a
+    /// resizable surface is on screen. Byte-identical to the orchestrator crate's
+    /// `types::FONT`.
+    pub const FONT: &str = "anamanti-font";
 }
 
 /// A device-action timer command decoded from an `anamanti-timer` frame (Phase 2).
@@ -211,6 +218,14 @@ pub enum RecipeCommand {
     Navigate(String),
     /// Scroll the active pane by voice: `"up"` / `"down"` (a page) or `"top"` / `"bottom"`.
     Scroll(String),
+}
+
+/// A font-scaling command decoded from an `anamanti-font` frame. `Adjust` carries the
+/// direction (`"increase"` / `"decrease"`); the device applies it to the global font scale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontCommand {
+    /// Step the global font scale in `direction` (`"increase"` / `"decrease"`).
+    Adjust(String),
 }
 
 /// A weather command decoded from an `anamanti-weather` frame. `Show`/`Current` carry
@@ -651,6 +666,33 @@ impl WyomingEvent {
         }
     }
 
+    /// An `anamanti-font` **adjust** action (used by tests + the mock server; the
+    /// orchestrator emits the wire form directly). Steps the global font scale in
+    /// `direction` (`"increase"` / `"decrease"`).
+    pub fn font_adjust(direction: &str) -> Self {
+        Self::with_data(
+            types::FONT,
+            json!({ "action": "adjust", "direction": direction }),
+        )
+    }
+
+    /// Decode an `anamanti-font` frame into a [`FontCommand`], or `None` if this is not a
+    /// font frame or its `action`/`direction` is unrecognized (an `adjust` with no
+    /// `direction` is rejected).
+    pub fn font_command(&self) -> Option<FontCommand> {
+        if self.event_type != types::FONT {
+            return None;
+        }
+        match self.data.get("action").and_then(Value::as_str)? {
+            "adjust" => self
+                .data
+                .get("direction")
+                .and_then(Value::as_str)
+                .map(|d| FontCommand::Adjust(d.to_string())),
+            _ => None,
+        }
+    }
+
     /// Serialize this event to its on-the-wire bytes: header line, then the
     /// length-prefixed `data` block, then the binary payload.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -928,6 +970,23 @@ mod tests {
         assert_eq!(bad_nav.recipe_command(), None);
         let bad_scroll = WyomingEvent::with_data(types::RECIPE, json!({ "action": "scroll" }));
         assert_eq!(bad_scroll.recipe_command(), None);
+    }
+
+    #[tokio::test]
+    async fn font_adjust_roundtrips_and_decodes_direction() {
+        // The frame constant is byte-identical to the orchestrator crate's (guards the
+        // mirrored `types` block).
+        assert_eq!(types::FONT, "anamanti-font");
+
+        let inc = roundtrip(&WyomingEvent::font_adjust("increase")).await;
+        assert_eq!(inc.font_command(), Some(FontCommand::Adjust("increase".to_string())));
+        let dec = roundtrip(&WyomingEvent::font_adjust("decrease")).await;
+        assert_eq!(dec.font_command(), Some(FontCommand::Adjust("decrease".to_string())));
+
+        // A non-font frame, or an adjust with no direction, decodes to None.
+        assert_eq!(WyomingEvent::interrupt().font_command(), None);
+        let bad = WyomingEvent::with_data(types::FONT, json!({ "action": "adjust" }));
+        assert_eq!(bad.font_command(), None);
     }
 
     #[tokio::test]

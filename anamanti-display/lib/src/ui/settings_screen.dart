@@ -1537,6 +1537,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       ),
+      const Divider(),
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          'Size of all on-screen text. A manual override of the voice commands '
+          '"increase font" / "decrease font"; applies on Save.',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ),
+      _rangeSlider(
+        label: 'Font size',
+        value: _settings.fontScale,
+        min: kFontScaleMin,
+        max: kFontScaleMax,
+        // Snap to 5% stops across the [0.85, 1.6] range (finer than the 0.1 voice step).
+        divisions: ((kFontScaleMax - kFontScaleMin) / 0.05).round(),
+        format: (v) => '${(v * 100).round()}%',
+        sliderKey: const Key('settings-font-scale'),
+        onChanged: (v) =>
+            setState(() => _settings = _settings.copyWith(fontScale: v)),
+      ),
     ];
   }
 

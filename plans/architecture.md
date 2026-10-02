@@ -512,6 +512,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   Steps, or `scroll` up/down/top/bottom). The device owns the resulting screen state —
   it persists across turns and idle while you cook — so, like timers, this is
   fire-and-forget from the Mac. See `plans/RecipePlan.md`.
+- **`anamanti-font`** (Anamanti Core → device): a project-local **device-action** frame
+  for the global on-screen font scale (`data.action` = `adjust`, `direction` =
+  `increase`/`decrease`). Emitted by the LLM `adjust_font` tool (and, optionally later, a
+  System-1 `font_increase`/`font_decrease` fast intent). The device owns + persists the
+  scale (one device-wide `TextScaler` on all ambient text), so this is fire-and-forget. See
+  `plans/FontScalePlan.md`.
 - **Display context on `audio-start`** (device → Anamanti Core): a **general,
   extensible** mechanism that tells the Core **what the display is currently showing**, so
   the model can *drive that screen by voice*. The device stamps a `data.screen` block on

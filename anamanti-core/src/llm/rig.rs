@@ -37,7 +37,9 @@ use rig_core::tool::PortableTool;
 
 use chrono::Local;
 
-use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
+use super::{
+    ActionSink, DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav, ReplyStream,
+};
 use crate::appsaid::{OutgoingMessage, PhoneMessenger};
 use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
@@ -72,6 +74,18 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              (convert the requested time to whole seconds) and `cancel_timer` tools. When the user \
              asks to set, start, or cancel a timer, call the tool — never say you are unable to set \
              timers. There can be any number of timers running at once.",
+        );
+    }
+    if has(ADJUST_FONT) {
+        parts.push(
+            "You can make the on-screen text larger or smaller with the `adjust_font` tool \
+             (action `increase` / `decrease`), but ONLY when the turn context says a resizable \
+             text surface is on screen. When the user asks to increase/decrease the font, make \
+             the text bigger/smaller, or says it's too small/too big to read, call `adjust_font` \
+             and relay its short spoken confirmation. If the context says there is nothing to \
+             resize, tell the user there's nothing on screen to resize; if it says the text is \
+             already at the maximum (for increase) or minimum (for decrease), tell them that \
+             instead of calling the tool.",
         );
     }
     if has(CalendarLookup::NAME) {
@@ -1273,6 +1287,9 @@ pub const CLOSE_RECIPE: &str = "close_recipe";
 /// Tool name for navigating the already-open recipe screen (switch tab / scroll).
 pub const RECIPE_CONTROL: &str = "recipe_control";
 
+/// Tool name for adjusting the global on-screen font scale ("increase/decrease font").
+pub const ADJUST_FONT: &str = "adjust_font";
+
 /// Typed arguments for [`RecipeLookup`].
 #[derive(Debug, Deserialize)]
 struct RecipeArgs {
@@ -1422,6 +1439,55 @@ fn recipe_control_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Res
     let sink = actions.context("no display is connected right now")?;
     sink.send(DeviceAction::RecipeControl(nav))
         .map_err(|_| anyhow::anyhow!("the display disconnected before the recipe could update"))?;
+    Ok(confirmation.to_string())
+}
+
+// ===========================================================================
+// Font-scale tool (make the on-screen text bigger / smaller)
+// ===========================================================================
+
+/// Typed arguments for [`adjust_font_invoke`].
+#[derive(Debug, Deserialize)]
+struct AdjustFontArgs {
+    /// `"increase"` (bigger) or `"decrease"` (smaller).
+    action: String,
+}
+
+fn adjust_font_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: ADJUST_FONT.to_string(),
+        description: "Make the text on the display bigger or smaller. Use ONLY when the turn \
+                      context says a resizable text surface is on screen; if the context says \
+                      the text is already at the maximum (for increase) or minimum (for \
+                      decrease) size, tell the user that instead of calling this tool."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["increase", "decrease"],
+                    "description": "increase = make the text bigger; decrease = make it smaller."
+                }
+            },
+            "required": ["action"]
+        }),
+    }
+}
+
+/// Execute `adjust_font`: map the action to a [`DeviceAction::AdjustFont`] and emit it on
+/// the per-turn sink.
+fn adjust_font_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+    let args: AdjustFontArgs =
+        serde_json::from_value(arguments.clone()).context("parsing adjust_font arguments")?;
+    let (dir, confirmation) = match args.action.as_str() {
+        "increase" => (FontDirection::Increase, "Making the text bigger."),
+        "decrease" => (FontDirection::Decrease, "Making the text smaller."),
+        other => anyhow::bail!("unknown adjust_font action `{other}`"),
+    };
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::AdjustFont(dir))
+        .map_err(|_| anyhow::anyhow!("the display disconnected before the font could change"))?;
     Ok(confirmation.to_string())
 }
 
@@ -1771,7 +1837,12 @@ impl Tools {
         weather: Option<crate::weather::WeatherConfig>,
         places: Option<crate::places::PlacesConfig>,
     ) -> Self {
-        let mut definitions = vec![set_timer_definition(), cancel_timer_definition()];
+        // Timer + font tools need no provider or config, so they are always advertised.
+        let mut definitions = vec![
+            set_timer_definition(),
+            cancel_timer_definition(),
+            adjust_font_definition(),
+        ];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
         if let Some(s) = &search {
             definitions.push(s.definition());
@@ -1850,6 +1921,7 @@ impl Tools {
         match name {
             SET_TIMER => set_timer_invoke(arguments, actions),
             CANCEL_TIMER => cancel_timer_invoke(arguments, actions),
+            ADJUST_FONT => adjust_font_invoke(arguments, actions),
             InternetSearch::NAME => match &self.search {
                 Some(search) => search.invoke(arguments).await,
                 None => anyhow::bail!("web search is not enabled"),
@@ -3131,7 +3203,37 @@ mod tests {
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
+        assert!(names.contains(&ADJUST_FONT));
         assert!(!names.contains(&InternetSearch::NAME));
+    }
+
+    #[test]
+    fn adjust_font_emits_direction_action_and_confirms() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = adjust_font_invoke(&json!({ "action": "increase" }), Some(&tx)).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), DeviceAction::AdjustFont(FontDirection::Increase));
+        assert!(out.to_lowercase().contains("bigger"));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        adjust_font_invoke(&json!({ "action": "decrease" }), Some(&tx)).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), DeviceAction::AdjustFont(FontDirection::Decrease));
+    }
+
+    #[test]
+    fn adjust_font_rejects_unknown_action_and_missing_device() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(adjust_font_invoke(&json!({ "action": "zoom" }), Some(&tx)).is_err());
+        // No device attached → the tool reports an error the model can relay.
+        assert!(adjust_font_invoke(&json!({ "action": "increase" }), None).is_err());
+    }
+
+    #[test]
+    fn adjust_font_guidance_mentions_the_context_gate() {
+        let tools = Tools::new(None, None, None, None, None, None, None, None, None);
+        let guidance = tool_guidance(&tools.definitions);
+        assert!(guidance.contains("adjust_font"));
+        // The guidance must reflect the "only when a surface is on screen" gate.
+        assert!(guidance.contains("ONLY when"));
     }
 
     /// End-to-end tool loop: the fake ollama asks for `set_timer`; the pipeline's

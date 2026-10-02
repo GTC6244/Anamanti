@@ -38,6 +38,7 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         WeatherConfig,
         deviceHardwareId,
         noteUserActivity,
+        setFontContext,
         setPlaceContext,
         setRecipeContext,
         setWeatherContext;
@@ -325,6 +326,11 @@ class _AmbientHomeState extends State<AmbientHome> {
       setRecipeContext: setRecipeContext,
       setWeatherContext: setWeatherContext,
       setPlaceContext: setPlaceContext,
+      // Voice "increase font" / "decrease font": tell the orchestrator the current
+      // global scale each turn, and apply + persist a requested adjustment here.
+      setFontContext: setFontContext,
+      onFontAdjust: _onFontAdjust,
+      fontScale: _settings.fontScale,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
       // flip to a "processing" indicator the instant the user stops talking.
       endpointCueEnabled: _settings.endpointCueEnabled,
@@ -419,15 +425,23 @@ class _AmbientHomeState extends State<AmbientHome> {
         next.driveRefreshToken != _settings.driveRefreshToken ||
         !listEquals(next.driveFolderIds, _settings.driveFolderIds) ||
         next.driveLinked != _settings.driveLinked;
+    // Computed before the setState below reassigns `_settings`.
+    final fontChanged = next.fontScale != _settings.fontScale;
 
     // setState so purely-presentational changes (e.g. the listening-ring toggle and
-    // its reactivity/attack/release/decay dials) repaint AmbientScreen even when
-    // neither the engine nor the photo source changed.
+    // its reactivity/attack/release/decay dials, and the font-size slider) repaint
+    // AmbientScreen even when neither the engine nor the photo source changed.
     setState(() {
       _settings = next;
       // Re-pin the control client to the (possibly new) orchestrator selection.
       _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
     });
+    // A manual font-size change (the Settings slider) applies to the UI via the setState
+    // above (the root MediaQuery re-reads `_settings.fontScale`); also mirror it to the
+    // controller so the next turn's font context reports the new scale.
+    if (fontChanged) {
+      _assistant?.updateFontScale(next.fontScale);
+    }
     if (photoChanged) {
       // A new/changed link means new refresh tokens: re-mint before rebuilding.
       await _refreshGoogleTokens();
@@ -439,6 +453,21 @@ class _AmbientHomeState extends State<AmbientHome> {
       baseUrl: next.updateBaseUrl,
       autoUpdateEnabled: next.autoUpdateEnabled,
     );
+  }
+
+  /// Apply a voice font-size command ("increase font" / "decrease font"): bump the global
+  /// [AppSettings.fontScale] by one step (clamped), persist it, rebuild so the root
+  /// [MediaQuery] re-scales all ambient text, and tell the controller the new value so the
+  /// next turn's context reports it. A no-op at the min/max bound.
+  Future<void> _onFontAdjust(String direction) async {
+    final step = direction == 'decrease' ? -kFontScaleStep : kFontScaleStep;
+    final next = (_settings.fontScale + step).clamp(kFontScaleMin, kFontScaleMax);
+    if (next == _settings.fontScale) return; // already at the bound
+    _settings = _settings.copyWith(fontScale: next);
+    await _store.save(_settings);
+    if (!mounted) return;
+    setState(() {});
+    _assistant?.updateFontScale(next);
   }
 
   void _openSettings() {
@@ -482,17 +511,27 @@ class _AmbientHomeState extends State<AmbientHome> {
         body: SlideshowView(controller: _slideshow),
       );
     } else {
-      content = AmbientScreen(
-        assistant: assistant,
-        slideshow: _slideshow,
-        notifications: _notifications,
-        updates: _updates,
-        onOpenSettings: _openSettings,
-        listeningRingEnabled: _settings.listeningRingEnabled,
-        ringReactivity: _settings.ringReactivity,
-        ringAttack: _settings.ringAttack,
-        ringRelease: _settings.ringRelease,
-        ringDecay: _settings.ringDecay,
+      // Apply the global voice-controlled font scale to every piece of ambient text at
+      // once: Flutter's `Text` reads `textScaler` from the ambient `MediaQuery`, so this
+      // single override scales all hardcoded font sizes under `AmbientScreen`. The pushed
+      // `SettingsScreen` is a separate `Navigator` route (see `_openSettings`), outside
+      // this subtree, so it stays at the default size.
+      content = MediaQuery(
+        data: MediaQuery.of(context).copyWith(
+          textScaler: TextScaler.linear(_settings.fontScale),
+        ),
+        child: AmbientScreen(
+          assistant: assistant,
+          slideshow: _slideshow,
+          notifications: _notifications,
+          updates: _updates,
+          onOpenSettings: _openSettings,
+          listeningRingEnabled: _settings.listeningRingEnabled,
+          ringReactivity: _settings.ringReactivity,
+          ringAttack: _settings.ringAttack,
+          ringRelease: _settings.ringRelease,
+          ringDecay: _settings.ringDecay,
+        ),
       );
     }
     // Kiosk guard: never let the hardware/gesture Back button pop the root route,

@@ -154,6 +154,7 @@ async fn calibrate_against_corpus() {
                 next_remaining_secs: (c.timers_running > 0).then_some(300),
                 labels: Vec::new(),
             },
+            font: Default::default(),
         };
         let decision = engine.decide(&req).await.unwrap_or(Decision::Defer);
         let (got_resolve, got_intent) = match &decision {

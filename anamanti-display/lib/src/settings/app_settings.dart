@@ -35,6 +35,14 @@ const List<String> kAvailableWakeWords = <String>[
 /// appends `/latest.json`.
 const String kDefaultUpdateBaseUrl = 'https://releases.immediacy.app/anamanti';
 
+/// Global on-screen font-scale bounds and step (device-local, voice-controlled via
+/// "increase font" / "decrease font"). A single factor applied to **all** ambient
+/// text through a root `MediaQuery` [TextScaler]; persisted across reboots. The step
+/// is additive so the at-min/at-max edges are exact.
+const double kFontScaleMin = 0.85;
+const double kFontScaleMax = 1.6;
+const double kFontScaleStep = 0.1;
+
 @immutable
 class AppSettings {
   const AppSettings({
@@ -72,6 +80,7 @@ class AppSettings {
     this.driveClientSecret = '',
     this.autoUpdateEnabled = true,
     this.updateBaseUrl = kDefaultUpdateBaseUrl,
+    this.fontScale = 1.0,
   });
 
   /// Stable selection key (`instance_id` TXT) of the orchestrator this display is
@@ -228,6 +237,12 @@ class AppSettings {
   /// custom domain). No trailing slash. Defaults to [kDefaultUpdateBaseUrl].
   final String updateBaseUrl;
 
+  /// Global on-screen font scale, voice-controlled by "increase font" / "decrease
+  /// font". A single device-wide multiplier applied to all ambient text via a root
+  /// `MediaQuery` [TextScaler], persisted across reboots. Clamped to
+  /// [[kFontScaleMin], [kFontScaleMax]]; `1.0` = unscaled.
+  final double fontScale;
+
   /// True when both Drive client credentials are present — the device can mint Drive
   /// access tokens. Runtime replacement for the old build-time `kGoogleDriveConfigured`.
   bool get driveConfigured =>
@@ -268,6 +283,7 @@ class AppSettings {
     String? driveClientSecret,
     bool? autoUpdateEnabled,
     String? updateBaseUrl,
+    double? fontScale,
   }) {
     return AppSettings(
       orchestratorKey: orchestratorKey ?? this.orchestratorKey,
@@ -304,6 +320,7 @@ class AppSettings {
       driveClientSecret: driveClientSecret ?? this.driveClientSecret,
       autoUpdateEnabled: autoUpdateEnabled ?? this.autoUpdateEnabled,
       updateBaseUrl: updateBaseUrl ?? this.updateBaseUrl,
+      fontScale: fontScale ?? this.fontScale,
     );
   }
 
@@ -342,6 +359,7 @@ class AppSettings {
     'driveClientSecret': driveClientSecret,
     'autoUpdateEnabled': autoUpdateEnabled,
     'updateBaseUrl': updateBaseUrl,
+    'fontScale': fontScale,
   };
 
   /// Parse from persisted JSON, tolerating missing/invalid keys by falling back to
@@ -469,6 +487,12 @@ class AppSettings {
               (json['updateBaseUrl'] as String).trim().isNotEmpty
           ? (json['updateBaseUrl'] as String).trim()
           : defaults.updateBaseUrl,
+      fontScale: json['fontScale'] is num
+          ? (json['fontScale'] as num).toDouble().clamp(
+              kFontScaleMin,
+              kFontScaleMax,
+            )
+          : defaults.fontScale,
     );
   }
 
@@ -509,7 +533,8 @@ class AppSettings {
       driveClientId == other.driveClientId &&
       driveClientSecret == other.driveClientSecret &&
       autoUpdateEnabled == other.autoUpdateEnabled &&
-      updateBaseUrl == other.updateBaseUrl;
+      updateBaseUrl == other.updateBaseUrl &&
+      fontScale == other.fontScale;
 
   @override
   int get hashCode => Object.hash(
@@ -550,6 +575,7 @@ class AppSettings {
       ringDecay,
       autoUpdateEnabled,
       updateBaseUrl,
+      fontScale,
     ),
   );
 }
