@@ -26,7 +26,7 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
-use crate::llm::{DeviceAction, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
+use crate::llm::{DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
@@ -36,8 +36,8 @@ use crate::memory::{
 use crate::settings::{Household, HouseholdMember, SharedSettings};
 use crate::speaker::{SpeakerContext, SpeakerService};
 use crate::stt::{SttEngine, SttEvent, Transcriber, WyomingTranscriber};
-use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::vad::SpeechGate;
+use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::tts::TtsSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
@@ -497,10 +497,7 @@ impl Pipeline {
     /// chosen live from `runtime.vad_engine` (config-page/device swap, no restart); a
     /// swap to Silero when no model is loaded (feature off or model absent) falls back
     /// to the energy gate with a warning. See `plans/VadSileroPlan.md`.
-    fn build_speech_gate(
-        &self,
-        runtime: &crate::settings::RuntimeSettings,
-    ) -> Box<dyn SpeechGate> {
+    fn build_speech_gate(&self, runtime: &crate::settings::RuntimeSettings) -> Box<dyn SpeechGate> {
         #[cfg(feature = "vad-silero")]
         if matches!(runtime.vad_engine, crate::config::VadEngineKind::Silero) {
             match &self.silero {
@@ -671,15 +668,9 @@ impl Pipeline {
                     deadline = Instant::now() + self.turn_timeout;
                     match sev? {
                         Some(SttEvent::Transcript(text)) => {
-                            // Diagnostic echo (#1): relay exactly what STT produced to the
-                            // device the instant it arrives — BEFORE the VAD gate, System-1,
-                            // or System-2 — so the device confirms STT is alive regardless of
-                            // any downstream gating/decision. This is the only place the raw
-                            // (pre-gate) transcript is emitted; the caller no longer re-sends it.
                             log::info!(
                                 "STT transcript {text:?} (speech_started={speech_started})"
                             );
-                            device.send(&WyomingEvent::transcript(&text)).await.ok();
 
                             // Guard against STT hallucinations on silence. If our energy
                             // VAD never latched `speech_started`, this turn finalized on
@@ -693,10 +684,12 @@ impl Pipeline {
                             // already treats as "no speech": sleep, send `audio-stop`,
                             // and end the follow-up chain (no `ambient-listen`). This
                             // stops the self-perpetuating phantom-reply loop in a quiet
-                            // room. The trade-off is that a genuine utterance too quiet
-                            // to clear `voice_rms_threshold` for `MIN_SPEECH_ONSET` is
-                            // also dropped — consistent with the existing no-speech
-                            // finalize, which already treats too-quiet audio as silence.
+                            // room. Crucially, a discarded hallucination is NEVER relayed
+                            // to the device (no phantom transcript on screen). The trade-off
+                            // is that a genuine utterance too quiet to clear
+                            // `voice_rms_threshold` for `MIN_SPEECH_ONSET` is also dropped —
+                            // consistent with the existing no-speech finalize, which already
+                            // treats too-quiet audio as silence.
                             if !speech_started {
                                 if !text.trim().is_empty() {
                                     log::info!(
@@ -707,6 +700,14 @@ impl Pipeline {
                                 }
                                 return Ok(Some((String::new(), Vec::new(), Duration::ZERO)));
                             }
+
+                            // Diagnostic echo (#1): relay exactly what STT produced to the
+                            // device the instant it clears the VAD gate — BEFORE System-1 or
+                            // System-2 — so the device confirms STT is alive regardless of
+                            // any downstream gating/decision. This is the only place the raw
+                            // (pre-decision) transcript is emitted; the caller no longer
+                            // re-sends it.
+                            device.send(&WyomingEvent::transcript(&text)).await.ok();
                             let stt_dur = finalized_at.map(|t| t.elapsed()).unwrap_or_default();
                             return Ok(Some((text, std::mem::take(&mut voiced_pcm), stt_dur)));
                         }
@@ -797,6 +798,9 @@ impl Pipeline {
                 // Background timer state (running/remaining/labels), ground truth for the
                 // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
                 timers: device_ctx.timers.clone(),
+                // Font-scaling state, ground truth for the optional font_increase/decrease
+                // fast intents (resolve only when a resizable surface is on screen).
+                font: device_ctx.font.clone(),
             };
             let engine = runtime.system1.engine.name().to_string();
             log::info!("system1 ({engine}) call: deciding on {transcript:?}");
@@ -904,6 +908,7 @@ impl Pipeline {
         let recall_embedded = self.recall.embeds_query();
         timing.recall_backend = Some(recall_backend.to_string());
         timing.recall_embedded = Some(recall_embedded);
+        timing.recall_embedder = self.recall.embedder_label().map(str::to_string);
         timing.recall_embed_ms = recalled.embed_ms;
         timing.recall_search_ms = recalled.search_ms;
         log::info!(
@@ -952,6 +957,15 @@ impl Pipeline {
         if let Some(screen) = device_ctx.widget.as_ref() {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&display_context_line(screen));
+        }
+        // Tell the model whether the on-screen text can be resized right now (the gate for
+        // the `adjust_font` tool). Added only when a resizable surface is present, so the
+        // model declines a bare "increase font" with nothing on screen; it also states the
+        // current scale + whether it is already at the max/min so the model can say so
+        // instead of a no-op call.
+        if device_ctx.font.scalable {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&font_context_line(&device_ctx.font));
         }
         // Output personality: a trailing style instruction (pure output tuning — it never
         // affects memory, recall, or tool use) plus a line telling the model how to switch
@@ -2244,6 +2258,25 @@ fn display_context_line(ctx: &protocol::DisplayContext) -> String {
     }
 }
 
+/// A prompt line, added only when a resizable text surface is on screen, telling the model
+/// it may resize the display text with `adjust_font` and whether the scale is already at the
+/// max/min — so it can say so instead of a no-op call. Mirrors `display_context_line` as the
+/// per-turn gate for the font tool.
+fn font_context_line(font: &protocol::FontContext) -> String {
+    let pct = (font.scale() * 100.0).round() as i32;
+    let bound = if font.at_max {
+        " The text is already at the maximum size, so decline a request to increase it."
+    } else if font.at_min {
+        " The text is already at the minimum size, so decline a request to decrease it."
+    } else {
+        ""
+    };
+    format!(
+        "The on-screen text is resizable (currently {pct}% of normal). Use the `adjust_font` \
+         tool to make it bigger or smaller when the user asks.{bound}"
+    )
+}
+
 /// The prompt line for the place card: names the place on screen so the model can answer
 /// follow-ups in context ("is it open on Sunday?" → `places_lookup` for the same place)
 /// or `close_places` when the user says to close it.
@@ -2536,6 +2569,10 @@ async fn drain_device_actions<W>(
                 RecipeNav::ScrollTop => WyomingEvent::recipe_scroll("top"),
                 RecipeNav::ScrollBottom => WyomingEvent::recipe_scroll("bottom"),
             },
+            DeviceAction::AdjustFont(dir) => WyomingEvent::font_adjust(match dir {
+                FontDirection::Increase => "increase",
+                FontDirection::Decrease => "decrease",
+            }),
         };
         if let Err(e) = protocol::write_event(writer, &event).await {
             log::warn!("failed to relay device action to the device: {e:#}");

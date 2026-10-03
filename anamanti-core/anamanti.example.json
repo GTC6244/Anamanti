@@ -142,6 +142,15 @@
     "link_token": null
   },
 
+  "appsaid": {
+    "worker_url": "https://appsaid.you.workers.dev",
+    "recipients": {
+      "Mom": "u_public_key_for_mom",
+      "Dad": "u_public_key_for_dad"
+    },
+    "default_recipient": "Mom"
+  },
+
   "tool_cache": {
     "weather_lookup": 3600
   }

@@ -15,6 +15,35 @@ pub fn engine_greeting(name: String) -> String {
     format!("Hello {name}, the anamanti-display Rust engine is alive 👋")
 }
 
+/// A stable per-device hardware id derived from the primary network interface's MAC
+/// address, formatted `anamanti-<12 lowercase hex>` (colons stripped) — e.g.
+/// `anamanti-140ac5942aca`. Reading the MAC from `/sys/class/net/<iface>/address`
+/// guarantees uniqueness across devices without any build-time configuration.
+///
+/// Returns an empty string if no usable MAC is found (an unreadable file, or an
+/// all-zero / locked-down `02:00:00:00:00:00` placeholder); the Dart layer then
+/// falls back to a persisted random id so the device still has a stable identity.
+#[flutter_rust_bridge::frb(sync)]
+pub fn device_hardware_id() -> String {
+    for iface in ["wlan0", "eth0"] {
+        let path = format!("/sys/class/net/{iface}/address");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let hex: String = raw
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        // A valid MAC is 12 hex digits and not an all-zero / randomized placeholder.
+        if hex.len() == 12 && hex != "000000000000" && hex != "020000000000" {
+            return format!("anamanti-{hex}");
+        }
+    }
+    String::new()
+}
+
 /// Reports the native engine's version and build target so the device can show
 /// exactly which cross-compiled binary it is running.
 #[flutter_rust_bridge::frb(sync)]
@@ -251,6 +280,11 @@ pub enum WakeWordEventKind {
     /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
     /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
     RecipeScroll,
+    /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
+    /// command. The direction (`"increase"` / `"decrease"`) rides the generic
+    /// `recipe_action` field (the same string carrier as `RecipeScroll`). The UI bumps the
+    /// global font scale and persists it.
+    FontAdjust,
     /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
     /// is `true` when someone has approached the display (brighten) and `false` when
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
@@ -531,6 +565,13 @@ impl WakeWordEvent {
         }
     }
 
+    pub(crate) fn font_adjust(direction: String) -> Self {
+        Self {
+            recipe_action: direction,
+            ..Self::base(WakeWordEventKind::FontAdjust)
+        }
+    }
+
     // Constructed only by the Android camera bridge; on host builds it's unused.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn presence(present: bool) -> Self {
@@ -679,6 +720,22 @@ pub fn set_place_context(active: bool, name: String, address: String) {
     crate::engine::set_display_context(screen);
 }
 
+/// Report the device's **font-scaling context** so the next voice turn's `audio-start`
+/// carries it to the orchestrator as the `screen.font` sibling (orthogonal to the
+/// foreground widget, like `screen.timers`). Lets "increase font" / "decrease font"
+/// resolve only when a resizable surface is on screen (`scalable`), and lets the assistant
+/// say when the text is already at the maximum/minimum. `scale` is the current global
+/// multiplier (1.0 = unscaled). Flutter calls this at startup and after each adjustment.
+#[frb(sync)]
+pub fn set_font_context(scalable: bool, scale: f32, at_min: bool, at_max: bool) {
+    crate::engine::set_font_context(Some(serde_json::json!({
+        "scalable": scalable,
+        "scale": scale,
+        "at_min": at_min,
+        "at_max": at_max,
+    })));
+}
+
 // ---------------------------------------------------------------------------
 // Proactive notifications (Approach A, visual-only). A persistent channel the
 // device dials to the orchestrator and holds open, receiving pushed
@@ -702,6 +759,9 @@ pub struct NotifyConfig {
     /// A stable identifier for this display, sent in the `anamanti-hello` frame so the
     /// orchestrator can key notifications per device (may be empty).
     pub device_id: String,
+    /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+    /// `device_id` in the `anamanti-hello` frame so the Core can name it (may be empty).
+    pub device_name: String,
 }
 
 /// One proactive notification pushed from the orchestrator, streamed to Flutter.
@@ -778,6 +838,7 @@ pub fn start_notify_channel(
                 timeout,
                 key,
                 config.device_id,
+                config.device_name,
                 loop_running,
                 move |note| {
                     sink.add(NotifyEvent {
@@ -830,6 +891,9 @@ pub struct WeatherConfig {
     pub discovery_timeout_secs: u64,
     /// A stable identifier for this display, sent in the `anamanti-hello` frame.
     pub device_id: String,
+    /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+    /// `device_id` in the `anamanti-hello` frame (may be empty).
+    pub device_name: String,
 }
 
 /// One ambient current-conditions push from the orchestrator, streamed to Flutter.
@@ -900,6 +964,7 @@ pub fn start_weather_channel(
                 timeout,
                 key,
                 config.device_id,
+                config.device_name,
                 loop_running,
                 move |report_json| sink.add(WeatherPush { report_json }).is_ok(),
             ));

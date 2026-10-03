@@ -52,6 +52,7 @@ mod tests {
             history: Vec::new(),
             location: None,
             timers: Default::default(),
+            font: Default::default(),
         }
     }
 

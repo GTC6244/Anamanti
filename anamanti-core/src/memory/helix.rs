@@ -85,13 +85,39 @@ impl HelixMemory {
         // The local object store canonicalizes its root, so it must exist first.
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating HelixDB store dir {}", root.display()))?;
+
+        // Dimensionality guard. The vector indexes bake in `dims` at creation and
+        // `create_index_if_not_exists` is a no-op on an existing store — so reopening
+        // with a different embedder (e.g. switching OpenAI 1536 ↔ local nomic 768, or
+        // changing Matryoshka width) would silently mismatch inserts/searches against
+        // the old index. We stamp the chosen dims in a marker file and fail loud on a
+        // mismatch rather than corrupt recall.
+        let marker = root.join("embedding_dims");
+        if let Ok(prev) = std::fs::read_to_string(&marker) {
+            if let Ok(prev) = prev.trim().parse::<usize>() {
+                anyhow::ensure!(
+                    prev == dims,
+                    "HelixDB store at {} was built for {prev}-dim embeddings but the current \
+                     embedder produces {dims}-dim vectors. Switching embedders or dimensions \
+                     needs a fresh store: remove or rename {} and restart — the chat log \
+                     re-ingests memory into the new store.",
+                    root.display(),
+                    root.display(),
+                );
+            }
+        }
+
         let db = HelixDB::open(HelixDbSource::Disk {
-            root,
+            root: root.clone(),
             database: database.to_string(),
         })
         .await
         .context("opening embedded HelixDB (disk)")?;
-        Self::init(db, dims).await
+        let me = Self::init(db, dims).await?;
+        // Record the dims for future opens (first creation, or re-affirm on match).
+        std::fs::write(&marker, dims.to_string())
+            .with_context(|| format!("writing embedding-dims marker {}", marker.display()))?;
+        Ok(me)
     }
 
     /// Open an ephemeral in-memory store (tests).

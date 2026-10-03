@@ -195,6 +195,12 @@ pub mod types {
     /// `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`, `photo_uri`, …).
     /// Byte-identical to the device crate's `types::PLACE`.
     pub const PLACE: &str = "anamanti-place";
+
+    /// orchestrator → device: adjust the global on-screen font scale (data: `action` =
+    /// `"adjust"`, `direction` = `"increase"` / `"decrease"`). A device action driven by
+    /// the `adjust_font` tool / System-1 intent when the turn's `screen.font` context says
+    /// a resizable surface is on screen. Byte-identical to the device crate's `types::FONT`.
+    pub const FONT: &str = "anamanti-font";
 }
 
 /// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
@@ -386,6 +392,15 @@ impl WyomingEvent {
         )
     }
 
+    /// An `anamanti-font` **adjust** action (orchestrator → device): step the global
+    /// on-screen font scale in `direction` (`"increase"` / `"decrease"`) by voice.
+    pub fn font_adjust(direction: &str) -> Self {
+        Self::with_data(
+            types::FONT,
+            json!({ "action": "adjust", "direction": direction }),
+        )
+    }
+
     /// True if this is an `anamanti-recipe` device-action frame.
     pub fn is_recipe(&self) -> bool {
         self.event_type == types::RECIPE
@@ -495,14 +510,20 @@ impl WyomingEvent {
     }
 
     /// An `anamanti-hello` channel-open frame (device → orchestrator): register the
-    /// persistent notify channel. Mirror of the device crate's `hello` constructor.
-    pub fn hello(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    /// persistent notify channel. `name` is a human-friendly label for the display
+    /// (may be empty). Mirror of the device crate's `hello` constructor.
+    pub fn hello(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "notify",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -511,13 +532,18 @@ impl WyomingEvent {
     /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
     /// so the server registers it with the weather push service rather than the notify
     /// service. Byte-identical to the device crate's `hello_weather`.
-    pub fn hello_weather(device_id: impl Into<String>, instance_id: impl Into<String>) -> Self {
+    pub fn hello_weather(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::with_data(
             types::ANAMANTI_HELLO,
             json!({
                 "role": "weather",
                 "device_id": device_id.into(),
                 "instance_id": instance_id.into(),
+                "name": name.into(),
             }),
         )
     }
@@ -526,6 +552,17 @@ impl WyomingEvent {
     pub fn hello_device_id(&self) -> Option<&str> {
         if self.event_type == types::ANAMANTI_HELLO {
             self.data.get("device_id").and_then(Value::as_str)
+        } else {
+            None
+        }
+    }
+
+    /// The human-friendly `name` from an `anamanti-hello` frame's `data.name`
+    /// (`None` when the frame is a different type or carries no name — older devices
+    /// that predate the field).
+    pub fn hello_name(&self) -> Option<&str> {
+        if self.event_type == types::ANAMANTI_HELLO {
+            self.data.get("name").and_then(Value::as_str)
         } else {
             None
         }
@@ -805,6 +842,36 @@ impl TimerContext {
     }
 }
 
+/// Font-scaling state the device reports on **every** turn, **orthogonal to the foreground
+/// widget** (`DisplayContext`): it describes whether a resizable text surface is on screen
+/// and the current global font scale, so it rides as a `font` sibling of `kind` inside the
+/// `screen` block (like `timers`). Lets the Core resolve "increase font" / "decrease font"
+/// only when there is something to resize (`scalable`), and report when the text is already
+/// at the maximum/minimum. `scale` is stored as **permille** (e.g. 1100 = 1.1×) so this
+/// derives `Eq` alongside [`DeviceContext`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FontContext {
+    /// Whether a resizable text surface is currently on screen (the resolve gate).
+    pub scalable: bool,
+    /// The current global font scale, in permille (1000 = 1.0×). 0 when never reported.
+    pub scale_permille: u16,
+    /// Whether the font is already at the minimum scale (a "decrease" would be a no-op).
+    pub at_min: bool,
+    /// Whether the font is already at the maximum scale (an "increase" would be a no-op).
+    pub at_max: bool,
+}
+
+impl FontContext {
+    /// The current global font scale as a multiplier (1.0 = unscaled); 1.0 when unset.
+    pub fn scale(&self) -> f32 {
+        if self.scale_permille == 0 {
+            1.0
+        } else {
+            self.scale_permille as f32 / 1000.0
+        }
+    }
+}
+
 /// The full device context for a turn: the foreground widget (if any) **plus** the
 /// orthogonal background state (active timers now; media later). Parsed once from the
 /// `audio-start` data via [`device_context`]. Keeping [`display_context`] separate lets
@@ -815,6 +882,8 @@ pub struct DeviceContext {
     pub widget: Option<DisplayContext>,
     /// Background timer state, reported regardless of `widget`.
     pub timers: TimerContext,
+    /// Font-scaling state, reported regardless of `widget`.
+    pub font: FontContext,
 }
 
 impl DeviceContext {
@@ -864,13 +933,44 @@ pub fn timer_context(data: &Value) -> TimerContext {
     }
 }
 
-/// Parse the full [`DeviceContext`] (foreground widget + background timers) from an
-/// `audio-start` data block. The turn pipeline uses this so System-1 sees background
-/// timers; [`display_context`] remains for the System-2 prompt line.
+/// Parse the font-scaling state from an `audio-start` data block's `screen.font` object.
+/// Missing/absent → a default [`FontContext`] (`scalable == false`), **independently of
+/// `screen.kind`** — the font state is reported even on an idle screen. `scale` arrives as
+/// a float multiplier on the wire and is stored as permille.
+pub fn font_context(data: &Value) -> FontContext {
+    let Some(font) = data
+        .as_object()
+        .and_then(|o| o.get("screen"))
+        .and_then(Value::as_object)
+        .and_then(|s| s.get("font"))
+        .and_then(Value::as_object)
+    else {
+        return FontContext::default();
+    };
+    let scalable = font.get("scalable").and_then(Value::as_bool).unwrap_or(false);
+    let scale_permille = font
+        .get("scale")
+        .and_then(Value::as_f64)
+        .map(|s| (s * 1000.0).round().clamp(0.0, u16::MAX as f64) as u16)
+        .unwrap_or(0);
+    let at_min = font.get("at_min").and_then(Value::as_bool).unwrap_or(false);
+    let at_max = font.get("at_max").and_then(Value::as_bool).unwrap_or(false);
+    FontContext {
+        scalable,
+        scale_permille,
+        at_min,
+        at_max,
+    }
+}
+
+/// Parse the full [`DeviceContext`] (foreground widget + background timers + font state)
+/// from an `audio-start` data block. The turn pipeline uses this so System-1 sees the
+/// background state; [`display_context`] remains for the System-2 prompt line.
 pub fn device_context(data: &Value) -> DeviceContext {
     DeviceContext {
         widget: display_context(data),
         timers: timer_context(data),
+        font: font_context(data),
     }
 }
 
@@ -1061,13 +1161,14 @@ mod tests {
 
     #[tokio::test]
     async fn weather_hello_carries_role() {
-        let hello = WyomingEvent::hello_weather("dev-1", "core-1");
+        let hello = WyomingEvent::hello_weather("dev-1", "core-1", "Bedroom");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.hello_role(), "weather");
         assert_eq!(back.hello_device_id(), Some("dev-1"));
+        assert_eq!(back.hello_name(), Some("Bedroom"));
         // The default notify hello reports the notify role.
-        assert_eq!(WyomingEvent::hello("d", "c").hello_role(), "notify");
+        assert_eq!(WyomingEvent::hello("d", "c", "").hello_role(), "notify");
     }
 
     #[tokio::test]
@@ -1084,6 +1185,57 @@ mod tests {
         assert_eq!(back, scroll);
         assert_eq!(back.data["action"], json!("scroll"));
         assert_eq!(back.data["direction"], json!("down"));
+    }
+
+    #[tokio::test]
+    async fn font_adjust_roundtrips_and_carries_direction() {
+        let inc = WyomingEvent::font_adjust("increase");
+        let back = roundtrip(&inc).await;
+        assert_eq!(back, inc);
+        assert_eq!(back.event_type, types::FONT);
+        assert_eq!(back.data["action"], json!("adjust"));
+        assert_eq!(back.data["direction"], json!("increase"));
+    }
+
+    #[test]
+    fn font_context_parses_orthogonally_to_widget_kind() {
+        // No screen block → default (not scalable), independent of any widget.
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        assert_eq!(font_context(&plain.data), FontContext::default());
+
+        // Font reported WITHOUT any `kind` (idle screen) is still seen.
+        let idle_with_font = json!({
+            "screen": { "font": { "scalable": true, "scale": 1.1, "at_min": false, "at_max": false } }
+        });
+        let font = font_context(&idle_with_font);
+        assert_eq!(
+            font,
+            FontContext {
+                scalable: true,
+                scale_permille: 1100,
+                at_min: false,
+                at_max: false,
+            }
+        );
+        assert!((font.scale() - 1.1).abs() < 1e-6);
+        // display_context sees nothing here (no `kind`), proving orthogonality.
+        assert_eq!(display_context(&idle_with_font), None);
+
+        // Font reported alongside a widget + timers: device_context carries all three.
+        let combined = json!({
+            "screen": {
+                "kind": "recipe",
+                "recipe": { "title": "Carbonara", "tab": "steps", "at_top": false, "at_bottom": true, "ingredient_count": 5, "step_count": 7 },
+                "timers": { "running": 1, "next_remaining_secs": 30 },
+                "font": { "scalable": true, "scale": 1.6, "at_min": false, "at_max": true }
+            }
+        });
+        let dev = device_context(&combined);
+        assert_eq!(dev.widget_label(), Some("recipe"));
+        assert_eq!(dev.timers.running, 1);
+        assert!(dev.font.scalable);
+        assert!(dev.font.at_max);
+        assert_eq!(dev.font.scale_permille, 1600);
     }
 
     #[test]
@@ -1242,14 +1394,16 @@ mod tests {
     #[tokio::test]
     async fn notify_frames_roundtrip() {
         // hello (device → orchestrator)
-        let hello = WyomingEvent::hello("echo-show-8", "Paul Family");
+        let hello = WyomingEvent::hello("echo-show-8", "Paul Family", "Kitchen");
         let back = roundtrip(&hello).await;
         assert_eq!(back, hello);
         assert_eq!(back.event_type, types::ANAMANTI_HELLO);
         assert_eq!(back.hello_device_id(), Some("echo-show-8"));
+        assert_eq!(back.hello_name(), Some("Kitchen"));
         assert_eq!(back.data["role"], json!("notify"));
-        // A non-hello frame yields no device id.
+        // A non-hello frame yields no device id or name.
         assert_eq!(WyomingEvent::audio_stop(0).hello_device_id(), None);
+        assert_eq!(WyomingEvent::audio_stop(0).hello_name(), None);
 
         // notify (orchestrator → device)
         let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");

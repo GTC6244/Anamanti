@@ -66,6 +66,19 @@ pub enum DeviceAction {
     /// the orchestrator applies it to [`SharedSettings`](crate::settings::SharedSettings)
     /// (no device frame), so the next turn's prompt carries the new style.
     SetPersonality { name: String },
+    /// Step the global on-screen font scale up or down. The device owns + persists the
+    /// scale, so this is fire-and-forget like the other display actions.
+    AdjustFont(FontDirection),
+}
+
+/// Which way to step the global font scale (relayed as an `anamanti-font` `adjust` frame).
+/// Emitted by the `adjust_font` tool / the System-1 font intents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontDirection {
+    /// Make the on-screen text larger.
+    Increase,
+    /// Make the on-screen text smaller.
+    Decrease,
 }
 
 /// A voice navigation command for the open recipe screen (relayed as an

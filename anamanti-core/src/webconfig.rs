@@ -40,15 +40,17 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::config::EmbedBackend;
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
-use crate::memory::{chatlog, promptlog, GraphView, MemoryStore};
+use crate::memory::{chatlog, promptlog, GraphRagController, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
 use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
-    CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember, LlmEngine, Personality,
-    PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate, System1Update,
+    AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
+    LlmEngine, Personality, PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings,
+    SpotifyUpdate, System1Update,
     WeatherToolUpdate,
 };
 
@@ -195,6 +197,11 @@ fn sidebar_html(active: &str) -> String {
             "Memory",
             &[
                 (
+                    "/embeddings",
+                    "Embeddings",
+                    r##"<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5L19 19M19 5l-2.5 2.5M7.5 16.5L5 19"/>"##,
+                ),
+                (
                     "/sqlite",
                     "SQLite",
                     r##"<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>"##,
@@ -309,6 +316,7 @@ const NOTIFY_BODY: &str = include_str!("webconfig/notifications.html");
 /// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
 const HOUSEHOLD_BODY: &str = include_str!("webconfig/household.html");
 const SYSTEM1_BODY: &str = include_str!("webconfig/system1.html");
+const EMBEDDINGS_BODY: &str = include_str!("webconfig/embeddings.html");
 
 /// `/personality` body — toggle the output personality on/off, pick the active one, and
 /// edit the catalog of personalities (label + style description). Pure output tuning: it
@@ -332,6 +340,7 @@ pub async fn serve(
     debug: DebugSources,
     music: Option<MusicHub>,
     notify: Arc<NotificationService>,
+    graphrag: Option<Arc<GraphRagController>>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -342,9 +351,10 @@ pub async fn serve(
         let debug = debug.clone();
         let music = music.clone();
         let notify = notify.clone();
+        let graphrag = graphrag.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(
-                stream, settings, catalog, connector, voices_dir, debug, music, notify,
+                stream, settings, catalog, connector, voices_dir, debug, music, notify, graphrag,
             )
             .await
             {
@@ -366,6 +376,7 @@ async fn handle(
     debug: DebugSources,
     music: Option<MusicHub>,
     notify: Arc<NotificationService>,
+    graphrag: Option<Arc<GraphRagController>>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
@@ -508,10 +519,38 @@ async fn handle(
         .await;
     }
 
+    // Embedding backend: current selection + a live hot-swap (rebuilds the embedder +
+    // per-backend HelixDB store + ingester and swaps them in with no restart). Needs the
+    // async controller, so handled here rather than in the pure `route` function.
+    if method == "GET" && path == "/embeddings/status.json" {
+        let payload = embeddings_status_json(graphrag.as_ref()).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    if method == "POST" && path == "/embeddings/switch" {
+        let payload = embeddings_switch_json(graphrag.as_ref(), &body).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+
     // Proactive notifications: how many device notify channels are connected, and a
     // button to push a test notification down them (Approach A, visual-only).
     if method == "GET" && path == "/notifications/status.json" {
-        let payload = json!({ "connected": notify.connected() }).to_string();
+        let payload = json!({
+            "connected": notify.connected(),
+            "devices": notify.connected_devices(),
+        })
+        .to_string();
         return write_response(
             &mut stream,
             "200 OK",
@@ -666,6 +705,34 @@ async fn handle(
     // returns — fine for a single admin request.
     if method == "POST" && path == "/cadora/link" {
         let payload = cadora_link_json(&settings, &body).await;
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // AppSaid phone-push status (worker URL + recipient names + token/tool state; never
+    // the token value).
+    if method == "GET" && path == "/appsaid/status.json" {
+        let payload = appsaid_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Set the AppSaid worker URL and/or default recipient (no token change).
+    if method == "POST" && path == "/appsaid/save" {
+        let payload = appsaid_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // Set the secret AppSaid sender app token (masked, never echoed back).
+    if method == "POST" && path == "/appsaid/token" {
+        let payload = appsaid_token_json(&settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -1648,8 +1715,145 @@ async fn cadora_link_json(settings: &SharedSettings, body: &[u8]) -> String {
     .to_string()
 }
 
+/// `GET /appsaid/status.json` — the AppSaid phone-push state for the `/household`
+/// page. Reports the worker URL, the configured recipient names, and whether the app
+/// token is set + the `send_phone_message` tool is therefore active. The token value
+/// is never included.
+fn appsaid_status_json(settings: &SharedSettings) -> String {
+    let a = settings.appsaid();
+    json!({
+        "ok": true,
+        "worker_url": a.worker_url.clone().unwrap_or_default(),
+        "recipients": a.recipient_names(),
+        "default_recipient": a.default_recipient.clone().unwrap_or_default(),
+        "token_set": a.token_set(),
+        "tool_active": a.active(),
+    })
+    .to_string()
+}
+
+/// `POST /appsaid/save` — set the AppSaid worker URL and/or default recipient. A blank
+/// value clears the field; an absent field is left unchanged. Applying rebuilds the LLM
+/// so the tool tracks state. Recipients themselves come from the JSON config's
+/// `appsaid.recipients` block.
+fn appsaid_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    // A present field (even blank → clear) updates it; absent leaves it unchanged.
+    let opt = |key: &str| {
+        data.get(key).and_then(Value::as_str).map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.trim_end_matches('/').to_string())
+            }
+        })
+    };
+    let worker_url = opt("worker_url");
+    let default_recipient = data
+        .get("default_recipient")
+        .and_then(Value::as_str)
+        .map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        });
+    settings.apply_appsaid(&AppSaidUpdate {
+        worker_url,
+        default_recipient,
+        ..Default::default()
+    });
+    appsaid_status_json(settings)
+}
+
+/// `POST /appsaid/token` — set the secret AppSaid sender app token. A blank/absent
+/// token is left unchanged (a page reload never wipes the stored token); a non-empty
+/// value sets it and rebuilds the backend so `send_phone_message` activates live.
+fn appsaid_token_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let app_token = match data.get("app_token").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+        _ => None,
+    };
+    settings.apply_appsaid(&AppSaidUpdate {
+        app_token,
+        ..Default::default()
+    });
+    appsaid_status_json(settings)
+}
+
 /// Pure request router: maps `(method, target, body)` to a response. Kept free of
 /// I/O so it is unit-testable against a [`SharedSettings`].
+/// Current embedding-backend status for the Embeddings page. `available:false` when
+/// GraphRAG memory isn't active (SQLite backend, or init failed at boot).
+async fn embeddings_status_json(graphrag: Option<&Arc<GraphRagController>>) -> String {
+    match graphrag {
+        None => json!({
+            "available": false,
+            "reason": "GraphRAG memory is not active (memory_backend is sqlite, or init failed at boot)",
+        })
+        .to_string(),
+        Some(ctrl) => embed_status_payload(true, &ctrl.status().await, None),
+    }
+}
+
+/// Hot-swap the embedding backend from a `{ "backend": "local"|"openai" }` body.
+async fn embeddings_switch_json(graphrag: Option<&Arc<GraphRagController>>, body: &[u8]) -> String {
+    let Some(ctrl) = graphrag else {
+        return json!({ "ok": false, "error": "GraphRAG memory is not active" }).to_string();
+    };
+    let backend = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v["backend"].as_str().map(str::to_string));
+    let target = match backend.as_deref() {
+        Some("local") | Some("nomic") => EmbedBackend::Local,
+        Some("openai") => EmbedBackend::OpenAi,
+        Some(other) => {
+            return json!({ "ok": false, "error": format!("unknown backend {other:?}") })
+                .to_string()
+        }
+        None => {
+            return json!({ "ok": false, "error": "missing 'backend' (local|openai)" }).to_string()
+        }
+    };
+    match ctrl.switch(target).await {
+        Ok(status) => embed_status_payload(true, &status, Some(true)),
+        Err(e) => json!({ "ok": false, "error": format!("{e:#}") }).to_string(),
+    }
+}
+
+/// Shared JSON shape for the status + switch responses.
+fn embed_status_payload(
+    available: bool,
+    s: &crate::memory::EmbedStatus,
+    ok: Option<bool>,
+) -> String {
+    let mut v = json!({
+        "available": available,
+        "active": s.active,
+        "dims": s.dims,
+        "local": { "available": s.local_available, "detail": s.local_detail.clone() },
+        "openai": { "available": s.openai_available, "detail": s.openai_detail.clone() },
+    });
+    if let Some(ok) = ok {
+        v["ok"] = json!(ok);
+    }
+    v.to_string()
+}
+
 fn route(
     method: &str,
     target: &str,
@@ -1707,6 +1911,11 @@ fn route(
             "200 OK",
             "text/html; charset=utf-8",
             page("/system1", "System-1", SYSTEM1_BODY).into_bytes(),
+        ),
+        ("GET", "/embeddings") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/embeddings", "Embeddings", EMBEDDINGS_BODY).into_bytes(),
         ),
         ("GET", "/notifications") => (
             "200 OK",
@@ -2406,6 +2615,43 @@ mod tests {
     }
 
     #[test]
+    fn appsaid_status_reports_unconfigured_by_default() {
+        let v: Value = serde_json::from_str(&appsaid_status_json(&settings())).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["token_set"], false);
+        assert_eq!(v["tool_active"], false);
+    }
+
+    #[test]
+    fn appsaid_token_save_sets_it_without_leaking_it() {
+        let s = settings();
+        assert!(!s.appsaid_token_set());
+        let out = appsaid_token_json(&s, br#"{"app_token":"appsaid-secret"}"#);
+        assert!(s.appsaid_token_set());
+        // The token must never appear in the status payload.
+        assert!(!out.contains("appsaid-secret"));
+        // A blank re-save keeps the stored token (a page reload never wipes it).
+        appsaid_token_json(&s, br#"{"app_token":""}"#);
+        assert!(s.appsaid_token_set());
+    }
+
+    #[test]
+    fn appsaid_save_sets_worker_url_and_default_recipient() {
+        let s = settings();
+        appsaid_save_json(
+            &s,
+            br#"{"worker_url":"https://appsaid.example.workers.dev/","default_recipient":"Mom"}"#,
+        );
+        let a = s.appsaid();
+        // Trailing slash trimmed.
+        assert_eq!(
+            a.worker_url.as_deref(),
+            Some("https://appsaid.example.workers.dev")
+        );
+        assert_eq!(a.default_recipient.as_deref(), Some("Mom"));
+    }
+
+    #[test]
     fn invalid_json_is_a_400() {
         let (status, _c, _b) = route("POST", "/config", b"not json", &settings());
         assert_eq!(status, "400 Bad Request");
@@ -2492,6 +2738,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();
@@ -2622,6 +2869,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();
@@ -2661,6 +2909,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();
@@ -2709,6 +2958,7 @@ mod tests {
                 debug(),
                 None,
                 notify(),
+                None,
             )
             .await
             .unwrap();

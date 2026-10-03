@@ -330,6 +330,11 @@ async fn run_turn_task(
     // `timers` block) when nothing is running. See plans/system1-fast-decisions.md §17/§19.
     let timer_snapshot = shared.timers.snapshot();
     conn.set_timer_context((timer_snapshot.running > 0).then(|| timer_snapshot.to_json()));
+    // Stamp the orthogonal font-scaling state (`scalable` + current global scale) as
+    // `screen.font`, set by the UI via `api::engine::set_font_context`, so the Core can
+    // resolve "increase/decrease font" only when there's something to resize. `None`
+    // (no `font` block) until the UI first reports it.
+    conn.set_font_context(crate::engine::font_context());
 
     // Idle watchdog for this turn: a follow-up turn keeps the mic open for the listen
     // window; give the device a small margin past it so the orchestrator's no-speech
@@ -423,6 +428,14 @@ async fn run_turn_task(
                 wyoming::protocol::PlaceCommand::Dismiss => {
                     log::info!("turn: dismiss place");
                     WakeWordEvent::dismiss_place()
+                }
+            },
+            // A font command relayed on the voice socket: step the global font scale. The
+            // UI owns + persists the scale, so just surface the direction.
+            TurnUpdate::Font(cmd) => match cmd {
+                wyoming::protocol::FontCommand::Adjust(direction) => {
+                    log::info!("turn: font adjust {direction}");
+                    WakeWordEvent::font_adjust(direction)
                 }
             },
             // Record the request to reopen the mic after this reply. Acted on only after

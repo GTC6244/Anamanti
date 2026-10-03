@@ -37,7 +37,10 @@ use rig_core::tool::PortableTool;
 
 use chrono::Local;
 
-use super::{ActionSink, DeviceAction, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
+use super::{
+    ActionSink, DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav, ReplyStream,
+};
+use crate::appsaid::{OutgoingMessage, PhoneMessenger};
 use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsConfig, DirectionsProvider, LiveHomeLocation, TravelMode};
@@ -80,6 +83,18 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              Call it whenever the user asks you to talk like one of the available personalities, \
              switch personality, or go back to normal. The turn's instructions list the available \
              personality names and which one is active; pass \"normal\" to turn it off.",
+        );
+    }
+    if has(ADJUST_FONT) {
+        parts.push(
+            "You can make the on-screen text larger or smaller with the `adjust_font` tool \
+             (action `increase` / `decrease`), but ONLY when the turn context says a resizable \
+             text surface is on screen. When the user asks to increase/decrease the font, make \
+             the text bigger/smaller, or says it's too small/too big to read, call `adjust_font` \
+             and relay its short spoken confirmation. If the context says there is nothing to \
+             resize, tell the user there's nothing on screen to resize; if it says the text is \
+             already at the maximum (for increase) or minimum (for decrease), tell them that \
+             instead of calling the tool.",
         );
     }
     if has(CalendarLookup::NAME) {
@@ -158,6 +173,18 @@ fn tool_guidance(tool_defs: &[ToolDefinition]) -> String {
              quantity when they say one. Relay the tool's spoken confirmation.",
         );
     }
+    if has(SendPhoneMessage::NAME) {
+        parts.push(
+            "You can push a message to a family member's phone with the \
+             `send_phone_message` tool. Whenever the user asks to text, send, or share \
+             something — a note, a location, or a map link — to a person or \"to my \
+             phone\" (e.g. \"text Mom the address\", \"send Dad this restaurant\", \
+             \"share the directions with me\"), you MUST call `send_phone_message`, one \
+             call per recipient. Put the note in `message`; pass an explicit link in \
+             `url`, or a place/address in `place` and it becomes a Google Maps link. \
+             Relay the tool's spoken confirmation.",
+        );
+    }
     parts.join(" ")
 }
 
@@ -230,7 +257,7 @@ impl DuckDuckGoSearch {
     /// tests).
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into(),
         }
     }
@@ -304,7 +331,7 @@ impl TavilySearch {
 
     pub fn with_base_url(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }
@@ -1197,6 +1224,130 @@ impl PortableTool for ShoppingListControl {
 }
 
 // ===========================================================================
+// Phone-message tool (push a message/map link to a family member via AppSaid)
+// ===========================================================================
+
+/// Typed arguments for [`SendPhoneMessage`].
+#[derive(Debug, Deserialize)]
+pub struct PhoneMessageArgs {
+    /// Family-member name to send to (case-insensitive). Omit to use the configured
+    /// default recipient.
+    #[serde(default)]
+    pub recipient: Option<String>,
+    /// The message text to send.
+    pub message: String,
+    /// An explicit link to attach as a tappable button (optional).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// A place/address; when given and `url` is not, a Google Maps link is built and
+    /// sent (optional).
+    #[serde(default)]
+    pub place: Option<String>,
+}
+
+/// A concrete, `std::error::Error` failure for the phone tool (rig requires the tool's
+/// error type to implement `std::error::Error`, which `anyhow::Error` does not).
+#[derive(Debug)]
+pub struct PhoneMessageError(pub String);
+
+impl std::fmt::Display for PhoneMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "send phone message failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for PhoneMessageError {}
+
+/// Pushes a message (often a Google Maps link) to a named family member's phone via
+/// an injected [`PhoneMessenger`] (AppSaid), so the tool is testable offline —
+/// mirroring [`ShoppingListControl`]. Delivery + HTML sanitization happen on the
+/// AppSaid worker; this only issues the send and relays a spoken confirmation.
+pub struct SendPhoneMessage {
+    messenger: Arc<dyn PhoneMessenger>,
+}
+
+impl SendPhoneMessage {
+    pub fn new(messenger: Arc<dyn PhoneMessenger>) -> Self {
+        Self { messenger }
+    }
+
+    /// The rig tool definition to advertise on a completion request.
+    pub fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: self.description(),
+            parameters: self.parameters(),
+        }
+    }
+
+    /// Execute the tool from the model's raw JSON arguments (the runtime path).
+    pub async fn invoke(&self, arguments: &Value) -> Result<String> {
+        let args: PhoneMessageArgs = serde_json::from_value(arguments.clone())
+            .context("parsing send_phone_message arguments")?;
+        self.call(args)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+
+impl PortableTool for SendPhoneMessage {
+    const NAME: &'static str = "send_phone_message";
+    type Args = PhoneMessageArgs;
+    type Output = String;
+    type Error = PhoneMessageError;
+
+    fn description(&self) -> String {
+        "Send a message to a family member's phone (via the AppSaid push app). Use this \
+         for ANY request to text, send, or share something — a note, a location, or a \
+         map link — to a person or \"to my phone\" (\"text Mom the address\", \"send Dad \
+         this restaurant\", \"share the directions with me\"). Put the note in `message`; \
+         to attach a link pass an explicit `url`, or a place/address in `place` and a \
+         Google Maps link is built for you. Call it once per recipient. Returns a short \
+         spoken confirmation to relay."
+            .to_string()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "recipient": {
+                    "type": "string",
+                    "description": "The family member to send to, e.g. \"Mom\" (case-insensitive). \
+                        Omit to use the default recipient (for \"text me …\")."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The message text to send."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "An explicit link to attach as a tappable button (optional)."
+                },
+                "place": {
+                    "type": "string",
+                    "description": "A place or address to turn into a Google Maps link when no \
+                        explicit `url` is given (optional)."
+                }
+            },
+            "required": ["message"]
+        })
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.messenger
+            .send(OutgoingMessage {
+                recipient: args.recipient,
+                message: args.message,
+                url: args.url,
+                place: args.place,
+            })
+            .await
+            .map_err(|e| PhoneMessageError(format!("{e:#}")))
+    }
+}
+
+// ===========================================================================
 // Recipe tool (fetch + parse a recipe, show it on the display)
 // ===========================================================================
 
@@ -1206,6 +1357,9 @@ pub const RECIPE_LOOKUP: &str = "recipe_lookup";
 pub const CLOSE_RECIPE: &str = "close_recipe";
 /// Tool name for navigating the already-open recipe screen (switch tab / scroll).
 pub const RECIPE_CONTROL: &str = "recipe_control";
+
+/// Tool name for adjusting the global on-screen font scale ("increase/decrease font").
+pub const ADJUST_FONT: &str = "adjust_font";
 
 /// Typed arguments for [`RecipeLookup`].
 #[derive(Debug, Deserialize)]
@@ -1356,6 +1510,55 @@ fn recipe_control_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Res
     let sink = actions.context("no display is connected right now")?;
     sink.send(DeviceAction::RecipeControl(nav))
         .map_err(|_| anyhow::anyhow!("the display disconnected before the recipe could update"))?;
+    Ok(confirmation.to_string())
+}
+
+// ===========================================================================
+// Font-scale tool (make the on-screen text bigger / smaller)
+// ===========================================================================
+
+/// Typed arguments for [`adjust_font_invoke`].
+#[derive(Debug, Deserialize)]
+struct AdjustFontArgs {
+    /// `"increase"` (bigger) or `"decrease"` (smaller).
+    action: String,
+}
+
+fn adjust_font_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: ADJUST_FONT.to_string(),
+        description: "Make the text on the display bigger or smaller. Use ONLY when the turn \
+                      context says a resizable text surface is on screen; if the context says \
+                      the text is already at the maximum (for increase) or minimum (for \
+                      decrease) size, tell the user that instead of calling this tool."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["increase", "decrease"],
+                    "description": "increase = make the text bigger; decrease = make it smaller."
+                }
+            },
+            "required": ["action"]
+        }),
+    }
+}
+
+/// Execute `adjust_font`: map the action to a [`DeviceAction::AdjustFont`] and emit it on
+/// the per-turn sink.
+fn adjust_font_invoke(arguments: &Value, actions: Option<&ActionSink>) -> Result<String> {
+    let args: AdjustFontArgs =
+        serde_json::from_value(arguments.clone()).context("parsing adjust_font arguments")?;
+    let (dir, confirmation) = match args.action.as_str() {
+        "increase" => (FontDirection::Increase, "Making the text bigger."),
+        "decrease" => (FontDirection::Decrease, "Making the text smaller."),
+        other => anyhow::bail!("unknown adjust_font action `{other}`"),
+    };
+    let sink = actions.context("no display is connected right now")?;
+    sink.send(DeviceAction::AdjustFont(dir))
+        .map_err(|_| anyhow::anyhow!("the display disconnected before the font could change"))?;
     Ok(confirmation.to_string())
 }
 
@@ -1682,6 +1885,7 @@ pub struct Tools {
     directions: Option<Arc<DirectionsLookup>>,
     spotify: Option<Arc<SpotifyControl>>,
     grocery: Option<Arc<ShoppingListControl>>,
+    appsaid: Option<Arc<SendPhoneMessage>>,
     recipe: Option<Arc<RecipeLookup>>,
     weather: Option<Arc<WeatherLookup>>,
     places: Option<Arc<PlacesLookup>>,
@@ -1699,14 +1903,18 @@ impl Tools {
         directions: Option<DirectionsConfig>,
         spotify: Option<Arc<dyn SpotifyController>>,
         grocery: Option<Arc<dyn GroceryController>>,
+        appsaid: Option<Arc<dyn PhoneMessenger>>,
         recipe: Option<Arc<dyn RecipeProvider>>,
         weather: Option<crate::weather::WeatherConfig>,
         places: Option<crate::places::PlacesConfig>,
     ) -> Self {
+        // Timer, personality, and font tools need no provider or config, so they are
+        // always advertised.
         let mut definitions = vec![
             set_timer_definition(),
             cancel_timer_definition(),
             set_personality_definition(),
+            adjust_font_definition(),
         ];
         let search = search.map(|provider| Arc::new(InternetSearch::new(provider)));
         if let Some(s) = &search {
@@ -1733,6 +1941,10 @@ impl Tools {
         let grocery = grocery.map(|c| Arc::new(ShoppingListControl::new(c)));
         if let Some(g) = &grocery {
             definitions.push(g.definition());
+        }
+        let appsaid = appsaid.map(|m| Arc::new(SendPhoneMessage::new(m)));
+        if let Some(a) = &appsaid {
+            definitions.push(a.definition());
         }
         let recipe = recipe.map(|p| Arc::new(RecipeLookup::new(p)));
         if let Some(r) = &recipe {
@@ -1763,6 +1975,7 @@ impl Tools {
             directions,
             spotify,
             grocery,
+            appsaid,
             recipe,
             weather,
             places,
@@ -1782,6 +1995,7 @@ impl Tools {
             SET_TIMER => set_timer_invoke(arguments, actions),
             CANCEL_TIMER => cancel_timer_invoke(arguments, actions),
             SET_PERSONALITY => set_personality_invoke(arguments, actions),
+            ADJUST_FONT => adjust_font_invoke(arguments, actions),
             InternetSearch::NAME => match &self.search {
                 Some(search) => search.invoke(arguments).await,
                 None => anyhow::bail!("web search is not enabled"),
@@ -1801,6 +2015,10 @@ impl Tools {
             ShoppingListControl::NAME => match &self.grocery {
                 Some(grocery) => grocery.invoke(arguments).await,
                 None => anyhow::bail!("the shopping list tool is not enabled"),
+            },
+            SendPhoneMessage::NAME => match &self.appsaid {
+                Some(appsaid) => appsaid.invoke(arguments).await,
+                None => anyhow::bail!("the phone message tool is not enabled"),
             },
             RECIPE_LOOKUP => match &self.recipe {
                 Some(recipe) => recipe.invoke(arguments, actions).await,
@@ -1877,6 +2095,7 @@ pub fn tools_from_config(
     calendar: Option<Arc<dyn CalendarSource>>,
     directions: Option<(Arc<dyn DirectionsProvider>, bool)>,
     grocery: Option<Arc<dyn GroceryController>>,
+    appsaid: Option<Arc<dyn PhoneMessenger>>,
     weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
     weather_imperial: bool,
     places: Option<Arc<dyn crate::places::PlacesProvider>>,
@@ -1915,8 +2134,10 @@ pub fn tools_from_config(
     // config-page consent flow; `None` → the spotify_control tool isn't advertised.
     // Grocery (Cadora shopping list) is likewise passed in from the live settings
     // (`CadoraConfig::controller`); `None` → the shopping_list_add tool isn't advertised.
+    // AppSaid (phone push) is passed in from the live settings (`AppSaidConfig::
+    // messenger`); `None` → the send_phone_message tool isn't advertised.
     Some(Arc::new(Tools::new(
-        search, calendar, directions, spotify, grocery, recipe, weather, places,
+        search, calendar, directions, spotify, grocery, appsaid, recipe, weather, places,
     )))
 }
 
@@ -1942,10 +2163,29 @@ pub struct RigBackend {
     tools: Option<Arc<Tools>>,
 }
 
+/// A keep-alive-tuned HTTP client in **rig's** reqwest version.
+///
+/// rig-core 0.42 pulls reqwest 0.13, a different major than the crate-wide
+/// reqwest 0.12 behind `crate::http`, so the shared client cannot be injected
+/// into rig's builders (their `HttpClientExt` bound is on rig's reqwest type).
+/// We build an equivalently tuned client from rig's own re-exported reqwest
+/// (`rig_core::http_client::ReqwestClient`) so the default/primary LLM path gets
+/// the same warm-connection / handshake-avoidance policy as everything else.
+fn rig_tuned_client() -> rig_core::http_client::ReqwestClient {
+    rig_core::http_client::ReqwestClient::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(300))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .http2_keep_alive_while_idle(true)
+        .build()
+        .unwrap_or_default()
+}
+
 impl RigBackend {
     /// Local Ollama via rig. `base_url` is the Ollama root (no API key).
     pub fn ollama(base_url: &str, model: &str, tools: Option<Arc<Tools>>) -> Result<Self> {
         let client = ollama::Client::builder()
+            .http_client(rig_tuned_client())
             .api_key(ollama::OllamaApiKey::default())
             .base_url(base_url)
             .build()
@@ -1967,6 +2207,7 @@ impl RigBackend {
         tools: Option<Arc<Tools>>,
     ) -> Result<Self> {
         let client = anthropic::Client::builder()
+            .http_client(rig_tuned_client())
             .api_key(anthropic::client::AnthropicKey::from(api_key))
             .base_url(base_url)
             .anthropic_version(anthropic::completion::ANTHROPIC_VERSION_LATEST)
@@ -2345,6 +2586,21 @@ mod tests {
         }
     }
 
+    /// A canned phone messenger so phone-tool tests never touch the network. Records
+    /// the last message so tests can assert the arg mapping.
+    struct StaticPhone {
+        last: std::sync::Mutex<Option<OutgoingMessage>>,
+    }
+
+    #[async_trait]
+    impl PhoneMessenger for StaticPhone {
+        async fn send(&self, msg: OutgoingMessage) -> Result<String> {
+            let who = msg.recipient.clone().unwrap_or_else(|| "you".to_string());
+            *self.last.lock().unwrap() = Some(msg);
+            Ok(format!("Sent to {who}."))
+        }
+    }
+
     /// Serve a fixed sequence of raw HTTP responses, one per inbound connection.
     fn serve_sequence(bodies: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2453,6 +2709,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2493,6 +2750,7 @@ mod tests {
         let tools = Some(Arc::new(Tools::new(
             None,
             Some(Arc::new(StaticCalendar(vec![event]))),
+            None,
             None,
             None,
             None,
@@ -2540,6 +2798,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2560,7 +2819,7 @@ mod tests {
 
     #[test]
     fn directions_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2576,6 +2835,7 @@ mod tests {
                 home_location: LiveHomeLocation::default(),
                 imperial: false,
             }),
+            None,
             None,
             None,
             None,
@@ -2620,7 +2880,7 @@ mod tests {
 
     #[test]
     fn spotify_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2637,6 +2897,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(with
             .definitions
@@ -2646,7 +2907,7 @@ mod tests {
 
     #[test]
     fn shopping_tool_advertised_only_when_configured() {
-        let none = Tools::new(None, None, None, None, None, None, None, None);
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(!none
             .definitions
             .iter()
@@ -2663,11 +2924,77 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(with
             .definitions
             .iter()
             .any(|d| d.name == ShoppingListControl::NAME));
+    }
+
+    #[test]
+    fn phone_tool_advertised_only_when_configured() {
+        let none = Tools::new(None, None, None, None, None, None, None, None, None);
+        assert!(!none
+            .definitions
+            .iter()
+            .any(|d| d.name == SendPhoneMessage::NAME));
+
+        let with = Tools::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::new(StaticPhone {
+                last: std::sync::Mutex::new(None),
+            })),
+            None,
+            None,
+            None,
+        );
+        assert!(with
+            .definitions
+            .iter()
+            .any(|d| d.name == SendPhoneMessage::NAME));
+    }
+
+    /// End-to-end tool loop for the phone tool: round 0 the fake Ollama asks for
+    /// `send_phone_message` (a place, no explicit url); round 1 (after the confirmation
+    /// is threaded back) it streams the reply. Proves the tool is advertised, dispatched
+    /// with the parsed args, and its result reaches the model — using a canned messenger.
+    #[tokio::test]
+    async fn rig_ollama_runs_phone_tool_then_streams_answer() {
+        let tool_call = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"send_phone_message\",\"arguments\":{\"recipient\":\"Mom\",\"message\":\"the restaurant\",\"place\":\"Blue Bottle, Oakland\"}}}]},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let answer = "{\"model\":\"m\",\"created_at\":\"t\",\"message\":{\"role\":\"assistant\",\"content\":\"Sent it to Mom.\"},\"done\":true,\"done_reason\":\"stop\"}\n";
+        let (url, server) = serve_sequence(vec![tool_call.to_string(), answer.to_string()]);
+
+        let messenger = Arc::new(StaticPhone {
+            last: std::sync::Mutex::new(None),
+        });
+        let tools = Some(Arc::new(Tools::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(messenger.clone()),
+            None,
+            None,
+            None,
+        )));
+        let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
+        let stream = backend
+            .respond(LlmTurn::new("sys", "text Mom the restaurant"))
+            .await
+            .unwrap();
+        assert_eq!(collect_reply(stream).await.unwrap(), "Sent it to Mom.");
+        // The messenger received the parsed message with recipient + place.
+        let sent = messenger.last.lock().unwrap().clone().unwrap();
+        assert_eq!(sent.recipient.as_deref(), Some("Mom"));
+        assert_eq!(sent.message, "the restaurant");
+        assert_eq!(sent.place.as_deref(), Some("Blue Bottle, Oakland"));
+        server.await.unwrap();
     }
 
     #[test]
@@ -2752,6 +3079,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend
@@ -2792,6 +3120,7 @@ mod tests {
             None,
             None,
             Some(controller.clone()),
+            None,
             None,
             None,
             None,
@@ -2873,7 +3202,7 @@ mod tests {
 
     #[test]
     fn set_personality_is_always_advertised() {
-        let tools = Tools::new(None, None, None, None, None, None, None, None);
+        let tools = Tools::new(None, None, None, None, None, None, None, None, None);
         assert!(tools.definitions.iter().any(|d| d.name == SET_PERSONALITY));
     }
 
@@ -2977,11 +3306,41 @@ mod tests {
 
     #[test]
     fn timer_tools_are_always_advertised_even_without_web_search() {
-        let tools = Tools::new(None, None, None, None, None, None, None, None);
+        let tools = Tools::new(None, None, None, None, None, None, None, None, None);
         let names: Vec<&str> = tools.definitions.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&SET_TIMER));
         assert!(names.contains(&CANCEL_TIMER));
+        assert!(names.contains(&ADJUST_FONT));
         assert!(!names.contains(&InternetSearch::NAME));
+    }
+
+    #[test]
+    fn adjust_font_emits_direction_action_and_confirms() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = adjust_font_invoke(&json!({ "action": "increase" }), Some(&tx)).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), DeviceAction::AdjustFont(FontDirection::Increase));
+        assert!(out.to_lowercase().contains("bigger"));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        adjust_font_invoke(&json!({ "action": "decrease" }), Some(&tx)).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), DeviceAction::AdjustFont(FontDirection::Decrease));
+    }
+
+    #[test]
+    fn adjust_font_rejects_unknown_action_and_missing_device() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(adjust_font_invoke(&json!({ "action": "zoom" }), Some(&tx)).is_err());
+        // No device attached → the tool reports an error the model can relay.
+        assert!(adjust_font_invoke(&json!({ "action": "increase" }), None).is_err());
+    }
+
+    #[test]
+    fn adjust_font_guidance_mentions_the_context_gate() {
+        let tools = Tools::new(None, None, None, None, None, None, None, None, None);
+        let guidance = tool_guidance(&tools.definitions);
+        assert!(guidance.contains("adjust_font"));
+        // The guidance must reflect the "only when a surface is on screen" gate.
+        assert!(guidance.contains("ONLY when"));
     }
 
     /// End-to-end tool loop: the fake ollama asks for `set_timer`; the pipeline's
@@ -2995,7 +3354,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // No web search — timers are always available regardless.
         let tools = Some(Arc::new(Tools::new(
-            None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None,
         )));
         let backend = RigBackend::ollama(&url, "test-model", tools).unwrap();
         let stream = backend

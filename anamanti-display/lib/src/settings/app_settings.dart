@@ -28,10 +28,27 @@ const List<String> kAvailableWakeWords = <String>[
   'ok_nabu',
 ];
 
+/// Default base URL the in-app updater fetches `latest.json` and the APK from
+/// (plans/UpdaterPlan.md). Points at the Anamanti subpath of the shared Cloudflare
+/// R2 bucket (`immediacy-releases`, custom domain `releases.immediacy.app`).
+/// Overridable on-device via Settings → Updates. No trailing slash; the Rust side
+/// appends `/latest.json`.
+const String kDefaultUpdateBaseUrl = 'https://releases.immediacy.app/anamanti';
+
+/// Global on-screen font-scale bounds and step (device-local, voice-controlled via
+/// "increase font" / "decrease font"). A single factor applied to **all** ambient
+/// text through a root `MediaQuery` [TextScaler]; persisted across reboots. The step
+/// is additive so the at-min/at-max edges are exact.
+const double kFontScaleMin = 0.85;
+const double kFontScaleMax = 1.6;
+const double kFontScaleStep = 0.1;
+
 @immutable
 class AppSettings {
   const AppSettings({
     this.orchestratorKey = '',
+    this.deviceId = '',
+    this.deviceName = '',
     this.wakeWord = 'hey_jarvis',
     this.threshold = 0.5,
     this.activeThreshold = 0.7,
@@ -61,6 +78,9 @@ class AppSettings {
     this.driveLinked = false,
     this.driveClientId = '',
     this.driveClientSecret = '',
+    this.autoUpdateEnabled = true,
+    this.updateBaseUrl = kDefaultUpdateBaseUrl,
+    this.fontScale = 1.0,
   });
 
   /// Stable selection key (`instance_id` TXT) of the orchestrator this display is
@@ -68,6 +88,17 @@ class AppSettings {
   /// Device-local: applied by rebuilding the engine's [WakeWordConfig] and used to
   /// pin the settings-control client to the same Mac.
   final String orchestratorKey;
+
+  /// Stable, globally-unique identifier for this physical display, derived from the
+  /// device's Wi-Fi MAC (`anamanti-<12 hex>`, e.g. `anamanti-140ac5942aca`). Minted
+  /// once on first run (via the Rust `deviceHardwareId()` call, falling back to a
+  /// persisted random id) and sent to the Core in the `anamanti-hello` frame so two
+  /// displays on one Core are distinguishable. Never changes once set.
+  final String deviceId;
+
+  /// Human-friendly label for this display (e.g. "Kitchen"), editable on the Settings
+  /// screen and sent to the Core alongside [deviceId]. Empty until the user names it.
+  final String deviceName;
 
   /// Selected wake-word model name (`<name>.onnx`).
   final String wakeWord;
@@ -197,6 +228,21 @@ class AppSettings {
   /// Google Drive OAuth client secret, synced from the orchestrator. TODO: secure storage.
   final String driveClientSecret;
 
+  /// Whether the in-app updater checks for and prompts about new builds
+  /// (plans/UpdaterPlan.md). Device-local; ignored entirely on the
+  /// `fdroid` flavor, which ships without the updater.
+  final bool autoUpdateEnabled;
+
+  /// Base URL the updater fetches `latest.json` + the APK from (your Cloudflare R2
+  /// custom domain). No trailing slash. Defaults to [kDefaultUpdateBaseUrl].
+  final String updateBaseUrl;
+
+  /// Global on-screen font scale, voice-controlled by "increase font" / "decrease
+  /// font". A single device-wide multiplier applied to all ambient text via a root
+  /// `MediaQuery` [TextScaler], persisted across reboots. Clamped to
+  /// [[kFontScaleMin], [kFontScaleMax]]; `1.0` = unscaled.
+  final double fontScale;
+
   /// True when both Drive client credentials are present — the device can mint Drive
   /// access tokens. Runtime replacement for the old build-time `kGoogleDriveConfigured`.
   bool get driveConfigured =>
@@ -204,6 +250,8 @@ class AppSettings {
 
   AppSettings copyWith({
     String? orchestratorKey,
+    String? deviceId,
+    String? deviceName,
     String? wakeWord,
     double? threshold,
     double? activeThreshold,
@@ -233,9 +281,14 @@ class AppSettings {
     bool? driveLinked,
     String? driveClientId,
     String? driveClientSecret,
+    bool? autoUpdateEnabled,
+    String? updateBaseUrl,
+    double? fontScale,
   }) {
     return AppSettings(
       orchestratorKey: orchestratorKey ?? this.orchestratorKey,
+      deviceId: deviceId ?? this.deviceId,
+      deviceName: deviceName ?? this.deviceName,
       wakeWord: wakeWord ?? this.wakeWord,
       threshold: threshold ?? this.threshold,
       activeThreshold: activeThreshold ?? this.activeThreshold,
@@ -265,11 +318,16 @@ class AppSettings {
       driveLinked: driveLinked ?? this.driveLinked,
       driveClientId: driveClientId ?? this.driveClientId,
       driveClientSecret: driveClientSecret ?? this.driveClientSecret,
+      autoUpdateEnabled: autoUpdateEnabled ?? this.autoUpdateEnabled,
+      updateBaseUrl: updateBaseUrl ?? this.updateBaseUrl,
+      fontScale: fontScale ?? this.fontScale,
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'orchestratorKey': orchestratorKey,
+    'deviceId': deviceId,
+    'deviceName': deviceName,
     'wakeWord': wakeWord,
     'threshold': threshold,
     'activeThreshold': activeThreshold,
@@ -299,6 +357,9 @@ class AppSettings {
     'driveLinked': driveLinked,
     'driveClientId': driveClientId,
     'driveClientSecret': driveClientSecret,
+    'autoUpdateEnabled': autoUpdateEnabled,
+    'updateBaseUrl': updateBaseUrl,
+    'fontScale': fontScale,
   };
 
   /// Parse from persisted JSON, tolerating missing/invalid keys by falling back to
@@ -313,6 +374,12 @@ class AppSettings {
       orchestratorKey: json['orchestratorKey'] is String
           ? json['orchestratorKey'] as String
           : defaults.orchestratorKey,
+      deviceId: json['deviceId'] is String
+          ? json['deviceId'] as String
+          : defaults.deviceId,
+      deviceName: json['deviceName'] is String
+          ? json['deviceName'] as String
+          : defaults.deviceName,
       wakeWord:
           json['wakeWord'] is String && (json['wakeWord'] as String).isNotEmpty
           ? json['wakeWord'] as String
@@ -412,6 +479,20 @@ class AppSettings {
       driveClientSecret: json['driveClientSecret'] is String
           ? json['driveClientSecret'] as String
           : '',
+      autoUpdateEnabled: json['autoUpdateEnabled'] is bool
+          ? json['autoUpdateEnabled'] as bool
+          : defaults.autoUpdateEnabled,
+      updateBaseUrl:
+          json['updateBaseUrl'] is String &&
+              (json['updateBaseUrl'] as String).trim().isNotEmpty
+          ? (json['updateBaseUrl'] as String).trim()
+          : defaults.updateBaseUrl,
+      fontScale: json['fontScale'] is num
+          ? (json['fontScale'] as num).toDouble().clamp(
+              kFontScaleMin,
+              kFontScaleMax,
+            )
+          : defaults.fontScale,
     );
   }
 
@@ -420,6 +501,8 @@ class AppSettings {
       other is AppSettings &&
       runtimeType == other.runtimeType &&
       orchestratorKey == other.orchestratorKey &&
+      deviceId == other.deviceId &&
+      deviceName == other.deviceName &&
       wakeWord == other.wakeWord &&
       threshold == other.threshold &&
       activeThreshold == other.activeThreshold &&
@@ -448,7 +531,10 @@ class AppSettings {
       listEquals(driveFolderIds, other.driveFolderIds) &&
       driveLinked == other.driveLinked &&
       driveClientId == other.driveClientId &&
-      driveClientSecret == other.driveClientSecret;
+      driveClientSecret == other.driveClientSecret &&
+      autoUpdateEnabled == other.autoUpdateEnabled &&
+      updateBaseUrl == other.updateBaseUrl &&
+      fontScale == other.fontScale;
 
   @override
   int get hashCode => Object.hash(
@@ -465,6 +551,8 @@ class AppSettings {
       platformNs,
       platformAgc,
       platformAec,
+      deviceId,
+      deviceName,
     ),
     endpointCueEnabled,
     endpointSilenceMs,
@@ -485,6 +573,9 @@ class AppSettings {
       ringAttack,
       ringRelease,
       ringDecay,
+      autoUpdateEnabled,
+      updateBaseUrl,
+      fontScale,
     ),
   );
 }

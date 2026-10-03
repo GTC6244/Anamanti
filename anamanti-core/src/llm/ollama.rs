@@ -21,7 +21,7 @@ impl OllamaBackend {
     /// `base_url` is the Ollama root (e.g. `http://127.0.0.1:11434`).
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             model: model.into(),
         }

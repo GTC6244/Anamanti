@@ -24,6 +24,7 @@ pub mod backend;
 pub mod chatlog;
 pub mod embed;
 pub mod entity;
+pub mod graphrag_control;
 pub mod graphview;
 pub mod promptlog;
 
@@ -35,6 +36,7 @@ pub use backend::HelixRecall;
 pub use backend::{Recall, RecallResult, SqliteRecall};
 pub use chatlog::{ChatLog, ChatLogRecord, TurnTiming};
 pub use extract::{infer_memories, parse_command, MemoryCommand};
+pub use graphrag_control::{EmbedStatus, GraphRagController};
 pub use graphview::GraphView;
 pub use promptlog::{PromptLog, PromptLogRecord};
 

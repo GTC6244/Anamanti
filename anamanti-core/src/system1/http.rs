@@ -95,12 +95,12 @@ impl HttpDecider {
         min_confidence: f64,
         intents: Vec<String>,
     ) -> Self {
-        // A short client timeout keeps a hung/absent sidecar from blocking the turn —
-        // on any error the caller simply defers to System-2.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(4))
-            .build()
-            .unwrap_or_default();
+        // Shared, keep-alive-tuned client so the pooled connection to the sidecar/
+        // OpenRouter stays warm between turns (skips the DNS+TCP+TLS handshake). The
+        // short 4 s budget — a hung/absent sidecar must not block the turn; on any
+        // error the caller simply defers to System-2 — is applied per-request in
+        // `post()` rather than on the shared client.
+        let client = crate::http::shared_client();
         let url = format!("{}/v1/systemone", base_url.trim_end_matches('/'));
         Self {
             client,
@@ -174,7 +174,11 @@ impl HttpDecider {
     /// POST a `/v1/systemone` body and decode the JSON response, erroring on a non-2xx
     /// status so the caller defers to System-2.
     async fn post(&self, body: &Value) -> Result<Value> {
-        let mut rb = self.client.post(&self.url).json(body);
+        let mut rb = self
+            .client
+            .post(&self.url)
+            .timeout(Duration::from_secs(4))
+            .json(body);
         if let Some(key) = &self.api_key {
             rb = rb.bearer_auth(key);
         }
@@ -209,8 +213,11 @@ fn intent_description(intent: &str) -> &str {
         }
         "end_session" => {
             "the user is finished and wants no more replies — a sign-off or dismissal \
-             like \"that's all\", \"nothing else\", or \"goodbye\"; NOT stopping a timer \
-             or music"
+             like \"that's all\", \"nothing else\", or \"goodbye\", including a bare \
+             standalone thanks used to close the conversation in any language \
+             (\"thank you\", \"thanks\", \"gracias\", \"merci\"); NOT stopping a timer \
+             or music, and NOT a thanks that is part of a continuing request \
+             (e.g. \"thanks, now what's the weather\")"
         }
         "stop_dismiss" => {
             "a bare \"stop\", \"cancel\", \"never mind\", or \"dismiss\" with no named \
@@ -219,7 +226,10 @@ fn intent_description(intent: &str) -> &str {
         "recipe_nav" => "navigate or scroll the recipe already on screen",
         "music" => "play, pause, skip, or change music volume",
         "shopping_add" => "add an item to the shopping list",
-        "smalltalk" => "a greeting, thanks, or acknowledgement needing no data",
+        "smalltalk" => {
+            "a greeting or acknowledgement needing no data (a bare sign-off thanks \
+             like \"thank you\" is end_session, not this)"
+        }
         _ => "",
     }
 }
@@ -455,6 +465,7 @@ mod tests {
             history: Vec::new(),
             location: None,
             timers: TimerContext::default(),
+            font: Default::default(),
         };
         assert!(device_state_fields(&bare).is_empty());
 
@@ -469,6 +480,7 @@ mod tests {
                 next_remaining_secs: Some(90),
                 labels: vec![],
             },
+            font: Default::default(),
         };
         let fields = device_state_fields(&ctx);
         assert_eq!(fields.get("screen"), Some(&json!("recipe")));

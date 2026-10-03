@@ -24,6 +24,7 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
+import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 import 'package:anamanti_display/src/settings/settings_store.dart';
@@ -59,7 +60,8 @@ enum _SettingsCategory {
   audioDiagnostics('Audio Diagnostics'),
   speechProcessing('Speech Processing'),
   speechDetection('Speech Detection'),
-  background('Background');
+  background('Background'),
+  updates('Updates');
 
   const _SettingsCategory(this.title);
 
@@ -75,6 +77,7 @@ class SettingsScreen extends StatefulWidget {
     required this.client,
     required this.onApplied,
     this.assistant,
+    this.updates,
   });
 
   /// The current device-local settings to edit.
@@ -95,6 +98,10 @@ class SettingsScreen extends StatefulWidget {
   /// then shows an "engine unavailable" note.
   final AssistantController? assistant;
 
+  /// The in-app updater controller (plans/UpdaterPlan.md). Null on the
+  /// `fdroid` flavor / in tests, which hides the Updates category entirely.
+  final UpdateController? updates;
+
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
@@ -105,6 +112,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _modelController = TextEditingController();
   final TextEditingController _voiceController = TextEditingController();
   final TextEditingController _folderController = TextEditingController();
+  final TextEditingController _updateUrlController = TextEditingController();
+  late final TextEditingController _deviceNameController = TextEditingController(
+    text: widget.initial.deviceName,
+  );
 
   String _backend = 'ollama';
   // Anthropic auth mode: 'apikey' or 'subscription' (Claude OAuth).
@@ -144,6 +155,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _folderController.text = _settings.driveFolderIds.join(', ');
+    _updateUrlController.text = _settings.updateBaseUrl;
     _loadRemote();
   }
 
@@ -152,6 +164,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelController.dispose();
     _voiceController.dispose();
     _folderController.dispose();
+    _updateUrlController.dispose();
+    _deviceNameController.dispose();
     super.dispose();
   }
 
@@ -473,8 +487,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _saving = true);
 
     // 1. Persist + apply the device-local settings (wake word, thresholds, photo).
+    final updateUrl = _updateUrlController.text.trim();
     final local = _settings.copyWith(
       driveFolderIds: _parseFolderIds(_folderController.text),
+      updateBaseUrl: updateUrl.isEmpty ? _settings.updateBaseUrl : updateUrl,
     );
     await widget.store.save(local);
     widget.onApplied(local);
@@ -598,6 +614,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           Icons.photo_library_outlined,
           'Idle photo slideshow',
         ),
+        // Only on the selfUpdate flavor (the controller is null on fdroid).
+        if (widget.updates != null)
+          _menuTile(
+            _SettingsCategory.updates,
+            Icons.system_update_alt,
+            'In-app app updates',
+          ),
       ],
     );
   }
@@ -619,10 +642,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (category == _SettingsCategory.audioDiagnostics) {
       return _audioDiagnosticsPage();
     }
+    // Updates is a full custom page (live download/install state).
+    if (category == _SettingsCategory.updates) {
+      return _updatesPage();
+    }
     final List<Widget> children;
     switch (category) {
       case _SettingsCategory.assistant:
         children = [
+          // Device-local identity: this display's name (sent to the Core) + its
+          // stable, MAC-derived id. Shown first so it's usable even when the
+          // selected orchestrator is offline.
+          _deviceNameTile(),
           // Device-local: which orchestrator this display talks to. Shown above
           // (and outside) the orchestrator-fetched tiles so it stays usable even
           // when the selected orchestrator is offline.
@@ -648,6 +679,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         children = _vadTiles();
       case _SettingsCategory.background:
         children = _photoTiles();
+      case _SettingsCategory.updates:
+        // Handled by the early return above; keep the switch exhaustive.
+        children = const [];
     }
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -682,6 +716,131 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  /// The Updates page (plans/UpdaterPlan.md): the auto-update toggle +
+  /// base URL (saved with the device-local settings on Save), the current version,
+  /// and a live "Check now / Update / Install" area driven by the updater controller.
+  Widget _updatesPage() {
+    final updates = widget.updates;
+    if (updates == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'The in-app updater is not available in this build.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        SwitchListTile(
+          key: const Key('settings-auto-update'),
+          secondary: const Icon(Icons.autorenew),
+          title: const Text('Automatic update checks'),
+          subtitle: const Text('Check for new versions on launch and periodically'),
+          value: _settings.autoUpdateEnabled,
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(autoUpdateEnabled: v)),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: TextField(
+            key: const Key('settings-update-url'),
+            controller: _updateUrlController,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Update URL',
+              helperText: 'Base URL hosting latest.json + the APK (no trailing slash). '
+                  'Save to apply before checking.',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ),
+        const Divider(),
+        AnimatedBuilder(
+          animation: updates,
+          builder: (context, _) => _updateStatusTile(updates),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _updateStatusTile(UpdateController updates) {
+    final manifest = updates.manifest;
+    final busy = updates.status == UpdateStatus.checking ||
+        updates.status == UpdateStatus.downloading ||
+        updates.status == UpdateStatus.installing;
+
+    final String statusLine = switch (updates.status) {
+      UpdateStatus.idle => 'Not checked yet.',
+      UpdateStatus.checking => 'Checking…',
+      UpdateStatus.upToDate => 'You’re up to date.',
+      UpdateStatus.available => manifest == null
+          ? 'An update is available.'
+          : 'Version ${manifest.versionName.isNotEmpty ? manifest.versionName : manifest.versionCode} is available.',
+      UpdateStatus.downloading => updates.progress == null
+          ? 'Downloading…'
+          : 'Downloading… ${(updates.progress! * 100).round()}%',
+      UpdateStatus.readyToInstall => 'Downloaded — ready to install.',
+      UpdateStatus.installing => 'Installing…',
+      UpdateStatus.error => updates.errorMessage,
+    };
+
+    final (String? actionLabel, VoidCallback? action) = switch (updates.status) {
+      UpdateStatus.available => ('Download & install', updates.download),
+      UpdateStatus.readyToInstall => ('Install', updates.install),
+      UpdateStatus.error => ('Retry', updates.retry),
+      _ => (null, null),
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          leading: const Icon(Icons.info_outline),
+          title: Text('Installed version code: ${updates.currentVersionCode}'),
+          subtitle: Text(statusLine),
+        ),
+        if (updates.status == UpdateStatus.available &&
+            manifest != null &&
+            manifest.notes.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(manifest.notes),
+          ),
+        if (updates.status == UpdateStatus.downloading)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: LinearProgressIndicator(value: updates.progress),
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Row(
+            children: [
+              OutlinedButton.icon(
+                key: const Key('settings-check-update'),
+                onPressed: busy ? null : updates.checkNow,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Check now'),
+              ),
+              const SizedBox(width: 12),
+              if (actionLabel != null)
+                FilledButton(
+                  key: const Key('settings-update-action'),
+                  onPressed: busy ? null : action,
+                  child: Text(actionLabel),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _section(String title) => Padding(
     padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
     child: Text(
@@ -692,6 +851,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ),
   );
+
+  /// Device-local editor for this display's friendly name, sent to the Core in the
+  /// `anamanti-hello` frame so two displays on one Core are distinguishable (and shown
+  /// in the Core config page's "Connected devices" list). The subtitle shows the stable
+  /// MAC-derived [AppSettings.deviceId]. Persisted via [SettingsStore]; a change
+  /// restarts the engine so the channels re-announce (see `main.dart`).
+  Widget _deviceNameTile() {
+    return ListTile(
+      leading: const Icon(Icons.devices_other),
+      title: const Text('Device name'),
+      subtitle: Text(
+        _settings.deviceId.isEmpty
+            ? 'A name for this display, shown on the Core'
+            : 'ID: ${_settings.deviceId}',
+      ),
+      trailing: SizedBox(
+        width: 160,
+        child: TextField(
+          key: const Key('settings-device-name'),
+          controller: _deviceNameController,
+          textAlign: TextAlign.end,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(hintText: 'e.g. Kitchen'),
+          onChanged: (v) =>
+              setState(() => _settings = _settings.copyWith(deviceName: v)),
+        ),
+      ),
+    );
+  }
 
   /// Device-local picker for which orchestrator this display connects to. "Auto"
   /// (empty key) uses the first available orchestrator; selecting a specific one
@@ -1348,6 +1536,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 .clamp(0, _kDimDelayPresets.length - 1)],
           ),
         ),
+      ),
+      const Divider(),
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          'Size of all on-screen text. A manual override of the voice commands '
+          '"increase font" / "decrease font"; applies on Save.',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ),
+      _rangeSlider(
+        label: 'Font size',
+        value: _settings.fontScale,
+        min: kFontScaleMin,
+        max: kFontScaleMax,
+        // Snap to 5% stops across the [0.85, 1.6] range (finer than the 0.1 voice step).
+        divisions: ((kFontScaleMax - kFontScaleMin) / 0.05).round(),
+        format: (v) => '${(v * 100).round()}%',
+        sliderKey: const Key('settings-font-scale'),
+        onChanged: (v) =>
+            setState(() => _settings = _settings.copyWith(fontScale: v)),
       ),
     ];
   }

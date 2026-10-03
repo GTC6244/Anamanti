@@ -515,3 +515,40 @@ actions".
       recipe" and confirm the screen reacts and the model reliably calls
       `recipe_control` / `close_recipe` (needs the Mac Anamanti Core + a spoken turn;
       not drivable headlessly).
+
+## 8. In-app APK auto-updater (shipped 2026-10-01 — verify on hardware)
+
+Self-rolled OTA updates from Cloudflare R2, replacing reliance on Obtainium (kept in
+parallel for now). Code + tests landed (see [`UpdaterPlan.md`](./UpdaterPlan.md) and
+Plan.MD): Rust fetch/stream-download/SHA-256-verify (`ureq`+rustls, `rust/src/update/`
++ `rust/src/api/updater.rs`), a native `anamanti_display/updater` MethodChannel +
+`InstallReceiver` (`PackageInstaller`), the Flutter `UpdateController` + `UpdateBanner`
++ Settings → Updates, and the `selfUpdate`/`fdroid` build flavors. Suites green (Rust
+`cargo test`/clippy, `dart analyze`, `flutter test` incl. `update_controller_test.dart`,
+FRB codegen pinned 2.11.1). **Not yet run on real hardware.**
+
+One-time ops (owner; not in this repo):
+- [ ] Generate + **back up** the one release keystore (`keytool`); never commit it.
+      Keep the key + `applicationId` constant forever (a self-update needs a matching
+      signature).
+- [ ] Create the R2 bucket, attach the custom domain (e.g. `dl.example.com`), add a
+      ~60 s edge-cache rule on `latest.json` (or purge each release). `npx wrangler login`.
+- [ ] On the Echo Show, grant this app "install unknown apps" once (adb / Settings).
+
+Remaining:
+- [ ] **Build-risk gate first:** `flutter build apk --release --flavor selfUpdate
+      --target-platform android-arm` must succeed — proves `ring` cross-compiles for
+      32-bit armv7 via cargokit/NDK (the one real build risk). (`cargo ndk -t
+      armeabi-v7a -p 30 build --release` is a faster Rust-only pre-check.)
+- [ ] **End-to-end on hardware:** set a real `updateBaseUrl` (Settings → Updates),
+      publish a higher-`versionCode` signed APK + `latest.json` via
+      `anamanti-display/scripts/release-r2.sh`, then confirm: banner appears → download
+      with progress → SHA-256 passes → unknown-sources prompt → system install →
+      relaunch at the new version. Also confirm a **bad sha256** aborts + cleans up.
+- [ ] **Confirm the `fdroid` flavor** (`flutter build apk --release --flavor fdroid`)
+      has no Updates UI/banner and no `REQUEST_INSTALL_PACKAGES` in its merged manifest.
+- [ ] Later: **retire Obtainium** + the GitHub Releases workflow once the in-app path
+      is proven; actually publish the F-Droid build.
+- [ ] Follow-up (security, shared with §3/§6a): the `latest.json`/APK ride plain HTTPS
+      from an owner-controlled host, integrity-pinned by SHA-256 — fine today; revisit
+      if the distribution host isn't trusted.

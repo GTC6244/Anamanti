@@ -14,6 +14,7 @@
 
 #[cfg(feature = "aec")]
 pub mod aec;
+pub mod appsaid;
 pub mod audio_dump;
 pub mod cache;
 pub mod cadora;
@@ -23,6 +24,7 @@ pub mod control;
 pub mod directions;
 pub mod discovery;
 pub mod drive_consent;
+pub mod http;
 pub mod llm;
 pub mod memory;
 pub mod music;

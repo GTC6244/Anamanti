@@ -26,6 +26,8 @@ import 'package:anamanti_display/src/engine/recipe_data.dart';
 import 'package:anamanti_display/src/engine/place_data.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
+import 'package:anamanti_display/src/settings/app_settings.dart'
+    show kFontScaleMin, kFontScaleMax;
 
 /// Opens the native engine event stream for a given config. Production passes
 /// `startWakeWordEngine`; tests pass a fake.
@@ -69,6 +71,20 @@ typedef PlaceContextSink =
       required bool active,
       required String name,
       required String address,
+    });
+
+/// Pushes the current font-scaling context down to the native engine, so the next voice
+/// turn's `audio-start` tells the orchestrator whether a resizable text surface is on
+/// screen and what the current global scale is. Lets "increase font" / "decrease font"
+/// resolve only when there is something to resize (and lets the assistant say when it is
+/// already at the maximum/minimum). Production wires the native [setFontContext]; null
+/// (the default, for tests) disables it.
+typedef FontContextSink =
+    void Function({
+      required bool scalable,
+      required double scale,
+      required bool atMin,
+      required bool atMax,
     });
 
 /// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
@@ -422,6 +438,9 @@ class AssistantController extends ChangeNotifier {
     RecipeContextSink? setRecipeContext,
     WeatherContextSink? setWeatherContext,
     PlaceContextSink? setPlaceContext,
+    FontContextSink? setFontContext,
+    void Function(String direction)? onFontAdjust,
+    double fontScale = 1.0,
   })  : _config = config,
         _onUserActivity = onUserActivity,
         _weatherAutoClose = weatherAutoClose,
@@ -429,6 +448,9 @@ class AssistantController extends ChangeNotifier {
         _setRecipeContext = setRecipeContext,
         _setWeatherContext = setWeatherContext,
         _setPlaceContext = setPlaceContext,
+        _setFontContext = setFontContext,
+        _onFontAdjust = onFontAdjust,
+        _fontScale = fontScale,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -493,6 +515,20 @@ class AssistantController extends ChangeNotifier {
   /// null disables it (tests with no native library).
   final PlaceContextSink? _setPlaceContext;
 
+  /// Sink for pushing font-scaling context to the native engine (see [FontContextSink]);
+  /// null disables it (tests with no native library).
+  final FontContextSink? _setFontContext;
+
+  /// Called when a voice "increase font" / "decrease font" command arrives, with the
+  /// direction `'increase'` / `'decrease'`. The app shell applies + persists the new
+  /// global [AppSettings.fontScale] and calls [updateFontScale] back. Null disables it.
+  final void Function(String direction)? _onFontAdjust;
+
+  /// The current global font scale, mirrored from [AppSettings.fontScale] so the pushed
+  /// font context reports the live value and whether it is at the min/max bound. Updated
+  /// by the app shell via [updateFontScale] after each voice adjustment.
+  double _fontScale;
+
   /// The active recipe pane's latest scroll position, tracked so recipe context
   /// pushes carry it. `_recipeAtTop` starts true (a freshly opened tab is at the top);
   /// the [RecipeView] corrects both once it measures the pane.
@@ -522,6 +558,10 @@ class AssistantController extends ChangeNotifier {
     _sub?.cancel();
     _backoff = _minBackoff;
     _listen();
+    // Seed the native font context before the first turn so its `audio-start` already
+    // carries the current global scale (and `scalable`). Pushed here — well ahead of any
+    // turn — so the value is read, not raced, when the turn stamps `screen.font`.
+    _pushFontContext();
     // Start probing immediately if we're offline (don't wait for the first event).
     _syncOfflinePoll();
   }
@@ -821,6 +861,11 @@ class AssistantController extends ChangeNotifier {
             ),
           );
         }
+      case WakeWordEventKind.fontAdjust:
+        // Voice "increase font" / "decrease font". The direction rides the generic
+        // [WakeWordEvent.recipeAction] string (same carrier as recipe scroll). The app
+        // shell applies + persists the new global scale and calls [updateFontScale] back.
+        _onFontAdjust?.call(e.recipeAction);
     }
   }
 
@@ -925,6 +970,32 @@ class AssistantController extends ChangeNotifier {
       _emit(_state.copyWith(clearPlace: true));
       _pushPlaceContext();
     }
+  }
+
+  /// Mirror the latest global font scale (from [AppSettings.fontScale]) after the app
+  /// shell applies a voice adjustment, and re-push the font context so the next turn
+  /// reports the new value (and whether it is now at the min/max bound).
+  void updateFontScale(double scale) {
+    _fontScale = scale;
+    _pushFontContext();
+  }
+
+  /// Push the current font-scaling context down to the native engine so the next voice
+  /// turn's `audio-start` carries it to the orchestrator. `scalable` is true whenever a
+  /// text surface is on screen — which on this always-on display is always the case (the
+  /// conversation panel and cards during a turn, the idle clock otherwise, the large away
+  /// clock in off mode), per the product decision to allow resizing whenever text is
+  /// visible. A no-op when no sink is wired (tests).
+  void _pushFontContext() {
+    final sink = _setFontContext;
+    if (sink == null) return;
+    const eps = 1e-6;
+    sink(
+      scalable: true,
+      scale: _fontScale,
+      atMin: _fontScale <= kFontScaleMin + eps,
+      atMax: _fontScale >= kFontScaleMax - eps,
+    );
   }
 
   /// Fold an ambient weather push (from the weather channel) into the indicator state.

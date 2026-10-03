@@ -168,6 +168,7 @@ async fn handle_connection(
             // takes over this task until the device closes it.
             Some(ev) if ev.event_type == types::ANAMANTI_HELLO => {
                 let device_id = ev.hello_device_id().unwrap_or_default().to_string();
+                let device_name = ev.hello_name().unwrap_or_default().to_string();
                 // The persistent channel serves either proactive notifications
                 // (`role=notify`, the default) or the ambient weather push
                 // (`role=weather`); the write pump below is identical for both — it
@@ -175,13 +176,13 @@ async fn handle_connection(
                 let is_weather = ev.hello_role() == "weather";
                 let channel = if is_weather { "weather" } else { "notify" };
                 log::info!(
-                    "[{}] {channel} channel opened (device_id={device_id:?})",
+                    "[{}] {channel} channel opened (device_id={device_id:?}, name={device_name:?})",
                     peer_str(peer.as_ref())
                 );
                 let (conn_id, mut rx) = if is_weather {
-                    weather.register(&device_id)
+                    weather.register(&device_id, &device_name)
                 } else {
-                    notify.register(&device_id)
+                    notify.register(&device_id, &device_name)
                 };
                 let (reader, writer) = device.split_mut();
                 // Pump enqueued pushes out to the device while watching the read half

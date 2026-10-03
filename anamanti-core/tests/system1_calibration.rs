@@ -103,6 +103,11 @@ fn corpus() -> Vec<Case> {
         // end session
         case("that's all thanks", Resolve(endsess)),
         case("nothing else", Resolve(endsess)),
+        // a bare standalone sign-off thanks ends the session (any language)
+        case("thank you", Resolve(endsess)),
+        case("thanks", Resolve(endsess)),
+        case("gracias", Resolve(endsess)),
+        case("merci", Resolve(endsess)),
         // must-defer precision anchors
         case("who was the sixteenth president", Defer),
         case("what's fifteen percent of two hundred forty", Defer),
@@ -154,6 +159,7 @@ async fn calibrate_against_corpus() {
                 next_remaining_secs: (c.timers_running > 0).then_some(300),
                 labels: Vec::new(),
             },
+            font: Default::default(),
         };
         let decision = engine.decide(&req).await.unwrap_or(Decision::Defer);
         let (got_resolve, got_intent) = match &decision {

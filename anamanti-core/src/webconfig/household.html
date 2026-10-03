@@ -44,6 +44,27 @@
   <p class="hint" style="margin:0.5rem 0 0">In the <b>NextHaul</b> app, open <b>Settings → Voice &amp; Integrations</b>, add a voice assistant to get a <b>6-digit code</b>, and enter it here. It's single-use and expires in a few minutes; the tool activates the moment the code is redeemed.</p>
 </div>
 
+<div class="card">
+  <h2>Phone messages (AppSaid)</h2>
+  <p class="desc">Enables the <code>send_phone_message</code> voice tool, so "text Mom the address" pushes a message (often a Google Maps link) to a family member's phone via AppSaid. Recipients are configured in <code>anamanti.json</code> (<code>appsaid.recipients</code>); the app token is a secret, set below.</p>
+  <div id="appsaid" class="muted">Loading…</div>
+  <div class="toolbar" style="margin-top:0.6rem;">
+    <input id="as_token" type="password" placeholder="AppSaid app token (leave blank to keep current)" autocomplete="off" style="min-width:22rem">
+    <button class="primary" onclick="appsaidToken()">Save token</button>
+    <span id="asmsg" class="muted"></span>
+  </div>
+  <details style="margin-top:0.5rem">
+    <summary class="hint">Advanced: worker URL &amp; default recipient</summary>
+    <div class="toolbar" style="margin-top:0.4rem">
+      <input id="as_worker" type="text" placeholder="https://appsaid.you.workers.dev" style="min-width:22rem">
+    </div>
+    <div class="toolbar" style="margin-top:0.4rem">
+      <input id="as_default" type="text" placeholder="default recipient (for &quot;text me…&quot;)" style="min-width:16rem">
+      <button onclick="appsaidSave()">Save</button>
+    </div>
+  </details>
+</div>
+
 <div class="card danger-zone">
   <h2>Danger zone</h2>
   <div class="callout">
@@ -145,4 +166,39 @@
     }catch(e){ msg.textContent = 'Request failed: ' + e; }
   };
   cadoraLoad();
+
+  // --- Phone messages (AppSaid) -------------------------------------------
+  async function appsaidLoad(){
+    try{
+      const j = await apiJSON('/appsaid/status.json');
+      const el = $('appsaid');
+      const state = j.tool_active
+        ? '<span class="badge good">configured — tool active</span>'
+        : '<span class="badge">not configured</span>';
+      const names = (j.recipients||[]).map(esc).join(', ') || '(none — set appsaid.recipients in anamanti.json)';
+      el.innerHTML = 'Status: ' + state
+        + ' &nbsp; token: ' + (j.token_set ? 'set' : 'not set')
+        + '<br>recipients: <code>' + names + '</code>'
+        + (j.default_recipient ? ' &nbsp; default: <code>' + esc(j.default_recipient) + '</code>' : '');
+      if(j.worker_url) $('as_worker').placeholder = esc(j.worker_url);
+    }catch(e){ $('appsaid').textContent = 'Request failed: ' + e; }
+  }
+  window.appsaidToken = async function(){
+    const msg = $('asmsg'); msg.textContent = 'Saving…';
+    try{
+      const r = await fetch('/appsaid/token', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({app_token: $('as_token').value.trim()})});
+      const j = await r.json(); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
+      $('as_token').value = '';
+      appsaidLoad();
+    }catch(e){ msg.textContent = 'Request failed: ' + e; }
+  };
+  window.appsaidSave = async function(){
+    const msg = $('asmsg'); msg.textContent = 'Saving…';
+    try{
+      const r = await fetch('/appsaid/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({worker_url: $('as_worker').value.trim(), default_recipient: $('as_default').value.trim()})});
+      const j = await r.json(); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
+      appsaidLoad();
+    }catch(e){ msg.textContent = 'Request failed: ' + e; }
+  };
+  appsaidLoad();
 </script>

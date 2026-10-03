@@ -1,0 +1,7 @@
+{
+  "versionCode": 12,
+  "versionName": "1.2.0",
+  "apkUrl": "https://dl.example.com/app-1.2.0.apk",
+  "sha256": "<lowercase hex sha256 of the apk>",
+  "notes": "Bug fixes"
+}

@@ -30,6 +30,29 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // The in-app updater reads BuildConfig.ENABLE_SELF_UPDATE (set per flavor below).
+    buildFeatures {
+        buildConfig = true
+    }
+
+    // Distribution flavors (plans/UpdaterPlan.md, item 6): `selfUpdate`
+    // ships the in-app R2 updater; `fdroid` ships without it so F-Droid can build and
+    // distribute. Both keep the SAME applicationId and release signing key — a
+    // PackageInstaller self-update requires a matching signature, and F-Droid tracks
+    // the same package. Because a flavor dimension exists, every APK build/run must
+    // name a flavor, e.g. `flutter build apk --release --flavor selfUpdate`.
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("selfUpdate") {
+            dimension = "distribution"
+            buildConfigField("boolean", "ENABLE_SELF_UPDATE", "true")
+        }
+        create("fdroid") {
+            dimension = "distribution"
+            buildConfigField("boolean", "ENABLE_SELF_UPDATE", "false")
+        }
+    }
+
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.anamanti.anamanti_display"

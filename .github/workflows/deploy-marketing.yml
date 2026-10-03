@@ -1,0 +1,53 @@
+name: Deploy marketing site
+
+# Deploys the static marketing site (marketing/index.html) to Cloudflare Workers
+# as the `anamanti` assets-only Worker (see wrangler.jsonc).
+#
+# This replaces Cloudflare's Git-integration "Workers Builds", which ran on every
+# push to every branch and failed on PRs that never touched the marketing site.
+# The `paths:` filter below is the gate: this job only runs when the marketing
+# site (or its deploy config) actually changes, so app/core PRs don't trigger it.
+#
+# One-time setup:
+#   1. Create a scoped Cloudflare API token (My Profile -> API Tokens ->
+#      "Edit Cloudflare Workers" template, or Account | Workers Scripts | Edit)
+#      and add it as a repo secret named CLOUDFLARE_API_TOKEN
+#      (Settings -> Secrets and variables -> Actions).
+#   2. Disable the old Cloudflare Git build so it stops posting failing checks:
+#      Cloudflare dashboard -> Workers & Pages -> anamanti -> Settings -> Builds
+#      -> disconnect the GitHub repo / turn off automatic builds.
+#
+# The Cloudflare account ID is not secret (it already appears in the dashboard
+# URLs); it is set inline below. Override it with a CLOUDFLARE_ACCOUNT_ID secret
+# if you prefer to keep it out of the workflow file.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "marketing/**"
+      - "wrangler.jsonc"
+      - ".github/workflows/deploy-marketing.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-marketing
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || 'f6a7e7d5c5e98d4f1905b95a0d098c1c' }}
+          wranglerVersion: "4.146.0"
+          command: deploy

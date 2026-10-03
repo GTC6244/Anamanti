@@ -157,6 +157,11 @@ pub struct DecisionRequest {
     /// widget. Ground truth for the `timer_query` / `timer_cancel` / `stop_dismiss`
     /// decisions (plans/system1-fast-decisions.md §17, §19). Empty when nothing runs.
     pub timers: crate::wyoming::protocol::TimerContext,
+    /// Font-scaling state the device reported this turn (whether a resizable surface is on
+    /// screen + the current global scale), **orthogonal to `screen`**. Ground truth for the
+    /// optional `font_increase` / `font_decrease` fast intents (resolve only when
+    /// `scalable`, defer at the matching bound). Default (`scalable == false`) when unset.
+    pub font: crate::wyoming::protocol::FontContext,
 }
 
 /// A resolved fast intent. M1+ extends this with structured args so the orchestrator
@@ -272,6 +277,7 @@ mod tests {
             history: Vec::new(),
             location: None,
             timers: Default::default(),
+            font: Default::default(),
         }
     }
 

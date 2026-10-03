@@ -88,13 +88,17 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: flutter build apk --release
+        # A `distribution` flavor dimension exists (selfUpdate / fdroid, see
+        # android/app/build.gradle.kts), so a flavor MUST be named. `selfUpdate`
+        # is the build that ships the in-app R2 updater (plans/UpdaterPlan.md).
+        run: flutter build apk --release --flavor selfUpdate
 
       - name: Rename APK with version
         id: apk
         run: |
           VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//')"
-          SRC="build/app/outputs/flutter-apk/app-release.apk"
+          # Flavored builds are named app-<flavor>-<buildtype>.apk.
+          SRC="build/app/outputs/flutter-apk/app-selfUpdate-release.apk"
           OUT="Anamanti-${VERSION}.apk"
           cp "$SRC" "$OUT"
           # softprops/action-gh-release ignores working-directory, so emit a
