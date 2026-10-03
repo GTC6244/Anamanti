@@ -61,6 +61,11 @@ pub enum DeviceAction {
     /// Drive the already-open recipe screen by voice — switch tab or scroll a pane.
     /// Fire-and-forget: the device owns the screen state.
     RecipeControl(RecipeNav),
+    /// Change the assistant's output personality (pure output tuning) by spoken name,
+    /// or "normal"/"off" to disable. Unlike the other actions this is **Core-side**:
+    /// the orchestrator applies it to [`SharedSettings`](crate::settings::SharedSettings)
+    /// (no device frame), so the next turn's prompt carries the new style.
+    SetPersonality { name: String },
     /// Step the global on-screen font scale up or down. The device owns + persists the
     /// scale, so this is fire-and-forget like the other display actions.
     AdjustFont(FontDirection),

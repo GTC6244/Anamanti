@@ -37,6 +37,11 @@ speaks the reply back through the Echo Show's speakers.
   display *without* you asking (a reminder, an alert), over a persistent connection
   the device holds open to its pinned Anamanti Core. Visual-only today (no spoken
   output); send a test one from the config page's **Notify** tab.
+- 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
+  heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
+  tuning* — it changes only how replies sound, never what the assistant knows or does.
+  Switch it on/off and pick one **by voice** ("talk like a 1940s gangster", "go back
+  to normal"); edit the catalog of personalities on the config page's **Personality** tab.
 
 ## Architecture at a glance
 

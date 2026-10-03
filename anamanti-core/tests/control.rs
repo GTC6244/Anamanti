@@ -88,6 +88,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             visualcrossing_key: None,
             google_places_key: None,
             system1: anamanti_core::settings::System1Runtime::default(),
+            personality: anamanti_core::settings::Personality::default(),
         },
     );
     let pipeline = Pipeline::with_settings(

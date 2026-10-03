@@ -544,6 +544,188 @@ pub struct PlacesToolUpdate {
     pub google_places_key: Option<Option<String>>,
 }
 
+/// A single output "personality" the assistant can speak in. **Pure output tuning:**
+/// the `description` is appended to the per-turn system prompt as a trailing style
+/// instruction (how the reply *sounds*) and never touches memory, recall, or tools.
+/// `key` is the stable id the voice tool + config page select by; `label` is the human
+/// name shown in the GUI and the spoken guidance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonalityDef {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+}
+
+/// The live personality selection plus the editable catalog of personalities. Persisted
+/// inside `anamanti_settings.json` (GUI-editable on the Personality tab) and read from
+/// the per-turn snapshot. `enabled == false` or an empty/"normal" `active` ⇒ the
+/// assistant speaks normally (no style instruction appended). Changing it never rebuilds
+/// the LLM — it only changes a string appended to the next turn's prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Personality {
+    /// Master on/off switch (toggled by the `set_personality` voice tool / config page).
+    #[serde(default)]
+    pub enabled: bool,
+    /// The selected personality key (empty / "normal" ⇒ normal voice).
+    #[serde(default)]
+    pub active: String,
+    /// The editable catalog. Seeded with the built-ins on first run.
+    #[serde(default = "default_personality_defs")]
+    pub definitions: Vec<PersonalityDef>,
+}
+
+impl Default for Personality {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            active: String::new(),
+            definitions: default_personality_defs(),
+        }
+    }
+}
+
+/// The built-in personalities seeded on first run (the GUI can edit / add / remove them).
+/// "Normal" is implicit — it is the off state, so it is not in this list.
+fn default_personality_defs() -> Vec<PersonalityDef> {
+    let def = |key: &str, label: &str, description: &str| PersonalityDef {
+        key: key.to_string(),
+        label: label.to_string(),
+        description: description.to_string(),
+    };
+    vec![
+        def(
+            "enthusiastic",
+            "Overly Enthusiastic",
+            "Respond with boundless, over-the-top enthusiasm and excitement. Pack in energy, \
+             exclamation points, and upbeat, encouraging language, and treat every little thing \
+             as thrilling and wonderful.",
+        ),
+        def(
+            "sarcastic",
+            "Heavy Sarcasm",
+            "Respond with heavy, dry sarcasm and playful mockery — witty, deadpan, and ironic, \
+             with a biting edge — while still actually giving the correct, useful answer.",
+        ),
+        def(
+            "depressed",
+            "Depressed",
+            "Respond in a gloomy, melancholic, world-weary tone. Sigh, be a little deflated and \
+             pessimistic, as if everything is a bit much and nothing ever quite works out — but \
+             still answer the question.",
+        ),
+        def(
+            "gangster",
+            "1940s Gangster",
+            "Respond like a tough 1940s mobster with a gravelly, hard-boiled, streetwise attitude. \
+             Use period slang (\"see\", \"wise guy\", \"pal\", \"the big cheese\", \"dough\", \
+             \"takin' a powder\") — but still answer accurately.",
+        ),
+        def(
+            "trump",
+            "Donald Trump",
+            "Respond in the distinctive speaking style of Donald Trump: superlatives \
+             (\"tremendous\", \"the best\", \"believe me\", \"nobody knows this better than me\"), \
+             short punchy sentences, repetition, and self-assured asides. Keep it recognizable but \
+             good-natured, and still answer accurately.",
+        ),
+    ]
+}
+
+impl Personality {
+    /// The resolved trailing style instruction to append to the system prompt, or `None`
+    /// when the assistant should speak normally (disabled, or the active key is
+    /// empty/"normal"/unknown, or its description is blank).
+    pub fn instruction(&self) -> Option<String> {
+        self.active_def()
+            .map(|d| d.description.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The human label of the active personality, when enabled + resolvable.
+    pub fn active_label(&self) -> Option<String> {
+        self.active_def().map(|d| d.label.clone())
+    }
+
+    /// The active [`PersonalityDef`], or `None` when speaking normally.
+    fn active_def(&self) -> Option<&PersonalityDef> {
+        if !self.enabled {
+            return None;
+        }
+        let key = self.active.trim();
+        if key.is_empty() || key.eq_ignore_ascii_case("normal") {
+            return None;
+        }
+        self.definitions
+            .iter()
+            .find(|d| d.key.eq_ignore_ascii_case(key))
+    }
+
+    /// The selectable personality keys, in catalog order (for spoken guidance + the tool).
+    pub fn keys(&self) -> Vec<String> {
+        self.definitions.iter().map(|d| d.key.clone()).collect()
+    }
+
+    /// Clean a GUI-submitted catalog: trim fields, drop entries with a blank key or
+    /// label, de-duplicate keys (case-insensitive, first wins), and trim `active`.
+    pub fn sanitized(&self) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let definitions = self
+            .definitions
+            .iter()
+            .map(|d| PersonalityDef {
+                key: d.key.trim().to_string(),
+                label: d.label.trim().to_string(),
+                description: d.description.trim().to_string(),
+            })
+            .filter(|d| !d.key.is_empty() && !d.label.is_empty())
+            .filter(|d| seen.insert(d.key.to_lowercase()))
+            .collect();
+        Self {
+            enabled: self.enabled,
+            active: self.active.trim().to_string(),
+            definitions,
+        }
+    }
+
+    /// Resolve a spoken/typed personality name to a stored key. Accepts
+    /// "normal"/"off"/"none"/"" (→ `Ok(None)`, i.e. turn personality off), an exact key
+    /// or label (case-insensitive), else a unique substring match on key or label.
+    /// Returns `Err` with the valid options when nothing matches.
+    pub fn resolve(&self, name: &str) -> std::result::Result<Option<String>, String> {
+        let n = name.trim();
+        if n.is_empty()
+            || n.eq_ignore_ascii_case("normal")
+            || n.eq_ignore_ascii_case("off")
+            || n.eq_ignore_ascii_case("none")
+        {
+            return Ok(None);
+        }
+        if let Some(d) = self
+            .definitions
+            .iter()
+            .find(|d| d.key.eq_ignore_ascii_case(n) || d.label.eq_ignore_ascii_case(n))
+        {
+            return Ok(Some(d.key.clone()));
+        }
+        let nl = n.to_lowercase();
+        let matches: Vec<&PersonalityDef> = self
+            .definitions
+            .iter()
+            .filter(|d| d.key.to_lowercase().contains(&nl) || d.label.to_lowercase().contains(&nl))
+            .collect();
+        if matches.len() == 1 {
+            return Ok(Some(matches[0].key.clone()));
+        }
+        let opts = self
+            .definitions
+            .iter()
+            .map(|d| d.key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!("unknown personality `{n}`; options: normal, {opts}"))
+    }
+}
+
 /// The mutable settings persisted to disk so page/device changes survive a
 /// restart. Contains the Tavily key in plaintext, so the file is written with
 /// `0600` permissions on unix and should stay on a trusted machine.
@@ -639,6 +821,10 @@ pub struct PersistedSettings {
     /// which then fall back to the `OPENROUTER_API_KEY` env seed.
     #[serde(default)]
     pub openrouter_api_key: Option<String>,
+    /// Output personality (on/off, active selection, and the editable catalog). Pure
+    /// output tuning. Defaulted (seeded with the built-ins) for older files.
+    #[serde(default)]
+    pub personality: Personality,
 }
 
 fn default_system1_base_url() -> String {
@@ -995,6 +1181,10 @@ pub struct RuntimeSettings {
     /// from the per-turn snapshot so a config-page swap takes effect between turns.
     /// Bundled into one field so the widely-constructed `RuntimeSettings` only gains one.
     pub system1: System1Runtime,
+    /// The live output personality (on/off + selection + catalog). Read per-turn from the
+    /// snapshot and appended to the prompt as a trailing style instruction. Pure output
+    /// tuning — orthogonal to the LLM rebuild path (a change never rebuilds the backend).
+    pub personality: Personality,
 }
 
 /// Default System-1 HTTP base URL (local `laya-serve`).
@@ -1198,6 +1388,7 @@ impl SharedSettings {
             system1_min_confidence: s.system1.min_confidence,
             system1_intents: s.system1.intents.clone(),
             openrouter_api_key: s.system1.openrouter_api_key.clone(),
+            personality: s.personality.clone(),
         }
     }
 
@@ -1260,6 +1451,7 @@ impl SharedSettings {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
         )
     }
@@ -1532,6 +1724,61 @@ impl SharedSettings {
             persist(path, &snap);
         }
         cleaned
+    }
+
+    /// A snapshot of the live output personality (on/off + selection + catalog). Read
+    /// per-turn when assembling the prompt and by the config dashboard. Cheap clone.
+    pub fn personality(&self) -> Personality {
+        self.inner.read().unwrap().personality.clone()
+    }
+
+    /// Replace the whole personality record (enabled, active, catalog) and persist it
+    /// (best-effort, 0600). The config-page Personality form is a full-record save, so
+    /// this sets rather than field-diffs; the value is [`Personality::sanitized`] first
+    /// (trim, drop blank entries, de-dupe keys). Never rebuilds the LLM — personality is
+    /// pure output tuning injected into the per-turn prompt. Returns the cleaned value.
+    pub fn apply_personality(&self, personality: &Personality) -> Personality {
+        let cleaned = personality.sanitized();
+        let mut w = self.inner.write().unwrap();
+        w.personality = cleaned.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        cleaned
+    }
+
+    /// Set the active personality by spoken/typed name (the `set_personality` voice tool).
+    /// `name` is resolved against the live catalog ([`Personality::resolve`]): a match
+    /// enables + selects it; "normal"/"off"/"none" disables. Persists. Returns the active
+    /// label (`None` for normal) on success, or an error string listing the valid options.
+    pub fn set_active_personality(&self, name: &str) -> std::result::Result<Option<String>, String> {
+        let mut w = self.inner.write().unwrap();
+        let resolved = w.personality.resolve(name)?;
+        match &resolved {
+            Some(key) => {
+                w.personality.enabled = true;
+                w.personality.active = key.clone();
+            }
+            None => {
+                w.personality.enabled = false;
+                w.personality.active = String::new();
+            }
+        }
+        let label = w.personality.active_label();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        Ok(label)
     }
 
     /// A snapshot of the live System-1 selection for the config page (never the key).
@@ -2239,6 +2486,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
         )
     }
@@ -2372,6 +2620,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
             Some(path.clone()),
         );
@@ -2581,6 +2830,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
             Some(path.clone()),
         );
@@ -2666,6 +2916,118 @@ mod tests {
     }
 
     #[test]
+    fn personality_instruction_resolves_only_when_enabled_and_active() {
+        let mut p = Personality::default();
+        // Off by default (disabled, no active key).
+        assert!(p.instruction().is_none());
+        assert!(p.active_label().is_none());
+        // Enabled but no active key → still normal.
+        p.enabled = true;
+        assert!(p.instruction().is_none());
+        // Select a built-in by key.
+        p.active = "gangster".into();
+        assert!(p.instruction().is_some_and(|s| !s.is_empty()));
+        assert_eq!(p.active_label().as_deref(), Some("1940s Gangster"));
+        // "normal" active key = off even when enabled.
+        p.active = "normal".into();
+        assert!(p.instruction().is_none());
+        // Unknown key = off (no panic).
+        p.active = "wizard".into();
+        assert!(p.instruction().is_none());
+    }
+
+    #[test]
+    fn personality_resolve_matches_names_and_rejects_unknown() {
+        let p = Personality::default();
+        assert_eq!(p.resolve("normal").unwrap(), None);
+        assert_eq!(p.resolve("off").unwrap(), None);
+        assert_eq!(p.resolve("").unwrap(), None);
+        // Exact key, case-insensitive.
+        assert_eq!(p.resolve("Gangster").unwrap().as_deref(), Some("gangster"));
+        // Exact label.
+        assert_eq!(p.resolve("Donald Trump").unwrap().as_deref(), Some("trump"));
+        // Unique substring.
+        assert_eq!(p.resolve("sarcas").unwrap().as_deref(), Some("sarcastic"));
+        // Unknown → Err listing the options.
+        assert!(p.resolve("wizard").is_err());
+    }
+
+    #[test]
+    fn personality_sanitize_trims_dedupes_and_drops_blanks() {
+        let messy = Personality {
+            enabled: true,
+            active: "  trump ".into(),
+            definitions: vec![
+                PersonalityDef {
+                    key: " trump ".into(),
+                    label: " Trump ".into(),
+                    description: "  loud  ".into(),
+                },
+                // duplicate key (case-insensitive) → dropped
+                PersonalityDef {
+                    key: "TRUMP".into(),
+                    label: "Dup".into(),
+                    description: "x".into(),
+                },
+                // blank key → dropped
+                PersonalityDef {
+                    key: "  ".into(),
+                    label: "Nameless".into(),
+                    description: "y".into(),
+                },
+                // blank label → dropped
+                PersonalityDef {
+                    key: "k".into(),
+                    label: " ".into(),
+                    description: "z".into(),
+                },
+            ],
+        };
+        let clean = messy.sanitized();
+        assert_eq!(clean.active, "trump");
+        assert_eq!(clean.definitions.len(), 1);
+        assert_eq!(clean.definitions[0].key, "trump");
+        assert_eq!(clean.definitions[0].label, "Trump");
+        assert_eq!(clean.definitions[0].description, "loud");
+    }
+
+    #[test]
+    fn set_active_personality_toggles_and_apply_sanitizes() {
+        let s = SharedSettings::fixed(
+            std::sync::Arc::new(crate::llm::mock::MockLlm::default()),
+            "mock",
+            None,
+        );
+        // Default: off.
+        assert!(!s.personality().enabled);
+        // Switch on by spoken name.
+        let label = s.set_active_personality("gangster").unwrap();
+        assert_eq!(label.as_deref(), Some("1940s Gangster"));
+        let live = s.personality();
+        assert!(live.enabled && live.active == "gangster");
+        assert!(live.instruction().is_some());
+        // Back to normal.
+        assert!(s.set_active_personality("normal").unwrap().is_none());
+        assert!(!s.personality().enabled);
+        // Unknown name is rejected and leaves state unchanged.
+        assert!(s.set_active_personality("wizard").is_err());
+        assert!(!s.personality().enabled);
+        // Full-record save sanitizes (trim key) and takes effect live.
+        let saved = s.apply_personality(&Personality {
+            enabled: true,
+            active: "x".into(),
+            definitions: vec![PersonalityDef {
+                key: " x ".into(),
+                label: "X".into(),
+                description: "be x".into(),
+            }],
+        });
+        assert_eq!(saved.definitions.len(), 1);
+        assert_eq!(saved.active, "x");
+        assert_eq!(s.personality().instruction().as_deref(), Some("be x"));
+    }
+
+    #[test]
     fn spotify_config_controller_only_builds_when_linked() {
         let mut c = SpotifyConfig::default();
         assert!(!c.configured() && !c.linked() && c.controller().is_none());
@@ -2727,6 +3089,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
             Some(path.clone()),
         );
@@ -2803,6 +3166,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
             Some(path.clone()),
         );
@@ -2887,6 +3251,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
             Some(path.clone()),
         );
@@ -2962,6 +3327,7 @@ mod tests {
                 visualcrossing_key: None,
                 google_places_key: None,
                 system1: System1Runtime::default(),
+                personality: Personality::default(),
             },
             Some(path.clone()),
         );

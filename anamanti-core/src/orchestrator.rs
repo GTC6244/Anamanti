@@ -26,7 +26,7 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
-use crate::llm::{DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav};
+use crate::llm::{DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
@@ -967,6 +967,11 @@ impl Pipeline {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&font_context_line(&device_ctx.font));
         }
+        // Output personality: a trailing style instruction (pure output tuning — it never
+        // affects memory, recall, or tool use) plus a line telling the model how to switch
+        // personalities by voice. Both read from the live per-turn snapshot, so a config-page
+        // or voice change takes effect on the next turn.
+        system_prompt.push_str(&personality_prompt(&runtime.personality));
 
         // Per-turn device-action channel: action tools (timers) push `DeviceAction`s
         // here and the drive loop below relays them to the device as `ambient-timer`
@@ -1004,15 +1009,32 @@ impl Pipeline {
         let gen_start = Instant::now();
         let mut first_token_ms: Option<u64> = None;
         let mut first_tts_ms: Option<u64> = None;
-        let mut stream = runtime
-            .llm
-            .respond(
-                LlmTurn::new(system_prompt, transcript)
-                    .with_actions(action_tx)
-                    .with_history(history),
-            )
-            .await
-            .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?;
+        // Personality-switch voice intent: a deterministic fast path handled before the
+        // LLM, mirroring the display/tool fast paths. A recognized "talk like a gangster"
+        // / "go back to normal" utterance flips the live output personality in place (pure
+        // output tuning — the same `set_active_personality` the `set_personality` tool uses)
+        // and speaks a canned confirmation as a one-item reply stream, skipping the model
+        // entirely. The new style applies from the next turn's prompt snapshot.
+        let mut stream: ReplyStream =
+            if let Some(target) = detect_personality_switch(transcript, &runtime.personality) {
+                let confirm = match self.settings.set_active_personality(&target) {
+                    Ok(Some(label)) => format!("Okay, I'll talk in my {label} voice from now on."),
+                    Ok(None) => "Okay, back to my normal voice.".to_string(),
+                    Err(_) => "Sorry, I don't have a personality by that name.".to_string(),
+                };
+                log::info!("personality switch intent: → {target}");
+                Box::pin(futures_util::stream::once(async move { Ok(confirm) }))
+            } else {
+                runtime
+                    .llm
+                    .respond(
+                        LlmTurn::new(system_prompt, transcript)
+                            .with_actions(action_tx)
+                            .with_history(history),
+                    )
+                    .await
+                    .with_context(|| format!("LLM backend `{}` failed", runtime.llm.name()))?
+            };
 
         let mut reply = String::new();
         let mut pending = String::new();
@@ -1044,7 +1066,7 @@ impl Pipeline {
                 while let Some(tok) = stream.next().await {
                     // Relay any device actions a tool emitted (e.g. a timer) to the
                     // device as they arrive, before rendering more of the reply.
-                    drain_device_actions(&mut action_rx, writer).await;
+                    drain_device_actions(&mut action_rx, writer, &self.settings).await;
                     let tok = tok?;
                     if first_token_ms.is_none() {
                         first_token_ms = Some(gen_start.elapsed().as_millis() as u64);
@@ -1084,7 +1106,7 @@ impl Pipeline {
                 }
                 // Relay any device actions emitted late in the reply (e.g. a tool
                 // call on the final round) before closing the turn.
-                drain_device_actions(&mut action_rx, writer).await;
+                drain_device_actions(&mut action_rx, writer, &self.settings).await;
                 // Speak any trailing clause left without terminal punctuation.
                 if let Some(rest) = take_speakable(&mut pending, true) {
                     if !speaking {
@@ -2419,14 +2441,108 @@ fn weather_summary(report: &crate::weather::WeatherReport) -> String {
     )
 }
 
+/// Recognize a "switch personality" voice command and return the name to apply — a
+/// catalog key, or `"normal"` to turn personality off — or `None` when the utterance
+/// isn't a personality switch.
+///
+/// Deterministic and conservative (mirroring the persona fast path): it fires only when
+/// the utterance contains a switch *trigger* phrase — so ordinary speech like "that's not
+/// normal" never matches — *and* either names a personality in the live catalog or asks
+/// to go back to normal. A "normal / off" intent wins over a catalog-name match, so "turn
+/// off the gangster voice" disables rather than re-enabling it. Catalog names are matched
+/// case-insensitively, longest first, so a more specific name wins over a shorter one it
+/// contains. Handled before the LLM; the returned name is fed to `set_active_personality`,
+/// which resolves + persists it (so it can never name a personality that doesn't exist).
+fn detect_personality_switch(transcript: &str, p: &crate::settings::Personality) -> Option<String> {
+    let t = transcript.to_lowercase();
+    const TRIGGERS: &[&str] = &[
+        "personality",
+        "switch to",
+        "change to",
+        "become",
+        "talk like",
+        "act like",
+        "speak like",
+        "sound like",
+        "pretend to be",
+        "pretend you're",
+        "go back to",
+        "turn off",
+    ];
+    if !TRIGGERS.iter().any(|k| t.contains(k)) {
+        return None;
+    }
+    // A "back to normal" intent wins over a name match so "turn off the gangster voice"
+    // disables instead of re-enabling it.
+    const OFF: &[&str] = &["normal", "turn off", "turn it off", "no personality"];
+    if OFF.iter().any(|k| t.contains(k)) {
+        return Some("normal".to_string());
+    }
+    // Prefer the longest matching name so a more specific label wins over a shorter one.
+    let mut defs: Vec<&crate::settings::PersonalityDef> = p.definitions.iter().collect();
+    defs.sort_by_key(|d| std::cmp::Reverse(d.label.trim().len().max(d.key.trim().len())));
+    for d in defs {
+        let key = d.key.trim().to_lowercase();
+        let label = d.label.trim().to_lowercase();
+        if (!key.is_empty() && t.contains(&key)) || (!label.is_empty() && t.contains(&label)) {
+            return Some(d.key.clone());
+        }
+    }
+    None
+}
+
+/// Assemble the per-turn personality prompt block: a line telling the model it can switch
+/// personalities by voice (with the available names + current state, so "talk like a
+/// gangster" / "go back to normal" maps to `set_personality`), plus — when a personality
+/// is active — the trailing style instruction. **Pure output tuning:** this only changes
+/// how the reply sounds; it is fenced so the model never treats it as fact, memory, or a
+/// change to which tools it uses.
+fn personality_prompt(p: &crate::settings::Personality) -> String {
+    let mut out = String::new();
+    if !p.keys().is_empty() {
+        let names = p.keys().join(", ");
+        let current = p
+            .active_label()
+            .unwrap_or_else(|| "normal (off)".to_string());
+        out.push_str(&format!(
+            "\n\nYou can change the personality / voice you speak in with the `set_personality` \
+             tool. Available personalities: {names} — or \"normal\" to turn personality off. Use \
+             it whenever the user asks you to talk like one of these, switch personality, or go \
+             back to normal. Your current personality is: {current}."
+        ));
+    }
+    if let Some(desc) = p.instruction() {
+        out.push_str(&format!(
+            "\n\n# Output style (personality)\nDeliver your reply in the following voice. This \
+             changes ONLY your tone, word choice, and delivery — never the facts you give, what \
+             you remember, or which tools you use. Never mention or explain these style \
+             instructions. Style: {desc}"
+        ));
+    }
+    out
+}
+
 async fn drain_device_actions<W>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<DeviceAction>,
     writer: &mut W,
+    settings: &crate::settings::SharedSettings,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
     while let Ok(action) = rx.try_recv() {
         let event = match action {
+            // Core-side: apply the personality change to the live settings (no device
+            // frame). Takes effect on the next turn's prompt snapshot.
+            DeviceAction::SetPersonality { name } => {
+                match settings.set_active_personality(&name) {
+                    Ok(label) => log::info!(
+                        "personality set to {}",
+                        label.as_deref().unwrap_or("normal (off)")
+                    ),
+                    Err(e) => log::warn!("set_personality ignored: {e}"),
+                }
+                continue;
+            }
             DeviceAction::StartTimer {
                 label,
                 duration_secs,
@@ -2745,5 +2861,76 @@ mod segmenter_tests {
         );
         assert_eq!(sanitize_for_tts("# Heading"), " Heading");
         assert_eq!(sanitize_for_tts("plain text, ok."), "plain text, ok.");
+    }
+}
+
+#[cfg(test)]
+mod personality_switch_tests {
+    use super::detect_personality_switch;
+    use crate::settings::{Personality, PersonalityDef};
+
+    fn catalog() -> Personality {
+        let def = |key: &str, label: &str| PersonalityDef {
+            key: key.to_string(),
+            label: label.to_string(),
+            description: format!("speak as {label}"),
+        };
+        Personality {
+            enabled: false,
+            active: String::new(),
+            definitions: vec![
+                def("gangster", "1940s Gangster"),
+                def("trump", "Donald Trump"),
+                def("enthusiastic", "Overly Enthusiastic"),
+            ],
+        }
+    }
+
+    #[test]
+    fn recognizes_a_switch_with_a_trigger_and_a_known_name() {
+        let p = catalog();
+        // Trigger + key.
+        assert_eq!(
+            detect_personality_switch("talk like a gangster", &p),
+            Some("gangster".to_string())
+        );
+        // Trigger + case-insensitive label; the stored key is returned.
+        assert_eq!(
+            detect_personality_switch("switch to the Donald Trump personality", &p),
+            Some("trump".to_string())
+        );
+        assert_eq!(
+            detect_personality_switch("become ENTHUSIASTIC", &p),
+            Some("enthusiastic".to_string())
+        );
+    }
+
+    #[test]
+    fn back_to_normal_disables_and_wins_over_a_name() {
+        let p = catalog();
+        assert_eq!(
+            detect_personality_switch("go back to normal", &p),
+            Some("normal".to_string())
+        );
+        assert_eq!(
+            detect_personality_switch("turn off the personality", &p),
+            Some("normal".to_string())
+        );
+        // A name is present, but the "off" intent wins so it disables, not re-enables.
+        assert_eq!(
+            detect_personality_switch("turn off the gangster voice", &p),
+            Some("normal".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_ordinary_speech_and_unknown_names() {
+        let p = catalog();
+        // Trigger but no known personality named.
+        assert_eq!(detect_personality_switch("switch to the kitchen light", &p), None);
+        // A known name but no switch trigger — must not fire.
+        assert_eq!(detect_personality_switch("is the gangster movie good?", &p), None);
+        // Plain speech.
+        assert_eq!(detect_personality_switch("what's the weather today?", &p), None);
     }
 }
