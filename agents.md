@@ -125,11 +125,15 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **Output personalities:** the assistant can speak in a selectable **personality**
   (overly enthusiastic, heavy sarcasm, depressed, 1940s gangster, Donald Trump; normal =
   off). **Pure output tuning** — it changes only how a reply *sounds*, never memory,
-  recall, facts, or tool use. On/off + selection are drivable **by voice** via the
+  recall, facts, or tool use. On/off + selection are drivable **by voice** two ways: a
+  deterministic **fast path** (`orchestrator::detect_personality_switch`) handled *before*
+  the LLM — a "talk like a gangster" / "go back to normal" utterance (switch trigger + a
+  catalog name, or an explicit off intent) flips the live personality in place and speaks a
+  canned confirmation, skipping the model — and, as a fallback the model can invoke, the
   always-on **`set_personality`** rig tool, which emits a **Core-side**
-  `DeviceAction::SetPersonality` the orchestrator applies to `SharedSettings` (no device
-  frame); the orchestrator appends a fenced style block to each turn's prompt from the
-  snapshot. State + the **editable catalog** live in the settings overlay (`Personality`
+  `DeviceAction::SetPersonality`. Both apply to `SharedSettings` via the same
+  `set_active_personality` (no device frame); the orchestrator appends a fenced style block
+  to each turn's prompt from the snapshot. State + the **editable catalog** live in the settings overlay (`Personality`
   in `settings.rs`, persisted to `anamanti_settings.json`, no `anamanti.json` seed) and
   are edited on the Core GUI **Personality tab** (`/personality`). Core-only; no Display
   UI. See architecture.md §8.4 and the Plan.MD decision row.

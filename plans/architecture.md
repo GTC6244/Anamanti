@@ -829,12 +829,21 @@ there is no Display UI.
   tools". A short always-present line lists the available personality names + the current
   one so the model can switch by voice. Both read from the live snapshot, so a config-page
   or voice change takes effect on the next turn. Nothing is written to memory/recall.
-- **Voice control = the `set_personality` rig tool** (always registered, like the timer
-  tools). "Talk like a 1940s gangster" / "go back to normal" → the model calls
-  `set_personality(name)`. Unlike a normal action tool it emits a **Core-side**
-  `DeviceAction::SetPersonality { name }` that `drain_device_actions` applies to
-  `SharedSettings::set_active_personality` (resolving the name against the live catalog,
-  "normal"/"off" disabling) rather than writing a device frame.
+- **Voice control, two layers** — both end at the same `SharedSettings::set_active_personality`
+  (resolving the name against the live catalog, "normal"/"off" disabling), so a change takes
+  effect on the next turn's snapshot with no LLM rebuild and no device frame:
+  1. **Deterministic fast path** (`orchestrator::detect_personality_switch`), checked
+     *before* the LLM. It fires only on a switch **trigger** phrase (`talk like`, `switch
+     to`, `become`, `personality`, `turn off`, …) **and** either a catalog name (key/label,
+     case-insensitive, longest-first) or an explicit **off** intent ("normal" / "turn off"),
+     with off winning over a name so "turn off the gangster voice" disables. On a match it
+     flips the personality in place and returns a canned spoken confirmation as a one-item
+     reply stream, **skipping the model entirely** (like the persona fast path). Conservative
+     by design: ordinary speech and a bare name without a trigger never match.
+  2. **`set_personality` rig tool** (always registered, like the timer tools) — the fallback
+     the model invokes for phrasings the fast path doesn't catch. It emits a **Core-side**
+     `DeviceAction::SetPersonality { name }` that `drain_device_actions` applies to the same
+     setter rather than writing a device frame.
 - **GUI** = the config page **Personality** tab (`/personality`, `webconfig/personality.html`
   + `personality_status_json`/`personality_save_json`): toggle on/off, pick the active one,
   and edit/add/remove personalities (label + style description). A full-record save through
