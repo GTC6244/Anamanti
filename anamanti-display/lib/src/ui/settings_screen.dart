@@ -20,6 +20,7 @@
 // refresh the slideshow.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:qr_flutter/qr_flutter.dart';
 
@@ -61,7 +62,8 @@ enum _SettingsCategory {
   speechProcessing('Speech Processing'),
   speechDetection('Speech Detection'),
   background('Background'),
-  updates('Updates');
+  updates('Updates'),
+  system('System');
 
   const _SettingsCategory(this.title);
 
@@ -126,6 +128,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// The open category page, or null while the top-level menu is shown.
   _SettingsCategory? _category;
+
+  /// Native channel for the System page's kiosk escape hatch (open Android settings
+  /// / switch Home app). Handled by [MainActivity]; a no-op on host/test platforms.
+  static const MethodChannel _maintenanceChannel =
+      MethodChannel('anamanti_display/maintenance');
 
   // Ambient-link QR dialog state: whether a QR dialog is showing, and whether the
   // user cancelled (so a late-completing poll doesn't apply a link they aborted).
@@ -621,6 +628,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Icons.system_update_alt,
             'In-app app updates',
           ),
+        // Always shown: the escape hatch out of the kiosk. This app is the device
+        // Home/launcher (so it auto-relaunches after a crash), so this is the way
+        // back to the stock Android launcher and system settings for maintenance.
+        _menuTile(
+          _SettingsCategory.system,
+          Icons.exit_to_app,
+          'Android settings & switch Home app',
+        ),
       ],
     );
   }
@@ -645,6 +660,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Updates is a full custom page (live download/install state).
     if (category == _SettingsCategory.updates) {
       return _updatesPage();
+    }
+    // System is the kiosk escape hatch (open Android settings / switch Home app).
+    if (category == _SettingsCategory.system) {
+      return _systemPage();
     }
     final List<Widget> children;
     switch (category) {
@@ -680,6 +699,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       case _SettingsCategory.background:
         children = _photoTiles();
       case _SettingsCategory.updates:
+        // Handled by the early return above; keep the switch exhaustive.
+        children = const [];
+      case _SettingsCategory.system:
         // Handled by the early return above; keep the switch exhaustive.
         children = const [];
     }
@@ -767,6 +789,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 24),
       ],
     );
+  }
+
+  /// The System page: the kiosk escape hatch. This app is the device Home/launcher
+  /// (so Android relaunches it the instant it dies — the crash-recovery watchdog),
+  /// which otherwise leaves no obvious way back to the stock UI. These two actions
+  /// cross [_maintenanceChannel] to [MainActivity], which launches the Android
+  /// settings screens. "Switch Home app" opens the Home-app picker so you can set the
+  /// stock LineageOS launcher back as default for maintenance. (adb fallback:
+  /// `adb shell cmd package set-home-activity <stock-launcher>/.Activity`.)
+  Widget _systemPage() {
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        ListTile(
+          key: const Key('settings-switch-home'),
+          leading: const Icon(Icons.home_outlined),
+          title: const Text('Switch Home app'),
+          subtitle: const Text(
+            'Open the Android Home-app picker to return to the stock launcher',
+          ),
+          trailing: const Icon(Icons.open_in_new),
+          onTap: () => _invokeMaintenance('openHomeSettings'),
+        ),
+        ListTile(
+          key: const Key('settings-open-android-settings'),
+          leading: const Icon(Icons.settings_applications_outlined),
+          title: const Text('Open Android settings'),
+          subtitle: const Text('The full system Settings app'),
+          trailing: const Icon(Icons.open_in_new),
+          onTap: () => _invokeMaintenance('openSystemSettings'),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  /// Best-effort call across the native maintenance channel. On a platform without
+  /// the channel (host tests) this is a harmless no-op.
+  Future<void> _invokeMaintenance(String method) async {
+    try {
+      await _maintenanceChannel.invokeMethod<void>(method);
+    } catch (_) {
+      // No channel (host/test) or the settings activity is unavailable: ignore.
+    }
   }
 
   Widget _updateStatusTile(UpdateController updates) {
