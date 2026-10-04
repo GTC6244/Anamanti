@@ -34,7 +34,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Updates), `AudioDiagnosticsView` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Updates / System), `AudioDiagnosticsView` |
 | **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
@@ -380,6 +380,16 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
     **Install** / **Retry** action — driven by `UpdateController`. The URL + toggle
     persist with the device-local settings on Save. See
     [`UpdaterPlan.md`](./UpdaterPlan.md).
+  - **System** — the **kiosk escape hatch** (always shown). A full custom page
+    (`_systemPage()`) with two tiles: **Switch Home app** (key
+    `settings-switch-home` → `Settings.ACTION_HOME_SETTINGS`, the Android Home-app
+    picker) and **Open Android settings** (key `settings-open-android-settings` →
+    `Settings.ACTION_SETTINGS`). Both cross the `anamanti_display/maintenance`
+    MethodChannel to `MainActivity.startSettings(...)`. This exists because the app
+    is the device **Home/launcher** (manifest `category.HOME` + `DEFAULT`), so the OS
+    relaunches it after a native crash (the crash-recovery watchdog) — these tiles
+    are the way back to the stock LineageOS launcher / system settings for
+    maintenance. adb fallback: `adb shell cmd package set-home-activity`.
 - On Save → `onApplied(next)` in `main.dart` restarts the engine (wake/threshold
   changes) and/or refreshes the slideshow (photo-source changes); assistant / VAD
   settings apply on the Mac.

@@ -40,6 +40,10 @@ class MainActivity : FlutterActivity() {
         // the system, not us — can post the final install status back to Dart.
         private const val UPDATER_CHANNEL = "anamanti_display/updater"
 
+        // Kiosk escape hatch: open Android settings / switch Home app from the
+        // in-app Settings → System page (see SettingsScreen._systemPage).
+        private const val MAINTENANCE_CHANNEL = "anamanti_display/maintenance"
+
         @Volatile
         private var updaterChannel: MethodChannel? = null
         private val mainHandler = Handler(Looper.getMainLooper())
@@ -120,6 +124,48 @@ class MainActivity : FlutterActivity() {
             }
         }
         updaterChannel = updater
+
+        // Kiosk escape hatch (plans/UpdaterPlan.md watchdog). This app is the device
+        // Home/launcher so the OS relaunches it after a crash; these let an operator
+        // reach the stock UI from inside the app (Settings → System page).
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            MAINTENANCE_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Open the Android "Home app" picker so the stock LineageOS launcher
+                // can be set back as default for maintenance.
+                "openHomeSettings" -> {
+                    startSettings(Settings.ACTION_HOME_SETTINGS)
+                    result.success(null)
+                }
+                // Open the full system Settings app.
+                "openSystemSettings" -> {
+                    startSettings(Settings.ACTION_SETTINGS)
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    /** Launch a system Settings activity by action, tolerating a missing screen. */
+    private fun startSettings(action: String) {
+        try {
+            startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            // Some ROMs lack a given settings screen; fall back to the top-level
+            // Settings app so the escape hatch always lands somewhere usable.
+            if (action != Settings.ACTION_SETTINGS) {
+                try {
+                    startActivity(
+                        Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                } catch (_: Exception) {
+                    // Nothing more we can do; the adb fallback is documented in the UI.
+                }
+            }
+        }
     }
 
     /** The running app's versionCode (`longVersionCode` on API 28+). */
