@@ -357,7 +357,11 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
   cargokit plugin (`anamanti-display/rust_builder/cargokit`) uses the legacy AGP variant API and
   `project.exec`, which Gradle 9 / AGP 9 removed. Pinned in
   `android/settings.gradle.kts` (AGP 8.7.3, Kotlin 2.1.0) and the Gradle wrapper
-  (8.11.1). Revisit only when cargokit ships AGP-9 support. NDK: `28.2.13676358`.
+  (**8.14.3** — bumped 2026-10-07 from 8.11.1: Flutter stable moved its minimum to
+  Gradle 8.14.0, and CI's `release.yml` floats on `channel: stable`. Still Gradle 8.x,
+  so the legacy cargokit APIs removed in Gradle 9 are intact; AGP stays on 8.7.3). Do
+  not cross into Gradle 9 / AGP 9 — revisit only when cargokit ships AGP-9 support.
+  NDK: `28.2.13676358`.
 
 ### Build output goes on the external drive (disk is tight)
 
