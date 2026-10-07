@@ -51,6 +51,12 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          # Pin to the known-good local/hardware-verified toolchain. `channel: stable`
+          # floats and had moved to 3.47.6, which demands Gradle >= 9.1 / AGP 9 and
+          # breaks the bundled cargokit plugin (see agents.md locked decision). 3.44.1
+          # bundles Dart 3.12.1 (matches pubspec `sdk: ^3.12.1`) and builds on the
+          # pinned AGP 8.7.3. Bump this deliberately alongside the Android toolchain.
+          flutter-version: 3.44.1
           channel: stable
           cache: true
 
