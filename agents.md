@@ -499,6 +499,113 @@ Notes:
   changed, so a new Core will not interoperate with an old Display build (or vice
   versa) — rebuild and reflash both.
 
+### Deploying / updating Anamanti Display (device OTA) — publish from the Mac
+
+This is how you ship an app update to the Echo Show fleet. Read this whole section
+before running anything — there is a **signing-key trap** that will silently break
+every device in the field if you get it wrong. Design doc: `plans/UpdaterPlan.md`.
+
+**Two independent OTA paths reach the devices (a release should feed both):**
+1. **In-app R2 updater — the baked-in default, the one the fleet actually uses.** The
+   app checks `<updateBaseUrl>/latest.json` on boot + every 6 h; `updateBaseUrl`
+   defaults to **`https://releases.immediacy.app/anamanti`** (`kDefaultUpdateBaseUrl`
+   in `lib/src/settings/app_settings.dart`) — the `anamanti/` subpath of the shared
+   **`immediacy-releases`** Cloudflare R2 bucket. Published with
+   `anamanti-display/scripts/release-r2.sh`.
+2. **GitHub Releases + Obtainium.** CI workflow `.github/workflows/release.yml` fires
+   on a pushed `v*` tag and attaches `Anamanti-<version>.apk` to a GitHub Release that
+   Obtainium polls. Legacy path, kept alive until the in-app path fully supersedes it.
+
+#### ⚠️ Signing key — the thing that will brick your OTA if ignored
+
+LineageOS enforces **signature consistency** on in-place updates: an OTA installs only
+if it is signed with the **same key as the build already on the device**. The fielded
+devices are signed with **this build host's `~/.android/debug.keystore`** (default
+creds: store/key password `android`, alias `androiddebugkey`; cert SHA-256
+`6b56aa286ccca32e311799fa8d5d063b359c10fa327ee1abe09e68afe11d97ec`). `build.gradle.kts`
+falls back to that debug key for release builds **when no `ANDROID_*` env / `key.properties`
+is present** (`hasReleaseSigning` false). So a plain `flutter build apk --release` on this
+Mac produces an OTA-installable APK. **Do NOT introduce a new/standalone release key** (or
+sign in CI with a different key) without reflashing every device by hand — the mismatch is
+rejected silently as "no update."
+Verify the signer before publishing (both tools need a JDK on PATH — use Android Studio's
+JBR, e.g. `export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"`):
+
+```bash
+APKSIGNER="$(ls -1 "$HOME"/Library/Android/sdk/build-tools/*/apksigner | sort -V | tail -1)"
+"$APKSIGNER" verify --print-certs <apk> | grep -i 'SHA-256'          # must equal 6b56aa…97ec
+keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep -i SHA256
+```
+
+#### Pre-flight (applies to BOTH paths)
+
+- **Bump the version** in `anamanti-display/pubspec.yaml`: `version: X.Y.Z+N`. The `+N`
+  build number is the Android **`versionCode`** and **must increase every release** — it
+  is what both updaters compare against the running build (a patch deploy is e.g.
+  `1.0.3+4` → `1.0.4+5`). Land it on `main` (PR), then build/publish from that commit.
+- **Pin the toolchain.** Build with **Flutter 3.44.1** (Dart 3.12.1 — matches pubspec
+  `sdk: ^3.12.1`); it is the hardware-verified version that builds on the locked
+  AGP 8.7.3 / Gradle 8.14.3. Newer Flutter stable demands Gradle 9 / AGP 9 and breaks
+  cargokit (see the locked decision above). `brew`'s floating `flutter` may have drifted
+  — check `flutter --version`.
+- **Build output must go to the external drive** (see the section above): export
+  `CARGO_TARGET_DIR`, `GRADLE_USER_HOME`, `TMPDIR`, and symlink `anamanti-display/build`.
+- **32-bit only.** The Echo Show 8 (crown) is armeabi-v7a — build
+  `--target-platform android-arm` (arm64 → `INSTALL_FAILED_NO_MATCHING_ABIS`).
+- The full build cross-compiles the Rust engine for armv7 (~3–11 min); run it backgrounded.
+
+#### Path 1 — in-app R2 updater (do this one; it reaches the fleet)
+
+`wrangler` auth is cached on this Mac (`npx wrangler whoami` → R2 write; bucket
+`immediacy-releases` exists). The script rebuilds the signed APK, computes its SHA-256,
+writes `latest.json`, and uploads **both** to R2 (`--remote` is mandatory — without it
+wrangler writes to a local simulator store and nothing publishes).
+
+```bash
+cd anamanti-display
+export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
+export GRADLE_USER_HOME=/Volumes/External/DeveloperSupport/mac-caches/gradle
+export TMPDIR=/Volumes/External/DeveloperSupport/ambient-build/tmp
+ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
+R2_BUCKET=immediacy-releases \
+UPDATE_BASE_URL=https://releases.immediacy.app/anamanti \
+NOTES="<user-facing release notes — shown in the device update banner>" \
+WRANGLER="npx -y wrangler" \
+./scripts/release-r2.sh
+```
+
+Verify it went live (devices pick it up on their next check, within the `latest.json`
+edge-cache TTL — purge/short-TTL it if a device lags):
+
+```bash
+curl -fsS "https://releases.immediacy.app/anamanti/latest.json"       # versionCode = new +N
+curl -fsSI "https://releases.immediacy.app/anamanti/app-<X.Y.Z>.apk"  # HTTP 200
+```
+
+#### Path 2 — GitHub Release for Obtainium (CI is currently NON-FUNCTIONAL for signing)
+
+`release.yml` **builds** fine but **cannot sign**: the repo has **no `ANDROID_*` secrets**,
+so the "Decode release keystore" step writes an empty keystore and signing throws
+`KeytoolException: Tag number over 30 is not supported`. Until that is fixed, **publish
+the GitHub Release from the Mac too** (same signed APK → guaranteed key match):
+
+```bash
+cd anamanti-display   # on the released commit, with build env exported as above
+flutter build apk --release --flavor selfUpdate --target-platform android-arm
+cp build/app/outputs/flutter-apk/app-selfUpdate-release.apk "Anamanti-<X.Y.Z>+<N>.apk"
+gh release create v<X.Y.Z> "Anamanti-<X.Y.Z>+<N>.apk" --title "v<X.Y.Z>" --generate-notes
+rm "Anamanti-<X.Y.Z>+<N>.apk"
+```
+
+**To make CI self-sufficient** (optional, needs owner sign-off because it sets the signing
+identity for all future updates): add the **existing debug keystore** as repo secrets so CI
+signs with the key the fleet already trusts —
+`ANDROID_KEYSTORE_BASE64=$(base64 < ~/.android/debug.keystore)`,
+`ANDROID_KEYSTORE_PASSWORD=android`, `ANDROID_KEY_ALIAS=androiddebugkey`,
+`ANDROID_KEY_PASSWORD=android` (`gh secret set …`). CI also floats on `channel: stable`
+and must stay pinned to Flutter 3.44.1 (see `release.yml`), or it drifts past the locked
+Android toolchain again.
+
 ## Conventions
 
 - **Rust:** async via `tokio`; keep the audio callback allocation-free; use the

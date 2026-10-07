@@ -60,6 +60,13 @@ name a flavor**, e.g. `flutter build apk --release --flavor selfUpdate`.
 
 ## Releasing
 
+> **Canonical runbook:** `agents.md` → "Deploying / updating Anamanti Display (device
+> OTA) — publish from the Mac" has the full, current step-by-step (both OTA paths, the
+> concrete `immediacy-releases` bucket + default URL, the signing-key trap, the Flutter
+> 3.44.1 pin, and why **CI `release.yml` currently cannot sign** — no `ANDROID_*`
+> secrets, so publish from the Mac for now). The steps below are the design-level
+> summary; follow `agents.md` when actually shipping.
+
 1. Bump `version:` in `pubspec.yaml` (e.g. `1.2.0+12`). The `+N` build number is the
    Android `versionCode` and **must increase every release**.
 2. Sign with the **one** release keystore (`android/key.properties` or `ANDROID_*`
