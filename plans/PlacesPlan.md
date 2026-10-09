@@ -40,7 +40,7 @@ place question and cleanly defers it to the System-2 LLM (which owns the free-fo
 | Question | Decision |
 | --- | --- |
 | **Data source** | The **Google Places API (New)** behind a `PlacesProvider` trait (injected, fixture-tested offline), mirroring `WeatherProvider`/`DirectionsProvider`. A **Text Search** (`places:searchText`) resolves the query to candidates; **Place Details** fetches the record. The API key is a secret (`GOOGLE_PLACES_API_KEY`), sent as the `X-Goog-Api-Key` **header** with a `X-Goog-FieldMask` to bound cost. **No keyless fallback** — mirrors `directions::from_token`: no key ⇒ the tool is not advertised. Runtime-settable on the config-page **Tools tab** (persisted 0600, rebuilds the tool live). |
-| **Trigger** | **Voice, by place name.** Any "where is / when is X open / tell me about X" → the LLM calls `places_lookup` (biased toward the household `home_location`). |
+| **Trigger** | **Voice, by place name.** Any "where is / when is X open / tell me about X" → the LLM calls `places_lookup` (biased toward the household's full home address — `HomeAddress::full_address`). |
 | **Disambiguation** | **Disambiguate first.** A single match shows the card immediately; multiple comparable candidates make the tool return a spoken candidate list **without** a card, so the model asks which one and re-calls `places_lookup` with the chosen `place_id`. Rides the existing follow-up-listen loop; no new state or protocol. |
 | **Photo** | **One hero photo, keyless.** The Core resolves the first photo via the photo-media endpoint with `skipHttpRedirect=true`, yielding a keyless `photoUri` (googleusercontent URL). Only that URL rides the frame; the device fetches it directly (like the recipe hero image), so the APK stays credential-free. A capped size + a graceful fallback icon respect the ~1 GB memory budget. |
 | **Transport** | A new `anamanti-place` frame (mirrored byte-for-byte in both `protocol.rs`, `anamanti-weather` as the template) with `action` = `show` / `dismiss`. No ambient push, no persistent channel (unlike weather) — show/dismiss only. |
@@ -96,7 +96,7 @@ Header auth `X-Goog-Api-Key` + a `X-Goog-FieldMask` on every call.
 
 ## 4. On-device validation (pending)
 
-Release APK per `agents.md`; set `GOOGLE_PLACES_API_KEY` + a `home_location`:
+Release APK per `agents.md`; set `GOOGLE_PLACES_API_KEY` + a `home_address`:
 - "what are the hours for <cafe>" → spoken confirmation + the card with photo + hours;
   an ambiguous chain name → the assistant asks which one, then shows the chosen branch.
 - "close it" and the on-screen close both dismiss.

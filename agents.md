@@ -286,8 +286,12 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     files means memory_backend="sqlite" — two processes can't share an embedded Helix graph.)
 #   db_path / chatlog_path / promptlog_path / helix_path / settings_path / audio_dump_dir
 #     (settings_path is the runtime OVERLAY file — see below; "off"/"none" disables persistence)
-#   system_prompt / home_location / weather_units / turn_timeout_secs / memory_backend
-#     (helix|sqlite; helix embeds locally by default — graphrag.embed_backend="openai"
+#   system_prompt / home_address / weather_units / turn_timeout_secs / memory_backend
+#     (home_address is a discrete-field object {address1,address2,city,state,postal,country};
+#     directions + nearby-places geocode the full combined address, weather + the prompt's
+#     "here" grounding use only City + State/Prov. A legacy single-line "home_location"
+#     string is still accepted and folds into City. helix|sqlite; helix embeds locally by
+#     default — graphrag.embed_backend="openai"
 #     is the opt-in cloud path and needs OPENAI_API_KEY, falling back to sqlite FTS if absent)
 #   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig),
 #     llm.anthropic_auth (apikey|subscription), llm.anthropic_token_cmd (default `ant`),
@@ -347,7 +351,7 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 #     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults
 #     to 3600s (60 min). Read once at boot (not runtime-settable). Mutating tools uncached.
 #
-# home_location/weather_units, drive, spotify, cadora, appsaid, the tts_voice, and the llm engine/
+# home_address/weather_units, drive, spotify, cadora, appsaid, the tts_voice, and the llm engine/
 # backend/model/web_search/search_provider fields only SEED the live settings at boot:
 # they are then editable from the config page and persisted to settings_path
 # (anamanti_settings.json), and a PERSISTED value wins over the JSON seed at the next boot.

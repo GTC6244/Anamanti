@@ -242,7 +242,7 @@ Sketch:
   catches → Defer. Home-location weather ("show me the weather") resolves.
 
 Each `intent` maps to a small handler that reuses existing code — e.g. `weather` →
-`weather_lookup(home_location)` → `DeviceAction::ShowWeather` + a templated spoken summary; `timer`
+`weather_lookup(home_address → City + State/Prov)` → `DeviceAction::ShowWeather` + a templated spoken summary; `timer`
 → parse duration deterministically (or Defer if unparseable) → `DeviceAction::StartTimer`;
 `recipe_nav` → `DeviceAction::RecipeControl`; etc.
 
@@ -251,7 +251,7 @@ Each `intent` maps to a small handler that reuses existing code — e.g. `weathe
 1. Transcript lands; `parse_command` → no match.
 2. `system1.decide` → `intent = weather (p≈0.97)`, `needs_full_understanding = false (p_true≈0.02)`.
    Both clear `min_confidence` → **Resolve(weather)**.
-3. Handler calls the existing `weather_lookup` for `home_location`, emits
+3. Handler calls the existing `weather_lookup` for the home City + State/Prov, emits
    `DeviceAction::ShowWeather(report)` on the existing action sink → the `anamanti-weather` frame
    opens the widget **immediately** (before speech).
 4. Speak a short templated line ("Here's your forecast — 18 and clear."); write chatlog; emit the

@@ -794,7 +794,8 @@ impl Pipeline {
                 history: Vec::new(), // M5: recent turns for follow-up disambiguation
                 // Home location grounds location-dependent intents (weather): the HTTP
                 // engine retries an otherwise-deferred turn with this folded into the query.
-                location: self.settings.home_location().get(),
+                // Weather-scoped (City + State/Prov), matching the weather tool.
+                location: self.settings.home_location().weather(),
                 // Background timer state (running/remaining/labels), ground truth for the
                 // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
                 timers: device_ctx.timers.clone(),
@@ -937,7 +938,7 @@ impl Pipeline {
             identity
         );
         if let Some(line) = location_line(
-            household.location.as_deref(),
+            household.address.weather_location().as_deref(),
             household.weather_units.as_deref(),
         ) {
             system_prompt.push_str("\n\n");
@@ -1848,7 +1849,11 @@ impl Pipeline {
         timing: &mut crate::memory::TurnTiming,
     ) -> Option<String> {
         let provider = self.weather.as_ref()?; // weather disabled → defer
-        let location = runtime.household.location.clone().unwrap_or_default();
+        let location = runtime
+            .household
+            .address
+            .weather_location()
+            .unwrap_or_default();
         if location.trim().is_empty() {
             log::debug!("system1 weather: no home location configured; deferring to System-2");
             return None;
@@ -2927,10 +2932,19 @@ mod personality_switch_tests {
     fn ignores_ordinary_speech_and_unknown_names() {
         let p = catalog();
         // Trigger but no known personality named.
-        assert_eq!(detect_personality_switch("switch to the kitchen light", &p), None);
+        assert_eq!(
+            detect_personality_switch("switch to the kitchen light", &p),
+            None
+        );
         // A known name but no switch trigger — must not fire.
-        assert_eq!(detect_personality_switch("is the gangster movie good?", &p), None);
+        assert_eq!(
+            detect_personality_switch("is the gangster movie good?", &p),
+            None
+        );
         // Plain speech.
-        assert_eq!(detect_personality_switch("what's the weather today?", &p), None);
+        assert_eq!(
+            detect_personality_switch("what's the weather today?", &p),
+            None
+        );
     }
 }
