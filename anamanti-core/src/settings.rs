@@ -181,8 +181,15 @@ pub struct HouseholdMember {
 /// editable from the config dashboard; the roster is dashboard-only.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Household {
-    /// The home's physical location (e.g. "Austin, Texas" or a street address).
-    /// `None`/blank = unset (the prompt omits the location line).
+    /// The home's physical location captured as discrete fields (Address 1/2, City,
+    /// State/Prov, Zip/Postal, Country). Directions + nearby-places use the full combined
+    /// address; weather + the prompt "here" line use only City + State/Prov. All-blank =
+    /// unset (the prompt omits the location line).
+    #[serde(default)]
+    pub address: crate::directions::HomeAddress,
+    /// **Legacy** single-line location from older config/persisted files that predate the
+    /// discrete-field split. Read-only compatibility: `sanitized()` migrates a present
+    /// value into `address.city` and clears this. New writes leave it `None`.
     #[serde(default)]
     pub location: Option<String>,
     /// Preferred measurement units ("imperial" / "metric"). `None` = model's choice.
@@ -207,15 +214,21 @@ impl Household {
             .find(|m| m.name.trim().eq_ignore_ascii_case(needle))
     }
 
-    /// True when nothing is configured — no location, units, or members.
+    /// True when nothing is configured — no address, units, or members. (Checks the
+    /// legacy single-line `location` too, since it may still hold a pre-migration value.)
     pub fn is_empty(&self) -> bool {
-        self.location.as_deref().is_none_or(str::is_empty)
+        self.address.is_empty()
+            && self.location.as_deref().is_none_or(str::is_empty)
             && self.weather_units.as_deref().is_none_or(str::is_empty)
             && self.members.is_empty()
     }
 
     /// A cleaned copy: strings trimmed, blanks dropped, and any member without a
-    /// name removed (so a half-filled form row never becomes a nameless entry).
+    /// name removed (so a half-filled form row never becomes a nameless entry). Also
+    /// **migrates the legacy** single-line `location`: when the discrete `address` is
+    /// empty but `location` is set, the value moves into `address.city` (which preserves
+    /// the old weather behavior of passing the whole string to the provider) and the
+    /// legacy field is cleared.
     pub fn sanitized(&self) -> Household {
         let clean_opt = |v: &Option<String>| {
             v.as_deref()
@@ -229,8 +242,16 @@ impl Household {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
         };
+        let mut address = self.address.sanitized();
+        let legacy = clean_opt(&self.location);
+        if address.is_empty() {
+            if let Some(loc) = legacy {
+                address.city = Some(loc);
+            }
+        }
         Household {
-            location: clean_opt(&self.location),
+            address,
+            location: None,
             weather_units: clean_opt(&self.weather_units),
             members: self
                 .members
@@ -722,7 +743,9 @@ impl Personality {
             .map(|d| d.key.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        Err(format!("unknown personality `{n}`; options: normal, {opts}"))
+        Err(format!(
+            "unknown personality `{n}`; options: normal, {opts}"
+        ))
     }
 }
 
@@ -1709,10 +1732,10 @@ impl SharedSettings {
     /// value that was stored.
     pub fn apply_household(&self, household: &Household) -> Household {
         let cleaned = household.sanitized();
-        // Point the directions tool's live default origin at the new home location.
-        // The factory's handle is the same cell every rebuilt backend's tool clones,
-        // so this takes effect immediately without rebuilding the LLM.
-        self.factory.home_location.set(cleaned.location.clone());
+        // Point the location-aware tools' live home address at the new value. The
+        // factory's handle is the same cell every rebuilt backend's tool clones, so this
+        // takes effect immediately without rebuilding the LLM.
+        self.factory.home_location.set(cleaned.address.clone());
         let mut w = self.inner.write().unwrap();
         w.household = cleaned.clone();
         let snapshot = self
@@ -1756,7 +1779,10 @@ impl SharedSettings {
     /// `name` is resolved against the live catalog ([`Personality::resolve`]): a match
     /// enables + selects it; "normal"/"off"/"none" disables. Persists. Returns the active
     /// label (`None` for normal) on success, or an error string listing the valid options.
-    pub fn set_active_personality(&self, name: &str) -> std::result::Result<Option<String>, String> {
+    pub fn set_active_personality(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<String>, String> {
         let mut w = self.inner.write().unwrap();
         let resolved = w.personality.resolve(name)?;
         match &resolved {
@@ -2887,7 +2913,13 @@ mod tests {
     #[test]
     fn household_sanitize_trims_and_drops_blanks_and_nameless() {
         let messy = Household {
-            location: Some("  Austin, Texas  ".into()),
+            address: crate::directions::HomeAddress {
+                address1: Some("  123 Main St  ".into()),
+                city: Some("  Austin  ".into()),
+                state: Some(" Texas ".into()),
+                ..Default::default()
+            },
+            location: None,
             weather_units: Some("   ".into()), // blank → cleared
             members: vec![
                 HouseholdMember {
@@ -2905,7 +2937,18 @@ mod tests {
             ],
         };
         let clean = messy.sanitized();
-        assert_eq!(clean.location.as_deref(), Some("Austin, Texas"));
+        assert_eq!(clean.address.address1.as_deref(), Some("123 Main St"));
+        assert_eq!(clean.address.city.as_deref(), Some("Austin"));
+        assert_eq!(clean.address.state.as_deref(), Some("Texas"));
+        assert_eq!(
+            clean.address.full_address().as_deref(),
+            Some("123 Main St, Austin, Texas")
+        );
+        assert_eq!(
+            clean.address.weather_location().as_deref(),
+            Some("Austin, Texas")
+        );
+        assert_eq!(clean.location, None);
         assert_eq!(clean.weather_units, None);
         assert_eq!(clean.members.len(), 1);
         assert_eq!(clean.members[0].name, "Alice");
@@ -2913,6 +2956,53 @@ mod tests {
         assert_eq!(clean.members[0].relationship.as_deref(), Some("parent"));
         assert!(!clean.is_empty());
         assert!(Household::default().is_empty());
+    }
+
+    #[test]
+    fn household_sanitize_migrates_legacy_location_into_city() {
+        // An old file / config seed carried a single-line `location` and no `address`.
+        let legacy = Household {
+            location: Some("  Austin, Texas  ".into()),
+            ..Default::default()
+        };
+        let clean = legacy.sanitized();
+        // Folds into City (preserving the old weather behavior) and clears the legacy field.
+        assert_eq!(clean.address.city.as_deref(), Some("Austin, Texas"));
+        assert_eq!(clean.location, None);
+        assert_eq!(
+            clean.address.weather_location().as_deref(),
+            Some("Austin, Texas")
+        );
+        assert_eq!(
+            clean.address.full_address().as_deref(),
+            Some("Austin, Texas")
+        );
+
+        // When the discrete address is set, the legacy value is ignored (not merged).
+        let both = Household {
+            address: crate::directions::HomeAddress {
+                city: Some("Boston".into()),
+                state: Some("MA".into()),
+                ..Default::default()
+            },
+            location: Some("Austin, Texas".into()),
+            ..Default::default()
+        };
+        let clean = both.sanitized();
+        assert_eq!(clean.address.city.as_deref(), Some("Boston"));
+        assert_eq!(clean.location, None);
+    }
+
+    #[test]
+    fn household_deserializes_legacy_location_json() {
+        // A persisted settings file written before the split stored `household.location`.
+        let h: Household =
+            serde_json::from_str(r#"{ "location": "Austin, Texas", "weather_units": "imperial" }"#)
+                .unwrap();
+        assert_eq!(h.location.as_deref(), Some("Austin, Texas"));
+        assert!(h.address.is_empty());
+        // After sanitize it migrates forward.
+        assert_eq!(h.sanitized().address.city.as_deref(), Some("Austin, Texas"));
     }
 
     #[test]
@@ -3095,7 +3185,12 @@ mod tests {
         );
 
         let stored = s.apply_household(&Household {
-            location: Some("Boston, MA".into()),
+            address: crate::directions::HomeAddress {
+                city: Some("Boston".into()),
+                state: Some("MA".into()),
+                ..Default::default()
+            },
+            location: None,
             weather_units: Some("imperial".into()),
             members: vec![HouseholdMember {
                 name: "Bob".into(),
@@ -3105,11 +3200,17 @@ mod tests {
             }],
         });
         assert_eq!(stored.members.len(), 1);
-        assert_eq!(s.household().location.as_deref(), Some("Boston, MA"));
+        assert_eq!(
+            s.household().address.weather_location().as_deref(),
+            Some("Boston, MA")
+        );
+        // The live handle reflects the edit for the location-aware tools.
+        assert_eq!(s.home_location().weather().as_deref(), Some("Boston, MA"));
 
         // It round-trips through the 0600 file so a restart keeps it.
         let p = load_persisted(&path).expect("settings file should exist");
-        assert_eq!(p.household.location.as_deref(), Some("Boston, MA"));
+        assert_eq!(p.household.address.city.as_deref(), Some("Boston"));
+        assert_eq!(p.household.address.state.as_deref(), Some("MA"));
         assert_eq!(p.household.weather_units.as_deref(), Some("imperial"));
         assert_eq!(p.household.members[0].name, "Bob");
         assert_eq!(p.household.members[0].emails, vec!["bob@example.com"]);

@@ -108,7 +108,7 @@ pub fn spawn_periodic(
         // A tiny initial delay lets the device dial its channel before the first push.
         tokio::time::sleep(Duration::from_secs(2)).await;
         loop {
-            match (home_location.get(), settings.current_weather_provider()) {
+            match (home_location.weather(), settings.current_weather_provider()) {
                 (Some(loc), Some(provider)) => match provider
                     .fetch(&loc, imperial, crate::weather::ForecastWhen::Now)
                     .await

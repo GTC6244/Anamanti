@@ -50,8 +50,7 @@ use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
     LlmEngine, Personality, PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings,
-    SpotifyUpdate, System1Update,
-    WeatherToolUpdate,
+    SpotifyUpdate, System1Update, WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -1151,7 +1150,7 @@ fn system1_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     }
 }
 
-/// `GET /household/status.json` — the canonical household record (home location +
+/// `GET /household/status.json` — the canonical household record (home address +
 /// units + roster). Contact details are shown so they can be edited on the page;
 /// this surface is loopback + unauthenticated by design (same as the rest).
 fn household_status_json(settings: &SharedSettings) -> String {
@@ -1170,15 +1169,22 @@ fn household_status_json(settings: &SharedSettings) -> String {
         .collect();
     json!({
         "ok": true,
-        "location": h.location,
+        "address": {
+            "address1": h.address.address1,
+            "address2": h.address.address2,
+            "city": h.address.city,
+            "state": h.address.state,
+            "postal": h.address.postal,
+            "country": h.address.country,
+        },
         "weather_units": h.weather_units,
         "members": members,
     })
     .to_string()
 }
 
-/// `POST /household/save` — replace the whole household record (location, units,
-/// roster). The value is sanitized on apply (trim, drop blanks / nameless members).
+/// `POST /household/save` — replace the whole household record (discrete address fields,
+/// units, roster). The value is sanitized on apply (trim, drop blanks / nameless members).
 fn household_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     let data: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -1216,8 +1222,18 @@ fn household_save_json(settings: &SharedSettings, body: &[u8]) -> String {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let addr = data.get("address");
+    let addr_field = |k: &str| opt_str(addr.and_then(|a| a.get(k)));
     let household = Household {
-        location: opt_str(data.get("location")),
+        address: crate::directions::HomeAddress {
+            address1: addr_field("address1"),
+            address2: addr_field("address2"),
+            city: addr_field("city"),
+            state: addr_field("state"),
+            postal: addr_field("postal"),
+            country: addr_field("country"),
+        },
+        location: None,
         weather_units: opt_str(data.get("weather_units")),
         members,
     };
@@ -1277,7 +1293,10 @@ fn personality_save_json(settings: &SharedSettings, body: &[u8]) -> String {
         })
         .unwrap_or_default();
     let personality = Personality {
-        enabled: data.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+        enabled: data
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         active: str_field(data.get("active")),
         definitions,
     };
@@ -2673,7 +2692,8 @@ mod tests {
     #[test]
     fn household_save_round_trips_through_the_route() {
         let s = settings();
-        let body = br#"{"location":"  Austin, TX  ","weather_units":"imperial",
+        let body = br#"{"address":{"address1":"  123 Main St ","address2":"","city":" Austin ",
+              "state":"TX","postal":"78701","country":"USA"},"weather_units":"imperial",
             "members":[
               {"name":" Alice ","emails":["alice@example.com"," "],"phones":["+1 555 0001"],"relationship":" parent "},
               {"name":"   ","emails":["ghost@example.com"]}
@@ -2682,8 +2702,12 @@ mod tests {
         assert_eq!(status, "200 OK");
         assert_eq!(ctype, "application/json");
         let v: Value = serde_json::from_slice(&out).unwrap();
-        // Location trimmed, the nameless member dropped, blank email dropped.
-        assert_eq!(v["location"], "Austin, TX");
+        // Address fields trimmed; blank address2 dropped to null.
+        assert_eq!(v["address"]["address1"], "123 Main St");
+        assert_eq!(v["address"]["address2"], Value::Null);
+        assert_eq!(v["address"]["city"], "Austin");
+        assert_eq!(v["address"]["state"], "TX");
+        assert_eq!(v["address"]["postal"], "78701");
         assert_eq!(v["weather_units"], "imperial");
         let members = v["members"].as_array().unwrap();
         assert_eq!(members.len(), 1);
@@ -2692,9 +2716,14 @@ mod tests {
         assert_eq!(members[0]["emails"].as_array().unwrap().len(), 1);
         assert_eq!(members[0]["relationship"], "parent");
 
-        // It landed in the live settings, so the per-turn prompt snapshot sees it.
+        // It landed in the live settings, so the per-turn prompt snapshot sees it:
+        // directions get the full combined address, weather gets City + State only.
         let h = s.household();
-        assert_eq!(h.location.as_deref(), Some("Austin, TX"));
+        assert_eq!(
+            h.address.full_address().as_deref(),
+            Some("123 Main St, Austin, TX 78701, USA")
+        );
+        assert_eq!(h.address.weather_location().as_deref(), Some("Austin, TX"));
         assert_eq!(h.members.len(), 1);
     }
 

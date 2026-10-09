@@ -2,9 +2,24 @@
 
 <div class="card">
   <h2>Home</h2>
-  <p class="desc">Grounds "here" for weather and nearby questions, and sets the units the assistant answers in.</p>
-  <label>Home location <span class="hint">e.g. "Austin, Texas" or a street address</span>
-    <input id="location" type="text" placeholder="(unset)" autocomplete="off">
+  <p class="desc">The home address, grounding "here" for weather and nearby questions. Driving directions use the full address; weather and the assistant's general "here" use only City + State/Prov. Leave fields blank if unknown.</p>
+  <label>Address 1 <span class="hint">street address, e.g. "123 Main St"</span>
+    <input id="address1" type="text" placeholder="(unset)" autocomplete="off">
+  </label>
+  <label>Address 2 <span class="hint">optional, e.g. "Apt 4"</span>
+    <input id="address2" type="text" placeholder="(unset)" autocomplete="off">
+  </label>
+  <label>City
+    <input id="city" type="text" placeholder="(unset)" autocomplete="off">
+  </label>
+  <label>State / Province
+    <input id="state" type="text" placeholder="(unset)" autocomplete="off">
+  </label>
+  <label>Zip / Postal code
+    <input id="postal" type="text" placeholder="(unset)" autocomplete="off">
+  </label>
+  <label>Country
+    <input id="country" type="text" placeholder="(unset)" autocomplete="off">
   </label>
   <label>Measurement units
     <select id="weather_units">
@@ -104,7 +119,13 @@
   async function load(){
     try{
       const j = await apiJSON('/household/status.json');
-      $('location').value = j.location || '';
+      const a = j.address || {};
+      $('address1').value = a.address1 || '';
+      $('address2').value = a.address2 || '';
+      $('city').value = a.city || '';
+      $('state').value = a.state || '';
+      $('postal').value = a.postal || '';
+      $('country').value = a.country || '';
       $('weather_units').value = j.weather_units || '';
       const box = $('members'); box.innerHTML = '';
       (j.members||[]).forEach(m => box.appendChild(memberRow(m)));
@@ -118,7 +139,14 @@
       phones: splitList(d.querySelector('.m-phones').value),
     })).filter(m => m.name);
     const body = {
-      location: $('location').value.trim() || null,
+      address: {
+        address1: $('address1').value.trim() || null,
+        address2: $('address2').value.trim() || null,
+        city: $('city').value.trim() || null,
+        state: $('state').value.trim() || null,
+        postal: $('postal').value.trim() || null,
+        country: $('country').value.trim() || null,
+      },
       weather_units: $('weather_units').value || null,
       members,
     };

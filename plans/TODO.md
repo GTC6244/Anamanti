@@ -459,7 +459,7 @@ actions".
       follow-up loop; a **route-only System-1 `place` intent** classifies then defers to
       System-2. Suites green (Core lib 320+places, device-rust 96, Flutter 107); clippy +
       `dart analyze` clean; FRB codegen clean. **Pending on-device QA** (§4 of the plan):
-      release APK, set `GOOGLE_PLACES_API_KEY` + a `home_location`, ask "what are the hours
+      release APK, set `GOOGLE_PLACES_API_KEY` + a `home_address`, ask "what are the hours
       for <cafe>" → card with photo + hours; confirm disambiguation and voice/touch close.
 - [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
       tool returns real distance, travel time, and **live traffic** between two places

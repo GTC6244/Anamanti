@@ -37,9 +37,7 @@ use rig_core::tool::PortableTool;
 
 use chrono::Local;
 
-use super::{
-    ActionSink, DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav, ReplyStream,
-};
+use super::{ActionSink, DeviceAction, FontDirection, LlmBackend, LlmTurn, RecipeNav, ReplyStream};
 use crate::appsaid::{OutgoingMessage, PhoneMessenger};
 use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
@@ -901,7 +899,7 @@ impl PortableTool for DirectionsLookup {
     fn description(&self) -> String {
         let home = self
             .home_location
-            .get()
+            .full()
             .map(|h| format!(" The origin defaults to the device's home ({h}) when omitted."))
             .unwrap_or_default();
         format!(
@@ -942,7 +940,7 @@ impl PortableTool for DirectionsLookup {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .or_else(|| self.home_location.get())
+            .or_else(|| self.home_location.full())
             .ok_or_else(|| {
                 DirectionsError(
                     "no starting point given and no home location is configured".to_string(),
@@ -1669,7 +1667,7 @@ impl WeatherLookup {
             .filter(|s| !s.is_empty());
         let is_home = explicit.is_none();
         let location = explicit
-            .or_else(|| self.home_location.get())
+            .or_else(|| self.home_location.weather())
             .context("no location was given and no home location is set")?;
         let when = crate::weather::resolve_when(args.when.as_deref(), Local::now())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1819,7 +1817,7 @@ impl PlacesLookup {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .context("no place to look up was given")?;
-        let bias = self.home_location.get();
+        let bias = self.home_location.full();
         let candidates = self
             .provider
             .search(&query, bias.as_deref())
@@ -2481,9 +2479,19 @@ impl LlmBackend for RigBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::directions::HomeAddress;
     use crate::llm::collect_reply;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// A `LiveHomeLocation` seeded from a single City string — convenient for the tool
+    /// fixtures, where the exact field split doesn't matter (full == City here).
+    fn home(city: &str) -> LiveHomeLocation {
+        LiveHomeLocation::new(HomeAddress {
+            city: Some(city.to_string()),
+            ..Default::default()
+        })
+    }
 
     /// A canned search provider so tool tests never touch the network.
     struct StaticSearch(&'static str);
@@ -2786,7 +2794,7 @@ mod tests {
         });
         let directions = DirectionsConfig {
             provider: provider.clone(),
-            home_location: LiveHomeLocation::new(Some("Home, Austin".to_string())),
+            home_location: home("Home, Austin"),
             imperial: true,
         };
         let tools = Some(Arc::new(Tools::new(
@@ -2856,7 +2864,7 @@ mod tests {
         let provider = Arc::new(StaticDirections {
             seen_origin: std::sync::Mutex::new(None),
         });
-        let home = LiveHomeLocation::new(Some("Austin, TX".to_string()));
+        let home = home("Austin, TX");
         let tool = DirectionsLookup::new(provider.clone(), home.clone(), true);
 
         tool.invoke(&json!({ "destination": "the airport" }))
@@ -2868,7 +2876,10 @@ mod tests {
         );
 
         // Edit the household location live — the next call uses the new origin.
-        home.set(Some("Boston, MA".to_string()));
+        home.set(HomeAddress {
+            city: Some("Boston, MA".to_string()),
+            ..Default::default()
+        });
         tool.invoke(&json!({ "destination": "the airport" }))
             .await
             .unwrap();
@@ -3264,11 +3275,7 @@ mod tests {
     }
 
     fn static_weather_tool() -> WeatherLookup {
-        WeatherLookup::new(
-            Arc::new(StaticWeather),
-            LiveHomeLocation::new(Some("Austin, TX".to_string())),
-            true,
-        )
+        WeatherLookup::new(Arc::new(StaticWeather), home("Austin, TX"), true)
     }
 
     #[tokio::test]
@@ -3318,12 +3325,18 @@ mod tests {
     fn adjust_font_emits_direction_action_and_confirms() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let out = adjust_font_invoke(&json!({ "action": "increase" }), Some(&tx)).unwrap();
-        assert_eq!(rx.try_recv().unwrap(), DeviceAction::AdjustFont(FontDirection::Increase));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::AdjustFont(FontDirection::Increase)
+        );
         assert!(out.to_lowercase().contains("bigger"));
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         adjust_font_invoke(&json!({ "action": "decrease" }), Some(&tx)).unwrap();
-        assert_eq!(rx.try_recv().unwrap(), DeviceAction::AdjustFont(FontDirection::Decrease));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::AdjustFont(FontDirection::Decrease)
+        );
     }
 
     #[test]

@@ -14,7 +14,14 @@
   "settings_path": "anamanti_settings.json",
   "audio_dump_dir": null,
   "system_prompt": null,
-  "home_location": "Austin, Texas",
+  "home_address": {
+    "address1": "",
+    "address2": "",
+    "city": "Austin",
+    "state": "Texas",
+    "postal": "",
+    "country": "USA"
+  },
   "weather_units": "imperial",
   "turn_timeout_secs": 30,
   "memory_backend": "helix",

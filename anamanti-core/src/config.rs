@@ -57,6 +57,27 @@ fn disable_sentinel(v: &str) -> Option<&str> {
     }
 }
 
+/// Resolve the boot-seed home address from the config file: prefer the structured
+/// `home_address` object; otherwise fold the legacy single-line `home_location` string
+/// into `city` (which preserves the old weather behavior of passing the whole string to
+/// the provider). Blank in → empty `HomeAddress`.
+fn resolve_home_address(
+    structured: Option<crate::directions::HomeAddress>,
+    legacy: Option<String>,
+) -> crate::directions::HomeAddress {
+    match structured.map(|a| a.sanitized()) {
+        Some(a) if !a.is_empty() => a,
+        _ => crate::directions::HomeAddress {
+            city: legacy
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            ..Default::default()
+        },
+    }
+}
+
 /// Default persona/system prompt: concise, speakable replies for an ambient
 /// display. Kept short because the reply is spoken aloud via Piper.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a friendly, concise voice assistant for a home \
@@ -113,13 +134,14 @@ pub struct Config {
     pub db_path: PathBuf,
     /// Base system prompt/persona.
     pub system_prompt: String,
-    /// The device's physical home location (e.g. "Austin, Texas"), injected into the
-    /// prompt so location-relative questions (weather, sunset, nearby places) resolve
-    /// an unqualified "here". `None` omits the location grounding. Set via the config
-    /// file's `home_location`.
-    pub home_location: Option<String>,
+    /// The device's physical home location as discrete fields (Address 1/2, City,
+    /// State/Prov, Zip/Postal, Country). Directions + nearby-places use the full combined
+    /// address; weather + the prompt's "here" grounding use only City + State/Prov. An
+    /// all-blank value omits the location grounding. Seeded from the config file's
+    /// `home_address` object (or the legacy single-line `home_location` string → City).
+    pub home_address: crate::directions::HomeAddress,
     /// Preferred measurement units for answers (e.g. "imperial" / "metric"), paired
-    /// with `home_location`. Set via the config file's `weather_units`.
+    /// with `home_address`. Set via the config file's `weather_units`.
     pub weather_units: Option<String>,
     /// Idle timeout for a stalled turn.
     pub turn_timeout: Duration,
@@ -666,7 +688,7 @@ impl Default for Config {
             },
             db_path: PathBuf::from("anamanti_memory.sqlite"),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            home_location: None,
+            home_address: crate::directions::HomeAddress::default(),
             weather_units: None,
             turn_timeout: Duration::from_secs(30),
             memory_backend: MemoryBackendChoice::Helix,
@@ -773,6 +795,12 @@ pub struct FileConfig {
     pub settings_path: Option<String>,
     pub audio_dump_dir: Option<PathBuf>,
     pub system_prompt: Option<String>,
+    /// Discrete home-address fields (Address 1/2, City, State/Prov, Zip/Postal, Country).
+    #[serde(default)]
+    pub home_address: Option<crate::directions::HomeAddress>,
+    /// **Legacy** single-line home location, kept for backward compatibility with config
+    /// files written before the discrete-field split. When `home_address` is absent, this
+    /// seeds `HomeAddress.city`.
     pub home_location: Option<String>,
     pub weather_units: Option<String>,
     pub turn_timeout_secs: Option<u64>,
@@ -1433,7 +1461,7 @@ impl Config {
             llm,
             db_path: fc.db_path.unwrap_or(d.db_path),
             system_prompt: nonempty(fc.system_prompt).unwrap_or(d.system_prompt),
-            home_location: nonempty(fc.home_location),
+            home_address: resolve_home_address(fc.home_address, fc.home_location),
             weather_units: nonempty(fc.weather_units),
             turn_timeout: fc
                 .turn_timeout_secs
@@ -1815,13 +1843,14 @@ impl Config {
     }
 
     /// The initial household + home information seeded from the config file
-    /// (`home_location` / `weather_units`). The member roster has no config form — it
+    /// (`home_address` / `weather_units`). The member roster has no config form — it
     /// is dashboard-only — so it starts empty. A persisted file overlays these at boot
-    /// (see [`Self::shared_settings`]), so a location edited on the config page wins
+    /// (see [`Self::shared_settings`]), so an address edited on the config page wins
     /// over the config-file seed.
     pub fn initial_household(&self) -> Household {
         Household {
-            location: self.home_location.clone(),
+            address: self.home_address.clone(),
+            location: None,
             weather_units: self.weather_units.clone(),
             members: Vec::new(),
         }
@@ -1910,8 +1939,8 @@ impl Config {
         // Google Drive photo config: config-file seed (client creds/folders), overlaid
         // by any persisted values below (the refresh token + page-set fields win).
         let mut drive = self.initial_drive();
-        // Household + home info: config-file seed (location/units from home_location /
-        // weather_units), overlaid by any persisted values below so a location fixed on
+        // Household + home info: config-file seed (address/units from home_address /
+        // weather_units), overlaid by any persisted values below so an address fixed on
         // the config page — and the dashboard-only member roster — win.
         let mut household = self.initial_household();
         // Spotify voice-control config: same seed-then-persist-overlay pattern.
@@ -2009,10 +2038,16 @@ impl Config {
                 drive.scope = p.drive.scope;
             }
             // Overlay persisted household onto the config-file seed: a persisted
-            // location / units wins (fixed on the config page), but keep the seed for
-            // any field the persisted file leaves empty so home_location still applies
-            // after an older file (no household) is loaded. The member roster is
-            // dashboard-only, so a persisted list always replaces the empty seed.
+            // address / units wins (fixed on the config page), but keep the seed for
+            // any field the persisted file leaves empty so the home address still applies
+            // after an older file (no household) is loaded. A persisted file written
+            // before the discrete-field split carries only the legacy single-line
+            // `location`; fold that in too (migrated to City by `sanitized()` below). The
+            // member roster is dashboard-only, so a persisted list always replaces the
+            // empty seed.
+            if !p.household.address.is_empty() {
+                household.address = p.household.address;
+            }
             if p.household.location.is_some() {
                 household.location = p.household.location;
             }
@@ -2081,11 +2116,15 @@ impl Config {
             personality = p.personality;
         }
 
-        // Seed the directions tool's live default origin from the resolved household
-        // location (config → household → this shared handle). The factory clone below
-        // shares the same cell, so the initial backend's tool — and every later
-        // rebuild — reads it; `apply_household` updates it on a config-page edit.
-        factory.home_location.set(household.location.clone());
+        // Sanitize the resolved household once: trims fields and **migrates** any legacy
+        // single-line `location` (from an older config/persisted file) into `address.city`
+        // so downstream only ever sees the discrete `address`.
+        let household = household.sanitized();
+        // Seed the location-aware tools' live home address from the resolved household
+        // (config → household → this shared handle). The factory clone below shares the
+        // same cell, so the initial backend's tools — and every later rebuild — read it;
+        // `apply_household` updates it on a config-page edit.
+        factory.home_location.set(household.address.clone());
         // Seed the shared token provider's override from the resolved subscription
         // token (env overlaid by persisted). The Arc is shared with every rebuilt
         // backend, so a token entered on the config page later takes effect in place.
@@ -2469,7 +2508,17 @@ mod tests {
         );
         assert_eq!(c.service_name, "Test Mac");
         assert_eq!(c.instance_id, "test-key");
-        assert_eq!(c.home_location.as_deref(), Some("Austin, Texas")); // trimmed
+        // Legacy single-line `home_location` folds into City (trimmed), so weather still
+        // resolves and the full address is the same string.
+        assert_eq!(c.home_address.city.as_deref(), Some("Austin, Texas"));
+        assert_eq!(
+            c.home_address.weather_location().as_deref(),
+            Some("Austin, Texas")
+        );
+        assert_eq!(
+            c.home_address.full_address().as_deref(),
+            Some("Austin, Texas")
+        );
         assert_eq!(c.weather_units.as_deref(), Some("imperial"));
         assert_eq!(c.turn_timeout, Duration::from_secs(45));
         assert_eq!(c.memory_backend, MemoryBackendChoice::Sqlite);

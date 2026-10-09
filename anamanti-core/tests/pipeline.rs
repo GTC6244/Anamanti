@@ -1188,7 +1188,12 @@ async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
 
     // The weather fast path needs a home location; set it on the live settings.
     let hh = Household {
-        location: Some("Austin, Texas".to_string()),
+        address: anamanti_core::directions::HomeAddress {
+            city: Some("Austin".to_string()),
+            state: Some("Texas".to_string()),
+            ..Default::default()
+        },
+        location: None,
         weather_units: Some("imperial".to_string()),
         members: Vec::new(),
     };
