@@ -1594,6 +1594,8 @@ impl Config {
                 program: bin("snapserver"),
                 args: vec!["-c".into(), m.snapserver_conf.display().to_string()],
                 log_path: log("ambient-snapserver.log"),
+                // Guarded by the "already reachable" check in start_all; no reap.
+                reap_pattern: None,
             },
         );
         specs.insert(
@@ -1611,8 +1613,20 @@ impl Config {
                     "320".into(),
                     "--initial-volume".into(),
                     "100".into(),
+                    // Persist the Spotify account session across restarts: the
+                    // one-time Connect hand-off authenticates this device, and the
+                    // cached credentials let it re-authenticate on every respawn so
+                    // it keeps appearing in the Web API device list that
+                    // `spotify_control` targets. `--disable-audio-cache` keeps only
+                    // the credentials/volume cache (no on-disk audio files).
+                    "--cache".into(),
+                    m.run_dir.join("librespot-cache").display().to_string(),
+                    "--disable-audio-cache".into(),
                 ],
                 log_path: log("ambient-librespot.log"),
+                // Reap any orphaned librespot for this device name before spawning
+                // (specific enough it can't match the Core or an unrelated proc).
+                reap_pattern: Some(format!("librespot --name {}", m.spotify_device_name)),
             },
         );
         specs.insert(
@@ -1631,6 +1645,8 @@ impl Config {
                     "--audio-format=s16".into(),
                 ],
                 log_path: log("ambient-mpv-web.log"),
+                // Reap any orphaned mpv bound to this IPC socket before spawning.
+                reap_pattern: Some(format!("input-ipc-server={}", mpv_ipc.display())),
             },
         );
         Some(Arc::new(MusicSupervisor::new(specs)))
