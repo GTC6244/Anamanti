@@ -63,7 +63,11 @@
     "model_dir": "models",
     "model_path": null,
     "language": "en",
-    "num_threads": 0
+    "num_threads": 0,
+    "elevenlabs": {
+      "model_id": "scribe_v2_realtime",
+      "base_url": "wss://api.elevenlabs.io"
+    }
   },
 
   "vad": {

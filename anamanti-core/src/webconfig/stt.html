@@ -1,0 +1,113 @@
+<p class="sub">Choose the speech-to-text engine that transcribes each turn. Changes apply live — the next turn uses the new engine, no restart. The Core's VAD still decides end-of-speech for every engine.</p>
+
+<div class="card">
+  <h2>STT engine</h2>
+  <p class="desc">
+    <b>Wyoming</b> dials the external <code>wyoming-faster-whisper</code> server (LAN).
+    <b>whisper-rs</b> runs whisper.cpp in-process (needs the <code>stt-whisper-local</code> build feature and a model file on disk).
+    <b>ElevenLabs</b> streams to the Scribe v2 Realtime API over WebSocket (needs an API key + internet).
+  </p>
+  <p class="desc" id="statusline">Loading…</p>
+
+  <label>Engine
+    <select id="engine">
+      <option value="wyoming">Wyoming (external faster-whisper, LAN)</option>
+      <option value="whisper-rs">whisper-rs (in-process whisper.cpp)</option>
+      <option value="elevenlabs">ElevenLabs Scribe v2 Realtime (cloud)</option>
+    </select>
+  </label>
+  <p class="desc" id="whisper_note"></p>
+
+  <div class="card-actions">
+    <div id="status" class="status"></div>
+    <button id="save" class="primary">Save engine</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>ElevenLabs</h2>
+  <p class="desc">Used only when the engine is <b>ElevenLabs</b>. Get a key at elevenlabs.io. The key is stored on the Core (0600) and never shown back. First STT engine that needs the internet — keep a local engine configured as a fallback.</p>
+
+  <label>API key <span class="hint" id="el_key_state"></span>
+    <input id="el_key" type="password" placeholder="(leave blank to keep current)" autocomplete="off">
+  </label>
+
+  <label>Model id
+    <input id="el_model" type="text" placeholder="scribe_v2_realtime" autocomplete="off">
+  </label>
+
+  <label>WebSocket base URL
+    <input id="el_base" type="text" placeholder="wss://api.elevenlabs.io" autocomplete="off">
+  </label>
+
+  <div class="card-actions">
+    <div id="el_status" class="status"></div>
+    <button id="el_clear">Clear key</button>
+    <button id="el_save" class="primary">Save ElevenLabs</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+
+  const statusEl = $('status');
+  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
+  const elStatusEl = $('el_status');
+  function elShow(ok, msg){ elStatusEl.textContent = msg; elStatusEl.className = 'status ' + (ok?'ok':'err'); }
+
+  function engineLabel(e){
+    if(e === 'whisper-rs') return 'whisper-rs (in-process)';
+    if(e === 'elevenlabs') return 'ElevenLabs Scribe v2 Realtime';
+    return 'Wyoming (external faster-whisper)';
+  }
+
+  async function load(){
+    try{
+      const j = await apiJSON('/stt/status.json');
+      $('engine').value = j.engine;
+      // Disable whisper-rs when it isn't available (feature off or model missing).
+      const wOpt = $('engine').querySelector('option[value="whisper-rs"]');
+      wOpt.disabled = !j.whisper_available;
+      $('whisper_note').textContent = j.whisper_available
+        ? ''
+        : 'whisper-rs is unavailable in this build (needs the stt-whisper-local feature + a model file on disk).';
+      let line = 'active engine: ' + engineLabel(j.engine);
+      if(j.engine === 'elevenlabs' && !j.elevenlabs_key_set){
+        line += ' — ⚠ no API key set; turns fall back to Wyoming until you add one';
+      }
+      $('statusline').textContent = line;
+      $('el_key_state').textContent = j.elevenlabs_key_set ? '(a key is set)' : '(no key set)';
+      $('el_key').value = '';
+      $('el_model').value = j.elevenlabs_model_id || '';
+      $('el_base').value = j.elevenlabs_base_url || '';
+    }catch(e){ show(false, 'Could not load status: ' + e); }
+  }
+
+  async function saveEngine(){
+    const body = { engine: $('engine').value };
+    try{
+      const j = await apiJSON('/stt/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved — applies on the next turn.'); }
+      load();
+    }catch(e){ show(false, 'Request failed: ' + e); }
+  }
+
+  async function saveElevenLabs(clear){
+    const body = {};
+    const m = $('el_model').value.trim(); if(m) body.elevenlabs_model_id = m;
+    const b = $('el_base').value.trim(); if(b) body.elevenlabs_base_url = b;
+    if(clear){ body.clear = true; }
+    else { const k = $('el_key').value.trim(); if(k) body.elevenlabs_api_key = k; }
+    try{
+      const j = await apiJSON('/stt/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(j.ok === false){ elShow(false, j.message || 'Rejected.'); } else { elShow(true, 'Saved.'); }
+      load();
+    }catch(e){ elShow(false, 'Request failed: ' + e); }
+  }
+
+  $('save').addEventListener('click', saveEngine);
+  $('el_save').addEventListener('click', () => saveElevenLabs(false));
+  $('el_clear').addEventListener('click', () => saveElevenLabs(true));
+  load();
+</script>

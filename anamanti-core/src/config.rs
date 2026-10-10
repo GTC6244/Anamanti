@@ -263,16 +263,31 @@ pub enum SttEngineKind {
     /// In-process whisper.cpp via `whisper-rs` (requires the `stt-whisper-local`
     /// build feature).
     WhisperLocal,
+    /// ElevenLabs Scribe v2 Realtime over WebSocket (always compiled; requires the
+    /// `ELEVENLABS_API_KEY` secret + network). See `plans/ElevenLabsSttPlan.md`.
+    ElevenLabs,
 }
 
 impl SttEngineKind {
     /// Parse the config label. `wyoming` (or `faster-whisper`) → the downstream
-    /// server; `whisper-rs` / `whisper-local` / `local` → in-process.
+    /// server; `whisper-rs` / `whisper-local` / `local` → in-process;
+    /// `elevenlabs` / `eleven-labs` / `11labs` → ElevenLabs realtime.
     pub fn from_label(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "wyoming" | "faster-whisper" | "whisper-wyoming" => Some(Self::Wyoming),
             "whisper-rs" | "whisper-local" | "whisper_local" | "local" => Some(Self::WhisperLocal),
+            "elevenlabs" | "eleven-labs" | "eleven_labs" | "11labs" => Some(Self::ElevenLabs),
             _ => None,
+        }
+    }
+
+    /// The canonical label (round-trips with [`from_label`](Self::from_label)); used to
+    /// persist the selection and report it to the config page.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Wyoming => "wyoming",
+            Self::WhisperLocal => "whisper-rs",
+            Self::ElevenLabs => "elevenlabs",
         }
     }
 }
@@ -282,7 +297,7 @@ impl SttEngineKind {
 /// top-level `stt_addr` (used when `engine = wyoming`).
 #[derive(Debug, Clone)]
 pub struct SttConfig {
-    /// Which engine transcribes (`wyoming` default, or `whisper-rs`).
+    /// Which engine transcribes (`wyoming` default, `whisper-rs`, or `elevenlabs`).
     pub engine: SttEngineKind,
     /// Named model size for the in-process engine: `base` (default) or `small`,
     /// resolved to `<model_dir>/ggml-<model>.en.bin` unless `model_path` overrides.
@@ -291,10 +306,33 @@ pub struct SttConfig {
     pub model_dir: PathBuf,
     /// Explicit ggml model file; overrides `model`/`model_dir` when set.
     pub model_path: Option<PathBuf>,
-    /// Decode language (`Some("en")`); `None` ⇒ auto-detect.
+    /// Decode language (`Some("en")`); `None` ⇒ auto-detect. Shared by the in-process
+    /// Whisper engine and the ElevenLabs engine (passed as `language_code`).
     pub language: Option<String>,
     /// Decode thread cap; `0` ⇒ a sensible default from host parallelism.
     pub num_threads: u32,
+    /// ElevenLabs realtime settings (used only when `engine = elevenlabs`).
+    pub elevenlabs: ElevenLabsSttConfig,
+}
+
+/// ElevenLabs Scribe v2 Realtime settings (`stt.elevenlabs` block). The API key is a
+/// **secret** and never lives here — it comes from `ELEVENLABS_API_KEY`.
+#[derive(Debug, Clone)]
+pub struct ElevenLabsSttConfig {
+    /// Model id; only `scribe_v2_realtime` is accepted by this endpoint today.
+    pub model_id: String,
+    /// WebSocket host base, e.g. `wss://api.elevenlabs.io` (regional residency hosts
+    /// like `wss://api.eu.residency.elevenlabs.io` also exist).
+    pub base_url: String,
+}
+
+impl Default for ElevenLabsSttConfig {
+    fn default() -> Self {
+        Self {
+            model_id: crate::stt::elevenlabs::DEFAULT_MODEL_ID.to_string(),
+            base_url: crate::stt::elevenlabs::DEFAULT_BASE_URL.to_string(),
+        }
+    }
 }
 
 impl SttConfig {
@@ -316,6 +354,7 @@ impl Default for SttConfig {
             model_path: None,
             language: Some("en".to_string()),
             num_threads: 0,
+            elevenlabs: ElevenLabsSttConfig::default(),
         }
     }
 }
@@ -919,6 +958,15 @@ pub struct FileStt {
     pub model_path: Option<PathBuf>,
     pub language: Option<String>,
     pub num_threads: Option<u32>,
+    #[serde(default)]
+    pub elevenlabs: FileElevenLabsStt,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileElevenLabsStt {
+    pub model_id: Option<String>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1245,7 +1293,9 @@ impl Config {
             engine: match fc.stt.engine.as_deref() {
                 None => sttd.engine,
                 Some(label) => SttEngineKind::from_label(label).with_context(|| {
-                    format!("unknown stt.engine {label:?} (expected `wyoming` or `whisper-rs`)")
+                    format!(
+                        "unknown stt.engine {label:?} (expected `wyoming`, `whisper-rs`, or `elevenlabs`)"
+                    )
                 })?,
             },
             model: nonempty(fc.stt.model).unwrap_or(sttd.model),
@@ -1259,6 +1309,12 @@ impl Config {
                 Some(s) => Some(s),
             },
             num_threads: fc.stt.num_threads.unwrap_or(sttd.num_threads),
+            elevenlabs: ElevenLabsSttConfig {
+                model_id: nonempty(fc.stt.elevenlabs.model_id)
+                    .unwrap_or(sttd.elevenlabs.model_id),
+                base_url: nonempty(fc.stt.elevenlabs.base_url)
+                    .unwrap_or(sttd.elevenlabs.base_url),
+            },
         };
 
         let vadd = VadConfig::default();
@@ -1677,6 +1733,49 @@ impl Config {
         })
     }
 
+    /// Load the in-process whisper.cpp engine for a **live-swappable** STT setup, or
+    /// `Ok(None)` when it isn't available. Mirroring the Silero model preload, this is
+    /// called at boot **regardless of the selected engine** so a later config-page swap
+    /// to `whisper-rs` works without a restart: the model is loaded once and held on the
+    /// pipeline (`Pipeline::with_whisper_engine`), and the per-turn
+    /// `build_stt_transcriber` picks it when the live selection is `whisper-rs`. Returns
+    /// `None` when the `stt-whisper-local` feature is off or the model file is absent (a
+    /// later swap to `whisper-rs` then falls back to Wyoming with a warning, like VAD).
+    /// The `wyoming` and `elevenlabs` engines need no boot resource (Wyoming dials the
+    /// connector per turn; ElevenLabs opens its WebSocket per turn from the live
+    /// snapshot). See `plans/ElevenLabsSttPlan.md`.
+    pub fn build_whisper_engine(&self) -> Result<Option<Arc<dyn crate::stt::SttEngine>>> {
+        #[cfg(feature = "stt-whisper-local")]
+        {
+            let model = self.stt.resolved_model_path();
+            if !model.exists() {
+                log::info!(
+                    "in-process whisper model {} not present; whisper-rs STT unavailable \
+                     (wyoming/elevenlabs still selectable)",
+                    model.display()
+                );
+                return Ok(None);
+            }
+            let model_str = model.to_string_lossy().into_owned();
+            let engine = crate::stt::WhisperEngine::open(
+                &model_str,
+                self.stt.language.clone(),
+                self.stt.num_threads as i32,
+            )
+            .with_context(|| format!("loading in-process Whisper model {model_str}"))?;
+            log::info!(
+                "in-process whisper engine loaded (model {model_str}, {} threads); \
+                 live-swappable",
+                self.stt.num_threads
+            );
+            Ok(Some(Arc::new(crate::stt::WhisperSttEngine::new(engine))))
+        }
+        #[cfg(not(feature = "stt-whisper-local"))]
+        {
+            Ok(None)
+        }
+    }
+
     /// The inputs a runtime backend swap (Phase 6) needs, captured from the config
     /// once so a later swap never re-reads anything. The provider API keys read here
     /// (still from the environment, since they're secrets) are only the **boot seed**:
@@ -1936,6 +2035,15 @@ impl Config {
         let mut silero_threshold = self.vad.silero.threshold;
         // VAD engine selection: config-file seed (`vad.engine`), overlaid by persisted.
         let mut vad_engine = self.vad.engine;
+        // STT engine selection + ElevenLabs config: config-file seed (`stt.*`), overlaid
+        // by persisted values below. The ElevenLabs API key is an env secret seed (like
+        // the other provider keys), overlaid by any persisted value.
+        let mut stt_engine = self.stt.engine;
+        let mut stt_el_model = self.stt.elevenlabs.model_id.clone();
+        let mut stt_el_base = self.stt.elevenlabs.base_url.clone();
+        let mut stt_el_key = env::var("ELEVENLABS_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         // Google Drive photo config: config-file seed (client creds/folders), overlaid
         // by any persisted values below (the refresh token + page-set fields win).
         let mut drive = self.initial_drive();
@@ -2017,6 +2125,22 @@ impl Config {
                 if let Some(e) = VadEngineKind::from_label(label) {
                     vad_engine = e;
                 }
+            }
+            // STT selection: overlay only when the persisted file carries a real label
+            // (older files leave it absent → keep the config-file `stt.engine` seed).
+            if let Some(label) = p.stt_engine.as_deref().filter(|s| !s.trim().is_empty()) {
+                if let Some(e) = SttEngineKind::from_label(label) {
+                    stt_engine = e;
+                }
+            }
+            if let Some(m) = p.stt_elevenlabs_model_id.filter(|s| !s.trim().is_empty()) {
+                stt_el_model = m;
+            }
+            if let Some(b) = p.stt_elevenlabs_base_url.filter(|s| !s.trim().is_empty()) {
+                stt_el_base = b;
+            }
+            if p.stt_elevenlabs_api_key.is_some() {
+                stt_el_key = p.stt_elevenlabs_api_key.filter(|s| !s.is_empty());
             }
             // Overlay persisted Drive fields onto the config-file seed: a persisted
             // value wins (refresh token, page-set creds/folders), but keep the seed for
@@ -2115,6 +2239,13 @@ impl Config {
             // persisted value always wins when present.
             personality = p.personality;
         }
+
+        // Whether the in-process whisper engine can be selected live: the feature must be
+        // compiled in and the ggml model present on disk (it is loaded at boot regardless
+        // of the seeded engine, mirroring Silero). Reported to the config page so it can
+        // disable the `whisper-rs` option when unavailable.
+        let whisper_available =
+            cfg!(feature = "stt-whisper-local") && self.stt.resolved_model_path().exists();
 
         // Sanitize the resolved household once: trims fields and **migrates** any legacy
         // single-line `location` (from an older config/persisted file) into `address.city`
@@ -2215,6 +2346,14 @@ impl Config {
                 voice_rms_threshold,
                 silero_threshold,
                 vad_engine,
+                stt: crate::settings::SttRuntime {
+                    engine: stt_engine,
+                    elevenlabs_model_id: stt_el_model,
+                    elevenlabs_base_url: stt_el_base,
+                    elevenlabs_api_key: stt_el_key,
+                    language: self.stt.language.clone(),
+                    whisper_available,
+                },
                 drive,
                 household,
                 spotify,

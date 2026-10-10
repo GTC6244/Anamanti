@@ -156,11 +156,15 @@ pub struct Pipeline {
     /// shared with the ambient push. `None` when weather is disabled — the weather
     /// intent then defers to System-2. Set via `with_weather`.
     weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
-    /// STT engine used to transcribe each turn. `None` keeps the historical path:
-    /// dial the downstream Wyoming Whisper server via the per-turn
-    /// [`ServiceConnector`]. `Some` (e.g. the in-process whisper.cpp engine) supplies
-    /// a session directly and the connector's `connect_stt` is never called.
-    stt_engine: Option<Arc<dyn SttEngine>>,
+    /// Pre-loaded in-process whisper.cpp STT engine. Loaded once at boot via
+    /// [`with_whisper_engine`](Self::with_whisper_engine) whenever the
+    /// `stt-whisper-local` feature is compiled and the model file is present —
+    /// **regardless of the boot STT selection**, so a config-page swap to `whisper-rs`
+    /// takes effect live (mirrors the `silero` model-preload pattern). `None` when the
+    /// feature is off or the model is missing. The live engine selection is read
+    /// per-turn from the settings snapshot (`runtime.stt.engine`) in
+    /// [`build_stt_transcriber`](Self::build_stt_transcriber).
+    whisper_engine: Option<Arc<dyn SttEngine>>,
     /// Shared, pre-loaded Silero VAD model (feature `vad-silero`). `Some` selects the
     /// neural gate for every turn; `None` keeps the energy gate. Loaded once at boot
     /// (`with_silero`) and cloned into each per-turn [`crate::vad::SileroGate`].
@@ -191,7 +195,7 @@ impl Pipeline {
             turn_timeout,
             follow_up: FollowUpConfig::default(),
             weather: None,
-            stt_engine: None,
+            whisper_engine: None,
             #[cfg(feature = "vad-silero")]
             silero: None,
         }
@@ -269,11 +273,12 @@ impl Pipeline {
         self
     }
 
-    /// Attach an in-process STT engine (e.g. whisper.cpp). Without this the pipeline
-    /// dials the downstream Wyoming Whisper server via the per-turn
-    /// [`ServiceConnector`] (the historical default).
-    pub fn with_stt_engine(mut self, engine: Arc<dyn SttEngine>) -> Self {
-        self.stt_engine = Some(engine);
+    /// Attach the pre-loaded in-process whisper.cpp engine. Loaded once at boot
+    /// (whenever the feature + model are available, regardless of the boot selection),
+    /// it is used for any turn whose live STT selection is `whisper-rs`. See the
+    /// `whisper_engine` field doc.
+    pub fn with_whisper_engine(mut self, engine: Arc<dyn SttEngine>) -> Self {
+        self.whisper_engine = Some(engine);
         self
     }
 
@@ -369,16 +374,12 @@ impl Pipeline {
 
         // 2. Open the STT stream and pump device PCM into it until the transcript.
         //    The concrete engine sits behind the `Transcriber` seam
-        //    (`plans/python-to-rust-whisper.md`): an attached in-process engine (e.g.
-        //    whisper.cpp) supplies a session directly; otherwise dial the downstream
-        //    Wyoming Whisper server via the connector (the historical default).
-        let mut stt: Box<dyn Transcriber> = match self.stt_engine.as_ref() {
-            Some(engine) => engine.begin(format).await?,
-            None => {
-                let stt_conn = connector.connect_stt().await?;
-                Box::new(WyomingTranscriber::begin(stt_conn, format).await?)
-            }
-        };
+        //    (`plans/python-to-rust-whisper.md`, `plans/ElevenLabsSttPlan.md`) and is
+        //    chosen live from the per-turn snapshot (`runtime.stt.engine`), so a
+        //    config-page swap takes effect between turns — mirroring the VAD gate.
+        let mut stt: Box<dyn Transcriber> = self
+            .build_stt_transcriber(&runtime, format, connector)
+            .await?;
         on_event(TurnEvent::Streaming);
 
         let end_silence = Duration::from_millis(runtime.end_silence_ms);
@@ -520,6 +521,53 @@ impl Pipeline {
             );
         }
         Box::new(crate::vad::EnergyGate::new(runtime.voice_rms_threshold))
+    }
+
+    /// Build this turn's [`Transcriber`] from the live STT selection
+    /// (`runtime.stt.engine`), so a config-page swap takes effect between turns with no
+    /// restart. `wyoming` dials the downstream Whisper server via the connector (the
+    /// historical default); `whisper-rs` uses the boot-loaded in-process engine;
+    /// `elevenlabs` opens a fresh realtime WebSocket from the snapshot's connection
+    /// config + key. An unavailable selection (whisper-rs with no engine loaded, or
+    /// elevenlabs with no key) warns and falls back to the Wyoming path — mirroring the
+    /// VAD gate's graceful fallback. See `plans/ElevenLabsSttPlan.md`.
+    async fn build_stt_transcriber(
+        &self,
+        runtime: &crate::settings::RuntimeSettings,
+        format: AudioFormat,
+        connector: &dyn ServiceConnector,
+    ) -> Result<Box<dyn Transcriber>> {
+        use crate::config::SttEngineKind;
+        match runtime.stt.engine {
+            SttEngineKind::WhisperLocal => {
+                if let Some(engine) = self.whisper_engine.as_ref() {
+                    return engine.begin(format).await;
+                }
+                log::warn!(
+                    "stt.engine=whisper-rs but no in-process engine is loaded (feature off \
+                     or model missing); falling back to the Wyoming STT path"
+                );
+            }
+            SttEngineKind::ElevenLabs => match runtime.stt.elevenlabs_api_key.as_deref() {
+                Some(key) if !key.is_empty() => {
+                    let engine = crate::stt::ElevenLabsEngine::new(
+                        runtime.stt.elevenlabs_base_url.clone(),
+                        key.to_string(),
+                        runtime.stt.elevenlabs_model_id.clone(),
+                        runtime.stt.language.clone(),
+                    );
+                    return engine.begin(format).await;
+                }
+                _ => log::warn!(
+                    "stt.engine=elevenlabs but no ELEVENLABS_API_KEY is set; falling back to \
+                     the Wyoming STT path"
+                ),
+            },
+            SttEngineKind::Wyoming => {}
+        }
+        // Wyoming (the default), or a graceful fallback from an unavailable selection.
+        let stt_conn = connector.connect_stt().await?;
+        Ok(Box::new(WyomingTranscriber::begin(stt_conn, format).await?))
     }
 
     /// Pump loop: forward device `audio-chunk`s to STT, detect end-of-speech, and

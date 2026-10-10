@@ -794,6 +794,20 @@ pub struct PersistedSettings {
     /// the config-file `vad.engine` seed.
     #[serde(default)]
     pub vad_engine: Option<String>,
+    /// STT engine label (`wyoming`/`whisper-rs`/`elevenlabs`). `Option` so an older file
+    /// (absent) keeps the config-file `stt.engine` seed (overlay only when non-empty).
+    #[serde(default)]
+    pub stt_engine: Option<String>,
+    /// Runtime-set ElevenLabs realtime model id. Defaulted (absent) for older files.
+    #[serde(default)]
+    pub stt_elevenlabs_model_id: Option<String>,
+    /// Runtime-set ElevenLabs WebSocket host base. Defaulted (absent) for older files.
+    #[serde(default)]
+    pub stt_elevenlabs_base_url: Option<String>,
+    /// Runtime-set ElevenLabs API key. Defaulted (absent) for older files, which then
+    /// fall back to the `ELEVENLABS_API_KEY` env seed. Plaintext (0600 file).
+    #[serde(default)]
+    pub stt_elevenlabs_api_key: Option<String>,
     /// Google Drive photo-slideshow credentials + linkage. Defaulted (empty) for
     /// older files.
     #[serde(default)]
@@ -1170,6 +1184,9 @@ pub struct RuntimeSettings {
     /// Which VAD engine decides end-of-speech (energy default, or silero). Live-swappable
     /// from the config page; a swap to silero with no model loaded falls back to energy.
     pub vad_engine: crate::config::VadEngineKind,
+    /// The live STT engine selection + ElevenLabs config/key, read per-turn so a
+    /// config-page swap takes effect between turns (see [`SttRuntime`]).
+    pub stt: SttRuntime,
     /// Google Drive photo-slideshow credentials + linkage (orchestrator-owned;
     /// pulled by the device over Wyoming). Orthogonal to the LLM rebuild path.
     pub drive: DriveConfig,
@@ -1276,6 +1293,68 @@ pub struct System1Update {
     pub min_confidence: Option<f64>,
     pub openrouter_api_key: Option<Option<String>>,
     pub intents: Option<Vec<String>>,
+}
+
+/// The live STT engine selection + ElevenLabs connection config, read per-turn from the
+/// snapshot (`orchestrator::Pipeline::build_stt_transcriber`) so a config-page swap takes
+/// effect between turns. Bundled into one field so the widely-constructed
+/// [`RuntimeSettings`] only gains one. The in-process whisper model itself is loaded once
+/// at boot and held on the pipeline (like Silero); this only picks which engine a turn
+/// uses and carries the ElevenLabs settings/key. See `plans/ElevenLabsSttPlan.md`.
+#[derive(Debug, Clone)]
+pub struct SttRuntime {
+    /// Which engine transcribes (`wyoming` / `whisper-rs` / `elevenlabs`).
+    pub engine: crate::config::SttEngineKind,
+    /// ElevenLabs realtime model id (used only when `engine = elevenlabs`).
+    pub elevenlabs_model_id: String,
+    /// ElevenLabs WebSocket host base (used only when `engine = elevenlabs`).
+    pub elevenlabs_base_url: String,
+    /// Live ElevenLabs API key (secret). Runtime-settable (config page); seeded from
+    /// `ELEVENLABS_API_KEY` at boot. `None` ⇒ selecting `elevenlabs` falls back to Wyoming.
+    pub elevenlabs_api_key: Option<String>,
+    /// Decode language (ISO 639) passed to the ElevenLabs engine; `None` ⇒ auto-detect.
+    /// Seeded from `stt.language`; not exposed on the config page.
+    pub language: Option<String>,
+    /// Whether the in-process whisper engine is available (feature compiled + model file
+    /// present at boot). Read-only info for the config page; never changed by a swap.
+    pub whisper_available: bool,
+}
+
+impl Default for SttRuntime {
+    fn default() -> Self {
+        Self {
+            engine: crate::config::SttEngineKind::Wyoming,
+            elevenlabs_model_id: crate::stt::elevenlabs::DEFAULT_MODEL_ID.to_string(),
+            elevenlabs_base_url: crate::stt::elevenlabs::DEFAULT_BASE_URL.to_string(),
+            elevenlabs_api_key: None,
+            language: None,
+            whisper_available: false,
+        }
+    }
+}
+
+/// Config-page view of the STT selection. Never exposes the ElevenLabs key (only
+/// whether one is set).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SttView {
+    /// Current engine label (`wyoming` / `whisper-rs` / `elevenlabs`).
+    pub engine: String,
+    pub elevenlabs_model_id: String,
+    pub elevenlabs_base_url: String,
+    /// Whether an ElevenLabs API key is configured (env or runtime).
+    pub elevenlabs_key_set: bool,
+    /// Whether `whisper-rs` can be selected (feature compiled + model present).
+    pub whisper_available: bool,
+}
+
+/// A requested STT change (config page). Absent fields are left unchanged; the API key
+/// is tri-state (`None` = keep, `Some(None)` = clear, `Some(Some(v))` = set).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SttUpdate {
+    pub engine: Option<String>,
+    pub elevenlabs_model_id: Option<String>,
+    pub elevenlabs_base_url: Option<String>,
+    pub elevenlabs_api_key: Option<Option<String>>,
 }
 
 /// A description of the settings currently in effect, for reporting back to the
@@ -1397,6 +1476,10 @@ impl SharedSettings {
             voice_rms_threshold: s.voice_rms_threshold,
             silero_threshold: Some(s.silero_threshold),
             vad_engine: Some(s.vad_engine.as_label().to_string()),
+            stt_engine: Some(s.stt.engine.as_label().to_string()),
+            stt_elevenlabs_model_id: Some(s.stt.elevenlabs_model_id.clone()),
+            stt_elevenlabs_base_url: Some(s.stt.elevenlabs_base_url.clone()),
+            stt_elevenlabs_api_key: s.stt.elevenlabs_api_key.clone(),
             drive: s.drive.clone(),
             household: s.household.clone(),
             spotify: s.spotify.clone(),
@@ -1465,6 +1548,7 @@ impl SharedSettings {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -1889,6 +1973,69 @@ impl SharedSettings {
                 .as_deref()
                 .is_some_and(|k| !k.is_empty()),
             intents: w.system1.intents.clone(),
+        };
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        Ok(view)
+    }
+
+    /// The live STT selection, for the config page. Never exposes the ElevenLabs key.
+    pub fn stt_view(&self) -> SttView {
+        let s = self.inner.read().unwrap();
+        SttView {
+            engine: s.stt.engine.as_label().to_string(),
+            elevenlabs_model_id: s.stt.elevenlabs_model_id.clone(),
+            elevenlabs_base_url: s.stt.elevenlabs_base_url.clone(),
+            elevenlabs_key_set: s
+                .stt
+                .elevenlabs_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            whisper_available: s.stt.whisper_available,
+        }
+    }
+
+    /// Apply an STT selection change and persist it (best-effort, 0600). The engine is
+    /// chosen live per turn from the snapshot, so this never rebuilds anything — the next
+    /// turn picks up the new engine. An unknown engine label is rejected. The API key is
+    /// tri-state (absent = keep, `Some(None)` = clear, `Some(Some(v))` = set).
+    pub fn apply_stt(&self, update: &SttUpdate) -> Result<SttView> {
+        let engine = match update.engine.as_deref() {
+            None => None,
+            Some(label) => Some(
+                crate::config::SttEngineKind::from_label(label)
+                    .ok_or_else(|| anyhow::anyhow!("unknown stt engine `{label}`"))?,
+            ),
+        };
+        let mut w = self.inner.write().unwrap();
+        if let Some(e) = engine {
+            w.stt.engine = e;
+        }
+        if let Some(m) = update.elevenlabs_model_id.clone().filter(|s| !s.is_empty()) {
+            w.stt.elevenlabs_model_id = m;
+        }
+        if let Some(b) = update.elevenlabs_base_url.clone().filter(|s| !s.is_empty()) {
+            w.stt.elevenlabs_base_url = b;
+        }
+        if let Some(k) = &update.elevenlabs_api_key {
+            w.stt.elevenlabs_api_key = k.clone().filter(|s| !s.is_empty());
+        }
+        let view = SttView {
+            engine: w.stt.engine.as_label().to_string(),
+            elevenlabs_model_id: w.stt.elevenlabs_model_id.clone(),
+            elevenlabs_base_url: w.stt.elevenlabs_base_url.clone(),
+            elevenlabs_key_set: w
+                .stt
+                .elevenlabs_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty()),
+            whisper_available: w.stt.whisper_available,
         };
         let snapshot = self
             .persist_path
@@ -2503,6 +2650,7 @@ mod tests {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2515,6 +2663,59 @@ mod tests {
                 personality: Personality::default(),
             },
         )
+    }
+
+    #[test]
+    fn apply_stt_swaps_engine_and_manages_the_elevenlabs_key() {
+        let s = shared(factory_with_key(None));
+        // Starts on the default Wyoming engine, no key.
+        assert_eq!(s.stt_view().engine, "wyoming");
+        assert!(!s.stt_view().elevenlabs_key_set);
+        assert_eq!(
+            s.snapshot().stt.engine,
+            crate::config::SttEngineKind::Wyoming
+        );
+
+        // Swap to ElevenLabs and set a key — reflected live in the snapshot.
+        let view = s
+            .apply_stt(&SttUpdate {
+                engine: Some("elevenlabs".to_string()),
+                elevenlabs_api_key: Some(Some("xi-secret".to_string())),
+                elevenlabs_model_id: Some("scribe_v2_realtime".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(view.engine, "elevenlabs");
+        assert!(view.elevenlabs_key_set);
+        let snap = s.snapshot();
+        assert_eq!(snap.stt.engine, crate::config::SttEngineKind::ElevenLabs);
+        assert_eq!(snap.stt.elevenlabs_api_key.as_deref(), Some("xi-secret"));
+
+        // A reload-style save (no key field) keeps the stored key.
+        s.apply_stt(&SttUpdate {
+            engine: Some("elevenlabs".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(s.stt_view().elevenlabs_key_set);
+
+        // Clearing wipes it.
+        let view = s
+            .apply_stt(&SttUpdate {
+                elevenlabs_api_key: Some(None),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!view.elevenlabs_key_set);
+
+        // An unknown engine label is rejected (and nothing changes).
+        assert!(s
+            .apply_stt(&SttUpdate {
+                engine: Some("nope".to_string()),
+                ..Default::default()
+            })
+            .is_err());
+        assert_eq!(s.stt_view().engine, "elevenlabs");
     }
 
     #[test]
@@ -2637,6 +2838,7 @@ mod tests {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -2847,6 +3049,7 @@ mod tests {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -3170,6 +3373,7 @@ mod tests {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -3258,6 +3462,7 @@ mod tests {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -3343,6 +3548,7 @@ mod tests {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),
@@ -3419,6 +3625,7 @@ mod tests {
                 voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: SttRuntime::default(),
                 drive: DriveConfig::default(),
                 household: Household::default(),
                 spotify: SpotifyConfig::default(),

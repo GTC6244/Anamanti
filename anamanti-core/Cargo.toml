@@ -117,6 +117,12 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 # rig-core agent framework (always compiled) — powers the LLM tool / web-search path.
 rig-core = "0.42"
+# WebSocket client for the ElevenLabs Scribe v2 Realtime STT engine
+# (`stt.engine=elevenlabs`; see `plans/ElevenLabsSttPlan.md`). Always compiled — a
+# pure-Rust network client with no native/toolchain dependency, like the cloud LLM
+# backends, so no feature gate. rustls (webpki roots) to share reqwest's TLS stack and
+# stay offline-build-friendly.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 # Pure-Rust ONNX inference for the ECAPA-TDNN speaker embedder (always compiled;
 # gated at runtime by speaker.model_path). No external onnxruntime binary — compiles
