@@ -30,6 +30,11 @@ mod whisper_local;
 #[cfg(feature = "stt-whisper-local")]
 pub use whisper_local::{WhisperEngine, WhisperLocal, WhisperSttEngine};
 
+/// ElevenLabs Scribe v2 Realtime STT engine (always compiled; see
+/// `plans/ElevenLabsSttPlan.md`). Activated by `stt.engine = "elevenlabs"`.
+pub mod elevenlabs;
+pub use elevenlabs::ElevenLabsEngine;
+
 /// An event surfaced by a [`Transcriber`] while a turn is streaming. The pump loop
 /// only cares about the final transcript; every other engine signal
 /// (`voice-started`/`voice-stopped`, partials we don't yet consume) collapses to

@@ -202,44 +202,28 @@ async fn run() -> Result<()> {
         }
     }
 
-    // STT engine selection (plans/python-to-rust-whisper.md). Default: the downstream
-    // Wyoming Whisper server dialed via the connector below. `whisper-rs` loads
-    // whisper.cpp in-process and needs the `stt-whisper-local` build feature.
-    match config.stt.engine {
-        SttEngineKind::Wyoming => {
-            log::info!(
-                "STT engine: wyoming (downstream Whisper at {})",
-                config.stt_addr
-            );
+    // STT engine (plans/python-to-rust-whisper.md, plans/ElevenLabsSttPlan.md). The live
+    // engine is chosen PER TURN from the settings snapshot (`stt.engine`, config-page
+    // swappable with no restart), so — like the Silero VAD model — we load the in-process
+    // whisper engine at boot whenever it's available (feature compiled + model present),
+    // regardless of the seeded engine, so a later swap to whisper-rs works live. Wyoming
+    // and ElevenLabs need no boot resource (dialed/connected per turn). The live selection
+    // is logged by `build_stt_transcriber` on each turn.
+    match config.build_whisper_engine() {
+        Ok(Some(engine)) => {
+            pipeline = pipeline.with_whisper_engine(engine);
         }
-        SttEngineKind::WhisperLocal => {
-            #[cfg(feature = "stt-whisper-local")]
-            {
-                let model = config.stt.resolved_model_path();
-                let model_str = model.to_string_lossy().into_owned();
-                let engine = anamanti_core::stt::WhisperEngine::open(
-                    &model_str,
-                    config.stt.language.clone(),
-                    config.stt.num_threads as i32,
-                )
-                .with_context(|| format!("loading in-process Whisper model {model_str}"))?;
-                log::info!(
-                    "STT engine: whisper-rs (in-process; model {model_str}, {} threads)",
-                    config.stt.num_threads
-                );
-                pipeline = pipeline
-                    .with_stt_engine(Arc::new(anamanti_core::stt::WhisperSttEngine::new(engine)));
+        Ok(None) => {}
+        Err(e) => {
+            // A present-but-unloadable model is fatal only if whisper-rs is the seeded
+            // engine; otherwise warn and continue (wyoming/elevenlabs still work).
+            if config.stt.engine == SttEngineKind::WhisperLocal {
+                return Err(e).context("loading the seeded in-process whisper STT engine");
             }
-            #[cfg(not(feature = "stt-whisper-local"))]
-            {
-                anyhow::bail!(
-                    "config selects stt.engine = whisper-rs, but this binary was built \
-                     without the `stt-whisper-local` feature; rebuild with \
-                     `--features stt-whisper-local`"
-                );
-            }
+            log::warn!("in-process whisper engine failed to load (non-fatal; not the seeded engine): {e:#}");
         }
     }
+    log::info!("STT engine (seed): {}", config.stt.engine.as_label());
 
     // End-of-speech VAD engine (plans/VadSileroPlan.md). The engine is runtime-swappable
     // from the config page / device (energy ⇄ silero), so on a `vad-silero` build we load

@@ -79,6 +79,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
             silero_threshold: DEFAULT_SILERO_THRESHOLD,
             vad_engine: anamanti_core::config::VadEngineKind::Energy,
+            stt: anamanti_core::settings::SttRuntime::default(),
             drive: DriveConfig::default(),
             household: Household::default(),
             spotify: SpotifyConfig::default(),

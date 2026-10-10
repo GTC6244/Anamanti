@@ -50,7 +50,7 @@ use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
     LlmEngine, Personality, PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings,
-    SpotifyUpdate, System1Update, WeatherToolUpdate,
+    SpotifyUpdate, SttUpdate, System1Update, WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -169,6 +169,11 @@ fn sidebar_html(active: &str) -> String {
                     "/tools",
                     "Tools",
                     r##"<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>"##,
+                ),
+                (
+                    "/stt",
+                    "Speech",
+                    r##"<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 19v3"/>"##,
                 ),
                 (
                     "/system1",
@@ -303,6 +308,12 @@ const DRIVE_BODY: &str = include_str!("webconfig/drive.html");
 /// set live (no restart). Uses a private `apiJSON` helper (not the shell's GET-only
 /// `getJSON`, which is appended after this script).
 const TOOLS_BODY: &str = include_str!("webconfig/tools.html");
+
+/// `/stt` body — pick the speech-to-text engine (wyoming / whisper-rs / elevenlabs),
+/// applied live (no restart), plus the ElevenLabs API key + connection settings. Uses
+/// a private `apiJSON` helper (not the shell's GET-only `getJSON`). See
+/// `plans/ElevenLabsSttPlan.md`.
+const STT_BODY: &str = include_str!("webconfig/stt.html");
 
 /// `/notifications` body — push a proactive (visual-only) notification to the
 /// display for testing, and see how many device notify channels are connected. Uses
@@ -458,6 +469,23 @@ async fn handle(
     // Save the Mapbox token for the directions tool (rebuilds the tool set live).
     if method == "POST" && path == "/tools/save" {
         let payload = directions_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // STT engine status — the live engine, ElevenLabs model/base, whether a key is set
+    // (never the key), and whether whisper-rs is available (feature + model present).
+    if method == "GET" && path == "/stt/status.json" {
+        let payload = stt_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the STT engine selection + ElevenLabs settings/key (applies live, next turn).
+    if method == "POST" && path == "/stt/save" {
+        let payload = stt_save_json(&settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -1077,6 +1105,70 @@ fn weather_save_json(settings: &SharedSettings, body: &[u8]) -> String {
         visualcrossing_key,
     });
     weather_status_json(settings)
+}
+
+/// `GET /stt/status.json` — the live STT selection for the `/stt` page. Reports the
+/// engine, the ElevenLabs model/base, whether an ElevenLabs key is set (never the key),
+/// and whether whisper-rs is available (feature compiled + model present) so the page can
+/// disable that option.
+fn stt_status_json(settings: &SharedSettings) -> String {
+    let v = settings.stt_view();
+    json!({
+        "ok": true,
+        "engine": v.engine,
+        "elevenlabs_model_id": v.elevenlabs_model_id,
+        "elevenlabs_base_url": v.elevenlabs_base_url,
+        "elevenlabs_key_set": v.elevenlabs_key_set,
+        "whisper_available": v.whisper_available,
+    })
+    .to_string()
+}
+
+/// `POST /stt/save` — set the STT engine and/or ElevenLabs settings. `engine` (when
+/// present) switches the live engine, applied on the next turn (no restart). A
+/// blank/absent `elevenlabs_api_key` is left unchanged (a page reload never wipes the
+/// stored key), while an explicit `"clear": true` clears it. Blank model/base are left
+/// unchanged. Returns the refreshed status, or an error on an unknown engine label.
+fn stt_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let engine = data
+        .get("engine")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let elevenlabs_model_id = data
+        .get("elevenlabs_model_id")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let elevenlabs_base_url = data
+        .get("elevenlabs_base_url")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let clear = data.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let elevenlabs_api_key = if clear {
+        Some(None)
+    } else {
+        match data.get("elevenlabs_api_key").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+            _ => None,
+        }
+    };
+    match settings.apply_stt(&SttUpdate {
+        engine,
+        elevenlabs_model_id,
+        elevenlabs_base_url,
+        elevenlabs_api_key,
+    }) {
+        Ok(_) => stt_status_json(settings),
+        Err(e) => json!({ "ok": false, "message": format!("{e}") }).to_string(),
+    }
 }
 
 /// `GET /tools/places/status.json` — the places tool state for the `/tools` page.
@@ -1926,6 +2018,11 @@ fn route(
             "text/html; charset=utf-8",
             page("/tools", "Tools", TOOLS_BODY).into_bytes(),
         ),
+        ("GET", "/stt") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("/stt", "Speech to Text", STT_BODY).into_bytes(),
+        ),
         ("GET", "/system1") => (
             "200 OK",
             "text/html; charset=utf-8",
@@ -2405,6 +2502,48 @@ mod tests {
         let json = system1_status_json(&s);
         assert!(json.contains("\"backend\":\"none\""), "status: {json}");
         assert!(json.contains("\"active\":false"), "status: {json}");
+    }
+
+    #[test]
+    fn get_stt_page_renders_with_nav_and_status_reports_default() {
+        let s = settings();
+        let (status, ctype, body) = route("GET", "/stt", b"", &s);
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("STT engine"), "stt page body");
+        assert!(html.contains("href=\"/stt\""), "nav links stt");
+        // The status endpoint reports the default Wyoming engine, no key.
+        let json = stt_status_json(&s);
+        assert!(json.contains("\"engine\":\"wyoming\""), "status: {json}");
+        assert!(
+            json.contains("\"elevenlabs_key_set\":false"),
+            "status: {json}"
+        );
+    }
+
+    #[test]
+    fn stt_save_switches_engine_live() {
+        let s = settings();
+        let out = stt_save_json(
+            &s,
+            br#"{"engine":"elevenlabs","elevenlabs_api_key":"xi-k"}"#,
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["engine"], "elevenlabs");
+        assert_eq!(v["elevenlabs_key_set"], true);
+        assert_eq!(
+            s.snapshot().stt.engine,
+            crate::config::SttEngineKind::ElevenLabs
+        );
+        // An unknown engine is rejected without changing the live selection.
+        let bad: Value = serde_json::from_str(&stt_save_json(&s, br#"{"engine":"nope"}"#)).unwrap();
+        assert_eq!(bad["ok"], false);
+        assert_eq!(
+            s.snapshot().stt.engine,
+            crate::config::SttEngineKind::ElevenLabs
+        );
     }
 
     #[test]
