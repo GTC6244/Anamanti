@@ -1,7 +1,8 @@
 <p class="sub">Give the assistant a speaking personality. This is <b>pure output tuning</b> — it only changes how replies <i>sound</i>, never what the assistant knows, remembers, or does. Turn it on or off (and switch personalities) by voice too: just say "talk like a 1940s gangster" or "go back to normal". Changes apply live, no restart.</p>
 
+<div class="card-grid">
 <div class="card">
-  <h2>Status</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v10"/></svg>Status</h2>
   <p class="desc">The master switch and which personality is active. Saying "go back to normal" (or picking <b>Normal (off)</b>) turns it off.</p>
   <label class="row" style="display:flex;align-items:center;gap:0.6rem;">
     <input id="enabled" type="checkbox">
@@ -15,14 +16,16 @@
 </div>
 
 <div class="card">
-  <h2>Personalities</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01M15 9h.01"/></svg>Personalities</h2>
   <p class="desc">The catalog the assistant can speak in. The <b>key</b> is the short name used by voice ("talk like a <code>gangster</code>"); the <b>style instruction</b> is appended to the prompt to shape the voice. Edit freely — have fun with it.</p>
   <div id="defs"></div>
   <div class="toolbar"><button id="add">+ Add personality</button></div>
 </div>
 
+</div>
+
 <div class="card danger-zone">
-  <h2>Danger zone</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Danger zone</h2>
   <div class="callout">
     <span class="ico">⚠</span>
     <div>Removing a personality and clicking <b>Save</b> permanently deletes it. If you delete the one that's currently active, the assistant falls back to its normal voice.</div>

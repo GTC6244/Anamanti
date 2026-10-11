@@ -1,7 +1,8 @@
 <p class="sub">Choose the speech-to-text engine that transcribes each turn. Changes apply live — the next turn uses the new engine, no restart. The Core's VAD still decides end-of-speech for every engine.</p>
 
+<div class="card-grid">
 <div class="card">
-  <h2>STT engine</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 19v3"/></svg>STT engine</h2>
   <p class="desc">
     <b>Wyoming</b> dials the external <code>wyoming-faster-whisper</code> server (LAN).
     <b>whisper-rs</b> runs whisper.cpp in-process (needs the <code>stt-whisper-local</code> build feature and a model file on disk).
@@ -25,7 +26,7 @@
 </div>
 
 <div class="card">
-  <h2>ElevenLabs</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10a4 4 0 0 0 0 8H7A5 5 0 1 1 8.5 8.2 5.5 5.5 0 0 1 18 10z"/></svg>ElevenLabs</h2>
   <p class="desc">Used only when the engine is <b>ElevenLabs</b>. Get a key at elevenlabs.io. The key is stored on the Core (0600) and never shown back. First STT engine that needs the internet — keep a local engine configured as a fallback.</p>
 
   <label>API key <span class="hint" id="el_key_state"></span>
@@ -45,6 +46,7 @@
     <button id="el_clear">Clear key</button>
     <button id="el_save" class="primary">Save ElevenLabs</button>
   </div>
+</div>
 </div>
 
 <script>
