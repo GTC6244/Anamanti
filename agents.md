@@ -253,6 +253,15 @@ cargo test  --manifest-path anamanti-core/Cargo.toml           # unit + pipeline
 cargo clippy --manifest-path anamanti-core/Cargo.toml --all-targets -- -D warnings
 cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyoming._tcp, serves turns
 
+# Admin console (loopback config page) web UI: plain static HTML in a Material Design
+# layout styled with Tailwind CSS, served by the same loopback HTTP server. Tailwind is
+# VENDORED PRECOMPILED — the committed anamanti-core/src/webconfig/panel.css is generated
+# from webconfig/tailwind/input.css by the Tailwind CLI, embedded via include_str!, so the
+# shipped binary needs no CDN / Node at runtime. After editing any webconfig *.html /
+# shell.js or the Tailwind theme, regenerate + commit panel.css (needs the `tailwindcss`
+# CLI on PATH, e.g. `brew install tailwindcss`):
+anamanti-core/scripts/build-webui-css.sh
+
 # Configuration lives in a PER-INSTANCE JSON FILE (see anamanti-core/src/config.rs and
 # the committed anamanti-core/anamanti.example.json). Default path: `anamanti.json` in the
 # working directory; override with `--config <path>`. A missing convention file → built-in
