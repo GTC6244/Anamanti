@@ -44,7 +44,11 @@ download/SHA-256-verify of a signed APK + `latest.json` from Cloudflare R2, a na
 `PackageInstaller` channel, and the `selfUpdate`/`fdroid` build flavors), and
 [`FontScalePlan.md`](./plans/FontScalePlan.md) (voice "increase/decrease font": a global
 device-wide `TextScaler` on all ambient text, the `adjust_font` tool + the `anamanti-font`
-frame, and the orthogonal `screen.font` display-context sibling that gates it).
+frame, and the orthogonal `screen.font` display-context sibling that gates it), and
+[`ElevenLabsSttPlan.md`](./plans/ElevenLabsSttPlan.md) (a third, selectable STT engine:
+ElevenLabs Scribe v2 Realtime over WebSocket, behind the existing `Transcriber`/`SttEngine`
+seam alongside `wyoming` and `whisper-rs`; boot-time `stt.engine=elevenlabs`, the
+`ELEVENLABS_API_KEY` secret, Core VAD stays the segmenter).
 
 ---
 
@@ -229,11 +233,16 @@ adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk   # or: flu
 ```
 
 - Requires: Flutter SDK, Android SDK + NDK, Rust toolchain, `adb`.
-- Mac side: Piper TTS on the LAN, plus **STT** — either the external
-  `wyoming-faster-whisper` server (default, `stt.engine=wyoming`) **or** the
-  in-process whisper.cpp engine (`stt.engine=whisper-rs`, built with
-  `--features stt-whisper-local`; no Python STT server). See
-  `plans/python-to-rust-whisper.md`.
+- Mac side: Piper TTS on the LAN, plus **STT** — one of three engines behind the
+  `Transcriber`/`SttEngine` seam: the external `wyoming-faster-whisper` server
+  (default, `stt.engine=wyoming`), the in-process whisper.cpp engine
+  (`stt.engine=whisper-rs`, built with `--features stt-whisper-local`; no Python STT
+  server; see `plans/python-to-rust-whisper.md`), **or** ElevenLabs Scribe v2 Realtime
+  over WebSocket (`stt.engine=elevenlabs`, needs the `ELEVENLABS_API_KEY` secret and
+  network; always compiled, no feature flag; see `plans/ElevenLabsSttPlan.md`). The
+  engine is **runtime-swappable** from the config-page **Speech** tab (`/stt`) with no
+  restart (like the LLM/VAD/weather controls); `stt.engine` is just the boot seed. The
+  Core's VAD stays the end-of-speech authority for all three.
 
 ```bash
 # Mac Mini Anamanti Core (the "brain"). Runs on the Mac, not the device.
@@ -243,6 +252,15 @@ adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk   # or: flu
 cargo test  --manifest-path anamanti-core/Cargo.toml           # unit + pipeline integration tests
 cargo clippy --manifest-path anamanti-core/Cargo.toml --all-targets -- -D warnings
 cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyoming._tcp, serves turns
+
+# Admin console (loopback config page) web UI: plain static HTML in a Material Design
+# layout styled with Tailwind CSS, served by the same loopback HTTP server. Tailwind is
+# VENDORED PRECOMPILED — the committed anamanti-core/src/webconfig/panel.css is generated
+# from webconfig/tailwind/input.css by the Tailwind CLI, embedded via include_str!, so the
+# shipped binary needs no CDN / Node at runtime. After editing any webconfig *.html /
+# shell.js or the Tailwind theme, regenerate + commit panel.css (needs the `tailwindcss`
+# CLI on PATH, e.g. `brew install tailwindcss`):
+anamanti-core/scripts/build-webui-css.sh
 
 # Configuration lives in a PER-INSTANCE JSON FILE (see anamanti-core/src/config.rs and
 # the committed anamanti-core/anamanti.example.json). Default path: `anamanti.json` in the

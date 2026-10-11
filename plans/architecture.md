@@ -276,6 +276,20 @@ predictable memory use and no GC pauses under the 1 GB limit.
   chat backend and the catalog share the provider so listing + turns authenticate
   identically. The mode rides the settings protocol (`anthropic_auth` field) and the
   config page toggle; OpenAI is API-key-only.
+- **Admin-console front-end** (`webconfig.rs` + `src/webconfig/*`): the whole config
+  UI is **plain static HTML in a Material Design layout styled with Tailwind CSS**,
+  served by the same hand-rolled loopback HTTP server — no page markup is generated in
+  Rust. Each tab is an authored `.html` body (`config.html`, `household.html`, …)
+  wrapped by a static shell (`shell_head.html` + `shell_foot.html`: the Material top
+  app bar + navigation drawer, with a `{{TITLE}}` token `page()` fills in); the
+  active-nav highlight and the mobile drawer live in `shell.js`. Tailwind is **vendored
+  precompiled**: `webconfig/tailwind/input.css` (theme + `@layer components`) is built
+  by `scripts/build-webui-css.sh` (the `tailwindcss` CLI) into the committed
+  `webconfig/panel.css`. All assets (`panel.css`, `shell.js`) are compiled into the
+  binary via `include_str!` and served as their own routes (`GET /panel.css`,
+  `GET /shell.js`) — so the single copied release binary still serves the entire UI
+  offline, with no CDN and nothing beside it. Page data flows through the existing
+  `*.json` endpoints the bodies fetch (e.g. `/about` renders `/about.json`).
 - **Debug/inspection pages** (`webconfig.rs`, same loopback HTTP server as the
   config page, strictly read-only): `GET /chatlog`, `/prompts`, `/sqlite`, `/helix`
   render the recent chat log, the exact assembled LLM prompt per turn (captured to

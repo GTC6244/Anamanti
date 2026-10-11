@@ -50,7 +50,7 @@ use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
     LlmEngine, Personality, PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings,
-    SpotifyUpdate, System1Update, WeatherToolUpdate,
+    SpotifyUpdate, SttUpdate, System1Update, WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -81,35 +81,7 @@ const GIT_SHA: &str = env!("ANAMANTI_GIT_SHA");
 const GIT_BRANCH: &str = env!("ANAMANTI_GIT_BRANCH");
 const BUILD_TIME: &str = env!("ANAMANTI_BUILD_TIME");
 
-/// `/about` body — the running build's version, git commit, and build time, so you
-/// can confirm what's actually deployed. Values are compile-time constants.
-fn about_body() -> String {
-    let cell = |v: &str| {
-        if v.is_empty() {
-            "—".to_string()
-        } else {
-            v.to_string()
-        }
-    };
-    format!(
-        "<p class=\"sub\">The running orchestrator build — use this to confirm what's deployed.</p>\
-         <div class=\"card\"><h2>Build</h2>\
-         <p class=\"desc\">Version and provenance of the binary currently serving this page.</p>\
-         <table><tbody>\
-         <tr><th>Version</th><td>{version}</td></tr>\
-         <tr><th>Git branch</th><td>{branch}</td></tr>\
-         <tr><th>Git commit</th><td><code>{sha}</code></td></tr>\
-         <tr><th>Built (UTC)</th><td>{built}</td></tr>\
-         <tr><th>Drive support</th><td>yes — Photos tab + <code>ambient-get-drive-token</code></td></tr>\
-         </tbody></table></div>",
-        version = cell(VERSION),
-        branch = cell(GIT_BRANCH),
-        sha = cell(GIT_SHA),
-        built = cell(BUILD_TIME),
-    )
-}
-
-/// `/about.json` — machine-readable build metadata (same values as the About page).
+/// `/about.json` — machine-readable build metadata the About page fetches + renders.
 fn about_json() -> String {
     json!({
         "ok": true,
@@ -132,152 +104,39 @@ const MAX_LOG_LIMIT: usize = 1000;
 /// it. Same rationale for every asset below.
 const CONFIG_BODY: &str = include_str!("webconfig/config.html");
 
-/// The shared admin-panel design system (split-pane layout, cards, form controls,
-/// pill toggles, tables, danger zone). Used by every page, Config included.
+/// The shared admin-console design system (Material 3: top app bar, navigation
+/// drawer, surface cards, filled fields, stadium buttons, tables, danger zone).
+/// GENERATED from `webconfig/tailwind/input.css` by `scripts/build-webui-css.sh`
+/// (the Tailwind CLI) and committed; served verbatim at `GET /panel.css`. Do not
+/// hand-edit — edit the Tailwind source + the page HTML, then re-run the script.
 const PANEL_CSS: &str = include_str!("webconfig/panel.css");
 
-/// Client-side helpers shared by every page (`esc`/`fmtTime`/`getJSON`).
+/// Client-side helpers shared by every page (`esc`/`fmtTime`/`getJSON`) plus the
+/// shell behavior (active-nav highlight, mobile drawer toggle). Served at
+/// `GET /shell.js`.
 const SHELL_SCRIPT: &str = include_str!("webconfig/shell.js");
 
-/// The left navigation for the split-pane shell: a brand block plus grouped links,
-/// with `active` highlighted. Each item carries a small inline icon. The link
-/// `href`s are kept verbatim (`href="/music"` etc.) — the device/tests rely on them.
-fn sidebar_html(active: &str) -> String {
-    // (href, label, inline-svg-body) for one nav link, grouped under a section title.
-    type Link = (&'static str, &'static str, &'static str);
-    type Group = (&'static str, &'static [Link]);
-    const GROUPS: [Group; 4] = [
-        (
-            "Settings",
-            &[
-                (
-                    "/",
-                    "Config",
-                    r##"<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/>"##,
-                ),
-                (
-                    "/household",
-                    "Household",
-                    r##"<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>"##,
-                ),
-                (
-                    "/personality",
-                    "Personality",
-                    r##"<path d="M12 2a5 5 0 0 1 5 5c0 2-1 3-1 5H8c0-2-1-3-1-5a5 5 0 0 1 5-5z"/><path d="M9 17h6M10 21h4"/>"##,
-                ),
-                (
-                    "/pronunciations",
-                    "Pronunciation",
-                    r##"<path d="M3 10v4h4l5 5V5L7 10z"/><path d="M16 8a4 4 0 0 1 0 8"/>"##,
-                ),
-                (
-                    "/tools",
-                    "Tools",
-                    r##"<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/>"##,
-                ),
-                (
-                    "/system1",
-                    "System-1",
-                    r##"<path d="M13 2L3 14h9l-1 8 10-12h-9z"/>"##,
-                ),
-                (
-                    "/notifications",
-                    "Notify",
-                    r##"<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>"##,
-                ),
-                (
-                    "/music",
-                    "Music",
-                    r##"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"##,
-                ),
-                (
-                    "/drive",
-                    "Photos",
-                    r##"<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>"##,
-                ),
-            ],
-        ),
-        (
-            "Memory",
-            &[
-                (
-                    "/embeddings",
-                    "Embeddings",
-                    r##"<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5L19 19M19 5l-2.5 2.5M7.5 16.5L5 19"/>"##,
-                ),
-                (
-                    "/sqlite",
-                    "SQLite",
-                    r##"<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>"##,
-                ),
-                (
-                    "/helix",
-                    "HelixDB",
-                    r##"<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/>"##,
-                ),
-            ],
-        ),
-        (
-            "Logs",
-            &[
-                (
-                    "/chatlog",
-                    "Chat log",
-                    r##"<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>"##,
-                ),
-                (
-                    "/prompts",
-                    "Prompts",
-                    r##"<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/>"##,
-                ),
-            ],
-        ),
-        (
-            "System",
-            &[(
-                "/about",
-                "About",
-                r##"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>"##,
-            )],
-        ),
-    ];
-    let mut out = String::from(
-        "<aside class=\"sidebar\">\
-         <div class=\"brand\"><span class=\"title\">Anamanti Core</span>\
-         <span class=\"tag\">Admin console</span></div><nav class=\"nav\">",
-    );
-    for (group, links) in GROUPS {
-        out.push_str(&format!("<div class=\"group\">{group}</div>"));
-        for (href, label, icon) in links.iter() {
-            let cls = if *href == active { " active" } else { "" };
-            out.push_str(&format!(
-                "<a class=\"navlink{cls}\" href=\"{href}\">\
-                 <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke-width=\"2\" \
-                 stroke-linecap=\"round\" stroke-linejoin=\"round\">{icon}</svg>{label}</a>"
-            ));
-        }
-    }
-    out.push_str("</nav></aside>");
-    out
-}
+/// The static HTML shell wrapped around every page body: the `<head>` + the Material
+/// top app bar + the navigation drawer (`shell_head.html`, with a `{{TITLE}}` token),
+/// and the closing tags (`shell_foot.html`). Authored as plain HTML so no page markup
+/// is generated in Rust; compiled in so the single binary still serves the whole UI.
+const SHELL_HEAD: &str = include_str!("webconfig/shell_head.html");
+const SHELL_FOOT: &str = include_str!("webconfig/shell_foot.html");
 
-/// Wrap a page `body` in the shared HTML shell: `<head>` + design-system CSS, then a
-/// split-pane `<div class="layout">` with the sidebar on the left and a scrolling
-/// content pane on the right (page header + shared helper script + the page body).
-/// The shared helper script (`esc`/`fmtTime`/`getJSON`) is emitted **before** the
-/// body so a body's inline `load()` (which runs as it is parsed) can rely on it.
-fn page(active: &str, title: &str, body: &str) -> String {
-    format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Ambient — {title}</title><style>{PANEL_CSS}</style></head>\
-         <body><div class=\"layout\">{nav}\
-         <main class=\"content\"><div class=\"content-inner\">\
-         <div class=\"page-head\"><h1>{title}</h1></div>\
-         <script>{SHELL_SCRIPT}</script>{body}\
-         </div></main></div></body></html>",
-        nav = sidebar_html(active),
-    )
+/// `/about` body — static HTML; the dynamic build metadata is fetched from
+/// `/about.json` and rendered client-side (like the other data-backed pages).
+const ABOUT_BODY: &str = include_str!("webconfig/about.html");
+
+/// Wrap a page `body` in the shared static HTML shell: `SHELL_HEAD` (`<head>` +
+/// `/panel.css` + the Material app bar + navigation drawer, with its `{{TITLE}}`
+/// token filled in for both `<title>` and the page `<h1>`), the page body, then
+/// `SHELL_FOOT` (closing tags). The nav highlight for the current path and the mobile
+/// drawer are handled in `/shell.js` (loaded, blocking, just before the body), so the
+/// shell needs no server-side state — `page()` is a pure concatenation and authors no
+/// markup in Rust. `title` is always a static literal, so no escaping is required.
+fn page(title: &str, body: &str) -> String {
+    let head = SHELL_HEAD.replace("{{TITLE}}", title);
+    format!("{head}{body}{SHELL_FOOT}")
 }
 
 /// `/chatlog` body — every completed turn, newest first.
@@ -308,6 +167,12 @@ const DRIVE_BODY: &str = include_str!("webconfig/drive.html");
 /// set live (no restart). Uses a private `apiJSON` helper (not the shell's GET-only
 /// `getJSON`, which is appended after this script).
 const TOOLS_BODY: &str = include_str!("webconfig/tools.html");
+
+/// `/stt` body — pick the speech-to-text engine (wyoming / whisper-rs / elevenlabs),
+/// applied live (no restart), plus the ElevenLabs API key + connection settings. Uses
+/// a private `apiJSON` helper (not the shell's GET-only `getJSON`). See
+/// `plans/ElevenLabsSttPlan.md`.
+const STT_BODY: &str = include_str!("webconfig/stt.html");
 
 /// `/notifications` body — push a proactive (visual-only) notification to the
 /// display for testing, and see how many device notify channels are connected. Uses
@@ -469,6 +334,23 @@ async fn handle(
     // Save the Mapbox token for the directions tool (rebuilds the tool set live).
     if method == "POST" && path == "/tools/save" {
         let payload = directions_save_json(&settings, &body);
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            payload.as_bytes(),
+        )
+        .await;
+    }
+    // STT engine status — the live engine, ElevenLabs model/base, whether a key is set
+    // (never the key), and whether whisper-rs is available (feature + model present).
+    if method == "GET" && path == "/stt/status.json" {
+        let payload = stt_status_json(&settings).into_bytes();
+        return write_response(&mut stream, "200 OK", "application/json", &payload).await;
+    }
+    // Save the STT engine selection + ElevenLabs settings/key (applies live, next turn).
+    if method == "POST" && path == "/stt/save" {
+        let payload = stt_save_json(&settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -1088,6 +970,70 @@ fn weather_save_json(settings: &SharedSettings, body: &[u8]) -> String {
         visualcrossing_key,
     });
     weather_status_json(settings)
+}
+
+/// `GET /stt/status.json` — the live STT selection for the `/stt` page. Reports the
+/// engine, the ElevenLabs model/base, whether an ElevenLabs key is set (never the key),
+/// and whether whisper-rs is available (feature compiled + model present) so the page can
+/// disable that option.
+fn stt_status_json(settings: &SharedSettings) -> String {
+    let v = settings.stt_view();
+    json!({
+        "ok": true,
+        "engine": v.engine,
+        "elevenlabs_model_id": v.elevenlabs_model_id,
+        "elevenlabs_base_url": v.elevenlabs_base_url,
+        "elevenlabs_key_set": v.elevenlabs_key_set,
+        "whisper_available": v.whisper_available,
+    })
+    .to_string()
+}
+
+/// `POST /stt/save` — set the STT engine and/or ElevenLabs settings. `engine` (when
+/// present) switches the live engine, applied on the next turn (no restart). A
+/// blank/absent `elevenlabs_api_key` is left unchanged (a page reload never wipes the
+/// stored key), while an explicit `"clear": true` clears it. Blank model/base are left
+/// unchanged. Returns the refreshed status, or an error on an unknown engine label.
+fn stt_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let engine = data
+        .get("engine")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let elevenlabs_model_id = data
+        .get("elevenlabs_model_id")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let elevenlabs_base_url = data
+        .get("elevenlabs_base_url")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let clear = data.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let elevenlabs_api_key = if clear {
+        Some(None)
+    } else {
+        match data.get("elevenlabs_api_key").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => Some(Some(s.trim().to_string())),
+            _ => None,
+        }
+    };
+    match settings.apply_stt(&SttUpdate {
+        engine,
+        elevenlabs_model_id,
+        elevenlabs_base_url,
+        elevenlabs_api_key,
+    }) {
+        Ok(_) => stt_status_json(settings),
+        Err(e) => json!({ "ok": false, "message": format!("{e}") }).to_string(),
+    }
 }
 
 /// `GET /tools/places/status.json` — the places tool state for the `/tools` page.
@@ -1941,15 +1887,27 @@ fn route(
 ) -> (&'static str, &'static str, Vec<u8>) {
     let path = target.split(['?', '#']).next().unwrap_or(target);
     match (method, path) {
+        // Shared static assets, served from the same server (reused by every page via
+        // <link>/<script> in the shell) instead of being inlined into each response.
+        ("GET", "/panel.css") => (
+            "200 OK",
+            "text/css; charset=utf-8",
+            PANEL_CSS.as_bytes().to_vec(),
+        ),
+        ("GET", "/shell.js") => (
+            "200 OK",
+            "application/javascript; charset=utf-8",
+            SHELL_SCRIPT.as_bytes().to_vec(),
+        ),
         ("GET", "/") | ("GET", "/index.html") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/", "Anamanti Core", CONFIG_BODY).into_bytes(),
+            page("Anamanti Core", CONFIG_BODY).into_bytes(),
         ),
         ("GET", "/household") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/household", "Household", HOUSEHOLD_BODY).into_bytes(),
+            page("Household", HOUSEHOLD_BODY).into_bytes(),
         ),
         ("GET", "/household/status.json") => (
             "200 OK",
@@ -1964,7 +1922,7 @@ fn route(
         ("GET", "/personality") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/personality", "Personality", PERSONALITY_BODY).into_bytes(),
+            page("Personality", PERSONALITY_BODY).into_bytes(),
         ),
         ("GET", "/personality/status.json") => (
             "200 OK",
@@ -1979,7 +1937,7 @@ fn route(
         ("GET", "/pronunciations") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/pronunciations", "Pronunciation", PRONUNCIATIONS_BODY).into_bytes(),
+            page("Pronunciation", PRONUNCIATIONS_BODY).into_bytes(),
         ),
         ("GET", "/pronunciations/status.json") => (
             "200 OK",
@@ -1994,57 +1952,62 @@ fn route(
         ("GET", "/drive") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/drive", "Photos", DRIVE_BODY).into_bytes(),
+            page("Photos", DRIVE_BODY).into_bytes(),
         ),
         ("GET", "/tools") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/tools", "Tools", TOOLS_BODY).into_bytes(),
+            page("Tools", TOOLS_BODY).into_bytes(),
+        ),
+        ("GET", "/stt") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("Speech to Text", STT_BODY).into_bytes(),
         ),
         ("GET", "/system1") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/system1", "System-1", SYSTEM1_BODY).into_bytes(),
+            page("System-1", SYSTEM1_BODY).into_bytes(),
         ),
         ("GET", "/embeddings") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/embeddings", "Embeddings", EMBEDDINGS_BODY).into_bytes(),
+            page("Embeddings", EMBEDDINGS_BODY).into_bytes(),
         ),
         ("GET", "/notifications") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/notifications", "Notify", NOTIFY_BODY).into_bytes(),
+            page("Notify", NOTIFY_BODY).into_bytes(),
         ),
         ("GET", "/chatlog") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/chatlog", "Chat log", CHATLOG_BODY).into_bytes(),
+            page("Chat log", CHATLOG_BODY).into_bytes(),
         ),
         ("GET", "/prompts") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/prompts", "Prompts", PROMPTS_BODY).into_bytes(),
+            page("Prompts", PROMPTS_BODY).into_bytes(),
         ),
         ("GET", "/sqlite") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/sqlite", "SQLite", SQLITE_BODY).into_bytes(),
+            page("SQLite", SQLITE_BODY).into_bytes(),
         ),
         ("GET", "/helix") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/helix", "HelixDB", HELIX_BODY).into_bytes(),
+            page("HelixDB", HELIX_BODY).into_bytes(),
         ),
         ("GET", "/music") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/music", "Music", MUSIC_BODY).into_bytes(),
+            page("Music", MUSIC_BODY).into_bytes(),
         ),
         ("GET", "/about") => (
             "200 OK",
             "text/html; charset=utf-8",
-            page("/about", "About", &about_body()).into_bytes(),
+            page("About", ABOUT_BODY).into_bytes(),
         ),
         ("GET", "/about.json") => ("200 OK", "application/json", about_json().into_bytes()),
         ("GET", "/config") => (
@@ -2440,8 +2403,10 @@ mod tests {
         assert_eq!(status, "200 OK");
         assert!(ctype.starts_with("text/html"));
         let html = String::from_utf8_lossy(&body);
-        assert!(html.contains("Version"));
-        assert!(html.contains(env!("CARGO_PKG_VERSION")));
+        // The build metadata is now fetched from /about.json and rendered client-side,
+        // so the static page references that endpoint rather than inlining the version.
+        assert!(html.contains("Build"));
+        assert!(html.contains("/about.json"));
         assert!(
             html.contains("href=\"/drive\""),
             "About page missing shared nav"
@@ -2480,6 +2445,48 @@ mod tests {
         let json = system1_status_json(&s);
         assert!(json.contains("\"backend\":\"none\""), "status: {json}");
         assert!(json.contains("\"active\":false"), "status: {json}");
+    }
+
+    #[test]
+    fn get_stt_page_renders_with_nav_and_status_reports_default() {
+        let s = settings();
+        let (status, ctype, body) = route("GET", "/stt", b"", &s);
+        assert_eq!(status, "200 OK");
+        assert!(ctype.starts_with("text/html"));
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("STT engine"), "stt page body");
+        assert!(html.contains("href=\"/stt\""), "nav links stt");
+        // The status endpoint reports the default Wyoming engine, no key.
+        let json = stt_status_json(&s);
+        assert!(json.contains("\"engine\":\"wyoming\""), "status: {json}");
+        assert!(
+            json.contains("\"elevenlabs_key_set\":false"),
+            "status: {json}"
+        );
+    }
+
+    #[test]
+    fn stt_save_switches_engine_live() {
+        let s = settings();
+        let out = stt_save_json(
+            &s,
+            br#"{"engine":"elevenlabs","elevenlabs_api_key":"xi-k"}"#,
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["engine"], "elevenlabs");
+        assert_eq!(v["elevenlabs_key_set"], true);
+        assert_eq!(
+            s.snapshot().stt.engine,
+            crate::config::SttEngineKind::ElevenLabs
+        );
+        // An unknown engine is rejected without changing the live selection.
+        let bad: Value = serde_json::from_str(&stt_save_json(&s, br#"{"engine":"nope"}"#)).unwrap();
+        assert_eq!(bad["ok"], false);
+        assert_eq!(
+            s.snapshot().stt.engine,
+            crate::config::SttEngineKind::ElevenLabs
+        );
     }
 
     #[test]

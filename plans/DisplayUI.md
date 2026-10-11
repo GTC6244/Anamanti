@@ -34,7 +34,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Updates / System), `AudioDiagnosticsView` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
 | **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
@@ -372,6 +372,24 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
     [`VadSileroPlan.md`](./VadSileroPlan.md)).
   - **Background** — photo source; Google Photos (Ambient) link via QR; Google
     Drive link via the orchestrator config page + Sync; folder-id field.
+  - **Permissions** — a full custom page (`_permissionsPage()`) listing every Android
+    permission the app declares (read live from the platform on open / on app resume),
+    each row keyed `settings-permission-<name>` with a status chip (Granted / Not
+    granted / unknown). The two **runtime** permissions — **Camera** (presence
+    detection + auto-brightness) and **Microphone** (wake word + voice) — show a
+    **Grant** button (key `settings-permission-grant-<name>`) when missing that fires
+    the Android runtime dialog; install-time permissions (Internet, Wi-Fi state,
+    multicast, audio settings) are read-only. A **Refresh** tile and an **Open app
+    settings** fallback (key `settings-permissions-app-settings`, the app's "App info"
+    page, for a permanently-denied grant) round it out. All three cross the
+    `anamanti_display/permissions` MethodChannel to `MainActivity`
+    (`status` / `request` → `onRequestPermissionsResult` / `openAppSettings`). A newly
+    granted **Camera** triggers `SettingsScreen.onRequestEngineRestart` (wired to
+    `main.dart`'s `_startEngine`) so the Rust camera-proximity sensor + auto-brightness
+    start immediately rather than on the next relaunch. Exists because the app is the
+    device Home/launcher, so there is no onboarding moment to prompt — before this a
+    missing grant (e.g. Camera, which silently disabled presence-based brightening)
+    could only be fixed over adb.
   - **Updates** — in-app app updates (only shown on the `selfUpdate` flavor, i.e.
     when `SettingsScreen.updates` is non-null). A full custom page
     (`_updatesPage()`): an "Automatic update checks" switch (`autoUpdateEnabled`), an

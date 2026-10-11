@@ -25,6 +25,7 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
+import 'package:anamanti_display/src/engine/permissions.dart';
 import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
@@ -62,6 +63,7 @@ enum _SettingsCategory {
   speechProcessing('Speech Processing'),
   speechDetection('Speech Detection'),
   background('Background'),
+  permissions('Permissions'),
   updates('Updates'),
   system('System');
 
@@ -80,6 +82,7 @@ class SettingsScreen extends StatefulWidget {
     required this.onApplied,
     this.assistant,
     this.updates,
+    this.onRequestEngineRestart,
   });
 
   /// The current device-local settings to edit.
@@ -104,12 +107,27 @@ class SettingsScreen extends StatefulWidget {
   /// `fdroid` flavor / in tests, which hides the Updates category entirely.
   final UpdateController? updates;
 
+  /// Force an engine restart (disposes + recreates the Rust engine). Called after
+  /// the Camera permission is newly granted so the proximity sensor + auto-brightness
+  /// start without a manual relaunch. Optional; null in tests / host.
+  final VoidCallback? onRequestEngineRestart;
+
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
+class _SettingsScreenState extends State<SettingsScreen>
+    with WidgetsBindingObserver {
   late AppSettings _settings = widget.initial;
+
+  /// Android permission inspector/requester for the Permissions page.
+  final PermissionsController _permissions = PermissionsController();
+
+  /// Grant state keyed by full permission name; null until first loaded.
+  Map<String, bool>? _permissionStatus;
+
+  /// True while a status read or grant request is in flight (disables the buttons).
+  bool _permissionsBusy = false;
 
   final TextEditingController _modelController = TextEditingController();
   final TextEditingController _voiceController = TextEditingController();
@@ -161,13 +179,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _folderController.text = _settings.driveFolderIds.join(', ');
     _updateUrlController.text = _settings.updateBaseUrl;
     _loadRemote();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Returning from the system "App info" page (opened to toggle a permanently-denied
+    // permission) can change grants out from under us — re-read them on resume.
+    if (state == AppLifecycleState.resumed &&
+        _category == _SettingsCategory.permissions) {
+      _loadPermissions();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _modelController.dispose();
     _voiceController.dispose();
     _folderController.dispose();
@@ -628,6 +658,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Icons.system_update_alt,
             'In-app app updates',
           ),
+        _menuTile(
+          _SettingsCategory.permissions,
+          Icons.verified_user_outlined,
+          'Camera, microphone & other grants',
+        ),
         // Always shown: the escape hatch out of the kiosk. This app is the device
         // Home/launcher (so it auto-relaunches after a crash), so this is the way
         // back to the stock Android launcher and system settings for maintenance.
@@ -647,7 +682,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       title: Text(category.title),
       subtitle: Text(subtitle),
       trailing: const Icon(Icons.chevron_right),
-      onTap: () => setState(() => _category = category),
+      onTap: () {
+        setState(() => _category = category);
+        // The Permissions page reads live grant state from the platform on open.
+        if (category == _SettingsCategory.permissions) _loadPermissions();
+      },
     );
   }
 
@@ -664,6 +703,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // System is the kiosk escape hatch (open Android settings / switch Home app).
     if (category == _SettingsCategory.system) {
       return _systemPage();
+    }
+    // Permissions is a custom page (live grant state + request buttons).
+    if (category == _SettingsCategory.permissions) {
+      return _permissionsPage();
     }
     final List<Widget> children;
     switch (category) {
@@ -698,6 +741,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         children = _vadTiles();
       case _SettingsCategory.background:
         children = _photoTiles();
+      case _SettingsCategory.permissions:
+        // Handled by the early return above; keep the switch exhaustive.
+        children = const [];
       case _SettingsCategory.updates:
         // Handled by the early return above; keep the switch exhaustive.
         children = const [];
@@ -832,6 +878,159 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await _maintenanceChannel.invokeMethod<void>(method);
     } catch (_) {
       // No channel (host/test) or the settings activity is unavailable: ignore.
+    }
+  }
+
+  /// The Permissions page: every Android permission this app declares, with its grant
+  /// state and — for the "dangerous" runtime permissions (Camera, Microphone) — a
+  /// Grant button that fires the system dialog. Install-time permissions are shown
+  /// read-only. An "Open app settings" fallback covers a permanently-denied grant.
+  Widget _permissionsPage() {
+    final status = _permissionStatus;
+    final knownNames = kKnownPermissions.map((p) => p.name).toSet();
+    // Any declared permission the device reported that we have no metadata for — show
+    // it by raw name so the panel never silently hides something the app requests.
+    final extras = (status ?? const <String, bool>{})
+        .keys
+        .where((n) => !knownNames.contains(n))
+        .toList()
+      ..sort();
+
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: Text(
+            'Android permissions this app uses. Camera and Microphone must be granted '
+            'for presence detection and the wake word to work; the rest are granted '
+            'automatically when the app is installed.',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ),
+        ListTile(
+          key: const Key('settings-permissions-refresh'),
+          leading: const Icon(Icons.refresh),
+          title: const Text('Refresh'),
+          enabled: !_permissionsBusy,
+          onTap: _permissionsBusy ? null : _loadPermissions,
+        ),
+        const Divider(),
+        if (status == null)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: Text('Checking permissions…')),
+          )
+        else ...[
+          for (final p in kKnownPermissions) _permissionTile(p, status[p.name]),
+          for (final name in extras)
+            _permissionTile(
+              AppPermission(
+                name: name,
+                label: name,
+                description: '',
+                runtime: false,
+              ),
+              status[name],
+            ),
+          const Divider(),
+          ListTile(
+            key: const Key('settings-permissions-app-settings'),
+            leading: const Icon(Icons.open_in_new),
+            title: const Text('Open app settings'),
+            subtitle: const Text(
+              'If a permission was permanently denied, toggle it here in Android '
+              'settings',
+            ),
+            onTap: _permissions.openAppSettings,
+          ),
+        ],
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  /// One permission row: an icon + label + what it powers, with a trailing status
+  /// chip or (for a missing runtime permission) a Grant button. [granted] is null
+  /// when the platform channel is absent (host/test), rendered as "unknown".
+  Widget _permissionTile(AppPermission p, bool? granted) {
+    final Widget trailing;
+    if (granted == null) {
+      trailing = const Text('—', style: TextStyle(color: Colors.grey));
+    } else if (granted) {
+      trailing = const _PermissionStatusLabel(
+        label: 'Granted',
+        color: Colors.green,
+        icon: Icons.check_circle,
+      );
+    } else if (p.runtime) {
+      trailing = FilledButton.tonal(
+        key: Key('settings-permission-grant-${p.name}'),
+        onPressed: _permissionsBusy ? null : () => _requestPermission(p),
+        child: const Text('Grant'),
+      );
+    } else {
+      trailing = const _PermissionStatusLabel(
+        label: 'Not granted',
+        color: Colors.red,
+        icon: Icons.cancel,
+      );
+    }
+
+    final Color leadingColor = granted == null
+        ? Colors.grey
+        : granted
+            ? Colors.green
+            : Colors.orange;
+    final IconData leadingIcon = granted == null
+        ? Icons.help_outline
+        : granted
+            ? Icons.check_circle
+            : Icons.error_outline;
+
+    return ListTile(
+      key: Key('settings-permission-${p.name}'),
+      leading: Icon(leadingIcon, color: leadingColor),
+      title: Text(p.label),
+      subtitle: p.description.isEmpty ? null : Text(p.description),
+      trailing: trailing,
+    );
+  }
+
+  /// Read current grant state from the platform into [_permissionStatus].
+  Future<void> _loadPermissions() async {
+    setState(() => _permissionsBusy = true);
+    final status = await _permissions.status();
+    if (!mounted) return;
+    setState(() {
+      _permissionStatus = status;
+      _permissionsBusy = false;
+    });
+  }
+
+  /// Fire the Android runtime dialog for [p], then refresh the list. A newly granted
+  /// Camera restarts the engine so the proximity sensor + auto-brightness start
+  /// immediately (otherwise they'd only begin on the next relaunch).
+  Future<void> _requestPermission(AppPermission p) async {
+    final wasGranted = _permissionStatus?[p.name] == true;
+    setState(() => _permissionsBusy = true);
+    final status = await _permissions.request([p.name]);
+    if (!mounted) return;
+    final nowGranted = status[p.name] == true;
+    setState(() {
+      // An empty map means the channel was absent (host/test) — keep prior state.
+      if (status.isNotEmpty) _permissionStatus = status;
+      _permissionsBusy = false;
+    });
+    if (!wasGranted && nowGranted && p.name == kCameraPermission) {
+      widget.onRequestEngineRestart?.call();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Camera enabled — starting presence detection…'),
+          ),
+        );
+      }
     }
   }
 
@@ -1827,6 +2026,32 @@ class _DriveFolderPickerState extends State<_DriveFolderPicker> {
           onPressed: () => Navigator.of(context).pop(_selected),
           child: Text('Use ${_selected.length}'),
         ),
+      ],
+    );
+  }
+}
+
+/// A compact "status chip": a colored icon + label used as the trailing widget on a
+/// permission row (Granted / Not granted).
+class _PermissionStatusLabel extends StatelessWidget {
+  const _PermissionStatusLabel({
+    required this.label,
+    required this.color,
+    required this.icon,
+  });
+
+  final String label;
+  final Color color;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: color, size: 18),
+        const SizedBox(width: 4),
+        Text(label, style: TextStyle(color: color)),
       ],
     );
   }

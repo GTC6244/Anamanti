@@ -30,6 +30,10 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private var multicastLock: WifiManager.MulticastLock? = null
 
+    // The in-flight permission request's Dart reply, held between requestPermissions()
+    // and onRequestPermissionsResult (only one request runs at a time).
+    private var pendingPermissionResult: MethodChannel.Result? = null
+
     companion object {
         private const val BRIGHTNESS_CHANNEL = "anamanti_display/brightness"
 
@@ -43,6 +47,15 @@ class MainActivity : FlutterActivity() {
         // Kiosk escape hatch: open Android settings / switch Home app from the
         // in-app Settings → System page (see SettingsScreen._systemPage).
         private const val MAINTENANCE_CHANNEL = "anamanti_display/maintenance"
+
+        // Runtime-permission inspector/requester: the in-app Settings → Permissions
+        // page reads grant state and fires the Android permission dialog through here
+        // (see SettingsScreen._permissionsPage). Needed because this kiosk app has no
+        // other moment to prompt — grants were previously only possible over adb.
+        private const val PERMISSIONS_CHANNEL = "anamanti_display/permissions"
+
+        // Arbitrary request code tying our requestPermissions() call to its callback.
+        private const val PERMISSION_REQUEST_CODE = 0xA11
 
         @Volatile
         private var updaterChannel: MethodChannel? = null
@@ -146,6 +159,93 @@ class MainActivity : FlutterActivity() {
                 }
                 else -> result.notImplemented()
             }
+        }
+
+        // Permissions inspector/requester for the Settings → Permissions page.
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            PERMISSIONS_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Map every permission this app declares → whether it is granted.
+                "status" -> result.success(permissionStatus())
+                // Fire the Android runtime dialog for the given permission names; the
+                // refreshed status is returned from onRequestPermissionsResult.
+                "request" -> {
+                    val names = call.argument<List<String>>("permissions") ?: emptyList()
+                    requestAppPermissions(names, result)
+                }
+                // Open this app's "App info" page (fallback for a permanently-denied
+                // permission, where the runtime dialog no longer appears).
+                "openAppSettings" -> {
+                    openAppDetailsSettings()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    /** Map every permission this app declares to whether it is currently granted. */
+    private fun permissionStatus(): Map<String, Boolean> {
+        val declared = try {
+            packageManager.getPackageInfo(
+                packageName,
+                android.content.pm.PackageManager.GET_PERMISSIONS,
+            ).requestedPermissions
+        } catch (_: Exception) {
+            null
+        } ?: emptyArray()
+        return declared.associateWith { name ->
+            checkSelfPermission(name) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    /**
+     * Fire the Android runtime permission dialog for [names]. The outcome arrives in
+     * [onRequestPermissionsResult], which replies to [result] with the refreshed
+     * status map. Only one request runs at a time — a second while one is pending is
+     * rejected rather than silently dropping the earlier reply.
+     */
+    private fun requestAppPermissions(names: List<String>, result: MethodChannel.Result) {
+        if (names.isEmpty()) {
+            result.success(permissionStatus())
+            return
+        }
+        if (pendingPermissionResult != null) {
+            result.error("busy", "A permission request is already in flight", null)
+            return
+        }
+        pendingPermissionResult = result
+        requestPermissions(names.toTypedArray(), PERMISSION_REQUEST_CODE)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            val reply = pendingPermissionResult
+            pendingPermissionResult = null
+            // Reply with the full freshly-read status so Dart refreshes every row.
+            reply?.success(permissionStatus())
+        }
+    }
+
+    /** Open this app's system "App info" screen, where permissions can be toggled. */
+    private fun openAppDetailsSettings() {
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName"),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (_: Exception) {
+            startSettings(Settings.ACTION_SETTINGS)
         }
     }
 

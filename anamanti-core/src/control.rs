@@ -493,6 +493,7 @@ mod tests {
                 voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
                 silero_threshold: crate::settings::DEFAULT_SILERO_THRESHOLD,
                 vad_engine: crate::config::VadEngineKind::Energy,
+                stt: crate::settings::SttRuntime::default(),
                 drive: crate::settings::DriveConfig::default(),
                 household: crate::settings::Household::default(),
                 spotify: crate::settings::SpotifyConfig::default(),

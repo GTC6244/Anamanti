@@ -482,6 +482,9 @@ class _AmbientHomeState extends State<AmbientHome> {
           assistant: _assistant,
           // The updater controller powers the Updates page (null on fdroid).
           updates: _updates,
+          // Restart the engine after a Camera grant so the proximity sensor +
+          // auto-brightness start immediately (Settings → Permissions).
+          onRequestEngineRestart: _startEngine,
         ),
       ),
     );
