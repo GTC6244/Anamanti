@@ -1966,6 +1966,10 @@ impl Config {
         // pure runtime/GUI concern — so it starts at the built-in default catalog (off) and
         // is overlaid by any persisted value below.
         let mut personality = Personality::default();
+        // STT pronunciation rewrite table (plans/stt-vocabulary-biasing.md). Like
+        // personality, a pure runtime/GUI concern with no config-file seed: starts empty
+        // and is overlaid by any persisted value below.
+        let mut pronunciations: Vec<crate::stt::PronunciationRule> = Vec::new();
 
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
@@ -2114,6 +2118,8 @@ impl Config {
             // Personality is a pure runtime/GUI concern (no config-file seed), so the
             // persisted value always wins when present.
             personality = p.personality;
+            // Same for the STT pronunciation table (no config-file seed).
+            pronunciations = p.pronunciations;
         }
 
         // Sanitize the resolved household once: trims fields and **migrates** any legacy
@@ -2233,6 +2239,7 @@ impl Config {
                     openrouter_api_key,
                 },
                 personality,
+                pronunciations,
             },
             persist_path,
         ))
