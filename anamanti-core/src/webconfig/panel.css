@@ -143,6 +143,15 @@ a { color: var(--accent); }
 .card > .desc { color: var(--muted); font-size: 0.86rem; margin: 0 0 1.15rem; }
 .card > .desc:last-child { margin-bottom: 0; }
 
+/* ---- Two-column card layout (home / Config pane) ----
+   CSS multi-column packs cards tightly top-to-bottom across two columns
+   (masonry-like, no uneven-row gaps). Pages that use it get a wider content
+   pane via the :has() rule below so each column keeps a comfortable width.
+   The .sticky-actions bar lives outside .card-grid, so it stays full-width. */
+.card-grid { columns: 2; column-gap: 1.4rem; }
+.card-grid .card { break-inside: avoid; }
+.content-inner:has(.card-grid) { max-width: 74rem; }
+
 h2 { font-size: 1.06rem; font-weight: 650; margin: 1.6rem 0 0.3rem; }
 
 /* ---- Forms ---- */
@@ -347,6 +356,11 @@ code {
   margin: 0.2rem 0 0;
 }
 .callout .ico { flex: 0 0 auto; font-size: 1rem; line-height: 1.35; }
+
+/* ---- Medium screens: two-column card grid folds back to one ---- */
+@media (max-width: 900px) {
+  .card-grid { columns: 1; }
+}
 
 /* ---- Narrow screens: sidebar collapses to a top strip ---- */
 @media (max-width: 760px) {
