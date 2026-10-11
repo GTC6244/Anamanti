@@ -106,6 +106,19 @@ after our `finish()` commit — so `read_event()` behaves just like `WhisperLoca
 interim/`Other` (or pending) until finalize, then one `Transcript` yielded once. This
 slots into the existing two-arm `select!` with no loop changes.
 
+> **⚠️ rustls CryptoProvider (do not remove).** `tokio-tungstenite`'s rustls
+> connector dials the Scribe `wss://` endpoint and reads the **process-default**
+> `rustls::crypto::CryptoProvider`. Our rustls 0.23 is compiled with **both** the
+> `aws-lc-rs` and `ring` providers (pulled in transitively by `reqwest` +
+> `tokio-tungstenite`), so rustls refuses to auto-pick one and the dial **panics**
+> (`Could not automatically determine the process-level CryptoProvider`) — which
+> aborts the turn with no transcript, no reply, and nothing written to `/chatlog`.
+> `reqwest` was unaffected because it selects its provider internally, so this only
+> surfaces once `stt.engine=elevenlabs` is selected. The fix: `run()` in `main.rs`
+> installs `rustls::crypto::aws_lc_rs::default_provider().install_default()` once at
+> boot, and `anamanti-core/Cargo.toml` carries a direct `rustls` dep solely for that
+> call. Keep both.
+
 ## Files touched
 
 - **New:** `anamanti-core/src/stt/elevenlabs.rs` — `ElevenLabsEngine` (`SttEngine`) +

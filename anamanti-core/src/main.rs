@@ -56,6 +56,24 @@ async fn run() -> Result<()> {
         .format_timestamp_millis()
         .init();
 
+    // Install a process-default rustls CryptoProvider before any TLS client is used.
+    // rustls 0.23 is compiled with BOTH the aws-lc-rs and ring providers (pulled in
+    // transitively by reqwest and tokio-tungstenite), so it refuses to auto-select a
+    // default and `CryptoProvider::get_default()` returns None. tokio-tungstenite's
+    // rustls connector — exercised the moment `stt.engine = elevenlabs` dials the
+    // Scribe v2 `wss://` endpoint — reads that process default and PANICS when it is
+    // unset/ambiguous, aborting the turn (no transcript, no reply, nothing logged).
+    // reqwest picks its provider internally, which is why this only surfaced once the
+    // ElevenLabs STT engine was selected. Install aws-lc-rs (reqwest's own default) so
+    // every TLS client in the process shares one provider. `install_default` errors
+    // only if a provider was already installed — harmless, so ignore it.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        log::debug!("rustls default CryptoProvider was already installed");
+    }
+
     let cli = parse_cli().context("parsing command-line arguments")?;
     let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     log::info!(
