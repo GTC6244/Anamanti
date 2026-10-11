@@ -862,6 +862,10 @@ pub struct PersistedSettings {
     /// output tuning. Defaulted (seeded with the built-ins) for older files.
     #[serde(default)]
     pub personality: Personality,
+    /// STT pronunciation rewrite table (`plans/stt-vocabulary-biasing.md`). Defaulted
+    /// (empty) for older files.
+    #[serde(default)]
+    pub pronunciations: Vec<crate::stt::PronunciationRule>,
 }
 
 fn default_system1_base_url() -> String {
@@ -1225,6 +1229,11 @@ pub struct RuntimeSettings {
     /// snapshot and appended to the prompt as a trailing style instruction. Pure output
     /// tuning — orthogonal to the LLM rebuild path (a change never rebuilds the backend).
     pub personality: Personality,
+    /// The live STT pronunciation rewrite table (`plans/stt-vocabulary-biasing.md`). Read
+    /// per-turn from the snapshot and applied to the final transcript before it is shown,
+    /// stored, or sent to the LLM. Empty ⇒ no rewriting. GUI-editable; orthogonal to the
+    /// LLM rebuild path (a change never rebuilds the backend).
+    pub pronunciations: Vec<crate::stt::PronunciationRule>,
 }
 
 /// Default System-1 HTTP base URL (local `laya-serve`).
@@ -1495,6 +1504,7 @@ impl SharedSettings {
             system1_intents: s.system1.intents.clone(),
             openrouter_api_key: s.system1.openrouter_api_key.clone(),
             personality: s.personality.clone(),
+            pronunciations: s.pronunciations.clone(),
         }
     }
 
@@ -1559,6 +1569,7 @@ impl SharedSettings {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
         )
     }
@@ -1848,6 +1859,36 @@ impl SharedSettings {
         let cleaned = personality.sanitized();
         let mut w = self.inner.write().unwrap();
         w.personality = cleaned.clone();
+        let snapshot = self
+            .persist_path
+            .is_some()
+            .then(|| Self::persisted_snapshot(&w));
+        drop(w);
+        if let (Some(path), Some(snap)) = (&self.persist_path, snapshot) {
+            persist(path, &snap);
+        }
+        cleaned
+    }
+
+    /// A snapshot of the live STT pronunciation rewrite table. Read by the config
+    /// dashboard; the orchestrator reads it from the per-turn settings snapshot. Cheap
+    /// clone.
+    pub fn pronunciations(&self) -> Vec<crate::stt::PronunciationRule> {
+        self.inner.read().unwrap().pronunciations.clone()
+    }
+
+    /// Replace the whole STT pronunciation table and persist it (best-effort, 0600).
+    /// The config-page form is a full-record save, so this sets rather than field-diffs;
+    /// the value is [`crate::stt::sanitize_rules`]d first (trim, drop blank/duplicate/
+    /// self-referential variants, drop unusable rules). Never rebuilds the LLM — the
+    /// table is applied to the transcript, not the backend. Returns the cleaned value.
+    pub fn apply_pronunciations(
+        &self,
+        rules: &[crate::stt::PronunciationRule],
+    ) -> Vec<crate::stt::PronunciationRule> {
+        let cleaned = crate::stt::sanitize_rules(rules);
+        let mut w = self.inner.write().unwrap();
+        w.pronunciations = cleaned.clone();
         let snapshot = self
             .persist_path
             .is_some()
@@ -2661,6 +2702,7 @@ mod tests {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
         )
     }
@@ -2849,6 +2891,7 @@ mod tests {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
             Some(path.clone()),
         );
@@ -3060,6 +3103,7 @@ mod tests {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
             Some(path.clone()),
         );
@@ -3384,6 +3428,7 @@ mod tests {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
             Some(path.clone()),
         );
@@ -3418,6 +3463,88 @@ mod tests {
         assert_eq!(p.household.weather_units.as_deref(), Some("imperial"));
         assert_eq!(p.household.members[0].name, "Bob");
         assert_eq!(p.household.members[0].emails, vec!["bob@example.com"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_pronunciations_sanitizes_persists_and_reloads() {
+        let path = std::env::temp_dir().join(format!(
+            "ambient_pron_{}_{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let factory = factory_with_key(None);
+        let (llm, label, model) = factory
+            .build(
+                LlmEngine::Native,
+                false,
+                "duckduckgo",
+                None,
+                "ollama",
+                Some("llama3.2"),
+                AnthropicAuth::ApiKey,
+            )
+            .unwrap();
+        let s = SharedSettings::new_persistent(
+            factory,
+            RuntimeSettings {
+                llm,
+                engine: LlmEngine::Native,
+                web_search: false,
+                search_provider: "duckduckgo".into(),
+                search_api_key: None,
+                llm_backend: label,
+                llm_model: model,
+                anthropic_api_key: None,
+                openai_api_key: None,
+                anthropic_oauth_token: None,
+                mapbox_token: None,
+                anthropic_auth: AnthropicAuth::ApiKey,
+                tts_voice: None,
+                end_silence_ms: DEFAULT_END_SILENCE_MS,
+                voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
+                silero_threshold: DEFAULT_SILERO_THRESHOLD,
+                vad_engine: crate::config::VadEngineKind::Energy,
+                drive: DriveConfig::default(),
+                household: Household::default(),
+                spotify: SpotifyConfig::default(),
+                cadora: CadoraConfig::default(),
+                appsaid: AppSaidConfig::default(),
+                weather_provider: "visualcrossing".to_string(),
+                visualcrossing_key: None,
+                google_places_key: None,
+                system1: System1Runtime::default(),
+                stt: SttRuntime::default(),
+                personality: Personality::default(),
+                pronunciations: Vec::new(),
+            },
+            Some(path.clone()),
+        );
+
+        let cleaned = s.apply_pronunciations(&[
+            crate::stt::PronunciationRule {
+                canonical: "  Zehrs  ".into(),
+                variants: vec!["zairs".into(), "  zairs  ".into(), "".into(), "Zehrs".into()],
+            },
+            crate::stt::PronunciationRule {
+                canonical: "".into(),
+                variants: vec!["dropped".into()],
+            },
+        ]);
+        // Sanitized: trimmed canonical, de-duped/blank/self variants dropped, unusable
+        // rule removed.
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].canonical, "Zehrs");
+        assert_eq!(cleaned[0].variants, vec!["zairs".to_string()]);
+        assert_eq!(s.pronunciations(), cleaned);
+
+        // Round-trips through the 0600 file so a restart keeps it.
+        let p = load_persisted(&path).expect("settings file should exist");
+        assert_eq!(p.pronunciations.len(), 1);
+        assert_eq!(p.pronunciations[0].canonical, "Zehrs");
+        assert_eq!(p.pronunciations[0].variants, vec!["zairs".to_string()]);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3473,6 +3600,7 @@ mod tests {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
             Some(path.clone()),
         );
@@ -3559,6 +3687,7 @@ mod tests {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
             Some(path.clone()),
         );
@@ -3636,6 +3765,7 @@ mod tests {
                 google_places_key: None,
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
+                pronunciations: Vec::new(),
             },
             Some(path.clone()),
         );

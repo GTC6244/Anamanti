@@ -193,6 +193,12 @@ const EMBEDDINGS_BODY: &str = include_str!("webconfig/embeddings.html");
 /// (not the shell's GET-only `getJSON`).
 const PERSONALITY_BODY: &str = include_str!("webconfig/personality.html");
 
+/// `/pronunciations` body — edit the STT pronunciation rewrite table as JSON. Each rule
+/// maps mis-heard forms of a word to its canonical spelling; applied to the transcript
+/// before it reaches the LLM (plans/stt-vocabulary-biasing.md). A full-record save. Uses
+/// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
+const PRONUNCIATIONS_BODY: &str = include_str!("webconfig/pronunciations.html");
+
 /// Cap on request bytes we buffer before the body — a config request is tiny; this
 /// just bounds a misbehaving/hostile client on the (unauthenticated) socket.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -1255,6 +1261,55 @@ fn personality_save_json(settings: &SharedSettings, body: &[u8]) -> String {
     personality_status_json(settings)
 }
 
+/// `GET /pronunciations/status.json` — the live STT pronunciation rewrite table.
+fn pronunciations_status_json(settings: &SharedSettings) -> String {
+    let rules: Vec<Value> = settings
+        .pronunciations()
+        .iter()
+        .map(|r| json!({ "canonical": r.canonical, "variants": r.variants }))
+        .collect();
+    json!({ "ok": true, "rules": rules }).to_string()
+}
+
+/// `POST /pronunciations/save` — replace the whole table from a JSON body
+/// `{ "rules": [ { "canonical": "Zehrs", "variants": ["zairs", "zay rz"] }, … ] }`.
+/// Sanitized on apply (trim, drop blank/duplicate/self variants, drop unusable rules).
+fn pronunciations_save_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "message": format!("invalid JSON: {e}") }).to_string()
+        }
+    };
+    let rules = data
+        .get("rules")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|r| crate::stt::PronunciationRule {
+                    canonical: r
+                        .get("canonical")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    variants: r
+                        .get("variants")
+                        .and_then(Value::as_array)
+                        .map(|vs| {
+                            vs.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    settings.apply_pronunciations(&rules);
+    pronunciations_status_json(settings)
+}
+
 /// `POST /music/proc` — body `{ proc, action }` starts/stops a managed process.
 async fn music_proc_json(music: Option<&MusicHub>, body: &[u8]) -> String {
     let Some(hub) = music else {
@@ -1878,6 +1933,21 @@ fn route(
             "200 OK",
             "application/json",
             personality_save_json(settings, body).into_bytes(),
+        ),
+        ("GET", "/pronunciations") => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            page("Pronunciation", PRONUNCIATIONS_BODY).into_bytes(),
+        ),
+        ("GET", "/pronunciations/status.json") => (
+            "200 OK",
+            "application/json",
+            pronunciations_status_json(settings).into_bytes(),
+        ),
+        ("POST", "/pronunciations/save") => (
+            "200 OK",
+            "application/json",
+            pronunciations_save_json(settings, body).into_bytes(),
         ),
         ("GET", "/drive") => (
             "200 OK",
@@ -2737,6 +2807,54 @@ mod tests {
         );
         assert_eq!(h.address.weather_location().as_deref(), Some("Austin, TX"));
         assert_eq!(h.members.len(), 1);
+    }
+
+    #[test]
+    fn pronunciations_save_round_trips_and_sanitizes_through_the_route() {
+        let s = settings();
+        // Blank canonical rule, a self/blank/duplicate variant, all exercised.
+        let body = br#"{"rules":[
+            {"canonical":"  Zehrs  ","variants":["zairs","  zairs  ","zay rz","Zehrs",""]},
+            {"canonical":"","variants":["ignored"]},
+            {"canonical":"Nope","variants":["   "]}
+        ]}"#;
+        let (status, ctype, out) = route("POST", "/pronunciations/save", body, &s);
+        assert_eq!(status, "200 OK");
+        assert_eq!(ctype, "application/json");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["ok"], Value::Bool(true));
+        let rules = v["rules"].as_array().unwrap();
+        // Only the usable, sanitized rule survives.
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["canonical"], "Zehrs");
+        let variants: Vec<&str> = rules[0]["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert_eq!(variants, vec!["zairs", "zay rz"]);
+
+        // It landed in the live settings, so the per-turn snapshot sees it.
+        let live = s.pronunciations();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].canonical, "Zehrs");
+
+        // GET status.json returns the same table.
+        let (_s, _c, g) = route("GET", "/pronunciations/status.json", b"", &s);
+        let gv: Value = serde_json::from_slice(&g).unwrap();
+        assert_eq!(gv["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(gv["rules"][0]["canonical"], "Zehrs");
+    }
+
+    #[test]
+    fn pronunciations_save_rejects_invalid_json() {
+        let s = settings();
+        let (status, _c, out) = route("POST", "/pronunciations/save", b"not json", &s);
+        assert_eq!(status, "200 OK");
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["ok"], Value::Bool(false));
+        assert!(v["message"].as_str().unwrap().contains("invalid JSON"));
     }
 
     #[test]

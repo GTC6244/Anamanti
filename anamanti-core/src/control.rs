@@ -504,6 +504,7 @@ mod tests {
                 google_places_key: None,
                 system1: crate::settings::System1Runtime::default(),
                 personality: crate::settings::Personality::default(),
+                pronunciations: Vec::new(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();

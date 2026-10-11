@@ -25,6 +25,11 @@ use crate::wyoming::protocol::AudioFormat;
 use crate::wyoming::stt::SttSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
+/// Deterministic transcript normalization (pronunciation rewrite table). Not
+/// feature-gated: it runs on the transcript regardless of which engine produced it.
+pub mod normalize;
+pub use normalize::{normalize, sanitize_rules, PronunciationRule};
+
 #[cfg(feature = "stt-whisper-local")]
 mod whisper_local;
 #[cfg(feature = "stt-whisper-local")]

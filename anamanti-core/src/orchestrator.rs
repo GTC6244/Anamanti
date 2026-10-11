@@ -407,6 +407,7 @@ impl Pipeline {
                 gate.as_mut(),
                 format.rate,
                 dump.as_ref(),
+                &runtime.pronunciations,
             )
             .await?
         else {
@@ -593,6 +594,7 @@ impl Pipeline {
         gate: &mut dyn SpeechGate,
         mic_rate: u32,
         dump: Option<&TurnAudioDump>,
+        pronunciations: &[crate::stt::PronunciationRule],
     ) -> Result<Option<(String, Vec<i16>, Duration)>> {
         // `gate`: the per-chunk speech decision (energy/RMS by default). The energy
         // gate is A/B-tunable via `voice_rms_threshold`; the Echo's far-field pickup is
@@ -748,6 +750,15 @@ impl Pipeline {
                                 }
                                 return Ok(Some((String::new(), Vec::new(), Duration::ZERO)));
                             }
+
+                            // Apply the live STT pronunciation rewrite table (Mechanism B,
+                            // plans/stt-vocabulary-biasing.md) to the real utterance now —
+                            // before the device echo, the returned transcript, and every
+                            // downstream consumer (speaker ID, memory, LLM, chat log) — so
+                            // there is a single corrected source of truth. Runs only past the
+                            // no-speech hallucination guard above (never on discarded
+                            // silence); an empty table leaves the text unchanged.
+                            let text = crate::stt::normalize(&text, pronunciations);
 
                             // Diagnostic echo (#1): relay exactly what STT produced to the
                             // device the instant it clears the VAD gate — BEFORE System-1 or
