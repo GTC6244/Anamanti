@@ -1,7 +1,7 @@
 <p class="sub">The text-embedding backend for GraphRAG memory. Switching is <strong>live</strong> (no restart) and <strong>lossless</strong>: each backend keeps its own vector index, and your durable memories (SQLite facts + the chat log) are never touched. The first switch to a backend rebuilds its index from the chat log in the background; switching back reuses it.</p>
 
 <div class="card">
-  <h2>Embedding backend</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 5-9 5-9-5z"/><path d="M3 12l9 5 9-5M3 17l9 5 9-5"/></svg>Embedding backend</h2>
   <p class="desc"><strong>Local (nomic-embed-text-v1.5)</strong> runs on-device — offline, no API key, 768-dim. <strong>OpenAI (text-embedding-3-small)</strong> sends memory text to OpenAI and needs <code>OPENAI_API_KEY</code>. The two use different vector spaces, so each has a separate store.</p>
   <p class="desc" id="statusline">Loading…</p>
 

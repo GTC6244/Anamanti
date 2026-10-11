@@ -1,13 +1,14 @@
 <p class="sub">Push a proactive notification to the display. The device holds a persistent "notify" channel open to the orchestrator; anything sent here appears on the idle screen without the user speaking. Visual-only for now — no spoken output.</p>
 
+<div class="card-grid">
 <div class="card">
-  <h2>Connected devices</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>Connected devices</h2>
   <p class="desc">Displays currently holding a notify channel open, with the name each one announced. Names and ids are set on the device's Settings screen (the id is derived from the device's Wi-Fi MAC).</p>
   <ul id="devices" class="devices"><li class="muted">Loading…</li></ul>
 </div>
 
 <div class="card">
-  <h2>Send a test notification</h2>
+  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg>Send a test notification</h2>
   <p class="desc" id="statusline">Loading…</p>
 
   <label>Title
@@ -28,6 +29,7 @@
     <div id="status" class="status"></div>
     <button id="send" class="primary">Send</button>
   </div>
+</div>
 </div>
 
 <script>

@@ -14,6 +14,13 @@ async function getJSON(url){ const r = await fetch(url); return r.json(); }
     document.querySelectorAll('.nav a.navlink').forEach(function(a){
       if (a.getAttribute('href') === path) a.classList.add('active');
     });
+    // Dashboard touch: mirror the active nav glyph next to the page title, so every
+    // page gets a matching icon header for free (no per-page markup).
+    var activeIcon = document.querySelector('.nav a.navlink.active svg');
+    var h1 = document.querySelector('.page-head h1');
+    if (activeIcon && h1 && !h1.querySelector('svg')) {
+      h1.insertBefore(activeIcon.cloneNode(true), h1.firstChild);
+    }
     var menu = document.getElementById('menuBtn');
     var drawer = document.getElementById('drawer');
     var scrim = document.getElementById('scrim');
