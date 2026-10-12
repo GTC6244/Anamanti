@@ -56,7 +56,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {String recipeAction = ''}) =>
       weatherJson: '',
       placeJson: '',
       recipeAction: recipeAction,
-    );
+      enrollJson: '',    );
 
 /// Captures the arguments of each [FontContextSink] push.
 class _FontCtx {

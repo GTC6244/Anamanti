@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NotifyHandle`, `WeatherHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
 
@@ -152,6 +152,31 @@ void setPlaceContext({
 /// closes (clearing the context back to an idle screen).
 void setDiagnosticsContext({required bool active}) =>
     RustLib.instance.api.crateApiEngineSetDiagnosticsContext(active: active);
+
+/// Report that the **voice-enrollment** screen is foreground (SpeakerEnrollmentPlan.md
+/// Phase 2) as the device's display context, so the next voice turn's `audio-start`
+/// routes the captured speech to the orchestrator's enrollment accumulator instead of
+/// the assistant. Like diagnostics, this is a **suppressing** context — no LLM/TTS — but
+/// it carries the session grouping the captures, the name being enrolled, the sample
+/// index (progress), and the `phase` (`"sample"` to train, `"verify"` for the read-only
+/// recognition check after commit).
+///
+/// Flutter sets it (`active == true`) just before each phrase capture and clears it
+/// (`active == false`) when the enroll screen closes. The enroll screen reuses the
+/// ordinary wake-word turn for capture, so there is no second audio path.
+void setEnrollContext({
+  required bool active,
+  required String session,
+  required String name,
+  required int sampleIndex,
+  required String phase,
+}) => RustLib.instance.api.crateApiEngineSetEnrollContext(
+  active: active,
+  session: session,
+  name: name,
+  sampleIndex: sampleIndex,
+  phase: phase,
+);
 
 /// Report the device's **font-scaling context** so the next voice turn's `audio-start`
 /// carries it to the orchestrator as the `screen.font` sibling (orthogonal to the
@@ -547,6 +572,10 @@ class WakeWordEvent {
   /// scroll direction (`RecipeScroll`). Empty for every other kind.
   final String recipeAction;
 
+  /// The enrollment-step result as a JSON string (`EnrollResult`); empty for every
+  /// other kind. The enroll screen decodes it to show progress / the verify outcome.
+  final String enrollJson;
+
   const WakeWordEvent({
     required this.kind,
     required this.message,
@@ -569,6 +598,7 @@ class WakeWordEvent {
     required this.weatherJson,
     required this.placeJson,
     required this.recipeAction,
+    required this.enrollJson,
   });
 
   @override
@@ -593,7 +623,8 @@ class WakeWordEvent {
       recipeJson.hashCode ^
       weatherJson.hashCode ^
       placeJson.hashCode ^
-      recipeAction.hashCode;
+      recipeAction.hashCode ^
+      enrollJson.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -620,7 +651,8 @@ class WakeWordEvent {
           recipeJson == other.recipeJson &&
           weatherJson == other.weatherJson &&
           placeJson == other.placeJson &&
-          recipeAction == other.recipeAction;
+          recipeAction == other.recipeAction &&
+          enrollJson == other.enrollJson;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -746,6 +778,12 @@ enum WakeWordEventKind {
   /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
   /// transitions, never per frame.
   presence,
+
+  /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
+  /// guided capture (a training sample or the verify check). `enroll_json` carries the
+  /// raw `anamanti-enroll-result` data block (phase / accepted / samples / consistency /
+  /// confidence / speaker_id / name / message); the enroll screen parses it to advance.
+  enrollResult,
 }
 
 /// Config for the persistent weather channel. Mirrors [`NotifyConfig`]; the

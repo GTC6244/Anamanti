@@ -34,8 +34,9 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Functions / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
-| **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Functions / People / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
+| **People / enrollment** (pushed from Settings → People) | `PeopleScreen`, `SpeakerEnrollScreen` |
+| **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
 ---
@@ -469,23 +470,37 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 ---
 
-## 10. Settings sub-screens — built but currently UNWIRED
+## 10. People, voice enrollment & other sub-screens
 
-These widgets exist and are tested but are **not reachable** from the running app
-in this version (referenced only from `test/`). Listed so they are not
-re-implemented by mistake; wire them into `SettingsScreen` navigation when needed.
+`PeopleScreen` + `SpeakerEnrollScreen` are **reachable** (Settings → People).
+`MemoryScreen` is built + tested but **not yet wired** into navigation (referenced
+only from `test/`) — listed so it isn't re-implemented by mistake.
 
-**`MemoryScreen`** — `lib/src/ui/memory_screen.dart`
+**`MemoryScreen`** (built, currently **unwired**) — `lib/src/ui/memory_screen.dart`
 - `Scaffold` + `AppBar("Memory")`. Lists Core memory entries (`MemoryView`: facts
   vs preferences, explicit vs inferred) as `ListTile`s with per-entry delete;
   app-bar refresh + "Forget all" (confirm dialog). Constructed with an
   `OrchestratorClient`.
 
 **`PeopleScreen`** — `lib/src/ui/people_screen.dart`
-- `Scaffold` + `AppBar("People")`. Lists voice-identified speakers (`SpeakerView`;
-  named people vs anonymous "Speaker N", voice-clip counts). Per-row menu:
-  Name/rename, Merge with…, Forget. Constructed with an `OrchestratorClient`.
+- Reached from **Settings → People** (`settings-menu-people`). `Scaffold` +
+  `AppBar("People")`. Lists voice-identified speakers (`SpeakerView`; named people vs
+  anonymous "Speaker N", voice-clip counts). Per-row menu: Name/rename, Merge with…,
+  Forget. An **"Add person"** FAB (`people-add`, shown when the live engine controller is
+  wired) opens the guided enrollment flow below. Constructed with an `OrchestratorClient`
+  (+ the `AssistantController` and native `setEnrollContext` for enrollment).
   See [`speaker_id_plan.md`](./speaker_id_plan.md).
+
+**`SpeakerEnrollScreen`** — `lib/src/ui/speaker_enroll_screen.dart`
+- `Scaffold` + `AppBar("Add a person")`. The guided "train a new voice" flow
+  (SpeakerEnrollmentPlan.md Phase 2): a name step → a capture step that prompts the user to
+  say the wake word and read short phrases (progress dots, per-sample accept/retry feedback)
+  → commit → a verify step that confirms recognition ("Recognized Dana!", with confidence).
+  Captures reuse the ordinary wake-word turn via an `enroll` display context (stamped by the
+  native `setEnrollContext`), so there is **no second audio path**; each capture's result
+  arrives as a `WakeWordEvent.enrollResult` folded into `AssistantState`. Commit/cancel are
+  `OrchestratorClient.enrollFinish`/`enrollCancel`. See
+  [`SpeakerEnrollmentPlan.md`](./SpeakerEnrollmentPlan.md).
 
 ---
 

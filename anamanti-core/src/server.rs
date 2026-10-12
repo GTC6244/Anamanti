@@ -92,7 +92,7 @@ async fn handle_connection(
                     &ev,
                     pipeline.memory(),
                     pipeline.settings(),
-                    pipeline.speaker().map(|s| s.registry()),
+                    pipeline.speaker().map(|s| s.as_ref()),
                     &catalog,
                     connector.as_ref(),
                     voices_dir.as_deref(),

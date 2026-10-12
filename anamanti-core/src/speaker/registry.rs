@@ -114,6 +114,31 @@ impl SpeakerRegistry {
         Ok(id)
     }
 
+    /// Create a **named, user-labeled** profile from a pre-built centroid and its
+    /// supporting `samples` count (active enrollment; SpeakerEnrollmentPlan.md
+    /// Phase 2). Unlike [`create_cluster`](Self::create_cluster) (anonymous, one
+    /// sample) this is the result of a guided multi-sample enrollment, so it starts
+    /// named and `labeled = 1`. Returns the new `speaker_id`.
+    pub fn create_labeled(&self, name: &str, centroid: &[f32], samples: u64) -> Result<String> {
+        let id = self.next_id();
+        let now = now();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO speakers (id, name, labeled, centroid, dims, samples, created_at, updated_at) \
+             VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                id,
+                name.trim(),
+                encode_vec(centroid),
+                centroid.len() as i64,
+                samples.max(1) as i64,
+                now
+            ],
+        )
+        .context("inserting enrolled speaker")?;
+        Ok(id)
+    }
+
     /// Fold `embedding` into `id`'s centroid via an online mean over normalized
     /// vectors, then renormalize; bumps `samples`. A no-op if the id is unknown.
     pub fn update_centroid(&self, id: &str, embedding: &[f32]) -> Result<()> {

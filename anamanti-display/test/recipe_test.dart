@@ -68,7 +68,7 @@ WakeWordEvent _ev(
   weatherJson: '',
   placeJson: '',
   recipeAction: recipeAction,
-);
+  enrollJson: '',);
 
 void main() {
   group('RecipeData.tryParse', () {

@@ -23,7 +23,17 @@ import 'support/in_memory_settings_store.dart';
 /// Open the category page whose menu key is `settings-menu-<name>` (the enum's
 /// `.name`, e.g. `assistant`, `deviceConfig`, `speechDetection`).
 Future<void> openCategory(WidgetTester tester, String name) async {
-  await tester.tap(find.byKey(Key('settings-menu-$name')));
+  final tile = find.byKey(Key('settings-menu-$name'));
+  // The menu's ListView builds lazily, so a tile below the viewport+cacheExtent
+  // isn't in the element tree yet — scroll it into view (building it) before
+  // tapping. No-op when it's already visible.
+  await tester.scrollUntilVisible(
+    tile,
+    120,
+    scrollable: find.byType(Scrollable).first,
+  );
+  await tester.pumpAndSettle();
+  await tester.tap(tile);
   await tester.pumpAndSettle();
 }
 

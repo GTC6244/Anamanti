@@ -1,7 +1,13 @@
 # Speaker ID Plan — Per-Person Identification in the Anamanti Core
 
-Status: **IMPLEMENTED (Phases A–D + device "People" UI; Phase E code-complete
-pending the real ONNX model + on-hardware calibration)** as of 2026-09-17. Picks
+Status: **IMPLEMENTED (Phases A–E + device "People" UI).** As of 2026-10-11 the
+real ECAPA-TDNN model is proven to load + run under pure-Rust `tract-onnx` (WeSpeaker
+`voxceleb_ECAPA512.onnx`, 192-dim, 80-mel fbank + per-utterance mean normalization);
+fetch it with `anamanti-core/scripts/fetch-speaker-model.sh` and enable via the
+`speaker{}` block in `anamanti.json`. **Only on-hardware threshold calibration (far-field
+`match`/`new`/`min_speech_ms`) remains.** Active **enrollment** ("train a new person") is
+added on top — see [`SpeakerEnrollmentPlan.md`](./SpeakerEnrollmentPlan.md). Config moved
+from env vars to the JSON `speaker{}` block (see below). Picks
 up `memory_plan.md` Deferred #2
 ("Speaker identification: real per-user attribution + populating `KNOWS` per
 speaker"). Layers passive, local speaker recognition onto the Mac-side brain
@@ -46,15 +52,30 @@ ID is turned on in config (`speaker.enabled`). The real ECAPA-TDNN ONNX embedder
   `speaker_name`; the ingester passes them through. Real-engine graphrag test green.
 - **Phase E — real model**: pure-Rust log-mel fbank front-end
   (`speaker/features.rs`, unit-tested) + `OnnxSpeakerEmbedder` (`tract-onnx`, behind
-  the opt-in `speaker` cargo feature) wired into `config.build_speaker_service`.
-  **Remaining (hardware/model-gated):** drop in a real ECAPA-TDNN `.onnx`, confirm
-  its input tensor layout + fbank params, and calibrate `MATCH`/`NEW`/
-  `MIN_SPEECH_MS` against real Echo Show far-field captures. Until then, enabling
-  `ANAMANTI_SPEAKER_ID=on` uses the mock embedder (dev only, logged loudly).
+  the always-compiled `tract-onnx` path) wired into `config.build_speaker_service`.
+  **Real model landed (2026-10-11):** WeSpeaker `voxceleb_ECAPA512.onnx` loads + runs under
+  `tract-onnx` (verified via `cargo run --example speaker_smoke` — 192-dim output, no
+  onnxruntime needed), its 80-mel/25ms/10ms fbank matches `FbankConfig`, and per-utterance
+  mean normalization was added to `features.rs` to match the model's training. **Remaining
+  (hardware-gated):** calibrate `match`/`new`/`min_speech_ms` against real Echo Show
+  far-field captures and document EER. With no `model_path` set it still uses the mock
+  embedder (dev only, logged loudly).
 
-**Config:** `ANAMANTI_SPEAKER_ID=on|off` (default off) · `ANAMANTI_SPEAKER_MODEL_PATH`
-· `ANAMANTI_SPEAKER_MATCH_THRESHOLD` · `ANAMANTI_SPEAKER_NEW_THRESHOLD` ·
-`ANAMANTI_SPEAKER_MIN_SPEECH_MS` · `ANAMANTI_SPEAKER_EMBED_DIMS` (default 192).
+**Config (current — the `speaker{}` block in `anamanti.json`; the old `ANAMANTI_SPEAKER_*`
+env vars are retired):**
+```json
+"speaker": {
+  "enabled": true,
+  "model_path": "models/voxceleb_ECAPA512.onnx",
+  "match_threshold": 0.55,
+  "new_threshold": 0.40,
+  "min_speech_ms": 1200,
+  "embed_dims": 192
+}
+```
+`enabled` defaults `false` (opt-in). With no `model_path` it degrades to the dev-only mock
+embedder (logged loudly). Fetch the model with `scripts/fetch-speaker-model.sh`. Thresholds
+are placeholders pending far-field calibration.
 
 ---
 

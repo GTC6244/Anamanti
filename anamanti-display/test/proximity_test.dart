@@ -59,7 +59,7 @@ WakeWordEvent _presence(bool present) => WakeWordEvent(
       weatherJson: '',
       placeJson: '',
       recipeAction: '',
-    );
+      enrollJson: '',    );
 
 /// A neutral engine event of a given [kind], for exercising the activity dispatch.
 WakeWordEvent _event(WakeWordEventKind kind) => WakeWordEvent(
@@ -84,7 +84,7 @@ WakeWordEvent _event(WakeWordEventKind kind) => WakeWordEvent(
       weatherJson: '',
       placeJson: '',
       recipeAction: '',
-    );
+      enrollJson: '',    );
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

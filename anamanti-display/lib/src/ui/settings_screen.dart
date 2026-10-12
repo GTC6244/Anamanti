@@ -34,7 +34,8 @@ import 'package:anamanti_display/src/slideshow/ambient_photos.dart';
 import 'package:anamanti_display/src/slideshow/drive_photos.dart';
 import 'package:anamanti_display/src/ui/audio_diagnostics_view.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart'
-    show updateDiagnosticsTuning, setDiagnosticsContext;
+    show updateDiagnosticsTuning, setDiagnosticsContext, setEnrollContext;
+import 'package:anamanti_display/src/ui/people_screen.dart';
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
 /// is the orchestrator's backend label.
@@ -627,6 +628,11 @@ class _SettingsScreenState extends State<SettingsScreen>
   /// The top-level category menu.
   Widget _menu() {
     return ListView(
+      // A distinct key so this list's scroll position isn't reused for a category
+      // page's list (the body swaps one ListView for another at the same spot; without
+      // distinct keys Flutter reuses the element + its scroll offset, so a scrolled menu
+      // would open a category page already scrolled).
+      key: const PageStorageKey('settings-menu-list'),
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
         _menuTile(
@@ -638,6 +644,16 @@ class _SettingsScreenState extends State<SettingsScreen>
           _SettingsCategory.functions,
           Icons.cloud_outlined,
           'What the assistant uses: cloud/local & keys',
+        ),
+        // People is a full screen (its own list + the guided "Add a person"
+        // enrollment flow), pushed rather than rendered inline as a category page.
+        ListTile(
+          key: const Key('settings-menu-people'),
+          leading: const Icon(Icons.people_outline),
+          title: const Text('People'),
+          subtitle: const Text('Recognize & train voices'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _openPeople,
         ),
         _menuTile(
           _SettingsCategory.deviceConfig,
@@ -685,6 +701,37 @@ class _SettingsScreenState extends State<SettingsScreen>
           'Android settings & switch Home app',
         ),
       ],
+    );
+  }
+
+  /// Open the full People screen (recognized voices + the guided "Add a person"
+  /// enrollment flow). Pushed as its own route because it is a complete screen with
+  /// its own list, FAB, and sub-flow — unlike the inline category pages. The live
+  /// engine controller powers enrollment capture; without it (shouldn't happen in
+  /// production) the Add-person button hides and passive management still works.
+  void _openPeople() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PeopleScreen(
+          client: widget.client,
+          controller: widget.assistant,
+          setEnrollContext: ({
+            required bool active,
+            required String session,
+            required String name,
+            required int sampleIndex,
+            required String phase,
+          }) =>
+              setEnrollContext(
+            active: active,
+            session: session,
+            name: name,
+            sampleIndex: sampleIndex,
+            phase: phase,
+          ),
+          wakeWord: _settings.wakeWord.replaceAll('_', ' '),
+        ),
+      ),
     );
   }
 
@@ -774,6 +821,9 @@ class _SettingsScreenState extends State<SettingsScreen>
         children = const [];
     }
     return ListView(
+      // Per-category key so each page keeps its own scroll position and never inherits
+      // the menu's (or another category's) offset via element reuse. See `_menu()`.
+      key: PageStorageKey('settings-category-${category.name}'),
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [...children, const SizedBox(height: 24)],
     );

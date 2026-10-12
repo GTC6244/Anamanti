@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1460362940;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1370377730;
 
 // Section: executor
 
@@ -366,6 +366,90 @@ fn wire__crate__api__engine__engine_version_impl(
                 let output_ok = Result::<_, ()>::Ok(crate::api::engine::engine_version())?;
                 Ok(output_ok)
             })())
+        },
+    )
+}
+fn wire__crate__api__settings__enroll_cancel_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "enroll_cancel",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
+            let api_session = <String>::sse_decode(&mut deserializer);
+            let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::settings::enroll_cancel(
+                            api_orchestrator_key,
+                            api_session,
+                            api_discovery_timeout_secs,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__settings__enroll_finish_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "enroll_finish",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
+            let api_session = <String>::sse_decode(&mut deserializer);
+            let api_name = <String>::sse_decode(&mut deserializer);
+            let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::settings::enroll_finish(
+                            api_orchestrator_key,
+                            api_session,
+                            api_name,
+                            api_discovery_timeout_secs,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
         },
     )
 }
@@ -885,6 +969,48 @@ fn wire__crate__api__engine__set_diagnostics_context_impl(
             transform_result_sse::<_, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok({
                     crate::api::engine::set_diagnostics_context(api_active);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine__set_enroll_context_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_enroll_context",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_active = <bool>::sse_decode(&mut deserializer);
+            let api_session = <String>::sse_decode(&mut deserializer);
+            let api_name = <String>::sse_decode(&mut deserializer);
+            let api_sample_index = <u32>::sse_decode(&mut deserializer);
+            let api_phase = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::set_enroll_context(
+                        api_active,
+                        api_session,
+                        api_name,
+                        api_sample_index,
+                        api_phase,
+                    );
                 })?;
                 Ok(output_ok)
             })())
@@ -1936,6 +2062,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_weatherJson = <String>::sse_decode(deserializer);
         let mut var_placeJson = <String>::sse_decode(deserializer);
         let mut var_recipeAction = <String>::sse_decode(deserializer);
+        let mut var_enrollJson = <String>::sse_decode(deserializer);
         return crate::api::engine::WakeWordEvent {
             kind: var_kind,
             message: var_message,
@@ -1958,6 +2085,7 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             weather_json: var_weatherJson,
             place_json: var_placeJson,
             recipe_action: var_recipeAction,
+            enroll_json: var_enrollJson,
         };
     }
 }
@@ -1995,6 +2123,7 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             25 => crate::api::engine::WakeWordEventKind::RecipeScroll,
             26 => crate::api::engine::WakeWordEventKind::FontAdjust,
             27 => crate::api::engine::WakeWordEventKind::Presence,
+            28 => crate::api::engine::WakeWordEventKind::EnrollResult,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -2041,41 +2170,43 @@ fn pde_ffi_dispatcher_primary_impl(
         4 => wire__crate__api__settings__delete_memory_impl(port, ptr, rust_vec_len, data_len),
         5 => wire__crate__api__settings__delete_speaker_impl(port, ptr, rust_vec_len, data_len),
         7 => wire__crate__api__updater__download_update_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__settings__fetch_orchestrator_settings_impl(
+        10 => wire__crate__api__settings__enroll_cancel_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__settings__enroll_finish_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__settings__fetch_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        11 => wire__crate__api__settings__get_drive_token_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__settings__get_functions_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
-        17 => {
+        13 => wire__crate__api__settings__get_drive_token_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__settings__get_functions_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
+        19 => {
             wire__crate__api__settings__list_orchestrators_impl(port, ptr, rust_vec_len, data_len)
         }
-        18 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        28 => {
+        20 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
+        31 => {
             wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        29 => {
+        32 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        30 => {
+        33 => {
             wire__crate__api__engine__start_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        31 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
-        32 => {
+        34 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        35 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        33 => {
+        36 => {
             wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        35 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        38 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -2096,16 +2227,17 @@ fn pde_ffi_dispatcher_sync_impl(
         6 => wire__crate__api__engine__device_hardware_id_impl(ptr, rust_vec_len, data_len),
         8 => wire__crate__api__engine__engine_greeting_impl(ptr, rust_vec_len, data_len),
         9 => wire__crate__api__engine__engine_version_impl(ptr, rust_vec_len, data_len),
-        14 => {
+        16 => {
             wire__crate__api__engine__is_wake_word_engine_running_impl(ptr, rust_vec_len, data_len)
         }
-        22 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__engine__set_diagnostics_context_impl(ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__engine__set_font_context_impl(ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__engine__set_diagnostics_context_impl(ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__engine__set_enroll_context_impl(ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__engine__set_font_context_impl(ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -2495,6 +2627,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.weather_json.into_into_dart().into_dart(),
             self.place_json.into_into_dart().into_dart(),
             self.recipe_action.into_into_dart().into_dart(),
+            self.enroll_json.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2542,6 +2675,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::RecipeScroll => 25.into_dart(),
             Self::FontAdjust => 26.into_dart(),
             Self::Presence => 27.into_dart(),
+            Self::EnrollResult => 28.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -3029,6 +3163,7 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <String>::sse_encode(self.weather_json, serializer);
         <String>::sse_encode(self.place_json, serializer);
         <String>::sse_encode(self.recipe_action, serializer);
+        <String>::sse_encode(self.enroll_json, serializer);
     }
 }
 
@@ -3065,6 +3200,7 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::RecipeScroll => 25,
                 crate::api::engine::WakeWordEventKind::FontAdjust => 26,
                 crate::api::engine::WakeWordEventKind::Presence => 27,
+                crate::api::engine::WakeWordEventKind::EnrollResult => 28,
                 _ => {
                     unimplemented!("");
                 }

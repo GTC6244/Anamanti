@@ -536,6 +536,64 @@ pub async fn delete_speaker(
     speaker_ok(&resp)
 }
 
+/// The `message` from an `ENROLL_RESULT`, surfacing a rejected request's in-band
+/// message as an error (parallels [`speaker_ok`]).
+fn enroll_message(resp: &WyomingEvent) -> Result<String> {
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let msg = resp
+        .data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if ok {
+        Ok(msg)
+    } else {
+        Err(anyhow!(
+            "{}",
+            if msg.is_empty() {
+                "enrollment failed".to_string()
+            } else {
+                msg
+            }
+        ))
+    }
+}
+
+/// Commit the current guided-enrollment session into a named profile
+/// (SpeakerEnrollmentPlan.md Phase 2); returns the orchestrator's confirmation
+/// message, or an error carrying the in-band reason (e.g. too few samples).
+pub async fn enroll_finish(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    session: &str,
+    name: &str,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request =
+        WyomingEvent::with_data(types::ENROLL_FINISH, json!({ "session": session, "name": name }));
+    let resp = round_trip(&endpoint, request).await?;
+    enroll_message(&resp)
+}
+
+/// Discard an in-flight guided-enrollment session (the user backed out).
+pub async fn enroll_cancel(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    session: &str,
+) -> Result<()> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request = WyomingEvent::with_data(types::ENROLL_CANCEL, json!({ "session": session }));
+    round_trip(&endpoint, request).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

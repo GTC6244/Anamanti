@@ -70,6 +70,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<Map<String, String>> namedCalls = <Map<String, String>>[];
   final List<Map<String, String>> mergeCalls = <Map<String, String>>[];
   final List<String> deletedSpeakers = <String>[];
+  final List<Map<String, String>> enrollFinishCalls = <Map<String, String>>[];
+  final List<String> enrollCancelCalls = <String>[];
+
+  /// When non-null, [enrollFinish] throws this instead of succeeding (simulates the
+  /// orchestrator rejecting the commit, e.g. too few samples).
+  String? enrollFinishError;
 
   @override
   Future<List<OrchestratorOption>> listOrchestrators() async {
@@ -197,5 +203,25 @@ class FakeOrchestratorClient implements OrchestratorClient {
     deletedSpeakers.add(id);
     _speakers.removeWhere((s) => s.id == id);
     return true;
+  }
+
+  @override
+  Future<String> enrollFinish(String session, String name) async {
+    enrollFinishCalls.add({'session': session, 'name': name});
+    final err = enrollFinishError;
+    if (err != null) throw Exception(err);
+    _speakers.add(SpeakerView(
+      id: 'spk-$session',
+      name: name,
+      labeled: true,
+      samples: 3,
+      createdAt: 0,
+    ));
+    return 'enrolled $name from 3 samples';
+  }
+
+  @override
+  Future<void> enrollCancel(String session) async {
+    enrollCancelCalls.add(session);
   }
 }
