@@ -90,8 +90,24 @@ impl MemoryIngester {
         }
         let mut items: Vec<Item> = Vec::new();
         for (ri, r) in records.iter().enumerate() {
-            texts.push(turn_text(r));
-            items.push(Item::Turn(ri));
+            // Gate: don't make a *non-answer* turn ("I don't know", "I can't find
+            // that", "could you clarify…") recallable. Re-surfacing it under "What you
+            // remember about this person" few-shot-primes the model to repeat the same
+            // failure next time — a self-reinforcing loop (a mis-transcribed proper noun
+            // that fails once then keeps failing). The turn still lives in the chat log
+            // (the auditable source of truth); only its raw transcript+reply Turn node is
+            // withheld from recall. Explicit/inferred facts written this turn are still
+            // ingested below.
+            if is_recallable_turn(r) {
+                texts.push(turn_text(r));
+                items.push(Item::Turn(ri));
+            } else {
+                log::debug!(
+                    "memory ingester: withholding non-answer turn {} from recall (reply: {:?})",
+                    r.id,
+                    truncate_for_log(&r.reply),
+                );
+            }
             for (mi, m) in r.memories_written.iter().enumerate() {
                 texts.push(m.clone());
                 items.push(Item::Memory(ri, mi));
@@ -166,6 +182,17 @@ impl MemoryIngester {
     /// is aborted (or the process exits).
     pub fn spawn(self: Arc<Self>, interval: Duration) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            // One-time cleanup of legacy non-answer turns ingested before the gate in
+            // `run_once` existed. Idempotent: once purged — and with new non-answers no
+            // longer ingested — later starts find nothing to remove, so this is cheap
+            // after the first run.
+            match self.helix.purge_non_answer_turns(is_non_answer).await {
+                Ok(0) => {}
+                Ok(n) => {
+                    log::info!("memory ingester: purged {n} legacy non-answer turn(s) from recall")
+                }
+                Err(e) => log::warn!("memory ingester: non-answer purge failed: {e:#}"),
+            }
             loop {
                 if let Err(e) = self.run_once().await {
                     log::warn!("memory ingester run failed: {e:#}");
@@ -207,8 +234,102 @@ fn turn_text(r: &ChatLogRecord) -> String {
     }
 }
 
+/// Phrases that mark a reply as a *non-answer*: the assistant declining, failing to find
+/// something, or asking the user to clarify. Matched case-insensitively against the reply
+/// with curly apostrophes normalized to ASCII. Kept deliberately conservative — it should
+/// only catch replies that clearly convey "I didn't answer this," never a real answer that
+/// happens to contain a hedge.
+const NON_ANSWER_MARKERS: &[&str] = &[
+    "i don't know",
+    "i do not know",
+    "i'm not sure which",
+    "i am not sure which",
+    "i'm not sure what",
+    "i'm not certain",
+    "i'm not finding",
+    "i am not finding",
+    "i'm still not finding",
+    "not finding a",
+    "not finding any",
+    "i couldn't find",
+    "i could not find",
+    "i can't find",
+    "i cannot find",
+    "couldn't find a",
+    "could not find a",
+    "couldn't find any",
+    "i'm not able to find",
+    "i am not able to find",
+    "i don't have that",
+];
+
+/// Whether a reply reads as a non-answer (see [`NON_ANSWER_MARKERS`]).
+fn is_non_answer(reply: &str) -> bool {
+    let normalized = reply.replace('\u{2019}', "'").to_lowercase();
+    NON_ANSWER_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+/// Whether a turn should be ingested as a recallable `Turn` node. False for non-answers,
+/// which would otherwise prime the model to repeat the failure (see the gate in
+/// [`MemoryIngester::run_once`]).
+fn is_recallable_turn(r: &ChatLogRecord) -> bool {
+    !is_non_answer(&r.reply)
+}
+
+/// Shorten a string for a log line (char-safe, won't split a UTF-8 boundary).
+fn truncate_for_log(s: &str) -> String {
+    const MAX: usize = 80;
+    if s.chars().count() <= MAX {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(MAX).collect();
+        format!("{head}…")
+    }
+}
+
 fn offset_sidecar(chatlog_path: &Path) -> PathBuf {
     let mut s = chatlog_path.to_path_buf().into_os_string();
     s.push(".offset");
     PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_non_answers() {
+        for reply in [
+            "I'm not sure which high school you mean — could you provide the full name?",
+            "I'm still not finding a high school by that name.",
+            "I couldn't find a route to that school — could you double-check the name?",
+            "I'm not finding a school by that name.",
+            "I'm not sure which secondary school you're referring to.",
+            "I don't know.",
+            "Sorry, I can't find that.",
+        ] {
+            assert!(is_non_answer(reply), "should flag as non-answer: {reply}");
+        }
+    }
+
+    #[test]
+    fn keeps_real_answers() {
+        for reply in [
+            "It's about a 20 minute drive north on Highway 8.",
+            "The weather in Kitchener is 12 degrees and sunny.",
+            "Sure, I've set a timer for ten minutes.",
+            "Jacob Hespeler Secondary School is at 355 Holiday Inn Drive in Cambridge.",
+            "Your next event is a dentist appointment on Thursday at 2 PM.",
+        ] {
+            assert!(!is_non_answer(reply), "should keep as a real answer: {reply}");
+        }
+    }
+
+    #[test]
+    fn normalizes_curly_apostrophe() {
+        // TTS/LLM output often uses U+2019; the gate must still catch it.
+        assert!(is_non_answer("I\u{2019}m not finding a school by that name."));
+    }
 }

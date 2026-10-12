@@ -493,6 +493,65 @@ impl HelixMemory {
         Ok(changed)
     }
 
+    /// Delete every `Turn` node whose **reply** reads as a non-answer, as judged by the
+    /// caller-supplied `reply_is_non_answer` predicate (the ingester's `is_non_answer`).
+    ///
+    /// A `Turn`'s `text` is the stored `"{transcript}\n{reply}"`; we classify only the
+    /// reply half, so a user *asking* "I don't know where the school is" is never mistaken
+    /// for the assistant failing to answer. A turn with no reply (no newline) is kept.
+    ///
+    /// This is the one-time cleanup for graphs built before the ingester's ingestion gate
+    /// landed: a stored "I couldn't find that" turn otherwise resurfaces under "What you
+    /// remember about this person" and few-shot-primes the model to repeat the failure.
+    /// Dropping a `Turn` also removes its incident edges (`SAID`/`MENTIONS`/`KNOWS`/
+    /// `FOLLOWS`) and its vector-index entry; durable `Memory` facts are never touched.
+    /// Returns the number of turns removed.
+    pub async fn purge_non_answer_turns(
+        &self,
+        reply_is_non_answer: impl Fn(&str) -> bool,
+    ) -> Result<u64> {
+        // Full value_map (not a projection) so each item carries its `$id`; we need the
+        // `text` to classify. The large `embedding` comes along but is simply ignored.
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as("t", g().n_with_label(L_TURN).value_map(None::<Vec<String>>))
+                    .returning(["t"]),
+            )
+            .await?;
+        let items = found
+            .get("t")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut removed = 0u64;
+        for item in items {
+            let (Some(id), Some(text)) = (
+                item.get("$id").and_then(|v| v.as_u64()),
+                item.get("text").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            // Classify only the reply half (see `turn_reply_half`). No reply → keep.
+            let Some(reply) = turn_reply_half(text) else {
+                continue;
+            };
+            if reply_is_non_answer(reply) {
+                self.write(
+                    batch::write_batch()
+                        .var_as("_d", g().n(NodeRef::id(id)).drop())
+                        .returning(["_d"]),
+                )
+                .await?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.flush().await?;
+        }
+        Ok(removed)
+    }
+
     // ---- reads ------------------------------------------------------------
 
     /// GraphRAG recall for a query embedding. Combines:
@@ -807,6 +866,16 @@ fn replace_whole_word(text: &str, from: &str, to: &str) -> Option<String> {
     changed.then_some(out)
 }
 
+/// The reply half of a stored `Turn.text` (`"{transcript}\n{reply}"`, as built by the
+/// ingester's `turn_text`). The transcript is a single STT utterance (no newline), so the
+/// first newline is the boundary and everything after it — even a multi-line reply — is the
+/// reply. Returns `None` when there is no newline (the reply was empty at ingest), so such a
+/// turn is never judged a non-answer. This keeps `purge_non_answer_turns` classifying only
+/// what the *assistant* said, never a user transcript that happens to contain "I don't know".
+fn turn_reply_half(text: &str) -> Option<&str> {
+    text.split_once('\n').map(|(_transcript, reply)| reply)
+}
+
 /// Extract the `$id` of the first element of `value[var]`, if any.
 fn first_id(value: &Value, var: &str) -> Option<u64> {
     value.get(var)?.as_array()?.first()?.get("$id")?.as_u64()
@@ -838,7 +907,29 @@ fn push_scoped(out: &mut Vec<String>, value: &Value, var: &str, prop: &str, want
 
 #[cfg(test)]
 mod tests {
-    use super::replace_whole_word;
+    use super::{replace_whole_word, turn_reply_half};
+
+    #[test]
+    fn turn_reply_half_classifies_only_the_assistant_reply() {
+        // Splits on the first newline (the transcript/reply boundary).
+        assert_eq!(
+            turn_reply_half("where is the library?\nIt's on Main Street."),
+            Some("It's on Main Street.")
+        );
+        // A *user* "I don't know" stays in the transcript, out of the reply half — so
+        // purge, which classifies the returned reply, never deletes this turn.
+        assert_eq!(
+            turn_reply_half("I don't know the capital of France, what is it?\nIt's Paris."),
+            Some("It's Paris.")
+        );
+        // A multi-line reply is returned whole (everything after the first newline).
+        assert_eq!(
+            turn_reply_half("directions?\nHead north.\nThen turn left."),
+            Some("Head north.\nThen turn left.")
+        );
+        // No newline → reply was empty at ingest → never a non-answer.
+        assert_eq!(turn_reply_half("just a transcript"), None);
+    }
 
     #[test]
     fn corrects_a_standalone_token_only() {
