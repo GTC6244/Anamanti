@@ -165,6 +165,49 @@ pub struct SpeakerInfo {
     pub created_at: i64,
 }
 
+/// One entity ("keyword") a turn mentions, decorating a [`TurnInfo`] row.
+#[derive(Debug, Clone)]
+pub struct EntityRef {
+    /// Canonical surface form (e.g. `jazz`, `Portland`, `Sam`).
+    pub name: String,
+    /// Coarse type: `person` | `place` | `thing` | `topic` (free-form).
+    pub kind: String,
+}
+
+/// One stored conversation turn from the GraphRAG graph, for the device Memory
+/// screen's "Conversations" tab. Built by the Core's `list_turns`.
+#[derive(Debug, Clone)]
+pub struct TurnInfo {
+    /// Graph node id (`$id`), used to delete this turn.
+    pub id: i64,
+    /// The chat-log record id this turn was ingested from.
+    pub ext_id: String,
+    /// The conversation session id.
+    pub session: String,
+    /// Unix seconds when the turn happened.
+    pub ts: i64,
+    /// What the user said (the STT transcript).
+    pub transcript: String,
+    /// What the assistant replied.
+    pub reply: String,
+    /// Speaker id (`spk-…`, or `household` for the shared/unattributed user).
+    pub speaker_id: String,
+    /// Entities ("keywords") this turn mentions.
+    pub entities: Vec<EntityRef>,
+}
+
+/// One stored entity ("keyword") from the GraphRAG graph, for the device Memory
+/// screen's "Keywords" tab. Built by the Core's `list_entities`.
+#[derive(Debug, Clone)]
+pub struct EntityInfo {
+    /// Graph node id (`$id`), used to delete this entity.
+    pub id: i64,
+    /// Canonical surface form.
+    pub name: String,
+    /// Coarse type: `person` | `place` | `thing` | `topic`.
+    pub kind: String,
+}
+
 /// A requested settings change from the screen. Absent fields are left unchanged.
 #[derive(Debug, Clone)]
 pub struct SettingsUpdate {
@@ -385,6 +428,73 @@ pub fn clear_memories(orchestrator_key: String, discovery_timeout_secs: u64) -> 
             &cache,
             timeout(discovery_timeout_secs),
             preferred(&orchestrator_key),
+        )
+        .await
+    })
+}
+
+/// Browse stored conversation turns from the GraphRAG graph (Memory screen →
+/// Conversations), newest first. All filters optional: `query` (substring over the
+/// turn text), `speaker_id` (that speaker only), `entity` (turns mentioning that
+/// keyword). An older Core (or the SQLite recall backend) surfaces as an error.
+pub fn list_turns(
+    orchestrator_key: String,
+    query: String,
+    speaker_id: String,
+    entity: String,
+    limit: u32,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<TurnInfo>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_turns(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &query,
+            &speaker_id,
+            &entity,
+            limit,
+        )
+        .await
+    })
+}
+
+/// Browse stored entities / "keywords" from the GraphRAG graph (Memory screen →
+/// Keywords). `query` is an optional substring filter on the name.
+pub fn list_entities(
+    orchestrator_key: String,
+    query: String,
+    limit: u32,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<EntityInfo>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_entities(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &query,
+            limit,
+        )
+        .await
+    })
+}
+
+/// Drop one graph node (a turn or entity) by its id. Helix-index-only — the durable
+/// SQLite facts and the chat log are untouched. Returns whether the Core accepted it.
+pub fn delete_graph_node(
+    orchestrator_key: String,
+    id: i64,
+    discovery_timeout_secs: u64,
+) -> Result<bool> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::delete_graph_node(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            id,
         )
         .await
     })

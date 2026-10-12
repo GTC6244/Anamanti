@@ -105,6 +105,24 @@ impl GraphView for SwappableGraphView {
     async fn rename_entity(&self, old_name: &str, new_name: &str) -> Result<Value> {
         self.current().rename_entity(old_name, new_name).await
     }
+    async fn list_turns(
+        &self,
+        query: Option<&str>,
+        speaker_id: Option<&str>,
+        entity: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Value> {
+        self.current()
+            .list_turns(query, speaker_id, entity, limit, offset)
+            .await
+    }
+    async fn list_entities(&self, query: Option<&str>, limit: usize) -> Result<Value> {
+        self.current().list_entities(query, limit).await
+    }
+    async fn delete_node(&self, id: u64) -> Result<bool> {
+        self.current().delete_node(id).await
+    }
 }
 
 /// Status of the embedding backend, for the config page.

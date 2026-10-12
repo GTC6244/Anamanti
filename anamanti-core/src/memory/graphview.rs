@@ -33,4 +33,29 @@ pub trait GraphView: Send + Sync {
     /// Returns `{ "entities": n, "turns": n, "memories": n, "total": n }`; a `total`
     /// of `0` means the name was found nowhere.
     async fn rename_entity(&self, old_name: &str, new_name: &str) -> Result<Value>;
+
+    /// Browse stored `Turn` nodes for the device Memory screen, newest first, as
+    /// `{ "turns": [ {id,ext_id,session,ts,transcript,reply,speaker_id,entities}, ... ] }`.
+    /// All filters are optional and AND-combined: `query` (case-insensitive substring over
+    /// the turn text), `speaker_id` (that speaker only), `entity` (turns mentioning that
+    /// entity name). Paginated by `offset`/`limit`.
+    async fn list_turns(
+        &self,
+        query: Option<&str>,
+        speaker_id: Option<&str>,
+        entity: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Value>;
+
+    /// Browse stored `Entity` nodes ("keywords") for the device Memory screen, as
+    /// `{ "entities": [ {id,name,kind}, ... ] }`. `query` is an optional case-insensitive
+    /// substring match on `name`; capped to `limit`, sorted by `name`.
+    async fn list_entities(&self, query: Option<&str>, limit: usize) -> Result<Value>;
+
+    /// Drop a single node by its `$id` (a `Turn`/`Entity`/`Memory` picked on the device).
+    /// Removes the node's incident edges and vector-index entry. Helix-index-only — the
+    /// durable SQLite facts and the chat log (source of truth) are untouched. Returns
+    /// `true` once the drop is flushed (idempotent for a missing id).
+    async fn delete_node(&self, id: u64) -> Result<bool>;
 }

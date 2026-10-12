@@ -14,8 +14,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<OrchestratorOption>? orchestrators,
     DriveTokenView? driveToken,
     List<FunctionStatusView>? functions,
+    List<TurnView>? turns,
+    List<EntityView>? entities,
     this.throwOnFetch = false,
-  })  : _functions = functions ?? <FunctionStatusView>[],
+  })  : _turns = turns ?? <TurnView>[],
+        _entities = entities ?? <EntityView>[],
+        _functions = functions ?? <FunctionStatusView>[],
         _driveToken = driveToken ??
             const DriveTokenView(
               linked: false,
@@ -60,6 +64,8 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<OrchestratorOption> _orchestrators;
   final DriveTokenView _driveToken;
   final List<FunctionStatusView> _functions;
+  final List<TurnView> _turns;
+  final List<EntityView> _entities;
   final bool throwOnFetch;
 
   // Call records for assertions.
@@ -72,6 +78,11 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<String> deletedSpeakers = <String>[];
   final List<Map<String, String>> enrollFinishCalls = <Map<String, String>>[];
   final List<String> enrollCancelCalls = <String>[];
+
+  // GraphRAG browse/delete call records.
+  final List<Map<String, dynamic>> listTurnsCalls = <Map<String, dynamic>>[];
+  final List<Map<String, dynamic>> listEntitiesCalls = <Map<String, dynamic>>[];
+  final List<int> deletedGraphNodes = <int>[];
 
   /// When non-null, [enrollFinish] throws this instead of succeeding (simulates the
   /// orchestrator rejecting the commit, e.g. too few samples).
@@ -170,6 +181,53 @@ class FakeOrchestratorClient implements OrchestratorClient {
     final n = _memories.length;
     _memories.clear();
     return n;
+  }
+
+  @override
+  Future<List<TurnView>> listTurns({
+    String query = '',
+    String speakerId = '',
+    String entity = '',
+    int limit = 100,
+  }) async {
+    listTurnsCalls.add({
+      'query': query,
+      'speakerId': speakerId,
+      'entity': entity,
+      'limit': limit,
+    });
+    if (throwOnFetch) throw Exception('offline');
+    Iterable<TurnView> out = _turns;
+    if (query.isNotEmpty) {
+      final q = query.toLowerCase();
+      out = out.where((t) =>
+          t.transcript.toLowerCase().contains(q) ||
+          t.reply.toLowerCase().contains(q));
+    }
+    if (speakerId.isNotEmpty) {
+      out = out.where((t) => t.speakerId == speakerId);
+    }
+    if (entity.isNotEmpty) {
+      out = out.where((t) => t.entities.any((e) => e.name == entity));
+    }
+    return out.toList();
+  }
+
+  @override
+  Future<List<EntityView>> listEntities({String query = '', int limit = 200}) async {
+    listEntitiesCalls.add({'query': query, 'limit': limit});
+    if (throwOnFetch) throw Exception('offline');
+    if (query.isEmpty) return List.of(_entities);
+    final q = query.toLowerCase();
+    return _entities.where((e) => e.name.toLowerCase().contains(q)).toList();
+  }
+
+  @override
+  Future<bool> deleteGraphNode(int id) async {
+    deletedGraphNodes.add(id);
+    _turns.removeWhere((t) => t.id == id);
+    _entities.removeWhere((e) => e.id == id);
+    return true;
   }
 
   @override
