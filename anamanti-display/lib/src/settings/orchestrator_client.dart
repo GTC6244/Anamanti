@@ -110,6 +110,50 @@ class DriveTokenView {
   final String scope;
 }
 
+/// One capability in the Core's read-only "functions" snapshot, shown on the
+/// Settings → Functions screen. Describes whether the function runs in the cloud or
+/// locally (or is off), which model it uses, and whether a required API key is set —
+/// never the key itself.
+class FunctionStatusView {
+  const FunctionStatusView({
+    required this.category,
+    required this.name,
+    required this.mode,
+    required this.provider,
+    required this.model,
+    required this.keyRequired,
+    required this.keySet,
+    required this.note,
+  });
+
+  /// Grouping header: `Config` | `Tools` | `System1` | `Memory` | `Speech`.
+  final String category;
+
+  /// Human-friendly capability name (e.g. `LLM`, `Weather`, `Embeddings`).
+  final String name;
+
+  /// Where it runs: `cloud` | `local` | `off`.
+  final String mode;
+
+  /// Provider label (e.g. `Anthropic (Claude)`, `Mapbox`); empty when n/a.
+  final String provider;
+
+  /// Selected model / voice / dims; empty when n/a.
+  final String model;
+
+  /// Whether this function needs an API key / credential to work.
+  final bool keyRequired;
+
+  /// Whether that key/credential is currently set on the Core.
+  final bool keySet;
+
+  /// Optional nuance (e.g. a keyless fallback); empty when none.
+  final String note;
+
+  /// True when a required key is missing — the UI shows the red warning.
+  bool get keyMissing => keyRequired && !keySet;
+}
+
 /// One discovered orchestrator, for the settings "Orchestrator" dropdown.
 class OrchestratorOption {
   const OrchestratorOption({
@@ -217,6 +261,11 @@ abstract class OrchestratorClient {
   /// ids) for the idle slideshow. Throws if the Mac is unreachable; callers fall
   /// back to the last-synced values persisted in app settings.
   Future<DriveTokenView> fetchDriveToken();
+
+  /// Fetch the Core's read-only "functions" snapshot (cloud/local, model, and
+  /// whether each required API key is set) for the Settings → Functions screen.
+  /// Throws if the Mac is unreachable; callers show an offline guard.
+  Future<List<FunctionStatusView>> fetchFunctions();
 
   Future<List<MemoryView>> listMemories();
 
@@ -342,6 +391,26 @@ class FrbOrchestratorClient implements OrchestratorClient {
       folderIds: t.folderIds,
       scope: t.scope,
     );
+  }
+
+  @override
+  Future<List<FunctionStatusView>> fetchFunctions() async {
+    final fns = await frb.getFunctions(
+      orchestratorKey: orchestratorKey,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return fns
+        .map((f) => FunctionStatusView(
+              category: f.category,
+              name: f.name,
+              mode: f.mode,
+              provider: f.provider,
+              model: f.model,
+              keyRequired: f.keyRequired,
+              keySet: f.keySet,
+              note: f.note,
+            ))
+        .toList();
   }
 
   @override

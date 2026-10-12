@@ -122,6 +122,15 @@ pub mod types {
     /// Byte-identical to the orchestrator's `DRIVE_TOKEN`.
     pub const DRIVE_TOKEN: &str = "anamanti-drive-token";
 
+    /// device → orchestrator: fetch the read-only snapshot of the Core's configured
+    /// functions for the Settings screen (no data). Byte-identical to the
+    /// orchestrator's `GET_FUNCTIONS`.
+    pub const GET_FUNCTIONS: &str = "anamanti-get-functions";
+    /// orchestrator → device: the functions snapshot (data: `ok`, `functions` array;
+    /// each entry has `category`, `name`, `mode`, `provider`, `model`, `note`,
+    /// `key_required`, `key_set`). Byte-identical to the orchestrator's `FUNCTIONS`.
+    pub const FUNCTIONS: &str = "anamanti-functions";
+
     // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
     //
     // orchestrator → device: a tool the LLM called on the Mac emits a device action

@@ -90,6 +90,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             google_places_key: None,
             system1: anamanti_core::settings::System1Runtime::default(),
             personality: anamanti_core::settings::Personality::default(),
+            pronunciations: Vec::new(),
         },
     );
     let pipeline = Pipeline::with_settings(
@@ -116,7 +117,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
     let notify = Arc::new(anamanti_core::notify::NotificationService::new());
     let weather = Arc::new(anamanti_core::weather::WeatherService::new());
     tokio::spawn(anamanti_core::server::serve(
-        listener, pipeline, connector, catalog, None, None, notify, weather,
+        listener, pipeline, connector, catalog, None, None, notify, weather, None,
     ));
     (addr, memory, settings)
 }

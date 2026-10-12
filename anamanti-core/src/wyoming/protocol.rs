@@ -128,6 +128,18 @@ pub mod types {
     /// Secrets ride the device↔orchestrator LAN hop only.
     pub const DRIVE_TOKEN: &str = "anamanti-drive-token";
 
+    /// device → orchestrator: fetch a read-only snapshot of the Core's configured
+    /// "functions" (LLM, web search, STT, TTS, directions/weather/places, Spotify,
+    /// shopping list, phone messages, calendar, System-1, embeddings) for the device
+    /// Settings screen. No data in the request.
+    pub const GET_FUNCTIONS: &str = "anamanti-get-functions";
+    /// orchestrator → device: the functions snapshot (data: `ok`, `functions` array;
+    /// each entry has `category`, `name`, `mode` (`cloud`/`local`/`off`), optional
+    /// `provider`/`model`/`note`, and `key_required`/`key_set` booleans). Never carries
+    /// secret values — only whether each required key is set, exactly like the config
+    /// page.
+    pub const FUNCTIONS: &str = "anamanti-functions";
+
     // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
     //
     // A tool the LLM calls on the Mac emits a **device action** that the pipeline

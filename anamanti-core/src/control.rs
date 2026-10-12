@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
-use crate::memory::MemoryStore;
+use crate::memory::{EmbedStatus, GraphRagController, MemoryStore};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
 use crate::speaker::SpeakerRegistry;
@@ -44,6 +44,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MODELS
             | types::LIST_VOICES
             | types::GET_DRIVE_TOKEN
+            | types::GET_FUNCTIONS
     )
 }
 
@@ -61,11 +62,20 @@ pub async fn handle_control(
     catalog: &ModelCatalog,
     connector: &dyn ServiceConnector,
     voices_dir: Option<&Path>,
+    graphrag: Option<&GraphRagController>,
 ) -> Result<()> {
     let response = if request.event_type == types::LIST_MODELS {
         models_response(catalog).await
     } else if request.event_type == types::LIST_VOICES {
         voices_response(connector, voices_dir).await
+    } else if request.event_type == types::GET_FUNCTIONS {
+        // The embeddings entry needs the live GraphRAG backend status (async), so this
+        // request is answered here rather than in the pure `respond`.
+        let embed = match graphrag {
+            Some(g) => Some(g.status().await),
+            None => None,
+        };
+        functions_response(settings, embed.as_ref())
     } else {
         respond(request, memory, settings, speaker)
     };
@@ -162,6 +172,356 @@ pub fn drive_token_response(settings: &SharedSettings) -> WyomingEvent {
             "scope": d.scope.unwrap_or_default(),
         }),
     )
+}
+
+/// One capability row in the `anamanti-functions` snapshot. `mode` is the device's
+/// cloud/local/off chip; `key_required && !key_set` drives the red "API key missing"
+/// warning. Secret values are never included — only whether each required key is set,
+/// exactly like the loopback config page.
+#[allow(clippy::too_many_arguments)]
+fn func_entry(
+    category: &str,
+    name: &str,
+    mode: &str,
+    provider: Option<&str>,
+    model: Option<String>,
+    key_required: bool,
+    key_set: bool,
+    note: Option<&str>,
+) -> Value {
+    json!({
+        "category": category,
+        "name": name,
+        "mode": mode,
+        "provider": provider.unwrap_or_default(),
+        "model": model.unwrap_or_default(),
+        "key_required": key_required,
+        "key_set": key_set,
+        "note": note.unwrap_or_default(),
+    })
+}
+
+/// Build the `anamanti-functions` response: a read-only snapshot of the Core's
+/// configured capabilities (cloud vs local, model, and whether a required API key is
+/// set) for the device Settings screen. Mirrors what the loopback config page's Config,
+/// Tools, System1, Speech, and Memory→Embedding tabs show, aggregated into one frame.
+/// Never exposes secret values. `embed` is the live GraphRAG embedding status when the
+/// GraphRAG backend is running (`None` ⇒ memory is on SQLite FTS).
+pub fn functions_response(settings: &SharedSettings, embed: Option<&EmbedStatus>) -> WyomingEvent {
+    let v = settings.view();
+    let mut fns: Vec<Value> = Vec::new();
+
+    // ---- Config: LLM ----
+    let llm = match v.llm_backend.as_str() {
+        "anthropic" => {
+            let key_set = match v.anthropic_auth {
+                AnthropicAuth::Subscription => v.anthropic_oauth_token_set,
+                AnthropicAuth::ApiKey => v.anthropic_key_set,
+            };
+            func_entry(
+                "Config",
+                "LLM",
+                "cloud",
+                Some("Anthropic (Claude)"),
+                v.llm_model.clone(),
+                true,
+                key_set,
+                None,
+            )
+        }
+        "openai" => func_entry(
+            "Config",
+            "LLM",
+            "cloud",
+            Some("OpenAI"),
+            v.llm_model.clone(),
+            true,
+            v.openai_key_set,
+            None,
+        ),
+        "ollama" => func_entry(
+            "Config",
+            "LLM",
+            "local",
+            Some("Ollama"),
+            v.llm_model.clone(),
+            false,
+            false,
+            None,
+        ),
+        _ => func_entry(
+            "Config",
+            "LLM",
+            "local",
+            Some("Mock (offline echo)"),
+            v.llm_model.clone(),
+            false,
+            false,
+            None,
+        ),
+    };
+    fns.push(llm);
+
+    // ---- Config: web search ----
+    if v.web_search {
+        let tavily = v.search_provider.eq_ignore_ascii_case("tavily");
+        fns.push(func_entry(
+            "Config",
+            "Web search",
+            "cloud",
+            Some(&v.search_provider),
+            None,
+            tavily, // DuckDuckGo is keyless
+            v.search_key_set,
+            None,
+        ));
+    }
+
+    // ---- Config: text-to-speech (Piper, always local) ----
+    fns.push(func_entry(
+        "Config",
+        "Text-to-speech",
+        "local",
+        Some("Piper"),
+        v.tts_voice.clone(),
+        false,
+        false,
+        None,
+    ));
+
+    // ---- Speech: speech-to-text ----
+    let stt = settings.stt_view();
+    let stt_entry = match stt.engine.as_str() {
+        "elevenlabs" => func_entry(
+            "Speech",
+            "Speech-to-text",
+            "cloud",
+            Some("ElevenLabs Scribe"),
+            Some(stt.elevenlabs_model_id.clone()),
+            true,
+            stt.elevenlabs_key_set,
+            None,
+        ),
+        "whisper-rs" => func_entry(
+            "Speech",
+            "Speech-to-text",
+            "local",
+            Some("Whisper (in-process)"),
+            None,
+            false,
+            false,
+            None,
+        ),
+        _ => func_entry(
+            "Speech",
+            "Speech-to-text",
+            "local",
+            Some("Whisper (Wyoming)"),
+            None,
+            false,
+            false,
+            None,
+        ),
+    };
+    fns.push(stt_entry);
+
+    // ---- Tools: directions (Mapbox) ----
+    // Optional add-on tools (directions/places/Spotify/shopping list/phone/calendar)
+    // are "on iff configured": a missing credential just means the tool is off, not a
+    // broken setup, so they never raise the red key warning — only the pipeline
+    // essentials above do. An off tool carries a note saying what would enable it.
+    let mapbox_set = v.mapbox_token_set;
+    fns.push(func_entry(
+        "Tools",
+        "Directions",
+        if mapbox_set { "cloud" } else { "off" },
+        Some("Mapbox"),
+        None,
+        false,
+        mapbox_set,
+        (!mapbox_set).then_some("Needs a Mapbox token"),
+    ));
+
+    // ---- Tools: weather ----
+    let weather_provider = settings.weather_provider_label();
+    let vc_key_set = settings.visualcrossing_key_set();
+    let weather_enabled = settings.weather_enabled();
+    let is_openmeteo = matches!(
+        weather_provider.as_str(),
+        "openmeteo" | "open-meteo" | "open_meteo"
+    );
+    // Visual Crossing needs a key; without one it silently falls back to keyless
+    // Open-Meteo, so the key is never strictly *required* — surface the fallback as a
+    // note instead of a red warning.
+    let (weather_mode, weather_provider_label, weather_note): (&str, &str, Option<&str>) =
+        if !weather_enabled {
+            ("off", "Weather", None)
+        } else if is_openmeteo {
+            ("local", "Open-Meteo", None)
+        } else if vc_key_set {
+            ("cloud", "Visual Crossing", None)
+        } else {
+            ("local", "Open-Meteo", Some("No Visual Crossing key — using Open-Meteo"))
+        };
+    fns.push(func_entry(
+        "Tools",
+        "Weather",
+        weather_mode,
+        Some(weather_provider_label),
+        None,
+        false,
+        vc_key_set,
+        weather_note,
+    ));
+
+    // ---- Tools: places (Google, no keyless fallback) ----
+    let places_set = settings.google_places_key_set();
+    fns.push(func_entry(
+        "Tools",
+        "Places",
+        if places_set { "cloud" } else { "off" },
+        Some("Google Places"),
+        None,
+        false,
+        places_set,
+        (!places_set).then_some("Needs a Google Places key"),
+    ));
+
+    // ---- Tools: Spotify ----
+    let spotify = settings.spotify();
+    let spotify_linked = spotify.linked();
+    fns.push(func_entry(
+        "Tools",
+        "Spotify",
+        if spotify_linked { "cloud" } else { "off" },
+        Some("Spotify"),
+        None,
+        false,
+        spotify_linked,
+        (!spotify_linked).then_some(if spotify.configured() {
+            "Not linked"
+        } else {
+            "Not configured"
+        }),
+    ));
+
+    // ---- Tools: shopping list (Cadora) ----
+    let cadora = settings.cadora();
+    let cadora_linked = cadora.linked();
+    fns.push(func_entry(
+        "Tools",
+        "Shopping list",
+        if cadora_linked { "cloud" } else { "off" },
+        Some("Cadora"),
+        None,
+        false,
+        cadora_linked,
+        (!cadora_linked).then_some("Not linked"),
+    ));
+
+    // ---- Tools: phone messages (AppSaid) ----
+    let appsaid = settings.appsaid();
+    let appsaid_active = appsaid.active();
+    fns.push(func_entry(
+        "Tools",
+        "Phone messages",
+        if appsaid_active { "cloud" } else { "off" },
+        Some("AppSaid"),
+        None,
+        false,
+        appsaid.token_set(),
+        (!appsaid_active).then_some(if appsaid.token_set() {
+            "No worker URL or recipient"
+        } else {
+            "Not configured"
+        }),
+    ));
+
+    // ---- Tools: calendar (read-only web .ics, keyless) ----
+    let calendar_active = settings.calendar_active();
+    fns.push(func_entry(
+        "Tools",
+        "Calendar",
+        if calendar_active { "cloud" } else { "off" },
+        Some("Web calendar"),
+        None,
+        false,
+        calendar_active,
+        (!calendar_active).then_some("No subscriptions"),
+    ));
+
+    // ---- System1: fast decisions ----
+    let s1 = settings.system1_view();
+    let s1_entry = match s1.backend.as_str() {
+        "jev" => func_entry(
+            "System1",
+            "Fast decisions",
+            "cloud",
+            Some("OpenRouter"),
+            Some(s1.model.clone()),
+            true,
+            s1.openrouter_key_set,
+            None,
+        ),
+        "laya-serve" => func_entry(
+            "System1",
+            "Fast decisions",
+            "local",
+            Some("Laya-Decision"),
+            None,
+            false,
+            false,
+            None,
+        ),
+        _ => func_entry(
+            "System1",
+            "Fast decisions",
+            "off",
+            Some("Disabled"),
+            None,
+            false,
+            false,
+            None,
+        ),
+    };
+    fns.push(s1_entry);
+
+    // ---- Memory: embeddings (GraphRAG) ----
+    let embed_entry = match embed {
+        Some(e) if e.active == "openai" => func_entry(
+            "Memory",
+            "Embeddings",
+            "cloud",
+            Some("OpenAI (text-embedding-3-small)"),
+            Some(format!("{}-dim", e.dims)),
+            true,
+            e.openai_available,
+            None,
+        ),
+        Some(e) => func_entry(
+            "Memory",
+            "Embeddings",
+            "local",
+            Some("nomic-embed-text"),
+            Some(format!("{}-dim", e.dims)),
+            false,
+            false,
+            None,
+        ),
+        None => func_entry(
+            "Memory",
+            "Embeddings",
+            "local",
+            Some("SQLite FTS"),
+            None,
+            false,
+            false,
+            Some("GraphRAG disabled"),
+        ),
+    };
+    fns.push(embed_entry);
+
+    WyomingEvent::with_data(types::FUNCTIONS, json!({ "ok": true, "functions": fns }))
 }
 
 /// Build the response event for a control `request`. Never fails: a bad request or
@@ -546,6 +906,48 @@ mod tests {
         assert_eq!(resp.data["refresh_token"], json!("1//refresh"));
         assert_eq!(resp.data["folder_ids"][0], json!("1AbC"));
         assert_eq!(resp.data["scope"], json!("scope-x"));
+    }
+
+    #[test]
+    fn get_functions_is_a_control_request_and_reports_a_snapshot() {
+        assert!(is_control_request(types::GET_FUNCTIONS));
+        let s = settings(); // mock LLM, no provider keys, nothing linked
+        let resp = functions_response(&s, None);
+        assert_eq!(resp.event_type, types::FUNCTIONS);
+        assert_eq!(resp.data["ok"], json!(true));
+        let fns = resp.data["functions"].as_array().unwrap();
+        assert!(!fns.is_empty());
+
+        let find = |name: &str| fns.iter().find(|f| f["name"] == json!(name)).unwrap();
+
+        // Mock LLM → local, no key required, so no red warning.
+        let llm = find("LLM");
+        assert_eq!(llm["mode"], json!("local"));
+        assert_eq!(llm["key_required"], json!(false));
+
+        // Places is an optional add-on tool: with no key it's simply off (not a
+        // broken setup), so it never raises the red warning — it shows "off" with a
+        // note, not key_required.
+        let places = find("Places");
+        assert_eq!(places["category"], json!("Tools"));
+        assert_eq!(places["key_required"], json!(false));
+        assert_eq!(places["key_set"], json!(false));
+        assert_eq!(places["mode"], json!("off"));
+        assert_eq!(places["note"], json!("Needs a Google Places key"));
+
+        // Embeddings with no GraphRAG controller → SQLite FTS, local, keyless.
+        let embed = find("Embeddings");
+        assert_eq!(embed["category"], json!("Memory"));
+        assert_eq!(embed["mode"], json!("local"));
+        assert_eq!(embed["note"], json!("GraphRAG disabled"));
+
+        // Every category we promised is present.
+        for cat in ["Config", "Tools", "System1", "Memory", "Speech"] {
+            assert!(
+                fns.iter().any(|f| f["category"] == json!(cat)),
+                "missing category {cat}"
+            );
+        }
     }
 
     #[test]

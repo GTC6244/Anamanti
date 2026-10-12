@@ -267,6 +267,23 @@ predictable memory use and no GC pauses under the 1 GB limit.
   render a dropdown (with a "Server default" entry) and fall back to a free-text
   field when the list is unavailable; a hand-set voice not in the list stays
   selectable.
+- **Functions status snapshot** (device Settings → Functions): a **read-only**
+  aggregate of what the Anamanti Core is configured to use for every capability —
+  cloud vs local, the model, and whether each required API key is set — so a user at
+  the display can see the assistant's setup (and spot a missing key) without the Mac
+  config page. The device fetches it over a dedicated control round trip
+  `anamanti-get-functions` → `anamanti-functions` (byte-identical `types` in both
+  crates; FRB `get_functions` → `OrchestratorClient.fetchFunctions()`). The Core's
+  `control::functions_response` builds one row per capability from the existing
+  `SharedSettings` accessors (`view`, `system1_view`, `stt_view`, the weather/places/
+  directions/Spotify/Cadora/AppSaid/calendar accessors) plus the live
+  `GraphRagController::status` for embeddings (threaded into the device server
+  alongside `catalog`/`notify`/`weather`). It covers LLM + web search + TTS (Config),
+  speech-to-text (Speech), directions/weather/places + Spotify/shopping list/phone
+  messages/calendar (Tools), fast decisions (System1), and embeddings (Memory). Like
+  the rest of the control path it never carries secret values — only each key's
+  set/unset bit — so the red "API key missing" warning on the device is driven by the
+  same `*_key_set` booleans the loopback config page uses.
 - **Anthropic auth mode** (`llm::anthropic_auth`): a per-provider toggle selects
   **API key** (`x-api-key` from `ANTHROPIC_API_KEY`) or **subscription OAuth**
   (`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`). Subscription tokens
