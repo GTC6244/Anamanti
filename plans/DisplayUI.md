@@ -34,8 +34,9 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Functions / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
-| **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Functions / People / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
+| **People / enrollment** (pushed from Settings → People) | `PeopleScreen`, `SpeakerEnrollScreen` |
+| **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
 ---
@@ -469,13 +470,13 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 ---
 
-## 10. Settings sub-screens — built but currently UNWIRED
+## 10. People, voice enrollment & other sub-screens
 
-These widgets exist and are tested but are **not reachable** from the running app
-in this version (referenced only from `test/`). Listed so they are not
-re-implemented by mistake; wire them into `SettingsScreen` navigation when needed.
+`PeopleScreen` + `SpeakerEnrollScreen` are **reachable** (Settings → People).
+`MemoryScreen` is built + tested but **not yet wired** into navigation (referenced
+only from `test/`) — listed so it isn't re-implemented by mistake.
 
-**`MemoryScreen`** — `lib/src/ui/memory_screen.dart`
+**`MemoryScreen`** (built, currently **unwired**) — `lib/src/ui/memory_screen.dart`
 - `Scaffold` + `AppBar("Memory")`. Lists Core memory entries (`MemoryView`: facts
   vs preferences, explicit vs inferred) as `ListTile`s with per-entry delete;
   app-bar refresh + "Forget all" (confirm dialog). Constructed with an
