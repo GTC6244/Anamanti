@@ -754,9 +754,13 @@ pub fn followup_wait_secs(data: &Value) -> u32 {
 /// block of each `audio-start`. It lets the model know what is on screen so it can
 /// **drive it by voice** with the matching tool. This is a **general, extensible**
 /// concept: each device screen that wants voice control reports its own context here,
-/// discriminated by the `screen.kind` string on the wire. Today only the recipe screen
-/// is implemented; music / weather / photo screens would add their own variants (and a
-/// device-side setter + a Core-side prompt line) without touching the transport.
+/// discriminated by the `screen.kind` string on the wire. Recipe / weather / place each
+/// add their own variant (and a device-side setter + a Core-side prompt line) without
+/// touching the transport.
+///
+/// Most contexts enrich the LLM turn, but a context can also **suppress** it: the
+/// [`Diagnostics`](DisplayContext::Diagnostics) screen makes the turn transcription-only
+/// (the orchestrator echoes the transcript and stops, never reaching the LLM/TTS).
 ///
 /// See `plans/architecture.md` §4 ("Display context") and `plans/RecipePlan.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -767,6 +771,12 @@ pub enum DisplayContext {
     Weather(WeatherScreen),
     /// The place card is up (`kind: "place"`).
     Place(PlaceScreen),
+    /// The audio-diagnostics screen is up (`kind: "diagnostics"`). This is a
+    /// **transcription-only** context: the turn pipeline echoes the STT transcript to
+    /// the device for on-screen display and then stops — no speaker ID, no System-1, no
+    /// LLM, no TTS, no memory/chat-log. The screen is a diagnostic surface only, so a
+    /// voice tone it hears must never be processed by the assistant. Carries no state.
+    Diagnostics,
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
@@ -823,6 +833,9 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
             parse_weather_screen(screen.get("weather")?.as_object()?).map(DisplayContext::Weather)
         }
         "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
+        // The audio-diagnostics screen carries no state — its presence alone switches the
+        // turn to transcription-only (the orchestrator short-circuits before any LLM work).
+        "diagnostics" => Some(DisplayContext::Diagnostics),
         _ => None,
     }
 }
@@ -906,6 +919,10 @@ impl DeviceContext {
             Some(DisplayContext::Recipe(_)) => Some("recipe"),
             Some(DisplayContext::Weather(_)) => Some("weather"),
             Some(DisplayContext::Place(_)) => Some("place"),
+            // Diagnostics never reaches System-1/System-2 (the turn short-circuits before
+            // them), so it reports no widget label — nothing can leak into a decision or
+            // prompt even if that ordering changes later.
+            Some(DisplayContext::Diagnostics) => None,
             None => None,
         }
     }
@@ -1304,6 +1321,12 @@ mod tests {
                 description: "partly cloudy".to_string(),
             }))
         );
+
+        // The audio-diagnostics screen carries no state — its bare `kind` is enough, and
+        // `widget_label()` reports nothing (it must never route a decision or prompt).
+        let diag = json!({ "screen": { "kind": "diagnostics" } });
+        assert_eq!(display_context(&diag), Some(DisplayContext::Diagnostics));
+        assert_eq!(device_context(&diag).widget_label(), None);
 
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
         let other = json!({ "screen": { "kind": "music" } });

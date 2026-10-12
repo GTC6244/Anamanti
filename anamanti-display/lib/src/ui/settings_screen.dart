@@ -34,7 +34,7 @@ import 'package:anamanti_display/src/slideshow/ambient_photos.dart';
 import 'package:anamanti_display/src/slideshow/drive_photos.dart';
 import 'package:anamanti_display/src/ui/audio_diagnostics_view.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart'
-    show updateDiagnosticsTuning;
+    show updateDiagnosticsTuning, setDiagnosticsContext;
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
 /// is the orchestrator's backend label.
@@ -803,6 +803,9 @@ class _SettingsScreenState extends State<SettingsScreen>
       onChanged: (next) => setState(() => _settings = next),
       onTune: (gain, threshold) =>
           updateDiagnosticsTuning(gainDb: gain, threshold: threshold),
+      // Entering/leaving the page toggles the Core's transcription-only context, so
+      // voice turns here show the recognized words but are never sent to the LLM.
+      onActiveChanged: (active) => setDiagnosticsContext(active: active),
     );
   }
 

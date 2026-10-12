@@ -259,6 +259,53 @@ async fn drive_device_silent(io: DuplexStream) -> (String, String, bool) {
     (transcript, reply, saw_listen)
 }
 
+/// Drive the device side of a turn while the **audio-diagnostics** screen is up: the
+/// `audio-start` carries a `screen: {kind: "diagnostics"}` block, and the audio is voiced
+/// so a real transcript is produced. Drains relayed frames until the socket's turn ends.
+/// Returns `(relayed_transcript, reply_text, saw_listen)`. A diagnostics turn must echo
+/// the transcript and then stop — no reply tokens, no follow-up listen.
+async fn drive_device_diagnostics(io: DuplexStream) -> (String, String, bool) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+
+    // Stamp the diagnostics display context onto the turn's `audio-start`, exactly as the
+    // device does when the Audio Diagnostics screen is foreground.
+    let mut start = WyomingEvent::audio_start(fmt, 0);
+    start.data["screen"] = json!({ "kind": "diagnostics" });
+    write_event(&mut writer, &start).await.unwrap();
+    // Voiced audio so the VAD latches speech and STT returns a real transcript.
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
+    )
+    .await
+    .unwrap();
+
+    let mut transcript = String::new();
+    let mut reply = String::new();
+    let mut saw_listen = false;
+    while let Some(ev) = read_event(&mut reader).await.unwrap() {
+        if ev.is_transcript() {
+            transcript = ev.transcript_text().unwrap_or_default().to_string();
+            continue;
+        }
+        if let Some(tok) = ev.reply_token_text() {
+            reply.push_str(tok);
+            continue;
+        }
+        if ev.event_type == types::LISTEN {
+            saw_listen = true;
+        }
+        // The diagnostics turn ends with a bare `audio-stop` (no reply, no listen).
+        if ev.event_type == types::AUDIO_STOP {
+            break;
+        }
+    }
+    (transcript, reply, saw_listen)
+}
+
 fn build_pipeline(memory: Arc<MemoryStore>) -> Pipeline {
     Pipeline::new(
         Arc::new(MockLlm::new("You said: {msg}")),
@@ -421,6 +468,65 @@ async fn silent_turn_discards_stt_hallucination_and_ends_the_chain() {
         "no ambient-listen after a discarded no-speech turn"
     );
     // The pipeline still completes cleanly (sleeps on silence).
+    assert_eq!(events.last(), Some(&TurnEvent::Finished));
+}
+
+/// When the Audio Diagnostics screen is foreground, a wake-word turn must transcribe
+/// speech and echo the words to the device for display, but the audio must NOT be
+/// processed any further: no LLM, no TTS, no speaker ID, no follow-up listen. The screen
+/// is a diagnostic surface only.
+#[tokio::test]
+async fn diagnostics_screen_transcribes_but_never_invokes_the_llm() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = build_pipeline(memory);
+    let connector = MockConnector::new("testing one two three");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_diagnostics(dev_test));
+
+    let mut events = Vec::new();
+    {
+        let mut on_event = |e: TurnEvent| events.push(e);
+        pipeline
+            .run_turn(&mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    let (transcript, reply, saw_listen) = device_task.await.unwrap();
+
+    // The words are transcribed and echoed to the screen…
+    assert_eq!(
+        transcript, "testing one two three",
+        "diagnostics turn must echo the STT transcript to the device"
+    );
+    // …but nothing is sent to the LLM / spoken back…
+    assert_eq!(reply, "", "diagnostics turn must not produce an LLM reply");
+    assert!(
+        connector.synthesized.lock().unwrap().is_empty(),
+        "diagnostics turn must not run TTS"
+    );
+    // …and no follow-up listen is issued (it is not a conversational turn).
+    assert!(!saw_listen, "diagnostics turn must not issue ambient-listen");
+
+    // The orchestrator never ran the LLM/speaker/reply stages — only Streaming,
+    // Transcript, and a clean Finished.
+    assert!(
+        events.iter().any(|e| matches!(e, TurnEvent::Transcript(t) if t == "testing one two three")),
+        "the transcript event still fires for display"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            TurnEvent::ReplyToken(_)
+                | TurnEvent::Reply(_)
+                | TurnEvent::Speaker(_)
+                | TurnEvent::Speaking
+                | TurnEvent::MemoryStored(_)
+        )),
+        "no LLM/speaker/TTS/memory stages run on a diagnostics turn"
+    );
     assert_eq!(events.last(), Some(&TurnEvent::Finished));
 }
 
