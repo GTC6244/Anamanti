@@ -146,7 +146,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `anamanti_chatlog.jsonl` and a background ingester (`memory/ingester.rs`) embeds
   it (OpenAI `text-embedding-3-small`, `OPENAI_API_KEY`) into a graph of
   `User/Turn/Memory/Entity` nodes, so recall does vector KNN + a graph hop rather
-  than keyword FTS. If `OPENAI_API_KEY` is absent or the graph fails to open,
+  than keyword FTS. **Non-answer turns are excluded from recall:** the ingester's
+  `is_non_answer(reply)` gate skips making a declined/"I can't find that"/clarification
+  turn a recallable `Turn` node — otherwise a run of them resurfaces under the prompt's
+  "What you remember about this person" block and few-shot-primes the model to repeat the
+  failure (a self-reinforcing loop on a mis-transcribed proper noun). The turn still lands
+  in the chat log (source of truth) and any **facts** it wrote are still ingested as
+  `Memory` nodes; only its raw `transcript\nreply` node is withheld. Graphs built before
+  the gate are cleaned once per backend start by `HelixMemory::purge_non_answer_turns`
+  (drops matching `Turn` nodes + their edges + vector-index entries; `Memory` facts
+  untouched). If `OPENAI_API_KEY` is absent or the graph fails to open,
   recall **falls back to SQLite FTS** (writes are unaffected); `ANAMANTI_MEMORY_BACKEND=sqlite`
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
