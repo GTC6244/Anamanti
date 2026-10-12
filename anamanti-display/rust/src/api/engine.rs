@@ -290,6 +290,11 @@ pub enum WakeWordEventKind {
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
     /// transitions, never per frame.
     Presence,
+    /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
+    /// guided capture (a training sample or the verify check). `enroll_json` carries the
+    /// raw `anamanti-enroll-result` data block (phase / accepted / samples / consistency /
+    /// confidence / speaker_id / name / message); the enroll screen parses it to advance.
+    EnrollResult,
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
@@ -355,6 +360,9 @@ pub struct WakeWordEvent {
     /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
     /// scroll direction (`RecipeScroll`). Empty for every other kind.
     pub recipe_action: String,
+    /// The enrollment-step result as a JSON string (`EnrollResult`); empty for every
+    /// other kind. The enroll screen decodes it to show progress / the verify outcome.
+    pub enroll_json: String,
 }
 
 impl WakeWordEvent {
@@ -381,6 +389,7 @@ impl WakeWordEvent {
             weather_json: String::new(),
             place_json: String::new(),
             recipe_action: String::new(),
+            enroll_json: String::new(),
         }
     }
 
@@ -549,6 +558,13 @@ impl WakeWordEvent {
 
     pub(crate) fn dismiss_place() -> Self {
         Self::base(WakeWordEventKind::DismissPlace)
+    }
+
+    pub(crate) fn enroll_result(enroll_json: String) -> Self {
+        Self {
+            enroll_json,
+            ..Self::base(WakeWordEventKind::EnrollResult)
+        }
     }
 
     pub(crate) fn recipe_navigate(target: String) -> Self {
@@ -734,6 +750,41 @@ pub fn set_place_context(active: bool, name: String, address: String) {
 pub fn set_diagnostics_context(active: bool) {
     let screen = if active {
         Some(serde_json::json!({ "kind": "diagnostics" }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(screen);
+}
+
+/// Report that the **voice-enrollment** screen is foreground (SpeakerEnrollmentPlan.md
+/// Phase 2) as the device's display context, so the next voice turn's `audio-start`
+/// routes the captured speech to the orchestrator's enrollment accumulator instead of
+/// the assistant. Like diagnostics, this is a **suppressing** context — no LLM/TTS — but
+/// it carries the session grouping the captures, the name being enrolled, the sample
+/// index (progress), and the `phase` (`"sample"` to train, `"verify"` for the read-only
+/// recognition check after commit).
+///
+/// Flutter sets it (`active == true`) just before each phrase capture and clears it
+/// (`active == false`) when the enroll screen closes. The enroll screen reuses the
+/// ordinary wake-word turn for capture, so there is no second audio path.
+#[frb(sync)]
+pub fn set_enroll_context(
+    active: bool,
+    session: String,
+    name: String,
+    sample_index: u32,
+    phase: String,
+) {
+    let screen = if active {
+        Some(serde_json::json!({
+            "kind": "enroll",
+            "enroll": {
+                "session": session,
+                "name": name,
+                "sample_index": sample_index,
+                "phase": phase,
+            },
+        }))
     } else {
         None
     };

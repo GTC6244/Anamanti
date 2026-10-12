@@ -99,6 +99,20 @@ pub mod types {
     /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
     pub const SPEAKER_RESULT: &str = "anamanti-speaker-result";
 
+    // ---- Active voice enrollment (SpeakerEnrollmentPlan.md Phase 2) ----
+    // Byte-identical to the orchestrator crate's `types`. Sample/verify captures ride
+    // the ordinary wake-word turn tagged `screen.kind = "enroll"`; commit/cancel are
+    // these control frames. Every step answers with `ENROLL_RESULT`.
+
+    /// device → orchestrator: commit the current enrollment session into a named,
+    /// labeled profile (data: `session`, `name`).
+    pub const ENROLL_FINISH: &str = "anamanti-enroll-finish";
+    /// device → orchestrator: discard an in-flight enrollment session (data: `session`).
+    pub const ENROLL_CANCEL: &str = "anamanti-enroll-cancel";
+    /// orchestrator → device: the result of an enrollment step (data: `ok`, `phase`,
+    /// plus `accepted`/`samples`/`consistency`/`confidence`/`speaker_id`/`name`/`message`).
+    pub const ENROLL_RESULT: &str = "anamanti-enroll-result";
+
     /// device → orchestrator: list the selectable LLM models for the settings model
     /// dropdown (no data).
     pub const LIST_MODELS: &str = "anamanti-list-models";

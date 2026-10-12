@@ -157,6 +157,34 @@ Future<bool> deleteSpeaker({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Commit the current guided voice-enrollment session into a named profile
+/// (SpeakerEnrollmentPlan.md Phase 2). The sample captures were streamed over the
+/// ordinary wake-word turns while the enroll screen was foreground; this averages
+/// them into a voiceprint. Returns the orchestrator's confirmation message, or an
+/// error carrying the reason (e.g. too few samples).
+Future<String> enrollFinish({
+  required String orchestratorKey,
+  required String session,
+  required String name,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsEnrollFinish(
+  orchestratorKey: orchestratorKey,
+  session: session,
+  name: name,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Discard an in-flight guided voice-enrollment session (the user backed out).
+Future<void> enrollCancel({
+  required String orchestratorKey,
+  required String session,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsEnrollCancel(
+  orchestratorKey: orchestratorKey,
+  session: session,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// The Google Drive photo-slideshow bundle the orchestrator owns, pulled by the
 /// device to drive the idle slideshow. The device mints Drive access tokens
 /// on-device from `refresh_token` using `client_id`/`client_secret`, so the tablet

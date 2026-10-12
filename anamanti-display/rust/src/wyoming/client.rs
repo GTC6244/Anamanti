@@ -283,6 +283,12 @@ pub enum TurnUpdate {
     /// a question). Does not change this turn's state machine — the engine reopens the
     /// mic (no wake word) once the reply audio finishes draining. See `plans/Plan.MD`.
     ListenFollowup(u32, u32),
+    /// The orchestrator's reply to a guided voice-enrollment capture (sample or verify;
+    /// SpeakerEnrollmentPlan.md Phase 2), relayed on the voice-turn socket. The payload
+    /// is the raw `anamanti-enroll-result` data block as a JSON string; the enrollment
+    /// screen (which outlives the turn) parses it to show progress / the verify result.
+    /// Does not change the turn's state machine.
+    EnrollResult(String),
     /// The turn ended cleanly and the client is back to idle.
     Finished,
 }
@@ -500,6 +506,11 @@ where
             if let Some(cmd) = event.font_command() {
                 on_update(TurnUpdate::Font(cmd));
             }
+        }
+        // The orchestrator's reply to an enrollment capture (sample/verify). The enroll
+        // screen owns the flow and outlives the turn, so just surface the raw result.
+        types::ENROLL_RESULT => {
+            on_update(TurnUpdate::EnrollResult(event.data.to_string()));
         }
         // Follow-up-listen request (the reply was a question). Surface it without
         // touching the turn state — it arrives mid-SPEAKING, and the engine reopens

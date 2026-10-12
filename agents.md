@@ -48,7 +48,13 @@ frame, and the orthogonal `screen.font` display-context sibling that gates it), 
 [`ElevenLabsSttPlan.md`](./plans/ElevenLabsSttPlan.md) (a third, selectable STT engine:
 ElevenLabs Scribe v2 Realtime over WebSocket, behind the existing `Transcriber`/`SttEngine`
 seam alongside `wyoming` and `whisper-rs`; boot-time `stt.engine=elevenlabs`, the
-`ELEVENLABS_API_KEY` secret, Core VAD stays the segmenter).
+`ELEVENLABS_API_KEY` secret, Core VAD stays the segmenter), and
+[`speaker_id_plan.md`](./plans/speaker_id_plan.md) + [`SpeakerEnrollmentPlan.md`](./plans/SpeakerEnrollmentPlan.md)
+(per-person voice recognition: an always-compiled ECAPA-TDNN voiceprint embedder
+identifies who is speaking on **every** turn's voiced PCM — not the wake word — and
+scopes memory/prompt per person; opt-in via `speaker.enabled`+`speaker.model_path`, with
+a device **People** screen whose guided "Add a person" flow actively enrolls + verifies a
+voice via an `enroll` display context on the ordinary turn — no second audio path).
 
 ---
 

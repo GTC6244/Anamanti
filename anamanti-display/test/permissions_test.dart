@@ -63,7 +63,13 @@ void main() {
 
     Future<void> openPermissions(WidgetTester tester) async {
       final tile = find.byKey(const Key('settings-menu-permissions'));
-      await tester.ensureVisible(tile);
+      // The menu's ListView builds lazily; a tile below the viewport+cacheExtent
+      // isn't in the element tree until scrolled into view.
+      await tester.scrollUntilVisible(
+        tile,
+        120,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.pumpAndSettle();
       await tester.tap(tile);
       await tester.pumpAndSettle();

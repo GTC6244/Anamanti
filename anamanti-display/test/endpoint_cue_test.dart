@@ -56,7 +56,7 @@ WakeWordEvent _ev(WakeWordEventKind kind, {double rms = 0, String model = ''}) =
       weatherJson: '',
       placeJson: '',
       recipeAction: '',
-    );
+      enrollJson: '',    );
 
 void main() {
   test('flips to processing after trailing silence once speech was seen', () async {

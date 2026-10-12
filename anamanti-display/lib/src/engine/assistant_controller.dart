@@ -192,6 +192,8 @@ class AssistantState {
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
+    this.enrollSeq = 0,
+    this.enrollResultJson = '',
   });
 
   final TurnPhase phase;
@@ -300,6 +302,16 @@ class AssistantState {
   /// or `'top'` / `'bottom'`. Read together with [recipeScrollSeq].
   final String recipeScrollDir;
 
+  /// Monotonic counter bumped each time a voice-enrollment capture result arrives
+  /// (SpeakerEnrollmentPlan.md Phase 2). The enroll screen watches it (a counter, so a
+  /// repeated/rejected sample still registers) and reads [enrollResultJson]. 0 = none.
+  final int enrollSeq;
+
+  /// The latest `anamanti-enroll-result` data block as a raw JSON string (paired with
+  /// [enrollSeq]): the orchestrator's reply to the most recent enrollment sample/verify
+  /// capture. Empty until the first result.
+  final String enrollResultJson;
+
   /// Whether recipe mode is currently on screen.
   bool get recipeActive => recipe != null;
 
@@ -385,6 +397,8 @@ class AssistantState {
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
+    int? enrollSeq,
+    String? enrollResultJson,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -415,6 +429,8 @@ class AssistantState {
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
+      enrollSeq: enrollSeq ?? this.enrollSeq,
+      enrollResultJson: enrollResultJson ?? this.enrollResultJson,
     );
   }
 }
@@ -866,6 +882,16 @@ class AssistantController extends ChangeNotifier {
         // [WakeWordEvent.recipeAction] string (same carrier as recipe scroll). The app
         // shell applies + persists the new global scale and calls [updateFontScale] back.
         _onFontAdjust?.call(e.recipeAction);
+      case WakeWordEventKind.enrollResult:
+        // A guided voice-enrollment capture's result (sample accepted/rejected, or the
+        // verify outcome). The enroll screen owns the flow; bump the counter + stash the
+        // raw JSON for it to parse. Does not touch the turn state machine.
+        _emit(
+          _state.copyWith(
+            enrollSeq: _state.enrollSeq + 1,
+            enrollResultJson: e.enrollJson,
+          ),
+        );
     }
   }
 

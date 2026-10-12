@@ -447,6 +447,13 @@ async fn run_turn_task(
                 pending_followup_wait.store(wait_secs, Ordering::SeqCst);
                 return;
             }
+            // The orchestrator's reply to an enrollment capture (sample/verify). Surface
+            // the raw JSON result to the UI (the enroll screen owns the flow + outlives
+            // the turn). Does not touch the turn state machine.
+            TurnUpdate::EnrollResult(json) => {
+                log::info!("turn: enroll result {json}");
+                WakeWordEvent::enroll_result(json)
+            }
             TurnUpdate::Finished => {
                 log::info!("turn: finished cleanly");
                 WakeWordEvent::disconnected("turn complete".to_string())

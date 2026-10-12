@@ -103,6 +103,25 @@ pub mod types {
     /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
     pub const SPEAKER_RESULT: &str = "anamanti-speaker-result";
 
+    // ---- Active voice enrollment (SpeakerEnrollmentPlan.md Phase 2) ----
+    //
+    // Guided "train a new person" flow. Sample + verify captures ride the ordinary
+    // wake-word audio turn, tagged by `screen.kind = "enroll"` (parsed into
+    // `DisplayContext::Enroll`), which the orchestrator short-circuits before the
+    // LLM — so there is no second audio path. Commit / cancel are control frames
+    // (no audio). Every capture/commit/cancel answers with `ENROLL_RESULT`.
+
+    /// device → orchestrator: commit the current enrollment session into a named,
+    /// labeled profile (data: `session`, `name`).
+    pub const ENROLL_FINISH: &str = "anamanti-enroll-finish";
+    /// device → orchestrator: discard an in-flight enrollment session (data:
+    /// `session`).
+    pub const ENROLL_CANCEL: &str = "anamanti-enroll-cancel";
+    /// orchestrator → device: the result of an enrollment step (data: `ok`,
+    /// `phase` = `sample`|`verify`|`finish`|`cancel`, plus `accepted`, `samples`,
+    /// `consistency`, `confidence`, `speaker_id`, `name`, `message` as applicable).
+    pub const ENROLL_RESULT: &str = "anamanti-enroll-result";
+
     /// device → orchestrator: list the selectable LLM models for the settings model
     /// dropdown (no data).
     pub const LIST_MODELS: &str = "anamanti-list-models";
@@ -777,6 +796,26 @@ pub enum DisplayContext {
     /// LLM, no TTS, no memory/chat-log. The screen is a diagnostic surface only, so a
     /// voice tone it hears must never be processed by the assistant. Carries no state.
     Diagnostics,
+    /// The guided voice-enrollment screen is up (`kind: "enroll"`;
+    /// SpeakerEnrollmentPlan.md Phase 2). Like [`Diagnostics`](Self::Diagnostics) this
+    /// **suppresses** the normal turn: the orchestrator routes the captured voiced PCM
+    /// to the enrollment accumulator (or the read-only verify check) instead of the
+    /// LLM, and never recalls/writes memory or speaks a generated reply.
+    Enroll(EnrollScreen),
+}
+
+/// The enrollment screen's per-capture state, carried in a [`DisplayContext::Enroll`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnrollScreen {
+    /// Device-chosen id grouping this enrollment's captures (one per "Add person" flow).
+    pub session: String,
+    /// The name the person is being enrolled under (for the spoken/shown confirmation).
+    pub name: String,
+    /// 0-based index of the phrase being captured (progress display only).
+    pub sample_index: u32,
+    /// `"sample"` (accumulate a training sample) or `"verify"` (read-only recognition
+    /// check after the profile is committed). Unknown values are treated as `"sample"`.
+    pub phase: String,
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
@@ -836,8 +875,31 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         // The audio-diagnostics screen carries no state — its presence alone switches the
         // turn to transcription-only (the orchestrator short-circuits before any LLM work).
         "diagnostics" => Some(DisplayContext::Diagnostics),
+        "enroll" => parse_enroll_screen(screen.get("enroll")?.as_object()?).map(DisplayContext::Enroll),
         _ => None,
     }
+}
+
+/// Parse the `screen.enroll` object into an [`EnrollScreen`]. A missing `session`
+/// is the one hard requirement (it keys the accumulator); the rest default.
+fn parse_enroll_screen(obj: &serde_json::Map<String, Value>) -> Option<EnrollScreen> {
+    let session = obj.get("session").and_then(Value::as_str)?.to_string();
+    if session.is_empty() {
+        return None;
+    }
+    Some(EnrollScreen {
+        session,
+        name: obj
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        sample_index: obj.get("sample_index").and_then(Value::as_u64).unwrap_or(0) as u32,
+        phase: match obj.get("phase").and_then(Value::as_str) {
+            Some("verify") => "verify".to_string(),
+            _ => "sample".to_string(),
+        },
+    })
 }
 
 /// Active-timer state the device reports on **every** turn, **orthogonal to the
@@ -921,8 +983,9 @@ impl DeviceContext {
             Some(DisplayContext::Place(_)) => Some("place"),
             // Diagnostics never reaches System-1/System-2 (the turn short-circuits before
             // them), so it reports no widget label — nothing can leak into a decision or
-            // prompt even if that ordering changes later.
-            Some(DisplayContext::Diagnostics) => None,
+            // prompt even if that ordering changes later. Enrollment is the same: the turn
+            // is consumed by the voiceprint accumulator, never the LLM.
+            Some(DisplayContext::Diagnostics) | Some(DisplayContext::Enroll(_)) => None,
             None => None,
         }
     }
@@ -1265,6 +1328,42 @@ mod tests {
         assert!(dev.font.scalable);
         assert!(dev.font.at_max);
         assert_eq!(dev.font.scale_permille, 1600);
+    }
+
+    #[test]
+    fn enroll_screen_parses_and_suppresses_the_widget_label() {
+        let data = json!({
+            "rate": 16_000, "width": 2, "channels": 1, "timestamp": 0,
+            "screen": {
+                "kind": "enroll",
+                "enroll": { "session": "sess-1", "name": "Dana", "sample_index": 2, "phase": "verify" },
+            },
+        });
+        assert_eq!(
+            display_context(&data),
+            Some(DisplayContext::Enroll(EnrollScreen {
+                session: "sess-1".to_string(),
+                name: "Dana".to_string(),
+                sample_index: 2,
+                phase: "verify".to_string(),
+            }))
+        );
+        // Like diagnostics, enrollment never surfaces a widget label (can't leak to the LLM).
+        assert_eq!(device_context(&data).widget_label(), None);
+
+        // An unknown phase defaults to "sample"; a missing session → no context.
+        let defaulted = json!({ "screen": { "kind": "enroll", "enroll": { "session": "s", "name": "" } } });
+        assert_eq!(
+            display_context(&defaulted),
+            Some(DisplayContext::Enroll(EnrollScreen {
+                session: "s".to_string(),
+                name: String::new(),
+                sample_index: 0,
+                phase: "sample".to_string(),
+            }))
+        );
+        let no_session = json!({ "screen": { "kind": "enroll", "enroll": { "name": "x" } } });
+        assert_eq!(display_context(&no_session), None);
     }
 
     #[test]

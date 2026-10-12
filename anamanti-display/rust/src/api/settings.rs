@@ -464,3 +464,45 @@ pub fn delete_speaker(
         .await
     })
 }
+
+/// Commit the current guided voice-enrollment session into a named profile
+/// (SpeakerEnrollmentPlan.md Phase 2). The sample captures were streamed over the
+/// ordinary wake-word turns while the enroll screen was foreground; this averages
+/// them into a voiceprint. Returns the orchestrator's confirmation message, or an
+/// error carrying the reason (e.g. too few samples).
+pub fn enroll_finish(
+    orchestrator_key: String,
+    session: String,
+    name: String,
+    discovery_timeout_secs: u64,
+) -> Result<String> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::enroll_finish(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &session,
+            &name,
+        )
+        .await
+    })
+}
+
+/// Discard an in-flight guided voice-enrollment session (the user backed out).
+pub fn enroll_cancel(
+    orchestrator_key: String,
+    session: String,
+    discovery_timeout_secs: u64,
+) -> Result<()> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::enroll_cancel(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &session,
+        )
+        .await
+    })
+}

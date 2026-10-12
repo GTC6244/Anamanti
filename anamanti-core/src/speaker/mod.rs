@@ -16,12 +16,25 @@ pub mod embed;
 pub mod features;
 pub mod registry;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
 pub use embed::{MockSpeakerEmbedder, SpeakerEmbedder};
 pub use registry::{SpeakerProfile, SpeakerRegistry};
+
+/// Minimum accepted samples before a guided enrollment can be committed to a
+/// profile (SpeakerEnrollmentPlan.md Phase 2). A few phrases give the centroid
+/// enough support to be stable; fewer risks a brittle voiceprint.
+pub const MIN_ENROLL_SAMPLES: usize = 3;
+
+/// Lowest cosine a new enrollment sample may have against the running mean of the
+/// already-accepted samples before it is rejected as "that didn't sound like the
+/// same person" (noise, a different speaker, or a bad capture). Deliberately loose
+/// — far-field captures of one person vary — so it only catches gross mismatches;
+/// calibrate alongside the identification thresholds on real hardware.
+pub const ENROLL_CONSISTENCY_MIN: f32 = 0.30;
 
 /// Reserved `speaker_id` for turns we don't attribute to a specific person
 /// (too little voiced audio, or speaker ID disabled). Preserves the pre-feature
@@ -100,6 +113,35 @@ impl SpeakerThresholds {
     }
 }
 
+/// The outcome of offering one utterance to a guided enrollment session
+/// (SpeakerEnrollmentPlan.md Phase 2). Reported back to the device so the enroll
+/// screen can show progress and ask for a retry on a rejected sample.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnrollSampleOutcome {
+    /// Whether this sample was added to the session.
+    pub accepted: bool,
+    /// Why a sample was rejected (`None` when accepted), for a user-facing hint.
+    pub reason: Option<String>,
+    /// How many samples the session holds *after* this one (0 if rejected-first).
+    pub samples: usize,
+    /// Cosine of this sample against the running mean of prior samples (1.0 for the
+    /// first sample). A low value is what triggers an "inconsistent" rejection.
+    pub consistency: f32,
+    /// Whether the session now has enough samples to be committed.
+    pub ready: bool,
+}
+
+/// The result of committing a guided enrollment session into a named profile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnrollFinishOutcome {
+    /// The new (or updated) profile's stable `speaker_id`.
+    pub speaker_id: String,
+    /// The name the profile was saved under.
+    pub name: String,
+    /// How many samples backed the committed centroid.
+    pub samples: usize,
+}
+
 /// Owns the embedder + registry + thresholds and turns an utterance into a
 /// [`SpeakerContext`]. Cheap to share behind an `Arc` across concurrent turns
 /// (the registry serializes its own SQLite access).
@@ -107,6 +149,9 @@ pub struct SpeakerService {
     embedder: Arc<dyn SpeakerEmbedder>,
     registry: SpeakerRegistry,
     thresholds: SpeakerThresholds,
+    /// In-flight guided-enrollment sessions, keyed by the device-chosen session id:
+    /// the accepted sample embeddings accumulated so far. Dropped on commit/cancel.
+    enrollments: Mutex<HashMap<String, Vec<Vec<f32>>>>,
 }
 
 impl SpeakerService {
@@ -120,12 +165,129 @@ impl SpeakerService {
             embedder,
             registry,
             thresholds,
+            enrollments: Mutex::new(HashMap::new()),
         }
     }
 
     /// The underlying registry (the Phase-C control handler lists/renames it).
     pub fn registry(&self) -> &SpeakerRegistry {
         &self.registry
+    }
+
+    /// Minimum voiced PCM length (samples) before identification/enrollment is
+    /// attempted — the orchestrator uses it to reject too-short captures.
+    pub fn min_speech_samples(&self) -> usize {
+        self.thresholds.min_speech_samples
+    }
+
+    /// Embed one utterance into a voiceprint vector (no registry side effects).
+    pub fn embed(&self, pcm: &[i16]) -> Result<Vec<f32>> {
+        self.embedder.embed(pcm)
+    }
+
+    /// **Read-only** identification: the best-matching profile and its cosine score,
+    /// without creating clusters or updating any centroid. Used by the enrollment
+    /// "verify" step to confirm a freshly enrolled voice is recognized. `None` when
+    /// there are no profiles or the best score is below `new_threshold`.
+    pub fn identify_only(&self, pcm: &[i16]) -> Result<Option<(String, Option<String>, f32)>> {
+        if pcm.len() < self.thresholds.min_speech_samples {
+            return Ok(None);
+        }
+        let embedding = self.embedder.embed(pcm)?;
+        match self.registry.identify(&embedding)? {
+            Some((id, score)) if score >= self.thresholds.new_threshold => {
+                let name = self.registry.get(&id)?.and_then(|p| p.name);
+                Ok(Some((id, name, score)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Offer one utterance to the guided-enrollment session `session_id`, creating
+    /// the session on first use. Rejects a too-short capture or one that is
+    /// grossly inconsistent with the samples gathered so far; otherwise accumulates
+    /// its embedding. Returns an [`EnrollSampleOutcome`] for the device UI.
+    pub fn enroll_sample(&self, session_id: &str, pcm: &[i16]) -> Result<EnrollSampleOutcome> {
+        if pcm.len() < self.thresholds.min_speech_samples {
+            let samples = self
+                .enrollments
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .map_or(0, Vec::len);
+            return Ok(EnrollSampleOutcome {
+                accepted: false,
+                reason: Some("too short — please speak a little longer".to_string()),
+                samples,
+                consistency: 0.0,
+                ready: samples >= MIN_ENROLL_SAMPLES,
+            });
+        }
+        let embedding = self.embedder.embed(pcm)?;
+        let mut sessions = self.enrollments.lock().unwrap();
+        let samples = sessions.entry(session_id.to_string()).or_default();
+
+        // Consistency = cosine against the mean of the already-accepted samples.
+        let consistency = if samples.is_empty() {
+            1.0
+        } else {
+            let mean = mean_vector(samples);
+            cosine(&embedding, &mean)
+        };
+        if !samples.is_empty() && consistency < ENROLL_CONSISTENCY_MIN {
+            return Ok(EnrollSampleOutcome {
+                accepted: false,
+                reason: Some("that didn't sound like the earlier samples".to_string()),
+                samples: samples.len(),
+                consistency,
+                ready: samples.len() >= MIN_ENROLL_SAMPLES,
+            });
+        }
+        samples.push(embedding);
+        Ok(EnrollSampleOutcome {
+            accepted: true,
+            reason: None,
+            samples: samples.len(),
+            consistency,
+            ready: samples.len() >= MIN_ENROLL_SAMPLES,
+        })
+    }
+
+    /// How many samples the session `session_id` currently holds.
+    pub fn enroll_count(&self, session_id: &str) -> usize {
+        self.enrollments
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map_or(0, Vec::len)
+    }
+
+    /// Commit the guided-enrollment session into a new **named, labeled** profile:
+    /// average the accepted sample embeddings into a centroid and store it. Fails
+    /// (without consuming the session) when fewer than [`MIN_ENROLL_SAMPLES`] were
+    /// gathered, so the device can keep collecting.
+    pub fn enroll_finish(&self, session_id: &str, name: &str) -> Result<EnrollFinishOutcome> {
+        let mut sessions = self.enrollments.lock().unwrap();
+        let samples = sessions.get(session_id).cloned().unwrap_or_default();
+        if samples.len() < MIN_ENROLL_SAMPLES {
+            anyhow::bail!(
+                "need at least {MIN_ENROLL_SAMPLES} voice samples (have {})",
+                samples.len()
+            );
+        }
+        let centroid = mean_vector(&samples);
+        let id = self.registry.create_labeled(name, &centroid, samples.len() as u64)?;
+        sessions.remove(session_id);
+        Ok(EnrollFinishOutcome {
+            speaker_id: id,
+            name: name.trim().to_string(),
+            samples: samples.len(),
+        })
+    }
+
+    /// Discard an in-flight enrollment session (the user backed out).
+    pub fn enroll_cancel(&self, session_id: &str) {
+        self.enrollments.lock().unwrap().remove(session_id);
     }
 
     /// Identify (and, on a confident match, reinforce) the speaker of `pcm`.
@@ -173,6 +335,35 @@ impl SpeakerService {
                 })
             }
         }
+    }
+}
+
+/// L2-normalized mean of a set of (already normalized) embeddings — the centroid
+/// of a cluster of enrollment samples.
+fn mean_vector(vectors: &[Vec<f32>]) -> Vec<f32> {
+    let dims = vectors.first().map_or(0, Vec::len);
+    let mut acc = vec![0.0f32; dims];
+    for v in vectors {
+        for (a, x) in acc.iter_mut().zip(v) {
+            *a += *x;
+        }
+    }
+    embed::l2_normalize(acc)
+}
+
+/// Cosine similarity between two equal-length vectors (0.0 on a length mismatch or
+/// a zero vector), matching the registry's defensive definition.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na <= f32::EPSILON || nb <= f32::EPSILON {
+        0.0
+    } else {
+        dot / (na * nb)
     }
 }
 
@@ -242,5 +433,65 @@ mod tests {
         let later = svc.identify_and_attribute(&tone(180.0, 1500)).unwrap();
         assert_eq!(later.speaker_id, ctx.speaker_id);
         assert_eq!(later.name.as_deref(), Some("Sam"));
+    }
+
+    #[test]
+    fn enrollment_accumulates_then_commits_a_named_profile() {
+        let svc = service();
+        // Three consistent samples of the "same voice" (same pitch, varied length).
+        for (i, ms) in [1500usize, 1700, 1600].into_iter().enumerate() {
+            let out = svc.enroll_sample("sess-1", &tone(180.0, ms)).unwrap();
+            assert!(out.accepted, "sample {i} should be accepted");
+            assert_eq!(out.samples, i + 1);
+        }
+        assert!(svc.enroll_count("sess-1") >= MIN_ENROLL_SAMPLES);
+        let fin = svc.enroll_finish("sess-1", "Dana").unwrap();
+        assert_eq!(fin.name, "Dana");
+        assert_eq!(fin.samples, 3);
+        assert_eq!(svc.enroll_count("sess-1"), 0, "session cleared on commit");
+
+        // The enrolled voice is now recognized by name, read-only.
+        let got = svc.identify_only(&tone(180.0, 1600)).unwrap();
+        let (id, name, score) = got.expect("enrolled voice should be recognized");
+        assert_eq!(id, fin.speaker_id);
+        assert_eq!(name.as_deref(), Some("Dana"));
+        assert!(score >= SpeakerThresholds::default().new_threshold);
+        let p = svc.registry().get(&fin.speaker_id).unwrap().unwrap();
+        assert!(p.labeled);
+    }
+
+    #[test]
+    fn enrollment_rejects_short_and_inconsistent_samples() {
+        let svc = service();
+        // Too short → rejected, nothing accumulated.
+        let short = svc.enroll_sample("s", &tone(180.0, 300)).unwrap();
+        assert!(!short.accepted);
+        assert_eq!(svc.enroll_count("s"), 0);
+
+        // One good sample, then a wildly different voice → inconsistent rejection.
+        assert!(svc.enroll_sample("s", &tone(160.0, 1500)).unwrap().accepted);
+        let bad = svc.enroll_sample("s", &tone(2000.0, 1500)).unwrap();
+        assert!(!bad.accepted);
+        assert!(bad.consistency < ENROLL_CONSISTENCY_MIN);
+        assert_eq!(svc.enroll_count("s"), 1, "bad sample not accumulated");
+    }
+
+    #[test]
+    fn enroll_finish_requires_minimum_samples() {
+        let svc = service();
+        svc.enroll_sample("s", &tone(180.0, 1500)).unwrap();
+        assert!(
+            svc.enroll_finish("s", "Sam").is_err(),
+            "one sample is below the floor"
+        );
+        assert_eq!(svc.enroll_count("s"), 1, "failed finish keeps the session");
+    }
+
+    #[test]
+    fn enroll_cancel_discards_the_session() {
+        let svc = service();
+        svc.enroll_sample("s", &tone(180.0, 1500)).unwrap();
+        svc.enroll_cancel("s");
+        assert_eq!(svc.enroll_count("s"), 0);
     }
 }

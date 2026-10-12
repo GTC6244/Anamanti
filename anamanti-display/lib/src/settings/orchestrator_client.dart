@@ -284,6 +284,14 @@ abstract class OrchestratorClient {
 
   /// Delete a speaker profile; returns whether one was removed.
   Future<bool> deleteSpeaker(String id);
+
+  /// Commit the current guided voice-enrollment session into a named profile
+  /// (SpeakerEnrollmentPlan.md Phase 2). Returns the orchestrator's confirmation
+  /// message; throws with the reason on failure (e.g. too few samples).
+  Future<String> enrollFinish(String session, String name);
+
+  /// Discard an in-flight guided voice-enrollment session (the user backed out).
+  Future<void> enrollCancel(String session);
 }
 
 /// Production client backed by the generated FRB control functions.
@@ -481,6 +489,21 @@ class FrbOrchestratorClient implements OrchestratorClient {
   Future<bool> deleteSpeaker(String id) => frb.deleteSpeaker(
         orchestratorKey: orchestratorKey,
         id: id,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<String> enrollFinish(String session, String name) => frb.enrollFinish(
+        orchestratorKey: orchestratorKey,
+        session: session,
+        name: name,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<void> enrollCancel(String session) => frb.enrollCancel(
+        orchestratorKey: orchestratorKey,
+        session: session,
         discoveryTimeoutSecs: _timeout,
       );
 

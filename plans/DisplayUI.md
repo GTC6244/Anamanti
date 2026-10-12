@@ -475,10 +475,24 @@ re-implemented by mistake; wire them into `SettingsScreen` navigation when neede
   `OrchestratorClient`.
 
 **`PeopleScreen`** — `lib/src/ui/people_screen.dart`
-- `Scaffold` + `AppBar("People")`. Lists voice-identified speakers (`SpeakerView`;
-  named people vs anonymous "Speaker N", voice-clip counts). Per-row menu:
-  Name/rename, Merge with…, Forget. Constructed with an `OrchestratorClient`.
+- Reached from **Settings → People** (`settings-menu-people`). `Scaffold` +
+  `AppBar("People")`. Lists voice-identified speakers (`SpeakerView`; named people vs
+  anonymous "Speaker N", voice-clip counts). Per-row menu: Name/rename, Merge with…,
+  Forget. An **"Add person"** FAB (`people-add`, shown when the live engine controller is
+  wired) opens the guided enrollment flow below. Constructed with an `OrchestratorClient`
+  (+ the `AssistantController` and native `setEnrollContext` for enrollment).
   See [`speaker_id_plan.md`](./speaker_id_plan.md).
+
+**`SpeakerEnrollScreen`** — `lib/src/ui/speaker_enroll_screen.dart`
+- `Scaffold` + `AppBar("Add a person")`. The guided "train a new voice" flow
+  (SpeakerEnrollmentPlan.md Phase 2): a name step → a capture step that prompts the user to
+  say the wake word and read short phrases (progress dots, per-sample accept/retry feedback)
+  → commit → a verify step that confirms recognition ("Recognized Dana!", with confidence).
+  Captures reuse the ordinary wake-word turn via an `enroll` display context (stamped by the
+  native `setEnrollContext`), so there is **no second audio path**; each capture's result
+  arrives as a `WakeWordEvent.enrollResult` folded into `AssistantState`. Commit/cancel are
+  `OrchestratorClient.enrollFinish`/`enrollCancel`. See
+  [`SpeakerEnrollmentPlan.md`](./SpeakerEnrollmentPlan.md).
 
 ---
 

@@ -151,7 +151,14 @@ predictable memory use and no GC pauses under the 1 GB limit.
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
   memory writes/recall and the prompt to that person (a shared "household" scope is
-  the floor); see `speaker_id_plan.md`.
+  the floor); see `speaker_id_plan.md`. The embedder is a real ECAPA-TDNN ONNX
+  (WeSpeaker `voxceleb_ECAPA512`, 192-dim, pure-Rust `tract-onnx`) selected at runtime
+  by `speaker.model_path`. Beyond passive auto-clustering, the device **People** screen
+  has a guided **"Add a person"** enrollment flow: it stamps an `enroll` display context
+  on ordinary wake-word turns (same suppress-the-LLM mechanism as the diagnostics screen —
+  **no second audio path**), the Core accumulates the captured samples into a named
+  voiceprint (`anamanti-enroll-finish`/`-cancel` → `anamanti-enroll-result`), then a verify
+  capture confirms recognition; see `SpeakerEnrollmentPlan.md`.
 - **End-of-speech / VAD** — runs in the **Anamanti Core**, for **both** STT engines
   (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
   `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The

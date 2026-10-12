@@ -461,6 +461,17 @@ impl Pipeline {
             return Ok(TurnOutcome::Completed);
         }
 
+        // Enrollment screen: a suppressing context like diagnostics. The captured voiced
+        // PCM is a *training sample* (or a verify check) for a voiceprint, NOT a turn —
+        // route it to the enrollment accumulator and answer with `anamanti-enroll-result`,
+        // never reaching speaker ID / System-1 / the LLM / TTS / memory. (Sample + verify
+        // captures ride this ordinary wake-word turn, so there is no second audio path.)
+        if let Some(protocol::DisplayContext::Enroll(screen)) = &device_ctx.widget {
+            self.handle_enrollment(screen, &voiced_pcm, device).await;
+            on_event(TurnEvent::Finished);
+            return Ok(TurnOutcome::Completed);
+        }
+
         // 2b. Identify who is speaking (or attribute to the shared household), so
         //     memory writes/recall and the reply are per-person.
         let speaker = self.identify_speaker(&voiced_pcm);
@@ -1410,6 +1421,74 @@ impl Pipeline {
         }
     }
 
+    /// Handle one guided-enrollment capture (SpeakerEnrollmentPlan.md Phase 2): either
+    /// accumulate a training sample or run the read-only verify check, then answer with
+    /// an `anamanti-enroll-result` frame and `audio-stop` (ending the turn without any
+    /// LLM/TTS). Never fails the connection — a problem is reported in the frame's `ok`.
+    async fn handle_enrollment(
+        &self,
+        screen: &protocol::EnrollScreen,
+        voiced_pcm: &[i16],
+        device: &mut DynConnection,
+    ) {
+        let result = match &self.speaker {
+            None => serde_json::json!({
+                "ok": false,
+                "phase": screen.phase,
+                "session": screen.session,
+                "message": "speaker identification is disabled on the orchestrator",
+            }),
+            Some(svc) if screen.phase == "verify" => match svc.identify_only(voiced_pcm) {
+                Ok(Some((id, name, score))) => serde_json::json!({
+                    "ok": true,
+                    "phase": "verify",
+                    "session": screen.session,
+                    "speaker_id": id,
+                    "name": name,
+                    "confidence": score,
+                    "message": format!(
+                        "recognized {} ({score:.2})",
+                        name.as_deref().unwrap_or("this voice")
+                    ),
+                }),
+                Ok(None) => serde_json::json!({
+                    "ok": true,
+                    "phase": "verify",
+                    "session": screen.session,
+                    "confidence": 0.0,
+                    "message": "didn't confidently recognize that voice — you can add more samples",
+                }),
+                Err(e) => serde_json::json!({
+                    "ok": false, "phase": "verify", "session": screen.session,
+                    "message": format!("verify failed: {e:#}"),
+                }),
+            },
+            Some(svc) => match svc.enroll_sample(&screen.session, voiced_pcm) {
+                Ok(out) => serde_json::json!({
+                    "ok": true,
+                    "phase": "sample",
+                    "session": screen.session,
+                    "accepted": out.accepted,
+                    "samples": out.samples,
+                    "consistency": out.consistency,
+                    "ready": out.ready,
+                    "message": out.reason.unwrap_or_else(|| {
+                        format!("captured sample {} of {}", out.samples, crate::speaker::MIN_ENROLL_SAMPLES.max(out.samples))
+                    }),
+                }),
+                Err(e) => serde_json::json!({
+                    "ok": false, "phase": "sample", "session": screen.session,
+                    "message": format!("enroll failed: {e:#}"),
+                }),
+            },
+        };
+        device
+            .send(&WyomingEvent::with_data(types::ENROLL_RESULT, result))
+            .await
+            .ok();
+        device.send(&WyomingEvent::audio_stop(0)).await.ok();
+    }
+
     /// Synthesize one chunk of reply text with Piper and relay its audio frames to
     /// the device over the same socket. A fresh downstream Piper connection is used
     /// per chunk so this works with any Wyoming TTS server (whether or not it keeps
@@ -1817,9 +1896,10 @@ impl Pipeline {
             Some(protocol::DisplayContext::Weather(_)) => Some("weather_dismiss"),
             Some(protocol::DisplayContext::Recipe(_)) => Some("recipe_dismiss"),
             Some(protocol::DisplayContext::Place(_)) => Some("place_dismiss"),
-            // The diagnostics screen is transcription-only and never reaches here (the
-            // turn short-circuits earlier), and it has no voice dismiss.
-            Some(protocol::DisplayContext::Diagnostics) => None,
+            // The diagnostics and enrollment screens are suppressing contexts that never
+            // reach here (the turn short-circuits earlier), and have no voice dismiss.
+            Some(protocol::DisplayContext::Diagnostics)
+            | Some(protocol::DisplayContext::Enroll(_)) => None,
             None => None,
         };
         if let Some(intent) = dismiss_intent {
@@ -2337,10 +2417,12 @@ fn display_context_line(ctx: &protocol::DisplayContext) -> String {
         protocol::DisplayContext::Recipe(screen) => recipe_screen_line(screen),
         protocol::DisplayContext::Weather(screen) => weather_screen_line(screen),
         protocol::DisplayContext::Place(screen) => place_screen_line(screen),
-        // Diagnostics is transcription-only: the turn never reaches the LLM, so there is
-        // no prompt line to contribute. (This arm is unreachable in practice — the
-        // orchestrator short-circuits a diagnostics turn before building the prompt.)
-        protocol::DisplayContext::Diagnostics => String::new(),
+        // Diagnostics and enrollment are suppressing contexts: the turn never reaches the
+        // LLM, so there is no prompt line to contribute. (These arms are unreachable in
+        // practice — the orchestrator short-circuits such turns before building the prompt.)
+        protocol::DisplayContext::Diagnostics | protocol::DisplayContext::Enroll(_) => {
+            String::new()
+        }
     }
 }
 

@@ -8,12 +8,32 @@
 
 import 'package:flutter/material.dart';
 
+import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
+import 'package:anamanti_display/src/ui/speaker_enroll_screen.dart';
 
 class PeopleScreen extends StatefulWidget {
-  const PeopleScreen({super.key, required this.client});
+  const PeopleScreen({
+    super.key,
+    required this.client,
+    this.controller,
+    this.setEnrollContext,
+    this.wakeWord = '',
+  });
 
   final OrchestratorClient client;
+
+  /// The live engine controller, needed for the guided "Add a person" enrollment flow
+  /// (it surfaces each capture result). When null the Add-person button is hidden —
+  /// passive naming/merge/forget still work.
+  final AssistantController? controller;
+
+  /// Stamps the enroll display context during a capture (see [EnrollContextSink]);
+  /// null disables stamping (tests).
+  final EnrollContextSink? setEnrollContext;
+
+  /// The configured wake word, shown in the enrollment capture instructions.
+  final String wakeWord;
 
   @override
   State<PeopleScreen> createState() => _PeopleScreenState();
@@ -64,7 +84,10 @@ class _PeopleScreenState extends State<PeopleScreen> {
         content: TextField(
           controller: controller,
           autofocus: true,
-          decoration: const InputDecoration(labelText: 'Name', hintText: 'e.g. Sam'),
+          decoration: const InputDecoration(
+            labelText: 'Name',
+            hintText: 'e.g. Sam',
+          ),
           onSubmitted: (v) => Navigator.pop(context, v.trim()),
         ),
         actions: [
@@ -107,7 +130,9 @@ class _PeopleScreenState extends State<PeopleScreen> {
           for (final e in others)
             SimpleDialogOption(
               onPressed: () => Navigator.pop(context, e.value),
-              child: Text('${_label(e.value, e.key)}  ·  ${e.value.samples} clips'),
+              child: Text(
+                '${_label(e.value, e.key)}  ·  ${e.value.samples} clips',
+              ),
             ),
         ],
       ),
@@ -157,12 +182,34 @@ class _PeopleScreenState extends State<PeopleScreen> {
   }
 
   void _snack(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Open the guided "Add a person" enrollment flow, then refresh so the new,
+  /// pre-named voiceprint appears. Only available when the engine controller is wired.
+  Future<void> _addPerson() async {
+    final controller = widget.controller;
+    if (controller == null) return;
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => SpeakerEnrollScreen(
+          client: widget.client,
+          controller: controller,
+          setEnrollContext: widget.setEnrollContext,
+          wakeWord: widget.wakeWord,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _reload();
   }
 
   @override
   Widget build(BuildContext context) {
     final people = _people;
+    final canEnroll = widget.controller != null;
     return Scaffold(
       appBar: AppBar(
         title: const Text('People'),
@@ -174,6 +221,14 @@ class _PeopleScreenState extends State<PeopleScreen> {
           ),
         ],
       ),
+      floatingActionButton: canEnroll
+          ? FloatingActionButton.extended(
+              key: const Key('people-add'),
+              onPressed: _addPerson,
+              icon: const Icon(Icons.person_add_alt_1),
+              label: const Text('Add person'),
+            )
+          : null,
       body: _buildBody(people),
     );
   }
@@ -194,7 +249,8 @@ class _PeopleScreenState extends State<PeopleScreen> {
       return const _Centered(
         icon: Icons.groups_outlined,
         title: 'No one recognized yet',
-        subtitle: 'As people talk to the assistant it learns their voices. Say '
+        subtitle:
+            'As people talk to the assistant it learns their voices. Say '
             '"my name is …" to introduce yourself, and they\'ll appear here.',
       );
     }
@@ -204,7 +260,9 @@ class _PeopleScreenState extends State<PeopleScreen> {
       itemBuilder: (context, i) {
         final s = people[i];
         final label = _label(s, i);
-        final clips = s.samples == 1 ? '1 voice clip' : '${s.samples} voice clips';
+        final clips = s.samples == 1
+            ? '1 voice clip'
+            : '${s.samples} voice clips';
         return ListTile(
           key: ValueKey('speaker-${s.id}'),
           leading: CircleAvatar(

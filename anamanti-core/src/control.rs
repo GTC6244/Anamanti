@@ -22,7 +22,7 @@ use crate::llm::catalog::ModelCatalog;
 use crate::memory::{EmbedStatus, GraphRagController, MemoryStore};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
-use crate::speaker::SpeakerRegistry;
+use crate::speaker::{SpeakerRegistry, SpeakerService};
 use crate::wyoming::protocol::{types, WyomingEvent};
 use crate::wyoming::tts::{describe_voices, VoiceEntry};
 use crate::wyoming::DynConnection;
@@ -41,6 +41,8 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::NAME_SPEAKER
             | types::MERGE_SPEAKERS
             | types::DELETE_SPEAKER
+            | types::ENROLL_FINISH
+            | types::ENROLL_CANCEL
             | types::LIST_MODELS
             | types::LIST_VOICES
             | types::GET_DRIVE_TOKEN
@@ -58,7 +60,7 @@ pub async fn handle_control(
     request: &WyomingEvent,
     memory: &MemoryStore,
     settings: &SharedSettings,
-    speaker: Option<&SpeakerRegistry>,
+    speaker: Option<&SpeakerService>,
     catalog: &ModelCatalog,
     connector: &dyn ServiceConnector,
     voices_dir: Option<&Path>,
@@ -76,8 +78,14 @@ pub async fn handle_control(
             None => None,
         };
         functions_response(settings, embed.as_ref())
+    } else if request.event_type == types::ENROLL_FINISH {
+        // Enrollment commit/cancel touch the SpeakerService's in-flight session map
+        // (not just the registry), so they are handled here rather than in `respond`.
+        enroll_finish(request, speaker)
+    } else if request.event_type == types::ENROLL_CANCEL {
+        enroll_cancel(request, speaker)
     } else {
-        respond(request, memory, settings, speaker)
+        respond(request, memory, settings, speaker.map(|s| s.registry()))
     };
     device.send(&response).await
 }
@@ -793,6 +801,67 @@ fn speaker_result(ok: bool, message: &str) -> WyomingEvent {
     )
 }
 
+/// Commit the current guided-enrollment session (SpeakerEnrollmentPlan.md Phase 2)
+/// into a named, labeled voiceprint. The session's samples were accumulated by the
+/// enroll-context capture turns; this averages them into a centroid.
+fn enroll_finish(request: &WyomingEvent, speaker: Option<&SpeakerService>) -> WyomingEvent {
+    let session = request
+        .data
+        .get("session")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let Some(svc) = speaker else {
+        return enroll_result(json!({
+            "ok": false, "phase": "finish", "session": session, "message": SPEAKER_DISABLED,
+        }));
+    };
+    let name = request
+        .data
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        return enroll_result(json!({
+            "ok": false, "phase": "finish", "session": session,
+            "message": "a name is required to finish enrollment",
+        }));
+    }
+    match svc.enroll_finish(session, name) {
+        Ok(out) => enroll_result(json!({
+            "ok": true,
+            "phase": "finish",
+            "session": session,
+            "speaker_id": out.speaker_id,
+            "name": out.name,
+            "samples": out.samples,
+            "message": format!("enrolled {} from {} samples", out.name, out.samples),
+        })),
+        Err(e) => enroll_result(json!({
+            "ok": false, "phase": "finish", "session": session, "message": format!("{e:#}"),
+        })),
+    }
+}
+
+/// Discard an in-flight guided-enrollment session (the user backed out).
+fn enroll_cancel(request: &WyomingEvent, speaker: Option<&SpeakerService>) -> WyomingEvent {
+    let session = request
+        .data
+        .get("session")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if let Some(svc) = speaker {
+        svc.enroll_cancel(session);
+    }
+    enroll_result(json!({
+        "ok": true, "phase": "cancel", "session": session, "message": "cancelled",
+    }))
+}
+
+fn enroll_result(data: Value) -> WyomingEvent {
+    WyomingEvent::with_data(types::ENROLL_RESULT, data)
+}
+
 const SPEAKER_DISABLED: &str = "speaker identification is disabled on the orchestrator";
 
 #[cfg(test)]
@@ -1048,6 +1117,8 @@ mod tests {
         assert!(is_control_request(types::NAME_SPEAKER));
         assert!(is_control_request(types::MERGE_SPEAKERS));
         assert!(is_control_request(types::DELETE_SPEAKER));
+        assert!(is_control_request(types::ENROLL_FINISH));
+        assert!(is_control_request(types::ENROLL_CANCEL));
         assert!(is_control_request(types::LIST_MODELS));
         assert!(is_control_request(types::LIST_VOICES));
         assert!(!is_control_request(types::AUDIO_START));
@@ -1127,6 +1198,59 @@ mod tests {
         );
         assert_eq!(del.data["ok"], json!(true));
         assert_eq!(reg.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn enroll_finish_commits_and_cancel_clears() {
+        use crate::speaker::{
+            MockSpeakerEmbedder, SpeakerRegistry, SpeakerService, SpeakerThresholds,
+        };
+        use std::sync::Arc;
+
+        // Disabled (no service) → an in-band failure, not a panic.
+        let disabled = enroll_finish(
+            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            None,
+        );
+        assert_eq!(disabled.event_type, types::ENROLL_RESULT);
+        assert_eq!(disabled.data["ok"], json!(false));
+
+        let svc = SpeakerService::new(
+            Arc::new(MockSpeakerEmbedder::default()),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default(),
+        );
+        let pcm = vec![1200i16; 20_000]; // > the 1200 ms floor
+
+        // Too few samples → commit refused, session preserved.
+        svc.enroll_sample("s", &pcm).unwrap();
+        let early = enroll_finish(
+            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            Some(&svc),
+        );
+        assert_eq!(early.data["ok"], json!(false));
+
+        // Enough samples → a named, labeled profile is created.
+        svc.enroll_sample("s", &pcm).unwrap();
+        svc.enroll_sample("s", &pcm).unwrap();
+        let done = enroll_finish(
+            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            Some(&svc),
+        );
+        assert_eq!(done.event_type, types::ENROLL_RESULT);
+        assert_eq!(done.data["ok"], json!(true));
+        assert_eq!(done.data["phase"], json!("finish"));
+        assert_eq!(done.data["name"], json!("Dana"));
+        assert_eq!(svc.registry().count().unwrap(), 1);
+
+        // Cancel discards an in-flight session.
+        svc.enroll_sample("s2", &pcm).unwrap();
+        let cancelled = enroll_cancel(
+            &req(types::ENROLL_CANCEL, json!({ "session": "s2" })),
+            Some(&svc),
+        );
+        assert_eq!(cancelled.data["ok"], json!(true));
+        assert_eq!(svc.enroll_count("s2"), 0);
     }
 
     #[test]
