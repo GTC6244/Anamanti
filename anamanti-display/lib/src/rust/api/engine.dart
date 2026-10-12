@@ -140,6 +140,19 @@ void setPlaceContext({
   address: address,
 );
 
+/// Report that the **audio-diagnostics** screen is (or is no longer) foreground as the
+/// device's display context. Unlike the recipe/weather/place screens — which enrich the
+/// LLM turn — this context makes the next voice turn **transcription-only**: the
+/// orchestrator echoes the STT transcript to the device for on-screen display and then
+/// stops, never running the LLM/TTS. It carries no state (the bare `kind` is the signal).
+///
+/// The diagnostics screen's setter for the general display-context mechanism (see
+/// [`set_recipe_context`] / [`crate::engine::set_display_context`]). Flutter calls it with
+/// `active == true` when the Audio Diagnostics screen opens and `active == false` when it
+/// closes (clearing the context back to an idle screen).
+void setDiagnosticsContext({required bool active}) =>
+    RustLib.instance.api.crateApiEngineSetDiagnosticsContext(active: active);
+
 /// Report the device's **font-scaling context** so the next voice turn's `audio-start`
 /// carries it to the orchestrator as the `screen.font` sibling (orthogonal to the
 /// foreground widget, like `screen.timers`). Lets "increase font" / "decrease font"

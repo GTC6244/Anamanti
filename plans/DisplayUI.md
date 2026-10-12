@@ -441,6 +441,14 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
   readouts** grid (RMS, dBFS, score, smoothed, threshold, gain, device / rate /
   channels); a **recent-detections** history (time + score); and two **live-tuning**
   sliders (**Capture gain**, **Sensitivity (idle)**).
+- A **Heard words** card (`Key('diag-transcript')`) shows what the server
+  transcribed from the last thing said *while this screen is up*. Entering the page
+  calls the new FRB `setDiagnosticsContext(active: true)` (and `false` on leave),
+  which stamps a **transcription-only** display context (`screen.kind ==
+  "diagnostics"`) on each voice turn's `audio-start`; the Core then transcribes and
+  relays the words here but **never sends them to the LLM** (no reply, no TTS, no
+  memory) — a diagnostic surface only. Reuses the normal wake-word turn (no second
+  audio path): say the wake word, then speak, and the recognized words appear.
 - The tuning sliders apply to the **running engine instantly** via the new FRB
   `updateDiagnosticsTuning(gainDb, threshold)` (no restart), and mirror into the
   parent's editable `AppSettings` via `onChanged` so the shared **Save** button

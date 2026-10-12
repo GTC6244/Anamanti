@@ -553,7 +553,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   extensible** mechanism that tells the Core **what the display is currently showing**, so
   the model can *drive that screen by voice*. The device stamps a `data.screen` block on
   every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload.
-  Two kinds ship today:
+  The kinds that ship today:
   - **recipe:** `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
     ingredient_count, step_count}}` — the model can `recipe_control` (switch tab / scroll)
     or `close_recipe`.
@@ -561,13 +561,25 @@ predictable memory use and no GC pauses under the 1 GB limit.
     model knows the forecast is up and for where, so it answers follow-ups in context
     ("what about tomorrow" → `weather_lookup` for the same place) and closes it on "close
     it" (`close_weather`).
+  - **place:** `{kind:"place", place:{name, address}}` — a place card is up, so the model
+    answers follow-ups about it and closes it on request.
+  - **diagnostics:** `{kind:"diagnostics"}` (no payload) — the **Audio Diagnostics**
+    screen is foreground. Unlike the kinds above, this one does not enrich the turn; it
+    **suppresses** it. The orchestrator still runs STT and relays the transcript to the
+    device (so the recognized words show on the diagnostics screen), but then
+    **short-circuits the turn** — no speaker ID, no System-1, no LLM, no TTS, no
+    memory/chat-log — and sends a bare `audio-stop`. The screen is a diagnostic surface
+    only: a voice tone it hears must be shown but never processed by the assistant. It
+    reuses the ordinary wake-word turn (no second audio path).
 
   Absent on an idle screen (and the small weather clock chip is **not** a screen — only
   the full-screen forecast sets weather context). The orchestrator parses the block
   (`protocol::display_context` → a `DisplayContext` enum) and injects a one-line
   description into that turn's system prompt (`orchestrator::display_context_line`, one
-  arm per screen). **Adding a new voice-controllable screen** (music, photos) is a
-  `DisplayContext` variant + a prompt-line arm + a device-side `set_<screen>_context`
+  arm per screen) — except a **suppressing** context like `diagnostics`, which the
+  orchestrator handles by ending the turn early (before any LLM work) rather than by
+  contributing a prompt line. **Adding a new voice-controllable screen** (music, photos) is
+  a `DisplayContext` variant + a prompt-line arm + a device-side `set_<screen>_context`
   setter — the transport is unchanged; an unknown `kind` is ignored, so a newer device
   never breaks an older Core.
 
@@ -581,8 +593,9 @@ predictable memory use and no GC pauses under the 1 GB limit.
   follow-up turn, recent chat history — is assembled **Core-side** into the same system
   prompt; the display-context line is appended to it.) On the device, Rust holds the
   current block in a global slot (`engine::display_context` / `set_display_context`) set by
-  the FRB layer (`set_recipe_context` / `set_weather_context`) whenever a screen opens,
-  closes, or changes, and stamps it in `WyomingConnection::send_audio_start`.
+  the FRB layer (`set_recipe_context` / `set_weather_context` / `set_place_context` /
+  `set_diagnostics_context`) whenever a screen opens, closes, or changes, and stamps it in
+  `WyomingConnection::send_audio_start`.
 
 ### Proactive notifications (Approach A — persistent device-dialed channel)
 

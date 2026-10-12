@@ -446,6 +446,21 @@ impl Pipeline {
             return Ok(TurnOutcome::Completed);
         }
 
+        // Diagnostics screen: a transcription-only context. The STT transcript has
+        // already been echoed to the device (inside `stream_to_transcript`), so the words
+        // are on screen — but this is a DIAGNOSTIC surface, so the audio must NOT be
+        // processed any further: no speaker ID, no System-1, no LLM, no TTS, and no
+        // memory/chat-log. Send `audio-stop` so the device leaves SPEAKING (it flipped
+        // there on the transcript above) and drop no follow-up listen. End the turn here.
+        if matches!(
+            device_ctx.widget,
+            Some(protocol::DisplayContext::Diagnostics)
+        ) {
+            device.send(&WyomingEvent::audio_stop(0)).await.ok();
+            on_event(TurnEvent::Finished);
+            return Ok(TurnOutcome::Completed);
+        }
+
         // 2b. Identify who is speaking (or attribute to the shared household), so
         //     memory writes/recall and the reply are per-person.
         let speaker = self.identify_speaker(&voiced_pcm);
@@ -1802,6 +1817,9 @@ impl Pipeline {
             Some(protocol::DisplayContext::Weather(_)) => Some("weather_dismiss"),
             Some(protocol::DisplayContext::Recipe(_)) => Some("recipe_dismiss"),
             Some(protocol::DisplayContext::Place(_)) => Some("place_dismiss"),
+            // The diagnostics screen is transcription-only and never reaches here (the
+            // turn short-circuits earlier), and it has no voice dismiss.
+            Some(protocol::DisplayContext::Diagnostics) => None,
             None => None,
         };
         if let Some(intent) = dismiss_intent {
@@ -2319,6 +2337,10 @@ fn display_context_line(ctx: &protocol::DisplayContext) -> String {
         protocol::DisplayContext::Recipe(screen) => recipe_screen_line(screen),
         protocol::DisplayContext::Weather(screen) => weather_screen_line(screen),
         protocol::DisplayContext::Place(screen) => place_screen_line(screen),
+        // Diagnostics is transcription-only: the turn never reaches the LLM, so there is
+        // no prompt line to contribute. (This arm is unreachable in practice — the
+        // orchestrator short-circuits a diagnostics turn before building the prompt.)
+        protocol::DisplayContext::Diagnostics => String::new(),
     }
 }
 

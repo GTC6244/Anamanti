@@ -37,6 +37,7 @@ class AudioDiagnosticsView extends StatefulWidget {
     required this.settings,
     required this.onChanged,
     required this.onTune,
+    required this.onActiveChanged,
   });
 
   /// The live, already-running wake-word engine controller. Its [AssistantState]
@@ -53,6 +54,13 @@ class AudioDiagnosticsView extends StatefulWidget {
   /// Apply a capture-gain (dB) + idle-threshold change to the **running** engine
   /// immediately (no restart), so the meters react as the user drags.
   final void Function(double gainDb, double threshold) onTune;
+
+  /// Announce to the engine that this diagnostics screen is (`true`) or is no longer
+  /// (`false`) foreground. Production wires it to the native `setDiagnosticsContext`,
+  /// which stamps a transcription-only display context on each voice turn's
+  /// `audio-start` so the Core transcribes and shows the words but never sends them to
+  /// the LLM. Called with `true` on mount and `false` on dispose.
+  final void Function(bool active) onActiveChanged;
 
   @override
   State<AudioDiagnosticsView> createState() => _AudioDiagnosticsViewState();
@@ -77,10 +85,16 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
     );
     _lastSeq = widget.controller.state.detectionSeq;
     widget.controller.addListener(_onTick);
+    // Tell the Core this is the diagnostics screen: subsequent voice turns transcribe
+    // and display the words but are NOT sent to the LLM (diagnostic surface only).
+    widget.onActiveChanged(true);
   }
 
   @override
   void dispose() {
+    // Leaving the diagnostics screen: clear the transcription-only context so normal
+    // (LLM-backed) turns resume elsewhere.
+    widget.onActiveChanged(false);
     widget.controller.removeListener(_onTick);
     _flash.dispose();
     super.dispose();
@@ -121,6 +135,8 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
         _monitorToggle(),
         const SizedBox(height: 8),
         _metersCard(),
+        const SizedBox(height: 16),
+        _transcriptCard(),
         const SizedBox(height: 16),
         _readoutsCard(),
         const SizedBox(height: 16),
@@ -261,6 +277,56 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
           ),
         ),
       ],
+    );
+  }
+
+  // --- Transcript (diagnostic, never sent to the LLM) ----------------------
+
+  /// Shows what the server transcribed from the last thing you said while this screen
+  /// is up. The device stamps a transcription-only display context on each turn's
+  /// `audio-start`, so the Core transcribes and relays the words here but does NOT send
+  /// them to the LLM — this screen is diagnostic only (no spoken reply). Say the wake
+  /// word, then talk, and the recognized words appear below.
+  Widget _transcriptCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: AnimatedBuilder(
+          animation: widget.controller,
+          builder: (context, _) {
+            final theme = Theme.of(context);
+            final transcript = widget.controller.state.transcript.trim();
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.hearing, size: 18),
+                    const SizedBox(width: 8),
+                    Text('Heard words', style: theme.textTheme.titleSmall),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Diagnostic only — these words are shown but never sent to the '
+                  'assistant. Say the wake word, then speak.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.hintColor,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  key: const Key('diag-transcript'),
+                  transcript.isEmpty ? '—' : transcript,
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    color: transcript.isEmpty ? theme.disabledColor : null,
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
     );
   }
 
