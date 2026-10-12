@@ -11,6 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::control;
 use crate::llm::catalog::ModelCatalog;
+use crate::memory::GraphRagController;
 use crate::music::MusicDucker;
 use crate::notify::NotificationService;
 use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome};
@@ -30,6 +31,7 @@ pub async fn serve(
     ducker: Option<Arc<MusicDucker>>,
     notify: Arc<NotificationService>,
     weather: Arc<WeatherService>,
+    graphrag: Option<Arc<GraphRagController>>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -41,9 +43,11 @@ pub async fn serve(
         let ducker = ducker.clone();
         let notify = notify.clone();
         let weather = weather.clone();
+        let graphrag = graphrag.clone();
         tokio::spawn(async move {
             match handle_connection(
                 stream, pipeline, connector, catalog, voices_dir, ducker, notify, weather,
+                graphrag,
             )
             .await
             {
@@ -69,6 +73,7 @@ async fn handle_connection(
     ducker: Option<Arc<MusicDucker>>,
     notify: Arc<NotificationService>,
     weather: Arc<WeatherService>,
+    graphrag: Option<Arc<GraphRagController>>,
 ) -> Result<()> {
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
@@ -91,6 +96,7 @@ async fn handle_connection(
                     &catalog,
                     connector.as_ref(),
                     voices_dir.as_deref(),
+                    graphrag.as_deref(),
                 )
                 .await?;
             }

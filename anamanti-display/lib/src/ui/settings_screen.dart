@@ -58,6 +58,7 @@ const List<int> _kDimDelayPresets = <int>[30, 60, 120, 300, 600, 900, 1800, 3600
 /// page. Order matches the menu order.
 enum _SettingsCategory {
   assistant('Assistant'),
+  functions('Functions'),
   deviceConfig('Device Config'),
   audioDiagnostics('Audio Diagnostics'),
   speechProcessing('Speech Processing'),
@@ -143,6 +144,13 @@ class _SettingsScreenState extends State<SettingsScreen>
   bool _remoteLoading = true;
   String? _remoteError;
   bool _saving = false;
+
+  // The Core "functions" status snapshot (Settings → Functions), loaded on open —
+  // decoupled from the Assistant/VAD `_loadRemote` path so it has its own
+  // loading/offline guard and Retry.
+  List<FunctionStatusView>? _functions;
+  bool _functionsLoading = false;
+  String? _functionsError;
 
   /// The open category page, or null while the top-level menu is shown.
   _SettingsCategory? _category;
@@ -627,6 +635,11 @@ class _SettingsScreenState extends State<SettingsScreen>
           'LLM backend, model, and voice',
         ),
         _menuTile(
+          _SettingsCategory.functions,
+          Icons.cloud_outlined,
+          'What the assistant uses: cloud/local & keys',
+        ),
+        _menuTile(
           _SettingsCategory.deviceConfig,
           Icons.tune,
           'Wake word & display',
@@ -686,6 +699,8 @@ class _SettingsScreenState extends State<SettingsScreen>
         setState(() => _category = category);
         // The Permissions page reads live grant state from the platform on open.
         if (category == _SettingsCategory.permissions) _loadPermissions();
+        // The Functions page fetches the Core's status snapshot on open.
+        if (category == _SettingsCategory.functions) _loadFunctions();
       },
     );
   }
@@ -708,8 +723,15 @@ class _SettingsScreenState extends State<SettingsScreen>
     if (category == _SettingsCategory.permissions) {
       return _permissionsPage();
     }
+    // Functions is a read-only page (the Core's status snapshot, loaded on open).
+    if (category == _SettingsCategory.functions) {
+      return _functionsPage();
+    }
     final List<Widget> children;
     switch (category) {
+      case _SettingsCategory.functions:
+        // Handled by the early return above; keep the switch exhaustive.
+        children = const [];
       case _SettingsCategory.assistant:
         children = [
           // Device-local identity: this display's name (sent to the Core) + its
@@ -878,6 +900,186 @@ class _SettingsScreenState extends State<SettingsScreen>
       await _maintenanceChannel.invokeMethod<void>(method);
     } catch (_) {
       // No channel (host/test) or the settings activity is unavailable: ignore.
+    }
+  }
+
+  /// The Functions page: a read-only snapshot of what the Anamanti Core is set up to
+  /// use for each capability — whether it runs in the cloud or locally, which model,
+  /// and a red warning when a required API key is missing. Fetched from the Core on
+  /// open (see [_loadFunctions]); secret values are never sent, only whether each key
+  /// is set, exactly like the Core's own config page.
+  Widget _functionsPage() {
+    final List<Widget> body;
+    if (_functionsLoading) {
+      body = const [
+        ListTile(
+          leading: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          title: Text('Contacting the assistant…'),
+        ),
+      ];
+    } else if (_functionsError != null) {
+      body = [
+        ListTile(
+          leading: const Icon(Icons.cloud_off),
+          title: const Text('Assistant offline'),
+          subtitle: const Text('This needs the Mac to be reachable.'),
+          trailing: TextButton(
+            onPressed: _loadFunctions,
+            child: const Text('Retry'),
+          ),
+        ),
+      ];
+    } else {
+      final fns = _functions ?? const <FunctionStatusView>[];
+      // Fixed display order of the Core's categories, with friendly headers.
+      const order = ['Config', 'Speech', 'Tools', 'System1', 'Memory'];
+      const headers = {
+        'Config': 'Language & search',
+        'Speech': 'Speech',
+        'Tools': 'Tools',
+        'System1': 'Fast decisions',
+        'Memory': 'Memory',
+      };
+      body = <Widget>[];
+      for (final cat in order) {
+        final rows = fns.where((f) => f.category == cat).toList();
+        if (rows.isEmpty) continue;
+        body.add(_section(headers[cat] ?? cat));
+        body.addAll(rows.map(_functionRow));
+      }
+      // Any category we didn't anticipate, appended so nothing is hidden.
+      final extra = fns.where((f) => !order.contains(f.category)).toList();
+      if (extra.isNotEmpty) {
+        body.add(_section('Other'));
+        body.addAll(extra.map(_functionRow));
+      }
+      if (body.isEmpty) {
+        body.add(const Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: Text('No functions reported.')),
+        ));
+      }
+    }
+
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: Text(
+            'What the assistant is set up to use. “Cloud” runs on an internet '
+            'service; “Local” runs on the Mac. A red key warns that a required '
+            'API key is missing, so that feature stays off until it’s set on the Mac.',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ),
+        ListTile(
+          key: const Key('settings-functions-refresh'),
+          leading: const Icon(Icons.refresh),
+          title: const Text('Refresh'),
+          enabled: !_functionsLoading,
+          onTap: _functionsLoading ? null : _loadFunctions,
+        ),
+        const Divider(),
+        ...body,
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  /// One capability row: the function name with its provider/model, and a trailing
+  /// cloud/local/off chip — or, when a required API key isn't set, the red
+  /// "API key missing" warning (a key glyph with a slash through it).
+  Widget _functionRow(FunctionStatusView f) {
+    final parts = <String>[
+      if (f.provider.isNotEmpty) f.provider,
+      if (f.model.isNotEmpty) f.model,
+    ];
+    var subtitle = parts.join(' · ');
+    if (f.note.isNotEmpty) {
+      subtitle = subtitle.isEmpty ? f.note : '$subtitle\n${f.note}';
+    }
+
+    final bool missing = f.keyMissing;
+    final Color leadingColor = missing
+        ? Colors.red
+        : f.mode == 'off'
+            ? Colors.grey
+            : f.mode == 'cloud'
+                ? Colors.blue
+                : Colors.green;
+    final IconData leadingIcon = missing
+        ? Icons.error_outline
+        : f.mode == 'off'
+            ? Icons.remove_circle_outline
+            : f.mode == 'cloud'
+                ? Icons.cloud_outlined
+                : Icons.computer;
+
+    return ListTile(
+      key: Key('settings-function-${f.category}-${f.name}'),
+      leading: Icon(leadingIcon, color: leadingColor),
+      title: Text(f.name),
+      subtitle: subtitle.isEmpty ? null : Text(subtitle),
+      trailing: missing
+          ? const _PermissionStatusLabel(
+              label: 'API key missing',
+              color: Colors.red,
+              icon: Icons.key_off,
+            )
+          : _modeChip(f.mode),
+    );
+  }
+
+  /// The cloud / local / off status chip for a function row.
+  Widget _modeChip(String mode) {
+    switch (mode) {
+      case 'cloud':
+        return const _PermissionStatusLabel(
+          label: 'Cloud',
+          color: Colors.blue,
+          icon: Icons.cloud_outlined,
+        );
+      case 'local':
+        return const _PermissionStatusLabel(
+          label: 'Local',
+          color: Colors.green,
+          icon: Icons.computer,
+        );
+      default:
+        return const _PermissionStatusLabel(
+          label: 'Off',
+          color: Colors.grey,
+          icon: Icons.remove_circle_outline,
+        );
+    }
+  }
+
+  /// Fetch the Core's functions status snapshot into [_functions]. Best-effort: a
+  /// failure (Mac unreachable, or an older Core that doesn't know the frame) shows
+  /// the offline guard with Retry.
+  Future<void> _loadFunctions() async {
+    setState(() {
+      _functionsLoading = true;
+      _functionsError = null;
+    });
+    try {
+      final fns = await widget.client.fetchFunctions();
+      if (!mounted) return;
+      setState(() {
+        _functions = fns;
+        _functionsLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _functionsError = '$e';
+        _functionsLoading = false;
+      });
     }
   }
 

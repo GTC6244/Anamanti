@@ -34,7 +34,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Functions / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
 | **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
@@ -356,6 +356,21 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
     subscription/OAuth), model, voice. The device-name + orchestrator tiles are
     device-local (usable offline); the rest are orchestrator-managed and show
     "Contacting…" / "Assistant offline" guard tiles when the Mac is unreachable.
+  - **Functions** — a **read-only** status view of what the Anamanti Core is
+    configured to use for each capability, mirroring the Core config page's Config,
+    Tools, System1, Speech, and Memory→Embedding tabs. Fetched from the Core on open
+    via the `anamanti-get-functions` → `anamanti-functions` control round trip (own
+    loading / "Assistant offline" + Retry guard, decoupled from the Assistant/VAD
+    `_loadRemote`). Grouped by section (Language & search / Speech / Tools / Fast
+    decisions / Memory); each row (`_functionRow`, key `settings-function-<cat>-<name>`)
+    shows the function name, its provider + model, and a trailing **Cloud / Local / Off**
+    chip (`_modeChip`) — **or**, when a required API key isn't set on the Core, a red
+    **"API key missing"** warning (`Icons.key_off` — a key with a slash). Covers LLM +
+    web search + TTS (Config), speech-to-text (Speech), directions/weather/places +
+    Spotify/shopping list/phone messages/calendar (Tools), fast decisions (System1),
+    and embeddings (Memory). Never carries secret values — only each key's set/unset
+    bit, exactly like the Core config page. Data path: `OrchestratorClient.fetchFunctions()`
+    → FRB `get_functions` → the Core's `control::functions_response`.
   - **Device Config** — Wake word (word, threshold slider, smoothing window,
     capture gain, "Fire on peak", "AudioRecord capture (far-field)", noise
     suppression / AGC / echo cancellation switches) + Display ("Dim screen after"

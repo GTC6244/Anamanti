@@ -2467,6 +2467,13 @@ impl SharedSettings {
         self.factory.weather_enabled
     }
 
+    /// Whether the `calendar_lookup` tool is active — i.e. at least one web-calendar
+    /// subscription is configured (the source is prebuilt once at boot). Read-only
+    /// status for the device Settings screen's functions snapshot.
+    pub fn calendar_active(&self) -> bool {
+        self.factory.calendar.is_some()
+    }
+
     /// Build a weather provider instance from the *current* live provider label + Visual
     /// Crossing key. Used by the ambient push each tick so a provider/key change on the
     /// config page retargets the push without a restart. `None` when weather is disabled.

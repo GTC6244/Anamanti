@@ -19,8 +19,8 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 use crate::api::settings::{
-    DriveToken, MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo,
-    VoiceInfo,
+    DriveToken, FunctionStatus, MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate,
+    SpeakerInfo, VoiceInfo,
 };
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
@@ -181,6 +181,26 @@ fn parse_drive_token(ev: &WyomingEvent) -> DriveToken {
     }
 }
 
+fn parse_function(v: &Value) -> FunctionStatus {
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let b = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    FunctionStatus {
+        category: s("category"),
+        name: s("name"),
+        mode: s("mode"),
+        provider: s("provider"),
+        model: s("model"),
+        key_required: b("key_required"),
+        key_set: b("key_set"),
+        note: s("note"),
+    }
+}
+
 fn parse_entry(v: &Value) -> MemoryEntry {
     let s = |k: &str| {
         v.get(k)
@@ -326,6 +346,34 @@ pub async fn get_drive_token(
         ));
     }
     Ok(parse_drive_token(&resp))
+}
+
+/// Fetch the Core's read-only "functions" snapshot (one row per configured
+/// capability: cloud/local, model, and whether a required key is set). Used by the
+/// device Settings screen. An `ok: false` body surfaces as an error.
+pub async fn get_functions(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<FunctionStatus>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::GET_FUNCTIONS)).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("fetching the functions snapshot failed")
+        ));
+    }
+    let functions = resp
+        .data
+        .get("functions")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_function).collect())
+        .unwrap_or_default();
+    Ok(functions)
 }
 
 /// List every persistent memory entry.

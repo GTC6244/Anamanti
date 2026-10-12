@@ -646,4 +646,87 @@ void main() {
     // The adopted Silero threshold (0.40) is shown on the slider label.
     expect(find.textContaining('0.40'), findsOneWidget);
   });
+
+  testWidgets('Functions page shows cloud/local chips and a missing-key warning',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(
+      functions: const [
+        FunctionStatusView(
+          category: 'Config',
+          name: 'LLM',
+          mode: 'cloud',
+          provider: 'Anthropic (Claude)',
+          model: 'claude-opus-5',
+          keyRequired: true,
+          keySet: true,
+          note: '',
+        ),
+        FunctionStatusView(
+          category: 'Tools',
+          name: 'Places',
+          mode: 'off',
+          provider: 'Google Places',
+          model: '',
+          keyRequired: true,
+          keySet: false, // required but unset → red "API key missing"
+          note: '',
+        ),
+        FunctionStatusView(
+          category: 'Memory',
+          name: 'Embeddings',
+          mode: 'local',
+          provider: 'nomic-embed-text',
+          model: '768-dim',
+          keyRequired: false,
+          keySet: false,
+          note: '',
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await openCategory(tester, 'functions');
+
+    // Section headers + rows rendered.
+    expect(find.byKey(const Key('settings-function-Config-LLM')), findsOneWidget);
+    expect(find.textContaining('claude-opus-5'), findsOneWidget);
+
+    // The cloud LLM (key present) shows a Cloud chip; the local embedder a Local chip.
+    expect(find.text('Cloud'), findsOneWidget);
+    expect(find.text('Local'), findsOneWidget);
+
+    // Places requires a key that isn't set → the red warning, not a chip.
+    expect(find.text('API key missing'), findsOneWidget);
+    expect(find.byIcon(Icons.key_off), findsOneWidget);
+  });
+
+  testWidgets('Functions page shows an offline guard when the Mac is unreachable',
+      (tester) async {
+    final store = InMemorySettingsStore();
+    final client = FakeOrchestratorClient(throwOnFetch: true);
+
+    await tester.pumpWidget(MaterialApp(
+      home: SettingsScreen(
+        initial: const AppSettings(),
+        store: store,
+        client: client,
+        onApplied: (_) {},
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await openCategory(tester, 'functions');
+    expect(find.text('Assistant offline'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
+  });
 }

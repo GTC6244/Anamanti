@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `block_on`, `preferred`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Discover every orchestrator on the LAN for the settings "Orchestrator"
 /// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
@@ -65,6 +65,18 @@ Future<DriveToken> getDriveToken({
   required String orchestratorKey,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsGetDriveToken(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Fetch the read-only snapshot of the Core's configured functions (cloud/local,
+/// model, and whether each required API key is set) for the Settings screen's
+/// "Functions" section. Never returns secret values. An older Core that doesn't
+/// recognize the frame surfaces as the round-trip timeout error.
+Future<List<FunctionStatus>> getFunctions({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsGetFunctions(
   orchestratorKey: orchestratorKey,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
@@ -206,6 +218,72 @@ class DriveToken {
           refreshToken == other.refreshToken &&
           folderIds == other.folderIds &&
           scope == other.scope;
+}
+
+/// One capability row in the Core's "functions" snapshot, shown read-only on the
+/// device Settings screen. Describes whether a function runs in the `cloud` or
+/// `local`ly (or is `off`), which model it uses, and whether a required API key is
+/// set — never the key itself. Built by the Core's `functions_response`.
+class FunctionStatus {
+  /// Grouping header: `Config` | `Tools` | `System1` | `Memory` | `Speech`.
+  final String category;
+
+  /// Human-friendly capability name (e.g. `LLM`, `Weather`, `Embeddings`).
+  final String name;
+
+  /// Where it runs: `cloud` | `local` | `off`.
+  final String mode;
+
+  /// Provider label (e.g. `Anthropic (Claude)`, `Mapbox`); empty when n/a.
+  final String provider;
+
+  /// Selected model / voice / dims; empty when n/a.
+  final String model;
+
+  /// Whether this function needs an API key / credential to work.
+  final bool keyRequired;
+
+  /// Whether that key/credential is currently set on the Core.
+  final bool keySet;
+
+  /// Optional nuance (e.g. a keyless fallback); empty when none.
+  final String note;
+
+  const FunctionStatus({
+    required this.category,
+    required this.name,
+    required this.mode,
+    required this.provider,
+    required this.model,
+    required this.keyRequired,
+    required this.keySet,
+    required this.note,
+  });
+
+  @override
+  int get hashCode =>
+      category.hashCode ^
+      name.hashCode ^
+      mode.hashCode ^
+      provider.hashCode ^
+      model.hashCode ^
+      keyRequired.hashCode ^
+      keySet.hashCode ^
+      note.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FunctionStatus &&
+          runtimeType == other.runtimeType &&
+          category == other.category &&
+          name == other.name &&
+          mode == other.mode &&
+          provider == other.provider &&
+          model == other.model &&
+          keyRequired == other.keyRequired &&
+          keySet == other.keySet &&
+          note == other.note;
 }
 
 /// One persistent memory entry, for the settings memory list.

@@ -98,6 +98,30 @@ pub struct DriveToken {
     pub scope: String,
 }
 
+/// One capability row in the Core's "functions" snapshot, shown read-only on the
+/// device Settings screen. Describes whether a function runs in the `cloud` or
+/// `local`ly (or is `off`), which model it uses, and whether a required API key is
+/// set — never the key itself. Built by the Core's `functions_response`.
+#[derive(Debug, Clone)]
+pub struct FunctionStatus {
+    /// Grouping header: `Config` | `Tools` | `System1` | `Memory` | `Speech`.
+    pub category: String,
+    /// Human-friendly capability name (e.g. `LLM`, `Weather`, `Embeddings`).
+    pub name: String,
+    /// Where it runs: `cloud` | `local` | `off`.
+    pub mode: String,
+    /// Provider label (e.g. `Anthropic (Claude)`, `Mapbox`); empty when n/a.
+    pub provider: String,
+    /// Selected model / voice / dims; empty when n/a.
+    pub model: String,
+    /// Whether this function needs an API key / credential to work.
+    pub key_required: bool,
+    /// Whether that key/credential is currently set on the Core.
+    pub key_set: bool,
+    /// Optional nuance (e.g. a keyless fallback); empty when none.
+    pub note: String,
+}
+
 /// One discovered orchestrator, for the settings "Orchestrator" dropdown.
 #[derive(Debug, Clone)]
 pub struct OrchestratorInfo {
@@ -292,6 +316,25 @@ pub fn get_drive_token(
     block_on(async move {
         let cache = EndpointCache::new();
         control::get_drive_token(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
+    })
+}
+
+/// Fetch the read-only snapshot of the Core's configured functions (cloud/local,
+/// model, and whether each required API key is set) for the Settings screen's
+/// "Functions" section. Never returns secret values. An older Core that doesn't
+/// recognize the frame surfaces as the round-trip timeout error.
+pub fn get_functions(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<FunctionStatus>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::get_functions(
             &cache,
             timeout(discovery_timeout_secs),
             preferred(&orchestrator_key),

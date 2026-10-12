@@ -13,8 +13,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<VoiceOption>? voices,
     List<OrchestratorOption>? orchestrators,
     DriveTokenView? driveToken,
+    List<FunctionStatusView>? functions,
     this.throwOnFetch = false,
-  })  : _driveToken = driveToken ??
+  })  : _functions = functions ?? <FunctionStatusView>[],
+        _driveToken = driveToken ??
             const DriveTokenView(
               linked: false,
               configured: false,
@@ -57,6 +59,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<VoiceOption> _voices;
   final List<OrchestratorOption> _orchestrators;
   final DriveTokenView _driveToken;
+  final List<FunctionStatusView> _functions;
   final bool throwOnFetch;
 
   // Call records for assertions.
@@ -137,6 +140,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
   Future<DriveTokenView> fetchDriveToken() async {
     if (throwOnFetch) throw Exception('offline');
     return _driveToken;
+  }
+
+  @override
+  Future<List<FunctionStatusView>> fetchFunctions() async {
+    if (throwOnFetch) throw Exception('offline');
+    return List.of(_functions);
   }
 
   @override
