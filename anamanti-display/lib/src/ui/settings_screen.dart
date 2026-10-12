@@ -35,6 +35,7 @@ import 'package:anamanti_display/src/slideshow/drive_photos.dart';
 import 'package:anamanti_display/src/ui/audio_diagnostics_view.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart'
     show updateDiagnosticsTuning, setDiagnosticsContext, setEnrollContext;
+import 'package:anamanti_display/src/ui/memory_screen.dart';
 import 'package:anamanti_display/src/ui/people_screen.dart';
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
@@ -655,6 +656,16 @@ class _SettingsScreenState extends State<SettingsScreen>
           trailing: const Icon(Icons.chevron_right),
           onTap: _openPeople,
         ),
+        // Memory is a full screen (tabs: Facts / Conversations / Keywords, each with
+        // its own list + delete), pushed rather than rendered inline.
+        ListTile(
+          key: const Key('settings-menu-memory'),
+          leading: const Icon(Icons.psychology_outlined),
+          title: const Text('Memory'),
+          subtitle: const Text('Browse & delete what the assistant remembers'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _openMemory,
+        ),
         _menuTile(
           _SettingsCategory.deviceConfig,
           Icons.tune,
@@ -731,6 +742,18 @@ class _SettingsScreenState extends State<SettingsScreen>
           ),
           wakeWord: _settings.wakeWord.replaceAll('_', ' '),
         ),
+      ),
+    );
+  }
+
+  /// Open the full Memory screen (tabs: Facts / Conversations / Keywords). Pushed as
+  /// its own route — like People — because it is a complete screen with its own tabbed
+  /// lists, search/filter controls, and per-item delete, unlike the inline category
+  /// pages. The pinned-orchestrator `client` is how it reads + prunes Core memory.
+  void _openMemory() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => MemoryScreen(client: widget.client),
       ),
     );
   }

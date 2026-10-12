@@ -37,6 +37,9 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MEMORIES
             | types::DELETE_MEMORY
             | types::CLEAR_MEMORIES
+            | types::LIST_TURNS
+            | types::LIST_ENTITIES
+            | types::DELETE_GRAPH_NODE
             | types::LIST_SPEAKERS
             | types::NAME_SPEAKER
             | types::MERGE_SPEAKERS
@@ -78,6 +81,13 @@ pub async fn handle_control(
             None => None,
         };
         functions_response(settings, embed.as_ref())
+    } else if request.event_type == types::LIST_TURNS
+        || request.event_type == types::LIST_ENTITIES
+        || request.event_type == types::DELETE_GRAPH_NODE
+    {
+        // GraphRAG browse/delete needs async access to the live HelixDB store (via the
+        // graph-view proxy), so these are answered here rather than in the pure `respond`.
+        graph_response(request, graphrag).await
     } else if request.event_type == types::ENROLL_FINISH {
         // Enrollment commit/cancel touch the SpeakerService's in-flight session map
         // (not just the registry), so they are handled here rather than in `respond`.
@@ -702,6 +712,108 @@ fn memory_error(message: &str) -> WyomingEvent {
         types::MEMORY_RESULT,
         json!({ "ok": false, "count": 0, "message": message }),
     )
+}
+
+// ---- GraphRAG (HelixDB) memory browsing ----
+
+/// Answer a `LIST_TURNS` / `LIST_ENTITIES` / `DELETE_GRAPH_NODE` request against the live
+/// GraphRAG graph. Requires the HelixDB backend: when `graphrag` is `None` (SQLite recall
+/// backend) every graph request replies `ok:false` with an explanation on the matching
+/// reply frame, so the device shows a clean "unavailable" state instead of hanging.
+async fn graph_response(
+    request: &WyomingEvent,
+    graphrag: Option<&GraphRagController>,
+) -> WyomingEvent {
+    // Pick the reply frame that pairs with this request so an error still round-trips.
+    let reply_type = match request.event_type.as_str() {
+        types::LIST_TURNS => types::TURNS,
+        types::LIST_ENTITIES => types::ENTITIES,
+        _ => types::GRAPH_RESULT,
+    };
+    let Some(ctrl) = graphrag else {
+        return WyomingEvent::with_data(
+            reply_type,
+            json!({
+                "ok": false,
+                "message": "graph memory is unavailable on this backend (SQLite recall)",
+            }),
+        );
+    };
+    let graph = ctrl.graph_view();
+    let data = &request.data;
+    let str_arg = |key: &str| -> Option<String> {
+        data.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+
+    match request.event_type.as_str() {
+        types::LIST_TURNS => {
+            let query = str_arg("query");
+            let speaker_id = str_arg("speaker_id");
+            let entity = str_arg("entity");
+            let limit = data.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+            let offset = data.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            match graph
+                .list_turns(
+                    query.as_deref(),
+                    speaker_id.as_deref(),
+                    entity.as_deref(),
+                    limit,
+                    offset,
+                )
+                .await
+            {
+                Ok(mut v) => {
+                    let turns = v
+                        .get_mut("turns")
+                        .map(Value::take)
+                        .unwrap_or_else(|| json!([]));
+                    WyomingEvent::with_data(types::TURNS, json!({ "ok": true, "turns": turns }))
+                }
+                Err(e) => WyomingEvent::with_data(
+                    types::TURNS,
+                    json!({ "ok": false, "message": format!("{e:#}"), "turns": [] }),
+                ),
+            }
+        }
+        types::LIST_ENTITIES => {
+            let query = str_arg("query");
+            let limit = data.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+            match graph.list_entities(query.as_deref(), limit).await {
+                Ok(mut v) => {
+                    let entities = v
+                        .get_mut("entities")
+                        .map(Value::take)
+                        .unwrap_or_else(|| json!([]));
+                    WyomingEvent::with_data(
+                        types::ENTITIES,
+                        json!({ "ok": true, "entities": entities }),
+                    )
+                }
+                Err(e) => WyomingEvent::with_data(
+                    types::ENTITIES,
+                    json!({ "ok": false, "message": format!("{e:#}"), "entities": [] }),
+                ),
+            }
+        }
+        // DELETE_GRAPH_NODE
+        _ => match data.get("id").and_then(|v| v.as_u64()) {
+            Some(id) => match graph.delete_node(id).await {
+                Ok(_) => WyomingEvent::with_data(types::GRAPH_RESULT, json!({ "ok": true })),
+                Err(e) => WyomingEvent::with_data(
+                    types::GRAPH_RESULT,
+                    json!({ "ok": false, "message": format!("{e:#}") }),
+                ),
+            },
+            None => WyomingEvent::with_data(
+                types::GRAPH_RESULT,
+                json!({ "ok": false, "message": "delete-graph-node requires a numeric `id`" }),
+            ),
+        },
+    }
 }
 
 // ---- speaker identification control (speaker_id_plan.md Phase C) ----

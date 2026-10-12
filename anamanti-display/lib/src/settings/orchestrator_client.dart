@@ -200,6 +200,69 @@ class MemoryView {
   final int createdAt;
 }
 
+/// One entity ("keyword") a turn mentions, decorating a [TurnView].
+class EntityRefView {
+  const EntityRefView({required this.name, required this.kind});
+
+  /// Canonical surface form (e.g. `jazz`, `Portland`, `Sam`).
+  final String name;
+
+  /// Coarse type: `person` | `place` | `thing` | `topic`.
+  final String kind;
+}
+
+/// One stored conversation turn from the GraphRAG graph (Memory → Conversations).
+class TurnView {
+  const TurnView({
+    required this.id,
+    required this.extId,
+    required this.session,
+    required this.ts,
+    required this.transcript,
+    required this.reply,
+    required this.speakerId,
+    required this.entities,
+  });
+
+  /// Graph node id, used to delete this turn.
+  final int id;
+
+  /// The chat-log record id this turn was ingested from.
+  final String extId;
+
+  /// The conversation session id.
+  final String session;
+
+  /// Unix seconds when the turn happened.
+  final int ts;
+
+  /// What the user said (STT transcript).
+  final String transcript;
+
+  /// What the assistant replied.
+  final String reply;
+
+  /// Speaker id (`spk-…`, or `household` for the shared/unattributed user).
+  final String speakerId;
+
+  /// Entities ("keywords") this turn mentions.
+  final List<EntityRefView> entities;
+}
+
+/// One stored entity ("keyword") from the GraphRAG graph (Memory → Keywords).
+class EntityView {
+  const EntityView({required this.id, required this.name, required this.kind});
+
+  /// Graph node id, used to delete this entity.
+  final int id;
+
+  /// Canonical surface form.
+  final String name;
+
+  /// Coarse type: `person` | `place` | `thing` | `topic`.
+  final String kind;
+}
+
 /// One identified speaker, for the settings "People" list.
 class SpeakerView {
   const SpeakerView({
@@ -272,6 +335,27 @@ abstract class OrchestratorClient {
   Future<bool> deleteMemory(int id);
 
   Future<int> clearMemories();
+
+  /// Browse stored conversation turns from the GraphRAG graph (Memory →
+  /// Conversations), newest first. All filters optional (empty = no filter):
+  /// [query] substring over the turn text, [speakerId], and [entity] (turns
+  /// mentioning that keyword). Throws if the Mac is unreachable or the backend has
+  /// no graph (SQLite recall).
+  Future<List<TurnView>> listTurns({
+    String query = '',
+    String speakerId = '',
+    String entity = '',
+    int limit = 100,
+  });
+
+  /// Browse stored entities / "keywords" from the GraphRAG graph (Memory →
+  /// Keywords). [query] is an optional substring filter on the name.
+  Future<List<EntityView>> listEntities({String query = '', int limit = 200});
+
+  /// Drop one graph node (a turn or entity) by its id. Helix-index-only — the
+  /// durable SQLite facts and the chat log are untouched. Returns whether the Core
+  /// accepted the delete.
+  Future<bool> deleteGraphNode(int id);
 
   /// List the identified speakers (the "People" view).
   Future<List<SpeakerView>> listSpeakers();
@@ -448,6 +532,57 @@ class FrbOrchestratorClient implements OrchestratorClient {
   @override
   Future<int> clearMemories() => frb.clearMemories(
         orchestratorKey: orchestratorKey,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<List<TurnView>> listTurns({
+    String query = '',
+    String speakerId = '',
+    String entity = '',
+    int limit = 100,
+  }) async {
+    final turns = await frb.listTurns(
+      orchestratorKey: orchestratorKey,
+      query: query,
+      speakerId: speakerId,
+      entity: entity,
+      limit: limit,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return turns
+        .map((t) => TurnView(
+              id: t.id.toInt(),
+              extId: t.extId,
+              session: t.session,
+              ts: t.ts.toInt(),
+              transcript: t.transcript,
+              reply: t.reply,
+              speakerId: t.speakerId,
+              entities: t.entities
+                  .map((e) => EntityRefView(name: e.name, kind: e.kind))
+                  .toList(),
+            ))
+        .toList();
+  }
+
+  @override
+  Future<List<EntityView>> listEntities({String query = '', int limit = 200}) async {
+    final entities = await frb.listEntities(
+      orchestratorKey: orchestratorKey,
+      query: query,
+      limit: limit,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return entities
+        .map((e) => EntityView(id: e.id.toInt(), name: e.name, kind: e.kind))
+        .toList();
+  }
+
+  @override
+  Future<bool> deleteGraphNode(int id) => frb.deleteGraphNode(
+        orchestratorKey: orchestratorKey,
+        id: id,
         discoveryTimeoutSecs: _timeout,
       );
 

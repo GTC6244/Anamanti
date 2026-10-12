@@ -84,6 +84,34 @@ pub mod types {
     /// orchestrator → device: result of a delete/clear (data: `ok`, `count`).
     pub const MEMORY_RESULT: &str = "anamanti-memory-result";
 
+    // ---- GraphRAG (HelixDB) memory browsing control frames ----
+    //
+    // Let the on-device Memory screen inspect and prune the derived GraphRAG graph —
+    // the `Turn` nodes and `Entity` ("keyword") nodes that back recall — separately from
+    // the durable SQLite facts above. Deletes here are Helix-index-only (the chat log,
+    // the source of truth, is untouched). Same device↔orchestrator-only framing;
+    // byte-identical to the device crate's `types`.
+
+    /// device → orchestrator: browse stored conversation turns, newest first (data: all
+    /// optional — `query` substring, `speaker_id`, `entity` name, `limit`, `offset`).
+    pub const LIST_TURNS: &str = "anamanti-list-turns";
+    /// orchestrator → device: the turns (data: `ok`, `turns` array of
+    /// `{id, ext_id, session, ts, transcript, reply, speaker_id, entities:[{name,kind}]}`;
+    /// on failure `ok:false` + `message`).
+    pub const TURNS: &str = "anamanti-turns";
+    /// device → orchestrator: browse stored entities / "keywords" (data: optional
+    /// `query` substring, `limit`).
+    pub const LIST_ENTITIES: &str = "anamanti-list-entities";
+    /// orchestrator → device: the entities (data: `ok`, `entities` array of
+    /// `{id, name, kind}`; on failure `ok:false` + `message`).
+    pub const ENTITIES: &str = "anamanti-entities";
+    /// device → orchestrator: drop one graph node by its id (data: `id`) — a `Turn`,
+    /// `Entity`, or graph `Memory` node, with its incident edges + vector entry.
+    pub const DELETE_GRAPH_NODE: &str = "anamanti-delete-graph-node";
+    /// orchestrator → device: result of a graph browse/delete failure or a delete
+    /// (data: `ok`, optional `message`).
+    pub const GRAPH_RESULT: &str = "anamanti-graph-result";
+
     // ---- Speaker identification control frames (speaker_id_plan.md Phase C) ----
     //
     // Let the on-device "People" settings view enumerate identified speakers and

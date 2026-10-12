@@ -19,8 +19,8 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 use crate::api::settings::{
-    DriveToken, FunctionStatus, MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate,
-    SpeakerInfo, VoiceInfo,
+    DriveToken, EntityInfo, EntityRef, FunctionStatus, MemoryEntry, ModelInfo,
+    OrchestratorSettings, SettingsUpdate, SpeakerInfo, TurnInfo, VoiceInfo,
 };
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
@@ -214,6 +214,61 @@ fn parse_entry(v: &Value) -> MemoryEntry {
         content: s("content"),
         source: s("source"),
         created_at: v.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+    }
+}
+
+fn parse_turn(v: &Value) -> TurnInfo {
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let entities = v
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|e| EntityRef {
+                    name: e
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    kind: e
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    TurnInfo {
+        id: v.get("id").and_then(Value::as_i64).unwrap_or(0),
+        ext_id: s("ext_id"),
+        session: s("session"),
+        ts: v.get("ts").and_then(Value::as_i64).unwrap_or(0),
+        transcript: s("transcript"),
+        reply: s("reply"),
+        speaker_id: s("speaker_id"),
+        entities,
+    }
+}
+
+fn parse_entity(v: &Value) -> EntityInfo {
+    EntityInfo {
+        id: v.get("id").and_then(Value::as_i64).unwrap_or(0),
+        name: v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        kind: v
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -435,6 +490,113 @@ pub async fn clear_memories(
         .and_then(Value::as_i64)
         .unwrap_or(0)
         .max(0) as u32)
+}
+
+/// Browse stored conversation turns from the GraphRAG graph, newest first. Empty
+/// filter strings are omitted from the request (treated as "no filter"). An
+/// `ok: false` body (older Core, or SQLite recall backend) surfaces as an error.
+pub async fn list_turns(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    query: &str,
+    speaker_id: &str,
+    entity: &str,
+    limit: u32,
+) -> Result<Vec<TurnInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let mut data = Map::new();
+    if !query.trim().is_empty() {
+        data.insert("query".into(), json!(query.trim()));
+    }
+    if !speaker_id.trim().is_empty() {
+        data.insert("speaker_id".into(), json!(speaker_id.trim()));
+    }
+    if !entity.trim().is_empty() {
+        data.insert("entity".into(), json!(entity.trim()));
+    }
+    if limit > 0 {
+        data.insert("limit".into(), json!(limit));
+    }
+    let request = WyomingEvent::with_data(types::LIST_TURNS, Value::Object(data));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing turns failed")
+        ));
+    }
+    Ok(resp
+        .data
+        .get("turns")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_turn).collect())
+        .unwrap_or_default())
+}
+
+/// Browse stored entities / "keywords" from the GraphRAG graph. An `ok: false` body
+/// (older Core, or SQLite recall backend) surfaces as an error.
+pub async fn list_entities(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<EntityInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let mut data = Map::new();
+    if !query.trim().is_empty() {
+        data.insert("query".into(), json!(query.trim()));
+    }
+    if limit > 0 {
+        data.insert("limit".into(), json!(limit));
+    }
+    let request = WyomingEvent::with_data(types::LIST_ENTITIES, Value::Object(data));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing entities failed")
+        ));
+    }
+    Ok(resp
+        .data
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_entity).collect())
+        .unwrap_or_default())
+}
+
+/// Drop one graph node by id (a turn or entity). Surfaces an in-band `message` as an
+/// error when the Core rejected the delete.
+pub async fn delete_graph_node(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: i64,
+) -> Result<bool> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request = WyomingEvent::with_data(types::DELETE_GRAPH_NODE, json!({ "id": id }));
+    let resp = round_trip(&endpoint, request).await?;
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !ok {
+        if let Some(msg) = resp.data.get("message").and_then(Value::as_str) {
+            if !msg.is_empty() {
+                return Err(anyhow!("{msg}"));
+            }
+        }
+    }
+    Ok(ok)
 }
 
 fn parse_speaker(v: &Value) -> SpeakerInfo {
@@ -671,6 +833,122 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::GET_DRIVE_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn list_turns_parses_turns_and_sends_filters() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::TURNS,
+            json!({
+                "ok": true,
+                "turns": [{
+                    "id": 7,
+                    "ext_id": "r1",
+                    "session": "sess",
+                    "ts": 123,
+                    "transcript": "where is the library?",
+                    "reply": "On Main Street.",
+                    "speaker_id": "household",
+                    "entities": [{ "name": "library", "kind": "place" }],
+                }],
+            }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let turns = list_turns(
+            &cache,
+            Duration::from_millis(0),
+            None,
+            "library",
+            "household",
+            "library",
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, 7);
+        assert_eq!(turns[0].transcript, "where is the library?");
+        assert_eq!(turns[0].reply, "On Main Street.");
+        assert_eq!(turns[0].entities.len(), 1);
+        assert_eq!(turns[0].entities[0].name, "library");
+        assert_eq!(turns[0].entities[0].kind, "place");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::LIST_TURNS);
+        assert_eq!(request.data.get("query").and_then(Value::as_str), Some("library"));
+        assert_eq!(
+            request.data.get("speaker_id").and_then(Value::as_str),
+            Some("household")
+        );
+        assert_eq!(request.data.get("entity").and_then(Value::as_str), Some("library"));
+        assert_eq!(request.data.get("limit").and_then(Value::as_u64), Some(50));
+    }
+
+    #[tokio::test]
+    async fn list_turns_surfaces_an_error_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::TURNS,
+            json!({ "ok": false, "message": "graph memory is unavailable", "turns": [] }),
+        );
+        let _server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = list_turns(&cache, Duration::from_millis(0), None, "", "", "", 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unavailable"));
+    }
+
+    #[tokio::test]
+    async fn list_entities_parses_entities() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::ENTITIES,
+            json!({
+                "ok": true,
+                "entities": [
+                    { "id": 1, "name": "jazz", "kind": "topic" },
+                    { "id": 2, "name": "Portland", "kind": "place" },
+                ],
+            }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let entities = list_entities(&cache, Duration::from_millis(0), None, "", 0)
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[0].name, "jazz");
+        assert_eq!(entities[1].kind, "place");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::LIST_ENTITIES);
+    }
+
+    #[tokio::test]
+    async fn delete_graph_node_sends_id_and_reads_ok() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(types::GRAPH_RESULT, json!({ "ok": true }));
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let ok = delete_graph_node(&cache, Duration::from_millis(0), None, 42)
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::DELETE_GRAPH_NODE);
+        assert_eq!(request.data.get("id").and_then(Value::as_i64), Some(42));
     }
 
     #[tokio::test]

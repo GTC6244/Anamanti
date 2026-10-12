@@ -44,11 +44,14 @@ full loop has not been exercised against real services on the device.
       mid-reply flushes playback and starts a fresh turn (flush-on-wake + the
       `anamanti-interrupt` frame aborts the Anamanti Core's in-flight LLM+TTS). Detection
       over loud playback takes a try or two without AEC.
-- [ ] Exercise **memory** on-device (voice "remember…"/"forget that" + the settings
-      memory list).
+- [ ] Exercise **memory** on-device (voice "remember…"/"forget that" + the Settings →
+      Memory screen).
 - [ ] Verify the Phase-6 **settings control protocol** on-device: change LLM
       backend / model / TTS voice from the settings screen and see it take effect on
-      the next turn; view/delete memory entries.
+      the next turn; and exercise **Settings → Memory** all three tabs — Facts
+      (SQLite view/delete/forget-all), Conversations (search + person/keyword filter +
+      delete a turn), Keywords (delete an entity) — confirming a deleted turn/keyword no
+      longer recalls (Helix-index-only: a backend-switch/rebuild can re-import it).
 
 ## 2. AEC / self-triggering (investigated on hardware — Plan §4)
 

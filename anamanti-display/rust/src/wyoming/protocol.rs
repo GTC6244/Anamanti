@@ -81,6 +81,30 @@ pub mod types {
     /// orchestrator → device: result of a delete/clear (data: `ok`, `count`).
     pub const MEMORY_RESULT: &str = "anamanti-memory-result";
 
+    // ---- GraphRAG (HelixDB) memory browsing control frames ----
+    //
+    // Let the device Memory screen browse + prune the derived GraphRAG graph (`Turn`
+    // nodes + `Entity`/"keyword" nodes) separately from the durable SQLite facts above.
+    // Deletes are Helix-index-only. Byte-identical to the orchestrator crate's `types`.
+
+    /// device → orchestrator: browse stored turns, newest first (data: all optional —
+    /// `query`, `speaker_id`, `entity`, `limit`, `offset`).
+    pub const LIST_TURNS: &str = "anamanti-list-turns";
+    /// orchestrator → device: the turns (data: `ok`, `turns` array of
+    /// `{id, ext_id, session, ts, transcript, reply, speaker_id, entities:[{name,kind}]}`).
+    pub const TURNS: &str = "anamanti-turns";
+    /// device → orchestrator: browse stored entities / "keywords" (data: optional
+    /// `query`, `limit`).
+    pub const LIST_ENTITIES: &str = "anamanti-list-entities";
+    /// orchestrator → device: the entities (data: `ok`, `entities` array of
+    /// `{id, name, kind}`).
+    pub const ENTITIES: &str = "anamanti-entities";
+    /// device → orchestrator: drop one graph node by id (data: `id`).
+    pub const DELETE_GRAPH_NODE: &str = "anamanti-delete-graph-node";
+    /// orchestrator → device: result of a graph browse/delete failure or a delete
+    /// (data: `ok`, optional `message`).
+    pub const GRAPH_RESULT: &str = "anamanti-graph-result";
+
     // Speaker identification control frames (speaker_id_plan.md Phase C). Kept
     // byte-identical to the orchestrator crate's `types` (guarded by round-trip
     // tests in both crates).

@@ -677,6 +677,203 @@ impl HelixMemory {
         Ok(arr)
     }
 
+    /// Browse stored `Turn` nodes for the device Memory screen, newest first.
+    ///
+    /// Filters (all optional, AND-combined):
+    /// - `query` — case-insensitive substring match on the turn `text`
+    ///   (`"{transcript}\n{reply}"`).
+    /// - `speaker_id` — keep only turns said by this speaker (`spk-…`); a turn with no
+    ///   `speaker_id` is treated as `household`.
+    /// - `entity` — keep only turns that `MENTIONS` an `Entity` with this exact `name`
+    ///   (the graph hop `Entity ← MENTIONS ← Turn`).
+    ///
+    /// Each returned turn carries its `$id`, `ext_id`, `session`, `ts`, the split
+    /// `transcript`/`reply`, `speaker_id`, and its mentioned `entities` (`[{name,kind}]`).
+    /// Sorted by `ts` descending, then `offset`/`limit` paginated. Entities are fetched
+    /// only for the returned page (bounded by `limit`), not for every candidate.
+    pub async fn list_turns(
+        &self,
+        query: Option<&str>,
+        speaker_id: Option<&str>,
+        entity: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Value> {
+        // Candidate set: either all Turn nodes, or just those mentioning `entity`.
+        let found = match entity.filter(|s| !s.is_empty()) {
+            Some(ent) => {
+                self.read(
+                    batch::read_batch()
+                        .var_as(
+                            "t",
+                            g().n_with_label(L_ENTITY)
+                                .where_(Predicate::eq("name", ent))
+                                .in_(Some(E_MENTIONS))
+                                .value_map(None::<Vec<String>>),
+                        )
+                        .returning(["t"]),
+                )
+                .await?
+            }
+            None => {
+                self.read(
+                    batch::read_batch()
+                        .var_as("t", g().n_with_label(L_TURN).value_map(None::<Vec<String>>))
+                        .returning(["t"]),
+                )
+                .await?
+            }
+        };
+        let items = found
+            .get("t")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let q = query.filter(|s| !s.is_empty()).map(|s| s.to_lowercase());
+        let want_speaker = speaker_id.filter(|s| !s.is_empty());
+
+        // First pass: filter + capture (ts, id, base fields) — no per-turn entity reads yet.
+        let mut matched: Vec<(i64, u64, Value)> = Vec::new();
+        for item in items {
+            let Some(id) = item.get("$id").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let sid = item
+                .get("speaker_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(HOUSEHOLD);
+            if let Some(want) = want_speaker {
+                if sid != want {
+                    continue;
+                }
+            }
+            if let Some(ref needle) = q {
+                if !text.to_lowercase().contains(needle.as_str()) {
+                    continue;
+                }
+            }
+            let ts = item.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+            let (transcript, reply) = split_turn_text(text);
+            let base = serde_json::json!({
+                "id": id,
+                "ext_id": item.get("ext_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "session": item.get("session").and_then(|v| v.as_str()).unwrap_or(""),
+                "ts": ts,
+                "transcript": transcript,
+                "reply": reply,
+                "speaker_id": sid,
+            });
+            matched.push((ts, id, base));
+        }
+
+        // Newest first, then paginate, then fetch entities only for the page.
+        matched.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut turns: Vec<Value> = Vec::new();
+        for (_ts, id, mut base) in matched.into_iter().skip(offset).take(limit) {
+            let entities = self.turn_entities(id).await?;
+            if let Some(obj) = base.as_object_mut() {
+                obj.insert("entities".to_string(), entities);
+            }
+            turns.push(base);
+        }
+        Ok(serde_json::json!({ "turns": turns }))
+    }
+
+    /// The entities a given `Turn` mentions, as `[{name,kind}]` (the `Turn → MENTIONS →
+    /// Entity` hop). Used to decorate each row in [`Self::list_turns`].
+    async fn turn_entities(&self, turn_id: u64) -> Result<Value> {
+        let v = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "e",
+                        g().n(NodeRef::id(turn_id))
+                            .out(Some(E_MENTIONS))
+                            .value_map(Some(vec!["name", "kind"])),
+                    )
+                    .returning(["e"]),
+            )
+            .await?;
+        let items = v
+            .get("e")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let out: Vec<Value> = items
+            .into_iter()
+            .filter_map(|item| {
+                let name = item.get("name").and_then(|v| v.as_str())?;
+                let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                Some(serde_json::json!({ "name": name, "kind": kind }))
+            })
+            .collect();
+        Ok(Value::Array(out))
+    }
+
+    /// Browse stored `Entity` nodes ("keywords"/people/places/topics) for the device
+    /// Memory screen, as `{ "entities": [ {id,name,kind}, ... ] }`. `query` is an optional
+    /// case-insensitive substring match on `name`; results are sorted by `name` and capped
+    /// to `limit`.
+    pub async fn list_entities(&self, query: Option<&str>, limit: usize) -> Result<Value> {
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "e",
+                        g().n_with_label(L_ENTITY).value_map(None::<Vec<String>>),
+                    )
+                    .returning(["e"]),
+            )
+            .await?;
+        let items = found
+            .get("e")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let q = query.filter(|s| !s.is_empty()).map(|s| s.to_lowercase());
+        let mut entities: Vec<(String, Value)> = Vec::new();
+        for item in items {
+            let Some(id) = item.get("$id").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(ref needle) = q {
+                if !name.to_lowercase().contains(needle.as_str()) {
+                    continue;
+                }
+            }
+            let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            entities.push((
+                name.to_string(),
+                serde_json::json!({ "id": id, "name": name, "kind": kind }),
+            ));
+        }
+        entities.sort_by(|a, b| a.0.cmp(&b.0));
+        let out: Vec<Value> = entities.into_iter().take(limit).map(|(_, v)| v).collect();
+        Ok(serde_json::json!({ "entities": out }))
+    }
+
+    /// Drop a single node by its `$id` (a `Turn`, `Entity`, or `Memory` chosen in the
+    /// device Memory screen). Dropping a node also removes its incident edges and its
+    /// vector-index entry — the same write `purge_non_answer_turns` performs per turn.
+    ///
+    /// This is a **Helix-index-only** delete: the durable SQLite facts and the chat-log
+    /// JSONL (the source of truth) are untouched, so a full index rebuild / embedding-
+    /// backend switch can re-import a deleted `Turn` from the chat log. Returns `true`
+    /// once the drop + flush succeed (idempotent — dropping a missing id is a no-op).
+    pub async fn delete_node(&self, id: u64) -> Result<bool> {
+        self.write(
+            batch::write_batch()
+                .var_as("_d", g().n(NodeRef::id(id)).drop())
+                .returning(["_d"]),
+        )
+        .await?;
+        self.flush().await?;
+        Ok(true)
+    }
+
     /// Close the store, flushing durable state.
     pub async fn close(self) -> Result<()> {
         self.db.close().await.context("closing embedded HelixDB")
@@ -817,6 +1014,25 @@ impl super::graphview::GraphView for HelixMemory {
             "total": outcome.total(),
         }))
     }
+
+    async fn list_turns(
+        &self,
+        query: Option<&str>,
+        speaker_id: Option<&str>,
+        entity: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Value> {
+        HelixMemory::list_turns(self, query, speaker_id, entity, limit, offset).await
+    }
+
+    async fn list_entities(&self, query: Option<&str>, limit: usize) -> Result<Value> {
+        HelixMemory::list_entities(self, query, limit).await
+    }
+
+    async fn delete_node(&self, id: u64) -> Result<bool> {
+        HelixMemory::delete_node(self, id).await
+    }
 }
 
 /// Empty edge-property list with the concrete type the builder needs.
@@ -874,6 +1090,17 @@ fn replace_whole_word(text: &str, from: &str, to: &str) -> Option<String> {
 /// what the *assistant* said, never a user transcript that happens to contain "I don't know".
 fn turn_reply_half(text: &str) -> Option<&str> {
     text.split_once('\n').map(|(_transcript, reply)| reply)
+}
+
+/// Split a stored `Turn.text` (`"{transcript}\n{reply}"`) into its `(transcript, reply)`
+/// halves on the first newline. With no newline the whole string is the transcript and
+/// the reply is empty. Used to present the two halves separately on the device Memory
+/// screen (the ingester joins them for embedding; see `turn_text`).
+fn split_turn_text(text: &str) -> (&str, &str) {
+    match text.split_once('\n') {
+        Some((transcript, reply)) => (transcript, reply),
+        None => (text, ""),
+    }
 }
 
 /// Extract the `$id` of the first element of `value[var]`, if any.
@@ -974,5 +1201,129 @@ mod tests {
             None
         );
         assert_eq!(replace_whole_word("anything", "", "x"), None);
+    }
+
+    #[test]
+    fn split_turn_text_separates_transcript_and_reply() {
+        use super::split_turn_text;
+        assert_eq!(
+            split_turn_text("where is the library?\nIt's on Main Street."),
+            ("where is the library?", "It's on Main Street.")
+        );
+        // Multi-line reply: everything after the first newline is the reply.
+        assert_eq!(
+            split_turn_text("directions?\nHead north.\nThen left."),
+            ("directions?", "Head north.\nThen left.")
+        );
+        // No newline → all transcript, empty reply.
+        assert_eq!(split_turn_text("just a transcript"), ("just a transcript", ""));
+    }
+
+    use super::HelixMemory;
+    use crate::memory::entity::Entity;
+
+    fn ent(name: &str, kind: &str) -> Entity {
+        Entity {
+            name: name.to_string(),
+            kind: kind.to_string(),
+        }
+    }
+
+    /// Browse/filter/delete the graph end-to-end against an in-memory store.
+    ///
+    /// Run on a generous-stack thread with its own current-thread runtime: the
+    /// embedded HelixDB engine's in-memory query execution recurses deeply and
+    /// overflows the ~2 MB default test-thread stack.
+    #[test]
+    fn list_turns_entities_and_delete_round_trip() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(list_turns_entities_and_delete_round_trip_body());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn list_turns_entities_and_delete_round_trip_body() {
+        let mem = HelixMemory::open_in_memory("test", 3).await.unwrap();
+        let emb = vec![0.1f32, 0.2, 0.3];
+
+        let t1 = mem
+            .ingest_turn(
+                "r1",
+                "sess",
+                100,
+                "where is the library?\nIt's on Main Street.",
+                emb.clone(),
+                &[ent("library", "place")],
+                "household",
+                None,
+            )
+            .await
+            .unwrap();
+        let _t2 = mem
+            .ingest_turn(
+                "r2",
+                "sess",
+                200,
+                "what time is it?\nIt's 3pm.",
+                emb.clone(),
+                &[],
+                "spk-dana",
+                Some("Dana"),
+            )
+            .await
+            .unwrap();
+
+        // All turns, newest first (t2 ts=200 before t1 ts=100).
+        let turns = mem.list_turns(None, None, None, 50, 0).await.unwrap();
+        let arr = turns["turns"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["ts"].as_i64(), Some(200));
+        assert_eq!(arr[0]["transcript"], "what time is it?");
+        assert_eq!(arr[0]["reply"], "It's 3pm.");
+
+        // The first turn carries its mentioned entity.
+        let lib = arr
+            .iter()
+            .find(|t| t["ext_id"] == "r1")
+            .expect("r1 present");
+        assert_eq!(lib["entities"][0]["name"], "library");
+        assert_eq!(lib["entities"][0]["kind"], "place");
+
+        // query filter (case-insensitive substring over the text).
+        let q = mem.list_turns(Some("LIBRARY"), None, None, 50, 0).await.unwrap();
+        assert_eq!(q["turns"].as_array().unwrap().len(), 1);
+        assert_eq!(q["turns"][0]["ext_id"], "r1");
+
+        // speaker filter.
+        let s = mem.list_turns(None, Some("spk-dana"), None, 50, 0).await.unwrap();
+        assert_eq!(s["turns"].as_array().unwrap().len(), 1);
+        assert_eq!(s["turns"][0]["ext_id"], "r2");
+
+        // entity filter (turns mentioning "library").
+        let e = mem.list_turns(None, None, Some("library"), 50, 0).await.unwrap();
+        assert_eq!(e["turns"].as_array().unwrap().len(), 1);
+        assert_eq!(e["turns"][0]["ext_id"], "r1");
+
+        // list_entities with and without a query filter.
+        let ents = mem.list_entities(None, 50).await.unwrap();
+        assert_eq!(ents["entities"].as_array().unwrap().len(), 1);
+        assert_eq!(ents["entities"][0]["name"], "library");
+        let ents_q = mem.list_entities(Some("zzz"), 50).await.unwrap();
+        assert_eq!(ents_q["entities"].as_array().unwrap().len(), 0);
+
+        // delete the library turn → gone from the browse list.
+        assert!(mem.delete_node(t1).await.unwrap());
+        let after = mem.list_turns(None, None, None, 50, 0).await.unwrap();
+        let after = after["turns"].as_array().unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0]["ext_id"], "r2");
     }
 }

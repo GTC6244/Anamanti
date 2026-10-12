@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `block_on`, `preferred`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Discover every orchestrator on the LAN for the settings "Orchestrator"
 /// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
@@ -107,6 +107,52 @@ Future<int> clearMemories({
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsClearMemories(
   orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Browse stored conversation turns from the GraphRAG graph (Memory screen →
+/// Conversations), newest first. All filters optional: `query` (substring over the
+/// turn text), `speaker_id` (that speaker only), `entity` (turns mentioning that
+/// keyword). An older Core (or the SQLite recall backend) surfaces as an error.
+Future<List<TurnInfo>> listTurns({
+  required String orchestratorKey,
+  required String query,
+  required String speakerId,
+  required String entity,
+  required int limit,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListTurns(
+  orchestratorKey: orchestratorKey,
+  query: query,
+  speakerId: speakerId,
+  entity: entity,
+  limit: limit,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Browse stored entities / "keywords" from the GraphRAG graph (Memory screen →
+/// Keywords). `query` is an optional substring filter on the name.
+Future<List<EntityInfo>> listEntities({
+  required String orchestratorKey,
+  required String query,
+  required int limit,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListEntities(
+  orchestratorKey: orchestratorKey,
+  query: query,
+  limit: limit,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Drop one graph node (a turn or entity) by its id. Helix-index-only — the durable
+/// SQLite facts and the chat log are untouched. Returns whether the Core accepted it.
+Future<bool> deleteGraphNode({
+  required String orchestratorKey,
+  required PlatformInt64 id,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsDeleteGraphNode(
+  orchestratorKey: orchestratorKey,
+  id: id,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
@@ -246,6 +292,55 @@ class DriveToken {
           refreshToken == other.refreshToken &&
           folderIds == other.folderIds &&
           scope == other.scope;
+}
+
+/// One stored entity ("keyword") from the GraphRAG graph, for the device Memory
+/// screen's "Keywords" tab. Built by the Core's `list_entities`.
+class EntityInfo {
+  /// Graph node id (`$id`), used to delete this entity.
+  final PlatformInt64 id;
+
+  /// Canonical surface form.
+  final String name;
+
+  /// Coarse type: `person` | `place` | `thing` | `topic`.
+  final String kind;
+
+  const EntityInfo({required this.id, required this.name, required this.kind});
+
+  @override
+  int get hashCode => id.hashCode ^ name.hashCode ^ kind.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EntityInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          kind == other.kind;
+}
+
+/// One entity ("keyword") a turn mentions, decorating a [`TurnInfo`] row.
+class EntityRef {
+  /// Canonical surface form (e.g. `jazz`, `Portland`, `Sam`).
+  final String name;
+
+  /// Coarse type: `person` | `place` | `thing` | `topic` (free-form).
+  final String kind;
+
+  const EntityRef({required this.name, required this.kind});
+
+  @override
+  int get hashCode => name.hashCode ^ kind.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EntityRef &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          kind == other.kind;
 }
 
 /// One capability row in the Core's "functions" snapshot, shown read-only on the
@@ -614,6 +709,70 @@ class SpeakerInfo {
           labeled == other.labeled &&
           samples == other.samples &&
           createdAt == other.createdAt;
+}
+
+/// One stored conversation turn from the GraphRAG graph, for the device Memory
+/// screen's "Conversations" tab. Built by the Core's `list_turns`.
+class TurnInfo {
+  /// Graph node id (`$id`), used to delete this turn.
+  final PlatformInt64 id;
+
+  /// The chat-log record id this turn was ingested from.
+  final String extId;
+
+  /// The conversation session id.
+  final String session;
+
+  /// Unix seconds when the turn happened.
+  final PlatformInt64 ts;
+
+  /// What the user said (the STT transcript).
+  final String transcript;
+
+  /// What the assistant replied.
+  final String reply;
+
+  /// Speaker id (`spk-…`, or `household` for the shared/unattributed user).
+  final String speakerId;
+
+  /// Entities ("keywords") this turn mentions.
+  final List<EntityRef> entities;
+
+  const TurnInfo({
+    required this.id,
+    required this.extId,
+    required this.session,
+    required this.ts,
+    required this.transcript,
+    required this.reply,
+    required this.speakerId,
+    required this.entities,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      extId.hashCode ^
+      session.hashCode ^
+      ts.hashCode ^
+      transcript.hashCode ^
+      reply.hashCode ^
+      speakerId.hashCode ^
+      entities.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TurnInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          extId == other.extId &&
+          session == other.session &&
+          ts == other.ts &&
+          transcript == other.transcript &&
+          reply == other.reply &&
+          speakerId == other.speakerId &&
+          entities == other.entities;
 }
 
 /// One selectable Piper voice for the settings TTS voice dropdown, as reported by

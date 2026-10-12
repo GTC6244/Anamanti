@@ -155,7 +155,15 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `Memory` nodes; only its raw `transcript\nreply` node is withheld. Graphs built before
   the gate are cleaned once per backend start by `HelixMemory::purge_non_answer_turns`
   (drops matching `Turn` nodes + their edges + vector-index entries; `Memory` facts
-  untouched). If `OPENAI_API_KEY` is absent or the graph fails to open,
+  untouched). Beyond that automatic prune, the device **Memory** screen (Settings →
+  Memory) can **manually browse and delete** the graph: `anamanti-list-turns` /
+  `anamanti-list-entities` return `Turn` / `Entity` ("keyword") rows (filterable by
+  text, speaker, or mentioned entity), and `anamanti-delete-graph-node` drops a chosen
+  node. These are **Helix-index-only** edits (the chat log stays the source of truth, so
+  a rebuild/backend-switch can re-import a deleted turn); they ride the existing
+  device↔Core control path and need the HelixDB backend (SQLite recall answers
+  `ok:false`). The screen's third surface is the durable SQLite facts via the existing
+  `anamanti-list-memories`/`-delete-memory`/`-clear-memories` frames. If `OPENAI_API_KEY` is absent or the graph fails to open,
   recall **falls back to SQLite FTS** (writes are unaffected); `ANAMANTI_MEMORY_BACKEND=sqlite`
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes

@@ -34,9 +34,9 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Functions / People / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Functions / People / Memory / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
 | **People / enrollment** (pushed from Settings → People) | `PeopleScreen`, `SpeakerEnrollScreen` |
-| **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen` |
+| **Memory** (pushed from Settings → Memory) | `MemoryScreen` (tabs: Facts / Conversations / Keywords) |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
 ---
@@ -472,15 +472,29 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 ## 10. People, voice enrollment & other sub-screens
 
-`PeopleScreen` + `SpeakerEnrollScreen` are **reachable** (Settings → People).
-`MemoryScreen` is built + tested but **not yet wired** into navigation (referenced
-only from `test/`) — listed so it isn't re-implemented by mistake.
+`PeopleScreen` + `SpeakerEnrollScreen` and `MemoryScreen` are all **reachable** from
+the Settings menu (→ People, → Memory).
 
-**`MemoryScreen`** (built, currently **unwired**) — `lib/src/ui/memory_screen.dart`
-- `Scaffold` + `AppBar("Memory")`. Lists Core memory entries (`MemoryView`: facts
-  vs preferences, explicit vs inferred) as `ListTile`s with per-entry delete;
-  app-bar refresh + "Forget all" (confirm dialog). Constructed with an
-  `OrchestratorClient`.
+**`MemoryScreen`** — `lib/src/ui/memory_screen.dart`
+- Reached from **Settings → Memory** (`settings-menu-memory`, pushed as its own route
+  like People). `Scaffold` + `AppBar("Memory")` with a 3-tab `TabBar`, each tab its own
+  list + delete, all constructed with an `OrchestratorClient`:
+  - **Facts** — the durable SQLite facts/preferences (`MemoryView`: facts vs
+    preferences, explicit vs inferred) as `ListTile`s with per-entry delete + a
+    "Forget all" action (confirm dialog). Uses `listMemories`/`deleteMemory`/
+    `clearMemories` (unchanged frames).
+  - **Conversations** — stored GraphRAG `Turn` nodes (`TurnView`): transcript + reply,
+    speaker + relative time, and entity ("keyword") chips. A search field + a person
+    dropdown (`listSpeakers`) + an optional entity filter chip (set by tapping a
+    keyword) drive `listTurns(query, speakerId, entity)`. Per-turn delete (confirm) →
+    `deleteGraphNode(turn.id)`.
+  - **Keywords** — stored GraphRAG `Entity` nodes (`EntityView`: name + kind) via
+    `listEntities(query)`; tapping one jumps to Conversations filtered to it; per-entity
+    delete (confirm) → `deleteGraphNode(entity.id)`.
+- Conversations/Keywords deletes are **Helix-index-only** (prune recall; the chat-log
+  source of truth is untouched, so a rebuild can restore them) — surfaced as a caption
+  at the bottom of those lists. Needs the Core on the HelixDB backend; the SQLite recall
+  backend answers these frames `ok:false` and the tab shows an "unavailable" state.
 
 **`PeopleScreen`** — `lib/src/ui/people_screen.dart`
 - Reached from **Settings → People** (`settings-menu-people`). `Scaffold` +
