@@ -18,7 +18,11 @@ import 'package:anamanti_display/src/settings/app_settings.dart';
 /// device's own speaker is less likely to self-trigger during playback.
 class WakeWordDefaults {
   static const String modelName = 'hey_jarvis';
-  static const double threshold = 0.5;
+
+  /// Idle detection threshold. **0.4** (lowered from 0.5) so higher-pitched/quieter
+  /// voices the pretrained model scores lower still trigger; tune live on the Audio
+  /// Diagnostics screen. Must match [AppSettings.threshold]'s default.
+  static const double threshold = 0.4;
   static const double activeThreshold = 0.7;
   static const int smoothingWindow = 2;
   static const bool fireOnPeak = false;

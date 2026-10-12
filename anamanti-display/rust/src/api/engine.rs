@@ -422,7 +422,13 @@ impl WakeWordEvent {
     /// screen can render the mic meter, the score-vs-threshold meter, and the
     /// numeric readouts from one stream. Emitted (in place of [`Self::level`]) while
     /// a wake-word model is loaded.
-    pub(crate) fn level_diag(rms: f32, score: f32, avg_score: f32, threshold: f32, gain_db: f32) -> Self {
+    pub(crate) fn level_diag(
+        rms: f32,
+        score: f32,
+        avg_score: f32,
+        threshold: f32,
+        gain_db: f32,
+    ) -> Self {
         Self {
             rms,
             score,
@@ -628,6 +634,33 @@ pub fn is_wake_word_engine_running() -> bool {
 #[frb(sync)]
 pub fn update_diagnostics_tuning(gain_db: f32, threshold: f32) {
     crate::engine::update_tuning(gain_db, threshold);
+}
+
+/// Live-adjust the detection-gate shape on the **running** engine without restarting it
+/// (the audio-diagnostics screen's "fire on peak" + "smoothing window" controls): the
+/// firing criterion (`fire_on_peak` — `true` fires on the window's peak score, `false`
+/// on its average) and the smoothing-window size. These are the strongest in-app levers
+/// for higher-pitched/quieter voices that score lower against the fixed model: peak-mode
+/// catches a brief confidence spike the average would dilute. Re-seeded from
+/// [`WakeWordConfig`] on the next engine start, so persist the chosen values to settings
+/// to keep them across restarts. `smoothing_window` is clamped to `[1, 10]`; a harmless
+/// no-op when no engine is running.
+#[frb(sync)]
+pub fn update_diagnostics_gate(fire_on_peak: bool, smoothing_window: u32) {
+    crate::engine::update_gate_tuning(fire_on_peak, smoothing_window);
+}
+
+/// Enable/disable **detection clip capture** and set its output directory on the running
+/// engine (the audio-diagnostics screen). While enabled, the engine keeps a rolling
+/// buffer of the last few seconds of mic audio and, on each wake-word fire, writes it to
+/// a 16 kHz mono WAV in `dir` — so detections (especially lower-scoring female/quiet
+/// voices) can be collected into a corpus for offline threshold/model evaluation. `dir`
+/// must be an app-writable path; an empty `dir` disables capture regardless of `enabled`.
+/// Capture only accumulates while enabled, so the default idle path is unaffected. A
+/// harmless no-op beyond storing state when no engine is running.
+#[frb(sync)]
+pub fn update_diagnostics_capture(enabled: bool, dir: String) {
+    crate::engine::update_capture(enabled, dir);
 }
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch

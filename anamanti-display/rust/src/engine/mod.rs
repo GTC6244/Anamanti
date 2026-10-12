@@ -14,6 +14,8 @@
 //! the engine just raises the confidence bar while a turn is active to suppress
 //! self-triggers (the AEC-interim mitigation, Plan.MD §4).
 
+use std::collections::VecDeque;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -126,7 +128,125 @@ fn load_tuning() -> (f32, f32) {
 /// engine without restarting it (the audio-diagnostics screen). Clamped to sane
 /// ranges. The values are re-seeded from config on the next engine start.
 pub fn update_tuning(gain_db: f32, threshold: f32) {
-    set_tuning(gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB), threshold.clamp(0.0, 1.0));
+    set_tuning(
+        gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB),
+        threshold.clamp(0.0, 1.0),
+    );
+}
+
+/// Live-tunable detection-gate shape — the firing criterion (`true` = peak,
+/// `false` = average) and the smoothing-window size — so the audio-diagnostics
+/// screen can A/B the gate on the running engine **without a restart**, exactly
+/// like [`TUNE_GAIN_DB`]/[`TUNE_THRESHOLD`]. Re-seeded from the [`WakeWordConfig`]
+/// each engine start, so a persisted settings value always wins on the next launch.
+static TUNE_FIRE_ON_PEAK: AtomicBool = AtomicBool::new(false);
+static TUNE_SMOOTH_WINDOW: AtomicU32 = AtomicU32::new(DEFAULT_SMOOTH_WINDOW as u32);
+
+fn set_gate_tuning(fire_on_peak: bool, smoothing_window: u32) {
+    TUNE_FIRE_ON_PEAK.store(fire_on_peak, Ordering::Relaxed);
+    TUNE_SMOOTH_WINDOW.store(smoothing_window, Ordering::Relaxed);
+}
+
+fn load_gate_tuning() -> (bool, u32) {
+    (
+        TUNE_FIRE_ON_PEAK.load(Ordering::Relaxed),
+        TUNE_SMOOTH_WINDOW.load(Ordering::Relaxed),
+    )
+}
+
+/// Upper bound on the live smoothing window, matching the Dart settings slider so a
+/// stray value can't balloon detection latency. The engine floors it at 1.
+const MAX_SMOOTH_WINDOW: u32 = 10;
+
+/// Live-adjust the detection-gate criterion + smoothing window on the running engine
+/// without restarting it (the audio-diagnostics screen). `smoothing_window` is clamped
+/// to `[1, 10]`. Re-seeded from config on the next engine start, so persist the chosen
+/// values to settings to keep them across restarts.
+pub fn update_gate_tuning(fire_on_peak: bool, smoothing_window: u32) {
+    set_gate_tuning(fire_on_peak, smoothing_window.clamp(1, MAX_SMOOTH_WINDOW));
+}
+
+/// Diagnostics clip capture: a rolling buffer of the most recent mic audio that is
+/// written to a WAV on each wake-word fire, so female/quiet-voice detections can be
+/// collected into a real corpus for offline threshold/model evaluation (the mic model
+/// has a known lower-pitch bias). Opt-in and off by default — it only accumulates +
+/// writes while the Audio Diagnostics screen has the toggle on, so the always-on IDLE
+/// path keeps allocating nothing. The directory is supplied by the Dart layer (an
+/// app-writable path); an empty directory also means "disabled".
+static DIAG_CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+static DIAG_CAPTURE_DIR: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn capture_dir_slot() -> &'static Mutex<String> {
+    DIAG_CAPTURE_DIR.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// Enable/disable diagnostics clip capture and set the output directory on the running
+/// engine (the audio-diagnostics screen). A no-op beyond storing state when no engine is
+/// running. An empty `dir` disables capture regardless of `enabled`.
+pub fn update_capture(enabled: bool, dir: String) {
+    *capture_dir_slot().lock().unwrap() = dir;
+    DIAG_CAPTURE_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+fn capture_enabled() -> bool {
+    DIAG_CAPTURE_ENABLED.load(Ordering::Relaxed)
+}
+
+fn capture_dir() -> String {
+    capture_dir_slot().lock().unwrap().clone()
+}
+
+/// Seconds of preceding mic audio retained for a detection clip. The wake word fires at
+/// the *end* of the utterance, so the retained window is the lead-in — ample to capture
+/// the whole "hey jarvis" plus room tone for evaluation.
+const CAPTURE_CLIP_SECONDS: usize = 4;
+
+/// Write a 16 kHz mono 16-bit PCM WAV of `samples` into `dir`, named with the model, a
+/// millisecond timestamp, and the smoothed score that fired (e.g.
+/// `hey_jarvis_1739472913_s72.wav` = score 0.72). Dependency-free: a 44-byte canonical
+/// WAV header followed by little-endian samples. Returns the written path.
+fn write_wav_clip(dir: &str, model: &str, score: f32, samples: &[i16]) -> std::io::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let safe_model: String = model
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let score_pct = (score.clamp(0.0, 1.0) * 100.0).round() as u32;
+    let path = format!("{dir}/{safe_model}_{ms}_s{score_pct:02}.wav");
+
+    let sample_rate = TARGET_SAMPLE_RATE;
+    let data_bytes = (samples.len() as u32) * 2; // 16-bit mono
+    let byte_rate = sample_rate * 2;
+    let mut buf: Vec<u8> = Vec::with_capacity(44 + data_bytes as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    buf.extend_from_slice(&1u16.to_le_bytes()); // channels = 1 (mono)
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes()); // block align = channels * bytes/sample
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_bytes.to_le_bytes());
+    for &s in samples {
+        buf.extend_from_slice(&s.to_le_bytes());
+    }
+    let mut f = std::fs::File::create(&path)?;
+    f.write_all(&buf)?;
+    Ok(path)
 }
 
 /// The display context — what the device is currently showing (e.g. the recipe screen's
@@ -495,6 +615,18 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // audio-diagnostics screen can adjust them on the running engine without a restart
     // (`update_tuning`); the loop re-reads them each block below.
     set_tuning(capture_gain_db, idle_threshold);
+    // Seed the live-tunable gate shape (criterion + window) from config too, and track
+    // the applied values so the loop only reconfigures the gate when they actually
+    // change (the diagnostics screen's "fire on peak" / "smoothing window" controls).
+    set_gate_tuning(config.fire_on_peak, smoothing_window as u32);
+    let mut cur_fire_on_peak = config.fire_on_peak;
+    let mut cur_window = smoothing_window;
+
+    // Rolling buffer of the most recent 16 kHz mono samples, dumped to a WAV on each
+    // fire while diagnostics clip capture is on (female/quiet-voice corpus collection).
+    // Only grows while capture is enabled, so the default IDLE path allocates nothing.
+    let capture_capacity = TARGET_SAMPLE_RATE as usize * CAPTURE_CLIP_SECONDS;
+    let mut capture_ring: VecDeque<i16> = VecDeque::new();
 
     while running.load(Ordering::SeqCst) {
         let n = consumer.pop_slice(&mut scratch);
@@ -529,6 +661,37 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
             for s in resampled.iter_mut() {
                 *s = (*s * capture_gain).clamp(i16::MIN as f32, i16::MAX as f32);
             }
+        }
+
+        // Live gate reconfiguration (the diagnostics screen's "fire on peak" /
+        // "smoothing window" controls): re-read the tunables each block and reshape the
+        // gate in place only when they change, so one utterance's scores are smoothed by
+        // a consistent window.
+        let (want_peak, want_window) = load_gate_tuning();
+        if want_peak != cur_fire_on_peak {
+            gate.set_fire_on_peak(want_peak);
+            cur_fire_on_peak = want_peak;
+        }
+        let want_window = (want_window as usize).max(1);
+        if want_window != cur_window {
+            gate.set_capacity(want_window);
+            cur_window = want_window;
+        }
+
+        // Diagnostics clip capture: while enabled, keep the most recent
+        // `CAPTURE_CLIP_SECONDS` of post-gain mono audio so a fire can dump the lead-in
+        // to a WAV. Free the buffer promptly when the toggle goes off.
+        let capture_on = capture_enabled();
+        if capture_on {
+            for &s in resampled.iter() {
+                capture_ring.push_back(s.clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+            }
+            while capture_ring.len() > capture_capacity {
+                capture_ring.pop_front();
+            }
+        } else if !capture_ring.is_empty() {
+            capture_ring.clear();
+            capture_ring.shrink_to_fit();
         }
 
         // While a turn is active, forward this 16 kHz block to the Wyoming client
@@ -613,6 +776,28 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                             .is_err()
                         {
                             break;
+                        }
+
+                        // Diagnostics clip capture: dump the retained lead-in audio to a
+                        // WAV so this detection joins an offline evaluation corpus. The
+                        // write (create + ~128 KB) runs on a detached thread so it never
+                        // stalls the real-time inference loop; a detection is rare
+                        // (one per utterance, debounced by the cooldown).
+                        if capture_on {
+                            let dir = capture_dir();
+                            if !dir.is_empty() {
+                                let samples: Vec<i16> = capture_ring.iter().copied().collect();
+                                let model = config.model_name.clone();
+                                let clip_sink = sink.clone();
+                                thread::spawn(move || {
+                                    let msg = match write_wav_clip(&dir, &model, avg, &samples) {
+                                        Ok(path) => format!("saved detection clip: {path}"),
+                                        Err(e) => format!("detection clip save failed: {e}"),
+                                    };
+                                    log::info!("{msg}");
+                                    let _ = clip_sink.add(WakeWordEvent::status(msg));
+                                });
+                            }
                         }
                         // Fire a Wyoming turn. When one is already active this is a
                         // barge-in: the network layer flushes playback, interrupts

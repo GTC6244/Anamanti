@@ -70,6 +70,25 @@ impl DetectionGate {
         }
     }
 
+    /// Switch the firing criterion (average vs peak) in place, so the
+    /// audio-diagnostics screen can A/B the two **without restarting the engine**.
+    /// Keeps the current window contents.
+    pub fn set_fire_on_peak(&mut self, fire_on_peak: bool) {
+        self.fire_on_peak = fire_on_peak;
+    }
+
+    /// Resize the smoothing window in place (live tuning), preserving the most
+    /// recent scores. `capacity` is floored at 1 (a 1-block window = no smoothing).
+    /// Shrinking drops the oldest scores so the gate can fire again as soon as the
+    /// smaller window fills.
+    pub fn set_capacity(&mut self, capacity: usize) {
+        let capacity = capacity.max(1);
+        self.capacity = capacity;
+        while self.window.len() > capacity {
+            self.window.pop_front();
+        }
+    }
+
     /// Record a new block `score` and decide whether the wake word fires now.
     ///
     /// Fires (returning the smoothed metric — average, or peak in peak mode) only
@@ -164,6 +183,48 @@ mod tests {
         assert!(g
             .observe(0.9, 0.5, t0 + Duration::from_millis(1500))
             .is_some());
+    }
+
+    #[test]
+    fn set_fire_on_peak_switches_criterion_live() {
+        // Start in average mode with a spike-then-silence window that averages below
+        // the bar, so it does not fire.
+        let mut g = DetectionGate::new(3, CD, false);
+        let t = Instant::now();
+        assert!(g.observe(0.0, 0.5, t).is_none());
+        assert!(g.observe(0.9, 0.5, t).is_none());
+        assert!(g.observe(0.0, 0.5, t).is_none()); // avg 0.30 < 0.50
+                                                   // Flip to peak mode mid-stream (what the diagnostics "fire on peak" toggle
+                                                   // does); the window's existing 0.9 peak now clears the bar on the next block.
+        g.set_fire_on_peak(true);
+        assert!(g.fire_on_peak);
+        assert!(g.observe(0.0, 0.5, t).is_some());
+    }
+
+    #[test]
+    fn set_capacity_shrinks_and_preserves_recent_scores() {
+        // A 3-wide window primed with three high scores.
+        let mut g = DetectionGate::new(3, CD, false);
+        let t = Instant::now();
+        assert_eq!(g.capacity, 3);
+        g.observe(0.9, 0.5, t);
+        g.observe(0.9, 0.5, t);
+        g.observe(0.9, 0.5, t);
+        // Shrink to a 1-block window: it drops the oldest scores but stays full of the
+        // most recent 0.9, so the very next high block fires immediately.
+        g.set_capacity(1);
+        assert_eq!(g.capacity, 1);
+        // Past the cooldown so the debounce doesn't mask the resize behaviour.
+        assert!(g
+            .observe(0.9, 0.5, t + Duration::from_millis(1500))
+            .is_some());
+    }
+
+    #[test]
+    fn set_capacity_floors_at_one() {
+        let mut g = DetectionGate::new(2, CD, false);
+        g.set_capacity(0);
+        assert_eq!(g.capacity, 1);
     }
 
     #[test]

@@ -68,7 +68,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1370377730;
+  int get rustContentHash => 389087425;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -244,6 +244,16 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiEngineStopWakeWordEngine();
 
   Future<void> crateApiEngineStopWeatherChannel();
+
+  void crateApiEngineUpdateDiagnosticsCapture({
+    required bool enabled,
+    required String dir,
+  });
+
+  void crateApiEngineUpdateDiagnosticsGate({
+    required bool fireOnPeak,
+    required int smoothingWindow,
+  });
 
   void crateApiEngineUpdateDiagnosticsTuning({
     required double gainDb,
@@ -1465,6 +1475,66 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "stop_weather_channel", argNames: []);
 
   @override
+  void crateApiEngineUpdateDiagnosticsCapture({
+    required bool enabled,
+    required String dir,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(enabled, serializer);
+          sse_encode_String(dir, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 37)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineUpdateDiagnosticsCaptureConstMeta,
+        argValues: [enabled, dir],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineUpdateDiagnosticsCaptureConstMeta =>
+      const TaskConstMeta(
+        debugName: "update_diagnostics_capture",
+        argNames: ["enabled", "dir"],
+      );
+
+  @override
+  void crateApiEngineUpdateDiagnosticsGate({
+    required bool fireOnPeak,
+    required int smoothingWindow,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_bool(fireOnPeak, serializer);
+          sse_encode_u_32(smoothingWindow, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 38)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiEngineUpdateDiagnosticsGateConstMeta,
+        argValues: [fireOnPeak, smoothingWindow],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiEngineUpdateDiagnosticsGateConstMeta =>
+      const TaskConstMeta(
+        debugName: "update_diagnostics_gate",
+        argNames: ["fireOnPeak", "smoothingWindow"],
+      );
+
+  @override
   void crateApiEngineUpdateDiagnosticsTuning({
     required double gainDb,
     required double threshold,
@@ -1475,7 +1545,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_f_32(gainDb, serializer);
           sse_encode_f_32(threshold, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 37)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 39)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1510,7 +1580,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 40,
             port: port_,
           );
         },

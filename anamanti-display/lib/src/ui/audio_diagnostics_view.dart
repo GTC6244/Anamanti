@@ -26,6 +26,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
@@ -44,6 +45,8 @@ class AudioDiagnosticsView extends StatefulWidget {
     required this.settings,
     required this.onChanged,
     required this.onTune,
+    required this.onGateTune,
+    required this.onCaptureChanged,
     required this.onActiveChanged,
   });
 
@@ -61,6 +64,20 @@ class AudioDiagnosticsView extends StatefulWidget {
   /// Apply a capture-gain (dB) + idle-threshold change to the **running** engine
   /// immediately (no restart), so the meters react as the user drags.
   final void Function(double gainDb, double threshold) onTune;
+
+  /// Apply a detection-gate change — the firing criterion (`fireOnPeak`) and the
+  /// smoothing-window size — to the **running** engine immediately (no restart).
+  /// Production wires the native `updateDiagnosticsGate`. These are the strongest
+  /// in-app levers for higher-pitched/quieter voices: peak mode catches a brief
+  /// confidence spike the averaging gate would dilute.
+  final void Function(bool fireOnPeak, int smoothingWindow) onGateTune;
+
+  /// Enable/disable **detection clip capture** on the running engine, with the
+  /// resolved output directory. While on, each wake-word fire writes the preceding
+  /// few seconds of mic audio to a WAV in [dir], building a corpus of (often
+  /// lower-scoring) real detections for offline threshold/model evaluation.
+  /// Production wires the native `updateDiagnosticsCapture`.
+  final void Function(bool enabled, String dir) onCaptureChanged;
 
   /// Announce to the engine that this diagnostics screen is (`true`) or is no longer
   /// (`false`) foreground. Production wires it to the native `setDiagnosticsContext`,
@@ -83,6 +100,19 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
   final List<_DetectionRecord> _history = <_DetectionRecord>[];
   int _lastSeq = 0;
 
+  /// Whether detection-clip capture (save each fire to a WAV) is on. Session-local and
+  /// off by default; turning it off on dispose so capture never outlives the screen.
+  bool _savingClips = false;
+
+  /// How many clips have been saved since capture was last turned on (each fire while
+  /// [_savingClips] writes one). Reset when capture is toggled back on.
+  int _savedCount = 0;
+
+  /// The resolved, app-writable directory clips are written to. Null until resolved
+  /// (or if path resolution is unavailable, e.g. a plugin-less test), which disables
+  /// the capture toggle.
+  String? _clipDir;
+
   @override
   void initState() {
     super.initState();
@@ -92,15 +122,33 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
     );
     _lastSeq = widget.controller.state.detectionSeq;
     widget.controller.addListener(_onTick);
+    _resolveClipDir();
     // Tell the Core this is the diagnostics screen: subsequent voice turns transcribe
     // and display the words but are NOT sent to the LLM (diagnostic surface only).
     widget.onActiveChanged(true);
   }
 
+  /// Resolve the clip output directory (`<app-support>/wake_clips`). Best-effort: if
+  /// path_provider is unavailable (e.g. a widget test with no plugins), the capture
+  /// toggle stays disabled rather than throwing.
+  Future<void> _resolveClipDir() async {
+    try {
+      final support = await getApplicationSupportDirectory();
+      if (!mounted) return;
+      setState(() => _clipDir = '${support.path}/wake_clips');
+    } catch (_) {
+      // Leave _clipDir null — the capture card shows as unavailable.
+    }
+  }
+
   @override
   void dispose() {
-    // Leaving the diagnostics screen: clear the transcription-only context so normal
+    // Leaving the diagnostics screen: stop clip capture so the engine's rolling buffer
+    // isn't left running, and clear the transcription-only context so normal
     // (LLM-backed) turns resume elsewhere.
+    if (_savingClips) {
+      widget.onCaptureChanged(false, _clipDir ?? '');
+    }
     widget.onActiveChanged(false);
     widget.controller.removeListener(_onTick);
     _flash.dispose();
@@ -120,6 +168,8 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
         _DetectionRecord(DateTime.now(), s.lastDetectionScore),
       );
       if (_history.length > 8) _history.removeLast();
+      // Each fire while capture is on writes one clip in the engine; mirror the count.
+      if (_savingClips) _savedCount++;
     });
   }
 
@@ -154,6 +204,8 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
                 _metersCard(),
                 const SizedBox(height: 12),
                 _tuningCard(),
+                const SizedBox(height: 12),
+                _captureCard(),
               ],
             ),
           ),
@@ -546,6 +598,117 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
                 widget.onTune(next.captureGainDb, next.threshold);
               },
             ),
+            _tuneSlider(
+              label: 'Smoothing window',
+              value: widget.settings.smoothingWindow.toDouble().clamp(1, 5),
+              min: 1,
+              max: 5,
+              divisions: 4,
+              format: (v) => '${v.round()}',
+              sliderKey: const Key('diag-smoothing'),
+              onChanged: (v) {
+                final next = widget.settings.copyWith(smoothingWindow: v.round());
+                widget.onChanged(next);
+                widget.onGateTune(next.fireOnPeak, next.smoothingWindow);
+              },
+            ),
+            SwitchListTile.adaptive(
+              key: const Key('diag-fire-on-peak'),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('Fire on peak'),
+              subtitle: const Text(
+                'Trigger on the window’s peak score, not its average — catches brief '
+                'or higher-pitched wake words that averaging dilutes.',
+              ),
+              value: widget.settings.fireOnPeak,
+              onChanged: (v) {
+                final next = widget.settings.copyWith(fireOnPeak: v);
+                widget.onChanged(next);
+                widget.onGateTune(next.fireOnPeak, next.smoothingWindow);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --- Detection-clip capture ---------------------------------------------
+
+  /// Opt-in recorder: while on, each wake-word fire writes the preceding few seconds of
+  /// mic audio to a WAV in the app's support dir, so real detections (especially
+  /// lower-scoring female/quiet voices) can be pulled off the device and evaluated
+  /// offline against threshold/model changes. Off by default and stopped on exit.
+  Widget _captureCard() {
+    final dir = _clipDir;
+    final available = dir != null;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Save detection clips',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                if (_savingClips && _savedCount > 0)
+                  Text(
+                    '$_savedCount saved',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                Switch.adaptive(
+                  key: const Key('diag-capture-toggle'),
+                  value: _savingClips,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  onChanged: available
+                      ? (v) {
+                          setState(() {
+                            _savingClips = v;
+                            if (v) _savedCount = 0;
+                          });
+                          widget.onCaptureChanged(v, dir);
+                        }
+                      : null,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              available
+                  ? 'Each wake-word fire saves the last few seconds of mic audio as a '
+                        'WAV — build a corpus of real (often quiet/female-voice) '
+                        'detections to evaluate threshold changes offline.'
+                  : 'Clip storage is unavailable on this build.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (available) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Folder',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  letterSpacing: 0.8,
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+              ),
+              Text(
+                dir,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+              Text(
+                'Pull with: adb pull "$dir"',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).hintColor,
+                ),
+              ),
+            ],
           ],
         ),
       ),

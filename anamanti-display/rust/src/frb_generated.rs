@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1370377730;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 389087425;
 
 // Section: executor
 
@@ -1401,6 +1401,75 @@ fn wire__crate__api__engine__stop_weather_channel_impl(
         },
     )
 }
+fn wire__crate__api__engine__update_diagnostics_capture_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_diagnostics_capture",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_enabled = <bool>::sse_decode(&mut deserializer);
+            let api_dir = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::update_diagnostics_capture(api_enabled, api_dir);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__engine__update_diagnostics_gate_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_diagnostics_gate",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_fire_on_peak = <bool>::sse_decode(&mut deserializer);
+            let api_smoothing_window = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::update_diagnostics_gate(
+                        api_fire_on_peak,
+                        api_smoothing_window,
+                    );
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__engine__update_diagnostics_tuning_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -2206,7 +2275,7 @@ fn pde_ffi_dispatcher_primary_impl(
         36 => {
             wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        40 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -2237,7 +2306,11 @@ fn pde_ffi_dispatcher_sync_impl(
         28 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
         29 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
         30 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
+        37 => {
+            wire__crate__api__engine__update_diagnostics_capture_impl(ptr, rust_vec_len, data_len)
+        }
+        38 => wire__crate__api__engine__update_diagnostics_gate_impl(ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

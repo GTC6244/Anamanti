@@ -70,7 +70,7 @@ void main() {
     });
     // Falls back to defaults rather than throwing.
     expect(loaded.wakeWord, 'hey_jarvis');
-    expect(loaded.threshold, 0.5);
+    expect(loaded.threshold, 0.4);
     expect(loaded.photoSource, PhotoSourceKind.local);
   });
 

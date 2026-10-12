@@ -50,7 +50,7 @@ class AppSettings {
     this.deviceId = '',
     this.deviceName = '',
     this.wakeWord = 'hey_jarvis',
-    this.threshold = 0.5,
+    this.threshold = 0.4,
     this.activeThreshold = 0.7,
     this.smoothingWindow = 2,
     this.fireOnPeak = false,
@@ -103,7 +103,10 @@ class AppSettings {
   /// Selected wake-word model name (`<name>.onnx`).
   final String wakeWord;
 
-  /// Idle-listening detection threshold in [0, 1].
+  /// Idle-listening detection threshold in [0, 1]. Default **0.4** — lowered from the
+  /// original 0.5 so higher-pitched/quieter voices (which the pretrained openWakeWord
+  /// model scores lower) still clear the bar. Lower = more sensitive, at a slightly
+  /// higher false-trigger rate. Tune live on the Audio Diagnostics screen.
   final double threshold;
 
   /// Higher threshold applied while a turn is active (the AEC-interim mitigation).

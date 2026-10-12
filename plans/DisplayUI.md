@@ -443,8 +443,11 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
   grid (RMS, dBFS, score, smoothed, threshold, gain, device / rate / channels)
   whose header carries a **copy-config** button (`Key('diag-copy-config')`) that
   copies the current config + live readouts to the clipboard as plain text; a
-  **recent-detections** history (time + score); and two **live-tuning** sliders
-  (**Capture gain**, **Sensitivity (idle)**).
+  **recent-detections** history (time + score); **live-tuning** controls
+  (**Capture gain** + **Sensitivity (idle)** sliders, a **Smoothing window** slider
+  `Key('diag-smoothing')` [1–5], and a **Fire on peak** toggle
+  `Key('diag-fire-on-peak')`); and a **Save detection clips** card
+  (`Key('diag-capture-toggle')`) — see below.
 - Layout: a **two-column** arrangement (meters + tuning on the left, readouts +
   heard-words + history on the right) with tightened card padding/spacing so the
   whole surface fits the Echo Show's wide landscape panel on one screen without
@@ -457,10 +460,26 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
   relays the words here but **never sends them to the LLM** (no reply, no TTS, no
   memory) — a diagnostic surface only. Reuses the normal wake-word turn (no second
   audio path): say the wake word, then speak, and the recognized words appear.
-- The tuning sliders apply to the **running engine instantly** via the new FRB
-  `updateDiagnosticsTuning(gainDb, threshold)` (no restart), and mirror into the
-  parent's editable `AppSettings` via `onChanged` so the shared **Save** button
-  persists them across restarts.
+- The tuning controls apply to the **running engine instantly** (no restart) via FRB
+  and mirror into the parent's editable `AppSettings` via `onChanged`, so the shared
+  **Save** button persists them across restarts: the gain/threshold sliders call
+  `updateDiagnosticsTuning(gainDb, threshold)`, and the **Smoothing window** slider +
+  **Fire on peak** toggle call `updateDiagnosticsGate(fireOnPeak, smoothingWindow)`.
+  These gate controls are the strongest in-app levers for **higher-pitched / quieter
+  voices** that the pretrained openWakeWord model scores lower: *fire on peak* triggers
+  on the window's peak score instead of its (diluting) average, and a smaller window is
+  snappier. The idle-threshold default was also lowered **0.5 → 0.4** for the same
+  reason (`WakeWordDefaults.threshold` / `AppSettings.threshold`).
+- A **Save detection clips** card (`AudioDiagnosticsView._captureCard`,
+  `Key('diag-capture-toggle')`, off by default) records a **female/quiet-voice
+  evaluation corpus**: while on, each wake-word fire writes the preceding ~4 s of mic
+  audio to a 16 kHz mono WAV under `<app-support>/wake_clips` (shown in the card, with
+  an `adb pull` hint + a session save count). It calls FRB
+  `updateDiagnosticsCapture(enabled, dir)`; capture only accumulates while enabled and
+  is turned **off on leaving the screen**, so the always-on idle path is unaffected.
+  Rust owns the rolling buffer + WAV write (`rust/src/engine/mod.rs`,
+  `write_wav_clip`, on a detached thread so the real-time loop never blocks on disk).
+  Reuses the existing captured PCM — **no second audio path**.
 - Data path: the Rust `run_loop` enriches its periodic `WakeWordEventKind.level`
   event with the live `score` / `avgScore` / `threshold` / `gainDb` (see
   `rust/src/engine/mod.rs`, `WakeWordEvent::level_diag`); the controller stores them

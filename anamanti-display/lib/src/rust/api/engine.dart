@@ -60,6 +60,37 @@ void updateDiagnosticsTuning({
   threshold: threshold,
 );
 
+/// Live-adjust the detection-gate shape on the **running** engine without restarting it
+/// (the audio-diagnostics screen's "fire on peak" + "smoothing window" controls): the
+/// firing criterion (`fire_on_peak` — `true` fires on the window's peak score, `false`
+/// on its average) and the smoothing-window size. These are the strongest in-app levers
+/// for higher-pitched/quieter voices that score lower against the fixed model: peak-mode
+/// catches a brief confidence spike the average would dilute. Re-seeded from
+/// [`WakeWordConfig`] on the next engine start, so persist the chosen values to settings
+/// to keep them across restarts. `smoothing_window` is clamped to `[1, 10]`; a harmless
+/// no-op when no engine is running.
+void updateDiagnosticsGate({
+  required bool fireOnPeak,
+  required int smoothingWindow,
+}) => RustLib.instance.api.crateApiEngineUpdateDiagnosticsGate(
+  fireOnPeak: fireOnPeak,
+  smoothingWindow: smoothingWindow,
+);
+
+/// Enable/disable **detection clip capture** and set its output directory on the running
+/// engine (the audio-diagnostics screen). While enabled, the engine keeps a rolling
+/// buffer of the last few seconds of mic audio and, on each wake-word fire, writes it to
+/// a 16 kHz mono WAV in `dir` — so detections (especially lower-scoring female/quiet
+/// voices) can be collected into a corpus for offline threshold/model evaluation. `dir`
+/// must be an app-writable path; an empty `dir` disables capture regardless of `enabled`.
+/// Capture only accumulates while enabled, so the default idle path is unaffected. A
+/// harmless no-op beyond storing state when no engine is running.
+void updateDiagnosticsCapture({required bool enabled, required String dir}) =>
+    RustLib.instance.api.crateApiEngineUpdateDiagnosticsCapture(
+      enabled: enabled,
+      dir: dir,
+    );
+
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
 /// — so it resets the screen-dim countdown (and brightens the screen if it had
 /// already dimmed). Flutter calls this on each voice-turn transition and on screen

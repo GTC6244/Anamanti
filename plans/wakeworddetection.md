@@ -302,6 +302,43 @@ is the right call for our single-binary Rust engine and the 32-bit target, but i
 CPU headroom becomes a problem on-device, TFLite with a delegate is the escape
 hatch VACA validates.
 
+### 4.8 Lower-pitch bias: higher-pitched/quieter voices under-trigger (small, high value) — ✅ DONE
+
+**Observation (field):** men trigger the wake word more easily than women. This is a
+known bias of the **pretrained** openWakeWord `hey_jarvis` classifier — its training /
+synthetic-TTS distribution skews toward lower-F0 voices, so higher-pitched speech lands
+slightly off the learned manifold and **scores lower** against a fixed threshold. It is
+the model, not the capture path (the log-mel front-end is amplitude-invariant per §4.4,
+so capture gain does **not** help — confirmed there).
+
+In-app mitigations shipped (no retraining, which is a locked v1 decision — see
+`agents.md`):
+
+- **Lower the default idle threshold `0.5 → 0.4`** (`WakeWordDefaults.threshold` +
+  `AppSettings.threshold`). Directly admits the lower-scoring detections; persisted
+  user values are untouched.
+- **Expose the detection-gate shape live** on the Audio Diagnostics screen — a
+  **Fire on peak** toggle and a **Smoothing window** slider — applied to the running
+  engine without a restart via the new FRB `update_diagnostics_gate(fire_on_peak,
+  smoothing_window)`. The run loop re-reads two new atomics each block and reshapes the
+  `DetectionGate` in place (`set_fire_on_peak` / `set_capacity`). *Fire on peak* is the
+  key lever: higher-pitched voices produce spikier score traces, and peak mode fires on
+  the window's max instead of its diluting average (see `gate.rs` §4.1).
+- **Detection-clip capture** (`update_diagnostics_capture(enabled, dir)` + the
+  diagnostics "Save detection clips" card): while on, each fire writes the preceding
+  ~4 s of 16 kHz mono audio to a WAV under `<app-support>/wake_clips`
+  (`write_wav_clip`, on a detached thread so the RT loop never blocks on disk). This
+  builds a **female/quiet-voice evaluation corpus** on the device (pull with
+  `adb pull`) so threshold/gate changes — or a swapped/retrained classifier — can be
+  measured offline instead of re-recorded live. Capture only accumulates while enabled
+  and is stopped on leaving the screen; it reuses the existing captured PCM (no second
+  audio path).
+
+**Proper fix (deferred, needs the locked "no custom training in v1" decision revisited):**
+train a custom openWakeWord classifier with Piper-TTS augmentation weighted toward
+female voices, or swap in a less-biased pretrained `<name>.onnx` over the shared
+mel/embedding chain (§4.5). The clip corpus above is what makes that evaluable.
+
 ---
 
 ## 5. Recommended next actions
