@@ -4,12 +4,18 @@
 // the mic monitor and renders, in real time from the always-on wake-word engine's
 // event stream (folded into [AssistantState] by [AssistantController]):
 //   * a live mic input-level (RMS) meter, on a dB scale so quiet far-field speech
-//     is visible — the direct signal for the documented mic-gain tuning;
+//     is visible — the direct signal for the documented mic-gain tuning; its header
+//     line also carries the mic-monitor switch (which only pauses/resumes this
+//     visualization — the wake-word mic itself is always on);
 //   * a live wake-word confidence meter with the firing threshold drawn as a line,
 //     so you can say the wake word and watch how close it gets to triggering;
 //   * a flash + short history each time the wake word actually fires; and
 //   * exact numeric readouts (RMS, dBFS, score, smoothed score, threshold, gain,
-//     capture device / sample rate / channels).
+//     capture device / sample rate / channels), with a copy-to-clipboard button
+//     that exports the current config + live readouts as plain text.
+//
+// The cards are laid out in two columns with tightened spacing so the whole surface
+// fits the Echo Show's wide landscape panel on one screen without scrolling.
 //
 // The two tuning sliders (capture gain + wake-word sensitivity) apply **live** to
 // the running engine via `updateDiagnosticsTuning` — no restart — so the meters
@@ -19,6 +25,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
@@ -108,7 +115,10 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
     if (!_monitoring || !mounted) return;
     _flash.forward(from: 0);
     setState(() {
-      _history.insert(0, _DetectionRecord(DateTime.now(), s.lastDetectionScore));
+      _history.insert(
+        0,
+        _DetectionRecord(DateTime.now(), s.lastDetectionScore),
+      );
       if (_history.length > 8) _history.removeLast();
     });
   }
@@ -129,39 +139,90 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-      children: [
-        _monitorToggle(),
-        const SizedBox(height: 8),
-        _metersCard(),
-        const SizedBox(height: 16),
-        _transcriptCard(),
-        const SizedBox(height: 16),
-        _readoutsCard(),
-        const SizedBox(height: 16),
-        _tuningCard(),
-        const SizedBox(height: 16),
-        _historyCard(),
-      ],
+    // The Echo Show is a wide landscape panel, so lay the cards out in two
+    // columns to keep everything on one screen without scrolling. The outer
+    // scroll view is a safety net for shorter test surfaces only.
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _metersCard(),
+                const SizedBox(height: 12),
+                _tuningCard(),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _readoutsCard(),
+                const SizedBox(height: 12),
+                _transcriptCard(),
+                const SizedBox(height: 12),
+                _historyCard(),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  // --- Monitor on/off ------------------------------------------------------
+  // --- Clipboard export ----------------------------------------------------
 
-  Widget _monitorToggle() {
-    return Card(
-      child: SwitchListTile(
-        key: const Key('diag-monitor-toggle'),
-        secondary: Icon(_monitoring ? Icons.mic : Icons.mic_off),
-        title: const Text('Microphone monitor'),
-        subtitle: Text(
-          _monitoring
-              ? 'Live — showing the always-on wake-word mic'
-              : 'Paused — the mic is still listening for the wake word',
-        ),
-        value: _monitoring,
-        onChanged: (v) => setState(() => _monitoring = v),
+  /// A plain-text snapshot of the current audio/wake-word configuration plus the
+  /// live readouts — copied to the clipboard for pasting into a bug report or
+  /// sharing while tuning.
+  String _configText() {
+    final s = widget.controller.state;
+    final threshold = s.wakeThreshold > 0
+        ? s.wakeThreshold
+        : widget.settings.threshold;
+    final device = s.captureDevice.isEmpty ? '—' : s.captureDevice;
+    final rate = s.captureSampleRate > 0 ? '${s.captureSampleRate} Hz' : '—';
+    final chans = s.captureChannels > 0 ? '${s.captureChannels}' : '—';
+    return (StringBuffer()
+          ..writeln('Anamanti audio diagnostics')
+          ..writeln('Wake word: ${widget.settings.wakeWord}')
+          ..writeln('Capture device: $device')
+          ..writeln('Sample rate: $rate')
+          ..writeln('Channels: $chans')
+          ..writeln('Capture gain: ${s.captureGainDb.toStringAsFixed(0)} dB')
+          ..writeln('Idle threshold: ${threshold.toStringAsFixed(2)}')
+          ..writeln(
+            'Active threshold: '
+            '${widget.settings.activeThreshold.toStringAsFixed(2)}',
+          )
+          ..writeln('Smoothing window: ${widget.settings.smoothingWindow}')
+          ..writeln('Fire on peak: ${widget.settings.fireOnPeak}')
+          ..writeln('AudioRecord input: ${widget.settings.useAudioRecord}')
+          ..writeln(
+            'Platform NS/AGC/AEC: ${widget.settings.platformNs}/'
+            '${widget.settings.platformAgc}/${widget.settings.platformAec}',
+          )
+          ..writeln('— live —')
+          ..writeln(
+            'RMS: ${s.micLevel.toStringAsFixed(4)} (${_dbfs(s.micLevel)})',
+          )
+          ..writeln('Score: ${s.wakeScore.toStringAsFixed(3)}')
+          ..writeln('Smoothed: ${s.wakeAvgScore.toStringAsFixed(3)}'))
+        .toString();
+  }
+
+  Future<void> _copyConfig() async {
+    await Clipboard.setData(ClipboardData(text: _configText()));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Diagnostics config copied to clipboard'),
+        duration: Duration(seconds: 2),
       ),
     );
   }
@@ -171,7 +232,7 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
   Widget _metersCard() {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: AnimatedBuilder(
           animation: Listenable.merge([widget.controller, _flash]),
           builder: (context, _) {
@@ -190,16 +251,32 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _meterHeader(
-                  'Mic input level',
-                  live ? _dbfs(rms) : 'paused',
+                // The mic-monitor switch lives on the mic-input line: it only
+                // pauses/resumes this visualization — the wake-word mic itself
+                // is always on (it must be, to hear the wake word).
+                Row(
+                  children: [
+                    Expanded(
+                      child: _meterHeader(
+                        'Mic input level',
+                        live ? _dbfs(rms) : 'paused',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Switch.adaptive(
+                      key: const Key('diag-monitor-toggle'),
+                      value: _monitoring,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      onChanged: (v) => setState(() => _monitoring = v),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 6),
                 _MeterBar(
                   fraction: _rmsFraction(rms),
                   color: Colors.tealAccent.shade400,
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 14),
                 Row(
                   children: [
                     Expanded(
@@ -290,7 +367,7 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
   Widget _transcriptCard() {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: AnimatedBuilder(
           animation: widget.controller,
           builder: (context, _) {
@@ -335,7 +412,7 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
   Widget _readoutsCard() {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: AnimatedBuilder(
           animation: widget.controller,
           builder: (context, _) {
@@ -348,11 +425,26 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Readouts', style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Readouts',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    IconButton(
+                      key: const Key('diag-copy-config'),
+                      icon: const Icon(Icons.copy_all, size: 18),
+                      tooltip: 'Copy config to clipboard',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _copyConfig,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
                 Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
+                  spacing: 10,
+                  runSpacing: 10,
                   children: [
                     _stat('RMS', s.micLevel.toStringAsFixed(4)),
                     _stat('Level', _dbfs(s.micLevel)),
@@ -381,7 +473,7 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
 
   Widget _stat(String label, String value) {
     return SizedBox(
-      width: 150,
+      width: 128,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -412,7 +504,7 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
     final threshold = widget.settings.threshold.clamp(0.1, 0.95);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -494,7 +586,7 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
   Widget _historyCard() {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -595,10 +687,7 @@ class _MeterBar extends StatelessWidget {
               FractionallySizedBox(
                 widthFactor: fraction.clamp(0.0, 1.0),
                 child: Container(
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: radius,
-                  ),
+                  decoration: BoxDecoration(color: color, borderRadius: radius),
                 ),
               ),
               // Smoothed-score tick (thin, lighter).
@@ -616,7 +705,11 @@ class _MeterBar extends StatelessWidget {
               if (marker != null)
                 Positioned(
                   left: (marker.clamp(0.0, 1.0) * w) - 1.5,
-                  child: Container(width: 3, height: height, color: Colors.white),
+                  child: Container(
+                    width: 3,
+                    height: height,
+                    color: Colors.white,
+                  ),
                 ),
             ],
           ),

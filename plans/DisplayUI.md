@@ -433,14 +433,21 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
   `AssistantController` via the new `SettingsScreen.assistant` field, wired from
   `main.dart`'s `_openSettings`). Driven entirely by the always-on wake-word
   engine's event stream folded into `AssistantState` — no second audio path.
-- Shows: a **Microphone monitor** toggle (pauses/resumes the visualization only —
-  the wake-word mic is always on); a **mic input-level (RMS) meter** on a dBFS
-  scale (so quiet far-field audio is visible); a **wake-word score meter** with the
-  firing **threshold** drawn as a bright line and the smoothed score as a faint
-  tick, flashing a **DETECTED** chip when the wake word fires; a **numeric
-  readouts** grid (RMS, dBFS, score, smoothed, threshold, gain, device / rate /
-  channels); a **recent-detections** history (time + score); and two **live-tuning**
-  sliders (**Capture gain**, **Sensitivity (idle)**).
+- Shows: a **mic input-level (RMS) meter** on a dBFS scale (so quiet far-field
+  audio is visible) whose header line carries the **Microphone monitor** switch
+  (`Key('diag-monitor-toggle')`, pauses/resumes the visualization only — the
+  wake-word mic is always on); a **wake-word score meter** with the firing
+  **threshold** drawn as a bright line and the smoothed score as a faint tick,
+  flashing a **DETECTED** chip when the wake word fires; a **numeric readouts**
+  grid (RMS, dBFS, score, smoothed, threshold, gain, device / rate / channels)
+  whose header carries a **copy-config** button (`Key('diag-copy-config')`) that
+  copies the current config + live readouts to the clipboard as plain text; a
+  **recent-detections** history (time + score); and two **live-tuning** sliders
+  (**Capture gain**, **Sensitivity (idle)**).
+- Layout: a **two-column** arrangement (meters + tuning on the left, readouts +
+  heard-words + history on the right) with tightened card padding/spacing so the
+  whole surface fits the Echo Show's wide landscape panel on one screen without
+  scrolling (an outer `SingleChildScrollView` is a safety net for shorter surfaces).
 - A **Heard words** card (`Key('diag-transcript')`) shows what the server
   transcribed from the last thing said *while this screen is up*. Entering the page
   calls the new FRB `setDiagnosticsContext(active: true)` (and `false` on leave),
