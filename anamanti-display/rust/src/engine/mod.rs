@@ -182,6 +182,29 @@ pub fn font_context() -> Option<serde_json::Value> {
     font_slot().lock().unwrap().clone()
 }
 
+/// The running engine's shared speaker [`PlaybackSink`], published so UI actions
+/// *other* than a voice turn can play audio through the one existing output path
+/// (no second audio stack — the locked decision). Today that's the People screen's
+/// "play" button replaying a person's stored voice clips. `None` while the engine
+/// isn't running or audio output was unavailable at start; set when playback opens in
+/// [`run_loop`] and cleared on teardown so a stale sink is never handed out.
+static PLAYBACK: OnceLock<Mutex<Option<Arc<crate::audio::playback::PlaybackSink>>>> =
+    OnceLock::new();
+
+fn playback_slot() -> &'static Mutex<Option<Arc<crate::audio::playback::PlaybackSink>>> {
+    PLAYBACK.get_or_init(|| Mutex::new(None))
+}
+
+fn set_playback_sink(sink: Option<Arc<crate::audio::playback::PlaybackSink>>) {
+    *playback_slot().lock().unwrap() = sink;
+}
+
+/// The running engine's playback sink, or `None` when no engine / no audio output is
+/// available. Callers submit mono `i16` PCM via [`PlaybackSink::submit_pcm`].
+pub fn playback_sink() -> Option<Arc<crate::audio::playback::PlaybackSink>> {
+    playback_slot().lock().unwrap().clone()
+}
+
 /// True while a wake-word engine thread is active.
 pub fn is_running() -> bool {
     slot()
@@ -392,7 +415,11 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                 "playback ready on '{}' ({} Hz, {} ch)",
                 stream.info.device_name, stream.info.sample_rate, stream.info.channels
             )));
-            (Some(stream), Some(Arc::new(sink_handle)))
+            let shared = Arc::new(sink_handle);
+            // Publish the sink so non-turn UI (the People screen's clip "play" button)
+            // can reuse this one output path.
+            set_playback_sink(Some(shared.clone()));
+            (Some(stream), Some(shared))
         }
         Ok(Err(e)) => {
             let _ = sink.add(WakeWordEvent::status(format!(
@@ -643,6 +670,9 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     }
 
+    // Stop handing out the shared sink before the stream it drains is torn down, so a
+    // late clip-playback call can't enqueue into a ring nobody reads.
+    set_playback_sink(None);
     // Drop the network first so its runtime stops forwarding (and stops handing
     // audio to the playback sink) before the streams are torn down; then drop the
     // playback and capture streams.

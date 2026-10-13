@@ -165,6 +165,20 @@ pub struct SpeakerInfo {
     pub created_at: i64,
 }
 
+/// One stored voice clip for a speaker, for the People screen's clip playback
+/// (speaker_id_plan.md Phase C).
+#[derive(Debug, Clone)]
+pub struct SpeakerClipInfo {
+    /// Opaque clip id (the Core's on-disk file stem); the key to fetch/play it.
+    pub name: String,
+    /// Capture time in Unix milliseconds (newest-first ordering).
+    pub created_ms: i64,
+    /// Number of `i16` samples in the clip.
+    pub samples: i64,
+    /// Sample rate of the clip's PCM in Hz (16 kHz house format).
+    pub sample_rate: u32,
+}
+
 /// One entity ("keyword") a turn mentions, decorating a [`TurnInfo`] row.
 #[derive(Debug, Clone)]
 pub struct EntityRef {
@@ -573,6 +587,91 @@ pub fn delete_speaker(
         )
         .await
     })
+}
+
+/// List a speaker's stored voice clips (newest first), for the People screen's
+/// playback. Empty when the speaker has no clips (or clip capture is disabled on the
+/// Core).
+pub fn list_speaker_clips(
+    orchestrator_key: String,
+    id: String,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<SpeakerClipInfo>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_speaker_clips(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &id,
+        )
+        .await
+    })
+}
+
+/// Fetch and play back a person's stored voice clips through the running engine's
+/// speaker, so a human can listen and put a name to an anonymous cluster. Clips play
+/// back-to-back (newest first) with a short gap between them. Returns the number of
+/// clips queued (0 when the person has none).
+///
+/// Reuses the one existing audio output path (the engine's [`PlaybackSink`]); errors
+/// if the engine isn't running / has no audio output. Playback itself runs on a
+/// background thread so the call returns promptly while the clips play out.
+pub fn play_speaker_clips(
+    orchestrator_key: String,
+    id: String,
+    discovery_timeout_secs: u64,
+) -> Result<i32> {
+    // A live output path is required — the People screen can only play clips while the
+    // assistant engine is running (it owns the speaker stream).
+    let sink = crate::engine::playback_sink().ok_or_else(|| {
+        anyhow::anyhow!("audio output isn't available right now — is the assistant running?")
+    })?;
+
+    // Fetch the clip list and each clip's raw PCM over the control socket.
+    let clips: Vec<(Vec<i16>, u32)> = block_on(async move {
+        let cache = EndpointCache::new();
+        let t = timeout(discovery_timeout_secs);
+        let pref = preferred(&orchestrator_key);
+        let infos = control::list_speaker_clips(&cache, t, pref, &id).await?;
+        let mut out = Vec::with_capacity(infos.len());
+        for info in &infos {
+            let bytes = control::fetch_speaker_clip(&cache, t, pref, &id, &info.name).await?;
+            out.push((decode_pcm_le(&bytes), info.sample_rate.max(1)));
+        }
+        Ok(out)
+    })?;
+
+    let count = clips.len() as i32;
+    if count == 0 {
+        return Ok(0);
+    }
+
+    // Play through the shared sink on a background thread: `submit_pcm` applies
+    // real-time backpressure, so submitting the whole run here would block the caller
+    // for the clips' duration. `clear()` first so a re-tap restarts cleanly.
+    std::thread::spawn(move || {
+        sink.clear();
+        for (i, (pcm, rate)) in clips.iter().enumerate() {
+            if i > 0 {
+                // ~300 ms of silence between clips so they're distinguishable.
+                let gap = vec![0i16; (*rate as usize) * 3 / 10];
+                sink.submit_pcm(&gap, *rate);
+            }
+            sink.submit_pcm(pcm, *rate);
+        }
+    });
+
+    Ok(count)
+}
+
+/// Decode raw little-endian `i16` PCM bytes (the clip wire format) into samples. A
+/// trailing odd byte (shouldn't happen) is ignored.
+fn decode_pcm_le(bytes: &[u8]) -> Vec<i16> {
+    bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect()
 }
 
 /// Commit the current guided voice-enrollment session into a named profile
