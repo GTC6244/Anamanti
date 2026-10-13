@@ -178,17 +178,13 @@ async fn handle_connection(
                 // (`role=notify`, the default) or the ambient weather push
                 // (`role=weather`); the write pump below is identical for both — it
                 // just drains whichever service's receiver.
-                let is_weather = ev.hello_role() == "weather";
-                let channel = if is_weather { "weather" } else { "notify" };
+                let channel = PushChannel::for_role(ev.hello_role(), &notify, &weather);
                 log::info!(
-                    "[{}] {channel} channel opened (device_id={device_id:?}, name={device_name:?})",
-                    peer_str(peer.as_ref())
+                    "[{}] {} channel opened (device_id={device_id:?}, name={device_name:?})",
+                    peer_str(peer.as_ref()),
+                    channel.label(),
                 );
-                let (conn_id, mut rx) = if is_weather {
-                    weather.register(&device_id, &device_name)
-                } else {
-                    notify.register(&device_id, &device_name)
-                };
+                let (conn_id, mut rx) = channel.register(&device_id, &device_name);
                 let (reader, writer) = device.split_mut();
                 // Pump enqueued pushes out to the device while watching the read half
                 // for the device closing the socket. In this visual-only phase the
@@ -216,15 +212,62 @@ async fn handle_connection(
                         }
                     }
                 }
-                if is_weather {
-                    weather.deregister(conn_id);
-                } else {
-                    notify.deregister(conn_id);
-                }
-                log::info!("[{}] {channel} channel closed", peer_str(peer.as_ref()));
+                channel.deregister(conn_id);
+                log::info!(
+                    "[{}] {} channel closed",
+                    peer_str(peer.as_ref()),
+                    channel.label()
+                );
                 return Ok(());
             }
             Some(_) => continue, // ignore stray pre-turn frames
+        }
+    }
+}
+
+/// The persistent push service an `anamanti-hello` frame opens, looked up by its
+/// `role`: `weather` → the ambient weather push, anything else (the default `notify`)
+/// → proactive notifications.
+enum PushChannel<'a> {
+    Notify(&'a NotificationService),
+    Weather(&'a WeatherService),
+}
+
+impl<'a> PushChannel<'a> {
+    fn for_role(role: &str, notify: &'a NotificationService, weather: &'a WeatherService) -> Self {
+        match role {
+            "weather" => PushChannel::Weather(weather),
+            _ => PushChannel::Notify(notify),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            PushChannel::Notify(_) => "notify",
+            PushChannel::Weather(_) => "weather",
+        }
+    }
+
+    /// Register the channel. Only notify channels record the device identity (for the
+    /// config page's connected-devices list).
+    fn register(
+        &self,
+        device_id: &str,
+        name: &str,
+    ) -> (
+        u64,
+        tokio::sync::mpsc::UnboundedReceiver<protocol::WyomingEvent>,
+    ) {
+        match self {
+            PushChannel::Notify(svc) => svc.register(device_id, name),
+            PushChannel::Weather(svc) => svc.register(),
+        }
+    }
+
+    fn deregister(&self, conn_id: u64) {
+        match self {
+            PushChannel::Notify(svc) => svc.deregister(conn_id),
+            PushChannel::Weather(svc) => svc.deregister(conn_id),
         }
     }
 }
