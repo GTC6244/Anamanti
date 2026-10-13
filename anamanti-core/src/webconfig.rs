@@ -48,12 +48,12 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::app::AppServices;
 use crate::config::EmbedBackend;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{chatlog, promptlog, GraphRagController, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
 use crate::notify::{Notification, NotificationService};
-use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
     Personality, PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate,
@@ -61,11 +61,11 @@ use crate::settings::{
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
-/// HelixDB). Cheaply cloneable — everything is behind an `Arc` or a small `PathBuf`.
-#[derive(Clone)]
+/// HelixDB) beyond the memory store itself (which comes from
+/// [`AppServices::memory`]). Cheaply cloneable — everything is behind an `Arc` or a
+/// small `PathBuf`.
+#[derive(Clone, Default)]
 pub struct DebugSources {
-    /// The SQLite memory store (rendered by `/sqlite`).
-    pub memory: Arc<MemoryStore>,
     /// Path to the append-only chat log JSONL (rendered by `/chatlog`).
     pub chatlog_path: PathBuf,
     /// Path to the append-only prompt log JSONL (rendered by `/prompts`).
@@ -205,34 +205,12 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 /// Accept config-page connections forever, one task per connection. Returns only if
 /// the listener itself fails.
-#[allow(clippy::too_many_arguments)]
-pub async fn serve(
-    listener: TcpListener,
-    settings: Arc<SharedSettings>,
-    catalog: Arc<ModelCatalog>,
-    connector: Arc<dyn ServiceConnector>,
-    voices_dir: Option<PathBuf>,
-    debug: DebugSources,
-    music: Option<MusicHub>,
-    notify: Arc<NotificationService>,
-    graphrag: Option<Arc<GraphRagController>>,
-) -> Result<()> {
+pub async fn serve(listener: TcpListener, services: Arc<AppServices>) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
-        let settings = settings.clone();
-        let catalog = catalog.clone();
-        let connector = connector.clone();
-        let voices_dir = voices_dir.clone();
-        let debug = debug.clone();
-        let music = music.clone();
-        let notify = notify.clone();
-        let graphrag = graphrag.clone();
+        let services = services.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(
-                stream, settings, catalog, connector, voices_dir, debug, music, notify, graphrag,
-            )
-            .await
-            {
+            if let Err(e) = handle(stream, &services).await {
                 log::debug!("config page connection {peer} ended: {e:#}");
             }
         });
@@ -241,18 +219,15 @@ pub async fn serve(
 
 /// Read one HTTP request, route it, write one response, close. One request per
 /// connection (`Connection: close`) — ample for a settings page.
-#[allow(clippy::too_many_arguments)]
-async fn handle(
-    mut stream: TcpStream,
-    settings: Arc<SharedSettings>,
-    catalog: Arc<ModelCatalog>,
-    connector: Arc<dyn ServiceConnector>,
-    voices_dir: Option<PathBuf>,
-    debug: DebugSources,
-    music: Option<MusicHub>,
-    notify: Arc<NotificationService>,
-    graphrag: Option<Arc<GraphRagController>>,
-) -> Result<()> {
+async fn handle(mut stream: TcpStream, services: &AppServices) -> Result<()> {
+    let settings = services.settings();
+    let catalog = &services.catalog;
+    let connector = &services.connector;
+    let voices_dir = &services.voices_dir;
+    let debug = &services.debug;
+    let music = &services.music;
+    let notify = &services.notify;
+    let graphrag = &services.graphrag;
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
 
@@ -320,7 +295,7 @@ async fn handle(
     // `describe`, so both are handled here rather than in the pure `route` function.
     let path = target.split(['?', '#']).next().unwrap_or(&target);
     if method == "GET" && path == "/models" {
-        let payload = models_json(&catalog).await.into_bytes();
+        let payload = models_json(catalog).await.into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     if method == "GET" && path == "/voices" {
@@ -332,17 +307,17 @@ async fn handle(
     }
     // Google Drive photo linkage status (booleans + folder ids; never secrets).
     if method == "GET" && path == "/drive/status.json" {
-        let payload = drive_status_json(&settings).into_bytes();
+        let payload = drive_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Directions tool (Mapbox) status — only a token-set boolean, never the token.
     if method == "GET" && path == "/tools/status.json" {
-        let payload = directions_status_json(&settings).into_bytes();
+        let payload = directions_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Save the Mapbox token for the directions tool (rebuilds the tool set live).
     if method == "POST" && path == "/tools/save" {
-        let payload = directions_save_json(&settings, &body);
+        let payload = directions_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -354,12 +329,12 @@ async fn handle(
     // STT engine status — the live engine, ElevenLabs model/base, whether a key is set
     // (never the key), and whether whisper-rs is available (feature + model present).
     if method == "GET" && path == "/stt/status.json" {
-        let payload = stt_status_json(&settings).into_bytes();
+        let payload = stt_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Save the STT engine selection + ElevenLabs settings/key (applies live, next turn).
     if method == "POST" && path == "/stt/save" {
-        let payload = stt_save_json(&settings, &body);
+        let payload = stt_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -371,13 +346,13 @@ async fn handle(
     // Weather tool status — the selected provider + whether a Visual Crossing key is set
     // (never the key), and whether the weather feature is enabled at all.
     if method == "GET" && path == "/tools/weather/status.json" {
-        let payload = weather_status_json(&settings).into_bytes();
+        let payload = weather_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Save the weather provider + Visual Crossing key (rebuilds the tool + retargets the
     // ambient push live).
     if method == "POST" && path == "/tools/weather/save" {
-        let payload = weather_save_json(&settings, &body);
+        let payload = weather_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -388,12 +363,12 @@ async fn handle(
     }
     // Places tool status — whether a Google Places key is set (never the key).
     if method == "GET" && path == "/tools/places/status.json" {
-        let payload = places_status_json(&settings).into_bytes();
+        let payload = places_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Save the Google Places key for the places tool (rebuilds the tool set live).
     if method == "POST" && path == "/tools/places/save" {
-        let payload = places_save_json(&settings, &body);
+        let payload = places_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -406,11 +381,11 @@ async fn handle(
     // System-1 fast-decision engine: current selection + a live swap (rebuilds the
     // engine, persists, takes effect on the next turn).
     if method == "GET" && path == "/system1/status.json" {
-        let payload = system1_status_json(&settings).into_bytes();
+        let payload = system1_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     if method == "POST" && path == "/system1/save" {
-        let payload = system1_save_json(&settings, &body);
+        let payload = system1_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -461,7 +436,7 @@ async fn handle(
         .await;
     }
     if method == "POST" && path == "/notifications/test" {
-        let payload = notifications_test_json(&notify, &body);
+        let payload = notifications_test_json(notify, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -475,10 +450,10 @@ async fn handle(
     // handled here (like `/models`) rather than in the pure `route` function.
     if method == "GET" {
         let json = match path {
-            "/chatlog.json" => Some(chatlog_json(&debug, limit_param(&target))),
-            "/prompts.json" => Some(prompts_json(&debug, limit_param(&target))),
-            "/sqlite.json" => Some(sqlite_json(&debug)),
-            "/helix.json" => Some(helix_json(&debug).await),
+            "/chatlog.json" => Some(chatlog_json(debug, limit_param(&target))),
+            "/prompts.json" => Some(prompts_json(debug, limit_param(&target))),
+            "/sqlite.json" => Some(sqlite_json(services.memory(), debug)),
+            "/helix.json" => Some(helix_json(debug).await),
             _ => None,
         };
         if let Some(body) = json {
@@ -490,7 +465,7 @@ async fn handle(
     // The only debug mutation: rename a GraphRAG `Entity` (fix a misspelled fact).
     // Needs the async graph handle + request body, so it's handled here.
     if method == "POST" && path == "/helix/rename-entity" {
-        let payload = helix_rename_json(&debug, &body).await;
+        let payload = helix_rename_json(debug, &body).await;
         return write_response(
             &mut stream,
             "200 OK",
@@ -529,12 +504,12 @@ async fn handle(
     // List the linked account's Drive folders for the Photos-page picker. Needs
     // async I/O (mints an access token, calls the Drive API), so it lives here.
     if method == "GET" && path == "/drive/folders.json" {
-        let payload = drive_folders_json(&settings).await.into_bytes();
+        let payload = drive_folders_json(settings).await.into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Save the Drive OAuth client credentials / folder ids (no consent yet).
     if method == "POST" && path == "/drive/save" {
-        let payload = drive_save_json(&settings, &body);
+        let payload = drive_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -547,7 +522,7 @@ async fn handle(
     // resulting refresh token. Blocks this connection until consent completes or
     // times out — fine for a single admin request on the loopback page.
     if method == "POST" && path == "/drive/link" {
-        let payload = drive_link_json(&settings).await;
+        let payload = drive_link_json(settings).await;
         return write_response(
             &mut stream,
             "200 OK",
@@ -558,12 +533,12 @@ async fn handle(
     }
     // Spotify voice-control linkage status (booleans + device name; never secrets).
     if method == "GET" && path == "/spotify/status.json" {
-        let payload = spotify_status_json(&settings).into_bytes();
+        let payload = spotify_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Save the Spotify app credentials + device name (no consent yet).
     if method == "POST" && path == "/spotify/save" {
-        let payload = spotify_save_json(&settings, &body);
+        let payload = spotify_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -576,7 +551,7 @@ async fn handle(
     // the resulting refresh token. Blocks this connection until consent completes or
     // times out — fine for a single admin request on the loopback page.
     if method == "POST" && path == "/spotify/link" {
-        let payload = spotify_link_json(&settings).await;
+        let payload = spotify_link_json(settings).await;
         return write_response(
             &mut stream,
             "200 OK",
@@ -587,12 +562,12 @@ async fn handle(
     }
     // Cadora shopping-list linkage status (booleans + base URL; never the token).
     if method == "GET" && path == "/cadora/status.json" {
-        let payload = cadora_status_json(&settings).into_bytes();
+        let payload = cadora_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Set the Cadora app-server base URL (no linking yet).
     if method == "POST" && path == "/cadora/save" {
-        let payload = cadora_save_json(&settings, &body);
+        let payload = cadora_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -605,7 +580,7 @@ async fn handle(
     // network call to the Cadora server; blocks this loopback connection until it
     // returns — fine for a single admin request.
     if method == "POST" && path == "/cadora/link" {
-        let payload = cadora_link_json(&settings, &body).await;
+        let payload = cadora_link_json(settings, &body).await;
         return write_response(
             &mut stream,
             "200 OK",
@@ -617,12 +592,12 @@ async fn handle(
     // AppSaid phone-push status (worker URL + recipient names + token/tool state; never
     // the token value).
     if method == "GET" && path == "/appsaid/status.json" {
-        let payload = appsaid_status_json(&settings).into_bytes();
+        let payload = appsaid_status_json(settings).into_bytes();
         return write_response(&mut stream, "200 OK", "application/json", &payload).await;
     }
     // Set the AppSaid worker URL and/or default recipient (no token change).
     if method == "POST" && path == "/appsaid/save" {
-        let payload = appsaid_save_json(&settings, &body);
+        let payload = appsaid_save_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -633,7 +608,7 @@ async fn handle(
     }
     // Set the secret AppSaid sender app token (masked, never echoed back).
     if method == "POST" && path == "/appsaid/token" {
-        let payload = appsaid_token_json(&settings, &body);
+        let payload = appsaid_token_json(settings, &body);
         return write_response(
             &mut stream,
             "200 OK",
@@ -643,7 +618,7 @@ async fn handle(
         .await;
     }
 
-    let (status, content_type, payload) = route(&method, &target, &body, &settings);
+    let (status, content_type, payload) = route(&method, &target, &body, settings);
     write_response(&mut stream, status, content_type, &payload).await
 }
 
@@ -746,8 +721,8 @@ fn prompts_json(debug: &DebugSources, limit: usize) -> String {
 }
 
 /// `{ ok, count, db_path, memory_backend, memories: [...] }` — the whole memory store.
-fn sqlite_json(debug: &DebugSources) -> String {
-    match debug.memory.list() {
+fn sqlite_json(memory: &MemoryStore, debug: &DebugSources) -> String {
+    match memory.list() {
         Ok(items) => {
             let memories: Vec<Value> = items
                 .iter()
@@ -2171,6 +2146,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::llm::mock::MockLlm;
+    use crate::orchestrator::ServiceConnector;
 
     fn settings() -> Arc<SharedSettings> {
         SharedSettings::fixed(Arc::new(MockLlm::default()), "mock", None)
@@ -2190,9 +2166,26 @@ mod tests {
         Arc::new(NotificationService::new())
     }
 
+    /// The config page's services around `settings` (in-memory store, mock voices).
+    fn services_with(
+        settings: Arc<SharedSettings>,
+        voices_dir: Option<std::path::PathBuf>,
+        debug: DebugSources,
+    ) -> AppServices {
+        let pipeline = crate::orchestrator::Pipeline::with_settings(
+            settings,
+            Arc::new(MemoryStore::open_in_memory().unwrap()),
+            "persona",
+            std::time::Duration::from_secs(5),
+        );
+        AppServices::new(pipeline, connector(), catalog())
+            .with_voices_dir(voices_dir)
+            .with_notify(notify())
+            .with_debug(debug)
+    }
+
     fn debug() -> DebugSources {
         DebugSources {
-            memory: Arc::new(MemoryStore::open_in_memory().unwrap()),
             chatlog_path: std::env::temp_dir().join("wc_test_chatlog.jsonl"),
             promptlog_path: std::env::temp_dir().join("wc_test_promptlog.jsonl"),
             db_path: std::path::PathBuf::from(":memory:"),
@@ -2863,19 +2856,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(
-                stream,
-                s,
-                catalog(),
-                connector(),
-                None,
-                debug(),
-                None,
-                notify(),
-                None,
-            )
-            .await
-            .unwrap();
+            handle(stream, &services_with(s, None, debug()))
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -2933,14 +2916,15 @@ mod tests {
     fn sqlite_json_reports_memory_rows() {
         use crate::memory::{MemoryKind, MemorySource};
         let d = debug();
-        d.memory
+        let memory = MemoryStore::open_in_memory().unwrap();
+        memory
             .add(
                 MemoryKind::Fact,
                 "The user likes tea",
                 MemorySource::Explicit,
             )
             .unwrap();
-        let v: Value = serde_json::from_str(&sqlite_json(&d)).unwrap();
+        let v: Value = serde_json::from_str(&sqlite_json(&memory, &d)).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["count"], 1);
         assert_eq!(v["memory_backend"], "sqlite");
@@ -2995,19 +2979,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(
-                stream,
-                s,
-                catalog(),
-                connector(),
-                None,
-                debug(),
-                None,
-                notify(),
-                None,
-            )
-            .await
-            .unwrap();
+            handle(stream, &services_with(s, None, debug()))
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -3038,19 +3012,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(
-                stream,
-                s,
-                catalog(),
-                connector(),
-                None,
-                debug(),
-                None,
-                notify(),
-                None,
-            )
-            .await
-            .unwrap();
+            handle(stream, &services_with(s, None, debug()))
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -3093,19 +3057,9 @@ mod tests {
         let dir_for_task = dir.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle(
-                stream,
-                s,
-                catalog(),
-                connector(),
-                Some(dir_for_task),
-                debug(),
-                None,
-                notify(),
-                None,
-            )
-            .await
-            .unwrap();
+            handle(stream, &services_with(s, Some(dir_for_task), debug()))
+                .await
+                .unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -3139,18 +3093,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let _ = handle(
-                stream,
-                server_settings,
-                catalog(),
-                connector(),
-                None,
-                debug(),
-                None,
-                notify(),
-                None,
-            )
-            .await;
+            let _ = handle(stream, &services_with(server_settings, None, debug())).await;
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
@@ -3511,18 +3454,7 @@ mod tests {
             let mut dbg = debug();
             dbg.chatlog_path = std::env::temp_dir().join("wc_inventory_missing_chatlog.jsonl");
             dbg.promptlog_path = std::env::temp_dir().join("wc_inventory_missing_prompts.jsonl");
-            let _ = handle(
-                stream,
-                settings(),
-                catalog(),
-                connector(),
-                None,
-                dbg,
-                None,
-                notify(),
-                None,
-            )
-            .await;
+            let _ = handle(stream, &services_with(settings(), None, dbg)).await;
         });
         let ctype = if method.eq_ignore_ascii_case("POST") {
             "Content-Type: application/json\r\n"

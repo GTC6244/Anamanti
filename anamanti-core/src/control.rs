@@ -17,6 +17,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
+use crate::app::AppServices;
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::graphview::NodeId;
@@ -61,22 +62,19 @@ pub fn is_control_request(event_type: &str) -> bool {
 /// requests are answered synchronously by [`respond`]; `ambient-list-models` needs
 /// an async catalog fetch and `ambient-list-voices` an async Piper `describe`, so
 /// those are handled here.
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_control(
     device: &mut DynConnection,
     request: &WyomingEvent,
-    memory: &MemoryStore,
-    settings: &SharedSettings,
-    speaker: Option<&SpeakerService>,
-    catalog: &ModelCatalog,
-    connector: &dyn ServiceConnector,
-    voices_dir: Option<&Path>,
-    graphrag: Option<&GraphRagController>,
+    services: &AppServices,
 ) -> Result<()> {
+    let memory = services.memory().as_ref();
+    let settings = services.settings().as_ref();
+    let speaker = services.speaker();
+    let graphrag = services.graphrag.as_deref();
     let response = if request.event_type == types::LIST_MODELS {
-        models_response(catalog).await
+        models_response(&services.catalog).await
     } else if request.event_type == types::LIST_VOICES {
-        voices_response(connector, voices_dir).await
+        voices_response(services.connector.as_ref(), services.voices_dir.as_deref()).await
     } else if request.event_type == types::GET_FUNCTIONS {
         // The embeddings entry needs the live GraphRAG backend status (async), so this
         // request is answered here rather than in the pure `respond`.
