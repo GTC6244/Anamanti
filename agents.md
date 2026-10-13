@@ -23,8 +23,9 @@ Read this together with [`architecture.md`](./plans/architecture.md) (the design
 > (`anamanti-listen`, `anamanti-notify`, …). Device and Core must be rebuilt/
 > redeployed together (the frame names, mDNS role, config filename, env vars, and
 > data-file names all changed).
-> **Deliberately NOT renamed (leave as-is):** the internal turn-pipeline module/
-> file `orchestrator.rs` / `orchestrator::…`; the FRB native lib crate
+> **Deliberately NOT renamed (leave as-is):** the internal turn-pipeline
+> module `orchestrator/` (`orchestrator::…`, split into `mod.rs`/`turn.rs`/`vad_loop.rs`/
+> `prompt.rs`/`system1_handlers.rs`/`speech_out.rs`); the FRB native lib crate
 > `rust_lib_ambient_display` (kept so cargokit/gradle/podspecs keep building); and
 > the Snapcast/music-routing infra ids (`ambient-mpv`, `ambient-snapserver`,
 > `ambient-librespot`, `ambient-snapclient`, launchd `com.ambient.*`) — these are
@@ -189,6 +190,12 @@ anamanti-core/      Anamanti Core — everything that runs on the Mac (crate
                     `anamanti_core`) — Wyoming server to the device + Wyoming
                     client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory,
                     mDNS.
+anamanti-protocol/  Shared Wyoming protocol crate (`anamanti_protocol`): the frame
+                    types, constructors/predicates and the size-capped framing
+                    reader. A path dependency of BOTH anamanti-core and
+                    anamanti-display/rust (each re-exports it as
+                    `crate::wyoming::protocol`) — a wire change is made once, here,
+                    and both sides must be redeployed together.
 plans/              Design + planning docs: architecture.md (design, source of
                     truth), Plan.MD (phases + decision table), TODO.md,
                     DisplayUI.md (the Display's on-screen UI catalog), the
@@ -267,6 +274,17 @@ cargo run   --manifest-path anamanti-core/Cargo.toml --release # advertises _wyo
 # shell.js or the Tailwind theme, regenerate + commit panel.css (needs the `tailwindcss`
 # CLI on PATH, e.g. `brew install tailwindcss`):
 anamanti-core/scripts/build-webui-css.sh
+#
+# The admin console is LOOPBACK-ONLY by design: every request's Host must be
+# 127.0.0.1/localhost/[::1] on the server's own port (else 403) and a present Origin must
+# be that same loopback origin (CSRF / DNS-rebinding guard); every POST must send
+# Content-Type: application/json (else 415) — page scripts use shell.js apiJSON/postJSON.
+# Routes live in ONE table (anamanti-core/src/webconfig/routes.rs); the checks run once,
+# before routing. Binding config_addr to a LAN address therefore does NOT expose it.
+
+# End-to-end check of a running Core (real STT → LLM → TTS) with a fake device:
+#   say -o /tmp/q.wav --data-format=LEI16@16000 "what is two plus two"
+#   anamanti-core/scripts/e2e_wyoming_client.py 127.0.0.1 <bind port> /tmp/q.wav
 
 # Configuration lives in a PER-INSTANCE JSON FILE (see anamanti-core/src/config.rs and
 # the committed anamanti-core/anamanti.example.json). Default path: `anamanti.json` in the
@@ -317,7 +335,10 @@ anamanti-core/scripts/build-webui-css.sh
 #     string is still accepted and folds into City. helix|sqlite; helix embeds locally by
 #     default — graphrag.embed_backend="openai"
 #     is the opt-in cloud path and needs OPENAI_API_KEY, falling back to sqlite FTS if absent)
-#   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig),
+#   llm.backend (ollama|anthropic|openai|mock), llm.engine (rig|native, default rig;
+#     on rig EVERY backend — incl. anthropic subscription auth and openai — gets tools +
+#     follow-up history and streams; `native` has neither and logs a loud warning, and
+#     the config view's `llm_capabilities` says so),
 #     llm.anthropic_auth (apikey|subscription), llm.anthropic_token_cmd (default `ant`),
 #     llm.web_search, llm.search_provider (duckduckgo|tavily, default tavily — needs
 #     the TAVILY_API_KEY secret; duckduckgo is keyless), and the per-provider
@@ -335,13 +356,17 @@ anamanti-core/scripts/build-webui-css.sh
 #     Anamanti Core ducks the music group while it speaks and — with music.autostart,
 #     also default on — supervises snapserver/librespot/mpv at boot; see
 #     anamanti.example.json for the full shape)
-#   system1{backend,base_url,openrouter_model,device,model,min_confidence,intents} — the
+#   system1{backend,base_url,openrouter_model,min_confidence,intents} — the
 #     pluggable System-1 fast-decision engine (plans/system1-fast-decisions.md). backend
 #     default "none" (disabled); "laya-serve" (local Laya-Decision sidecar on base_url,
 #     `/v1/systemone`) or "jev" (OpenRouter, needs OPENROUTER_API_KEY). Runtime-swappable
 #     + persisted; UI: System-1 tab → /system1. Resolves weather/timer before the LLM.
+#     (system1.device / system1.model are deprecated: still accepted, ignored + warned.)
 #   calendar.subscriptions=[{name,url}], calendar.cache_ttl_secs (read-only web .ics;
-#     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised)
+#     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised). The
+#     feed cache is the shared ToolCache: calendar.cache_ttl_secs wins when set (0 = no
+#     cache), else tool_cache.calendar_lookup (default 300s). A total feed failure is
+#     never cached — the tool says it couldn't reach the calendar.
 #   directions.provider="mapbox" (+ the MAPBOX_TOKEN secret, set via env or the Tools
 #     tab) → the directions_lookup tool
 #   weather{enabled,provider,refresh_interval_secs} → the weather_lookup tool + ambient
