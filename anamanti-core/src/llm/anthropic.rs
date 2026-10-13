@@ -12,11 +12,55 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
-use super::anthropic_auth::{apply_auth, AnthropicAuth, AnthropicTokenProvider};
+use super::anthropic_auth::{apply_auth, AnthropicAuth, AnthropicTokenProvider, ANTHROPIC_VERSION};
 use super::{line_stream, LlmBackend, LlmTurn, ReplyStream};
 
-/// Anthropic API version pinned per the claude-api skill.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// One non-streaming text completion from the Messages API, authenticated with an
+/// API key: `system` + a single user message in, the concatenated text blocks of
+/// the reply out. For background jobs that want a whole answer rather than a token
+/// stream (e.g. the GraphRAG entity extractor). A non-2xx status is an error that
+/// carries the response body.
+pub async fn complete_text(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    max_tokens: u32,
+    system: &str,
+    user: &str,
+) -> Result<String> {
+    let body = json!({
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    });
+    let resp = client
+        .post(format!("{}/v1/messages", base_url.trim_end_matches('/')))
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .context("POST /v1/messages to Anthropic")?;
+    let status = resp.status();
+    let payload = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("Anthropic HTTP {status}: {payload}");
+    }
+    let parsed: Value =
+        serde_json::from_str(&payload).context("parsing Anthropic messages response")?;
+    let blocks = parsed
+        .get("content")
+        .and_then(Value::as_array)
+        .context("Anthropic messages response has no `content` array")?;
+    Ok(blocks
+        .iter()
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(""))
+}
 
 /// Config + HTTP client for the Claude Messages API. Authenticates with either an
 /// API key (`x-api-key`) or a Claude subscription OAuth token (`Authorization:
