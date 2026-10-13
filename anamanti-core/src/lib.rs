@@ -13,6 +13,7 @@
 //! the integration tests drive the same code.
 
 pub mod appsaid;
+pub mod audio;
 pub mod audio_dump;
 pub mod cache;
 pub mod cadora;

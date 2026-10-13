@@ -508,12 +508,17 @@ async fn diagnostics_screen_transcribes_but_never_invokes_the_llm() {
         "diagnostics turn must not run TTS"
     );
     // …and no follow-up listen is issued (it is not a conversational turn).
-    assert!(!saw_listen, "diagnostics turn must not issue ambient-listen");
+    assert!(
+        !saw_listen,
+        "diagnostics turn must not issue ambient-listen"
+    );
 
     // The orchestrator never ran the LLM/speaker/reply stages — only Streaming,
     // Transcript, and a clean Finished.
     assert!(
-        events.iter().any(|e| matches!(e, TurnEvent::Transcript(t) if t == "testing one two three")),
+        events
+            .iter()
+            .any(|e| matches!(e, TurnEvent::Transcript(t) if t == "testing one two three")),
         "the transcript event still fires for display"
     );
     assert!(

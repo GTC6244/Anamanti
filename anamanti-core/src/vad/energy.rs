@@ -1,12 +1,14 @@
-//! The energy / RMS speech gate — the committed default VAD engine.
+//! The energy / RMS speech gate — the opt-in fallback VAD engine (`vad.engine =
+//! "energy"`, an energy-only `--no-default-features` build, or the automatic fallback
+//! when no Silero model is loaded). Silero is the default; see [`super`].
 
 use super::{rms_i16_le, SpeechGate};
 
 /// Amplitude-threshold speech gate: a chunk is speech when its RMS exceeds
 /// `threshold` (`voice_rms_threshold`, i16 units). This preserves the historical
-/// Anamanti Core VAD byte-for-byte behind the [`SpeechGate`] seam, so it stays the
-/// default engine. Stateless apart from caching the last decision's confidence for
-/// [`prob`](SpeechGate::prob).
+/// Anamanti Core VAD byte-for-byte behind the [`SpeechGate`] seam, as the fallback to
+/// the default Silero gate. Stateless apart from caching the last decision's confidence
+/// for [`prob`](SpeechGate::prob).
 pub struct EnergyGate {
     threshold: f64,
     last_prob: f32,

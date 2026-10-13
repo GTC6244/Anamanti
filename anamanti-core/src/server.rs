@@ -46,8 +46,7 @@ pub async fn serve(
         let graphrag = graphrag.clone();
         tokio::spawn(async move {
             match handle_connection(
-                stream, pipeline, connector, catalog, voices_dir, ducker, notify, weather,
-                graphrag,
+                stream, pipeline, connector, catalog, voices_dir, ducker, notify, weather, graphrag,
             )
             .await
             {

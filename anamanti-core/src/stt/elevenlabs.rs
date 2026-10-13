@@ -18,6 +18,8 @@
 //! [`finish`]: Transcriber::finish
 //! [`read_event`]: Transcriber::read_event
 
+use std::time::Duration;
+
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -29,6 +31,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::wyoming::protocol::AudioFormat;
+use crate::wyoming::TimedOut;
 
 use super::{SttEngine, SttEvent, Transcriber};
 
@@ -36,6 +39,12 @@ use super::{SttEngine, SttEvent, Transcriber};
 pub const DEFAULT_MODEL_ID: &str = "scribe_v2_realtime";
 /// The global production WebSocket host (regional residency hosts also exist).
 pub const DEFAULT_BASE_URL: &str = "wss://api.elevenlabs.io";
+
+/// Budget for opening a realtime session: DNS + TCP + TLS + the WebSocket upgrade
+/// **and** the `session_started` handshake frame. The user has just finished the wake
+/// word and is speaking, so a stalled ElevenLabs edge must fail the turn quickly rather
+/// than hang it; a healthy connect takes a few hundred milliseconds.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -48,6 +57,8 @@ pub struct ElevenLabsEngine {
     model_id: String,
     /// Decode language (ISO 639); `None` ⇒ let the model auto-detect.
     language: Option<String>,
+    /// Connect + handshake budget ([`CONNECT_TIMEOUT`] by default).
+    connect_timeout: Duration,
 }
 
 impl ElevenLabsEngine {
@@ -62,21 +73,46 @@ impl ElevenLabsEngine {
             api_key: api_key.into(),
             model_id: model_id.into(),
             language,
+            connect_timeout: CONNECT_TIMEOUT,
         }
+    }
+
+    /// Build the engine for a turn from the live STT settings snapshot, or `None` when
+    /// no (non-empty) ElevenLabs API key is set — the caller then falls back to the
+    /// Wyoming path.
+    pub fn from_settings(stt: &crate::settings::SttRuntime) -> Option<Self> {
+        let key = stt
+            .elevenlabs_api_key
+            .as_deref()
+            .filter(|k| !k.is_empty())?;
+        Some(Self::new(
+            stt.elevenlabs_base_url.clone(),
+            key,
+            stt.elevenlabs_model_id.clone(),
+            stt.language.clone(),
+        ))
+    }
+
+    /// Override the connect + handshake budget (tests use a short one).
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
     }
 }
 
 #[async_trait]
 impl SttEngine for ElevenLabsEngine {
     async fn begin(&self, format: AudioFormat) -> Result<Box<dyn Transcriber>> {
-        let session = ElevenLabsTranscriber::connect(
+        let connect = ElevenLabsTranscriber::connect(
             &self.base_url,
             &self.api_key,
             &self.model_id,
             self.language.as_deref(),
             format.rate,
-        )
-        .await?;
+        );
+        let session = tokio::time::timeout(self.connect_timeout, connect)
+            .await
+            .map_err(|_| TimedOut::new("ElevenLabs STT connect", self.connect_timeout))??;
         Ok(Box::new(session))
     }
 }
@@ -285,6 +321,45 @@ mod tests {
     use tokio_tungstenite::tungstenite::handshake::server::{
         ErrorResponse, Request as HsRequest, Response as HsResponse,
     };
+
+    /// A server that completes the WebSocket upgrade but never sends `session_started`
+    /// must not hang the turn: `begin` fails with a [`TimedOut`] after the connect
+    /// budget.
+    #[tokio::test]
+    async fn stalled_handshake_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // Hold the socket open, silent, until the client gives up.
+            while let Some(Ok(_)) = ws.next().await {}
+        });
+
+        let engine = ElevenLabsEngine::new(format!("ws://{addr}"), "k", DEFAULT_MODEL_ID, None)
+            .with_connect_timeout(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let err = match engine.begin(AudioFormat::PCM_16K_MONO).await {
+            Ok(_) => panic!("a silent handshake must not produce a session"),
+            Err(e) => e,
+        };
+        assert!(
+            err.chain().any(|c| c.is::<TimedOut>()),
+            "expected a TimedOut error, got {err:#}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+        server.abort();
+    }
+
+    #[test]
+    fn from_settings_requires_a_key() {
+        let mut stt = crate::settings::SttRuntime::default();
+        assert!(ElevenLabsEngine::from_settings(&stt).is_none());
+        stt.elevenlabs_api_key = Some(String::new());
+        assert!(ElevenLabsEngine::from_settings(&stt).is_none());
+        stt.elevenlabs_api_key = Some("key".into());
+        assert!(ElevenLabsEngine::from_settings(&stt).is_some());
+    }
 
     /// Drive the engine against a mock ElevenLabs realtime server over a plain `ws://`
     /// socket: asserts the connection request shape (query params + `xi-api-key`), that
