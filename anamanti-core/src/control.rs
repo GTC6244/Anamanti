@@ -529,22 +529,24 @@ pub fn functions_response(settings: &SharedSettings, embed: Option<&EmbedStatus>
     let weather_provider = settings.weather_provider_label();
     let vc_key_set = settings.visualcrossing_key_set();
     let weather_enabled = settings.weather_enabled();
-    let is_openmeteo = matches!(
-        weather_provider.as_str(),
-        "openmeteo" | "open-meteo" | "open_meteo"
-    );
     // Visual Crossing needs a key; without one it silently falls back to keyless
     // Open-Meteo, so the key is never strictly *required* — surface the fallback as a
-    // note instead of a red warning.
+    // note instead of a red warning. The backend itself is `weather::from_config`'s own
+    // decision (an unsupported provider is Open-Meteo even with a key).
     let (weather_mode, weather_provider_label, weather_note): (&str, &str, Option<&str>) =
-        if !weather_enabled {
-            ("off", "Weather", None)
-        } else if is_openmeteo {
-            ("local", "Open-Meteo", None)
-        } else if vc_key_set {
-            ("cloud", "Visual Crossing", None)
-        } else {
-            ("local", "Open-Meteo", Some("No Visual Crossing key — using Open-Meteo"))
+        match crate::weather::effective_backend(weather_enabled, &weather_provider, vc_key_set) {
+            crate::weather::WeatherBackend::Disabled => ("off", "Weather", None),
+            crate::weather::WeatherBackend::VisualCrossing => ("cloud", "Visual Crossing", None),
+            crate::weather::WeatherBackend::OpenMeteo
+                if crate::weather::selects_visualcrossing(&weather_provider) =>
+            {
+                (
+                    "local",
+                    "Open-Meteo",
+                    Some("No Visual Crossing key — using Open-Meteo"),
+                )
+            }
+            crate::weather::WeatherBackend::OpenMeteo => ("local", "Open-Meteo", None),
         };
     fns.push(func_entry(
         "Tools",

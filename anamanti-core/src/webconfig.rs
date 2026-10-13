@@ -903,16 +903,9 @@ fn weather_status_json(settings: &SharedSettings) -> String {
     let provider = settings.weather_provider_label();
     let key_set = settings.visualcrossing_key_set();
     let enabled = settings.weather_enabled();
-    // Which backend actually serves requests, mirroring `weather::from_config`.
-    let effective = if !enabled {
-        "disabled"
-    } else if provider == "openmeteo" || provider == "open-meteo" || provider == "open_meteo" {
-        "openmeteo"
-    } else if key_set {
-        "visualcrossing"
-    } else {
-        "openmeteo" // visualcrossing selected but no key → keyless fallback
-    };
+    // Which backend actually serves requests — the same decision `weather::from_config`
+    // builds from (an unsupported provider falls back to Open-Meteo even with a key).
+    let effective = crate::weather::effective_backend(enabled, &provider, key_set).as_str();
     json!({
         "ok": true,
         "provider": provider,
