@@ -416,7 +416,14 @@ piece; it can land after the Mac-side A–D are green.
   it can run concurrently with the LLM's first token.
 - **Privacy.** Voiceprints (centroids) never leave the Mac; they're derived
   vectors, not audio, and are user-deletable via the People UI and
-  `anamanti-delete-speaker`. Raw utterance PCM is not persisted for speaker ID.
+  `anamanti-delete-speaker`. **Raw utterance PCM is persisted only as a small,
+  bounded rolling window of recent clips per speaker** (`speaker::clips::ClipStore`,
+  the newest `MAX_CLIPS_PER_SPEAKER` = 10 raw 16 kHz mono i16 clips under
+  `<db_path dir>/anamanti_clips/<speaker_id>/`), so a human can play a voice back to
+  put a name to an anonymous cluster (the People screen "play" button;
+  `anamanti-list-speaker-clips` / `anamanti-get-speaker-clip`). The clips never leave
+  the Mac↔device LAN hop, ride along with the profile (forgetting a person deletes
+  their clips; a merge moves them), and are capped so the footprint stays tiny.
 - **Barge-in / TTS self-trigger.** Short/low-SNR self-triggers fall under
   `MIN_SPEECH_MS` → `household`, so they don't pollute clusters.
 

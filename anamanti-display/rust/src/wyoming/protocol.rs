@@ -123,6 +123,22 @@ pub mod types {
     /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
     pub const SPEAKER_RESULT: &str = "anamanti-speaker-result";
 
+    // ---- Voice-clip playback (speaker_id_plan.md Phase C) ----
+    // Byte-identical to the orchestrator crate's `types`. Let the People screen play
+    // back the raw utterances behind a voiceprint so a human can name an anonymous
+    // cluster. Clips are raw little-endian i16 mono PCM at 16 kHz.
+
+    /// device → orchestrator: list a speaker's stored voice clips (data: `id`).
+    pub const LIST_SPEAKER_CLIPS: &str = "anamanti-list-speaker-clips";
+    /// orchestrator → device: the clips (data: `ok`, `id`, `clips` array of
+    /// `{name, created_ms, samples, sample_rate}`; on failure `ok:false` + `message`).
+    pub const SPEAKER_CLIPS: &str = "anamanti-speaker-clips";
+    /// device → orchestrator: fetch one clip's raw audio (data: `id`, `clip` = name).
+    pub const GET_SPEAKER_CLIP: &str = "anamanti-get-speaker-clip";
+    /// orchestrator → device: one clip (data: `ok`, `id`, `clip`, `sample_rate`,
+    /// `samples`; **payload** = raw little-endian i16 mono PCM; on failure `ok:false`).
+    pub const SPEAKER_CLIP: &str = "anamanti-speaker-clip";
+
     // ---- Active voice enrollment (SpeakerEnrollmentPlan.md Phase 2) ----
     // Byte-identical to the orchestrator crate's `types`. Sample/verify captures ride
     // the ordinary wake-word turn tagged `screen.kind = "enroll"`; commit/cancel are

@@ -20,7 +20,7 @@ use tokio::net::TcpStream;
 
 use crate::api::settings::{
     DriveToken, EntityInfo, EntityRef, FunctionStatus, MemoryEntry, ModelInfo,
-    OrchestratorSettings, SettingsUpdate, SpeakerInfo, TurnInfo, VoiceInfo,
+    OrchestratorSettings, SettingsUpdate, SpeakerClipInfo, SpeakerInfo, TurnInfo, VoiceInfo,
 };
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
@@ -737,6 +737,77 @@ pub async fn delete_speaker(
     let request = WyomingEvent::with_data(types::DELETE_SPEAKER, json!({ "id": id }));
     let resp = round_trip(&endpoint, request).await?;
     speaker_ok(&resp)
+}
+
+fn parse_speaker_clip(v: &Value) -> SpeakerClipInfo {
+    SpeakerClipInfo {
+        name: v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        created_ms: v.get("created_ms").and_then(Value::as_i64).unwrap_or(0),
+        samples: v.get("samples").and_then(Value::as_i64).unwrap_or(0),
+        sample_rate: v
+            .get("sample_rate")
+            .and_then(Value::as_u64)
+            .unwrap_or(16_000) as u32,
+    }
+}
+
+/// List a speaker's stored voice clips (newest first), for the People screen's
+/// playback.
+pub async fn list_speaker_clips(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: &str,
+) -> Result<Vec<SpeakerClipInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request = WyomingEvent::with_data(types::LIST_SPEAKER_CLIPS, json!({ "id": id }));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing voice clips failed")
+        ));
+    }
+    Ok(resp
+        .data
+        .get("clips")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_speaker_clip).collect())
+        .unwrap_or_default())
+}
+
+/// Fetch one clip's raw little-endian `i16` mono PCM bytes (the `payload` of the
+/// `anamanti-speaker-clip` response). Errors if the Core reports failure or sends no
+/// audio.
+pub async fn fetch_speaker_clip(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: &str,
+    clip: &str,
+) -> Result<Vec<u8>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request =
+        WyomingEvent::with_data(types::GET_SPEAKER_CLIP, json!({ "id": id, "clip": clip }));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("fetching the voice clip failed")
+        ));
+    }
+    resp.payload
+        .ok_or_else(|| anyhow!("the orchestrator returned no audio for this clip"))
 }
 
 /// The `message` from an `ENROLL_RESULT`, surfacing a rejected request's in-band

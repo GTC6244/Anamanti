@@ -2467,8 +2467,30 @@ impl Config {
                 Arc::new(MockSpeakerEmbedder::default())
             }
         };
-        Ok(Some(Arc::new(SpeakerService::new(
-            embedder, registry, thresholds,
+        // Rolling raw-clip store (the People screen's "play" button): keep the newest
+        // few utterances per speaker next to the registry database so a human can
+        // listen to an anonymous cluster and name it. Clip capture is best-effort — a
+        // store that can't be opened just means there's nothing to play back.
+        let clips_root = self
+            .db_path
+            .parent()
+            .map(|dir| dir.join("anamanti_clips"))
+            .unwrap_or_else(|| std::path::PathBuf::from("anamanti_clips"));
+        let clips = match crate::speaker::ClipStore::open(&clips_root) {
+            Ok(store) => {
+                log::info!("voice-clip store: {}", clips_root.display());
+                Some(store)
+            }
+            Err(e) => {
+                log::warn!(
+                    "voice-clip store unavailable at {} ({e:#}); clips won't be saved",
+                    clips_root.display()
+                );
+                None
+            }
+        };
+        Ok(Some(Arc::new(SpeakerService::new_with_clips(
+            embedder, registry, thresholds, clips,
         ))))
     }
 

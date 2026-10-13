@@ -16,8 +16,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<FunctionStatusView>? functions,
     List<TurnView>? turns,
     List<EntityView>? entities,
+    Map<String, List<SpeakerClipView>>? clipsBySpeaker,
     this.throwOnFetch = false,
   })  : _turns = turns ?? <TurnView>[],
+        _clipsBySpeaker = clipsBySpeaker ?? <String, List<SpeakerClipView>>{},
         _entities = entities ?? <EntityView>[],
         _functions = functions ?? <FunctionStatusView>[],
         _driveToken = driveToken ??
@@ -79,6 +81,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<Map<String, String>> enrollFinishCalls = <Map<String, String>>[];
   final List<String> enrollCancelCalls = <String>[];
   final List<Map<String, String>> pairPhoneCalls = <Map<String, String>>[];
+
+  // Per-speaker stored voice clips, and a record of play requests.
+  final Map<String, List<SpeakerClipView>> _clipsBySpeaker;
+  final List<String> playedClips = <String>[];
 
   // GraphRAG browse/delete call records.
   final List<Map<String, dynamic>> listTurnsCalls = <Map<String, dynamic>>[];
@@ -266,6 +272,19 @@ class FakeOrchestratorClient implements OrchestratorClient {
     deletedSpeakers.add(id);
     _speakers.removeWhere((s) => s.id == id);
     return true;
+  }
+
+  @override
+  Future<List<SpeakerClipView>> listSpeakerClips(String id) async {
+    if (throwOnFetch) throw Exception('offline');
+    return List.of(_clipsBySpeaker[id] ?? const <SpeakerClipView>[]);
+  }
+
+  @override
+  Future<int> playSpeakerClips(String id) async {
+    playedClips.add(id);
+    if (throwOnFetch) throw Exception('offline');
+    return (_clipsBySpeaker[id] ?? const <SpeakerClipView>[]).length;
   }
 
   @override

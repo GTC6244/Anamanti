@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `block_on`, `preferred`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `block_on`, `decode_pcm_le`, `preferred`, `timeout`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Discover every orchestrator on the LAN for the settings "Orchestrator"
 /// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
@@ -214,6 +214,37 @@ Future<bool> deleteSpeaker({
   required String id,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsDeleteSpeaker(
+  orchestratorKey: orchestratorKey,
+  id: id,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// List a speaker's stored voice clips (newest first), for the People screen's
+/// playback. Empty when the speaker has no clips (or clip capture is disabled on the
+/// Core).
+Future<List<SpeakerClipInfo>> listSpeakerClips({
+  required String orchestratorKey,
+  required String id,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListSpeakerClips(
+  orchestratorKey: orchestratorKey,
+  id: id,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Fetch and play back a person's stored voice clips through the running engine's
+/// speaker, so a human can listen and put a name to an anonymous cluster. Clips play
+/// back-to-back (newest first) with a short gap between them. Returns the number of
+/// clips queued (0 when the person has none).
+///
+/// Reuses the one existing audio output path (the engine's [`PlaybackSink`]); errors
+/// if the engine isn't running / has no audio output. Playback itself runs on a
+/// background thread so the call returns promptly while the clips play out.
+Future<int> playSpeakerClips({
+  required String orchestratorKey,
+  required String id,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsPlaySpeakerClips(
   orchestratorKey: orchestratorKey,
   id: id,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
@@ -679,6 +710,46 @@ class SettingsUpdate {
           voiceRmsThreshold == other.voiceRmsThreshold &&
           vadEngine == other.vadEngine &&
           sileroThreshold == other.sileroThreshold;
+}
+
+/// One stored voice clip for a speaker, for the People screen's clip playback
+/// (speaker_id_plan.md Phase C).
+class SpeakerClipInfo {
+  /// Opaque clip id (the Core's on-disk file stem); the key to fetch/play it.
+  final String name;
+
+  /// Capture time in Unix milliseconds (newest-first ordering).
+  final PlatformInt64 createdMs;
+
+  /// Number of `i16` samples in the clip.
+  final PlatformInt64 samples;
+
+  /// Sample rate of the clip's PCM in Hz (16 kHz house format).
+  final int sampleRate;
+
+  const SpeakerClipInfo({
+    required this.name,
+    required this.createdMs,
+    required this.samples,
+    required this.sampleRate,
+  });
+
+  @override
+  int get hashCode =>
+      name.hashCode ^
+      createdMs.hashCode ^
+      samples.hashCode ^
+      sampleRate.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SpeakerClipInfo &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          createdMs == other.createdMs &&
+          samples == other.samples &&
+          sampleRate == other.sampleRate;
 }
 
 /// One identified speaker, for the settings "People" list (speaker_id_plan.md

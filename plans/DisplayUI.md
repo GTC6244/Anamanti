@@ -500,11 +500,15 @@ the Settings menu (→ People, → Memory).
 **`PeopleScreen`** — `lib/src/ui/people_screen.dart`
 - Reached from **Settings → People** (`settings-menu-people`). `Scaffold` +
   `AppBar("People")`. Lists voice-identified speakers (`SpeakerView`; named people vs
-  anonymous "Speaker N", voice-clip counts). Per-row menu: Name/rename, Merge with…,
-  Forget. An **"Add person"** FAB (`people-add`, shown when the live engine controller is
-  wired) opens the guided enrollment flow below. Constructed with an `OrchestratorClient`
-  (+ the `AssistantController` and native `setEnrollContext` for enrollment).
-  See [`speaker_id_plan.md`](./speaker_id_plan.md).
+  anonymous "Speaker N", voice-clip counts). Each row has a **play button**
+  (`speaker-play-<id>`, ▶) that replays that person's recorded voice clips through the
+  assistant's speaker so a human can listen and recognize who it is before naming them
+  (`OrchestratorClient.playSpeakerClips` → the Core streams the clips back; a snackbar
+  reports how many played, or that none are saved yet). Per-row menu: Name/rename,
+  Merge with…, Forget. An **"Add person"** FAB (`people-add`, shown when the live engine
+  controller is wired) opens the guided enrollment flow below. Constructed with an
+  `OrchestratorClient` (+ the `AssistantController` and native `setEnrollContext` for
+  enrollment). See [`speaker_id_plan.md`](./speaker_id_plan.md).
 
 **`SpeakerEnrollScreen`** — `lib/src/ui/speaker_enroll_screen.dart`
 - `Scaffold` + `AppBar("Add a person")`. The guided "train a new voice" flow

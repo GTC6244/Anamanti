@@ -131,6 +131,26 @@ pub mod types {
     /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
     pub const SPEAKER_RESULT: &str = "anamanti-speaker-result";
 
+    // ---- Voice-clip playback (speaker_id_plan.md Phase C) ----
+    //
+    // Let the "People" screen play back the raw utterances behind a voiceprint so a
+    // human can listen and put a name to an anonymous cluster. The Core keeps a small
+    // rolling window of each speaker's recent clips (raw little-endian i16 mono PCM at
+    // 16 kHz); the device lists them and fetches the bytes to play locally.
+
+    /// device → orchestrator: list a speaker's stored voice clips (data: `id`).
+    pub const LIST_SPEAKER_CLIPS: &str = "anamanti-list-speaker-clips";
+    /// orchestrator → device: the clips (data: `ok`, `id`, `clips` array of
+    /// `{name, created_ms, samples, sample_rate}`; on failure `ok:false` + `message`).
+    pub const SPEAKER_CLIPS: &str = "anamanti-speaker-clips";
+    /// device → orchestrator: fetch one clip's raw audio (data: `id`, `clip` = the
+    /// clip's `name`).
+    pub const GET_SPEAKER_CLIP: &str = "anamanti-get-speaker-clip";
+    /// orchestrator → device: one clip (data: `ok`, `id`, `clip`, `sample_rate`,
+    /// `samples`; **payload** = raw little-endian i16 mono PCM. On failure `ok:false` +
+    /// `message` and no payload).
+    pub const SPEAKER_CLIP: &str = "anamanti-speaker-clip";
+
     // ---- Active voice enrollment (SpeakerEnrollmentPlan.md Phase 2) ----
     //
     // Guided "train a new person" flow. Sample + verify captures ride the ordinary

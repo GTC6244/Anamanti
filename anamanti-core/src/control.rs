@@ -44,6 +44,8 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::NAME_SPEAKER
             | types::MERGE_SPEAKERS
             | types::DELETE_SPEAKER
+            | types::LIST_SPEAKER_CLIPS
+            | types::GET_SPEAKER_CLIP
             | types::ENROLL_FINISH
             | types::ENROLL_CANCEL
             | types::LIST_MODELS
@@ -99,8 +101,34 @@ pub async fn handle_control(
         enroll_finish(request, speaker)
     } else if request.event_type == types::ENROLL_CANCEL {
         enroll_cancel(request, speaker)
+    } else if request.event_type == types::LIST_SPEAKER_CLIPS {
+        // Clip list/fetch read the SpeakerService's clip store (not the registry), so
+        // they are answered here with the full service rather than in `respond`.
+        speaker_clips_response(speaker, request)
+    } else if request.event_type == types::GET_SPEAKER_CLIP {
+        speaker_clip_response(speaker, request)
     } else {
-        respond(request, memory, settings, speaker.map(|s| s.registry()))
+        let response = respond(request, memory, settings, speaker.map(|s| s.registry()));
+        // Keep the rolling clip store in step with registry mutations the pure
+        // `respond` just applied: forgetting a person drops their clips; merging two
+        // clusters moves the dropped one's clips onto the kept profile. Guarded on the
+        // in-band `ok` so a rejected request leaves the clips untouched.
+        if response_ok(&response) {
+            if let Some(svc) = speaker {
+                if request.event_type == types::DELETE_SPEAKER {
+                    if let Some(id) = request.data.get("id").and_then(Value::as_str) {
+                        svc.delete_clips(id);
+                    }
+                } else if request.event_type == types::MERGE_SPEAKERS {
+                    let keep = request.data.get("keep").and_then(Value::as_str);
+                    let drop = request.data.get("drop").and_then(Value::as_str);
+                    if let (Some(keep), Some(drop)) = (keep, drop) {
+                        svc.merge_clips(keep, drop);
+                    }
+                }
+            }
+        }
+        response
     };
     device.send(&response).await
 }
@@ -158,6 +186,83 @@ fn pair_result(ok: bool, message: String, name: Option<String>) -> WyomingEvent 
         data["name"] = json!(name);
     }
     WyomingEvent::with_data(types::PAIR_RESULT, data)
+}
+
+/// Whether a response event reports success in its `ok` field (defaulting to `true`
+/// for events that carry no `ok`).
+fn response_ok(response: &WyomingEvent) -> bool {
+    response
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// The `anamanti-speaker-clips` response listing one speaker's stored voice clips.
+fn speaker_clips_response(speaker: Option<&SpeakerService>, request: &WyomingEvent) -> WyomingEvent {
+    let id = request.data.get("id").and_then(Value::as_str).unwrap_or("");
+    let Some(svc) = speaker else {
+        return WyomingEvent::with_data(
+            types::SPEAKER_CLIPS,
+            json!({ "ok": false, "message": SPEAKER_DISABLED, "clips": [] }),
+        );
+    };
+    match svc.list_clips(id) {
+        Ok(clips) => {
+            let clips: Vec<Value> = clips
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "name": c.name,
+                        "created_ms": c.created_ms as i64,
+                        "samples": c.samples as i64,
+                        "sample_rate": crate::speaker::embed::SAMPLE_RATE,
+                    })
+                })
+                .collect();
+            WyomingEvent::with_data(
+                types::SPEAKER_CLIPS,
+                json!({ "ok": true, "id": id, "clips": clips }),
+            )
+        }
+        Err(e) => WyomingEvent::with_data(
+            types::SPEAKER_CLIPS,
+            json!({ "ok": false, "message": format!("{e:#}"), "clips": [] }),
+        ),
+    }
+}
+
+/// The `anamanti-speaker-clip` response carrying one clip's raw PCM in the payload.
+fn speaker_clip_response(speaker: Option<&SpeakerService>, request: &WyomingEvent) -> WyomingEvent {
+    let id = request.data.get("id").and_then(Value::as_str).unwrap_or("");
+    let clip = request.data.get("clip").and_then(Value::as_str).unwrap_or("");
+    let Some(svc) = speaker else {
+        return WyomingEvent::with_data(
+            types::SPEAKER_CLIP,
+            json!({ "ok": false, "message": SPEAKER_DISABLED }),
+        );
+    };
+    match svc.load_clip(id, clip) {
+        Ok(bytes) => {
+            let samples = (bytes.len() / 2) as i64;
+            let mut event = WyomingEvent::with_data(
+                types::SPEAKER_CLIP,
+                json!({
+                    "ok": true,
+                    "id": id,
+                    "clip": clip,
+                    "sample_rate": crate::speaker::embed::SAMPLE_RATE,
+                    "samples": samples,
+                }),
+            );
+            event.payload = Some(bytes);
+            event
+        }
+        Err(e) => WyomingEvent::with_data(
+            types::SPEAKER_CLIP,
+            json!({ "ok": false, "message": format!("{e:#}") }),
+        ),
+    }
 }
 
 /// Build the `ambient-voices` response: Piper's advertised voice catalog, filtered
