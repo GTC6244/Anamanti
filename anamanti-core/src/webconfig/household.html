@@ -100,7 +100,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function memberRow(m){
     m = m || {};
@@ -157,7 +156,7 @@
       members,
     };
     try{
-      const j = await apiJSON('/household/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const j = await postJSON('/household/save', body);
       if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
     }catch(e){ show(false, 'Request failed: ' + e); }
   }
@@ -180,8 +179,7 @@
   window.cadoraSave = async function(){
     const msg = $('cadmsg'); msg.textContent = 'Saving…';
     try{
-      const r = await fetch('/cadora/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({base_url: $('cad_base').value.trim()})});
-      const j = await r.json(); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
+      const j = await postJSON('/cadora/save', {base_url: $('cad_base').value.trim()}); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
       cadoraLoad();
     }catch(e){ msg.textContent = 'Request failed: ' + e; }
   };
@@ -193,8 +191,7 @@
       base_url: $('cad_base').value.trim(),
     };
     try{
-      const r = await fetch('/cadora/link', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-      const j = await r.json(); msg.textContent = j.ok ? (j.message||'Linked.') : (j.message||'Error');
+      const j = await postJSON('/cadora/link', body); msg.textContent = j.ok ? (j.message||'Linked.') : (j.message||'Error');
       $('cad_token').value = ''; $('cad_code').value = '';
       cadoraLoad();
     }catch(e){ msg.textContent = 'Request failed: ' + e; }
@@ -220,8 +217,7 @@
   window.appsaidToken = async function(){
     const msg = $('asmsg'); msg.textContent = 'Saving…';
     try{
-      const r = await fetch('/appsaid/token', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({app_token: $('as_token').value.trim()})});
-      const j = await r.json(); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
+      const j = await postJSON('/appsaid/token', {app_token: $('as_token').value.trim()}); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
       $('as_token').value = '';
       appsaidLoad();
     }catch(e){ msg.textContent = 'Request failed: ' + e; }
@@ -229,8 +225,7 @@
   window.appsaidSave = async function(){
     const msg = $('asmsg'); msg.textContent = 'Saving…';
     try{
-      const r = await fetch('/appsaid/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({worker_url: $('as_worker').value.trim(), default_recipient: $('as_default').value.trim()})});
-      const j = await r.json(); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
+      const j = await postJSON('/appsaid/save', {worker_url: $('as_worker').value.trim(), default_recipient: $('as_default').value.trim()}); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
       appsaidLoad();
     }catch(e){ msg.textContent = 'Request failed: ' + e; }
   };

@@ -279,12 +279,7 @@
     const st = parseFloat($('silero_threshold').value);
     if (!Number.isNaN(st)) body.silero_threshold = st;
     try {
-      const r = await fetch('/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const v = await r.json();
+      const v = await postJSON('/config', body);
       if (v.ok) { fill(v); show(true, v.message || 'Applied.'); }
       else { show(false, v.message || 'Rejected.'); }
     } catch (e) {

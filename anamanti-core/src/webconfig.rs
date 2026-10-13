@@ -6,8 +6,16 @@
 //! for the same [`SharedSettings`]: a tiny web page you can open from any browser
 //! on the LAN to see and change the live settings without the device.
 //!
-//! **No authentication.** This is a convenience surface for a trusted home
-//! network; bind it to loopback (the default) unless you understand the exposure.
+//! **No authentication.** This is a convenience surface for the Mac itself: it must
+//! be bound to loopback (the default). Every request is checked by
+//! `check_request`: the `Host` header must name this server on a loopback address
+//! (`127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>`) — defeating DNS
+//! rebinding — and an `Origin` header, when present, must be that same loopback origin
+//! — defeating cross-site POSTs from any other page open in a browser on the Mac.
+//! POSTs must also carry `Content-Type: application/json` (a plain HTML form cannot set
+//! it). Failures get `403` / `415` and never reach a handler. A consequence: the page
+//! is not reachable from another machine even if `config_addr` is bound to a LAN
+//! address.
 //! It is deliberately hand-rolled over `tokio` TCP — the same style as the
 //! Wyoming protocol here — so it pulls in no HTTP framework dependency.
 //!
@@ -41,7 +49,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::EmbedBackend;
-use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{chatlog, promptlog, GraphRagController, GraphView, MemoryStore};
 use crate::music::{ManagedProc, MusicHub};
@@ -49,8 +56,8 @@ use crate::notify::{Notification, NotificationService};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, DirectionsUpdate, DriveUpdate, Household, HouseholdMember,
-    LlmEngine, Personality, PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings,
-    SpotifyUpdate, SttUpdate, System1Update, WeatherToolUpdate,
+    Personality, PersonalityDef, PlacesToolUpdate, SettingsUpdate, SharedSettings, SpotifyUpdate,
+    SttUpdate, System1Update, WeatherToolUpdate,
 };
 
 /// Read-only data sources the debug pages render (chat log, prompts, SQLite,
@@ -111,7 +118,9 @@ const CONFIG_BODY: &str = include_str!("webconfig/config.html");
 /// hand-edit — edit the Tailwind source + the page HTML, then re-run the script.
 const PANEL_CSS: &str = include_str!("webconfig/panel.css");
 
-/// Client-side helpers shared by every page (`esc`/`fmtTime`/`getJSON`) plus the
+/// Client-side helpers shared by every page (`esc`/`fmtTime`/`getJSON`/`apiJSON`/
+/// `postJSON` — every POST goes through `postJSON`, which sends the JSON content type
+/// the server requires) plus the
 /// shell behavior (active-nav highlight, mobile drawer toggle). Served at
 /// `GET /shell.js`.
 const SHELL_SCRIPT: &str = include_str!("webconfig/shell.js");
@@ -156,47 +165,38 @@ const MUSIC_BODY: &str = include_str!("webconfig/music.html");
 
 /// `/drive` body — link a Google Drive folder for the idle photo slideshow. The
 /// orchestrator runs the one-time OAuth consent here (a browser opens on the Mac);
-/// the tablet then pulls the token over Wyoming. Uses a private `apiJSON` helper —
-/// NOT the shared `getJSON`, which the page shell redefines (single-arg, GET-only)
-/// in a script appended after this one, so calling it here would silently downgrade
-/// our POSTs to GET.
+/// the tablet then pulls the token over Wyoming.
 const DRIVE_BODY: &str = include_str!("webconfig/drive.html");
 
 /// `/tools` body — credentials for the LLM tools that need a secret. v1 hosts the
 /// **Mapbox token** for the `directions_lookup` tool; a saved token rebuilds the tool
-/// set live (no restart). Uses a private `apiJSON` helper (not the shell's GET-only
-/// `getJSON`, which is appended after this script).
+/// set live (no restart).
 const TOOLS_BODY: &str = include_str!("webconfig/tools.html");
 
 /// `/stt` body — pick the speech-to-text engine (wyoming / whisper-rs / elevenlabs),
-/// applied live (no restart), plus the ElevenLabs API key + connection settings. Uses
-/// a private `apiJSON` helper (not the shell's GET-only `getJSON`). See
+/// applied live (no restart), plus the ElevenLabs API key + connection settings. See
 /// `plans/ElevenLabsSttPlan.md`.
 const STT_BODY: &str = include_str!("webconfig/stt.html");
 
 /// `/notifications` body — push a proactive (visual-only) notification to the
-/// display for testing, and see how many device notify channels are connected. Uses
-/// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
+/// display for testing, and see how many device notify channels are connected.
 const NOTIFY_BODY: &str = include_str!("webconfig/notifications.html");
 
 /// `/household` body — edit the canonical household + home information: the home
 /// location + units (grounds "here" for weather/nearby questions) and the roster of
-/// people who live here with their emails + phone numbers. A full-record save. Uses
-/// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
+/// people who live here with their emails + phone numbers. A full-record save.
 const HOUSEHOLD_BODY: &str = include_str!("webconfig/household.html");
 const SYSTEM1_BODY: &str = include_str!("webconfig/system1.html");
 const EMBEDDINGS_BODY: &str = include_str!("webconfig/embeddings.html");
 
 /// `/personality` body — toggle the output personality on/off, pick the active one, and
 /// edit the catalog of personalities (label + style description). Pure output tuning: it
-/// only changes how replies sound. A full-record save. Uses a private `apiJSON` helper
-/// (not the shell's GET-only `getJSON`).
+/// only changes how replies sound. A full-record save.
 const PERSONALITY_BODY: &str = include_str!("webconfig/personality.html");
 
 /// `/pronunciations` body — edit the STT pronunciation rewrite table as JSON. Each rule
 /// maps mis-heard forms of a word to its canonical spelling; applied to the transcript
-/// before it reaches the LLM (plans/stt-vocabulary-biasing.md). A full-record save. Uses
-/// a private `apiJSON` helper (not the shell's GET-only `getJSON`).
+/// before it reaches the LLM (plans/stt-vocabulary-biasing.md). A full-record save.
 const PRONUNCIATIONS_BODY: &str = include_str!("webconfig/pronunciations.html");
 
 /// Cap on request bytes we buffer before the body — a config request is tiny; this
@@ -284,14 +284,23 @@ async fn handle(
     let method = parts.next().unwrap_or_default().to_string();
     let target = normalize_target(parts.next().unwrap_or("/"));
 
-    let content_length = lines
-        .find_map(|line| {
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
         })
+        .collect();
+
+    // Same-origin loopback guard (A6): reject before reading the body or touching any
+    // handler, so a hostile page / rebinding DNS name can neither read nor mutate.
+    let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
+    if let Err((status, why)) = check_request(&method, &headers, port) {
+        log::warn!("config page: rejected {method} {target}: {why}");
+        return write_response(&mut stream, status, "text/plain", why.as_bytes()).await;
+    }
+
+    let content_length = header(&headers, "content-length")
+        .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0)
         .min(MAX_REQUEST_BYTES);
 
@@ -636,6 +645,64 @@ async fn handle(
 
     let (status, content_type, payload) = route(&method, &target, &body, &settings);
     write_response(&mut stream, status, content_type, &payload).await
+}
+
+/// The value of header `name` (lowercase), if present.
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// Whether `authority` (a `Host` header value or the host part of an `Origin`) names
+/// this server on a loopback address: `127.0.0.1:<port>`, `localhost:<port>` or
+/// `[::1]:<port>` (case-insensitive).
+fn is_loopback_authority(authority: &str, port: u16) -> bool {
+    let a = authority.trim().to_ascii_lowercase();
+    ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|host| a == format!("{host}:{port}"))
+}
+
+/// The admin-page request guard (A6): `Host` must be this server's loopback
+/// authority (blocks DNS rebinding), an `Origin`, when sent, must be the same loopback
+/// origin (blocks cross-site requests from other pages in a browser on the Mac), and
+/// every POST must declare `Content-Type: application/json`. Returns the HTTP status +
+/// reason to send on rejection.
+fn check_request(
+    method: &str,
+    headers: &[(String, String)],
+    port: u16,
+) -> std::result::Result<(), (&'static str, &'static str)> {
+    const FORBIDDEN: &str = "403 Forbidden";
+    match header(headers, "host") {
+        Some(host) if is_loopback_authority(host, port) => {}
+        Some(_) => return Err((FORBIDDEN, "forbidden: Host is not this loopback server")),
+        None => return Err((FORBIDDEN, "forbidden: missing Host header")),
+    }
+    if let Some(origin) = header(headers, "origin") {
+        let same = origin
+            .strip_prefix("http://")
+            .is_some_and(|auth| is_loopback_authority(auth, port));
+        if !same {
+            return Err((FORBIDDEN, "forbidden: cross-origin request"));
+        }
+    }
+    if method.eq_ignore_ascii_case("POST") {
+        let json = header(headers, "content-type").is_some_and(|ct| {
+            ct.split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+        });
+        if !json {
+            return Err((
+                "415 Unsupported Media Type",
+                "POST requires Content-Type: application/json",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The selectable models as a JSON string (`{ "ok": true, "models": [...] }`).
@@ -2018,7 +2085,8 @@ fn route(
             view_json(settings, true, None).into_bytes(),
         ),
         ("POST", "/config") => match serde_json::from_slice::<Value>(body) {
-            Ok(data) => match settings.apply(&parse_update(&data)) {
+            // The loopback page is the one place provider secrets may be entered.
+            Ok(data) => match settings.apply(&SettingsUpdate::from_json(&data, true)) {
                 Ok(_) => (
                     "200 OK",
                     "application/json",
@@ -2043,105 +2111,10 @@ fn route(
 }
 
 /// The current settings as a JSON string, with an `ok`/`message` envelope that
-/// mirrors the Wyoming `ambient-settings` response.
+/// mirrors the Wyoming `ambient-settings` response (both use
+/// [`crate::settings::SettingsView::to_json`]).
 fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> String {
-    let v = settings.view();
-    let engine = match v.engine {
-        LlmEngine::Native => "native",
-        LlmEngine::Rig => "rig",
-    };
-    json!({
-        "ok": ok,
-        "message": message,
-        "llm_backend": v.llm_backend,
-        "llm_model": v.llm_model,
-        "anthropic_key_set": v.anthropic_key_set,
-        "openai_key_set": v.openai_key_set,
-        "anthropic_oauth_token_set": v.anthropic_oauth_token_set,
-        "anthropic_auth": v.anthropic_auth.as_str(),
-        "tts_voice": v.tts_voice,
-        "engine": engine,
-        "web_search": v.web_search,
-        "search_provider": v.search_provider,
-        "search_key_set": v.search_key_set,
-        "end_silence_ms": v.end_silence_ms,
-        "voice_rms_threshold": v.voice_rms_threshold,
-        "silero_threshold": v.silero_threshold,
-        "vad_engine": v.vad_engine.as_label(),
-    })
-    .to_string()
-}
-
-/// Parse a [`SettingsUpdate`] from a JSON object. Identical semantics to the
-/// Wyoming control path (`control::parse_update`): an absent key leaves that
-/// setting unchanged; `tts_voice: null` clears the voice.
-fn parse_update(data: &Value) -> SettingsUpdate {
-    let string_field = |key: &str| {
-        data.get(key)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
-    let tts_voice = match data.get("tts_voice") {
-        None => None,                    // unchanged
-        Some(Value::Null) => Some(None), // clear
-        Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
-    };
-    let engine =
-        data.get("engine")
-            .and_then(Value::as_str)
-            .map(|e| match e.to_lowercase().as_str() {
-                "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
-                _ => LlmEngine::Native,
-            });
-    let web_search = data.get("web_search").and_then(Value::as_bool);
-    // Key: absent/empty = leave unchanged (so a page reload never wipes it);
-    // explicit JSON null = clear.
-    let search_api_key = match data.get("search_api_key") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(v) => match v.as_str() {
-            Some(s) if !s.is_empty() => Some(Some(s.to_string())),
-            _ => None,
-        },
-    };
-    let anthropic_auth = data
-        .get("anthropic_auth")
-        .and_then(Value::as_str)
-        .map(AnthropicAuth::from_label);
-    // Provider API keys, same tri-state as the search key: absent/empty = leave
-    // unchanged (a page reload never wipes a stored key); explicit JSON null = clear.
-    let key_field = |key: &str| match data.get(key) {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(v) => match v.as_str() {
-            Some(s) if !s.is_empty() => Some(Some(s.to_string())),
-            _ => None,
-        },
-    };
-    SettingsUpdate {
-        llm_backend: string_field("llm_backend"),
-        llm_model: string_field("llm_model"),
-        anthropic_api_key: key_field("anthropic_api_key"),
-        openai_api_key: key_field("openai_api_key"),
-        anthropic_oauth_token: key_field("anthropic_oauth_token"),
-        anthropic_auth,
-        tts_voice,
-        engine,
-        web_search,
-        search_provider: string_field("search_provider"),
-        search_api_key,
-        end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
-        voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
-        silero_threshold: data
-            .get("silero_threshold")
-            .and_then(Value::as_f64)
-            .map(|v| v as f32),
-        vad_engine: data
-            .get("vad_engine")
-            .and_then(Value::as_str)
-            .and_then(crate::config::VadEngineKind::from_label),
-    }
+    settings.view().to_json(ok, message).to_string()
 }
 
 /// Write a minimal HTTP/1.1 response and close the connection.
@@ -2916,9 +2889,10 @@ mod tests {
         let body = br#"{"tts_voice":"en_US-amy-medium"}"#;
         // Absolute-form target, exactly as an HTTP proxy forwards it.
         let req = format!(
-            "POST http://127.0.0.1:{}/config HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
-            addr.port(),
-            body.len()
+            "POST http://127.0.0.1:{port}/config HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+            port = addr.port(),
         );
         client.write_all(req.as_bytes()).await.unwrap();
         client.write_all(body).await.unwrap();
@@ -3046,7 +3020,10 @@ mod tests {
         let mut client = TcpStream::connect(addr).await.unwrap();
         let body = br#"{"tts_voice":"en_US-amy-medium"}"#;
         let req = format!(
-            "POST /config HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            "POST /config HTTP/1.1\r\nHost: localhost:{}\r\nOrigin: http://localhost:{}\r\n\
+             Content-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+            addr.port(),
+            addr.port(),
             body.len()
         );
         client.write_all(req.as_bytes()).await.unwrap();
@@ -3085,7 +3062,13 @@ mod tests {
 
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
-            .write_all(b"GET /models HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(
+                format!(
+                    "GET /models HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+                    addr.port()
+                )
+                .as_bytes(),
+            )
             .await
             .unwrap();
 
@@ -3134,7 +3117,13 @@ mod tests {
 
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
-            .write_all(b"GET /voices HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(
+                format!(
+                    "GET /voices HTTP/1.1\r\nHost: [::1]:{}\r\n\r\n",
+                    addr.port()
+                )
+                .as_bytes(),
+            )
             .await
             .unwrap();
 
@@ -3145,5 +3134,229 @@ mod tests {
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
         assert!(resp.contains("en_US-amy-medium"), "resp: {resp}");
         assert!(!resp.contains("en_US-lessac-medium"), "resp: {resp}");
+    }
+
+    /// Serve exactly one raw request (built from the bound port) through `handle` and
+    /// return the raw response plus the settings it ran against.
+    async fn one_request(build: impl FnOnce(u16) -> String) -> (String, Arc<SharedSettings>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let s = settings();
+        let server_settings = s.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = handle(
+                stream,
+                server_settings,
+                catalog(),
+                connector(),
+                None,
+                debug(),
+                None,
+                notify(),
+                None,
+            )
+            .await;
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(build(addr.port()).as_bytes())
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        (resp, s)
+    }
+
+    fn post_voice(port: u16, host: &str, extra: &str) -> String {
+        let body = r#"{"tts_voice":"en_US-amy-medium"}"#;
+        let host = host.replace("{port}", &port.to_string());
+        format!(
+            "POST /config HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn rejects_a_non_loopback_host_with_403() {
+        // DNS rebinding: the browser sends the attacker's hostname as Host.
+        let (resp, s) = one_request(|p| {
+            post_voice(
+                p,
+                "evil.example:{port}",
+                "Content-Type: application/json\r\n",
+            )
+        })
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 403 Forbidden"), "resp: {resp}");
+        assert_eq!(s.view().tts_voice, None, "the handler never ran");
+
+        // Right host, wrong port (another local service's name for us) — also refused.
+        let (resp, _) =
+            one_request(|_| "GET /config HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n".to_string()).await;
+        assert!(resp.starts_with("HTTP/1.1 403 Forbidden"), "resp: {resp}");
+
+        // No Host at all — refused.
+        let (resp, _) = one_request(|_| "GET /config HTTP/1.1\r\n\r\n".to_string()).await;
+        assert!(resp.starts_with("HTTP/1.1 403 Forbidden"), "resp: {resp}");
+    }
+
+    #[tokio::test]
+    async fn rejects_a_cross_origin_post_with_403() {
+        let (resp, s) = one_request(|p| {
+            post_voice(
+                p,
+                "127.0.0.1:{port}",
+                "Origin: https://evil.example\r\nContent-Type: application/json\r\n",
+            )
+        })
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 403 Forbidden"), "resp: {resp}");
+        assert_eq!(s.view().tts_voice, None, "the handler never ran");
+
+        // An opaque `null` origin (sandboxed iframe / file://) is not same-origin either.
+        let (resp, _) = one_request(|p| {
+            post_voice(
+                p,
+                "127.0.0.1:{port}",
+                "Origin: null\r\nContent-Type: application/json\r\n",
+            )
+        })
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 403 Forbidden"), "resp: {resp}");
+    }
+
+    #[tokio::test]
+    async fn rejects_a_post_without_a_json_content_type() {
+        // A cross-site HTML form can only send form/text content types.
+        let (resp, s) = one_request(|p| {
+            post_voice(
+                p,
+                "127.0.0.1:{port}",
+                "Content-Type: application/x-www-form-urlencoded\r\n",
+            )
+        })
+        .await;
+        assert!(
+            resp.starts_with("HTTP/1.1 415 Unsupported Media Type"),
+            "resp: {resp}"
+        );
+        assert_eq!(s.view().tts_voice, None, "the handler never ran");
+
+        // Missing entirely — also refused.
+        let (resp, _) = one_request(|p| post_voice(p, "127.0.0.1:{port}", "")).await;
+        assert!(resp.starts_with("HTTP/1.1 415"), "resp: {resp}");
+    }
+
+    #[tokio::test]
+    async fn accepts_a_same_origin_loopback_post() {
+        let (resp, s) = one_request(|p| {
+            post_voice(
+                p,
+                "127.0.0.1:{port}",
+                &format!("Origin: http://127.0.0.1:{p}\r\nContent-Type: application/json\r\n"),
+            )
+        })
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
+        assert_eq!(s.view().tts_voice.as_deref(), Some("en_US-amy-medium"));
+    }
+
+    #[test]
+    fn check_request_accepts_only_loopback_authorities() {
+        let h = |host: &str| vec![("host".to_string(), host.to_string())];
+        assert!(check_request("GET", &h("127.0.0.1:8730"), 8730).is_ok());
+        assert!(check_request("GET", &h("LOCALHOST:8730"), 8730).is_ok());
+        assert!(check_request("GET", &h("[::1]:8730"), 8730).is_ok());
+        assert!(check_request("GET", &h("127.0.0.1"), 8730).is_err());
+        assert!(check_request("GET", &h("192.168.1.5:8730"), 8730).is_err());
+        assert!(check_request("GET", &h("localhost.evil.example:8730"), 8730).is_err());
+    }
+
+    /// Every POST the admin pages make goes through `postJSON` (which sends the JSON
+    /// content type the server now requires); no page keeps a private `apiJSON` copy or
+    /// a raw `fetch(..., {method:'POST'})`.
+    #[test]
+    fn admin_pages_post_only_through_the_shared_json_helper() {
+        assert!(SHELL_SCRIPT.contains("async function postJSON"));
+        assert!(SHELL_SCRIPT.contains("'Content-Type':'application/json'"));
+        for (name, body) in [
+            ("config", CONFIG_BODY),
+            ("drive", DRIVE_BODY),
+            ("tools", TOOLS_BODY),
+            ("stt", STT_BODY),
+            ("notify", NOTIFY_BODY),
+            ("household", HOUSEHOLD_BODY),
+            ("system1", SYSTEM1_BODY),
+            ("embeddings", EMBEDDINGS_BODY),
+            ("personality", PERSONALITY_BODY),
+            ("pronunciations", PRONUNCIATIONS_BODY),
+            ("music", MUSIC_BODY),
+            ("helix", HELIX_BODY),
+            ("chatlog", CHATLOG_BODY),
+            ("prompts", PROMPTS_BODY),
+            ("sqlite", SQLITE_BODY),
+            ("about", ABOUT_BODY),
+        ] {
+            assert!(
+                !body.contains("function apiJSON"),
+                "{name} redefines apiJSON"
+            );
+            assert!(!body.contains("method:'POST'"), "{name} has a raw POST");
+            assert!(!body.contains("method: 'POST'"), "{name} has a raw POST");
+        }
+    }
+
+    #[test]
+    fn web_and_device_settings_payloads_share_field_names() {
+        // One view builder: the device response is the page payload (same keys).
+        let s = settings();
+        let page: Value = serde_json::from_str(&view_json(&s, true, Some("m"))).unwrap();
+        let device = crate::control::respond(
+            &crate::wyoming::protocol::WyomingEvent::new(
+                crate::wyoming::protocol::types::DESCRIBE_SETTINGS,
+            ),
+            &MemoryStore::open_in_memory().unwrap(),
+            &s,
+            None,
+        );
+        let mut a: Vec<_> = page.as_object().unwrap().keys().cloned().collect();
+        let mut b: Vec<_> = device.data.as_object().unwrap().keys().cloned().collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        for key in [
+            "ok",
+            "message",
+            "llm_backend",
+            "llm_model",
+            "anthropic_key_set",
+            "openai_key_set",
+            "anthropic_oauth_token_set",
+            "anthropic_auth",
+            "tts_voice",
+            "engine",
+            "web_search",
+            "search_provider",
+            "search_key_set",
+            "end_silence_ms",
+            "voice_rms_threshold",
+            "silero_threshold",
+            "vad_engine",
+        ] {
+            assert!(page.get(key).is_some(), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn post_config_blank_or_null_search_key_semantics() {
+        let s = settings();
+        route("POST", "/config", br#"{"search_api_key":"tvly-k"}"#, &s);
+        // A blank key (page reload) leaves it; an explicit null clears it.
+        route("POST", "/config", br#"{"search_api_key":""}"#, &s);
+        assert!(s.view().search_key_set);
+        route("POST", "/config", br#"{"search_api_key":null}"#, &s);
+        assert!(!s.view().search_key_set);
     }
 }

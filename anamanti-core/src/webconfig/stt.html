@@ -51,7 +51,6 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
 
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
@@ -89,7 +88,7 @@
   async function saveEngine(){
     const body = { engine: $('engine').value };
     try{
-      const j = await apiJSON('/stt/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const j = await postJSON('/stt/save', body);
       if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved — applies on the next turn.'); }
       load();
     }catch(e){ show(false, 'Request failed: ' + e); }
@@ -102,7 +101,7 @@
     if(clear){ body.clear = true; }
     else { const k = $('el_key').value.trim(); if(k) body.elevenlabs_api_key = k; }
     try{
-      const j = await apiJSON('/stt/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const j = await postJSON('/stt/save', body);
       if(j.ok === false){ elShow(false, j.message || 'Rejected.'); } else { elShow(true, 'Saved.'); }
       load();
     }catch(e){ elShow(false, 'Request failed: ' + e); }

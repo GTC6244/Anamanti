@@ -41,7 +41,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
   function defRow(d){
@@ -101,7 +100,7 @@
       definitions,
     };
     try{
-      const j = await apiJSON('/personality/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const j = await postJSON('/personality/save', body);
       if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
     }catch(e){ show(false, 'Request failed: ' + e); }
   }
