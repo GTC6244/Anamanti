@@ -32,14 +32,22 @@ pub(super) fn weather_cache() -> Arc<crate::cache::ToolCache> {
 pub(super) struct CachingWeatherProvider {
     inner: Arc<dyn WeatherProvider>,
     cache: Arc<crate::cache::ToolCache>,
+    /// Which backend `inner` is (`"visualcrossing"` / `"openmeteo"`), part of the cache
+    /// key so switching providers never serves the other provider's cached report.
+    backend: &'static str,
 }
 
 impl CachingWeatherProvider {
     pub(super) fn new(
         inner: Arc<dyn WeatherProvider>,
         cache: Arc<crate::cache::ToolCache>,
+        backend: &'static str,
     ) -> Self {
-        Self { inner, cache }
+        Self {
+            inner,
+            cache,
+            backend,
+        }
     }
 }
 
@@ -63,8 +71,10 @@ impl WeatherProvider for CachingWeatherProvider {
             ForecastWhen::Now => format!("now:{}", Local::now().format("%Y-%m-%dT%H")),
             ForecastWhen::Day(d) => format!("day:{}", d.format("%Y-%m-%d")),
         };
-        let key =
-            crate::cache::ToolCache::key(WEATHER_TOOL, &(location, imperial, when_key.as_str()));
+        let key = crate::cache::ToolCache::key(
+            WEATHER_TOOL,
+            &(self.backend, location, imperial, when_key.as_str()),
+        );
         if let Some(key) = &key {
             if let Some(hit) = self.cache.get_as::<WeatherReport>(key) {
                 log::info!("weather cache hit for {location:?} (imperial={imperial}, {when_key})");
@@ -115,7 +125,7 @@ mod tests {
         // A dedicated cache (not the process-global one) so the test is isolated. The TTL
         // comes from the process cache config, which defaults `weather_lookup` to 60 min.
         let cache = Arc::new(crate::cache::ToolCache::new());
-        let provider = CachingWeatherProvider::new(inner.clone(), cache);
+        let provider = CachingWeatherProvider::new(inner.clone(), cache, "test");
 
         // First call misses → upstream runs once.
         let a = provider

@@ -98,11 +98,19 @@ pub fn parse_voice_catalog(data: &Value) -> Vec<VoiceEntry> {
 /// rather than leaving the device in SPEAKING indefinitely.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Budget for the FIRST read of a sentence (Piper's `audio-start`, sent only once the
+/// whole sentence has synthesized). Longer than [`READ_TIMEOUT`] because a voice that
+/// is not yet loaded — or that wyoming-piper downloads on first use — can take well over
+/// 10 s before its first byte; once audio flows, the tighter per-chunk budget applies.
+pub const FIRST_READ_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// A single synthesis request over a downstream Piper connection.
 pub struct TtsSession<R, W> {
     conn: Connection<R, W>,
     done: bool,
     read_timeout: Duration,
+    first_read_timeout: Duration,
+    started: bool,
 }
 
 impl<R, W> TtsSession<R, W>
@@ -121,12 +129,16 @@ where
             conn,
             done: false,
             read_timeout: READ_TIMEOUT,
+            first_read_timeout: FIRST_READ_TIMEOUT,
+            started: false,
         })
     }
 
-    /// Override the per-read budget ([`READ_TIMEOUT`] by default).
+    /// Override the read budget — both the first read ([`FIRST_READ_TIMEOUT`] by
+    /// default) and every later read ([`READ_TIMEOUT`] by default).
     pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
         self.read_timeout = timeout;
+        self.first_read_timeout = timeout;
         self
     }
 
@@ -138,9 +150,15 @@ where
         if self.done {
             return Ok(None);
         }
-        let next = tokio::time::timeout(self.read_timeout, self.conn.read())
+        let budget = if self.started {
+            self.read_timeout
+        } else {
+            self.first_read_timeout
+        };
+        let next = tokio::time::timeout(budget, self.conn.read())
             .await
-            .map_err(|_| TimedOut::new("TTS audio read", self.read_timeout))?;
+            .map_err(|_| TimedOut::new("TTS audio read", budget))?;
+        self.started = true;
         match next? {
             Some(ev) => {
                 if ev.event_type == types::AUDIO_STOP {
@@ -236,6 +254,38 @@ mod tests {
             .expect_err("stalled read must time out");
         assert!(TimedOut::is_in(&err), "expected TimedOut, got {err:#}");
         server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_first_sentence_gets_the_longer_first_read_budget() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_io);
+        let conn = Connection::from_halves(BufReader::new(cr), cw);
+
+        // Mock Piper that takes longer than READ_TIMEOUT (but less than
+        // FIRST_READ_TIMEOUT) before its first byte — e.g. a voice still loading.
+        let server = tokio::spawn(async move {
+            let (sr, sw) = split(server_io);
+            let mut reader = BufReader::new(sr);
+            let mut writer = sw;
+            let _ = read_event(&mut reader).await;
+            tokio::time::sleep(READ_TIMEOUT + Duration::from_secs(5)).await;
+            for ev in [
+                WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0),
+                WyomingEvent::audio_stop(0),
+            ] {
+                write_event(&mut writer, &ev).await.unwrap();
+            }
+        });
+
+        let mut session = TtsSession::begin(conn, "hello", None).await.unwrap();
+        let first = session
+            .next_audio()
+            .await
+            .expect("first read within budget");
+        assert_eq!(first.unwrap().event_type, types::AUDIO_START);
+        assert!(FIRST_READ_TIMEOUT > READ_TIMEOUT + Duration::from_secs(5));
+        server.await.unwrap();
     }
 
     #[test]

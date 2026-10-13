@@ -95,11 +95,11 @@ pub fn from_config(
 ) -> Option<Arc<dyn WeatherProvider>> {
     let key = crate::util::non_empty(api_key);
     let backend = effective_backend(enabled, provider, key.is_some());
-    let provider: Arc<dyn WeatherProvider> = match (backend, key) {
+    let (provider, label): (Arc<dyn WeatherProvider>, &'static str) = match (backend, key) {
         (WeatherBackend::Disabled, _) => return None,
         (WeatherBackend::VisualCrossing, Some(key)) => {
             log::info!("weather enabled (Visual Crossing Timeline API)");
-            Arc::new(VisualCrossingWeather::new(key))
+            (Arc::new(VisualCrossingWeather::new(key)), "visualcrossing")
         }
         _ => {
             match parse_provider(provider) {
@@ -116,7 +116,7 @@ pub fn from_config(
                     provider.trim().to_lowercase()
                 ),
             }
-            Arc::new(OpenMeteoWeather::new())
+            (Arc::new(OpenMeteoWeather::new()), "openmeteo")
         }
     };
     // Wrap every provider in the shared response cache. `from_config` is the single
@@ -128,6 +128,7 @@ pub fn from_config(
     Some(Arc::new(CachingWeatherProvider::new(
         provider,
         weather_cache(),
+        label,
     )))
 }
 

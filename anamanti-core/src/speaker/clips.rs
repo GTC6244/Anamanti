@@ -30,6 +30,10 @@ use crate::ids::IdMinter;
 /// recognize a voice while keeping the footprint tiny (≈ a few hundred KB/person).
 pub const MAX_CLIPS_PER_SPEAKER: usize = 10;
 
+/// Longest stored voice clip: 60 s of 16 kHz mono `i16` (≈1.9 MB). Clips are replayed on
+/// the device as a single Wyoming payload, which the shared protocol caps at 8 MiB.
+pub const MAX_CLIP_SAMPLES: usize = 16_000 * 60;
+
 /// Metadata for one stored clip (the People screen's clip list). The raw samples are
 /// fetched separately by [`ClipStore::load`] using [`name`](Self::name).
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +79,9 @@ impl ClipStore {
         if pcm.is_empty() {
             return Ok(());
         }
+        // Keep the first MAX_CLIP_SAMPLES only: a clip is sent to the device in ONE
+        // Wyoming payload, so it must stay well under the protocol's payload cap.
+        let pcm = &pcm[..pcm.len().min(MAX_CLIP_SAMPLES)];
         let id = sanitize(speaker_id)?;
         let _guard = self.write_lock.lock().unwrap();
         let dir = self.root.join(&id);
@@ -101,7 +108,12 @@ impl ClipStore {
         let id = sanitize(speaker_id)?;
         let name = sanitize(clip)?;
         let path = self.root.join(id).join(format!("{name}.pcm"));
-        fs::read(&path).with_context(|| format!("reading voice clip {}", path.display()))
+        let mut bytes =
+            fs::read(&path).with_context(|| format!("reading voice clip {}", path.display()))?;
+        // Clips saved before the length cap existed may be longer; never hand the device
+        // a payload its framing reader would reject.
+        bytes.truncate(MAX_CLIP_SAMPLES * 2);
+        Ok(bytes)
     }
 
     /// Delete every clip for `speaker_id` (called when a profile is forgotten). A
@@ -261,6 +273,28 @@ mod tests {
     fn store() -> (ClipStore, TmpDir) {
         let dir = TmpDir::new();
         (ClipStore::open(&dir.0).unwrap(), dir)
+    }
+
+    #[test]
+    fn save_caps_a_clip_to_fit_one_wyoming_payload() {
+        let (s, _d) = store();
+        let pcm = vec![7i16; MAX_CLIP_SAMPLES + 16_000];
+        s.save("spk-1", &pcm).unwrap();
+        let clips = s.list("spk-1").unwrap();
+        assert_eq!(clips[0].samples, MAX_CLIP_SAMPLES as u64);
+        let bytes = s.load("spk-1", &clips[0].name).unwrap();
+        assert_eq!(bytes.len(), MAX_CLIP_SAMPLES * 2);
+        assert!(bytes.len() < anamanti_protocol::MAX_PAYLOAD_BYTES);
+    }
+
+    #[test]
+    fn load_trims_an_oversize_legacy_clip() {
+        let (s, d) = store();
+        let dir = d.0.join("spk-1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("1-0.pcm"), vec![0u8; MAX_CLIP_SAMPLES * 2 + 4096]).unwrap();
+        let bytes = s.load("spk-1", "1-0").unwrap();
+        assert_eq!(bytes.len(), MAX_CLIP_SAMPLES * 2);
     }
 
     #[test]

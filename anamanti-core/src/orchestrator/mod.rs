@@ -59,13 +59,19 @@ use speech_out::{
 use turn::TurnCtx;
 use vad_loop::Listen;
 
-/// Inactivity budget for the LLM reply stream: the longest we wait for the stream to
-/// be opened or for the *next* token. Generous because a rig turn with tool rounds
-/// (web search, weather, directions) produces nothing until its final completion
-/// returns; a provider that has gone quiet this long has stalled. On expiry the turn
-/// ends cleanly — whatever was already spoken stands, the device gets its closing
-/// `audio-stop`, and music ducking is restored by the caller.
-pub const LLM_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Inactivity budget for the LLM reply stream *between* tokens once the reply has
+/// started. Rig streams every round, but a tool round can still sit silent for a tool
+/// call (web search ≤15 s, places/recipe ≤12 s) plus the next round's time-to-first-
+/// token, so this stays generous; a provider that has gone quiet this long has stalled.
+/// On expiry the turn ends cleanly — whatever was already spoken stands, the device gets
+/// its closing `audio-stop`, and music ducking is restored by the caller.
+pub const LLM_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Budget for opening the LLM request *and* receiving its first token. Must exceed the
+/// backends' own response-start allowance for a cold local model
+/// (`crate::llm::RESPONSE_START_TIMEOUT`, 90 s) plus a few silent tool rounds, so the
+/// outer guard never pre-empts a backend that is still within its own budget.
+pub const LLM_FIRST_TOKEN_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// Progress events surfaced as a turn runs (logging, tests, and — via the device
 /// relay — the Phase-5 UI).
@@ -160,6 +166,8 @@ pub struct Pipeline {
     turn_timeout: Duration,
     /// Inactivity budget for the LLM reply stream ([`LLM_STREAM_IDLE_TIMEOUT`]).
     llm_idle_timeout: Duration,
+    /// Budget for opening the LLM request + its first token ([`LLM_FIRST_TOKEN_TIMEOUT`]).
+    llm_first_token_timeout: Duration,
     /// Auto follow-up listening: when a reply is a question, tell the device to
     /// reopen the mic (no wake word) and feed recent history into that turn's prompt.
     /// Defaults to [`FollowUpConfig::default`] (enabled) until `with_follow_up` sets it.
@@ -206,6 +214,7 @@ impl Pipeline {
             system_prompt: system_prompt.into(),
             turn_timeout,
             llm_idle_timeout: LLM_STREAM_IDLE_TIMEOUT,
+            llm_first_token_timeout: LLM_FIRST_TOKEN_TIMEOUT,
             follow_up: FollowUpConfig::default(),
             weather: None,
             whisper_engine: None,
@@ -269,7 +278,9 @@ impl Pipeline {
     /// Override the LLM reply-stream inactivity budget ([`LLM_STREAM_IDLE_TIMEOUT`] by
     /// default).
     pub fn with_llm_idle_timeout(mut self, timeout: Duration) -> Self {
+        // One knob for tests/embedders: it bounds the whole stream, start included.
         self.llm_idle_timeout = timeout;
+        self.llm_first_token_timeout = timeout;
         self
     }
 
@@ -748,6 +759,9 @@ impl Pipeline {
             let dump = ctx.dump.as_ref();
             let followup_depth = ctx.followup_depth;
             let idle = self.llm_idle_timeout;
+            // The first token gets the longer start budget (cold model + tool rounds).
+            let first_budget = self.llm_first_token_timeout;
+            let first_deadline = tokio::time::Instant::now() + first_budget;
 
             // The generation + speaking driver. Dropping it (when a barge-in wins the
             // race) drops the LLM stream and any in-flight `TtsSession`, cancelling the
@@ -761,9 +775,9 @@ impl Pipeline {
                         let turn = LlmTurn::new(system_prompt, transcript)
                             .with_actions(action_tx)
                             .with_history(history);
-                        tokio::time::timeout(idle, runtime.llm.respond(turn))
+                        tokio::time::timeout_at(first_deadline, runtime.llm.respond(turn))
                             .await
-                            .map_err(|_| TimedOut::new("LLM request", idle))?
+                            .map_err(|_| TimedOut::new("LLM request", first_budget))?
                             .with_context(|| {
                                 format!("LLM backend `{}` failed", runtime.llm.name())
                             })?
@@ -771,9 +785,17 @@ impl Pipeline {
                 };
                 let mut speaking = false;
                 loop {
-                    let next = tokio::time::timeout(idle, stream.next())
-                        .await
-                        .map_err(|_| TimedOut::new("LLM token stream", idle))?;
+                    // Until the first token arrives, the start deadline (shared with the
+                    // request open) applies; after that, the per-token idle budget.
+                    let next = if first_token_ms.is_none() {
+                        tokio::time::timeout_at(first_deadline, stream.next())
+                            .await
+                            .map_err(|_| TimedOut::new("LLM first token", first_budget))?
+                    } else {
+                        tokio::time::timeout(idle, stream.next())
+                            .await
+                            .map_err(|_| TimedOut::new("LLM token stream", idle))?
+                    };
                     let Some(tok) = next else { break };
                     // Relay any device actions a tool emitted (e.g. a timer) before
                     // rendering more of the reply.

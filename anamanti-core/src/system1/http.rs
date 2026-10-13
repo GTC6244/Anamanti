@@ -187,13 +187,24 @@ impl HttpDecider {
     }
 }
 
-/// The classifier criterion for an intent label: the built-in [`Intent`]'s description,
-/// or — for a custom label from the config — the label itself.
+/// The classifier criterion for an intent label: the built-in [`Intent`]'s description;
+/// for a label without a handler that a config may still list (System-1 resolves it and
+/// then defers to System-2), the criterion it always had — so e.g. `smalltalk` keeps
+/// steering a bare "thank you" to `end_session`; otherwise the label itself.
 fn intent_description(label: &str) -> &str {
-    label
-        .parse::<Intent>()
-        .map(Intent::description)
-        .unwrap_or(label)
+    if let Ok(intent) = label.parse::<Intent>() {
+        return intent.description();
+    }
+    match label {
+        "recipe_nav" => "navigate or scroll the recipe already on screen",
+        "music" => "play, pause, skip, or change music volume",
+        "shopping_add" => "add an item to the shopping list",
+        "smalltalk" => {
+            "a greeting or acknowledgement needing no data (a bare sign-off thanks \
+             like \"thank you\" is end_session, not this)"
+        }
+        other => other,
+    }
 }
 
 /// The compact device-state fields folded into the request `state` for the 3B hybrid
@@ -379,6 +390,20 @@ fn choice_confidence(answer: Option<&Value>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_unhandled_labels_keep_their_criteria() {
+        assert!(intent_description("smalltalk").contains("end_session"));
+        assert_eq!(
+            intent_description("shopping_add"),
+            "add an item to the shopping list"
+        );
+        assert_eq!(intent_description("custom_label"), "custom_label");
+        assert_eq!(
+            intent_description("weather"),
+            "weather".parse::<Intent>().unwrap().description()
+        );
+    }
 
     fn intents() -> Vec<String> {
         vec!["weather".to_string(), "timer".to_string()]
@@ -590,15 +615,24 @@ mod tests {
 
     #[test]
     fn criteria_use_intent_descriptions_and_fall_back_to_custom_labels() {
-        let labels = vec!["place_dismiss".to_string(), "music".to_string()];
+        let labels = vec![
+            "place_dismiss".to_string(),
+            "music".to_string(),
+            "my_label".to_string(),
+        ];
         let body = build_request("close it", None, &labels, &Map::new());
         let crit = &body["questions"]["intent"]["criteria"];
         assert_eq!(
             crit["place_dismiss"],
             json!(Intent::PlaceDismiss.description())
         );
-        // A custom label with no built-in intent describes itself.
-        assert_eq!(crit["music"], json!("music"));
+        // A legacy unhandled label keeps the criterion it always had.
+        assert_eq!(
+            crit["music"],
+            json!("play, pause, skip, or change music volume")
+        );
+        // A truly custom label describes itself.
+        assert_eq!(crit["my_label"], json!("my_label"));
     }
 
     #[test]
