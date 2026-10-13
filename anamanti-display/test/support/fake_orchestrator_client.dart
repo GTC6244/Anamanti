@@ -80,6 +80,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   final List<String> deletedSpeakers = <String>[];
   final List<Map<String, String>> enrollFinishCalls = <Map<String, String>>[];
   final List<String> enrollCancelCalls = <String>[];
+  final List<Map<String, String>> pairPhoneCalls = <Map<String, String>>[];
 
   // Per-speaker stored voice clips, and a record of play requests.
   final Map<String, List<SpeakerClipView>> _clipsBySpeaker;
@@ -93,6 +94,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
   /// When non-null, [enrollFinish] throws this instead of succeeding (simulates the
   /// orchestrator rejecting the commit, e.g. too few samples).
   String? enrollFinishError;
+
+  /// When set, [pairPhone] throws with this message (simulates a bad/expired code
+  /// or an unreachable Mac).
+  String? pairPhoneError;
 
   @override
   Future<List<OrchestratorOption>> listOrchestrators() async {
@@ -300,5 +305,13 @@ class FakeOrchestratorClient implements OrchestratorClient {
   @override
   Future<void> enrollCancel(String session) async {
     enrollCancelCalls.add(session);
+  }
+
+  @override
+  Future<String> pairPhone(String name, String code) async {
+    pairPhoneCalls.add({'name': name, 'code': code});
+    final err = pairPhoneError;
+    if (err != null) throw Exception(err);
+    return "Linked $name's phone.";
   }
 }

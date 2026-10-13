@@ -36,6 +36,7 @@ import 'package:anamanti_display/src/ui/audio_diagnostics_view.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart'
     show updateDiagnosticsTuning, setDiagnosticsContext, setEnrollContext;
 import 'package:anamanti_display/src/ui/memory_screen.dart';
+import 'package:anamanti_display/src/ui/pair_phone_screen.dart';
 import 'package:anamanti_display/src/ui/people_screen.dart';
 
 /// LLM backends the settings screen can select. Labels are user-facing; the value
@@ -666,6 +667,16 @@ class _SettingsScreenState extends State<SettingsScreen>
           trailing: const Icon(Icons.chevron_right),
           onTap: _openMemory,
         ),
+        // Link a phone is a full screen (enter a name + a 4-char AppSaid pairing
+        // code), pushed rather than rendered inline.
+        ListTile(
+          key: const Key('settings-menu-pair-phone'),
+          leading: const Icon(Icons.phonelink_ring),
+          title: const Text('Link a phone'),
+          subtitle: const Text('Pair a family member\'s phone for messages'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _openPairPhone,
+        ),
         _menuTile(
           _SettingsCategory.deviceConfig,
           Icons.tune,
@@ -754,6 +765,18 @@ class _SettingsScreenState extends State<SettingsScreen>
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => MemoryScreen(client: widget.client),
+      ),
+    );
+  }
+
+  /// Open the "Link a phone" screen: enter a family member's name + the 4-character
+  /// pairing code shown in their AppSaid app, and the Core claims it + stores their
+  /// phone as a `send_phone_message` recipient. Pushed as its own route like People
+  /// and Memory. The pinned-orchestrator `client` carries the pairing round-trip.
+  void _openPairPhone() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PairPhoneScreen(client: widget.client),
       ),
     );
   }

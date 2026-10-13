@@ -34,9 +34,10 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Functions / People / Memory / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
+| **Settings (route)** | `SettingsScreen` (Assistant / Functions / People / Memory / Link a phone / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Permissions / Updates / System), `AudioDiagnosticsView` |
 | **People / enrollment** (pushed from Settings → People) | `PeopleScreen`, `SpeakerEnrollScreen` |
 | **Memory** (pushed from Settings → Memory) | `MemoryScreen` (tabs: Facts / Conversations / Keywords) |
+| **Link a phone** (pushed from Settings → Link a phone) | `PairPhoneScreen` (name + 4-char AppSaid pairing code) |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
 ---
@@ -519,6 +520,21 @@ the Settings menu (→ People, → Memory).
   arrives as a `WakeWordEvent.enrollResult` folded into `AssistantState`. Commit/cancel are
   `OrchestratorClient.enrollFinish`/`enrollCancel`. See
   [`SpeakerEnrollmentPlan.md`](./SpeakerEnrollmentPlan.md).
+
+**`PairPhoneScreen`** — `lib/src/ui/pair_phone_screen.dart`
+- Reached from **Settings → Link a phone** (`settings-menu-pair-phone`, pushed as its own
+  route like People/Memory). `Scaffold` + `AppBar("Link a phone")`. Matches a 4-character
+  **AppSaid pairing code** — shown on a family member's phone in the AppSaid app ("Link
+  another device") — to a **person**: a name field (`pair-name`) + a 4-char code field
+  (`pair-code`, upper-cased, alphanumeric), then a **Link phone** button (`pair-submit`,
+  disabled until both are valid). Submitting calls
+  `OrchestratorClient.pairPhone(name, code)`, which round-trips **`anamanti-pair-phone` →
+  `anamanti-pair-result`** to the Core; the Core redeems the code (`POST /v1/pair/claim`),
+  learns the phone's `user_key`, and stores it on the matching **household member's**
+  AppSaid address — **auto-adding the person to the household** if new — so recipients stay
+  unified on the household (the key never returns to the device). On success a done step shows the Core's
+  confirmation + **Done** (`pair-done`); a bad/expired code or unreachable Mac shows the
+  reason inline (`pair-error`). See [`architecture.md`](./architecture.md) §8.4.
 
 ---
 

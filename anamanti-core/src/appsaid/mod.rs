@@ -46,6 +46,72 @@ pub trait PhoneMessenger: Send + Sync {
     async fn send(&self, msg: OutgoingMessage) -> Result<String>;
 }
 
+/// Normalize a user-entered AppSaid pairing code: uppercase, with spaces and dashes
+/// stripped. AppSaid's claim endpoint is itself case/space/dash-insensitive, so this
+/// is defense-in-depth — it also makes `"ab 2k"` / `"ab-2k"` from a phone display
+/// resolve the same as `"AB2K"`.
+pub fn normalize_pairing_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// Redeem a short **pairing code** shown on a recipient's AppSaid phone app for that
+/// phone's durable public `user_key` — the TV-style onboarding from the AppSaid
+/// integration guide. One `POST {worker_url}/v1/pair/claim` with `{ code }`; the claim
+/// is unauthenticated (the phone isn't linked to us yet) and single-use, so a code can
+/// be redeemed exactly once within its ~10 min lifetime.
+///
+/// Maps the documented statuses to speakable errors: `400` (not a well-formed 4-char
+/// code), `404` (invalid, already used, or expired), `429` (rate limited). On success
+/// returns the recipient's `user_key`, which the caller persists against a name.
+pub async fn claim_pairing_code(worker_url: &str, code: &str) -> Result<String> {
+    let worker_url = worker_url.trim().trim_end_matches('/');
+    if worker_url.is_empty() {
+        bail!("set the AppSaid worker URL before linking a phone");
+    }
+    let code = normalize_pairing_code(code);
+    if code.is_empty() {
+        bail!("enter the pairing code shown in the AppSaid app");
+    }
+
+    let resp = crate::http::shared_client()
+        .post(format!("{worker_url}/v1/pair/claim"))
+        .json(&json!({ "code": code }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .context("calling the AppSaid pairing endpoint")?;
+
+    let status = resp.status();
+    // The body may be absent/non-JSON on some error paths; tolerate that.
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+
+    if !status.is_success() {
+        let server_msg = body
+            .get("message")
+            .or_else(|| body.get("error"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let hint = match status.as_u16() {
+            404 => "that pairing code is invalid, already used, or expired — ask for a fresh one",
+            400 => "that doesn't look like a valid pairing code",
+            429 => "too many attempts — wait a minute and try again",
+            _ => server_msg.unwrap_or("the AppSaid service rejected the pairing code"),
+        };
+        bail!("AppSaid pairing failed ({status}): {hint}");
+    }
+
+    body.get("user_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .context("the AppSaid pairing response carried no user_key")
+}
+
 /// Build a Google Maps search link for a free-text place/address, URL-encoding the
 /// query per the Maps URL scheme.
 pub fn maps_search_url(place: &str) -> String {
@@ -187,6 +253,7 @@ impl PhoneMessenger for AppSaidClient {
             .http
             .post(format!("{}/v1/messages", self.worker_url))
             .json(&payload)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .context("calling the AppSaid send API")?;
@@ -409,6 +476,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no recipient"));
+    }
+
+    #[test]
+    fn normalize_pairing_code_uppercases_and_strips_spaces_and_dashes() {
+        assert_eq!(normalize_pairing_code("ab2k"), "AB2K");
+        assert_eq!(normalize_pairing_code("  ab-2k "), "AB2K");
+        assert_eq!(normalize_pairing_code("a b 2 k"), "AB2K");
+    }
+
+    #[tokio::test]
+    async fn claim_returns_the_user_key_and_posts_normalized_code() {
+        let (base, handle) =
+            fake_server("200 OK", r#"{"user_key":"gdksxryuunome6dp"}"#).await;
+        let key = claim_pairing_code(&base, "ab-2k").await.unwrap();
+        assert_eq!(key, "gdksxryuunome6dp");
+
+        let req = handle.await.unwrap();
+        assert!(
+            req.contains("POST /v1/pair/claim"),
+            "posts to the claim endpoint: {req}"
+        );
+        assert!(
+            req.contains("\"code\":\"AB2K\""),
+            "sends the normalized code: {req}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_maps_404_to_a_fresh_code_hint() {
+        let (base, _h) = fake_server("404 Not Found", r#"{"error":"not_found"}"#).await;
+        let err = claim_pairing_code(&base, "ZZZZ").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expired") || msg.contains("fresh one"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn claim_with_blank_code_errors_before_any_network() {
+        // No server bound — resolution must fail before the HTTP call.
+        let err = claim_pairing_code("http://127.0.0.1:1", "   ").await.unwrap_err();
+        assert!(err.to_string().contains("pairing code"), "{err}");
     }
 
     #[tokio::test]

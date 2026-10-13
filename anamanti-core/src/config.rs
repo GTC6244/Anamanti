@@ -2272,7 +2272,23 @@ impl Config {
         // Sanitize the resolved household once: trims fields and **migrates** any legacy
         // single-line `location` (from an older config/persisted file) into `address.city`
         // so downstream only ever sees the discrete `address`.
-        let household = household.sanitized();
+        let mut household = household.sanitized();
+        // Unify AppSaid recipients onto the household (the single source of truth): fold
+        // any legacy `appsaid.recipients` seed (config file / older persisted settings)
+        // into the roster — upsert a member by name, which auto-adds them if absent — then
+        // DERIVE the messenger roster from the household's members' `appsaid` addresses.
+        // A member that already carries an AppSaid address (persisted household) wins over
+        // the legacy seed, so re-runs are idempotent and never clobber a page/pairing edit.
+        for (name, key) in std::mem::take(&mut appsaid.recipients) {
+            let already_set = household
+                .member_matching(&name)
+                .and_then(|m| m.appsaid.as_deref())
+                .is_some_and(|s| !s.trim().is_empty());
+            if !already_set {
+                household.set_member_appsaid(&name, &key);
+            }
+        }
+        appsaid.recipients = household.appsaid_roster();
         // Seed the location-aware tools' live home address from the resolved household
         // (config → household → this shared handle). The factory clone below shares the
         // same cell, so the initial backend's tools — and every later rebuild — read it;

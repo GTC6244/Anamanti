@@ -1120,6 +1120,7 @@ fn household_status_json(settings: &SharedSettings) -> String {
                 "name": m.name,
                 "emails": m.emails,
                 "phones": m.phones,
+                "appsaid": m.appsaid,
                 "relationship": m.relationship,
             })
         })
@@ -1174,6 +1175,7 @@ fn household_save_json(settings: &SharedSettings, body: &[u8]) -> String {
                     name: opt_str(m.get("name")).unwrap_or_default(),
                     emails: str_list(m.get("emails")),
                     phones: str_list(m.get("phones")),
+                    appsaid: opt_str(m.get("appsaid")),
                     relationship: opt_str(m.get("relationship")),
                 })
                 .collect::<Vec<_>>()
@@ -2777,7 +2779,7 @@ mod tests {
         let body = br#"{"address":{"address1":"  123 Main St ","address2":"","city":" Austin ",
               "state":"TX","postal":"78701","country":"USA"},"weather_units":"imperial",
             "members":[
-              {"name":" Alice ","emails":["alice@example.com"," "],"phones":["+1 555 0001"],"relationship":" parent "},
+              {"name":" Alice ","emails":["alice@example.com"," "],"phones":["+1 555 0001"],"appsaid":" gdksxryuunome6dp ","relationship":" parent "},
               {"name":"   ","emails":["ghost@example.com"]}
             ]}"#;
         let (status, ctype, out) = route("POST", "/household/save", body, &s);
@@ -2796,6 +2798,7 @@ mod tests {
         assert_eq!(members[0]["name"], "Alice");
         assert_eq!(members[0]["emails"][0], "alice@example.com");
         assert_eq!(members[0]["emails"].as_array().unwrap().len(), 1);
+        assert_eq!(members[0]["appsaid"], "gdksxryuunome6dp");
         assert_eq!(members[0]["relationship"], "parent");
 
         // It landed in the live settings, so the per-turn prompt snapshot sees it:
@@ -2807,6 +2810,12 @@ mod tests {
         );
         assert_eq!(h.address.weather_location().as_deref(), Some("Austin, TX"));
         assert_eq!(h.members.len(), 1);
+        assert_eq!(h.members[0].appsaid.as_deref(), Some("gdksxryuunome6dp"));
+        // The member's AppSaid address makes them a send_phone_message recipient.
+        assert_eq!(
+            s.appsaid().recipients.get("Alice").map(String::as_str),
+            Some("gdksxryuunome6dp")
+        );
     }
 
     #[test]

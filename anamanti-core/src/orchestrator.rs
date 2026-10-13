@@ -2825,6 +2825,7 @@ mod household_tests {
             name: name.to_string(),
             emails: emails.iter().map(|s| s.to_string()).collect(),
             phones: phones.iter().map(|s| s.to_string()).collect(),
+            appsaid: None,
             relationship: rel.map(str::to_string),
         }
     }
