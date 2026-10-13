@@ -77,4 +77,29 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('cleans the AnyhowException wrapper + Rust backtrace from the error',
+      (tester) async {
+    // In production a Core-side failure surfaces as flutter_rust_bridge's
+    // AnyhowException with a backtrace tail — the screen must show only the message.
+    final client = FakeOrchestratorClient()
+      ..pairPhoneError =
+          'AnyhowException(AppSaid pairing failed (404 Not Found): that pairing '
+              'code is invalid, already used, or expired — ask for a fresh one\n\n'
+              'Stack backtrace:\n   0: <unknown>\n   1: <unknown>)';
+    await tester.pumpWidget(MaterialApp(home: PairPhoneScreen(client: client)));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const Key('pair-name')), 'Brendon');
+    await tester.enterText(find.byKey(const Key('pair-code')), 'QWER');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('pair-submit')));
+    await tester.pumpAndSettle();
+
+    final err = tester.widget<Text>(find.byKey(const Key('pair-error'))).data!;
+    expect(err, contains('invalid, already used, or expired'));
+    expect(err, isNot(contains('AnyhowException')));
+    expect(err, isNot(contains('Stack backtrace')));
+    expect(err, isNot(contains('<unknown>')));
+  });
 }

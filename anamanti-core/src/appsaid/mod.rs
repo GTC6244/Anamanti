@@ -79,6 +79,7 @@ pub async fn claim_pairing_code(worker_url: &str, code: &str) -> Result<String> 
     let resp = crate::http::shared_client()
         .post(format!("{worker_url}/v1/pair/claim"))
         .json(&json!({ "code": code }))
+        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
         .context("calling the AppSaid pairing endpoint")?;
@@ -252,6 +253,7 @@ impl PhoneMessenger for AppSaidClient {
             .http
             .post(format!("{}/v1/messages", self.worker_url))
             .json(&payload)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .context("calling the AppSaid send API")?;

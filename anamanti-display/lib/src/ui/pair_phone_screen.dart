@@ -78,10 +78,21 @@ class _PairPhoneScreenState extends State<PairPhoneScreen> {
     }
   }
 
-  /// Strip the `Exception: ` prefix Dart prepends so the user sees just the reason.
+  /// Reduce a thrown error to a short, human-readable reason. A failure that comes
+  /// back from the Core (bad/expired code, no worker URL) arrives as a Rust
+  /// `anyhow` error, which flutter_rust_bridge surfaces as
+  /// `AnyhowException(<message>\n\nStack backtrace:\n …)` — so unwrap that wrapper and
+  /// drop the backtrace tail, leaving just the message.
   String _reason(Object e) {
-    final s = e.toString();
-    return s.startsWith('Exception: ') ? s.substring('Exception: '.length) : s;
+    var s = e.toString();
+    if (s.startsWith('Exception: ')) s = s.substring('Exception: '.length);
+    final anyhow =
+        RegExp(r'^AnyhowException\((.*)\)$', dotAll: true).firstMatch(s);
+    if (anyhow != null) s = anyhow.group(1)!;
+    // Cut off any Rust backtrace that anyhow appended.
+    final bt = s.indexOf(RegExp(r'\n+\s*Stack backtrace:'));
+    if (bt >= 0) s = s.substring(0, bt);
+    return s.trim();
   }
 
   @override
