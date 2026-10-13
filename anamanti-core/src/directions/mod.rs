@@ -17,12 +17,12 @@
 //! traffic-aware ETA + a plain-language traffic note). Rendering a map/route on the
 //! display is a deferred follow-up (see `TODO.md §7`).
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde_json::Value;
+use serde::Deserialize;
 
 /// How to travel between the two points. `Driving` uses Mapbox's live-traffic
 /// profile; the others are traffic-free.
@@ -247,10 +247,119 @@ pub struct DirectionsConfig {
 /// Needs a `MAPBOX_TOKEN`. Driving routes use the `driving-traffic` profile, whose
 /// `duration` reflects live traffic and which also returns a typical (no-traffic)
 /// duration for comparison.
+///
+/// Mapbox only accepts the token as the `access_token` query parameter (no header
+/// form), so every request goes through [`crate::http`]'s redacting helpers: a failed
+/// request's error text never carries the URL or the token.
 pub struct MapboxDirections {
-    client: reqwest::Client,
     token: String,
     base_url: String,
+}
+
+/// Per-request budget for each Mapbox call.
+const MAPBOX_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+
+/// `User-Agent` component label for Mapbox requests.
+const COMPONENT: &str = "directions";
+
+/// How long a geocoded origin stays memoized. The origin is almost always the
+/// unchanged household address, so this saves one round trip per directions turn; a
+/// day keeps a moved pin from lingering, and an edited address is a new key anyway.
+const ORIGIN_GEOCODE_TTL: StdDuration = StdDuration::from_secs(24 * 3600);
+
+/// Process-wide memo of geocoded origins, keyed by (API root, address string). Shared
+/// across provider rebuilds (a settings save builds a new [`MapboxDirections`]).
+fn origin_geocode_cache() -> &'static crate::cache::ToolCache {
+    static CACHE: OnceLock<crate::cache::ToolCache> = OnceLock::new();
+    CACHE.get_or_init(crate::cache::ToolCache::new)
+}
+
+/// A geocoded point: `(longitude, latitude, label)`.
+type GeoPoint = (f64, f64, String);
+
+/// Mapbox Geocoding v6 `forward` response (only the fields we read).
+#[derive(Debug, Default, Deserialize)]
+struct GeocodeResponse {
+    #[serde(default)]
+    features: Vec<GeocodeFeature>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeocodeFeature {
+    #[serde(default)]
+    geometry: Option<GeocodeGeometry>,
+    #[serde(default)]
+    properties: Option<GeocodeProperties>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeocodeGeometry {
+    #[serde(default)]
+    coordinates: Vec<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeocodeProperties {
+    #[serde(default)]
+    full_address: Option<String>,
+    #[serde(default)]
+    place_formatted: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl GeocodeProperties {
+    /// The best label: the first present of `full_address` / `place_formatted` /
+    /// `name`, or `None` when that one is blank.
+    fn label(&self) -> Option<&str> {
+        self.full_address
+            .as_deref()
+            .or(self.place_formatted.as_deref())
+            .or(self.name.as_deref())
+            .filter(|s| !s.is_empty())
+    }
+}
+
+/// Mapbox Directions v5 response (only the fields we read).
+#[derive(Debug, Default, Deserialize)]
+struct DirectionsResponse {
+    #[serde(default)]
+    routes: Vec<Route>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Route {
+    #[serde(default)]
+    distance: Option<f64>,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    duration_typical: Option<f64>,
+    #[serde(default)]
+    legs: Vec<RouteLeg>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RouteLeg {
+    #[serde(default)]
+    duration_typical: Option<f64>,
+}
+
+impl Route {
+    /// The typical (no-traffic) duration: the top-level `duration_typical` when
+    /// present, else the sum of the legs' `duration_typical`. `None` when the profile
+    /// doesn't provide it (walking/cycling).
+    fn typical_duration(&self) -> Option<f64> {
+        if let Some(d) = self.duration_typical {
+            return Some(d);
+        }
+        let legs: Vec<f64> = self
+            .legs
+            .iter()
+            .filter_map(|l| l.duration_typical)
+            .collect();
+        (!legs.is_empty()).then(|| legs.iter().sum())
+    }
 }
 
 impl MapboxDirections {
@@ -260,13 +369,7 @@ impl MapboxDirections {
 
     /// Point the client at a specific API root (overridable for tests).
     pub fn with_base_url(base_url: impl Into<String>, token: impl Into<String>) -> Self {
-        let client = crate::http::tuned_builder()
-            .timeout(StdDuration::from_secs(10))
-            .user_agent("anamanti-core/0.1 (directions)")
-            .build()
-            .unwrap_or_default();
         Self {
-            client,
             token: token.into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
         }
@@ -274,51 +377,55 @@ impl MapboxDirections {
 
     /// Forward-geocode a free-text place into `(longitude, latitude, label)` using
     /// the Mapbox Geocoding v6 API. Returns the best (first) match.
-    async fn geocode(&self, query: &str) -> Result<(f64, f64, String)> {
-        let value: Value = self
-            .client
-            .get(format!("{}/search/geocode/v6/forward", self.base_url))
+    async fn geocode(&self, query: &str) -> Result<GeoPoint> {
+        let value: GeocodeResponse = crate::http::send_json(
+            crate::http::get(
+                format!("{}/search/geocode/v6/forward", self.base_url),
+                COMPONENT,
+            )
             .query(&[
                 ("q", query),
                 ("access_token", self.token.as_str()),
                 ("limit", "1"),
-            ])
-            .send()
-            .await
-            .context("GET Mapbox geocoding")?
-            .error_for_status()
-            .context("Mapbox geocoding returned an error status")?
-            .json()
-            .await
-            .context("parsing Mapbox geocoding JSON")?;
+            ]),
+            MAPBOX_TIMEOUT,
+            "Mapbox geocoding",
+        )
+        .await?;
 
         let feature = value
-            .get("features")
-            .and_then(Value::as_array)
-            .and_then(|f| f.first())
+            .features
+            .into_iter()
+            .next()
             .with_context(|| format!("no location found for \"{query}\""))?;
         let coords = feature
-            .get("geometry")
-            .and_then(|g| g.get("coordinates"))
-            .and_then(Value::as_array)
+            .geometry
+            .map(|g| g.coordinates)
             .filter(|c| c.len() >= 2)
             .with_context(|| format!("geocoding result for \"{query}\" had no coordinates"))?;
-        let lon = coords[0]
-            .as_f64()
-            .context("geocoding longitude was not a number")?;
-        let lat = coords[1]
-            .as_f64()
-            .context("geocoding latitude was not a number")?;
-        let props = feature.get("properties");
-        let label = props
-            .and_then(|p| p.get("full_address"))
-            .or_else(|| props.and_then(|p| p.get("place_formatted")))
-            .or_else(|| props.and_then(|p| p.get("name")))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
+        let label = feature
+            .properties
+            .as_ref()
+            .and_then(GeocodeProperties::label)
             .unwrap_or(query)
             .to_string();
-        Ok((lon, lat, label))
+        Ok((coords[0], coords[1], label))
+    }
+
+    /// [`Self::geocode`] memoized per address string (see [`ORIGIN_GEOCODE_TTL`]), for
+    /// the origin — normally the unchanged home address — so it isn't re-geocoded on
+    /// every call. Failures are never memoized.
+    async fn geocode_origin(&self, query: &str) -> Result<GeoPoint> {
+        let cache = origin_geocode_cache();
+        let key = crate::cache::ToolCache::key("mapbox_origin_geocode", &(&self.base_url, query));
+        if let Some(hit) = key.as_deref().and_then(|k| cache.get_as::<GeoPoint>(k)) {
+            return Ok(hit);
+        }
+        let point = self.geocode(query).await?;
+        if let Some(key) = key {
+            cache.put_as(key, &point, ORIGIN_GEOCODE_TTL);
+        }
+        Ok(point)
     }
 }
 
@@ -330,46 +437,38 @@ impl DirectionsProvider for MapboxDirections {
         destination: &str,
         mode: TravelMode,
     ) -> Result<Directions> {
-        let (o_lon, o_lat, origin_label) = self.geocode(origin).await?;
+        let (o_lon, o_lat, origin_label) = self.geocode_origin(origin).await?;
         let (d_lon, d_lat, destination_label) = self.geocode(destination).await?;
 
         let coords = format!("{o_lon:.6},{o_lat:.6};{d_lon:.6},{d_lat:.6}");
-        let value: Value = self
-            .client
-            .get(format!(
-                "{}/directions/v5/mapbox/{}/{}",
-                self.base_url,
-                mode.mapbox_profile(),
-                coords
-            ))
+        let value: DirectionsResponse = crate::http::send_json(
+            crate::http::get(
+                format!(
+                    "{}/directions/v5/mapbox/{}/{}",
+                    self.base_url,
+                    mode.mapbox_profile(),
+                    coords
+                ),
+                COMPONENT,
+            )
             .query(&[
                 ("access_token", self.token.as_str()),
                 ("overview", "false"),
                 ("alternatives", "false"),
-            ])
-            .send()
-            .await
-            .context("GET Mapbox directions")?
-            .error_for_status()
-            .context("Mapbox directions returned an error status")?
-            .json()
-            .await
-            .context("parsing Mapbox directions JSON")?;
+            ]),
+            MAPBOX_TIMEOUT,
+            "Mapbox directions",
+        )
+        .await?;
 
         let route = value
-            .get("routes")
-            .and_then(Value::as_array)
-            .and_then(|r| r.first())
+            .routes
+            .into_iter()
+            .next()
             .context("Mapbox returned no route between those points")?;
-        let distance_meters = route
-            .get("distance")
-            .and_then(Value::as_f64)
-            .context("route had no distance")?;
-        let duration_seconds = route
-            .get("duration")
-            .and_then(Value::as_f64)
-            .context("route had no duration")?;
-        let duration_typical_seconds = typical_duration(route);
+        let distance_meters = route.distance.context("route had no distance")?;
+        let duration_seconds = route.duration.context("route had no duration")?;
+        let duration_typical_seconds = route.typical_duration();
 
         Ok(Directions {
             origin_label,
@@ -382,27 +481,20 @@ impl DirectionsProvider for MapboxDirections {
     }
 }
 
-/// Pull the typical (no-traffic) duration from a Mapbox route: the top-level
-/// `duration_typical` when present, else the sum of the legs' `duration_typical`.
-/// Returns `None` when the profile doesn't provide it (walking/cycling).
-fn typical_duration(route: &Value) -> Option<f64> {
-    if let Some(d) = route.get("duration_typical").and_then(Value::as_f64) {
-        return Some(d);
+/// The directions backend [`from_token`] would build for this provider label + token,
+/// or `None` when the tool would not be advertised (unsupported provider, or no
+/// usable token). The single source of truth for "is directions on, and with what".
+pub fn effective_backend(provider: &str, token: Option<&str>) -> Option<&'static str> {
+    let provider = provider.trim().to_lowercase();
+    if !(provider.is_empty() || provider == "mapbox") {
+        return None;
     }
-    let legs = route.get("legs").and_then(Value::as_array)?;
-    let mut total = 0.0;
-    let mut any = false;
-    for leg in legs {
-        if let Some(d) = leg.get("duration_typical").and_then(Value::as_f64) {
-            total += d;
-            any = true;
-        }
-    }
-    any.then_some(total)
+    crate::util::non_empty(token).map(|_| "mapbox")
 }
 
 /// Build the directions provider from an explicit token. Returns `None` (tool not
-/// advertised) unless a supported provider is selected and a usable token is present.
+/// advertised) unless a supported provider is selected and a usable token is present
+/// (see [`effective_backend`]).
 ///
 /// - `provider` selects the backend (from `directions.provider`; default/only:
 ///   `mapbox`; empty is treated as `mapbox`).
@@ -420,15 +512,15 @@ pub fn from_token(
     token: Option<&str>,
     imperial: bool,
 ) -> Option<(Arc<dyn DirectionsProvider>, bool)> {
-    let provider = provider.trim().to_lowercase();
-    if !(provider.is_empty() || provider == "mapbox") {
+    if effective_backend(provider, Some("x")).is_none() {
         log::warn!(
-            "directions.provider='{provider}' is not supported (only 'mapbox' in v1); \
-             directions_lookup disabled"
+            "directions.provider='{}' is not supported (only 'mapbox' in v1); \
+             directions_lookup disabled",
+            provider.trim().to_lowercase()
         );
         return None;
     }
-    let token = token.map(str::trim).filter(|s| !s.is_empty())?;
+    let token = crate::util::non_empty(token)?;
 
     log::info!(
         "directions_lookup enabled (mapbox; {} units; origin from the live household location)",
@@ -515,26 +607,15 @@ fn format_distance(meters: f64, imperial: bool) -> String {
 }
 
 /// Format a duration (seconds) as a short spoken phrase ("24 minutes",
-/// "1 hour 10 minutes", "under a minute").
+/// "1 hour 10 minutes", "under a minute"); see [`crate::speech::DurationStyle::Minutes`].
 fn format_duration(seconds: f64) -> String {
-    let total_min = (seconds.abs() / 60.0).round() as i64;
-    if total_min < 1 {
-        return "under a minute".to_string();
-    }
-    let (h, m) = (total_min / 60, total_min % 60);
-    let unit = |n: i64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
-    match (h, m) {
-        (0, m) => unit(m, "minute"),
-        (h, 0) => unit(h, "hour"),
-        (h, m) => format!("{} {}", unit(h, "hour"), unit(m, "minute")),
-    }
+    crate::speech::duration(seconds, crate::speech::DurationStyle::Minutes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use crate::http::test_support::{refused_base, serve_sequence, serve_statuses};
 
     fn addr(
         a1: &str,
@@ -692,29 +773,6 @@ mod tests {
         assert!(out.contains("heavy"));
     }
 
-    /// Serve a fixed sequence of raw HTTP JSON responses, one per inbound connection.
-    fn serve_sequence(bodies: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        std_listener.set_nonblocking(true).unwrap();
-        let addr = std_listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            let listener = TcpListener::from_std(std_listener).unwrap();
-            for body in bodies {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                let mut buf = [0u8; 8192];
-                let _ = sock.read(&mut buf).await;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                sock.write_all(resp.as_bytes()).await.unwrap();
-                sock.flush().await.unwrap();
-            }
-        });
-        (format!("http://{addr}"), handle)
-    }
-
     #[tokio::test]
     async fn mapbox_geocodes_both_ends_then_routes() {
         // Two geocode responses (origin, destination) then one directions response.
@@ -743,5 +801,93 @@ mod tests {
         assert!(spoken.contains("Austin Airport"));
         assert!(spoken.contains("heavy"));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn home_origin_is_geocoded_once_across_calls() {
+        let geo_home = r#"{"features":[{"geometry":{"coordinates":[-97.7,30.2]},"properties":{"full_address":"Home, Austin"}}]}"#;
+        let geo_dest = r#"{"features":[{"geometry":{"coordinates":[-97.6,30.1]},"properties":{"full_address":"Airport"}}]}"#;
+        let route = r#"{"routes":[{"distance":1000.0,"duration":600.0}]}"#;
+        // First call: origin + destination geocodes + route. Second call: only the
+        // destination geocode + route — a re-geocoded origin would consume the
+        // destination body and the route would then fail to geocode.
+        let (url, server) = serve_sequence(vec![
+            geo_home.to_string(),
+            geo_dest.to_string(),
+            route.to_string(),
+            geo_dest.to_string(),
+            route.to_string(),
+        ]);
+        let mapbox = MapboxDirections::with_base_url(url, "tok");
+        let home = "1 Memo Test Rd, Austin";
+        let first = mapbox
+            .directions(home, "airport", TravelMode::Driving)
+            .await
+            .unwrap();
+        // A rebuilt provider (settings save) still shares the memo.
+        let mapbox = MapboxDirections::with_base_url(mapbox.base_url.clone(), "tok");
+        let second = mapbox
+            .directions(home, "airport", TravelMode::Driving)
+            .await
+            .unwrap();
+        assert_eq!(first.origin_label, "Home, Austin");
+        assert_eq!(second.origin_label, "Home, Austin");
+        assert_eq!(second.destination_label, "Airport");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mapbox_401_error_does_not_leak_the_token() {
+        let (url, server) = serve_statuses(vec![(
+            "401 Unauthorized",
+            r#"{"message":"Not Authorized - Invalid Token"}"#.to_string(),
+        )]);
+        let mapbox = MapboxDirections::with_base_url(url, "pk.SECRET-MAPBOX-TOKEN");
+        let err = mapbox
+            .directions("Leak Test Origin 401", "b", TravelMode::Driving)
+            .await
+            .unwrap_err();
+        let text = format!("{err} | {err:#} | {err:?}");
+        assert!(!text.contains("SECRET-MAPBOX-TOKEN"), "{text}");
+        assert!(text.contains("401"), "{text}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mapbox_connection_error_does_not_leak_the_token() {
+        let mapbox = MapboxDirections::with_base_url(refused_base(), "pk.SECRET-MAPBOX-TOKEN");
+        let err = mapbox
+            .directions("Leak Test Origin refused", "b", TravelMode::Driving)
+            .await
+            .unwrap_err();
+        let text = format!("{err} | {err:#} | {err:?}");
+        assert!(!text.contains("SECRET-MAPBOX-TOKEN"), "{text}");
+        assert!(!text.contains("access_token"), "{text}");
+    }
+
+    #[test]
+    fn effective_backend_mirrors_from_token() {
+        assert_eq!(effective_backend("mapbox", Some("t")), Some("mapbox"));
+        assert_eq!(effective_backend("", Some("t")), Some("mapbox"));
+        assert_eq!(effective_backend("mapbox", Some("  ")), None);
+        assert_eq!(effective_backend("google", Some("t")), None);
+        for (p, t) in [("mapbox", Some("t")), ("", None), ("google", Some("t"))] {
+            assert_eq!(
+                effective_backend(p, t).is_some(),
+                from_token(p, t, false).is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn typical_duration_sums_legs_when_top_level_absent() {
+        let r: Route =
+            serde_json::from_str(r#"{"legs":[{"duration_typical":100},{"duration_typical":50}]}"#)
+                .unwrap();
+        assert_eq!(r.typical_duration(), Some(150.0));
+        let r: Route = serde_json::from_str(r#"{"duration_typical":7,"legs":[]}"#).unwrap();
+        assert_eq!(r.typical_duration(), Some(7.0));
+        let r: Route = serde_json::from_str(r#"{"legs":[{}]}"#).unwrap();
+        assert_eq!(r.typical_duration(), None);
     }
 }
