@@ -112,13 +112,20 @@ struct SearchHit {
     is_context: bool,
 }
 
+/// Per-request budget for every Spotify Web API / accounts call, so a stalled Spotify
+/// can't hang a voice turn.
+const SPOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `User-Agent` component label for Spotify requests.
+const COMPONENT: &str = "spotify";
+
 /// Live Spotify Web API implementation of [`SpotifyController`].
 ///
 /// Holds long-lived credentials (client id/secret + refresh token) and caches a
 /// short-lived access token, refreshing it on demand. Every playback call targets
-/// the librespot Connect device resolved by name.
+/// the librespot Connect device resolved by name. Requests ride the shared
+/// [`crate::http::shared_client`] pool with a per-request timeout.
 pub struct SpotifyWebApi {
-    http: reqwest::Client,
     client_id: String,
     client_secret: String,
     refresh_token: String,
@@ -158,7 +165,6 @@ impl SpotifyWebApi {
         api_base: impl Into<String>,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
             client_id: client_id.into(),
             client_secret: client_secret.into(),
             refresh_token: refresh_token.into(),
@@ -178,24 +184,17 @@ impl SpotifyWebApi {
                 return Ok(tok.clone());
             }
         }
-        let resp: Value = self
-            .http
-            .post(format!("{}/api/token", self.accounts_base))
-            .basic_auth(&self.client_id, Some(&self.client_secret))
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", self.refresh_token.as_str()),
-            ])
-            .send()
-            .await
-            .context("requesting Spotify access token")?
-            .error_for_status()
-            .context(
-                "Spotify token endpoint returned an error (check client id/secret/refresh token)",
-            )?
-            .json()
-            .await
-            .context("parsing Spotify token response")?;
+        let resp: Value = crate::http::send_json(
+            crate::http::post(format!("{}/api/token", self.accounts_base), COMPONENT)
+                .basic_auth(&self.client_id, Some(&self.client_secret))
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", self.refresh_token.as_str()),
+                ]),
+            SPOTIFY_TIMEOUT,
+            "Spotify token endpoint (check client id/secret/refresh token)",
+        )
+        .await?;
 
         let access = resp
             .get("access_token")
@@ -214,18 +213,13 @@ impl SpotifyWebApi {
     /// with a speakable message when the device is not present (e.g. librespot is
     /// down or the speaker is asleep).
     async fn device_id(&self, token: &str) -> Result<String> {
-        let resp: Value = self
-            .http
-            .get(format!("{}/v1/me/player/devices", self.api_base))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("listing Spotify devices")?
-            .error_for_status()
-            .context("Spotify devices endpoint returned an error")?
-            .json()
-            .await
-            .context("parsing Spotify devices response")?;
+        let resp: Value = crate::http::send_json(
+            crate::http::get(format!("{}/v1/me/player/devices", self.api_base), COMPONENT)
+                .bearer_auth(token),
+            SPOTIFY_TIMEOUT,
+            "Spotify devices",
+        )
+        .await?;
 
         let devices = resp
             .get("devices")
@@ -253,19 +247,14 @@ impl SpotifyWebApi {
 
     /// Search for the top matching entity of `kind`.
     async fn search(&self, token: &str, query: &str, kind: SearchKind) -> Result<SearchHit> {
-        let resp: Value = self
-            .http
-            .get(format!("{}/v1/search", self.api_base))
-            .bearer_auth(token)
-            .query(&[("q", query), ("type", kind.as_query()), ("limit", "1")])
-            .send()
-            .await
-            .context("searching Spotify")?
-            .error_for_status()
-            .context("Spotify search returned an error")?
-            .json()
-            .await
-            .context("parsing Spotify search response")?;
+        let resp: Value = crate::http::send_json(
+            crate::http::get(format!("{}/v1/search", self.api_base), COMPONENT)
+                .bearer_auth(token)
+                .query(&[("q", query), ("type", kind.as_query()), ("limit", "1")]),
+            SPOTIFY_TIMEOUT,
+            "Spotify search",
+        )
+        .await?;
 
         let item = resp
             .get(kind.results_key())
@@ -299,22 +288,25 @@ impl SpotifyWebApi {
     ) -> Result<()> {
         let mut query: Vec<(&str, &str)> = vec![("device_id", device_id)];
         query.extend_from_slice(extra_query);
-        let mut req = self
-            .http
-            .request(method, format!("{}/v1/me/player{path}", self.api_base))
-            .bearer_auth(token)
-            .query(&query);
+        let mut req = crate::http::request(
+            method,
+            format!("{}/v1/me/player{path}", self.api_base),
+            COMPONENT,
+        )
+        .bearer_auth(token)
+        .query(&query);
         if let Some(b) = body {
             req = req.json(&b);
         } else {
             // Spotify's play/pause endpoints want a JSON content-type even empty.
             req = req.header(reqwest::header::CONTENT_LENGTH, "0");
         }
-        req.send()
-            .await
-            .with_context(|| format!("Spotify player call {path}"))?
-            .error_for_status()
-            .with_context(|| format!("Spotify player endpoint {path} returned an error"))?;
+        crate::http::send_ok(
+            req,
+            SPOTIFY_TIMEOUT,
+            &format!("Spotify player endpoint {path}"),
+        )
+        .await?;
         Ok(())
     }
 }

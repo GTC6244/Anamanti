@@ -22,10 +22,10 @@
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 /// Everything the device needs to render a place card. Plain strings/integers/booleans
 /// (empty string / `0` / `None` when a field is absent) so the type is `Eq` and
@@ -96,10 +96,15 @@ pub struct PlacesConfig {
 /// sent as the `X-Goog-Api-Key` header, never as a query parameter, so it never lands in
 /// a logged URL.
 pub struct GooglePlaces {
-    client: reqwest::Client,
     base: String,
     api_key: String,
 }
+
+/// Per-request budget for each Google Places call.
+const PLACES_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+
+/// `User-Agent` component label for Places requests.
+const COMPONENT: &str = "places";
 
 impl GooglePlaces {
     pub fn new(api_key: impl Into<String>) -> Self {
@@ -108,13 +113,7 @@ impl GooglePlaces {
 
     /// Point the client at a specific API root (for tests).
     pub fn with_base_url(base: impl Into<String>, api_key: impl Into<String>) -> Self {
-        let client = crate::http::tuned_builder()
-            .timeout(StdDuration::from_secs(10))
-            .user_agent("anamanti-core/0.1 (places)")
-            .build()
-            .unwrap_or_default();
         Self {
-            client,
             base: base.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }
@@ -124,25 +123,14 @@ impl GooglePlaces {
     /// photo-media endpoint with `skipHttpRedirect=true`. Best-effort: any failure
     /// returns an empty string so a missing/failed photo never fails the whole lookup.
     async fn resolve_photo(&self, photo_name: &str) -> String {
-        let url = format!("{}/v1/{photo_name}/media", self.base);
-        let resp = self
-            .client
-            .get(url)
+        let req = crate::http::get(format!("{}/v1/{photo_name}/media", self.base), COMPONENT)
             .header("X-Goog-Api-Key", &self.api_key)
-            .query(&[("maxWidthPx", "800"), ("skipHttpRedirect", "true")])
-            .send()
-            .await;
-        let Ok(resp) = resp.and_then(reqwest::Response::error_for_status) else {
-            return String::new();
-        };
-        let Ok(value) = resp.json::<Value>().await else {
-            return String::new();
-        };
-        value
-            .get("photoUri")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
+            .query(&[("maxWidthPx", "800"), ("skipHttpRedirect", "true")]);
+        crate::http::send_json::<PhotoMedia>(req, PLACES_TIMEOUT, "Google Places photo")
+            .await
+            .ok()
+            .and_then(|m| m.photo_uri)
+            .unwrap_or_default()
     }
 }
 
@@ -152,24 +140,16 @@ impl PlacesProvider for GooglePlaces {
         let query = query.trim();
         anyhow::ensure!(!query.is_empty(), "no place query given");
         let text_query = compose_query(query, bias);
-        let value: Value = self
-            .client
-            .post(format!("{}/v1/places:searchText", self.base))
+        let req = crate::http::post(format!("{}/v1/places:searchText", self.base), COMPONENT)
             .header("X-Goog-Api-Key", &self.api_key)
             .header(
                 "X-Goog-FieldMask",
                 "places.id,places.displayName,places.formattedAddress,places.types",
             )
-            .json(&json!({ "textQuery": text_query, "maxResultCount": 5 }))
-            .send()
-            .await
-            .context("POST Google Places text search")?
-            .error_for_status()
-            .context("Google Places text search returned an error status")?
-            .json()
-            .await
-            .context("parsing Google Places text search JSON")?;
-        Ok(candidates_from_search(&value))
+            .json(&json!({ "textQuery": text_query, "maxResultCount": 5 }));
+        let value: SearchResponse =
+            crate::http::send_json(req, PLACES_TIMEOUT, "Google Places text search").await?;
+        Ok(candidates_from_search(value))
     }
 
     async fn details(&self, place_id: &str) -> Result<PlaceReport> {
@@ -181,24 +161,16 @@ impl PlacesProvider for GooglePlaces {
         } else {
             format!("places/{place_id}")
         };
-        let value: Value = self
-            .client
-            .get(format!("{}/v1/{path}", self.base))
+        let req = crate::http::get(format!("{}/v1/{path}", self.base), COMPONENT)
             .header("X-Goog-Api-Key", &self.api_key)
             .header(
                 "X-Goog-FieldMask",
                 "id,displayName,formattedAddress,regularOpeningHours,currentOpeningHours,\
                  rating,userRatingCount,nationalPhoneNumber,websiteUri,googleMapsUri,\
                  priceLevel,primaryTypeDisplayName,photos",
-            )
-            .send()
-            .await
-            .context("GET Google Places details")?
-            .error_for_status()
-            .context("Google Places details returned an error status")?
-            .json()
-            .await
-            .context("parsing Google Places details JSON")?;
+            );
+        let value: PlaceDetails =
+            crate::http::send_json(req, PLACES_TIMEOUT, "Google Places details").await?;
 
         let mut report = report_from_details(&value);
         // Resolve the first photo to a keyless URL (a second, best-effort request).
@@ -209,13 +181,123 @@ impl PlacesProvider for GooglePlaces {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Google Places (New) response shapes — only the fields we read. Every field is
+// optional (`#[serde(default)]`) so a sparse record degrades to empties instead of
+// failing the whole lookup.
+// ---------------------------------------------------------------------------
+
+/// A localized text (`{ "text": …, "languageCode": … }`), tolerating a bare string or
+/// any other shape (read as empty).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LocalizedText {
+    Plain(String),
+    Localized {
+        #[serde(default)]
+        text: Option<String>,
+    },
+    Other(serde::de::IgnoredAny),
+}
+
+impl LocalizedText {
+    fn text(&self) -> &str {
+        match self {
+            LocalizedText::Plain(s) => s,
+            LocalizedText::Localized { text } => text.as_deref().unwrap_or(""),
+            LocalizedText::Other(_) => "",
+        }
+    }
+}
+
+/// Read an optional localized text, empty when absent.
+fn text_of(t: &Option<LocalizedText>) -> String {
+    t.as_ref()
+        .map(LocalizedText::text)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `places:searchText` response.
+#[derive(Debug, Default, Deserialize)]
+struct SearchResponse {
+    #[serde(default)]
+    places: Vec<SearchPlace>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchPlace {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    display_name: Option<LocalizedText>,
+    #[serde(default)]
+    formatted_address: Option<String>,
+    #[serde(default)]
+    types: Option<Vec<String>>,
+}
+
+/// Place Details response.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaceDetails {
+    #[serde(default)]
+    display_name: Option<LocalizedText>,
+    #[serde(default)]
+    formatted_address: Option<String>,
+    #[serde(default)]
+    regular_opening_hours: Option<OpeningHours>,
+    #[serde(default)]
+    current_opening_hours: Option<OpeningHours>,
+    #[serde(default)]
+    rating: Option<f64>,
+    #[serde(default)]
+    user_rating_count: Option<i64>,
+    #[serde(default)]
+    national_phone_number: Option<String>,
+    #[serde(default)]
+    website_uri: Option<String>,
+    #[serde(default)]
+    google_maps_uri: Option<String>,
+    #[serde(default)]
+    price_level: Option<String>,
+    #[serde(default)]
+    primary_type_display_name: Option<LocalizedText>,
+    #[serde(default)]
+    photos: Vec<Photo>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpeningHours {
+    #[serde(default)]
+    open_now: Option<bool>,
+    #[serde(default)]
+    weekday_descriptions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Photo {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Photo-media response (`skipHttpRedirect=true`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PhotoMedia {
+    #[serde(default)]
+    photo_uri: Option<String>,
+}
+
 /// Build the Text Search `textQuery`: fold in the home location as a "near …" hint when
 /// a `bias` is set and the query doesn't already carry its own location context (a comma,
 /// or the words "near"/"in "/"around"). Keeps "coffee shop" → "coffee shop near Austin,
 /// TX" while leaving "the Louvre, Paris" untouched.
 fn compose_query(query: &str, bias: Option<&str>) -> String {
     let query = query.trim();
-    let Some(bias) = bias.map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(bias) = crate::util::non_empty(bias) else {
         return query.to_string();
     };
     let lower = query.to_lowercase();
@@ -236,23 +318,16 @@ fn compose_query(query: &str, bias: Option<&str>) -> String {
 /// `street_address` point named "45 River Rd E f" with no hours/phone/rating — which makes
 /// a useless place card. Dropping non-establishment results turns those into a clean
 /// "couldn't find it" instead.
-fn candidates_from_search(value: &Value) -> Vec<PlaceCandidate> {
-    let Some(places) = value.get("places").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    places
-        .iter()
-        .filter(|p| is_establishment(p))
+fn candidates_from_search(value: SearchResponse) -> Vec<PlaceCandidate> {
+    value
+        .places
+        .into_iter()
+        .filter(is_establishment)
         .filter_map(|p| {
-            let place_id = p.get("id").and_then(Value::as_str)?.to_string();
             Some(PlaceCandidate {
-                place_id,
-                name: display_name(p),
-                address: p
-                    .get("formattedAddress")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                name: text_of(&p.display_name),
+                address: p.formatted_address.unwrap_or_default(),
+                place_id: p.id?,
             })
         })
         .collect()
@@ -263,96 +338,52 @@ fn candidates_from_search(value: &Value) -> Vec<PlaceCandidate> {
 /// `point_of_interest`) in `types`; an address point carries only `street_address` /
 /// `subpremise` / `premise` / `route` / `geocode`. Results with no `types` at all are kept
 /// (be lenient — the field may be absent), but an explicit address-only result is dropped.
-fn is_establishment(place: &Value) -> bool {
-    match place.get("types").and_then(Value::as_array) {
+fn is_establishment(place: &SearchPlace) -> bool {
+    match &place.types {
         None => true, // no type info → don't over-filter
-        Some(types) => {
-            let has = |t: &str| types.iter().any(|v| v.as_str() == Some(t));
-            has("establishment") || has("point_of_interest")
-        }
+        Some(types) => types
+            .iter()
+            .any(|t| t == "establishment" || t == "point_of_interest"),
     }
 }
 
 /// Map a Place Details response body into a [`PlaceReport`]. Missing fields degrade to
 /// empties/`None` rather than failing the whole lookup. Note: `photo_uri` is filled in
 /// separately by a follow-up photo-media request (see [`GooglePlaces::details`]).
-fn report_from_details(value: &Value) -> PlaceReport {
+fn report_from_details(value: &PlaceDetails) -> PlaceReport {
     // Prefer the current opening hours' open-now flag; the human weekday lines come from
     // the regular hours (a stable weekly schedule reads better on the card).
     let open_now = value
-        .get("currentOpeningHours")
-        .or_else(|| value.get("regularOpeningHours"))
-        .and_then(|h| h.get("openNow"))
-        .and_then(Value::as_bool);
+        .current_opening_hours
+        .as_ref()
+        .or(value.regular_opening_hours.as_ref())
+        .and_then(|h| h.open_now);
     let hours = value
-        .get("regularOpeningHours")
-        .or_else(|| value.get("currentOpeningHours"))
-        .and_then(|h| h.get("weekdayDescriptions"))
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+        .regular_opening_hours
+        .as_ref()
+        .or(value.current_opening_hours.as_ref())
+        .and_then(|h| h.weekday_descriptions.clone())
         .unwrap_or_default();
 
     PlaceReport {
-        name: display_name(value),
-        address: str_field(value, "formattedAddress"),
-        category: value
-            .get("primaryTypeDisplayName")
-            .and_then(|t| t.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        name: text_of(&value.display_name),
+        address: value.formatted_address.clone().unwrap_or_default(),
+        category: text_of(&value.primary_type_display_name),
         open_now,
         hours,
-        rating: value
-            .get("rating")
-            .and_then(Value::as_f64)
-            .map(|r| format!("{r:.1}"))
-            .unwrap_or_default(),
-        rating_count: value
-            .get("userRatingCount")
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as i32,
-        price_level: price_level_label(value.get("priceLevel").and_then(Value::as_str)),
-        phone: str_field(value, "nationalPhoneNumber"),
-        website: str_field(value, "websiteUri"),
-        maps_uri: str_field(value, "googleMapsUri"),
+        rating: value.rating.map(|r| format!("{r:.1}")).unwrap_or_default(),
+        rating_count: value.user_rating_count.unwrap_or(0) as i32,
+        price_level: price_level_label(value.price_level.as_deref()),
+        phone: value.national_phone_number.clone().unwrap_or_default(),
+        website: value.website_uri.clone().unwrap_or_default(),
+        maps_uri: value.google_maps_uri.clone().unwrap_or_default(),
         photo_uri: String::new(),
     }
 }
 
 /// The `photos[0].name` resource id, if any (used to resolve a keyless photo URL).
-fn first_photo_name(value: &Value) -> Option<String> {
-    value
-        .get("photos")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .and_then(|p| p.get("name"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-/// Read a place's `displayName.text`, falling back to a bare `displayName` string.
-fn display_name(value: &Value) -> String {
-    value
-        .get("displayName")
-        .and_then(|d| d.get("text").or(Some(d)))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Read a top-level string field, empty when absent.
-fn str_field(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
+fn first_photo_name(value: &PlaceDetails) -> Option<String> {
+    value.photos.first().and_then(|p| p.name.clone())
 }
 
 /// Map the Places `priceLevel` enum to a short human label.
@@ -368,25 +399,35 @@ fn price_level_label(level: Option<&str>) -> String {
     .to_string()
 }
 
+/// The places backend [`from_key`] would build for this provider label + key, or `None`
+/// when the tool would not be advertised (unsupported provider, or no usable key).
+pub fn effective_backend(provider: &str, key: Option<&str>) -> Option<&'static str> {
+    let provider = provider.trim().to_lowercase();
+    if !(provider.is_empty() || provider == "google") {
+        return None;
+    }
+    crate::util::non_empty(key).map(|_| "google")
+}
+
 /// Build the configured places provider from an explicit key. Returns `None` — the tool
 /// is simply not advertised — unless a supported provider is selected and a usable key is
 /// present (Google Places has no keyless fallback, mirroring
-/// [`crate::directions::from_token`]).
+/// [`crate::directions::from_token`]); see [`effective_backend`].
 ///
 /// - `provider` selects the backend (`places.provider`; default/only: `google`; empty is
 ///   treated as `google`).
 /// - `key` is the Google Places API key — a **secret**, seeded from `GOOGLE_PLACES_API_KEY`
 ///   but runtime-settable from the config page's Tools tab, so it's passed in here.
 pub fn from_key(provider: &str, key: Option<&str>) -> Option<Arc<dyn PlacesProvider>> {
-    let provider = provider.trim().to_lowercase();
-    if !(provider.is_empty() || provider == "google") {
+    if effective_backend(provider, Some("x")).is_none() {
         log::warn!(
-            "places.provider='{provider}' is not supported (only 'google' in v1); \
-             places_lookup disabled"
+            "places.provider='{}' is not supported (only 'google' in v1); \
+             places_lookup disabled",
+            provider.trim().to_lowercase()
         );
         return None;
     }
-    let key = key.map(str::trim).filter(|s| !s.is_empty())?;
+    let key = crate::util::non_empty(key)?;
     log::info!("places_lookup enabled (Google Places API New)");
     Some(Arc::new(GooglePlaces::new(key)) as Arc<dyn PlacesProvider>)
 }
@@ -491,8 +532,7 @@ mod tests {
 
     #[test]
     fn parses_search_candidates() {
-        let value: Value = serde_json::from_str(SEARCH).unwrap();
-        let out = candidates_from_search(&value);
+        let out = candidates_from_search(serde_json::from_str(SEARCH).unwrap());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].place_id, "ChIJA");
         assert_eq!(out[0].name, "Blue Bottle Coffee");
@@ -502,7 +542,7 @@ mod tests {
 
     #[test]
     fn parses_details_body() {
-        let value: Value = serde_json::from_str(DETAILS).unwrap();
+        let value: PlaceDetails = serde_json::from_str(DETAILS).unwrap();
         let report = report_from_details(&value);
         assert_eq!(report.name, "Blue Bottle Coffee");
         assert_eq!(report.address, "1 Main St, Austin, TX 78701, USA");
@@ -526,7 +566,7 @@ mod tests {
 
     #[test]
     fn details_missing_fields_degrade_gracefully() {
-        let value: Value = serde_json::from_str(r#"{"displayName":{"text":"X"}}"#).unwrap();
+        let value: PlaceDetails = serde_json::from_str(r#"{"displayName":{"text":"X"}}"#).unwrap();
         let report = report_from_details(&value);
         assert_eq!(report.name, "X");
         assert_eq!(report.address, "");
@@ -563,8 +603,7 @@ mod tests {
 
     #[test]
     fn candidates_render_exposes_place_ids_for_the_model() {
-        let value: Value = serde_json::from_str(SEARCH).unwrap();
-        let out = candidates_from_search(&value);
+        let out = candidates_from_search(serde_json::from_str(SEARCH).unwrap());
         let line = render_candidates(&out);
         assert!(line.contains("Blue Bottle Coffee"), "{line}");
         assert!(line.contains("1 Main St"), "{line}");
@@ -588,42 +627,21 @@ mod tests {
                  "types":["gym","point_of_interest","establishment"]}
             ]
         });
-        let out = candidates_from_search(&body);
+        let out = candidates_from_search(serde_json::from_value(body).unwrap());
         assert_eq!(out.len(), 1, "the address point must be filtered out");
         assert_eq!(out[0].place_id, "gym");
     }
 
     #[tokio::test]
     async fn search_then_details_over_a_loopback_server() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
         // Serve the search body, then the details body, then a photo-media body.
-        let bodies = vec![
+        let (base, server) = crate::http::test_support::serve_sequence(vec![
             SEARCH.to_string(),
             DETAILS.to_string(),
             r#"{"name":"x","photoUri":"https://lh3.googleusercontent.com/keyless"}"#.to_string(),
-        ];
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        std_listener.set_nonblocking(true).unwrap();
-        let addr = std_listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let listener = TcpListener::from_std(std_listener).unwrap();
-            for body in bodies {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                let mut buf = [0u8; 8192];
-                let _ = sock.read(&mut buf).await;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                sock.write_all(resp.as_bytes()).await.unwrap();
-                sock.flush().await.unwrap();
-            }
-        });
+        ]);
 
-        let provider = GooglePlaces::with_base_url(format!("http://{addr}"), "test-key");
+        let provider = GooglePlaces::with_base_url(base, "test-key");
         let candidates = provider
             .search("coffee shop", Some("Austin"))
             .await
@@ -636,5 +654,35 @@ mod tests {
             "https://lh3.googleusercontent.com/keyless"
         );
         server.await.unwrap();
+    }
+
+    #[test]
+    fn display_name_tolerates_a_bare_string_and_odd_shapes() {
+        let v: PlaceDetails = serde_json::from_str(
+            r#"{"displayName":"Plain","primaryTypeDisplayName":42,"photos":[{}]}"#,
+        )
+        .unwrap();
+        let r = report_from_details(&v);
+        assert_eq!(r.name, "Plain");
+        assert_eq!(r.category, "");
+        assert_eq!(first_photo_name(&v), None);
+    }
+
+    #[test]
+    fn open_now_prefers_current_hours_even_without_the_flag() {
+        // Present current hours without openNow ⇒ unknown (the old precedence).
+        let v: PlaceDetails = serde_json::from_str(
+            r#"{"currentOpeningHours":{},"regularOpeningHours":{"openNow":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(report_from_details(&v).open_now, None);
+    }
+
+    #[test]
+    fn effective_backend_mirrors_from_key() {
+        assert_eq!(effective_backend("google", Some("k")), Some("google"));
+        assert_eq!(effective_backend("", Some("k")), Some("google"));
+        assert_eq!(effective_backend("google", None), None);
+        assert_eq!(effective_backend("yelp", Some("k")), None);
     }
 }
