@@ -1247,6 +1247,30 @@ impl LlmFactory {
         )
     }
 
+    /// The tool dependencies this factory's providers describe, with the given
+    /// web-search selection.
+    pub fn tool_deps(
+        &self,
+        web_search: bool,
+        search_provider: &str,
+        search_api_key: Option<&str>,
+    ) -> crate::llm::rig::ToolDeps {
+        crate::llm::rig::ToolDeps {
+            web_search,
+            search_provider: search_provider.to_string(),
+            search_api_key: search_api_key.map(str::to_string),
+            home_location: self.home_location.clone(),
+            calendar: self.calendar.clone(),
+            directions: self.directions.clone(),
+            spotify: self.spotify.clone(),
+            grocery: self.cadora.clone(),
+            appsaid: self.appsaid.clone(),
+            weather: self.weather.clone(),
+            weather_imperial: self.weather_imperial,
+            places: self.places.clone(),
+        }
+    }
+
     /// Default model for a backend label when the caller pins none.
     fn default_model(backend: &str) -> Option<&'static str> {
         match backend {
@@ -1271,6 +1295,15 @@ impl LlmFactory {
         model: Option<&str>,
         anthropic_auth: AnthropicAuth,
     ) -> Result<(Arc<dyn LlmBackend>, String, Option<String>)> {
+        // The tool registry, built at most once per build (only the rig engine runs
+        // tools) from this factory's live providers.
+        let tools = || {
+            Arc::new(crate::llm::rig::Tools::build(self.tool_deps(
+                web_search,
+                search_provider,
+                search_api_key,
+            )))
+        };
         match backend.to_lowercase().as_str() {
             "mock" => Ok((Arc::new(MockLlm::default()), "mock".to_string(), None)),
             "anthropic" | "claude" => {
@@ -1304,20 +1337,7 @@ impl LlmFactory {
                                 &key,
                                 &model,
                                 self.anthropic_max_tokens,
-                                crate::llm::rig::tools_from_config(
-                                    web_search,
-                                    search_provider,
-                                    search_api_key,
-                                    self.home_location.clone(),
-                                    self.spotify.clone(),
-                                    self.calendar.clone(),
-                                    self.directions.clone(),
-                                    self.cadora.clone(),
-                                    self.appsaid.clone(),
-                                    self.weather.clone(),
-                                    self.weather_imperial,
-                                    self.places.clone(),
-                                ),
+                                tools(),
                             )?),
                             _ => Arc::new(AnthropicBackend::new(
                                 &self.anthropic_base_url,
@@ -1355,20 +1375,7 @@ impl LlmFactory {
                     LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::ollama(
                         &self.ollama_url,
                         &model,
-                        crate::llm::rig::tools_from_config(
-                            web_search,
-                            search_provider,
-                            search_api_key,
-                            self.home_location.clone(),
-                            self.spotify.clone(),
-                            self.calendar.clone(),
-                            self.directions.clone(),
-                            self.cadora.clone(),
-                            self.appsaid.clone(),
-                            self.weather.clone(),
-                            self.weather_imperial,
-                            self.places.clone(),
-                        ),
+                        tools(),
                     )?),
                     _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
                 };
