@@ -117,13 +117,6 @@ impl MemoryIngester {
             return Ok(0);
         }
 
-        // The current speaker aliases. A read failure fails the run (the offset is not
-        // advanced, so it retries) rather than ingesting under stale ids.
-        let aliases = match &self.aliases {
-            Some(a) => a.load().context("loading speaker aliases")?,
-            None => AliasMap::default(),
-        };
-
         // 1. Batch-embed all turn texts (transcript + reply) and memory strings in a
         //    single call. Track which vector belongs to which item.
         let mut texts: Vec<String> = Vec::new();
@@ -168,6 +161,15 @@ impl MemoryIngester {
             vectors.len(),
             items.len()
         );
+
+        // The current speaker aliases, loaded AFTER the (slow) embedding call so a merge
+        // that commits mid-run is still honoured for this batch. A read failure fails the
+        // run (the offset is not advanced, so it retries) rather than ingesting under
+        // stale ids.
+        let aliases = match &self.aliases {
+            Some(a) => a.load().context("loading speaker aliases")?,
+            None => AliasMap::default(),
+        };
 
         // 2 + 3. Extract entities and upsert, in log order.
         let mut ingested = 0usize;

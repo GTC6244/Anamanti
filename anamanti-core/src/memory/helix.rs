@@ -487,8 +487,12 @@ impl HelixMemory {
                 ("speaker_id", PropertyInput::from(from)),
                 (P_MERGED_INTO, PropertyInput::from(to.as_str())),
             ];
-            if let Some(name) = from_name.as_deref() {
-                tomb.push(("name", PropertyInput::from(name)));
+            // Keep the display name only for a merge into another person; a forget
+            // (target = household) must not leave the forgotten person's name behind.
+            if to != HOUSEHOLD {
+                if let Some(name) = from_name.as_deref() {
+                    tomb.push(("name", PropertyInput::from(name)));
+                }
             }
             b = b.var_as("_tomb", g().add_n(L_USER, tomb));
             self.write(b.returning(["_tomb"])).await?;
@@ -1171,6 +1175,26 @@ impl HelixMemory {
 
     /// Follow `merged_into` tombstones from `speaker_id` to the surviving speaker id
     /// (bounded, so a malformed cycle can't spin). Unknown ids resolve to themselves.
+    /// True when this store has a live (not merged/forgotten) `User` node for
+    /// `speaker_id` — i.e. a pending alias replay could still move something.
+    pub async fn has_live_speaker(&self, speaker_id: &str) -> Result<bool> {
+        let v = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "n",
+                        g().n_with_label(L_USER)
+                            .where_(Predicate::eq("speaker_id", speaker_id))
+                            .value_map(Some(vec![P_MERGED_INTO])),
+                    )
+                    .returning(["n"]),
+            )
+            .await?;
+        Ok(items_of(&v, "n")
+            .iter()
+            .any(|i| i.get(P_MERGED_INTO).and_then(Value::as_str).is_none()))
+    }
+
     async fn resolve_speaker(&self, speaker_id: &str) -> Result<String> {
         let mut sid = speaker_id.to_string();
         for _ in 0..8 {

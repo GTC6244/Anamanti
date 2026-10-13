@@ -397,15 +397,25 @@ async fn build_backend(
             .await
             .context("opening embedded HelixDB store")?,
     );
+    // Speaker attribution must never take recall down: on any alias problem, warn and
+    // serve the store as-is. The ingester resolves aliases as it writes, and this replay
+    // is idempotent and runs again on the next boot/switch.
     if let Some(aliases) = &aliases {
-        let map = aliases.load().context("loading speaker aliases")?;
-        let moved = apply_speaker_aliases(&helix, &map)
-            .await
-            .with_context(|| format!("applying speaker aliases to the {sig} store"))?;
-        if moved > 0 {
-            log::info!(
-                "memory store {sig}: re-attributed {moved} node(s) per speaker merges/forgets"
-            );
+        match aliases.load() {
+            Ok(map) => match apply_speaker_aliases(&helix, &map).await {
+                Ok(moved) if moved > 0 => log::info!(
+                    "memory store {sig}: re-attributed {moved} node(s) per speaker merges/forgets"
+                ),
+                Ok(_) => {}
+                Err(e) => log::warn!(
+                    "memory store {sig}: applying speaker aliases failed ({e:#}); serving \
+                     the store as-is, will retry on the next boot"
+                ),
+            },
+            Err(e) => log::warn!(
+                "memory store {sig}: loading speaker aliases failed ({e:#}); serving the \
+                 store as-is, will retry on the next boot"
+            ),
         }
     }
     let ingester = Arc::new(
@@ -435,6 +445,11 @@ async fn build_backend(
 async fn apply_speaker_aliases(helix: &HelixMemory, aliases: &AliasMap) -> Result<u64> {
     let mut moved = 0;
     for (from, _) in aliases.iter() {
+        // Skip aliases this store already applied (tombstoned) or never saw (no User
+        // node ⇒ no turns/memories to move), so boot cost doesn't grow with history.
+        if !helix.has_live_speaker(from).await? {
+            continue;
+        }
         moved += match aliases.resolve(from) {
             HOUSEHOLD_SPEAKER => helix.delete_speaker(from).await?,
             to => helix.reassign_speaker(from, to).await?,
