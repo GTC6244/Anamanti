@@ -4,6 +4,13 @@
 //! `POST /v1/messages` with `stream: true` (per the claude-api skill's cURL
 //! reference). The response is Server-Sent Events; the reply tokens ride on
 //! `content_block_delta` events as `delta.text`, which map onto [`ReplyStream`].
+//!
+//! This is the **native engine** (`llm.engine="native"`): plain streamed text, no
+//! tools and no follow-up history ([`Capabilities::TEXT_ONLY`](super::Capabilities)).
+//! The default rig engine (`super::rig`) serves the same provider with tools.
+//!
+//! [`complete_text`] (one non-streaming completion) serves background jobs such as
+//! GraphRAG entity extraction regardless of engine.
 
 use std::sync::Arc;
 
@@ -13,7 +20,10 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use super::anthropic_auth::{apply_auth, AnthropicAuth, AnthropicTokenProvider, ANTHROPIC_VERSION};
-use super::{line_stream, LlmBackend, LlmTurn, ReplyStream};
+use super::{line_stream, send_streaming, LlmBackend, LlmTurn, ReplyStream};
+
+/// Deadline for a whole non-streaming [`complete_text`] call.
+const COMPLETE_TEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One non-streaming text completion from the Messages API, authenticated with an
 /// API key: `system` + a single user message in, the concatenated text blocks of
@@ -41,9 +51,10 @@ pub async fn complete_text(
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("content-type", "application/json")
         .json(&body)
+        .timeout(COMPLETE_TEXT_TIMEOUT)
         .send()
         .await
-        .context("POST /v1/messages to Anthropic")?;
+        .map_err(|e| crate::http::redacted("POST /v1/messages to Anthropic".into(), e))?;
     let status = resp.status();
     let payload = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -118,16 +129,22 @@ impl AnthropicBackend {
 
     /// Send one Messages request with the current auth applied. `bearer` is the
     /// subscription token when in OAuth mode.
-    async fn post(&self, body: &Value, bearer: Option<&str>) -> reqwest::Result<reqwest::Response> {
+    async fn post(
+        &self,
+        body: &Value,
+        bearer: Option<&str>,
+        what: &str,
+    ) -> Result<reqwest::Response> {
         let req = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json");
-        apply_auth(req, self.auth, &self.api_key, bearer)
-            .json(body)
-            .send()
-            .await
+        send_streaming(
+            apply_auth(req, self.auth, &self.api_key, bearer).json(body),
+            what,
+        )
+        .await
     }
 }
 
@@ -160,9 +177,8 @@ impl LlmBackend for AnthropicBackend {
         };
 
         let mut resp = self
-            .post(&body, bearer.as_deref())
-            .await
-            .context("POST /v1/messages to Anthropic")?;
+            .post(&body, bearer.as_deref(), "POST /v1/messages to Anthropic")
+            .await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && self.auth == AnthropicAuth::Subscription
         {
@@ -170,9 +186,12 @@ impl LlmBackend for AnthropicBackend {
                 tp.invalidate();
                 bearer = Some(tp.bearer().await?);
                 resp = self
-                    .post(&body, bearer.as_deref())
-                    .await
-                    .context("POST /v1/messages to Anthropic (after token refresh)")?;
+                    .post(
+                        &body,
+                        bearer.as_deref(),
+                        "POST /v1/messages to Anthropic (after token refresh)",
+                    )
+                    .await?;
             }
         }
         let resp = resp

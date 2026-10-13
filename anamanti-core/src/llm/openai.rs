@@ -3,15 +3,18 @@
 //! Symmetric with [`crate::llm::anthropic`]: Rust has no official OpenAI SDK, so
 //! this talks raw HTTP to `POST /v1/chat/completions` with `stream: true`. The
 //! response is Server-Sent Events; the reply tokens ride on `choices[0].delta.content`
-//! which map onto [`ReplyStream`]. Used when the model selector picks a specific
-//! OpenAI (GPT / o-series) model.
+//! which map onto [`ReplyStream`].
+//!
+//! This is the **native engine** (`llm.engine="native"`): plain streamed text, no
+//! tools and no follow-up history ([`Capabilities::TEXT_ONLY`](super::Capabilities)).
+//! The default rig engine (`super::rig`) serves the same provider with tools.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::json;
 
-use super::{line_stream, LlmBackend, LlmTurn, ReplyStream};
+use super::{line_stream, send_streaming, LlmBackend, LlmTurn, ReplyStream};
 
 /// Config + HTTP client for the OpenAI Chat Completions API.
 pub struct OpenAiBackend {
@@ -61,17 +64,17 @@ impl LlmBackend for OpenAiBackend {
             ],
         });
 
-        let resp = self
-            .client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .header("authorization", format!("Bearer {}", self.api_key))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("POST /v1/chat/completions to OpenAI")?
-            .error_for_status()
-            .context("OpenAI returned an error status")?;
+        let resp = send_streaming(
+            self.client
+                .post(format!("{}/v1/chat/completions", self.base_url))
+                .header("authorization", format!("Bearer {}", self.api_key))
+                .header("content-type", "application/json")
+                .json(&body),
+            "POST /v1/chat/completions to OpenAI",
+        )
+        .await?
+        .error_for_status()
+        .context("OpenAI returned an error status")?;
 
         let lines = line_stream(resp.bytes_stream());
         let tokens = async_stream::try_stream! {

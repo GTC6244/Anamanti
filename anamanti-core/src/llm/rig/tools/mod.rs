@@ -1,6 +1,6 @@
 //! The voice-assistant tool set the rig engine offers the model.
 //!
-//! Every tool implements one crate-local trait, [`VoiceTool`]: a name, the
+//! Every tool implements one crate-local trait, `VoiceTool`: a name, the
 //! [`ToolDefinition`] advertised to the model, optional usage guidance for the system
 //! preamble, and an async `invoke` that turns the model's JSON arguments into a short
 //! speakable result. [`Tools`] is a name-keyed, insertion-ordered registry of them:
@@ -13,9 +13,9 @@
 //! provider is configured (web search, calendar, directions, Spotify, shopping list,
 //! phone, recipe, weather, places).
 //!
-//! Layout: [`search`] (web search providers + `internet_search`), [`device`] (timers,
-//! personality, font), [`display`] (recipe / weather / places screens and their
-//! `close_*` tools), [`services`] (calendar, directions, Spotify, shopping list, phone).
+//! Layout: `search` (web search providers + `internet_search`), `device` (timers,
+//! personality, font), `display` (recipe / weather / places screens and their
+//! `close_*` tools), `services` (calendar, directions, Spotify, shopping list, phone).
 
 mod device;
 mod display;

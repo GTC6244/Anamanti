@@ -2,13 +2,22 @@
 //! Ollama's `/api/chat` with `stream: true` returns newline-delimited JSON, one
 //! object per token chunk (`{"message":{"content":"..."},"done":false}`), which
 //! maps cleanly onto [`ReplyStream`].
+//!
+//! This is the **native engine** (`llm.engine="native"`): plain streamed text, no
+//! tools and no follow-up history ([`Capabilities::TEXT_ONLY`](super::Capabilities)).
+//! The default rig engine (`super::rig`) serves the same provider with tools.
+//!
+//! [`available_models`] / [`resolve_model`] (the startup model check) serve both engines.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::json;
 
-use super::{line_stream, LlmBackend, LlmTurn, ReplyStream};
+use super::{line_stream, send_streaming, LlmBackend, LlmTurn, ReplyStream};
+
+/// Deadline for the startup `GET /api/tags` model check.
+const TAGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Config + HTTP client for a local Ollama endpoint.
 pub struct OllamaBackend {
@@ -34,14 +43,12 @@ impl OllamaBackend {
 /// 404 at request time.
 pub async fn available_models(base_url: &str) -> Result<Vec<String>> {
     let base_url = base_url.trim_end_matches('/');
-    let resp = reqwest::Client::new()
-        .get(format!("{base_url}/api/tags"))
-        .send()
-        .await
-        .context("GET /api/tags from Ollama")?
-        .error_for_status()
-        .context("Ollama /api/tags returned an error status")?;
-    let body: serde_json::Value = resp.json().await.context("parsing /api/tags JSON")?;
+    let body: serde_json::Value = crate::http::send_json(
+        crate::http::get(format!("{base_url}/api/tags"), "ollama"),
+        TAGS_TIMEOUT,
+        "Ollama /api/tags",
+    )
+    .await?;
     Ok(body
         .get("models")
         .and_then(|m| m.as_array())
@@ -92,15 +99,15 @@ impl LlmBackend for OllamaBackend {
             ],
         });
 
-        let resp = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .context("POST /api/chat to Ollama")?
-            .error_for_status()
-            .context("Ollama returned an error status")?;
+        let resp = send_streaming(
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&body),
+            "POST /api/chat to Ollama",
+        )
+        .await?
+        .error_for_status()
+        .context("Ollama returned an error status")?;
 
         let lines = line_stream(resp.bytes_stream());
         let tokens = async_stream::try_stream! {

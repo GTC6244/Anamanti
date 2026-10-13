@@ -12,7 +12,7 @@
 //! configured integration). `respond` runs a short negotiation loop: each round is
 //! one completion; if the model asks for tools they are executed, their results
 //! appended to the conversation, and the model is asked again — up to
-//! [`MAX_TOOL_ROUNDS`] rounds, after which one final round is made with tool use
+//! `MAX_TOOL_ROUNDS` rounds, after which one final round is made with tool use
 //! forbidden so the turn always ends in an answer.
 //!
 //! Every round is **streamed**: text deltas reach TTS as they arrive and tool calls
@@ -22,7 +22,7 @@
 //! tool turns used to fall back to a non-streaming `completion()`; 0.42's Ollama
 //! adapter reads tool calls from every record — covered by
 //! `tests::rig_ollama_stream_surfaces_a_tool_call_from_a_non_final_chunk`.) The
-//! non-streaming path remains for a provider whose [`RoundModel::streams_tool_calls`]
+//! non-streaming path remains for a provider whose `RoundModel::streams_tool_calls`
 //! is false.
 
 mod oauth;

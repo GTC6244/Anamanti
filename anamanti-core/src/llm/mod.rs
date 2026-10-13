@@ -5,6 +5,11 @@
 //! concrete backend: it is handed a `Box<dyn LlmBackend>` chosen from config, so
 //! local (Ollama / llama.cpp) and cloud (Claude) are swappable without touching
 //! the turn logic. This is the locked "pluggable behind a trait" decision.
+//!
+//! Two engines implement it: [`rig`] (default; every provider with the tool set
+//! and follow-up history) and the native plain-text clients ([`ollama`],
+//! [`anthropic`], [`openai`]). What a backend can do is explicit data —
+//! [`LlmBackend::capabilities`] — so a lost capability is warned about, not silent.
 
 pub mod anthropic;
 pub mod anthropic_auth;
@@ -15,6 +20,7 @@ pub mod openai;
 pub mod rig;
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -220,18 +226,55 @@ pub async fn collect_reply(mut stream: ReplyStream) -> Result<String> {
     Ok(out)
 }
 
+/// How long a native backend waits for a streamed request's response headers
+/// (connect + the provider starting its reply; a cold local model can be slow).
+pub(crate) const RESPONSE_START_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long a native streamed reply may go without a single byte before it is
+/// abandoned. Resets on every chunk, so a long reply is never cut.
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Send a native backend's streaming request, bounding the wait for the response
+/// headers by [`RESPONSE_START_TIMEOUT`] (a whole-request timeout would cut the
+/// stream). Transport errors carry no URL or secret.
+pub(crate) async fn send_streaming(
+    req: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<reqwest::Response> {
+    match tokio::time::timeout(RESPONSE_START_TIMEOUT, req.send()).await {
+        Ok(sent) => sent.map_err(|e| crate::http::redacted(format!("{what}: request failed"), e)),
+        Err(_) => anyhow::bail!(
+            "{what}: no response within {}s",
+            RESPONSE_START_TIMEOUT.as_secs()
+        ),
+    }
+}
+
 /// Turn a byte stream (an HTTP response body) into a stream of complete text lines,
 /// splitting on `\n`. Both streaming LLM wire formats used here are line-oriented:
 /// Ollama emits newline-delimited JSON, Claude emits SSE (`event:`/`data:` lines).
-/// A trailing partial line (no terminating `\n`) is yielded at end-of-stream.
+/// A trailing partial line (no terminating `\n`) is yielded at end-of-stream. A body
+/// that goes silent for [`STREAM_IDLE_TIMEOUT`] ends the stream with an error.
 pub(crate) fn line_stream(
     body: impl Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+) -> impl Stream<Item = Result<String>> + Send + 'static {
+    line_stream_with_idle(body, STREAM_IDLE_TIMEOUT)
+}
+
+fn line_stream_with_idle(
+    body: impl Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+    idle: Duration,
 ) -> impl Stream<Item = Result<String>> + Send + 'static {
     async_stream::try_stream! {
         let mut buf: Vec<u8> = Vec::new();
         futures_util::pin_mut!(body);
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk?;
+        loop {
+            let Ok(next) = tokio::time::timeout(idle, body.next()).await else {
+                Err(anyhow::anyhow!("LLM stream stalled: no data for {}s", idle.as_secs()))?;
+                break;
+            };
+            let Some(chunk) = next else { break };
+            let chunk = chunk.map_err(|e| crate::http::redacted("reading the LLM stream".into(), e))?;
             buf.extend_from_slice(&chunk);
             while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=nl).collect();
@@ -263,6 +306,34 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert_eq!(lines, vec!["one", "two", "three"]);
+    }
+
+    #[tokio::test]
+    async fn line_stream_errors_when_the_body_goes_silent() {
+        let body = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(b"one\n"))])
+            .chain(futures_util::stream::pending());
+        let mut lines = Box::pin(line_stream_with_idle(body, Duration::from_millis(50)));
+        assert_eq!(lines.next().await.unwrap().unwrap(), "one");
+        let err = lines.next().await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("stalled"), "{err}");
+        assert!(lines.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn send_streaming_reports_refused_connections_without_the_url() {
+        let base = crate::http::test_support::refused_base();
+        let err = send_streaming(
+            crate::http::shared_client().post(format!("{base}/api/chat?key=SECRET")),
+            "POST /api/chat to Ollama",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.starts_with("POST /api/chat to Ollama: request failed"),
+            "{text}"
+        );
+        assert!(!text.contains("SECRET"), "{text}");
     }
 
     #[tokio::test]
