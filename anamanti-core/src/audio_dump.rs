@@ -1,7 +1,7 @@
-//! Debug-only per-turn audio capture for the Phase 0 AEC corpus.
+//! Debug-only per-turn audio capture (originally the Phase 0 AEC corpus).
 //!
 //! When `audio_dump_dir` is set in the config file, each voice turn writes the
-//! two streams the host-side APM will need — the device's far-field **mic** PCM
+//! two streams an offline echo-cancellation experiment needs — the device's far-field **mic** PCM
 //! (near-end, as streamed up for STT) and the **Piper TTS** PCM relayed back
 //! (far-end reference) — as raw little-endian `i16` files, plus a JSON-lines
 //! manifest for pairing them offline. Unset by default, so production is
@@ -14,10 +14,11 @@
 //! **barge-in**: the mic of turn `N+1` captures the still-playing reply of turn
 //! `N`. To reconstruct that pair offline we record, per turn, the wall-clock time
 //! of the first mic byte and the first TTS byte, so the mic of `N+1` can be lined
-//! up against the reference (TTS of `N`) by their absolute start times. AEC3's
-//! delay estimator then refines the residual offset.
+//! up against the reference (TTS of `N`) by their absolute start times; an AEC's
+//! delay estimator then refines the residual offset. (Echo cancellation itself now
+//! ships in the device-side audio-HAL shim, so the in-crate AEC spike was removed.)
 //!
-//! Convert a dump to the `aec_spike` format (16 kHz mono) with, e.g.:
+//! Convert a dump to 16 kHz mono raw PCM with, e.g.:
 //!   ffmpeg -f s16le -ar <rate> -ac 1 -i turn_N_tts_<rate>.raw \
 //!          -f s16le -ar 16000 -ac 1 ref.pcm
 

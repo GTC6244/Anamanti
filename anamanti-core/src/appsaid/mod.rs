@@ -57,6 +57,12 @@ pub fn normalize_pairing_code(code: &str) -> String {
         .collect()
 }
 
+/// Per-request budget for AppSaid calls.
+const APPSAID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `User-Agent` component label for AppSaid requests.
+const COMPONENT: &str = "appsaid";
+
 /// Redeem a short **pairing code** shown on a recipient's AppSaid phone app for that
 /// phone's durable public `user_key` — the TV-style onboarding from the AppSaid
 /// integration guide. One `POST {worker_url}/v1/pair/claim` with `{ code }`; the claim
@@ -76,13 +82,13 @@ pub async fn claim_pairing_code(worker_url: &str, code: &str) -> Result<String> 
         bail!("enter the pairing code shown in the AppSaid app");
     }
 
-    let resp = crate::http::shared_client()
-        .post(format!("{worker_url}/v1/pair/claim"))
-        .json(&json!({ "code": code }))
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .context("calling the AppSaid pairing endpoint")?;
+    let resp = crate::http::send(
+        crate::http::post(format!("{worker_url}/v1/pair/claim"), COMPONENT)
+            .json(&json!({ "code": code })),
+        APPSAID_TIMEOUT,
+        "calling the AppSaid pairing endpoint",
+    )
+    .await?;
 
     let status = resp.status();
     // The body may be absent/non-JSON on some error paths; tolerate that.
@@ -134,7 +140,6 @@ pub fn maps_search_url(place: &str) -> String {
 /// (display name → `user_key`), and an optional default recipient. Every send is one
 /// `POST {worker_url}/v1/messages`.
 pub struct AppSaidClient {
-    http: reqwest::Client,
     /// Worker base URL with any trailing slash trimmed (e.g. `https://appsaid.you.workers.dev`).
     worker_url: String,
     /// The sender app token (SECRET).
@@ -154,7 +159,6 @@ impl AppSaidClient {
         default_recipient: Option<String>,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
             worker_url: worker_url.into().trim_end_matches('/').to_string(),
             app_token: app_token.into(),
             recipients,
@@ -249,14 +253,12 @@ impl PhoneMessenger for AppSaidClient {
             payload["url_title"] = json!("Open");
         }
 
-        let resp = self
-            .http
-            .post(format!("{}/v1/messages", self.worker_url))
-            .json(&payload)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await
-            .context("calling the AppSaid send API")?;
+        let resp = crate::http::send(
+            crate::http::post(format!("{}/v1/messages", self.worker_url), COMPONENT).json(&payload),
+            APPSAID_TIMEOUT,
+            "calling the AppSaid send API",
+        )
+        .await?;
 
         let status = resp.status();
         let body: Value = resp
@@ -487,8 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_returns_the_user_key_and_posts_normalized_code() {
-        let (base, handle) =
-            fake_server("200 OK", r#"{"user_key":"gdksxryuunome6dp"}"#).await;
+        let (base, handle) = fake_server("200 OK", r#"{"user_key":"gdksxryuunome6dp"}"#).await;
         let key = claim_pairing_code(&base, "ab-2k").await.unwrap();
         assert_eq!(key, "gdksxryuunome6dp");
 
@@ -508,13 +509,18 @@ mod tests {
         let (base, _h) = fake_server("404 Not Found", r#"{"error":"not_found"}"#).await;
         let err = claim_pairing_code(&base, "ZZZZ").await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("expired") || msg.contains("fresh one"), "{msg}");
+        assert!(
+            msg.contains("expired") || msg.contains("fresh one"),
+            "{msg}"
+        );
     }
 
     #[tokio::test]
     async fn claim_with_blank_code_errors_before_any_network() {
         // No server bound — resolution must fail before the HTTP call.
-        let err = claim_pairing_code("http://127.0.0.1:1", "   ").await.unwrap_err();
+        let err = claim_pairing_code("http://127.0.0.1:1", "   ")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("pairing code"), "{err}");
     }
 

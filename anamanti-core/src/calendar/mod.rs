@@ -2,24 +2,28 @@
 //! `calendar_lookup` tool (wired in `llm/rig.rs`).
 //!
 //! One or more subscriptions are configured in the JSON config file's `calendar`
-//! block. On each lookup the [`IcalSubscription`] source fetches the feeds (cached
-//! with a TTL — `calendar.cache_ttl_secs`, default 5 min — since the fetch dominates
-//! cost and parsing even a ~1 MB feed is ~20 ms), parses the `VEVENT`s, expands recurring
-//! events within the requested [`TimeWindow`], and returns the matching
-//! [`CalEvent`]s. Everything is read-only: we never write back to a feed.
+//! block. On each lookup the [`IcalSubscription`] source fetches the feeds (cached in
+//! the shared [`crate::cache::ToolCache`] under `calendar_lookup` with a TTL —
+//! `calendar.cache_ttl_secs` when set, else `tool_cache.calendar_lookup`, default 5 min
+//! — since the fetch dominates cost and parsing even a ~1 MB feed is ~20 ms), parses the
+//! `VEVENT`s, expands recurring events within the requested [`TimeWindow`], and returns
+//! the matching [`CalEvent`]s. If every feed fails the lookup is an error (never cached)
+//! rather than an empty calendar. Everything is read-only: we never write back to a feed.
 //!
 //! People linkage is intentionally light for v1: filtering by `person` is a fuzzy
 //! match over each event's attendees / organizer / title (see [`person_matches`]),
 //! which needs no email addresses in the feed and no HelixDB round-trip. A future
 //! pass can canonicalize a spoken name against `Entity`/`User` nodes in the graph.
 
-use std::sync::Arc;
-use std::time::{Duration as StdDuration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration as StdDuration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
 use tokio::sync::Mutex;
+
+use crate::cache::ToolCache;
 
 mod parse;
 
@@ -65,56 +69,101 @@ pub struct CalendarSpec {
     pub url: String,
 }
 
-/// A [`CalendarSource`] backed by web `.ics` subscription URLs.
+/// The logical tool name calendar caches under — its key in the `tool_cache` TTL config
+/// and in the shared [`ToolCache`] key space.
+pub const CALENDAR_TOOL: &str = "calendar_lookup";
+
+/// What the tool reports when **every** configured feed failed to load. Never cached,
+/// so the next question retries instead of hearing "nothing on your calendar".
+pub const UNREACHABLE: &str = "I couldn't reach your calendar";
+
+/// Per-request budget for one `.ics` feed fetch.
+const FEED_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+
+/// A [`CalendarSource`] backed by web `.ics` subscription URLs. Fetched feed bodies are
+/// cached in the shared [`ToolCache`] under [`CALENDAR_TOOL`].
 pub struct IcalSubscription {
-    client: reqwest::Client,
     specs: Vec<CalendarSpec>,
-    ttl: StdDuration,
-    cache: Mutex<Option<Cache>>,
+    /// An explicit TTL (`calendar.cache_ttl_secs`); `None` ⇒ the `tool_cache`
+    /// config's `calendar_lookup` entry (default [`IcalSubscription::DEFAULT_TTL`]).
+    ttl_override: Option<StdDuration>,
+    cache: Arc<ToolCache>,
+    /// Serializes refreshes so concurrent lookups don't fetch every feed twice.
+    refresh: Mutex<()>,
 }
 
-struct Cache {
-    fetched_at: Instant,
-    /// `(calendar name, raw ics body)` for each feed that fetched successfully.
-    bodies: Vec<(String, String)>,
+/// The process-wide calendar body cache, shared across rebuilt sources (a settings
+/// save builds a new [`IcalSubscription`]); entries are keyed by the feed list.
+fn calendar_cache() -> Arc<ToolCache> {
+    static CACHE: OnceLock<Arc<ToolCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(ToolCache::new())).clone()
 }
 
 impl IcalSubscription {
     /// Default cache TTL. The dominant cost of a lookup is the HTTPS fetch (parsing
     /// a ~1 MB feed is ~20 ms); calendar contents don't change second-to-second, so
     /// a few minutes of staleness makes back-to-back questions instant at negligible
-    /// freshness cost. Override with `calendar.cache_ttl_secs` in the config file
-    /// (`0` disables caching).
-    pub const DEFAULT_TTL: StdDuration = StdDuration::from_secs(300);
+    /// freshness cost. Override with `calendar.cache_ttl_secs` (or
+    /// `tool_cache.calendar_lookup`) in the config file (`0` disables caching).
+    pub const DEFAULT_TTL: StdDuration =
+        StdDuration::from_secs(crate::cache::DEFAULT_CALENDAR_TTL_SECS);
 
-    pub fn new(specs: Vec<CalendarSpec>) -> Self {
-        Self::with_ttl(specs, Self::DEFAULT_TTL)
+    /// A source with an explicit cache TTL (`calendar.cache_ttl_secs`), or `None` to
+    /// follow the `tool_cache.calendar_lookup` TTL.
+    pub fn with_ttl(specs: Vec<CalendarSpec>, ttl: Option<StdDuration>) -> Self {
+        Self::with_cache(specs, ttl, calendar_cache())
     }
 
-    /// Like [`new`](Self::new) but with an explicit cache TTL.
-    pub fn with_ttl(specs: Vec<CalendarSpec>, ttl: StdDuration) -> Self {
-        let client = crate::http::tuned_builder()
-            .timeout(StdDuration::from_secs(10))
-            .user_agent("anamanti-core/0.1 (calendar)")
-            .build()
-            .unwrap_or_default();
+    fn with_cache(
+        specs: Vec<CalendarSpec>,
+        ttl: Option<StdDuration>,
+        cache: Arc<ToolCache>,
+    ) -> Self {
         Self {
-            client,
             specs,
-            ttl,
-            cache: Mutex::new(None),
+            ttl_override: ttl,
+            cache,
+            refresh: Mutex::new(()),
         }
+    }
+
+    /// The effective cache TTL: the explicit `calendar.cache_ttl_secs`, else
+    /// `tool_cache.calendar_lookup`.
+    fn ttl(&self) -> StdDuration {
+        self.ttl_override
+            .unwrap_or_else(|| crate::cache::config().ttl(CALENDAR_TOOL))
+    }
+
+    /// The cache key: the tool name plus every configured `(name, url)`.
+    fn cache_key(&self) -> Option<String> {
+        let feeds: Vec<(&str, &str)> = self
+            .specs
+            .iter()
+            .map(|s| (s.name.as_str(), s.url.as_str()))
+            .collect();
+        ToolCache::key(CALENDAR_TOOL, &feeds)
     }
 
     /// Fetch all feeds, or return the cached bodies if still fresh. Individual feed
-    /// failures are logged and skipped so one bad URL doesn't sink the lookup.
-    async fn bodies(&self) -> Vec<(String, String)> {
-        let mut guard = self.cache.lock().await;
-        if let Some(cache) = guard.as_ref() {
-            if cache.fetched_at.elapsed() < self.ttl {
-                return cache.bodies.clone();
-            }
+    /// failures are logged and skipped so one bad URL doesn't sink the lookup (what
+    /// did load is cached as usual). When **every** feed fails the result is an
+    /// [`UNREACHABLE`] error and nothing is cached.
+    async fn bodies(&self) -> Result<Vec<(String, String)>> {
+        let ttl = self.ttl();
+        let key = self.cache_key().filter(|_| !ttl.is_zero());
+        let cached = |key: &Option<String>| {
+            key.as_deref()
+                .and_then(|k| self.cache.get_as::<Vec<(String, String)>>(k))
+        };
+        if let Some(hit) = cached(&key) {
+            return Ok(hit);
         }
+        let _refresh = self.refresh.lock().await;
+        // Another lookup may have refreshed while we waited.
+        if let Some(hit) = cached(&key) {
+            return Ok(hit);
+        }
+
         let mut bodies = Vec::new();
         for spec in &self.specs {
             match self.fetch_one(spec).await {
@@ -122,24 +171,30 @@ impl IcalSubscription {
                 Err(e) => log::warn!("calendar '{}' fetch failed: {e:#}", spec.name),
             }
         }
-        *guard = Some(Cache {
-            fetched_at: Instant::now(),
-            bodies: bodies.clone(),
-        });
-        bodies
+        if bodies.is_empty() && !self.specs.is_empty() {
+            anyhow::bail!(UNREACHABLE);
+        }
+        if let Some(key) = key {
+            self.cache.put_as(key, &bodies, ttl);
+        }
+        Ok(bodies)
     }
 
     async fn fetch_one(&self, spec: &CalendarSpec) -> Result<String> {
         let url = normalize_url(&spec.url);
-        let resp = self.client.get(&url).send().await?.error_for_status()?;
-        Ok(resp.text().await?)
+        crate::http::send_text(
+            crate::http::get(url, "calendar"),
+            FEED_TIMEOUT,
+            "calendar feed",
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl CalendarSource for IcalSubscription {
     async fn events(&self, window: TimeWindow) -> Result<Vec<CalEvent>> {
-        let bodies = self.bodies().await;
+        let bodies = self.bodies().await?;
         let mut all = Vec::new();
         for (name, body) in &bodies {
             all.extend(parse::events_in_window(name, body, window));
@@ -168,21 +223,29 @@ fn normalize_url(url: &str) -> String {
 
 /// Build the calendar source from the configured subscriptions + cache TTL.
 /// Returns `None` (tool not advertised) when there are no usable subscriptions.
-pub fn build(specs: Vec<CalendarSpec>, ttl: StdDuration) -> Option<Arc<dyn CalendarSource>> {
+///
+/// `ttl` is the raw `calendar.cache_ttl_secs`: when set it wins (`0` = no cache);
+/// `None` (key absent) ⇒ the `tool_cache.calendar_lookup` TTL applies (default 5 min).
+pub fn build_with(
+    specs: Vec<CalendarSpec>,
+    ttl: Option<StdDuration>,
+) -> Option<Arc<dyn CalendarSource>> {
     if specs.is_empty() {
         return None;
     }
+    let source = IcalSubscription::with_ttl(specs, ttl);
     log::info!(
         "calendar_lookup enabled with {} subscription(s): {} (cache TTL {}s)",
-        specs.len(),
-        specs
+        source.specs.len(),
+        source
+            .specs
             .iter()
             .map(|s| s.name.as_str())
             .collect::<Vec<_>>()
             .join(", "),
-        ttl.as_secs()
+        source.ttl().as_secs()
     );
-    Some(Arc::new(IcalSubscription::with_ttl(specs, ttl)))
+    Some(Arc::new(source))
 }
 
 // ---------------------------------------------------------------------------
@@ -527,5 +590,100 @@ mod tests {
         assert!(text.contains("Sync"));
         assert!(text.contains("with Alice"));
         assert!(text.contains("[Work]"));
+    }
+
+    // ---- fetching + caching (loopback servers, no real network) ----
+
+    use crate::http::test_support::{refused_base, serve_statuses};
+
+    fn ics_one_event_soon(summary: &str) -> String {
+        let stamp = (Local::now() + Duration::hours(2))
+            .format("%Y%m%dT%H%M%S")
+            .to_string();
+        format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:{summary}\r\nDTSTART:{stamp}\r\nDTEND:{stamp}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+    }
+
+    fn next_day() -> TimeWindow {
+        TimeWindow {
+            start: Local::now(),
+            end: Local::now() + Duration::days(1),
+        }
+    }
+
+    fn source(urls: &[(&str, String)]) -> IcalSubscription {
+        let specs = urls
+            .iter()
+            .map(|(name, url)| CalendarSpec {
+                name: name.to_string(),
+                url: url.clone(),
+            })
+            .collect();
+        // A private cache + explicit TTL so tests are isolated from each other.
+        IcalSubscription::with_cache(
+            specs,
+            Some(StdDuration::from_secs(300)),
+            Arc::new(ToolCache::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn total_failure_is_an_error_and_is_not_cached() {
+        // First fetch: the only feed fails (500). Second: it is back up.
+        let (base, server) = serve_statuses(vec![
+            ("500 Internal Server Error", String::new()),
+            ("200 OK", ics_one_event_soon("Dentist")),
+        ]);
+        let src = source(&[("Home", format!("{base}/home.ics"))]);
+        let err = src.events(next_day()).await.unwrap_err();
+        assert_eq!(format!("{err:#}"), UNREACHABLE);
+        // The failure was not cached as "no events": the retry refetches and sees it.
+        let events = src.events(next_day()).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Dentist");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_failure_returns_and_caches_what_loaded() {
+        // One good feed (served exactly once) + one unreachable feed.
+        let (base, server) = serve_statuses(vec![("200 OK", ics_one_event_soon("Standup"))]);
+        let src = source(&[
+            ("Work", format!("{base}/work.ics")),
+            ("Broken", format!("{}/x.ics", refused_base())),
+        ]);
+        let first = src.events(next_day()).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].calendar, "Work");
+        server.await.unwrap();
+        // Served from the cache: the good feed's server is gone now.
+        let second = src.events(next_day()).await.unwrap();
+        assert_eq!(second.len(), 1);
+    }
+
+    #[test]
+    fn explicit_ttl_wins_and_absent_follows_the_tool_cache_config() {
+        let spec = || {
+            vec![CalendarSpec {
+                name: "A".into(),
+                url: "https://a/x.ics".into(),
+            }]
+        };
+        // An explicit calendar.cache_ttl_secs wins…
+        let s = IcalSubscription::with_ttl(spec(), Some(StdDuration::from_secs(60)));
+        assert_eq!(s.ttl(), StdDuration::from_secs(60));
+        // …including one equal to the 5-minute default (no longer read as "unset")…
+        let s = IcalSubscription::with_ttl(spec(), Some(IcalSubscription::DEFAULT_TTL));
+        assert_eq!(s.ttl_override, Some(IcalSubscription::DEFAULT_TTL));
+        // …and 0, which disables the cache.
+        let s = IcalSubscription::with_ttl(spec(), Some(StdDuration::ZERO));
+        assert!(s.ttl().is_zero());
+        // Absent, it follows tool_cache.calendar_lookup (default 5 min).
+        let s = IcalSubscription::with_ttl(spec(), None);
+        assert_eq!(s.ttl_override, None);
+        assert_eq!(s.ttl(), crate::cache::config().ttl(CALENDAR_TOOL));
+        assert!(build_with(Vec::new(), None).is_none());
+        assert!(build_with(spec(), Some(StdDuration::ZERO)).is_some());
     }
 }

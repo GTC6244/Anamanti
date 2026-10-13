@@ -3,13 +3,12 @@
 //! fans them out as `anamanti-weather` `{"action":"current"}` frames — so the small
 //! icon + temperature beside the idle clock stay fresh without a voice turn.
 //!
-//! Structurally a twin of [`crate::notify::NotificationService`]: the socket is owned
-//! by the per-connection task in [`crate::server`]; this registry only holds an mpsc
-//! *sender* into that task. A newly-registered channel is immediately sent the
-//! last-known report so the indicator appears at once rather than after the next tick.
+//! Structurally a twin of [`crate::notify::NotificationService`] — both wrap a
+//! [`ChannelRegistry`]: the socket is owned by the per-connection task in
+//! [`crate::server`]; the registry only holds an mpsc *sender* into that task. A
+//! newly-registered channel is immediately sent the last-known report so the indicator
+//! appears at once rather than after the next tick.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,8 +16,9 @@ use tokio::sync::mpsc;
 
 use serde_json::{to_value as json_to_value, Value};
 
-use crate::directions::LiveHomeLocation;
-use crate::weather::WeatherReport;
+use crate::notify::ChannelRegistry;
+use crate::settings::SharedSettings;
+use crate::weather::{WeatherProvider, WeatherReport};
 use crate::wyoming::protocol::WyomingEvent;
 
 /// Serialize a report to the JSON `weather` payload carried in the frame; an empty
@@ -32,10 +32,7 @@ fn to_value(report: &WeatherReport) -> Value {
 /// server (which registers live channels) and the periodic push task.
 #[derive(Default)]
 pub struct WeatherService {
-    /// conn_id → the sender feeding that connection's write pump.
-    conns: Mutex<HashMap<u64, mpsc::UnboundedSender<WyomingEvent>>>,
-    /// Monotonic connection-handle allocator.
-    next_conn: AtomicU64,
+    channels: ChannelRegistry<()>,
     /// The most recent report, replayed to a channel the moment it connects.
     last: Mutex<Option<WeatherReport>>,
 }
@@ -49,86 +46,93 @@ impl WeatherService {
     /// [`deregister`](Self::deregister) on close) and the receiver the connection task
     /// drains to write pushes out. If a report is already cached it is queued
     /// immediately so the device shows conditions without waiting for the next tick.
-    pub fn register(
-        &self,
-        _device_id: &str,
-        _name: &str,
-    ) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        if let Some(report) = self.last.lock().unwrap().as_ref() {
-            let _ = tx.send(WyomingEvent::weather_current(to_value(report)));
-        }
-        let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        self.conns.lock().unwrap().insert(conn_id, tx);
-        (conn_id, rx)
+    pub fn register(&self) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
+        let initial = self
+            .last
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|report| WyomingEvent::weather_current(to_value(report)));
+        self.channels.register((), initial)
     }
 
     /// Drop a channel from the registry (its task is ending / the device closed).
     pub fn deregister(&self, conn_id: u64) {
-        self.conns.lock().unwrap().remove(&conn_id);
+        self.channels.deregister(conn_id);
     }
 
     /// How many weather channels are currently connected.
     pub fn connected(&self) -> usize {
-        self.conns.lock().unwrap().len()
+        self.channels.len()
     }
 
     /// Cache `report` and push it to every connected device as a `current` frame.
     /// Dead channels (receiver dropped) are pruned. Returns the delivery count.
     pub fn broadcast(&self, report: &WeatherReport) -> usize {
         *self.last.lock().unwrap() = Some(report.clone());
-        let event = WyomingEvent::weather_current(to_value(report));
-        let mut conns = self.conns.lock().unwrap();
-        let mut delivered = 0usize;
-        conns.retain(|_, tx| match tx.send(event.clone()) {
-            Ok(()) => {
-                delivered += 1;
-                true
-            }
-            Err(_) => false,
-        });
-        delivered
+        self.channels
+            .broadcast(&WyomingEvent::weather_current(to_value(report)))
     }
 }
 
-/// Spawn the periodic ambient-weather push. Every `interval` it reads the live home
-/// location, builds the *currently selected* forecast provider from `settings` (so a
-/// config-page provider/key change retargets the push without a restart), fetches current
-/// conditions, and broadcasts them to all connected weather channels. No-ops on a tick
-/// when no location is set, weather is disabled, or the fetch fails (the previous report
-/// stays on screen). Returns immediately; the task runs for the process lifetime.
+/// Spawn the periodic ambient-weather push: every `interval`, one [`push_once`] with the
+/// *currently selected* forecast provider built from `settings` (so a config-page
+/// provider/key change retargets the push without a restart). Returns immediately; the
+/// task runs for the process lifetime.
 pub fn spawn_periodic(
     service: Arc<WeatherService>,
-    settings: Arc<crate::settings::SharedSettings>,
-    home_location: LiveHomeLocation,
-    imperial: bool,
+    settings: Arc<SharedSettings>,
     interval: Duration,
 ) {
     tokio::spawn(async move {
         // A tiny initial delay lets the device dial its channel before the first push.
         tokio::time::sleep(Duration::from_secs(2)).await;
         loop {
-            match (home_location.weather(), settings.current_weather_provider()) {
-                (Some(loc), Some(provider)) => match provider
-                    .fetch(&loc, imperial, crate::weather::ForecastWhen::Now)
-                    .await
-                {
-                    Ok(report) => {
-                        let n = service.broadcast(&report);
-                        log::debug!(
-                            "weather push: {} in {} → {n} device(s)",
-                            report.current.temp,
-                            report.location_label
-                        );
-                    }
-                    Err(e) => log::warn!("weather push: fetch failed: {e:#}"),
-                },
-                (None, _) => log::debug!("weather push: no home location set; skipping tick"),
-                (_, None) => log::debug!("weather push: weather disabled; skipping tick"),
-            }
+            push_once(&service, &settings, settings.current_weather_provider()).await;
             tokio::time::sleep(interval).await;
         }
     });
+}
+
+/// One ambient-weather tick. Reads the **live** household location and units from the
+/// settings (so a config-page edit of either applies on the next tick, matching the
+/// spoken weather path), fetches current conditions from `provider`, and broadcasts
+/// them to every connected weather channel. Returns the delivery count, or `None` when
+/// the tick was skipped: no home location, weather disabled (`provider` is `None`), or
+/// the fetch failed (the previous report stays on screen).
+pub async fn push_once(
+    service: &WeatherService,
+    settings: &SharedSettings,
+    provider: Option<Arc<dyn WeatherProvider>>,
+) -> Option<usize> {
+    let household = settings.household();
+    let Some(provider) = provider else {
+        log::debug!("weather push: weather disabled; skipping tick");
+        return None;
+    };
+    let Some(location) = household.address.weather_location() else {
+        log::debug!("weather push: no home location set; skipping tick");
+        return None;
+    };
+    let imperial = crate::household::units_are_imperial(household.weather_units.as_deref());
+    match provider
+        .fetch(&location, imperial, crate::weather::ForecastWhen::Now)
+        .await
+    {
+        Ok(report) => {
+            let n = service.broadcast(&report);
+            log::debug!(
+                "weather push: {} in {} → {n} device(s)",
+                report.current.temp,
+                report.location_label
+            );
+            Some(n)
+        }
+        Err(e) => {
+            log::warn!("weather push: fetch failed: {e:#}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -157,8 +161,8 @@ mod tests {
         let svc = WeatherService::new();
         assert_eq!(svc.connected(), 0);
 
-        let (id_a, mut rx_a) = svc.register("dev-a", "Kitchen");
-        let (_id_b, rx_b) = svc.register("dev-b", "Bedroom");
+        let (id_a, mut rx_a) = svc.register();
+        let (_id_b, rx_b) = svc.register();
         assert_eq!(svc.connected(), 2);
 
         drop(rx_b);
@@ -177,10 +181,79 @@ mod tests {
     fn a_new_channel_gets_the_last_report_immediately() {
         let svc = WeatherService::new();
         svc.broadcast(&report()); // caches, nobody connected yet
-        let (_id, mut rx) = svc.register("late", "");
+        let (_id, mut rx) = svc.register();
         let got = rx
             .try_recv()
             .expect("late joiner replayed the cached report");
         assert_eq!(got.event_type, types::WEATHER);
+    }
+
+    /// Records the `imperial` flag of every fetch.
+    struct UnitsProbe(std::sync::Mutex<Vec<bool>>);
+
+    #[async_trait::async_trait]
+    impl WeatherProvider for UnitsProbe {
+        async fn fetch(
+            &self,
+            _location: &str,
+            imperial: bool,
+            _when: crate::weather::ForecastWhen,
+        ) -> anyhow::Result<WeatherReport> {
+            self.0.lock().unwrap().push(imperial);
+            Ok(report())
+        }
+    }
+
+    fn household(units: &str) -> crate::settings::Household {
+        crate::settings::Household {
+            address: crate::household::HomeAddress {
+                city: Some("Austin".into()),
+                state: Some("Texas".into()),
+                ..Default::default()
+            },
+            weather_units: Some(units.into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn each_tick_reads_the_live_household_units() {
+        // Regression guard: the push used to capture `imperial` once at boot, so the
+        // idle-screen weather disagreed with the spoken weather after a units change.
+        let settings = crate::settings::SharedSettings::fixed(
+            std::sync::Arc::new(crate::llm::mock::MockLlm::new("")),
+            "mock",
+            None,
+        );
+        let svc = WeatherService::new();
+        let probe = Arc::new(UnitsProbe(Default::default()));
+
+        settings.apply_household(&household("metric"));
+        assert_eq!(
+            push_once(&svc, &settings, Some(probe.clone())).await,
+            Some(0)
+        );
+        settings.apply_household(&household("imperial"));
+        assert_eq!(
+            push_once(&svc, &settings, Some(probe.clone())).await,
+            Some(0)
+        );
+
+        assert_eq!(*probe.0.lock().unwrap(), vec![false, true]);
+    }
+
+    #[tokio::test]
+    async fn a_tick_without_a_home_location_or_provider_is_skipped() {
+        let settings = crate::settings::SharedSettings::fixed(
+            std::sync::Arc::new(crate::llm::mock::MockLlm::new("")),
+            "mock",
+            None,
+        );
+        let svc = WeatherService::new();
+        let probe = Arc::new(UnitsProbe(Default::default()));
+        assert_eq!(push_once(&svc, &settings, Some(probe.clone())).await, None);
+        settings.apply_household(&household("metric"));
+        assert_eq!(push_once(&svc, &settings, None).await, None);
+        assert!(probe.0.lock().unwrap().is_empty());
     }
 }

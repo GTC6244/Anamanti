@@ -1,26 +1,36 @@
 //! Background ingestion (memory_plan.md Goal 3, Q3 "batch/background").
 //!
 //! The ingester tails the JSONL chat log, and for each new batch of turns:
-//! 1. embeds them (one batched OpenAI call per run),
+//! 1. embeds them (one batched embedder call per run),
 //! 2. runs entity/topic extraction (Claude Haiku 4.5) to build the graph,
 //! 3. upserts `Turn`/`Memory`/`Entity` nodes + edges into HelixDB,
 //! 4. advances a committed high-water mark (a sidecar `<log>.offset` file) so
 //!    re-runs are cheap and crash-safe (upserts are idempotent by `ext_id`).
 //!
 //! This keeps embedding/extraction off the live turn path entirely — the only
-//! per-turn cost is the query embedding at recall time. Requires the `helix`
-//! feature (it writes into the embedded HelixDB).
+//! per-turn cost is the query embedding at recall time.
+//!
+//! ## The high-water mark
+//! The sidecar holds a **line index** (the number of chat-log lines already
+//! ingested) — the format every existing install has on disk, and still the one
+//! written. In memory the ingester also caches the matching **byte position**
+//! ([`LogCursor`]), so each tick seeks straight to the new lines and counts them
+//! while streaming instead of re-reading the whole log; the byte position is found
+//! once per process by one streaming pass over the already-ingested prefix. Only
+//! complete (`\n`-terminated) lines are consumed, so a record still being appended
+//! is picked up whole on the next tick. The file I/O runs on the blocking pool.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use super::chatlog::{self, ChatLogRecord};
+use super::chatlog::{self, ChatLogRecord, LogCursor};
 use super::embed::Embedder;
 use super::entity::EntityExtractor;
-use super::helix::HelixMemory;
+use super::helix::{turn_text, HelixMemory, NewTurn};
+use crate::speaker::{AliasMap, SpeakerAliases};
 
 /// Drains the chat log into the HelixDB graph memory.
 pub struct MemoryIngester {
@@ -29,6 +39,13 @@ pub struct MemoryIngester {
     helix: Arc<HelixMemory>,
     embedder: Arc<dyn Embedder>,
     extractor: Arc<dyn EntityExtractor>,
+    /// The cached read position matching the committed line index; `None` until the
+    /// first run locates it.
+    cursor: Mutex<Option<LogCursor>>,
+    /// Speaker-id aliases left by merges/forgets (`crate::speaker::aliases`). The chat
+    /// log keeps each turn's original speaker id, so every record is resolved through
+    /// these before it is written to the store. `None` = no alias table (ids as logged).
+    aliases: Option<Arc<SpeakerAliases>>,
 }
 
 impl MemoryIngester {
@@ -42,13 +59,7 @@ impl MemoryIngester {
     ) -> Self {
         let chatlog_path = chatlog_path.into();
         let offset_path = offset_sidecar(&chatlog_path);
-        Self {
-            chatlog_path,
-            offset_path,
-            helix,
-            embedder,
-            extractor,
-        }
+        Self::new_with_offset(chatlog_path, offset_path, helix, embedder, extractor)
     }
 
     /// Like [`MemoryIngester::new`] but with an explicit offset sidecar path. Used by
@@ -68,15 +79,41 @@ impl MemoryIngester {
             helix,
             embedder,
             extractor,
+            cursor: Mutex::new(None),
+            aliases: None,
         }
+    }
+
+    /// Resolve every record's speaker id through `aliases` before writing it, so a
+    /// merged-away or forgotten speaker's turns land on the surviving speaker (or the
+    /// household) in whichever store this ingester feeds.
+    pub fn with_aliases(mut self, aliases: Option<Arc<SpeakerAliases>>) -> Self {
+        self.aliases = aliases;
+        self
     }
 
     /// Process every chat-log record past the committed offset. Returns how many
     /// new turns were ingested. Safe to call repeatedly.
     pub async fn run_once(&self) -> Result<usize> {
-        let from = self.read_offset();
-        let (next, records) = chatlog::read_from(&self.chatlog_path, from)?;
+        let cached = *self.cursor.lock().unwrap();
+        let chatlog_path = self.chatlog_path.clone();
+        let offset_path = self.offset_path.clone();
+        let (from, next, records) = tokio::task::spawn_blocking(move || {
+            let from = match cached {
+                Some(c) => c,
+                None => chatlog::cursor_at_line(&chatlog_path, read_offset(&offset_path))?,
+            };
+            let (next, records) = chatlog::read_after(&chatlog_path, from)?;
+            anyhow::Ok((from, next, records))
+        })
+        .await
+        .context("joining the chat-log read task")??;
+        *self.cursor.lock().unwrap() = Some(from);
         if records.is_empty() {
+            if next != from {
+                // Only blank/malformed lines arrived: still move past them.
+                self.commit(next).await?;
+            }
             return Ok(0);
         }
 
@@ -99,7 +136,7 @@ impl MemoryIngester {
             // withheld from recall. Explicit/inferred facts written this turn are still
             // ingested below.
             if is_recallable_turn(r) {
-                texts.push(turn_text(r));
+                texts.push(turn_text(&r.transcript, &r.reply));
                 items.push(Item::Turn(ri));
             } else {
                 log::debug!(
@@ -125,31 +162,38 @@ impl MemoryIngester {
             items.len()
         );
 
+        // The current speaker aliases, loaded AFTER the (slow) embedding call so a merge
+        // that commits mid-run is still honoured for this batch. A read failure fails the
+        // run (the offset is not advanced, so it retries) rather than ingesting under
+        // stale ids.
+        let aliases = match &self.aliases {
+            Some(a) => a.load().context("loading speaker aliases")?,
+            None => AliasMap::default(),
+        };
+
         // 2 + 3. Extract entities and upsert, in log order.
         let mut ingested = 0usize;
-        for (item, vector) in items.into_iter().zip(vectors) {
+        for ((item, vector), text) in items.into_iter().zip(vectors).zip(&texts) {
             match item {
                 Item::Turn(ri) => {
                     let r = &records[ri];
-                    let entities =
-                        self.extractor
-                            .extract(&turn_text(r))
-                            .await
-                            .unwrap_or_else(|e| {
-                                log::warn!("entity extraction failed for turn {}: {e}", r.id);
-                                Vec::new()
-                            });
+                    let entities = self.extractor.extract(text).await.unwrap_or_else(|e| {
+                        log::warn!("entity extraction failed for turn {}: {e}", r.id);
+                        Vec::new()
+                    });
+                    let (speaker_id, speaker_name) = attribution(r, &aliases);
                     self.helix
-                        .ingest_turn(
-                            &r.id,
-                            &r.session_id,
-                            r.ts,
-                            &turn_text(r),
-                            vector,
-                            &entities,
-                            speaker_of(r),
-                            r.speaker_name.as_deref(),
-                        )
+                        .ingest_turn(NewTurn {
+                            ext_id: &r.id,
+                            session: &r.session_id,
+                            ts: r.ts,
+                            transcript: &r.transcript,
+                            reply: &r.reply,
+                            embedding: vector,
+                            entities: &entities,
+                            speaker_id,
+                            speaker_name,
+                        })
                         .await
                         .with_context(|| format!("ingesting turn {}", r.id))?;
                     ingested += 1;
@@ -159,8 +203,9 @@ impl MemoryIngester {
                     let content = &r.memories_written[mi];
                     let entities = self.extractor.extract(content).await.unwrap_or_default();
                     let ext_id = format!("{}-mem-{}", r.id, mi);
+                    let (speaker_id, _) = attribution(r, &aliases);
                     self.helix
-                        .ingest_memory(&ext_id, "memory", content, vector, &entities, speaker_of(r))
+                        .ingest_memory(&ext_id, "memory", content, vector, &entities, speaker_id)
                         .await
                         .with_context(|| format!("ingesting memory {ext_id}"))?;
                 }
@@ -172,8 +217,11 @@ impl MemoryIngester {
         self.helix.flush().await.context("flushing after ingest")?;
 
         // 4. Commit the new high-water mark only after successful upserts.
-        self.write_offset(next)?;
-        log::info!("memory ingester: ingested {ingested} new turn(s), offset now {next}");
+        self.commit(next).await?;
+        log::info!(
+            "memory ingester: ingested {ingested} new turn(s), offset now {}",
+            next.line
+        );
         Ok(ingested)
     }
 
@@ -202,17 +250,35 @@ impl MemoryIngester {
         })
     }
 
-    fn read_offset(&self) -> u64 {
-        std::fs::read_to_string(&self.offset_path)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
+    /// Persist `next` (its line index, the on-disk format) and cache its position.
+    async fn commit(&self, next: LogCursor) -> Result<()> {
+        let path = self.offset_path.clone();
+        tokio::task::spawn_blocking(move || write_offset(&path, next.line))
+            .await
+            .context("joining the offset write task")??;
+        *self.cursor.lock().unwrap() = Some(next);
+        Ok(())
     }
+}
 
-    fn write_offset(&self, offset: u64) -> Result<()> {
-        std::fs::write(&self.offset_path, offset.to_string())
-            .with_context(|| format!("writing offset {}", self.offset_path.display()))
-    }
+/// The committed line index from the sidecar (`0` when absent or unreadable — the
+/// upserts are idempotent by `ext_id`, so starting over never duplicates nodes).
+fn read_offset(path: &Path) -> u64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Write the line index atomically (temp file + rename), so a crash mid-write can
+/// never leave a truncated sidecar that would restart ingestion from line 0.
+fn write_offset(path: &Path, line: u64) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, line.to_string())
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .with_context(|| format!("writing offset {}", path.display()))
 }
 
 /// The speaker id to attribute a record to, normalizing a missing id (pre-speaker-ID
@@ -225,12 +291,17 @@ fn speaker_of(r: &ChatLogRecord) -> &str {
     }
 }
 
-/// Combined turn text used for embedding + extraction (Q8: transcript + reply).
-fn turn_text(r: &ChatLogRecord) -> String {
-    if r.reply.trim().is_empty() {
-        r.transcript.clone()
+/// The `(speaker id, display name)` to store a record under: its logged speaker
+/// resolved through the merge/forget `aliases`. When the id was remapped, the logged
+/// name belonged to the old cluster, so it is dropped (the registry is the source of
+/// truth for names).
+fn attribution<'a>(r: &'a ChatLogRecord, aliases: &'a AliasMap) -> (&'a str, Option<&'a str>) {
+    let logged = speaker_of(r);
+    let resolved = aliases.resolve(logged);
+    if resolved == logged {
+        (logged, r.speaker_name.as_deref())
     } else {
-        format!("{}\n{}", r.transcript, r.reply)
+        (resolved, None)
     }
 }
 
@@ -298,6 +369,9 @@ fn offset_sidecar(chatlog_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::chatlog::ChatLog;
+    use crate::memory::embed::MockEmbedder;
+    use crate::memory::entity::NoopEntityExtractor;
 
     #[test]
     fn flags_non_answers() {
@@ -323,13 +397,128 @@ mod tests {
             "Jacob Hespeler Secondary School is at 355 Holiday Inn Drive in Cambridge.",
             "Your next event is a dentist appointment on Thursday at 2 PM.",
         ] {
-            assert!(!is_non_answer(reply), "should keep as a real answer: {reply}");
+            assert!(
+                !is_non_answer(reply),
+                "should keep as a real answer: {reply}"
+            );
         }
     }
 
     #[test]
     fn normalizes_curly_apostrophe() {
         // TTS/LLM output often uses U+2019; the gate must still catch it.
-        assert!(is_non_answer("I\u{2019}m not finding a school by that name."));
+        assert!(is_non_answer(
+            "I\u{2019}m not finding a school by that name."
+        ));
+    }
+
+    fn rec(id: &str, transcript: &str) -> ChatLogRecord {
+        ChatLogRecord {
+            id: id.to_string(),
+            ts: 1,
+            session_id: "s".to_string(),
+            transcript: transcript.to_string(),
+            reply: "ok".to_string(),
+            memories_written: vec![],
+            llm_backend: "mock".to_string(),
+            model: None,
+            speaker_id: String::new(),
+            speaker_name: None,
+            timing: None,
+        }
+    }
+
+    /// An existing install's sidecar holds a plain LINE index. The ingester must
+    /// resume exactly after that line — never re-ingesting or skipping a turn — keep
+    /// writing the same format, and pick up a partially-appended record only once it
+    /// is complete.
+    #[test]
+    fn honours_a_legacy_line_index_sidecar() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(legacy_sidecar_body());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn legacy_sidecar_body() {
+        let dir = std::env::temp_dir().join(format!(
+            "anamanti-ingest-{}-{}",
+            std::process::id(),
+            crate::clock::now_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("anamanti_chatlog.jsonl");
+        let sidecar = dir.join("anamanti_chatlog.jsonl.nomic-768.offset");
+
+        let log = ChatLog::open(&log_path).unwrap();
+        for (id, t) in [("a", "first"), ("b", "second"), ("c", "third")] {
+            log.append(&rec(id, t)).unwrap();
+        }
+        // Production state: two lines already ingested, recorded as a line index.
+        std::fs::write(&sidecar, "2").unwrap();
+
+        let helix = Arc::new(HelixMemory::open_in_memory("legacy", 8).await.unwrap());
+        let ingester = MemoryIngester::new_with_offset(
+            &log_path,
+            &sidecar,
+            helix.clone(),
+            Arc::new(MockEmbedder::new(8)),
+            Arc::new(NoopEntityExtractor),
+        );
+        assert_eq!(ingester.run_once().await.unwrap(), 1, "only line 3 is new");
+        let turns = helix
+            .list_turns(None, None, None, 10, 0)
+            .await
+            .unwrap()
+            .turns;
+        let ids: Vec<&str> = turns.iter().map(|t| t.ext_id.as_str()).collect();
+        assert_eq!(ids, vec!["c"], "lines 1-2 were not re-ingested");
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "3");
+
+        // Nothing new → nothing ingested.
+        assert_eq!(ingester.run_once().await.unwrap(), 0);
+
+        // A record mid-append (no newline yet) is left for the next tick.
+        let line = serde_json::to_string(&rec("d", "fourth")).unwrap();
+        let (head, tail) = line.split_at(10);
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .unwrap();
+            f.write_all(head.as_bytes()).unwrap();
+            assert_eq!(ingester.run_once().await.unwrap(), 0);
+            assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "3");
+            f.write_all(format!("{tail}\n").as_bytes()).unwrap();
+        }
+        assert_eq!(ingester.run_once().await.unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "4");
+
+        // A fresh process (no cached position) resumes from the line index alone.
+        let restarted = MemoryIngester::new_with_offset(
+            &log_path,
+            &sidecar,
+            helix.clone(),
+            Arc::new(MockEmbedder::new(8)),
+            Arc::new(NoopEntityExtractor),
+        );
+        log.append(&rec("e", "fifth")).unwrap();
+        assert_eq!(restarted.run_once().await.unwrap(), 1);
+        let turns = helix
+            .list_turns(None, None, None, 10, 0)
+            .await
+            .unwrap()
+            .turns;
+        assert_eq!(turns.len(), 3, "c, d, e — each exactly once");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

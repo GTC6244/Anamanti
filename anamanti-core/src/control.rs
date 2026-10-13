@@ -17,11 +17,13 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
+use crate::app::AppServices;
 use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
+use crate::memory::graphview::NodeId;
 use crate::memory::{EmbedStatus, GraphRagController, MemoryStore};
 use crate::orchestrator::ServiceConnector;
-use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
+use crate::settings::{SettingsUpdate, SharedSettings};
 use crate::speaker::{SpeakerRegistry, SpeakerService};
 use crate::wyoming::protocol::{types, WyomingEvent};
 use crate::wyoming::tts::{describe_voices, VoiceEntry};
@@ -60,22 +62,19 @@ pub fn is_control_request(event_type: &str) -> bool {
 /// requests are answered synchronously by [`respond`]; `ambient-list-models` needs
 /// an async catalog fetch and `ambient-list-voices` an async Piper `describe`, so
 /// those are handled here.
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_control(
     device: &mut DynConnection,
     request: &WyomingEvent,
-    memory: &MemoryStore,
-    settings: &SharedSettings,
-    speaker: Option<&SpeakerService>,
-    catalog: &ModelCatalog,
-    connector: &dyn ServiceConnector,
-    voices_dir: Option<&Path>,
-    graphrag: Option<&GraphRagController>,
+    services: &AppServices,
 ) -> Result<()> {
+    let memory = services.memory().as_ref();
+    let settings = services.settings().as_ref();
+    let speaker = services.speaker();
+    let graphrag = services.graphrag.as_deref();
     let response = if request.event_type == types::LIST_MODELS {
-        models_response(catalog).await
+        models_response(&services.catalog).await
     } else if request.event_type == types::LIST_VOICES {
-        voices_response(connector, voices_dir).await
+        voices_response(services.connector.as_ref(), services.voices_dir.as_deref()).await
     } else if request.event_type == types::GET_FUNCTIONS {
         // The embeddings entry needs the live GraphRAG backend status (async), so this
         // request is answered here rather than in the pure `respond`.
@@ -107,28 +106,15 @@ pub async fn handle_control(
         speaker_clips_response(speaker, request)
     } else if request.event_type == types::GET_SPEAKER_CLIP {
         speaker_clip_response(speaker, request)
+    } else if request.event_type == types::MERGE_SPEAKERS
+        || request.event_type == types::DELETE_SPEAKER
+    {
+        // Merging/forgetting a person spans the registry, SQLite memory, voice clips
+        // and the (async) GraphRAG graph, so the SpeakerService coordinates it here.
+        let graph = graphrag.map(|g| g.recall());
+        speaker_change_response(request, memory, speaker, graph.as_deref()).await
     } else {
-        let response = respond(request, memory, settings, speaker.map(|s| s.registry()));
-        // Keep the rolling clip store in step with registry mutations the pure
-        // `respond` just applied: forgetting a person drops their clips; merging two
-        // clusters moves the dropped one's clips onto the kept profile. Guarded on the
-        // in-band `ok` so a rejected request leaves the clips untouched.
-        if response_ok(&response) {
-            if let Some(svc) = speaker {
-                if request.event_type == types::DELETE_SPEAKER {
-                    if let Some(id) = request.data.get("id").and_then(Value::as_str) {
-                        svc.delete_clips(id);
-                    }
-                } else if request.event_type == types::MERGE_SPEAKERS {
-                    let keep = request.data.get("keep").and_then(Value::as_str);
-                    let drop = request.data.get("drop").and_then(Value::as_str);
-                    if let (Some(keep), Some(drop)) = (keep, drop) {
-                        svc.merge_clips(keep, drop);
-                    }
-                }
-            }
-        }
-        response
+        respond(request, memory, settings, speaker.map(|s| s.registry()))
     };
     device.send(&response).await
 }
@@ -167,7 +153,9 @@ async fn pair_phone_response(request: &WyomingEvent, settings: &SharedSettings) 
             let message = if cfg.active() {
                 format!("Linked {name}'s phone.")
             } else if !cfg.token_set() {
-                format!("Linked {name}, but set the AppSaid app token on the Core to send messages.")
+                format!(
+                    "Linked {name}, but set the AppSaid app token on the Core to send messages."
+                )
             } else {
                 format!("Linked {name}.")
             };
@@ -188,18 +176,11 @@ fn pair_result(ok: bool, message: String, name: Option<String>) -> WyomingEvent 
     WyomingEvent::with_data(types::PAIR_RESULT, data)
 }
 
-/// Whether a response event reports success in its `ok` field (defaulting to `true`
-/// for events that carry no `ok`).
-fn response_ok(response: &WyomingEvent) -> bool {
-    response
-        .data
-        .get("ok")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-}
-
 /// The `anamanti-speaker-clips` response listing one speaker's stored voice clips.
-fn speaker_clips_response(speaker: Option<&SpeakerService>, request: &WyomingEvent) -> WyomingEvent {
+fn speaker_clips_response(
+    speaker: Option<&SpeakerService>,
+    request: &WyomingEvent,
+) -> WyomingEvent {
     let id = request.data.get("id").and_then(Value::as_str).unwrap_or("");
     let Some(svc) = speaker else {
         return WyomingEvent::with_data(
@@ -235,7 +216,11 @@ fn speaker_clips_response(speaker: Option<&SpeakerService>, request: &WyomingEve
 /// The `anamanti-speaker-clip` response carrying one clip's raw PCM in the payload.
 fn speaker_clip_response(speaker: Option<&SpeakerService>, request: &WyomingEvent) -> WyomingEvent {
     let id = request.data.get("id").and_then(Value::as_str).unwrap_or("");
-    let clip = request.data.get("clip").and_then(Value::as_str).unwrap_or("");
+    let clip = request
+        .data
+        .get("clip")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let Some(svc) = speaker else {
         return WyomingEvent::with_data(
             types::SPEAKER_CLIP,
@@ -529,22 +514,24 @@ pub fn functions_response(settings: &SharedSettings, embed: Option<&EmbedStatus>
     let weather_provider = settings.weather_provider_label();
     let vc_key_set = settings.visualcrossing_key_set();
     let weather_enabled = settings.weather_enabled();
-    let is_openmeteo = matches!(
-        weather_provider.as_str(),
-        "openmeteo" | "open-meteo" | "open_meteo"
-    );
     // Visual Crossing needs a key; without one it silently falls back to keyless
     // Open-Meteo, so the key is never strictly *required* — surface the fallback as a
-    // note instead of a red warning.
+    // note instead of a red warning. The backend itself is `weather::from_config`'s own
+    // decision (an unsupported provider is Open-Meteo even with a key).
     let (weather_mode, weather_provider_label, weather_note): (&str, &str, Option<&str>) =
-        if !weather_enabled {
-            ("off", "Weather", None)
-        } else if is_openmeteo {
-            ("local", "Open-Meteo", None)
-        } else if vc_key_set {
-            ("cloud", "Visual Crossing", None)
-        } else {
-            ("local", "Open-Meteo", Some("No Visual Crossing key — using Open-Meteo"))
+        match crate::weather::effective_backend(weather_enabled, &weather_provider, vc_key_set) {
+            crate::weather::WeatherBackend::Disabled => ("off", "Weather", None),
+            crate::weather::WeatherBackend::VisualCrossing => ("cloud", "Visual Crossing", None),
+            crate::weather::WeatherBackend::OpenMeteo
+                if crate::weather::selects_visualcrossing(&weather_provider) =>
+            {
+                (
+                    "local",
+                    "Open-Meteo",
+                    Some("No Visual Crossing key — using Open-Meteo"),
+                )
+            }
+            crate::weather::WeatherBackend::OpenMeteo => ("local", "Open-Meteo", None),
         };
     fns.push(func_entry(
         "Tools",
@@ -719,14 +706,17 @@ pub fn respond(
     match request.event_type.as_str() {
         types::LIST_SPEAKERS => speakers_response(speaker),
         types::NAME_SPEAKER => name_speaker(request, speaker),
-        types::MERGE_SPEAKERS => merge_speakers(request, memory, speaker),
-        types::DELETE_SPEAKER => delete_speaker(request, speaker),
         types::GET_DRIVE_TOKEN => drive_token_response(settings),
         types::DESCRIBE_SETTINGS => settings_response(settings, true, "current settings"),
-        types::SET_SETTINGS => match settings.apply(&parse_update(&request.data)) {
-            Ok(_) => settings_response(settings, true, "settings applied"),
-            Err(e) => settings_response(settings, false, &format!("{e:#}")),
-        },
+        // The device path never accepts secrets (`allow_secrets = false`): provider keys
+        // are entered only on the orchestrator's loopback config page, so cloud secrets
+        // never travel from or live on the shared Echo Show screen.
+        types::SET_SETTINGS => {
+            match settings.apply(&SettingsUpdate::from_json(&request.data, false)) {
+                Ok(_) => settings_response(settings, true, "settings applied"),
+                Err(e) => settings_response(settings, false, &format!("{e:#}")),
+            }
+        }
         types::LIST_MEMORIES => memories_response(memory),
         types::DELETE_MEMORY => {
             let id = request.data.get("id").and_then(Value::as_i64);
@@ -746,99 +736,12 @@ pub fn respond(
     }
 }
 
-/// Parse a `SettingsUpdate` from the `ambient-set-settings` data block. An absent
-/// key leaves that setting unchanged; a present `tts_voice: null` clears the voice.
-fn parse_update(data: &Value) -> SettingsUpdate {
-    let string_field = |key: &str| {
-        data.get(key)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
-    let tts_voice = match data.get("tts_voice") {
-        None => None,                    // unchanged
-        Some(Value::Null) => Some(None), // clear
-        Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
-    };
-    let engine =
-        data.get("engine")
-            .and_then(Value::as_str)
-            .map(|e| match e.to_lowercase().as_str() {
-                "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
-                _ => LlmEngine::Native,
-            });
-    let web_search = data.get("web_search").and_then(Value::as_bool);
-    let search_api_key = match data.get("search_api_key") {
-        None => None,                    // unchanged
-        Some(Value::Null) => Some(None), // clear
-        Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
-    };
-    let anthropic_auth = data
-        .get("anthropic_auth")
-        .and_then(Value::as_str)
-        .map(AnthropicAuth::from_label);
-    SettingsUpdate {
-        llm_backend: string_field("llm_backend"),
-        llm_model: string_field("llm_model"),
-        // Provider API keys / tokens are intentionally NOT accepted from the device
-        // control path — they are entered only on the orchestrator's loopback config
-        // page, so cloud secrets never travel from or live on the shared Echo Show screen.
-        anthropic_api_key: None,
-        openai_api_key: None,
-        anthropic_oauth_token: None,
-        anthropic_auth,
-        tts_voice,
-        engine,
-        web_search,
-        search_provider: string_field("search_provider"),
-        search_api_key,
-        end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
-        voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
-        silero_threshold: data
-            .get("silero_threshold")
-            .and_then(Value::as_f64)
-            .map(|v| v as f32),
-        vad_engine: data
-            .get("vad_engine")
-            .and_then(Value::as_str)
-            .and_then(crate::config::VadEngineKind::from_label),
-    }
-}
-
+/// Build the `ambient-settings` response: the shared settings JSON view
+/// ([`crate::settings::SettingsView::to_json`], the same payload the config page
+/// serves) with an `ok`/`message` envelope. Read-only on the device: whether a provider
+/// key is configured, never the key itself.
 fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> WyomingEvent {
-    let v = settings.view();
-    WyomingEvent::with_data(
-        types::SETTINGS,
-        json!({
-            "ok": ok,
-            "message": message,
-            "llm_backend": v.llm_backend,
-            "llm_model": v.llm_model,
-            // Read-only on the device: whether a provider key is configured, never
-            // the key itself. Provider keys are entered only on the loopback config
-            // page (see `webconfig`), not from the shared device screen.
-            "anthropic_key_set": v.anthropic_key_set,
-            "openai_key_set": v.openai_key_set,
-            "anthropic_auth": v.anthropic_auth.as_str(),
-            "tts_voice": v.tts_voice,
-            "engine": engine_label(v.engine),
-            "web_search": v.web_search,
-            "search_provider": v.search_provider,
-            "search_key_set": v.search_key_set,
-            "end_silence_ms": v.end_silence_ms,
-            "voice_rms_threshold": v.voice_rms_threshold,
-            "silero_threshold": v.silero_threshold,
-            "vad_engine": v.vad_engine.as_label(),
-        }),
-    )
-}
-
-/// Canonical string label for an engine (for JSON responses).
-fn engine_label(engine: LlmEngine) -> &'static str {
-    match engine {
-        LlmEngine::Native => "native",
-        LlmEngine::Rig => "rig",
-    }
+    WyomingEvent::with_data(types::SETTINGS, settings.view().to_json(ok, Some(message)))
 }
 
 fn memories_response(memory: &MemoryStore) -> WyomingEvent {
@@ -931,13 +834,10 @@ async fn graph_response(
                 )
                 .await
             {
-                Ok(mut v) => {
-                    let turns = v
-                        .get_mut("turns")
-                        .map(Value::take)
-                        .unwrap_or_else(|| json!([]));
-                    WyomingEvent::with_data(types::TURNS, json!({ "ok": true, "turns": turns }))
-                }
+                Ok(list) => WyomingEvent::with_data(
+                    types::TURNS,
+                    json!({ "ok": true, "turns": list.turns }),
+                ),
                 Err(e) => WyomingEvent::with_data(
                     types::TURNS,
                     json!({ "ok": false, "message": format!("{e:#}"), "turns": [] }),
@@ -948,16 +848,10 @@ async fn graph_response(
             let query = str_arg("query");
             let limit = data.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
             match graph.list_entities(query.as_deref(), limit).await {
-                Ok(mut v) => {
-                    let entities = v
-                        .get_mut("entities")
-                        .map(Value::take)
-                        .unwrap_or_else(|| json!([]));
-                    WyomingEvent::with_data(
-                        types::ENTITIES,
-                        json!({ "ok": true, "entities": entities }),
-                    )
-                }
+                Ok(list) => WyomingEvent::with_data(
+                    types::ENTITIES,
+                    json!({ "ok": true, "entities": list.entities }),
+                ),
                 Err(e) => WyomingEvent::with_data(
                     types::ENTITIES,
                     json!({ "ok": false, "message": format!("{e:#}"), "entities": [] }),
@@ -965,7 +859,11 @@ async fn graph_response(
             }
         }
         // DELETE_GRAPH_NODE
-        _ => match data.get("id").and_then(|v| v.as_u64()) {
+        _ => match data
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .map(NodeId::from_raw)
+        {
             Some(id) => match graph.delete_node(id).await {
                 Ok(_) => WyomingEvent::with_data(types::GRAPH_RESULT, json!({ "ok": true })),
                 Err(e) => WyomingEvent::with_data(
@@ -1030,44 +928,57 @@ fn name_speaker(request: &WyomingEvent, speaker: Option<&SpeakerRegistry>) -> Wy
     }
 }
 
-fn merge_speakers(
+/// Answer `MERGE_SPEAKERS` (`{keep, drop}`) or `DELETE_SPEAKER` (`{id}`) through
+/// [`SpeakerService::merge`] / [`SpeakerService::delete`], which update the registry,
+/// SQLite memory, voice clips and the GraphRAG graph (`graph`: the live recall
+/// backend, `None` without GraphRAG) together. Failures are reported in-band.
+async fn speaker_change_response(
     request: &WyomingEvent,
     memory: &MemoryStore,
-    speaker: Option<&SpeakerRegistry>,
+    speaker: Option<&SpeakerService>,
+    graph: Option<&dyn crate::memory::Recall>,
 ) -> WyomingEvent {
-    let Some(reg) = speaker else {
+    let Some(svc) = speaker else {
         return speaker_result(false, SPEAKER_DISABLED);
     };
-    let keep = request.data.get("keep").and_then(Value::as_str);
-    let drop = request.data.get("drop").and_then(Value::as_str);
-    match (keep, drop) {
-        (Some(keep), Some(drop)) => match reg.merge(keep, drop) {
-            Ok(true) => {
-                // Move the dropped speaker's memories onto the kept profile.
-                let moved = memory.reassign_speaker(drop, keep).unwrap_or(0);
-                speaker_result(
-                    true,
-                    &format!("merged {drop} into {keep} ({moved} memories moved)"),
-                )
-            }
-            Ok(false) => speaker_result(false, "merge failed (unknown id, or same id)"),
+    let arg = |key: &str| request.data.get(key).and_then(Value::as_str);
+    if request.event_type == types::MERGE_SPEAKERS {
+        let (Some(keep), Some(drop)) = (arg("keep"), arg("drop")) else {
+            return speaker_result(false, "merge-speakers requires `keep` and `drop`");
+        };
+        match svc.merge(keep, drop, memory, graph).await {
+            Ok(Some(change)) => speaker_result(
+                true,
+                &format!(
+                    "merged {drop} into {keep} ({} memories moved){}",
+                    change.memories,
+                    warnings_suffix(&change.warnings)
+                ),
+            ),
+            Ok(None) => speaker_result(false, "merge failed (unknown id, or same id)"),
             Err(e) => speaker_result(false, &format!("{e:#}")),
-        },
-        _ => speaker_result(false, "merge-speakers requires `keep` and `drop`"),
+        }
+    } else {
+        let Some(id) = arg("id") else {
+            return speaker_result(false, "delete-speaker requires `id`");
+        };
+        match svc.delete(id, memory, graph).await {
+            Ok(Some(change)) => speaker_result(
+                true,
+                &format!("deleted{}", warnings_suffix(&change.warnings)),
+            ),
+            Ok(None) => speaker_result(false, "no such speaker"),
+            Err(e) => speaker_result(false, &format!("{e:#}")),
+        }
     }
 }
 
-fn delete_speaker(request: &WyomingEvent, speaker: Option<&SpeakerRegistry>) -> WyomingEvent {
-    let Some(reg) = speaker else {
-        return speaker_result(false, SPEAKER_DISABLED);
-    };
-    match request.data.get("id").and_then(Value::as_str) {
-        Some(id) => match reg.delete(id) {
-            Ok(true) => speaker_result(true, "deleted"),
-            Ok(false) => speaker_result(false, "no such speaker"),
-            Err(e) => speaker_result(false, &format!("{e:#}")),
-        },
-        None => speaker_result(false, "delete-speaker requires `id`"),
+/// `"; warnings: a; b"` for a speaker change whose follow-up steps partly failed.
+fn warnings_suffix(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("; warnings: {}", warnings.join("; "))
     }
 }
 
@@ -1168,7 +1079,7 @@ mod tests {
                 openai_api_key: None,
                 openai_max_tokens: 10,
                 anthropic_token: None,
-                home_location: crate::directions::LiveHomeLocation::default(),
+                home_location: crate::household::LiveHomeLocation::default(),
                 spotify: None,
                 cadora: None,
                 appsaid: None,
@@ -1180,6 +1091,8 @@ mod tests {
                 weather_imperial: false,
                 weather_enabled: false,
                 places: None,
+                places_enabled: true,
+                places_provider: "google".to_string(),
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -1355,17 +1268,17 @@ mod tests {
 
         // The claimed user_key must never ride back down to the device.
         let wire = serde_json::to_string(&resp.data).unwrap();
-        assert!(!wire.contains("gdksxryuunome6dp"), "leaked user_key: {wire}");
+        assert!(
+            !wire.contains("gdksxryuunome6dp"),
+            "leaked user_key: {wire}"
+        );
     }
 
     #[tokio::test]
     async fn pair_phone_without_a_name_is_an_in_band_error() {
         let s = settings();
-        let resp = pair_phone_response(
-            &req(types::PAIR_PHONE, json!({ "code": "ab2k" })),
-            &s,
-        )
-        .await;
+        let resp =
+            pair_phone_response(&req(types::PAIR_PHONE, json!({ "code": "ab2k" })), &s).await;
         assert_eq!(resp.data["ok"], json!(false));
         assert!(s.appsaid().recipients.is_empty());
     }
@@ -1387,7 +1300,10 @@ mod tests {
         .await;
         assert_eq!(resp.event_type, types::PAIR_RESULT);
         assert_eq!(resp.data["ok"], json!(false));
-        assert!(s.appsaid().recipients.is_empty(), "nothing stored on failure");
+        assert!(
+            s.appsaid().recipients.is_empty(),
+            "nothing stored on failure"
+        );
     }
 
     #[test]
@@ -1515,12 +1431,23 @@ mod tests {
         assert_eq!(resp.data["ok"], json!(false));
     }
 
-    #[test]
-    fn list_name_and_delete_speakers() {
-        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry};
+    /// A speaker service over an in-memory registry (no clips).
+    fn speaker_service() -> crate::speaker::SpeakerService {
+        use crate::speaker::{MockSpeakerEmbedder, SpeakerService, SpeakerThresholds};
+        SpeakerService::new(
+            Arc::new(MockSpeakerEmbedder::default()),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn list_name_and_delete_speakers() {
+        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder};
         let s = settings();
         let mem = MemoryStore::open_in_memory().unwrap();
-        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let svc = speaker_service();
+        let reg = svc.registry();
         let e = MockSpeakerEmbedder::default();
         let id = reg
             .create_cluster(&e.embed(&vec![1000i16; 20_000]).unwrap())
@@ -1531,7 +1458,7 @@ mod tests {
             &WyomingEvent::new(types::LIST_SPEAKERS),
             &mem,
             &s,
-            Some(&reg),
+            Some(reg),
         );
         assert_eq!(listed.event_type, types::SPEAKERS);
         assert_eq!(listed.data["ok"], json!(true));
@@ -1545,7 +1472,7 @@ mod tests {
             &req(types::NAME_SPEAKER, json!({ "id": id, "name": "Sam" })),
             &mem,
             &s,
-            Some(&reg),
+            Some(reg),
         );
         assert_eq!(named.event_type, types::SPEAKER_RESULT);
         assert_eq!(named.data["ok"], json!(true));
@@ -1556,19 +1483,51 @@ mod tests {
             &req(types::NAME_SPEAKER, json!({ "id": "nope", "name": "X" })),
             &mem,
             &s,
-            Some(&reg),
+            Some(reg),
         );
         assert_eq!(bad.data["ok"], json!(false));
 
-        // Delete it.
-        let del = respond(
+        // Delete it (through the SpeakerService, which also detaches memories).
+        mem.add_scoped(
+            MemoryKind::Fact,
+            "likes tea",
+            MemorySource::Explicit,
+            Some(&id),
+        )
+        .unwrap();
+        let del = speaker_change_response(
             &req(types::DELETE_SPEAKER, json!({ "id": id })),
             &mem,
-            &s,
-            Some(&reg),
-        );
+            Some(&svc),
+            None,
+        )
+        .await;
+        assert_eq!(del.event_type, types::SPEAKER_RESULT);
         assert_eq!(del.data["ok"], json!(true));
         assert_eq!(reg.count().unwrap(), 0);
+        assert_eq!(
+            mem.list().unwrap()[0].speaker_id,
+            None,
+            "memory kept, now shared"
+        );
+
+        // Deleting again, or without speaker ID, fails in-band.
+        let again = speaker_change_response(
+            &req(types::DELETE_SPEAKER, json!({ "id": id })),
+            &mem,
+            Some(&svc),
+            None,
+        )
+        .await;
+        assert_eq!(again.data["ok"], json!(false));
+        let disabled = speaker_change_response(
+            &req(types::DELETE_SPEAKER, json!({ "id": id })),
+            &mem,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(disabled.data["ok"], json!(false));
     }
 
     #[test]
@@ -1580,7 +1539,10 @@ mod tests {
 
         // Disabled (no service) → an in-band failure, not a panic.
         let disabled = enroll_finish(
-            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            &req(
+                types::ENROLL_FINISH,
+                json!({ "session": "s", "name": "Dana" }),
+            ),
             None,
         );
         assert_eq!(disabled.event_type, types::ENROLL_RESULT);
@@ -1596,7 +1558,10 @@ mod tests {
         // Too few samples → commit refused, session preserved.
         svc.enroll_sample("s", &pcm).unwrap();
         let early = enroll_finish(
-            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            &req(
+                types::ENROLL_FINISH,
+                json!({ "session": "s", "name": "Dana" }),
+            ),
             Some(&svc),
         );
         assert_eq!(early.data["ok"], json!(false));
@@ -1605,7 +1570,10 @@ mod tests {
         svc.enroll_sample("s", &pcm).unwrap();
         svc.enroll_sample("s", &pcm).unwrap();
         let done = enroll_finish(
-            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            &req(
+                types::ENROLL_FINISH,
+                json!({ "session": "s", "name": "Dana" }),
+            ),
             Some(&svc),
         );
         assert_eq!(done.event_type, types::ENROLL_RESULT);
@@ -1624,13 +1592,13 @@ mod tests {
         assert_eq!(svc.enroll_count("s2"), 0);
     }
 
-    #[test]
-    fn merge_speakers_moves_memories() {
+    #[tokio::test]
+    async fn merge_speakers_moves_memories() {
         use crate::memory::{MemoryKind, MemorySource};
-        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder, SpeakerRegistry};
-        let s = settings();
+        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder};
         let mem = MemoryStore::open_in_memory().unwrap();
-        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let svc = speaker_service();
+        let reg = svc.registry();
         let e = MockSpeakerEmbedder::default();
         let keep = reg
             .create_cluster(&e.embed(&vec![1000i16; 20_000]).unwrap())
@@ -1646,13 +1614,19 @@ mod tests {
         )
         .unwrap();
 
-        let resp = respond(
+        let resp = speaker_change_response(
             &req(types::MERGE_SPEAKERS, json!({ "keep": keep, "drop": drop })),
             &mem,
-            &s,
-            Some(&reg),
-        );
+            Some(&svc),
+            None,
+        )
+        .await;
+        assert_eq!(resp.event_type, types::SPEAKER_RESULT);
         assert_eq!(resp.data["ok"], json!(true));
+        assert!(resp.data["message"]
+            .as_str()
+            .unwrap()
+            .contains("1 memories moved"));
         assert_eq!(reg.count().unwrap(), 1, "dropped profile removed");
         // The dropped speaker's memory now belongs to the kept speaker.
         let hits = mem.search_scoped("tea", Some(&keep), 10).unwrap();

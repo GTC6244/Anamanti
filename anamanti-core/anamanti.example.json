@@ -127,8 +127,6 @@
     "backend": "none",
     "base_url": "http://127.0.0.1:8000",
     "openrouter_model": "typesafe/jev-1.13",
-    "device": "metal",
-    "model": "convaiinnovations/laya",
     "min_confidence": 0.85,
     "intents": []
   },

@@ -24,7 +24,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
 
   const EXAMPLE = [
     { canonical: "Zehrs", variants: ["zairs", "zehr's", "zares", "zay rz", "zayers"] }
@@ -45,7 +44,7 @@
     }catch(e){ show(false, 'Not valid JSON: ' + e.message); return; }
     if(!Array.isArray(rules)){ show(false, 'Top level must be a JSON array of rules.'); return; }
     try{
-      const j = await apiJSON('/pronunciations/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({rules})});
+      const j = await postJSON('/pronunciations/save', {rules});
       if(j.ok === false){ show(false, j.message || 'Rejected.'); }
       else { $('json').value = JSON.stringify(j.rules || [], null, 2); show(true, 'Saved.'); }
     }catch(e){ show(false, 'Request failed: ' + e); }

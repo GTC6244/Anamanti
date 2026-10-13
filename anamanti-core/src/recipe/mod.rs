@@ -72,74 +72,63 @@ pub trait RecipeProvider: Send + Sync {
 }
 
 /// A [`RecipeProvider`] that discovers a source page via the **Tavily** search API
-/// (the same key the web-search tool uses) and parses its `schema.org/Recipe`
-/// JSON-LD. Needs a Tavily API key; without one the `recipe_lookup` tool is not
-/// advertised (see [`from_search`]).
+/// (the same key the web-search tool uses, through the shared
+/// [`crate::tavily::TavilyClient`]) and parses its `schema.org/Recipe` JSON-LD. Needs a
+/// Tavily API key; without one the `recipe_lookup` tool is not advertised (see
+/// [`from_search`]).
 pub struct TavilyRecipeProvider {
-    client: reqwest::Client,
-    tavily_base: String,
-    tavily_key: String,
+    tavily: crate::tavily::TavilyClient,
 }
+
+/// Per-request budget for both the Tavily search and the recipe page fetch.
+const RECIPE_TIMEOUT: StdDuration = StdDuration::from_secs(12);
+
+/// `User-Agent` component label for recipe requests.
+const COMPONENT: &str = "recipe";
 
 impl TavilyRecipeProvider {
     pub fn new(tavily_key: impl Into<String>) -> Self {
-        Self::with_base_url("https://api.tavily.com", tavily_key)
+        Self::with_base_url(crate::tavily::DEFAULT_BASE_URL, tavily_key)
     }
 
     /// Point Tavily at a specific API root (overridable for tests).
     pub fn with_base_url(base_url: impl Into<String>, tavily_key: impl Into<String>) -> Self {
-        let client = crate::http::tuned_builder()
-            .timeout(StdDuration::from_secs(12))
-            .user_agent("anamanti-core/0.1 (recipe)")
-            .build()
-            .unwrap_or_default();
         Self {
-            client,
-            tavily_base: base_url.into().trim_end_matches('/').to_string(),
-            tavily_key: tavily_key.into(),
+            tavily: crate::tavily::TavilyClient::with_base_url(
+                base_url,
+                tavily_key,
+                RECIPE_TIMEOUT,
+                COMPONENT,
+            ),
         }
     }
 
     /// Ask Tavily for the best source URL for "<dish> recipe".
     async fn search_url(&self, dish: &str) -> Result<String> {
-        let body = serde_json::json!({
-            "api_key": self.tavily_key,
-            "query": format!("{dish} recipe"),
-            "max_results": 5,
-            "search_depth": "basic",
-        });
-        let value: Value = self
-            .client
-            .post(format!("{}/search", self.tavily_base))
-            .json(&body)
-            .send()
-            .await
-            .context("POST Tavily /search for a recipe URL")?
-            .error_for_status()
-            .context("Tavily returned an error status")?
-            .json()
-            .await
-            .context("parsing Tavily JSON")?;
-        value
-            .get("results")
-            .and_then(Value::as_array)
-            .and_then(|rs| rs.iter().find_map(|r| r.get("url").and_then(Value::as_str)))
-            .map(str::to_string)
+        let query = format!("{dish} recipe");
+        let resp = self
+            .tavily
+            .search(&crate::tavily::SearchRequest {
+                query: &query,
+                max_results: 5,
+                search_depth: "basic",
+                include_answer: None,
+            })
+            .await?;
+        resp.results
+            .into_iter()
+            .find_map(|r| r.url)
             .with_context(|| format!("no recipe source found for \"{dish}\""))
     }
 
     /// Fetch a page's HTML.
     async fn fetch_html(&self, url: &str) -> Result<String> {
-        self.client
-            .get(url)
-            .send()
-            .await
-            .with_context(|| format!("GET recipe page {url}"))?
-            .error_for_status()
-            .with_context(|| format!("recipe page {url} returned an error status"))?
-            .text()
-            .await
-            .with_context(|| format!("reading recipe page {url}"))
+        crate::http::send_text(
+            crate::http::get(url, COMPONENT),
+            RECIPE_TIMEOUT,
+            "recipe page",
+        )
+        .await
     }
 }
 
@@ -166,7 +155,7 @@ pub fn from_search(provider: &str, api_key: Option<&str>) -> Option<Arc<dyn Reci
     if provider.trim().to_lowercase() != "tavily" {
         return None;
     }
-    let key = api_key.map(str::trim).filter(|s| !s.is_empty())?;
+    let key = crate::util::non_empty(api_key)?;
     log::info!("recipe_lookup enabled (Tavily source search + JSON-LD parse)");
     Some(Arc::new(TavilyRecipeProvider::new(key)))
 }
@@ -255,8 +244,8 @@ fn type_includes(node: &Value, wanted: &str) -> bool {
 /// Map a `schema.org/Recipe` node into a [`Recipe`].
 fn recipe_from_node(node: &Value, source_url: &str) -> Recipe {
     Recipe {
-        title: string_field(node, "name"),
-        summary: string_field(node, "description"),
+        title: crate::util::json_str(node, "name"),
+        summary: crate::util::json_str(node, "description"),
         source_url: source_url.to_string(),
         image_url: first_image(node.get("image")),
         servings: map_yield(node.get("recipeYield")),
@@ -264,21 +253,13 @@ fn recipe_from_node(node: &Value, source_url: &str) -> Recipe {
             .get("totalTime")
             .and_then(Value::as_str)
             .and_then(parse_iso8601_duration)
-            .map(humanize_secs)
+            .map(|secs| crate::speech::duration(secs as f64, crate::speech::DurationStyle::Coarse))
             .unwrap_or_default(),
         ingredients: string_list(node.get("recipeIngredient"))
             .or_else(|| string_list(node.get("ingredients")))
             .unwrap_or_default(),
         steps: collect_steps(node.get("recipeInstructions")),
     }
-}
-
-/// A trimmed string field, empty when absent/non-string.
-fn string_field(node: &Value, key: &str) -> String {
-    node.get(key)
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
 }
 
 /// Extract a hero image URL from `image`, which may be a string, an `ImageObject`
@@ -407,27 +388,6 @@ fn parse_iso8601_duration(s: &str) -> Option<u64> {
     (saw_any && num.is_empty()).then_some(secs)
 }
 
-/// Render whole seconds as a short, speakable phrase ("25 minutes",
-/// "1 hour 25 minutes", "45 seconds").
-fn humanize_secs(secs: u64) -> String {
-    if secs == 0 {
-        return String::new();
-    }
-    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    let mut parts = Vec::new();
-    let unit = |n: u64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
-    if h > 0 {
-        parts.push(unit(h, "hour"));
-    }
-    if m > 0 {
-        parts.push(unit(m, "minute"));
-    }
-    if s > 0 && h == 0 {
-        parts.push(unit(s, "second"));
-    }
-    parts.join(" ")
-}
-
 /// A short spoken confirmation for the model to relay once a recipe is on screen.
 pub fn render_confirmation(recipe: &Recipe) -> String {
     let mut out = format!("Here's a recipe for {}", recipe.title);
@@ -473,14 +433,6 @@ mod tests {
         assert_eq!(parse_iso8601_duration("P0DT0H25M0S"), Some(1500));
         assert_eq!(parse_iso8601_duration("PT45S"), Some(45));
         assert_eq!(parse_iso8601_duration("garbage"), None);
-    }
-
-    #[test]
-    fn humanize() {
-        assert_eq!(humanize_secs(1500), "25 minutes");
-        assert_eq!(humanize_secs(5400), "1 hour 30 minutes");
-        assert_eq!(humanize_secs(3600), "1 hour");
-        assert_eq!(humanize_secs(0), "");
     }
 
     #[test]

@@ -48,12 +48,17 @@ pub trait GroceryController: Send + Sync {
     async fn command(&self, cmd: GroceryCommand) -> Result<String>;
 }
 
+/// Per-request budget for Cadora calls, so a stalled server can't hang a voice turn.
+const CADORA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `User-Agent` component label for Cadora requests.
+const COMPONENT: &str = "cadora";
+
 /// Live Cadora voice-API implementation of [`GroceryController`].
 ///
 /// Holds the app-server base URL and the long-lived `vl_…` voice-link token minted
 /// by the pairing-code redeem flow. Every command is one `POST /voice/command`.
 pub struct CadoraVoiceApi {
-    http: reqwest::Client,
     /// Base URL with any trailing slash trimmed (e.g. `https://cadora-server.fly.dev`).
     base_url: String,
     /// The `vl_…` voice-link bearer token.
@@ -63,7 +68,6 @@ pub struct CadoraVoiceApi {
 impl CadoraVoiceApi {
     pub fn new(base_url: impl Into<String>, link_token: impl Into<String>) -> Self {
         Self {
-            http: crate::http::shared_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             link_token: link_token.into(),
         }
@@ -84,14 +88,14 @@ impl CadoraVoiceApi {
             payload["quantity"] = json!(q);
         }
 
-        let resp = self
-            .http
-            .post(format!("{}/voice/command", self.base_url))
-            .bearer_auth(&self.link_token)
-            .json(&payload)
-            .send()
-            .await
-            .context("calling the Cadora voice API")?;
+        let resp = crate::http::send(
+            crate::http::post(format!("{}/voice/command", self.base_url), COMPONENT)
+                .bearer_auth(&self.link_token)
+                .json(&payload),
+            CADORA_TIMEOUT,
+            "calling the Cadora voice API",
+        )
+        .await?;
 
         let status = resp.status();
         let body: Value = resp
@@ -162,12 +166,13 @@ pub async fn redeem_pairing_code(base_url: &str, code: &str) -> Result<String> {
         bail!("enter the 6-digit pairing code shown in the Cadora app");
     }
 
-    let resp = crate::http::shared_client()
-        .post(format!("{base_url}/voice/links/redeem"))
-        .json(&json!({ "code": code }))
-        .send()
-        .await
-        .context("calling the Cadora pairing endpoint")?;
+    let resp = crate::http::send(
+        crate::http::post(format!("{base_url}/voice/links/redeem"), COMPONENT)
+            .json(&json!({ "code": code })),
+        CADORA_TIMEOUT,
+        "calling the Cadora pairing endpoint",
+    )
+    .await?;
 
     let status = resp.status();
     let body: Value = resp

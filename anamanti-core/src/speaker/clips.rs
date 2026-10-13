@@ -19,16 +19,20 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+
+use crate::ids::IdMinter;
 
 /// How many of the most recent clips to keep per speaker. Older clips are evicted on
 /// each [`ClipStore::save`]. A handful of varied utterances is plenty for a human to
 /// recognize a voice while keeping the footprint tiny (≈ a few hundred KB/person).
 pub const MAX_CLIPS_PER_SPEAKER: usize = 10;
+
+/// Longest stored voice clip: 60 s of 16 kHz mono `i16` (≈1.9 MB). Clips are replayed on
+/// the device as a single Wyoming payload, which the shared protocol caps at 8 MiB.
+pub const MAX_CLIP_SAMPLES: usize = 16_000 * 60;
 
 /// Metadata for one stored clip (the People screen's clip list). The raw samples are
 /// fetched separately by [`ClipStore::load`] using [`name`](Self::name).
@@ -48,8 +52,8 @@ pub struct ClipInfo {
 /// safe: a single mutex serializes the (infrequent) mutating operations.
 pub struct ClipStore {
     root: PathBuf,
-    /// Disambiguates clip names minted within the same millisecond.
-    counter: AtomicU64,
+    /// Mints `<millis>-<seq>` clip names (see [`crate::ids`]).
+    ids: IdMinter,
     /// Serializes save/prune/delete/move so concurrent turns can't race the rolling
     /// eviction. Reads (`list`/`load`) don't take it — the filesystem is the source
     /// of truth and a stale listing is harmless.
@@ -64,7 +68,7 @@ impl ClipStore {
             .with_context(|| format!("creating voice-clip dir {}", root.display()))?;
         Ok(Self {
             root,
-            counter: AtomicU64::new(0),
+            ids: IdMinter::new(),
             write_lock: Mutex::new(()),
         })
     }
@@ -75,6 +79,9 @@ impl ClipStore {
         if pcm.is_empty() {
             return Ok(());
         }
+        // Keep the first MAX_CLIP_SAMPLES only: a clip is sent to the device in ONE
+        // Wyoming payload, so it must stay well under the protocol's payload cap.
+        let pcm = &pcm[..pcm.len().min(MAX_CLIP_SAMPLES)];
         let id = sanitize(speaker_id)?;
         let _guard = self.write_lock.lock().unwrap();
         let dir = self.root.join(&id);
@@ -101,7 +108,12 @@ impl ClipStore {
         let id = sanitize(speaker_id)?;
         let name = sanitize(clip)?;
         let path = self.root.join(id).join(format!("{name}.pcm"));
-        fs::read(&path).with_context(|| format!("reading voice clip {}", path.display()))
+        let mut bytes =
+            fs::read(&path).with_context(|| format!("reading voice clip {}", path.display()))?;
+        // Clips saved before the length cap existed may be longer; never hand the device
+        // a payload its framing reader would reject.
+        bytes.truncate(MAX_CLIP_SAMPLES * 2);
+        Ok(bytes)
     }
 
     /// Delete every clip for `speaker_id` (called when a profile is forgotten). A
@@ -138,7 +150,7 @@ impl ClipStore {
             let src = from.join(format!("{}.pcm", clip.name));
             // Preserve the original capture-millis prefix so newest-first ordering
             // survives the move; only the dedup suffix is refreshed.
-            let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+            let seq = self.ids.next_seq();
             let dest = to.join(format!("{}-{seq}.pcm", clip.created_ms));
             if let Err(e) = fs::rename(&src, &dest) {
                 log::warn!("merging clip {} failed: {e:#}", src.display());
@@ -151,12 +163,7 @@ impl ClipStore {
 
     /// Mint a unique `<millis>-<seq>` clip stem.
     fn next_name(&self) -> String {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
-        format!("{millis}-{seq}")
+        self.ids.mint("")
     }
 
     /// Keep only the newest [`MAX_CLIPS_PER_SPEAKER`] clips in `dir`, deleting the
@@ -236,6 +243,8 @@ fn sanitize(component: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// A self-cleaning temporary directory (avoids a `tempfile` dev-dependency).
     struct TmpDir(PathBuf);
@@ -247,8 +256,10 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
             let seq = N.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("anamanti-clips-test-{}-{nanos}-{seq}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "anamanti-clips-test-{}-{nanos}-{seq}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -262,6 +273,28 @@ mod tests {
     fn store() -> (ClipStore, TmpDir) {
         let dir = TmpDir::new();
         (ClipStore::open(&dir.0).unwrap(), dir)
+    }
+
+    #[test]
+    fn save_caps_a_clip_to_fit_one_wyoming_payload() {
+        let (s, _d) = store();
+        let pcm = vec![7i16; MAX_CLIP_SAMPLES + 16_000];
+        s.save("spk-1", &pcm).unwrap();
+        let clips = s.list("spk-1").unwrap();
+        assert_eq!(clips[0].samples, MAX_CLIP_SAMPLES as u64);
+        let bytes = s.load("spk-1", &clips[0].name).unwrap();
+        assert_eq!(bytes.len(), MAX_CLIP_SAMPLES * 2);
+        assert!(bytes.len() < anamanti_protocol::MAX_PAYLOAD_BYTES);
+    }
+
+    #[test]
+    fn load_trims_an_oversize_legacy_clip() {
+        let (s, d) = store();
+        let dir = d.0.join("spk-1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("1-0.pcm"), vec![0u8; MAX_CLIP_SAMPLES * 2 + 4096]).unwrap();
+        let bytes = s.load("spk-1", "1-0").unwrap();
+        assert_eq!(bytes.len(), MAX_CLIP_SAMPLES * 2);
     }
 
     #[test]

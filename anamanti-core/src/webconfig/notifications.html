@@ -36,7 +36,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
   async function load(){
     try{
       const j = await apiJSON('/notifications/status.json');
@@ -72,7 +71,7 @@
       priority: $('priority').value,
     };
     try{
-      const j = await apiJSON('/notifications/test', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      const j = await postJSON('/notifications/test', payload);
       if(j.ok === false){ show(false, j.message || 'Rejected.'); }
       else { show(true, 'Sent to ' + (j.delivered || 0) + ' device(s).'); }
       load();

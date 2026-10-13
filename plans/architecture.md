@@ -190,7 +190,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   engine-independent:
   after speech (a 250 ms onset debounce) followed by ~700 ms of trailing silence (or a
   6 s no-speech fallback), it finalizes the transcriber
-  (`anamanti-core/src/orchestrator.rs`, `stream_to_transcript`). The Echo Show device
+  (`anamanti-core/src/orchestrator/vad_loop.rs`, `stream_to_transcript`). The Echo Show device
   still runs **no VAD of its own** — it streams continuously and waits for the
   transcript.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
@@ -808,6 +808,9 @@ design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |
 | Idle photo slideshow (Google) | Ambient value when idle; user picks the folder |
 | Proactive notifications via a persistent **device-dialed** channel (Approach A) | Mac reaches the display unprompted while keeping the device the dialer — reuses the existing mDNS + `instance_id` pin and the blessed auto-reconnect model; avoids a reverse connection / device listener / new trust direction. A doorbell (device advertises, Mac nudges) was considered but only wins idle-socket cost, which is free on a mains-powered display, at the price of lossy triggers. Shipped visual-only first (see §4) |
+| One shared Wyoming protocol crate (`anamanti-protocol/`) | Core and Display previously each kept a copy of the framing + ~58 frame constants; one crate makes a wire change a single edit, golden-bytes tests pin the encoding, and the framing reader caps header (64 KiB), `data` (4 MiB) and `payload` (8 MiB) sizes so a LAN peer can't force a huge allocation. Both sides re-export it as `crate::wyoming::protocol`; cargokit builds the device crate in place, so the path dependency works on device builds |
+| LLM tools are a name-keyed `VoiceTool` registry built from `ToolDeps` (`llm/rig/tools/`) | One place per tool (definition + guidance + invoke); settings rebuild the whole tool set from one function (`LlmFactory::for_settings`) so saving one setting can never drop another tool. Every rig round streams (tool calls are detected mid-stream), and every rig backend — incl. Anthropic subscription OAuth and OpenAI — gets tools + follow-up history; the `native` engine remains as an explicitly capability-limited fallback |
+| Admin console is loopback-only (Host/Origin + JSON content-type checks) | Settings, secrets and OAuth flows are reachable from it, so cross-site POSTs and DNS rebinding from a browser on the Mac are rejected (403/415) centrally before routing |
 | In-app APK auto-updater over Cloudflare R2 (Rust download/verify + native `PackageInstaller`), with `selfUpdate`/`fdroid` flavors | First-party, hands-off updates for a headless kiosk without depending on the third-party Obtainium app; networking stays in Rust (ureq+rustls, the one HTTPS client) and only the unavoidable install is a native channel; SHA-256 pins integrity; flavors let F-Droid ship without the self-updater. Keep Obtainium in parallel until hardware-proven. See §4 + [`UpdaterPlan.md`](./UpdaterPlan.md) |
 
 ---
@@ -914,11 +917,11 @@ FRB event → Flutter UI. To add a new action, mirror these steps:
    `Option<&ActionSink>` and `send`s a new `DeviceAction` variant
    (`anamanti-core/src/llm/mod.rs`) instead of doing the work locally. Action tools are
    registered unconditionally (they need no config).
-2. **Relay** (`anamanti-core/src/orchestrator.rs`): the reply loop already drains the per-turn
+2. **Relay** (`anamanti-core/src/orchestrator/speech_out.rs`): the reply loop already drains the per-turn
    action channel (`drain_device_actions`) and writes the frame; add a match arm
    mapping the new `DeviceAction` to its `WyomingEvent` constructor.
-3. **Wire frame** (`anamanti-core/src/wyoming/protocol.rs` **and** `anamanti-display/rust/src/wyoming/protocol.rs`,
-   kept **byte-identical** with round-trip tests in both crates): add an `anamanti-*`
+3. **Wire frame** (the shared `anamanti-protocol` crate, re-exported by both `anamanti-core/src/wyoming/protocol.rs` and `anamanti-display/rust/src/wyoming/protocol.rs`,
+   one definition with golden-bytes round-trip tests): add an `anamanti-*`
    `type` const, constructor(s), and — on the device side — a decoder
    (e.g. `timer_command()`).
 4. **Device intake** (`anamanti-display/rust/src/wyoming/client.rs`): add a `TurnUpdate` variant and a
@@ -962,7 +965,7 @@ there is no Display UI.
   part of `PersistedSettings`/`RuntimeSettings` (persisted to `anamanti_settings.json`,
   read from the per-turn snapshot) and has **no `anamanti.json` seed** — it's a pure
   runtime/GUI concern. Changing it **never rebuilds the LLM backend** (like `household`).
-- **Prompt injection** (`orchestrator.rs`, `personality_prompt`): during prompt assembly
+- **Prompt injection** (`orchestrator/prompt.rs`, `personality_prompt`): during prompt assembly
   the snapshot's active personality is appended as a **trailing, fenced style block** —
   "deliver your reply in this voice; this changes ONLY tone… never facts, memory, or
   tools". A short always-present line lists the available personality names + the current

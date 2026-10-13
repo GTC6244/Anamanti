@@ -56,7 +56,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
 
   // Folder picker state: the full listing from the last Browse, keyed by id → name.
   let ALL_FOLDERS = [];
@@ -138,14 +137,14 @@
       folder_ids: selectedIds(),
     };
     try{
-      const j = await apiJSON('/drive/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const j = await postJSON('/drive/save', body);
       if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved. The tablet picks this up on its next refresh (or reboot).'); load(); }
     }catch(e){ show(false, 'Request failed: ' + e); }
   }
   async function link(){
     show(true, 'Opening a browser on this Mac — approve access, then return here…');
     try{
-      const j = await apiJSON('/drive/link', {method:'POST'});
+      const j = await postJSON('/drive/link');
       if(j.ok){
         let m = j.message || 'Linked.';
         if(j.verify && j.verify.length){

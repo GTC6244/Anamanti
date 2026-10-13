@@ -289,12 +289,7 @@ impl LocalNomicEmbedder {
             if dims < NOMIC_FULL_DIMS {
                 for v in &mut vectors {
                     v.truncate(dims);
-                    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    if norm > 0.0 {
-                        for x in v.iter_mut() {
-                            *x /= norm;
-                        }
-                    }
+                    crate::vecmath::l2_normalize_in_place(v);
                 }
             }
             Ok(vectors)
@@ -380,12 +375,7 @@ fn embed_mock(text: &str, dims: usize) -> Vec<f32> {
     }
     // L2-normalize so cosine similarity behaves; empty text → tiny nonzero vector
     // (a zero vector has undefined direction for cosine).
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in &mut v {
-            *x /= norm;
-        }
-    } else {
+    if !crate::vecmath::l2_normalize_in_place(&mut v) {
         v[0] = 1.0;
     }
     v

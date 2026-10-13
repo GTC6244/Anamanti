@@ -14,7 +14,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
 
 /// A named entity extracted from conversation text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +34,9 @@ pub trait EntityExtractor: Send + Sync {
     async fn extract(&self, text: &str) -> Result<Vec<Entity>>;
 }
 
-/// Anthropic-backed extractor (Claude Haiku 4.5). Non-streaming `POST /v1/messages`
-/// asking for a compact JSON array of `{name, kind}`.
+/// Anthropic-backed extractor (Claude Haiku 4.5). One non-streaming Messages call
+/// ([`crate::llm::anthropic::complete_text`]) asking for a compact JSON array of
+/// `{name, kind}`.
 pub struct AnthropicEntityExtractor {
     client: reqwest::Client,
     base_url: String,
@@ -44,7 +44,8 @@ pub struct AnthropicEntityExtractor {
     model: String,
 }
 
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Output budget for one extraction reply (a short JSON array).
+const EXTRACT_MAX_TOKENS: u32 = 512;
 
 impl AnthropicEntityExtractor {
     pub fn new(
@@ -76,48 +77,19 @@ impl EntityExtractor for AnthropicEntityExtractor {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let body = json!({
-            "model": self.model,
-            "max_tokens": 512,
-            "system": Self::system_prompt(),
-            "messages": [{"role": "user", "content": text}],
-        });
-        let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("POST /v1/messages to Anthropic (entity extraction)")?;
-        let status = resp.status();
-        let payload = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("Anthropic extraction HTTP {status}: {payload}");
-        }
-        let parsed: MessagesResponse =
-            serde_json::from_str(&payload).context("parsing Anthropic messages response")?;
-        let joined: String = parsed
-            .content
-            .into_iter()
-            .filter_map(|b| b.text)
-            .collect::<Vec<_>>()
-            .join("");
-        Ok(parse_entities_json(&joined))
+        let reply = crate::llm::anthropic::complete_text(
+            &self.client,
+            &self.base_url,
+            &self.api_key,
+            &self.model,
+            EXTRACT_MAX_TOKENS,
+            Self::system_prompt(),
+            text,
+        )
+        .await
+        .context("Anthropic entity extraction")?;
+        Ok(parse_entities_json(&reply))
     }
-}
-
-#[derive(Deserialize)]
-struct MessagesResponse {
-    content: Vec<ContentBlock>,
-}
-
-#[derive(Deserialize)]
-struct ContentBlock {
-    #[serde(default)]
-    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -236,8 +208,23 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
+            // Read the whole request (headers + JSON body) to check what was sent.
+            let mut req = Vec::new();
             let mut buf = [0u8; 8192];
-            let _ = sock.read(&mut buf).await;
+            // The body's last key is `system` (serde_json sorts keys); stop at its `}`.
+            while !(String::from_utf8_lossy(&req).contains("\"system\"") && req.ends_with(b"}")) {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+            }
+            let req = String::from_utf8_lossy(&req).to_lowercase();
+            assert!(req.starts_with("post /v1/messages"), "{req}");
+            assert!(req.contains("x-api-key: k"), "{req}");
+            assert!(req.contains("anthropic-version: 2023-06-01"), "{req}");
+            assert!(req.contains("\"max_tokens\":512"), "{req}");
+            assert!(req.contains("\"model\":\"claude-haiku-4-5\""), "{req}");
             // Messages API shape: content is an array of text blocks; our text block
             // holds the JSON entity array (possibly with surrounding prose).
             let body = r#"{"content":[{"type":"text","text":"[{\"name\":\"jazz\",\"kind\":\"topic\"},{\"name\":\"Portland\",\"kind\":\"place\"}]"}]}"#;

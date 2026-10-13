@@ -1,9 +1,18 @@
 // Client-side helpers shared by every admin page. Served from /shell.js and loaded
 // (blocking) before each page body, so a body's inline load() — which runs as it is
-// parsed — can rely on esc/fmtTime/getJSON being defined.
+// parsed — can rely on esc/fmtTime/getJSON/apiJSON/postJSON being defined.
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function fmtTime(ts){ if(!ts) return ''; try { return new Date(ts*1000).toLocaleString(); } catch(e){ return String(ts); } }
 async function getJSON(url){ const r = await fetch(url); return r.json(); }
+// fetch + parse JSON with arbitrary fetch options.
+async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
+// POST a JSON body (default `{}`) and parse the JSON reply. Every admin POST goes
+// through this: the server rejects a POST without `Content-Type: application/json`
+// (a cross-site form post cannot set it).
+async function postJSON(url, body){
+  return apiJSON(url, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body === undefined ? {} : body)});
+}
 
 // Shell behavior: highlight the active nav link for the current path, and wire the
 // app-bar menu button to the navigation drawer on narrow screens. Runs once the DOM

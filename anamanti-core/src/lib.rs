@@ -12,33 +12,43 @@
 //! The library exposes every layer so both the `anamanti-core` binary and
 //! the integration tests drive the same code.
 
-#[cfg(feature = "aec")]
-pub mod aec;
+pub mod app;
 pub mod appsaid;
+pub mod audio;
 pub mod audio_dump;
 pub mod cache;
 pub mod cadora;
 pub mod calendar;
+pub mod clock;
 pub mod config;
 pub mod control;
+pub mod db;
 pub mod directions;
 pub mod discovery;
 pub mod drive_consent;
+pub mod household;
 pub mod http;
+pub mod ids;
 pub mod llm;
 pub mod memory;
 pub mod music;
 pub mod notify;
+pub mod oauth_loopback;
 pub mod orchestrator;
 pub mod places;
 pub mod recipe;
 pub mod server;
 pub mod settings;
 pub mod speaker;
+pub mod speech;
 pub mod spotify_consent;
 pub mod stt;
 pub mod system1;
+pub mod tavily;
+pub mod timer;
+pub mod util;
 pub mod vad;
+pub mod vecmath;
 pub mod weather;
 pub mod webconfig;
 pub mod wyoming;

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 
+use anamanti_core::app::AppServices;
 use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind, VadEngineKind};
 use anamanti_core::discovery::MdnsAdvertiser;
 use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
@@ -109,8 +110,9 @@ async fn run() -> Result<()> {
 
     // Selectable-model catalog for the settings dropdown (device + config page).
     // Live-fetched from the provider APIs (filtered to the last 12 months) with a
-    // curated static fallback; shared by both front doors.
-    let catalog = Arc::new(config.model_catalog());
+    // curated static fallback; shared by both front doors. Credentials are read live
+    // from the settings, so keys entered on the config page are used.
+    let catalog = Arc::new(config.model_catalog(&settings));
 
     // Chat log (always on): every completed turn is recorded here, both as the
     // durable source of truth and as the ingestion queue for GraphRAG memory.
@@ -310,45 +312,53 @@ async fn run() -> Result<()> {
     // Dormant (no task) when weather is disabled in the config.
     let weather_svc = Arc::new(WeatherService::new());
     if config.weather.enabled {
-        let imperial =
-            anamanti_core::directions::units_are_imperial(config.weather_units.as_deref());
-        // The push builds its provider from the live settings each tick, so a config-page
-        // provider/key switch retargets it without a restart.
+        // Each tick reads the live household location + units and builds the provider
+        // from the live settings, so a config-page edit of any of them retargets the
+        // push without a restart.
         anamanti_core::weather::service::spawn_periodic(
             weather_svc.clone(),
             pipeline.settings().clone(),
-            pipeline.settings().home_location(),
-            imperial,
             config.weather.refresh_interval(),
         );
         log::info!(
-            "weather push: every {}s (imperial={imperial}, provider={})",
+            "weather push: every {}s (provider={})",
             config.weather.refresh_interval().as_secs(),
             config.weather.provider,
         );
     }
 
+    // House-wide music routing (Snapcast) control plane. Dormant unless music is
+    // enabled in the config file; when on, the ducker lowers the music group's volume
+    // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
+    let ducker = config
+        .build_ducker()
+        .map(|d| d as Arc<dyn anamanti_core::server::Ducker>);
+
+    // Every shared service handle, built once: the device server, its control protocol
+    // and the config page all share this one `Arc`.
+    let services = Arc::new(
+        AppServices::new(pipeline, connector, catalog)
+            .with_voices_dir(config.tts_voices_dir.clone())
+            .with_notify(notify)
+            .with_weather(weather_svc)
+            .with_graphrag(graphrag)
+            .with_ducker(ducker)
+            .with_music(music_hub.clone())
+            .with_debug(DebugSources {
+                chatlog_path: config.chatlog_path.clone(),
+                promptlog_path: config.promptlog_path.clone(),
+                db_path: config.db_path.clone(),
+                helix_path: config.helix_path.clone(),
+                memory_backend: match config.memory_backend {
+                    MemoryBackendChoice::Helix => "helix",
+                    MemoryBackendChoice::Sqlite => "sqlite",
+                }
+                .to_string(),
+                graph: graph_view,
+            }),
+    );
+
     if let Some(config_addr) = config.config_addr {
-        let settings = pipeline.settings().clone();
-        let catalog = catalog.clone();
-        let connector = connector.clone();
-        let voices_dir = config.tts_voices_dir.clone();
-        let music = music_hub.clone();
-        let notify = notify.clone();
-        let graphrag = graphrag.clone();
-        let debug = DebugSources {
-            memory: pipeline.memory().clone(),
-            chatlog_path: config.chatlog_path.clone(),
-            promptlog_path: config.promptlog_path.clone(),
-            db_path: config.db_path.clone(),
-            helix_path: config.helix_path.clone(),
-            memory_backend: match config.memory_backend {
-                MemoryBackendChoice::Helix => "helix",
-                MemoryBackendChoice::Sqlite => "sqlite",
-            }
-            .to_string(),
-            graph: graph_view.clone(),
-        };
         match TcpListener::bind(config_addr).await {
             Ok(listener) => {
                 let local = listener.local_addr().unwrap_or(config_addr);
@@ -356,13 +366,9 @@ async fn run() -> Result<()> {
                     "config + debug pages on http://{local}/ \
                      (chat log, prompts, SQLite, HelixDB — no auth, keep it on a trusted network)"
                 );
+                let services = services.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = webconfig::serve(
-                        listener, settings, catalog, connector, voices_dir, debug, music, notify,
-                        graphrag,
-                    )
-                    .await
-                    {
+                    if let Err(e) = webconfig::serve(listener, services).await {
                         log::error!("config page stopped: {e:#}");
                     }
                 });
@@ -381,10 +387,6 @@ async fn run() -> Result<()> {
     let _mdns = MdnsAdvertiser::advertise(&config.service_name, &config.instance_id, local.port())
         .context("advertising Wyoming service over mDNS")?;
 
-    // House-wide music routing (Snapcast) control plane. Dormant unless music is
-    // enabled in the config file; when on, the ducker lowers the music group's volume
-    // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
-    let ducker = config.build_ducker();
     if config.music.enabled {
         log::info!(
             "music routing on: snapserver={} duck_on_speech={} duck_to={}% group={:?}",
@@ -410,7 +412,7 @@ async fn run() -> Result<()> {
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     let outcome = tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker, notify, weather_svc, graphrag) => {
+        res = server::serve(listener, services) => {
             res.context("device-facing server stopped")
         }
         _ = tokio::signal::ctrl_c() => {

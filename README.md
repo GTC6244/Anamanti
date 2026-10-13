@@ -81,6 +81,7 @@ See [`architecture.md`](./plans/architecture.md) for the full design and
 anamanti-display/   Anamanti Display — the Echo Show app: Flutter UI (`lib/`) +
                     Rust device engine (`rust/`: audio, wake word, Wyoming client)
 anamanti-core/      Anamanti Core — the Mac Mini brain (STT ↔ LLM + memory ↔ TTS)
+anamanti-protocol/  Shared Wyoming protocol crate used by both Core and Display
 plans/              Design + planning docs (architecture.md, Plan.MD, TODO.md, …)
 agents.md           Build guidance for AI agents & contributors
 README.md           You are here
