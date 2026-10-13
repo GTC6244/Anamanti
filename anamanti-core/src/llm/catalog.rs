@@ -43,6 +43,10 @@ impl ModelInfo {
     }
 }
 
+/// Per-request deadline for a provider's `GET /v1/models`; on timeout the static
+/// fallback list is served.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How long a fetched catalog is reused before re-querying the provider APIs.
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 /// The "last 12 months" window, in seconds.
@@ -68,7 +72,6 @@ pub type CredentialSource = Arc<dyn Fn() -> CatalogCredentials + Send + Sync>;
 /// curated static fallback. Shared (behind an `Arc`) by the device control path
 /// and the web config page.
 pub struct ModelCatalog {
-    client: reqwest::Client,
     anthropic_base_url: String,
     /// Fixed credentials, used when no live [`CredentialSource`] is attached.
     fixed: CatalogCredentials,
@@ -89,7 +92,6 @@ impl ModelCatalog {
         openai_api_key: Option<String>,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
             anthropic_base_url: anthropic_base_url.into().trim_end_matches('/').to_string(),
             fixed: CatalogCredentials {
                 anthropic_api_key: anthropic_api_key.filter(|k| !k.is_empty()),
@@ -200,16 +202,17 @@ impl ModelCatalog {
         bearer: Option<&str>,
         now: i64,
     ) -> anyhow::Result<Vec<ModelInfo>> {
-        let req = self
-            .client
-            .get(format!("{}/v1/models?limit=1000", self.anthropic_base_url))
-            .header("anthropic-version", ANTHROPIC_VERSION);
-        let v: serde_json::Value = apply_auth(req, auth, api_key, bearer)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let req = crate::http::get(
+            format!("{}/v1/models?limit=1000", self.anthropic_base_url),
+            "model-catalog",
+        )
+        .header("anthropic-version", ANTHROPIC_VERSION);
+        let v: serde_json::Value = crate::http::send_json(
+            apply_auth(req, auth, api_key, bearer),
+            FETCH_TIMEOUT,
+            "Anthropic /v1/models",
+        )
+        .await?;
 
         let cutoff = now - TWELVE_MONTHS_SECS;
         let mut out: Vec<(i64, ModelInfo)> = Vec::new();
@@ -258,15 +261,16 @@ impl ModelCatalog {
     }
 
     async fn fetch_openai(&self, key: &str, now: i64) -> anyhow::Result<Vec<ModelInfo>> {
-        let v: serde_json::Value = self
-            .client
-            .get(format!("{}/v1/models", self.openai_base_url))
-            .header("authorization", format!("Bearer {key}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let v: serde_json::Value = crate::http::send_json(
+            crate::http::get(
+                format!("{}/v1/models", self.openai_base_url),
+                "model-catalog",
+            )
+            .header("authorization", format!("Bearer {key}")),
+            FETCH_TIMEOUT,
+            "OpenAI /v1/models",
+        )
+        .await?;
 
         let cutoff = now - TWELVE_MONTHS_SECS;
         let mut out: Vec<(i64, ModelInfo)> = Vec::new();
