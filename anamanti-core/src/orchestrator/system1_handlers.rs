@@ -144,7 +144,7 @@ impl Pipeline {
             log::debug!("system1 weather: no home location configured; deferring to System-2");
             return None;
         }
-        let imperial = crate::directions::units_are_imperial(household.weather_units.as_deref());
+        let imperial = crate::household::units_are_imperial(household.weather_units.as_deref());
         let t0 = Instant::now();
         let report = match tokio::time::timeout(
             SYSTEM1_WEATHER_BUDGET,
@@ -292,32 +292,10 @@ fn spoken_clock_reply(intent: Intent) -> String {
 }
 
 /// A speakable duration, e.g. `600` → "10 minutes", `5400` → "1 hour 30 minutes",
-/// `90` → "1 minute 30 seconds". Used in the System-1 timer confirmations.
+/// `90` → "1 minute 30 seconds", `0` → "0 seconds". Used in the System-1 timer
+/// confirmations; the shared [`crate::speech::DurationStyle::Exact`] phrasing.
 fn human_duration(secs: u64) -> String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    let mut parts = Vec::new();
-    let unit = |n: u64, singular: &str| {
-        if n == 1 {
-            format!("1 {singular}")
-        } else {
-            format!("{n} {singular}s")
-        }
-    };
-    if h > 0 {
-        parts.push(unit(h, "hour"));
-    }
-    if m > 0 {
-        parts.push(unit(m, "minute"));
-    }
-    if s > 0 {
-        parts.push(unit(s, "second"));
-    }
-    if parts.is_empty() {
-        return "0 seconds".to_string();
-    }
-    parts.join(" ")
+    crate::speech::duration(secs as f64, crate::speech::DurationStyle::Exact)
 }
 
 /// A short, speakable one-line summary of a forecast for the System-1 weather fast path
@@ -397,5 +375,41 @@ mod tests {
         assert_eq!(human_duration(5400), "1 hour 30 minutes");
         assert_eq!(human_duration(90), "1 minute 30 seconds");
         assert_eq!(human_duration(0), "0 seconds");
+    }
+
+    /// The humanizer this module used before it moved onto `crate::speech::duration`
+    /// (D11), kept as the oracle: the timer confirmations must read exactly as before.
+    fn legacy_human_duration(secs: u64) -> String {
+        let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+        let unit = |n: u64, singular: &str| {
+            if n == 1 {
+                format!("1 {singular}")
+            } else {
+                format!("{n} {singular}s")
+            }
+        };
+        let mut parts = Vec::new();
+        if h > 0 {
+            parts.push(unit(h, "hour"));
+        }
+        if m > 0 {
+            parts.push(unit(m, "minute"));
+        }
+        if s > 0 {
+            parts.push(unit(s, "second"));
+        }
+        if parts.is_empty() {
+            return "0 seconds".to_string();
+        }
+        parts.join(" ")
+    }
+
+    #[test]
+    fn human_duration_matches_the_legacy_output_exactly() {
+        // Every second up to 2 h 1 min, then a sweep out past the 24 h timer cap.
+        let secs = (0..=7_260).chain((7_261..=200_000).step_by(37));
+        for s in secs {
+            assert_eq!(human_duration(s), legacy_human_duration(s), "{s}s");
+        }
     }
 }

@@ -114,7 +114,7 @@ pub async fn push_once(
         log::debug!("weather push: no home location set; skipping tick");
         return None;
     };
-    let imperial = crate::directions::units_are_imperial(household.weather_units.as_deref());
+    let imperial = crate::household::units_are_imperial(household.weather_units.as_deref());
     match provider
         .fetch(&location, imperial, crate::weather::ForecastWhen::Now)
         .await
@@ -206,7 +206,7 @@ mod tests {
 
     fn household(units: &str) -> crate::settings::Household {
         crate::settings::Household {
-            address: crate::directions::HomeAddress {
+            address: crate::household::HomeAddress {
                 city: Some("Austin".into()),
                 state: Some("Texas".into()),
                 ..Default::default()

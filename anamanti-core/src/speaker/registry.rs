@@ -74,6 +74,7 @@ impl SpeakerRegistry {
             "#,
         )
         .context("initializing speaker schema")?;
+        super::aliases::ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             ids: IdMinter::new(),
@@ -218,16 +219,29 @@ impl SpeakerRegistry {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Delete a profile by id; returns whether a row was removed.
+    /// Delete a profile by id; returns whether a row was removed. In the same
+    /// transaction, records the alias `id → household` (see [`super::aliases`]) so the
+    /// chat log and inactive GraphRAG stores stop attributing anything to `id`.
     pub fn delete(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn.execute("DELETE FROM speakers WHERE id = ?1", params![id])?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let n = tx.execute("DELETE FROM speakers WHERE id = ?1", params![id])?;
+        if n > 0 {
+            super::aliases::record(&tx, id, None)?;
+        }
+        tx.commit().context("committing speaker delete")?;
         Ok(n > 0)
     }
 
+    /// The persisted speaker-id aliases left by earlier merges/deletes.
+    pub fn aliases(&self) -> Result<super::AliasMap> {
+        super::aliases::load(&self.conn.lock().unwrap())
+    }
+
     /// Merge `drop_id` into `keep_id`: fold the voiceprints (weighted by sample
-    /// counts) and delete the dropped profile, in **one transaction** — a crash
-    /// leaves either both profiles untouched or the merge complete. Moving the
+    /// counts), delete the dropped profile and record the alias `drop_id → keep_id`
+    /// (see [`super::aliases`]), in **one transaction** — a crash leaves either both
+    /// profiles untouched or the merge complete. Moving the
     /// speaker's memories, clips and graph nodes is [`super::SpeakerService::merge`]'s
     /// job. Returns whether a merge happened. A user-given name on `keep` is
     /// preserved; if only `drop` was named, its name carries over.
@@ -261,6 +275,7 @@ impl SpeakerRegistry {
             params![encode_vec(&merged), ks + ds, name, labeled, now(), keep_id],
         )?;
         tx.execute("DELETE FROM speakers WHERE id = ?1", params![drop_id])?;
+        super::aliases::record(&tx, drop_id, Some(keep_id))?;
         tx.commit().context("committing speaker merge")?;
         Ok(true)
     }

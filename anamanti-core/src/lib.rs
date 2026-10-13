@@ -12,6 +12,7 @@
 //! The library exposes every layer so both the `anamanti-core` binary and
 //! the integration tests drive the same code.
 
+pub mod app;
 pub mod appsaid;
 pub mod audio;
 pub mod audio_dump;
@@ -25,6 +26,7 @@ pub mod db;
 pub mod directions;
 pub mod discovery;
 pub mod drive_consent;
+pub mod household;
 pub mod http;
 pub mod ids;
 pub mod llm;

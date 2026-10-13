@@ -265,7 +265,7 @@ pub(crate) fn day_summary(daily: &[DailyForecast], date: NaiveDate) -> (CurrentC
 /// imperial units. Mirrors [`crate::directions::DirectionsConfig`].
 pub struct WeatherConfig {
     pub provider: Arc<dyn WeatherProvider>,
-    pub home_location: crate::directions::LiveHomeLocation,
+    pub home_location: crate::household::LiveHomeLocation,
     pub imperial: bool,
 }
 

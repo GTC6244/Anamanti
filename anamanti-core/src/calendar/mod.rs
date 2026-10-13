@@ -224,18 +224,8 @@ fn normalize_url(url: &str) -> String {
 /// Build the calendar source from the configured subscriptions + cache TTL.
 /// Returns `None` (tool not advertised) when there are no usable subscriptions.
 ///
-/// `ttl` is the config's resolved `calendar.cache_ttl_secs`, which the config layer
-/// fills with [`IcalSubscription::DEFAULT_TTL`] when the key is absent. A value equal
-/// to that default is therefore read as "not set" and the TTL follows
-/// `tool_cache.calendar_lookup` (whose own default is the same 5 minutes), so either
-/// key can set it; any other value — including `0` (off) — is an explicit
-/// `calendar.cache_ttl_secs` and wins. Prefer [`build_with`] to pass the raw option.
-pub fn build(specs: Vec<CalendarSpec>, ttl: StdDuration) -> Option<Arc<dyn CalendarSource>> {
-    build_with(specs, (ttl != IcalSubscription::DEFAULT_TTL).then_some(ttl))
-}
-
-/// [`build`] with the raw `calendar.cache_ttl_secs` (`None` when the key is absent ⇒
-/// the `tool_cache.calendar_lookup` TTL applies).
+/// `ttl` is the raw `calendar.cache_ttl_secs`: when set it wins (`0` = no cache);
+/// `None` (key absent) ⇒ the `tool_cache.calendar_lookup` TTL applies (default 5 min).
 pub fn build_with(
     specs: Vec<CalendarSpec>,
     ttl: Option<StdDuration>,
@@ -673,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn build_maps_the_default_ttl_onto_the_tool_cache_config() {
+    fn explicit_ttl_wins_and_absent_follows_the_tool_cache_config() {
         let spec = || {
             vec![CalendarSpec {
                 name: "A".into(),
@@ -683,10 +673,17 @@ mod tests {
         // An explicit calendar.cache_ttl_secs wins…
         let s = IcalSubscription::with_ttl(spec(), Some(StdDuration::from_secs(60)));
         assert_eq!(s.ttl(), StdDuration::from_secs(60));
-        // …absent, it follows tool_cache.calendar_lookup (default 5 min).
+        // …including one equal to the 5-minute default (no longer read as "unset")…
+        let s = IcalSubscription::with_ttl(spec(), Some(IcalSubscription::DEFAULT_TTL));
+        assert_eq!(s.ttl_override, Some(IcalSubscription::DEFAULT_TTL));
+        // …and 0, which disables the cache.
+        let s = IcalSubscription::with_ttl(spec(), Some(StdDuration::ZERO));
+        assert!(s.ttl().is_zero());
+        // Absent, it follows tool_cache.calendar_lookup (default 5 min).
         let s = IcalSubscription::with_ttl(spec(), None);
-        assert_eq!(s.ttl(), IcalSubscription::DEFAULT_TTL);
-        assert!(build(Vec::new(), IcalSubscription::DEFAULT_TTL).is_none());
-        assert!(build(spec(), StdDuration::ZERO).is_some());
+        assert_eq!(s.ttl_override, None);
+        assert_eq!(s.ttl(), crate::cache::config().ttl(CALENDAR_TOOL));
+        assert!(build_with(Vec::new(), None).is_none());
+        assert!(build_with(spec(), Some(StdDuration::ZERO)).is_some());
     }
 }

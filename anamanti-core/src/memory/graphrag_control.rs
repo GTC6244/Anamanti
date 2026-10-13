@@ -33,6 +33,7 @@ use super::graphview::{
 };
 use super::helix::HelixMemory;
 use super::ingester::MemoryIngester;
+use crate::speaker::{AliasMap, SpeakerAliases, HOUSEHOLD_SPEAKER};
 
 /// A [`Recall`] that forwards to an inner backend which can be swapped at runtime.
 /// Reads clone the current `Arc` under a short read lock and release it before the
@@ -153,6 +154,10 @@ pub struct GraphRagController {
     helix_base: PathBuf,
     cfg: GraphRagConfig,
     extractor: Arc<dyn EntityExtractor>,
+    /// Speaker merges/forgets (`crate::speaker::aliases`), replayed onto a store each
+    /// time it becomes active and applied by its ingester. `None` when the alias table
+    /// could not be opened.
+    aliases: Option<Arc<SpeakerAliases>>,
     recall: Arc<SwappableRecall>,
     graph: Arc<SwappableGraphView>,
     live: Mutex<Live>,
@@ -183,26 +188,42 @@ impl GraphRagController {
         let helix_base = config.helix_path.clone();
         let chatlog_path = chatlog.path().to_path_buf();
         let extractor = build_extractor(&cfg);
+        // The alias table lives in the SQLite store of record; it exists (empty) even
+        // when speaker identification is off.
+        let aliases = match SpeakerAliases::open(&config.db_path) {
+            Ok(a) => Some(Arc::new(a)),
+            Err(e) => {
+                log::warn!("speaker aliases unavailable ({e:#}); graph ids are used as logged");
+                None
+            }
+        };
 
         let configured = cfg.embed_backend;
         let initial = read_marker(&marker_path(&helix_base)).unwrap_or(configured);
+        let build = |backend| {
+            build_backend(
+                &cfg,
+                &helix_base,
+                &chatlog_path,
+                &extractor,
+                aliases.clone(),
+                backend,
+            )
+        };
 
-        let (backend, built) =
-            match build_backend(&cfg, &helix_base, &chatlog_path, &extractor, initial).await {
-                Ok(b) => (initial, b),
-                Err(e) if initial != configured => {
-                    log::warn!(
-                        "persisted embedding backend {} failed to start ({e:#}); \
-                         falling back to the configured default {}",
-                        label(initial),
-                        label(configured)
-                    );
-                    let b = build_backend(&cfg, &helix_base, &chatlog_path, &extractor, configured)
-                        .await?;
-                    (configured, b)
-                }
-                Err(e) => return Err(e),
-            };
+        let (backend, built) = match build(initial).await {
+            Ok(b) => (initial, b),
+            Err(e) if initial != configured => {
+                log::warn!(
+                    "persisted embedding backend {} failed to start ({e:#}); \
+                     falling back to the configured default {}",
+                    label(initial),
+                    label(configured)
+                );
+                (configured, build(configured).await?)
+            }
+            Err(e) => return Err(e),
+        };
 
         log::info!(
             "memory embeddings: {} backend active ({} dims); store {}",
@@ -216,6 +237,7 @@ impl GraphRagController {
             helix_base,
             cfg,
             extractor,
+            aliases,
             recall: Arc::new(SwappableRecall::new(built.recall)),
             graph: Arc::new(SwappableGraphView::new(built.graph)),
             live: Mutex::new(Live {
@@ -251,6 +273,7 @@ impl GraphRagController {
             &self.helix_base,
             &self.chatlog_path,
             &self.extractor,
+            self.aliases.clone(),
             backend,
         )
         .await
@@ -355,11 +378,14 @@ fn build_extractor(cfg: &GraphRagConfig) -> Arc<dyn EntityExtractor> {
     }
 }
 
+/// Build a backend about to become active (boot or a switch): open its store, bring
+/// it up to date with the speaker aliases, and wire its ingester to resolve them.
 async fn build_backend(
     cfg: &GraphRagConfig,
     helix_base: &Path,
     chatlog_path: &Path,
     extractor: &Arc<dyn EntityExtractor>,
+    aliases: Option<Arc<SpeakerAliases>>,
     backend: EmbedBackend,
 ) -> Result<Built> {
     let embedder = build_embedder(cfg, backend)?;
@@ -371,13 +397,27 @@ async fn build_backend(
             .await
             .context("opening embedded HelixDB store")?,
     );
-    let ingester = Arc::new(MemoryIngester::new_with_offset(
-        chatlog_path.to_path_buf(),
-        offset_path(chatlog_path, &sig),
-        helix.clone(),
-        embedder.clone(),
-        extractor.clone(),
-    ));
+    if let Some(aliases) = &aliases {
+        let map = aliases.load().context("loading speaker aliases")?;
+        let moved = apply_speaker_aliases(&helix, &map)
+            .await
+            .with_context(|| format!("applying speaker aliases to the {sig} store"))?;
+        if moved > 0 {
+            log::info!(
+                "memory store {sig}: re-attributed {moved} node(s) per speaker merges/forgets"
+            );
+        }
+    }
+    let ingester = Arc::new(
+        MemoryIngester::new_with_offset(
+            chatlog_path.to_path_buf(),
+            offset_path(chatlog_path, &sig),
+            helix.clone(),
+            embedder.clone(),
+            extractor.clone(),
+        )
+        .with_aliases(aliases),
+    );
     let recall: Arc<dyn Recall> = Arc::new(HelixRecall::new(helix.clone(), embedder, cfg.recall_k));
     let graph: Arc<dyn GraphView> = helix;
     Ok(Built {
@@ -386,6 +426,21 @@ async fn build_backend(
         ingester,
         dims,
     })
+}
+
+/// Replay every speaker merge/forget onto `helix`: a store that was inactive when the
+/// change happened still attributes nodes to the old id. Idempotent (an id with no
+/// nodes left is a no-op), so it runs every time a store becomes active. Returns the
+/// number of `Turn` + `Memory` nodes re-attributed.
+async fn apply_speaker_aliases(helix: &HelixMemory, aliases: &AliasMap) -> Result<u64> {
+    let mut moved = 0;
+    for (from, _) in aliases.iter() {
+        moved += match aliases.resolve(from) {
+            HOUSEHOLD_SPEAKER => helix.delete_speaker(from).await?,
+            to => helix.reassign_speaker(from, to).await?,
+        };
+    }
+    Ok(moved)
 }
 
 fn build_embedder(cfg: &GraphRagConfig, backend: EmbedBackend) -> Result<Arc<dyn Embedder>> {
@@ -533,6 +588,204 @@ mod tests {
         );
     }
 
+    // ---- speaker aliases across stores ------------------------------------------
+
+    use crate::memory::chatlog::ChatLogRecord;
+    use crate::memory::embed::MockEmbedder;
+    use crate::memory::entity::NoopEntityExtractor;
+    use crate::memory::{HelixRecall, MemoryStore};
+    use crate::speaker::{MockSpeakerEmbedder, SpeakerRegistry, SpeakerService, SpeakerThresholds};
+
+    /// Run an async test body on a big-stack thread (the embedded HelixDB engine's
+    /// futures overflow the default test-thread stack).
+    fn on_big_stack<F: std::future::Future<Output = ()> + Send + 'static>(body: F) {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(body)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn logged(id: &str, speaker: &str, name: &str, transcript: &str) -> ChatLogRecord {
+        ChatLogRecord {
+            id: id.to_string(),
+            ts: 1,
+            session_id: "s".to_string(),
+            transcript: transcript.to_string(),
+            reply: "Noted.".to_string(),
+            memories_written: vec![],
+            llm_backend: "mock".to_string(),
+            model: None,
+            speaker_id: speaker.to_string(),
+            speaker_name: Some(name.to_string()),
+            timing: None,
+        }
+    }
+
+    /// A household with two voice clusters (`keep` = Ann, `drop` = an anonymous
+    /// cluster that is really Ann too), one logged turn each, and the speaker service +
+    /// alias reader over a real SQLite file. Returns the pieces the tests need.
+    struct Household {
+        dir: PathBuf,
+        log_path: PathBuf,
+        service: SpeakerService,
+        aliases: Arc<SpeakerAliases>,
+        memory: MemoryStore,
+        keep: String,
+        drop: String,
+    }
+
+    fn household(tag: &str) -> Household {
+        let dir = std::env::temp_dir().join(format!(
+            "anamanti-alias-{tag}-{}-{}",
+            std::process::id(),
+            crate::clock::now_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("anamanti_memory.sqlite");
+        let registry = SpeakerRegistry::open(&db).unwrap();
+        let keep = registry
+            .create_labeled("Ann", &[1.0, 0.0, 0.0, 0.0], 3)
+            .unwrap();
+        let drop = registry.create_cluster(&[0.0, 1.0, 0.0, 0.0]).unwrap();
+        let service = SpeakerService::new(
+            Arc::new(MockSpeakerEmbedder::new(4)),
+            registry,
+            SpeakerThresholds::from_ms(0.7, 0.5, 100),
+        );
+        let log_path = dir.join("anamanti_chatlog.jsonl");
+        let log = ChatLog::open(&log_path).unwrap();
+        log.append(&logged("t1", &keep, "Ann", "I like green tea"))
+            .unwrap();
+        log.append(&logged("t2", &drop, "Speaker 2", "I play the cello"))
+            .unwrap();
+        Household {
+            aliases: Arc::new(SpeakerAliases::open(&db).unwrap()),
+            memory: MemoryStore::open_in_memory().unwrap(),
+            dir,
+            log_path,
+            service,
+            keep,
+            drop,
+        }
+    }
+
+    /// A store fed from the chat log by its own ingester (one per embedding backend),
+    /// with the production alias wiring.
+    async fn ingested_store(h: &Household, sig: &str) -> Arc<HelixMemory> {
+        let helix = Arc::new(HelixMemory::open_in_memory(sig, 8).await.unwrap());
+        let ingester = MemoryIngester::new_with_offset(
+            &h.log_path,
+            offset_path(&h.log_path, sig),
+            helix.clone(),
+            Arc::new(MockEmbedder::new(8)),
+            Arc::new(NoopEntityExtractor),
+        )
+        .with_aliases(Some(h.aliases.clone()));
+        ingester.run_once().await.unwrap();
+        helix
+    }
+
+    async fn turns_of(helix: &HelixMemory, speaker: &str) -> Vec<String> {
+        let list = helix
+            .list_turns(None, Some(speaker), None, 10, 0)
+            .await
+            .unwrap();
+        list.turns
+            .into_iter()
+            .filter(|t| t.speaker_id == speaker)
+            .map(|t| t.ext_id)
+            .collect()
+    }
+
+    /// After a merge, re-ingesting the chat log (which still records the dropped
+    /// speaker's id) into a fresh store attributes those turns to the kept speaker.
+    #[test]
+    fn reingest_after_merge_attributes_to_the_kept_speaker() {
+        on_big_stack(async {
+            let h = household("reingest");
+            let active = ingested_store(&h, "nomic-8").await;
+            let graph = HelixRecall::new(active.clone(), Arc::new(MockEmbedder::new(8)), 8);
+            h.service
+                .merge(&h.keep, &h.drop, &h.memory, Some(&graph))
+                .await
+                .unwrap()
+                .expect("merged");
+
+            // A store built from scratch from the chat log (a new backend's first use).
+            let fresh = ingested_store(&h, "openai-8").await;
+            assert!(turns_of(&fresh, &h.drop).await.is_empty());
+            let mut kept = turns_of(&fresh, &h.keep).await;
+            kept.sort();
+            assert_eq!(kept, vec!["t1", "t2"]);
+
+            // A forget re-points the merged id too: both now land on the household.
+            h.service
+                .delete(&h.keep, &h.memory, Some(&graph))
+                .await
+                .unwrap()
+                .expect("deleted");
+            let after_forget = ingested_store(&h, "other-8").await;
+            assert!(turns_of(&after_forget, &h.keep).await.is_empty());
+            assert!(turns_of(&after_forget, &h.drop).await.is_empty());
+            assert_eq!(turns_of(&after_forget, "household").await.len(), 2);
+            std::fs::remove_dir_all(&h.dir).ok();
+        });
+    }
+
+    /// A store that was inactive during the merge still holds the old id; activating
+    /// it (the alias replay `build_backend` runs on boot and on `switch`) re-attributes
+    /// it before it serves recall, so the old id is not resurrected.
+    #[test]
+    fn activating_another_store_after_merge_does_not_resurrect_the_old_id() {
+        on_big_stack(async {
+            let h = household("switch");
+            let active = ingested_store(&h, "nomic-8").await;
+            let inactive = ingested_store(&h, "openai-8").await;
+            assert_eq!(turns_of(&inactive, &h.drop).await, vec!["t2"]);
+
+            let graph = HelixRecall::new(active.clone(), Arc::new(MockEmbedder::new(8)), 8);
+            h.service
+                .merge(&h.keep, &h.drop, &h.memory, Some(&graph))
+                .await
+                .unwrap()
+                .expect("merged");
+            // Only the active store was rewritten by the merge itself.
+            assert_eq!(turns_of(&inactive, &h.drop).await, vec!["t2"]);
+
+            // Switch: the newly active store is brought up to date first.
+            let map = h.aliases.load().unwrap();
+            assert_eq!(apply_speaker_aliases(&inactive, &map).await.unwrap(), 1);
+            let recall = HelixRecall::new(inactive.clone(), Arc::new(MockEmbedder::new(8)), 8);
+            let as_old = recall
+                .recall("I play the cello", Some(&h.drop), 8)
+                .await
+                .unwrap();
+            assert!(
+                !as_old.hits.iter().any(|t| t.contains("cello")),
+                "old id still scoped to the turn: {:?}",
+                as_old.hits
+            );
+            let as_kept = recall
+                .recall("I play the cello", Some(&h.keep), 8)
+                .await
+                .unwrap();
+            assert!(as_kept.hits.iter().any(|t| t.contains("cello")));
+            assert!(turns_of(&inactive, &h.drop).await.is_empty());
+
+            // Idempotent: replaying again (the next boot) changes nothing.
+            assert_eq!(apply_speaker_aliases(&inactive, &map).await.unwrap(), 0);
+            std::fs::remove_dir_all(&h.dir).ok();
+        });
+    }
+
     #[test]
     fn offset_path_is_signature_scoped() {
         let p = offset_path(Path::new("/x/anamanti_chatlog.jsonl"), "nomic-768");
@@ -579,6 +832,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let config = Config {
             helix_path: tmp.join("helix"),
+            db_path: tmp.join("memory.sqlite"),
             ..Config::default()
         };
         let chatlog = Arc::new(ChatLog::open(tmp.join("chatlog.jsonl")).unwrap());

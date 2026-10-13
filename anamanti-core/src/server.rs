@@ -3,7 +3,6 @@
 //! device discovers over mDNS (Plan.MD Phase 4 bullet 5, "frames stream back to
 //! the Echo Show over the Wyoming socket").
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -12,9 +11,8 @@ use async_trait::async_trait;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
+use crate::app::AppServices;
 use crate::control;
-use crate::llm::catalog::ModelCatalog;
-use crate::memory::GraphRagController;
 use crate::music::MusicDucker;
 use crate::notify::NotificationService;
 use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome, TurnStart};
@@ -134,35 +132,13 @@ pub async fn drive_turn(
 
 /// Accept device connections forever, handling each on its own task. Returns only
 /// if the listener itself fails.
-#[allow(clippy::too_many_arguments)]
-pub async fn serve(
-    listener: TcpListener,
-    pipeline: Pipeline,
-    connector: Arc<dyn ServiceConnector>,
-    catalog: Arc<ModelCatalog>,
-    voices_dir: Option<PathBuf>,
-    ducker: Option<Arc<MusicDucker>>,
-    notify: Arc<NotificationService>,
-    weather: Arc<WeatherService>,
-    graphrag: Option<Arc<GraphRagController>>,
-) -> Result<()> {
+pub async fn serve(listener: TcpListener, services: Arc<AppServices>) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         log::info!("device connected: {peer}");
-        let pipeline = pipeline.clone();
-        let connector = connector.clone();
-        let catalog = catalog.clone();
-        let voices_dir = voices_dir.clone();
-        let ducker = ducker.clone();
-        let notify = notify.clone();
-        let weather = weather.clone();
-        let graphrag = graphrag.clone();
+        let services = services.clone();
         tokio::spawn(async move {
-            match handle_connection(
-                stream, pipeline, connector, catalog, voices_dir, ducker, notify, weather, graphrag,
-            )
-            .await
-            {
+            match handle_connection(stream, &services).await {
                 Ok(()) => log::info!("device disconnected: {peer}"),
                 Err(e) => log::warn!("connection {peer} ended with error: {e:#}"),
             }
@@ -175,18 +151,9 @@ pub async fn serve(
 /// the memory store / runtime settings; an `audio-start` opens a voice turn. The
 /// Phase-3 device opens a fresh connection per turn, but looping here also supports
 /// a device that reuses one socket for several turns or control requests.
-#[allow(clippy::too_many_arguments)]
-async fn handle_connection(
-    stream: TcpStream,
-    pipeline: Pipeline,
-    connector: Arc<dyn ServiceConnector>,
-    catalog: Arc<ModelCatalog>,
-    voices_dir: Option<PathBuf>,
-    ducker: Option<Arc<MusicDucker>>,
-    notify: Arc<NotificationService>,
-    weather: Arc<WeatherService>,
-    graphrag: Option<Arc<GraphRagController>>,
-) -> Result<()> {
+async fn handle_connection(stream: TcpStream, services: &AppServices) -> Result<()> {
+    let pipeline = &services.pipeline;
+    let connector = services.connector.as_ref();
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
     // Music ducking for this connection's turns, applied in order on one task. Started
@@ -202,18 +169,7 @@ async fn handle_connection(
                     peer_str(peer.as_ref()),
                     ev.event_type
                 );
-                control::handle_control(
-                    &mut device,
-                    &ev,
-                    pipeline.memory(),
-                    pipeline.settings(),
-                    pipeline.speaker().map(|s| s.as_ref()),
-                    &catalog,
-                    connector.as_ref(),
-                    voices_dir.as_deref(),
-                    graphrag.as_deref(),
-                )
-                .await?;
+                control::handle_control(&mut device, &ev, services).await?;
             }
             Some(ev) if ev.event_type == types::AUDIO_START => {
                 // The opening frame carries the PCM format, the follow-up chain depth +
@@ -223,15 +179,13 @@ async fn handle_connection(
                     continue;
                 };
                 if ducking.is_none() {
-                    ducking = ducker
-                        .clone()
-                        .map(|d| ConnectionDucking::spawn(d as Arc<dyn Ducker>));
+                    ducking = services.ducker.clone().map(ConnectionDucking::spawn);
                 }
                 let mut on_event = |ev: TurnEvent| log_event(peer.as_ref(), &ev);
                 match drive_turn(
-                    &pipeline,
+                    pipeline,
                     &mut device,
-                    connector.as_ref(),
+                    connector,
                     start,
                     ducking.as_ref(),
                     &mut on_event,
@@ -248,9 +202,7 @@ async fn handle_connection(
                 let text = ev.speak_text().unwrap_or_default().to_string();
                 log::info!("[{}] speak request: {text:?}", peer_str(peer.as_ref()));
                 if !text.trim().is_empty() {
-                    pipeline
-                        .announce(&mut device, connector.as_ref(), &text)
-                        .await?;
+                    pipeline.announce(&mut device, connector, &text).await?;
                 }
             }
             // device → orchestrator: open the persistent proactive-notification
@@ -265,7 +217,8 @@ async fn handle_connection(
                 // (`role=notify`, the default) or the ambient weather push
                 // (`role=weather`); the write pump below is identical for both — it
                 // just drains whichever service's receiver.
-                let channel = PushChannel::for_role(ev.hello_role(), &notify, &weather);
+                let channel =
+                    PushChannel::for_role(ev.hello_role(), &services.notify, &services.weather);
                 log::info!(
                     "[{}] {} channel opened (device_id={device_id:?}, name={device_name:?})",
                     peer_str(peer.as_ref()),

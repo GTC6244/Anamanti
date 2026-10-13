@@ -88,7 +88,7 @@ pub trait PlacesProvider: Send + Sync {
 /// home location used to bias searches. Mirrors [`crate::weather::WeatherConfig`].
 pub struct PlacesConfig {
     pub provider: Arc<dyn PlacesProvider>,
-    pub home_location: crate::directions::LiveHomeLocation,
+    pub home_location: crate::household::LiveHomeLocation,
 }
 
 /// A [`PlacesProvider`] backed by the Google Places API (New). The API key is a
