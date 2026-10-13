@@ -181,6 +181,25 @@ class _PeopleScreenState extends State<PeopleScreen> {
     setState(() => _people?.removeWhere((p) => p.id == s.id));
   }
 
+  /// Play back a person's recorded voice clips through the assistant's speaker so a
+  /// human can listen and recognize them (then name the cluster). The audio plays on
+  /// the Mac-connected device's speaker; this just asks the engine to play it.
+  Future<void> _play(SpeakerView s, int index) async {
+    try {
+      final count = await widget.client.playSpeakerClips(s.id);
+      if (!mounted) return;
+      if (count == 0) {
+        _snack('No voice clips saved yet for ${_label(s, index)}.');
+      } else {
+        final clips = count == 1 ? '1 clip' : '$count clips';
+        _snack('Playing $clips for ${_label(s, index)}…');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _snack('Couldn\'t play clips: $e');
+    }
+  }
+
   void _snack(String message) {
     ScaffoldMessenger.of(
       context,
@@ -270,22 +289,33 @@ class _PeopleScreenState extends State<PeopleScreen> {
           ),
           title: Text(label),
           subtitle: Text(s.labeled ? clips : 'Not named yet · $clips'),
-          trailing: PopupMenuButton<String>(
-            key: ValueKey('speaker-menu-${s.id}'),
-            onSelected: (action) {
-              switch (action) {
-                case 'rename':
-                  _rename(s, i);
-                case 'merge':
-                  _merge(s, i);
-                case 'delete':
-                  _delete(s, i);
-              }
-            },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'rename', child: Text('Name / rename')),
-              PopupMenuItem(value: 'merge', child: Text('Merge with…')),
-              PopupMenuItem(value: 'delete', child: Text('Forget')),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                key: ValueKey('speaker-play-${s.id}'),
+                tooltip: 'Play voice clips',
+                icon: const Icon(Icons.play_circle_outline),
+                onPressed: () => _play(s, i),
+              ),
+              PopupMenuButton<String>(
+                key: ValueKey('speaker-menu-${s.id}'),
+                onSelected: (action) {
+                  switch (action) {
+                    case 'rename':
+                      _rename(s, i);
+                    case 'merge':
+                      _merge(s, i);
+                    case 'delete':
+                      _delete(s, i);
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'rename', child: Text('Name / rename')),
+                  PopupMenuItem(value: 'merge', child: Text('Merge with…')),
+                  PopupMenuItem(value: 'delete', child: Text('Forget')),
+                ],
+              ),
             ],
           ),
           onTap: () => _rename(s, i),

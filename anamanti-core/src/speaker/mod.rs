@@ -12,6 +12,7 @@
 //! voice leaves the LAN); Phases A–D exercise it with the deterministic
 //! [`MockSpeakerEmbedder`].
 
+pub mod clips;
 pub mod embed;
 pub mod features;
 pub mod registry;
@@ -21,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
+pub use clips::{ClipInfo, ClipStore};
 pub use embed::{MockSpeakerEmbedder, SpeakerEmbedder};
 pub use registry::{SpeakerProfile, SpeakerRegistry};
 
@@ -152,26 +154,92 @@ pub struct SpeakerService {
     /// In-flight guided-enrollment sessions, keyed by the device-chosen session id:
     /// the accepted sample embeddings accumulated so far. Dropped on commit/cancel.
     enrollments: Mutex<HashMap<String, Vec<Vec<f32>>>>,
+    /// Optional rolling store of the raw utterances behind each voiceprint, so a human
+    /// can play a cluster's clips back to put a name to it (speaker_id_plan.md Phase C).
+    /// `None` when clip capture is unavailable (e.g. the store dir couldn't be opened);
+    /// identification still works, there's just nothing to play back.
+    clips: Option<ClipStore>,
 }
 
 impl SpeakerService {
-    /// Assemble a service from an embedder, a profile registry, and thresholds.
+    /// Assemble a service from an embedder, a profile registry, and thresholds, with
+    /// no raw-clip capture (clips are `None`).
     pub fn new(
         embedder: Arc<dyn SpeakerEmbedder>,
         registry: SpeakerRegistry,
         thresholds: SpeakerThresholds,
+    ) -> Self {
+        Self::new_with_clips(embedder, registry, thresholds, None)
+    }
+
+    /// Assemble a service that also persists a rolling window of each speaker's raw
+    /// utterances into `clips` (the People screen's "play" button). Pass `None` to
+    /// disable clip capture (equivalent to [`new`](Self::new)).
+    pub fn new_with_clips(
+        embedder: Arc<dyn SpeakerEmbedder>,
+        registry: SpeakerRegistry,
+        thresholds: SpeakerThresholds,
+        clips: Option<ClipStore>,
     ) -> Self {
         Self {
             embedder,
             registry,
             thresholds,
             enrollments: Mutex::new(HashMap::new()),
+            clips,
         }
     }
 
     /// The underlying registry (the Phase-C control handler lists/renames it).
     pub fn registry(&self) -> &SpeakerRegistry {
         &self.registry
+    }
+
+    /// List `speaker_id`'s stored voice clips, newest first (empty when clip capture
+    /// is off or the speaker has none).
+    pub fn list_clips(&self, speaker_id: &str) -> Result<Vec<ClipInfo>> {
+        match &self.clips {
+            Some(store) => store.list(speaker_id),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The raw little-endian `i16` PCM bytes of one of `speaker_id`'s clips. Errors
+    /// when clip capture is off or the clip is unknown.
+    pub fn load_clip(&self, speaker_id: &str, clip: &str) -> Result<Vec<u8>> {
+        match &self.clips {
+            Some(store) => store.load(speaker_id, clip),
+            None => anyhow::bail!("voice-clip capture is not enabled on the orchestrator"),
+        }
+    }
+
+    /// Discard every stored clip for `speaker_id` (called when a profile is deleted).
+    pub fn delete_clips(&self, speaker_id: &str) {
+        if let Some(store) = &self.clips {
+            if let Err(e) = store.delete_speaker(speaker_id) {
+                log::warn!("deleting voice clips for {speaker_id} failed: {e:#}");
+            }
+        }
+    }
+
+    /// Move `drop`'s clips onto `keep` (called when two clusters are merged).
+    pub fn merge_clips(&self, keep: &str, drop: &str) {
+        if let Some(store) = &self.clips {
+            if let Err(e) = store.merge_speakers(keep, drop) {
+                log::warn!("merging voice clips {drop}→{keep} failed: {e:#}");
+            }
+        }
+    }
+
+    /// Persist one raw utterance for `speaker_id` into the rolling clip store, if
+    /// enabled. Best-effort: a clip-IO failure is logged, never propagated (it must
+    /// not break the turn).
+    fn save_clip(&self, speaker_id: &str, pcm: &[i16]) {
+        if let Some(store) = &self.clips {
+            if let Err(e) = store.save(speaker_id, pcm) {
+                log::warn!("saving voice clip for {speaker_id} failed: {e:#}");
+            }
+        }
     }
 
     /// Minimum voiced PCM length (samples) before identification/enrollment is
@@ -308,6 +376,9 @@ impl SpeakerService {
             Some((id, score)) if score >= self.thresholds.match_threshold => {
                 self.registry.update_centroid(&id, &embedding)?;
                 let name = self.registry.get(&id)?.and_then(|p| p.name);
+                // Keep this utterance in the rolling clip window so a human can play
+                // the voice back (and so a named person accumulates fresh samples).
+                self.save_clip(&id, pcm);
                 Ok(SpeakerContext {
                     speaker_id: id,
                     name,
@@ -318,6 +389,7 @@ impl SpeakerService {
             Some((id, score)) if score >= self.thresholds.new_threshold => {
                 // Borderline: attribute this turn but don't poison the voiceprint.
                 let name = self.registry.get(&id)?.and_then(|p| p.name);
+                self.save_clip(&id, pcm);
                 Ok(SpeakerContext {
                     speaker_id: id,
                     name,
@@ -327,6 +399,9 @@ impl SpeakerService {
             }
             _ => {
                 let id = self.registry.create_cluster(&embedding)?;
+                // The first clip for a brand-new cluster — this is exactly what a
+                // human needs to hear to put a name to the anonymous "Speaker N".
+                self.save_clip(&id, pcm);
                 Ok(SpeakerContext {
                     speaker_id: id,
                     name: None,
@@ -493,5 +568,43 @@ mod tests {
         svc.enroll_sample("s", &tone(180.0, 1500)).unwrap();
         svc.enroll_cancel("s");
         assert_eq!(svc.enroll_count("s"), 0);
+    }
+
+    #[test]
+    fn attribution_saves_a_playable_clip_for_the_speaker() {
+        let tmp = std::env::temp_dir().join(format!(
+            "anamanti-svc-clips-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let svc = SpeakerService::new_with_clips(
+            Arc::new(MockSpeakerEmbedder::default()),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default(),
+            Some(ClipStore::open(&tmp).unwrap()),
+        );
+        let utterance = tone(180.0, 1500);
+        let ctx = svc.identify_and_attribute(&utterance).unwrap();
+
+        // A clip was stored for the new cluster, and its bytes round-trip back as the
+        // same PCM the "play" button would submit to the speaker.
+        let clips = svc.list_clips(&ctx.speaker_id).unwrap();
+        assert_eq!(clips.len(), 1, "one clip captured for the new speaker");
+        let bytes = svc.load_clip(&ctx.speaker_id, &clips[0].name).unwrap();
+        assert_eq!(bytes.len(), utterance.len() * 2, "raw i16 LE, 2 bytes/sample");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn clip_methods_degrade_gracefully_without_a_store() {
+        let svc = service(); // no clip store
+        assert!(svc.list_clips("spk-1").unwrap().is_empty());
+        assert!(svc.load_clip("spk-1", "whatever").is_err());
+        svc.delete_clips("spk-1"); // no panic
+        svc.merge_clips("a", "b"); // no panic
     }
 }

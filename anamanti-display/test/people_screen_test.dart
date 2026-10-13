@@ -71,6 +71,42 @@ void main() {
     expect(find.text('Dana'), findsOneWidget);
   });
 
+  testWidgets('play button plays a person\'s voice clips', (tester) async {
+    final client = FakeOrchestratorClient(
+      speakers: [_spk('spk-2')],
+      clipsBySpeaker: {
+        'spk-2': const [
+          SpeakerClipView(
+              name: '100-0', createdMs: 100, samples: 16000, sampleRate: 16000),
+          SpeakerClipView(
+              name: '200-1', createdMs: 200, samples: 16000, sampleRate: 16000),
+        ],
+      },
+    );
+    await tester.pumpWidget(MaterialApp(home: PeopleScreen(client: client)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('speaker-play-spk-2')));
+    await tester.pump(); // let the future resolve + snackbar appear
+    await tester.pump();
+
+    expect(client.playedClips, ['spk-2']);
+    expect(find.textContaining('Playing 2 clips'), findsOneWidget);
+  });
+
+  testWidgets('play button reports when a person has no clips', (tester) async {
+    final client = FakeOrchestratorClient(speakers: [_spk('spk-2')]);
+    await tester.pumpWidget(MaterialApp(home: PeopleScreen(client: client)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('speaker-play-spk-2')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(client.playedClips, ['spk-2']);
+    expect(find.textContaining('No voice clips saved yet'), findsOneWidget);
+  });
+
   testWidgets('empty state shows a friendly hint', (tester) async {
     final client = FakeOrchestratorClient(speakers: []);
     await tester.pumpWidget(MaterialApp(home: PeopleScreen(client: client)));

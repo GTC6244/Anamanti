@@ -289,6 +289,28 @@ class SpeakerView {
   final int createdAt;
 }
 
+/// One stored voice clip for a speaker, for the People screen's clip playback.
+class SpeakerClipView {
+  const SpeakerClipView({
+    required this.name,
+    required this.createdMs,
+    required this.samples,
+    required this.sampleRate,
+  });
+
+  /// Opaque clip id (the key to fetch/play it).
+  final String name;
+
+  /// Capture time in Unix milliseconds (newest first).
+  final int createdMs;
+
+  /// Number of `i16` samples in the clip.
+  final int samples;
+
+  /// Sample rate of the clip's PCM in Hz.
+  final int sampleRate;
+}
+
 /// Reads and changes orchestrator-side settings and persistent memory. All calls
 /// hit the network (mDNS discovery + a short Wyoming control connection) and may
 /// throw if the Mac is unreachable; callers surface that as an offline state.
@@ -368,6 +390,15 @@ abstract class OrchestratorClient {
 
   /// Delete a speaker profile; returns whether one was removed.
   Future<bool> deleteSpeaker(String id);
+
+  /// List a speaker's stored voice clips (newest first), for playback. Empty when
+  /// the person has no saved clips yet.
+  Future<List<SpeakerClipView>> listSpeakerClips(String id);
+
+  /// Play a person's stored voice clips through the assistant's speaker so a human
+  /// can listen and identify them. Returns the number of clips queued (0 when there
+  /// are none); throws if audio output isn't available or the Mac is unreachable.
+  Future<int> playSpeakerClips(String id);
 
   /// Commit the current guided voice-enrollment session into a named profile
   /// (SpeakerEnrollmentPlan.md Phase 2). Returns the orchestrator's confirmation
@@ -622,6 +653,30 @@ class FrbOrchestratorClient implements OrchestratorClient {
 
   @override
   Future<bool> deleteSpeaker(String id) => frb.deleteSpeaker(
+        orchestratorKey: orchestratorKey,
+        id: id,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<List<SpeakerClipView>> listSpeakerClips(String id) async {
+    final clips = await frb.listSpeakerClips(
+      orchestratorKey: orchestratorKey,
+      id: id,
+      discoveryTimeoutSecs: _timeout,
+    );
+    return clips
+        .map((c) => SpeakerClipView(
+              name: c.name,
+              createdMs: c.createdMs.toInt(),
+              samples: c.samples.toInt(),
+              sampleRate: c.sampleRate,
+            ))
+        .toList();
+  }
+
+  @override
+  Future<int> playSpeakerClips(String id) => frb.playSpeakerClips(
         orchestratorKey: orchestratorKey,
         id: id,
         discoveryTimeoutSecs: _timeout,
