@@ -24,7 +24,7 @@ pub use spotify::{SearchKind, SpotifyCommand, SpotifyController, SpotifyWebApi};
 pub use supervisor::{ManagedProc, MusicHub, MusicSupervisor, ProcSpec, ProcStatus};
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -146,26 +146,6 @@ impl SnapcastClient {
                 "id": client_id,
                 "volume": { "muted": muted, "percent": percent.min(100) },
             })),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// `Group.SetMute` — mute/unmute an entire group.
-    pub async fn set_group_muted(&self, group_id: &str, mute: bool) -> Result<()> {
-        self.call(
-            "Group.SetMute",
-            Some(json!({ "id": group_id, "mute": mute })),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    /// `Group.SetStream` — point a group at a different stream id.
-    pub async fn set_group_stream(&self, group_id: &str, stream_id: &str) -> Result<()> {
-        self.call(
-            "Group.SetStream",
-            Some(json!({ "id": group_id, "stream_id": stream_id })),
         )
         .await
         .map(|_| ())
@@ -361,7 +341,7 @@ impl MusicDucker {
 /// Controls a sibling `mpv` process over its JSON IPC Unix socket
 /// (`mpv --input-ipc-server=<path> --idle --no-video`). The mpv process decodes a
 /// URL to PCM and writes it to the web snapfifo; this only sends control commands
-/// (load/stop/volume/pause) — never audio.
+/// (load/stop) — never audio.
 #[derive(Debug, Clone)]
 pub struct MpvControl {
     socket: PathBuf,
@@ -372,10 +352,6 @@ impl MpvControl {
         Self {
             socket: socket.into(),
         }
-    }
-
-    pub fn socket_path(&self) -> &Path {
-        &self.socket
     }
 
     /// Send one mpv IPC command array and return its `data` (if any).
@@ -430,24 +406,6 @@ impl MpvControl {
     /// Stop playback and clear the playlist.
     pub async fn stop(&self) -> Result<()> {
         self.command(vec![json!("stop")]).await.map(|_| ())
-    }
-
-    /// Set the player volume (0–100+; mpv allows >100 but we clamp to 100).
-    pub async fn set_volume(&self, percent: u8) -> Result<()> {
-        self.command(vec![
-            json!("set_property"),
-            json!("volume"),
-            json!(f64::from(percent.min(100))),
-        ])
-        .await
-        .map(|_| ())
-    }
-
-    /// Pause or resume playback.
-    pub async fn set_paused(&self, paused: bool) -> Result<()> {
-        self.command(vec![json!("set_property"), json!("pause"), json!(paused)])
-            .await
-            .map(|_| ())
     }
 }
 
@@ -630,7 +588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mpv_load_and_volume_roundtrip() {
+    async fn mpv_load_and_stop_roundtrip() {
         use tokio::net::UnixListener;
         let dir = std::env::temp_dir();
         let sock = dir.join(format!("ambient-mpv-test-{}.sock", std::process::id()));
@@ -662,13 +620,13 @@ mod tests {
 
         let mpv = MpvControl::new(&sock);
         mpv.load("http://example.com/stream.mp3").await.unwrap();
-        mpv.set_volume(55).await.unwrap();
+        mpv.stop().await.unwrap();
 
         let got = received.lock().await;
         assert_eq!(got.len(), 2);
         assert_eq!(got[0]["command"][0], json!("loadfile"));
         assert_eq!(got[0]["command"][1], json!("http://example.com/stream.mp3"));
-        assert_eq!(got[1]["command"], json!(["set_property", "volume", 55.0]));
+        assert_eq!(got[1]["command"], json!(["stop"]));
         let _ = std::fs::remove_file(&sock);
     }
 }
