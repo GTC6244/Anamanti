@@ -35,7 +35,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         openai_api_key: None,
         openai_max_tokens: 128,
         anthropic_token: None,
-        home_location: anamanti_core::directions::LiveHomeLocation::default(),
+        home_location: anamanti_core::household::LiveHomeLocation::default(),
         spotify: None,
         cadora: None,
         appsaid: None,

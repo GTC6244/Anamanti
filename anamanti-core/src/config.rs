@@ -58,12 +58,12 @@ fn disable_sentinel(v: &str) -> Option<&str> {
 /// into `city` (which preserves the old weather behavior of passing the whole string to
 /// the provider). Blank in → empty `HomeAddress`.
 fn resolve_home_address(
-    structured: Option<crate::directions::HomeAddress>,
+    structured: Option<crate::household::HomeAddress>,
     legacy: Option<String>,
-) -> crate::directions::HomeAddress {
+) -> crate::household::HomeAddress {
     match structured.map(|a| a.sanitized()) {
         Some(a) if !a.is_empty() => a,
-        _ => crate::directions::HomeAddress {
+        _ => crate::household::HomeAddress {
             city: legacy
                 .as_deref()
                 .map(str::trim)
@@ -135,7 +135,7 @@ pub struct Config {
     /// address; weather + the prompt's "here" grounding use only City + State/Prov. An
     /// all-blank value omits the location grounding. Seeded from the config file's
     /// `home_address` object (or the legacy single-line `home_location` string → City).
-    pub home_address: crate::directions::HomeAddress,
+    pub home_address: crate::household::HomeAddress,
     /// Preferred measurement units for answers (e.g. "imperial" / "metric"), paired
     /// with `home_address`. Set via the config file's `weather_units`.
     pub weather_units: Option<String>,
@@ -717,7 +717,7 @@ impl Default for Config {
             },
             db_path: PathBuf::from("anamanti_memory.sqlite"),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            home_address: crate::directions::HomeAddress::default(),
+            home_address: crate::household::HomeAddress::default(),
             weather_units: None,
             turn_timeout: Duration::from_secs(30),
             memory_backend: MemoryBackendChoice::Helix,
@@ -826,7 +826,7 @@ pub struct FileConfig {
     pub system_prompt: Option<String>,
     /// Discrete home-address fields (Address 1/2, City, State/Prov, Zip/Postal, Country).
     #[serde(default)]
-    pub home_address: Option<crate::directions::HomeAddress>,
+    pub home_address: Option<crate::household::HomeAddress>,
     /// **Legacy** single-line home location, kept for backward compatibility with config
     /// files written before the discrete-field split. When `home_address` is absent, this
     /// seeds `HomeAddress.city`.

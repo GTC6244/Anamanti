@@ -232,7 +232,7 @@ pub struct Household {
     /// address; weather + the prompt "here" line use only City + State/Prov. All-blank =
     /// unset (the prompt omits the location line).
     #[serde(default)]
-    pub address: crate::directions::HomeAddress,
+    pub address: crate::household::HomeAddress,
     /// **Legacy** single-line location from older config/persisted files that predate the
     /// discrete-field split. Read-only compatibility: `sanitized()` migrates a present
     /// value into `address.city` and clears this. New writes leave it `None`.
@@ -2375,7 +2375,7 @@ impl SharedSettings {
     /// The live home-location handle (the factory's shared cell, updated by
     /// [`apply_household`](Self::apply_household)). Handed to the ambient weather push
     /// so it tracks a config-page location edit without a restart.
-    pub fn home_location(&self) -> crate::directions::LiveHomeLocation {
+    pub fn home_location(&self) -> crate::household::LiveHomeLocation {
         self.factory.home_location.clone()
     }
 
@@ -3377,7 +3377,7 @@ mod tests {
     #[test]
     fn household_sanitize_trims_and_drops_blanks_and_nameless() {
         let messy = Household {
-            address: crate::directions::HomeAddress {
+            address: crate::household::HomeAddress {
                 address1: Some("  123 Main St  ".into()),
                 city: Some("  Austin  ".into()),
                 state: Some(" Texas ".into()),
@@ -3446,7 +3446,7 @@ mod tests {
 
         // When the discrete address is set, the legacy value is ignored (not merged).
         let both = Household {
-            address: crate::directions::HomeAddress {
+            address: crate::household::HomeAddress {
                 city: Some("Boston".into()),
                 state: Some("MA".into()),
                 ..Default::default()
@@ -3653,7 +3653,7 @@ mod tests {
         );
 
         let stored = s.apply_household(&Household {
-            address: crate::directions::HomeAddress {
+            address: crate::household::HomeAddress {
                 city: Some("Boston".into()),
                 state: Some("MA".into()),
                 ..Default::default()

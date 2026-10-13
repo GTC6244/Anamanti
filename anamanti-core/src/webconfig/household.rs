@@ -75,7 +75,7 @@ pub(super) fn household_save_json(settings: &SharedSettings, data: &Value) -> St
     let addr = data.get("address");
     let addr_field = |k: &str| addr.and_then(|a| str_field(a, k));
     let household = Household {
-        address: crate::directions::HomeAddress {
+        address: crate::household::HomeAddress {
             address1: addr_field("address1"),
             address2: addr_field("address2"),
             city: addr_field("city"),

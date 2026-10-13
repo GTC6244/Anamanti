@@ -1079,7 +1079,7 @@ mod tests {
                 openai_api_key: None,
                 openai_max_tokens: 10,
                 anthropic_token: None,
-                home_location: crate::directions::LiveHomeLocation::default(),
+                home_location: crate::household::LiveHomeLocation::default(),
                 spotify: None,
                 cadora: None,
                 appsaid: None,

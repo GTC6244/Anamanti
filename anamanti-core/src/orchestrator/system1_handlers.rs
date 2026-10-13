@@ -144,7 +144,7 @@ impl Pipeline {
             log::debug!("system1 weather: no home location configured; deferring to System-2");
             return None;
         }
-        let imperial = crate::directions::units_are_imperial(household.weather_units.as_deref());
+        let imperial = crate::household::units_are_imperial(household.weather_units.as_deref());
         let t0 = Instant::now();
         let report = match tokio::time::timeout(
             SYSTEM1_WEATHER_BUDGET,
