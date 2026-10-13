@@ -12,8 +12,6 @@
 //! The library exposes every layer so both the `anamanti-core` binary and
 //! the integration tests drive the same code.
 
-#[cfg(feature = "aec")]
-pub mod aec;
 pub mod appsaid;
 pub mod audio_dump;
 pub mod cache;
