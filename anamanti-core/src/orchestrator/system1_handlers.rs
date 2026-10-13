@@ -1,0 +1,401 @@
+//! The System-1 fast-decision fork (plans/system1-fast-decisions.md): ask the decision
+//! engine, and on a confident [`Intent`] whose handler preconditions hold, answer the
+//! turn here — skipping memory recall and the LLM.
+//!
+//! Each handler only *decides* (returns a [`FastReply`], or `None` to defer before
+//! anything reaches the device, so deferring can never double-speak); the one output
+//! path, [`Pipeline::speak_fast_reply`], applies the action, speaks, and closes the
+//! turn under the barge-in watcher.
+
+use std::time::Duration;
+
+use tokio::time::Instant;
+
+use crate::llm::DeviceAction;
+use crate::system1::{Decision, DecisionRequest, Intent, Resolution};
+use crate::timer::MAX_TIMER_SECS;
+use crate::wyoming::protocol::{DeviceContext, DisplayContext};
+
+use super::speech_out::{Delivery, FastReply};
+use super::{Pipeline, TurnCtx};
+
+/// Wall-clock budget for the System-1 weather fetch on the *fast* path. The provider's
+/// own client timeout bounds a single request, but a fast-path fetch can chain a
+/// geocode *then* a forecast call — up to ~20 s of dead air before it gives up. That
+/// defeats the point of the fast path: a slow/flaky provider should fail over to
+/// System-2 promptly, not stall the user. Bound the whole fetch here; on timeout we
+/// defer, exactly as we do on any other fetch error.
+pub(crate) const SYSTEM1_WEATHER_BUDGET: Duration = Duration::from_millis(2500);
+
+impl Pipeline {
+    /// Run the System-1 fork for this turn. Skipped entirely for the default `none`
+    /// engine. Returns `Some((reply, delivery))` when the turn was answered on the fast
+    /// path, `None` to fall through to System-2 (defer, error, no handler, or a handler
+    /// precondition that failed before anything was sent). Records the decision in the
+    /// turn's timing.
+    pub(crate) async fn run_system1(
+        &self,
+        ctx: &mut TurnCtx<'_>,
+        transcript: &str,
+    ) -> Option<(String, Delivery)> {
+        let engine_handle = ctx.runtime.system1.engine.clone();
+        let engine = engine_handle.name().to_string();
+        if engine == "none" {
+            return None;
+        }
+        let req = DecisionRequest {
+            transcript: transcript.to_string(),
+            // The foreground widget label ("recipe"/"weather"), so screen-relative
+            // commands can route; `None` on an idle display.
+            screen: ctx.device_ctx.widget_label().map(str::to_string),
+            // Background timer state (running/remaining/labels), ground truth for the
+            // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
+            timers: ctx.device_ctx.timers.clone(),
+        };
+        log::info!("system1 ({engine}) call: deciding on {transcript:?}");
+        let t0 = Instant::now();
+        let decision = engine_handle.decide(&req).await;
+        let ms = t0.elapsed().as_millis();
+        ctx.timing.system1_ms = Some(ms as u64);
+        let r: Resolution = match decision {
+            Ok(Decision::Resolve(r)) => r,
+            Ok(Decision::Defer) => {
+                ctx.timing.system1_outcome = Some("defer".to_string());
+                log::info!("system1 ({engine}) DEFER in {ms}ms; falling through to System-2");
+                return None;
+            }
+            Err(e) => {
+                ctx.timing.system1_outcome = Some("error".to_string());
+                log::warn!(
+                    "system1 ({engine}) decide FAILED in {ms}ms ({e:#}); deferring to System-2"
+                );
+                return None;
+            }
+        };
+        ctx.timing.system1_intent = Some(r.intent.clone());
+        ctx.timing.system1_confidence = Some(r.confidence);
+        log::info!(
+            "system1 ({engine}) RESOLVE intent `{}` (conf {:.2}) in {ms}ms",
+            r.intent,
+            r.confidence,
+        );
+        let reply = match r.intent.parse::<Intent>() {
+            Ok(intent) => self.fast_reply_for(intent, ctx, transcript).await,
+            Err(_) => None, // a custom config label: routable, but no handler
+        };
+        let Some(reply) = reply else {
+            ctx.timing.system1_outcome = Some("no-handler".to_string());
+            log::info!(
+                "system1 ({engine}) intent `{}` has no fast-path handler; deferring to System-2",
+                r.intent
+            );
+            return None;
+        };
+        // Committed: own the turn from here (never fall through → no double-speak).
+        ctx.timing.path = Some("system1".to_string());
+        ctx.timing.system1_outcome = Some("resolve".to_string());
+        let delivery = self.speak_fast_reply(ctx, &reply).await;
+        log::info!(
+            "system1 ({engine}) handled intent `{}` on the fast path",
+            r.intent
+        );
+        Some((reply.text, delivery))
+    }
+
+    /// Decide the fast-path reply for a resolved intent, or `None` to defer. Exhaustive
+    /// over [`Intent`], so a new intent must choose a handler (or defer) here.
+    async fn fast_reply_for(
+        &self,
+        intent: Intent,
+        ctx: &mut TurnCtx<'_>,
+        transcript: &str,
+    ) -> Option<FastReply> {
+        match intent {
+            Intent::Weather => self.weather_reply(ctx).await,
+            Intent::Timer => timer_reply(transcript),
+            // Clock queries answer from the wall clock (no tool, no network, no widget).
+            // Always resolvable → always commit.
+            Intent::Time | Intent::Date => Some(FastReply::say(spoken_clock_reply(intent))),
+            Intent::TimerCancel => timer_cancel_reply(&ctx.device_ctx),
+            Intent::TimerQuery => timer_query_reply(&ctx.device_ctx),
+            Intent::WeatherDismiss | Intent::RecipeDismiss | Intent::PlaceDismiss => {
+                screen_dismiss_reply(intent, &ctx.device_ctx)
+            }
+            // The user signalled they are done: a brief ack that ends the follow-up chain
+            // (a bare `audio-stop`, no `listen`), returning the device to IDLE. Always
+            // resolvable (a fresh "goodbye" turn just ends cleanly).
+            Intent::EndSession => Some(FastReply::say("Okay.").ending_session()),
+            Intent::StopDismiss => stop_dismiss_reply(&ctx.device_ctx, ctx.followup_depth),
+            // Route-only: the free-form place name needs the System-2 LLM.
+            Intent::Place => None,
+        }
+    }
+
+    /// The System-1 `weather` fast path: fetch the forecast for home, open the
+    /// full-screen weather widget *before* speaking, then speak a short templated
+    /// summary and invite a follow-up. Returns `None` (defer) on a precondition that
+    /// fails before anything is emitted: no provider, no home location (from the turn
+    /// snapshot), or the fetch errors / exceeds [`SYSTEM1_WEATHER_BUDGET`].
+    async fn weather_reply(&self, ctx: &mut TurnCtx<'_>) -> Option<FastReply> {
+        let provider = self.weather.as_ref()?; // weather disabled → defer
+        let household = &ctx.runtime.household;
+        let location = household.address.weather_location().unwrap_or_default();
+        if location.trim().is_empty() {
+            log::debug!("system1 weather: no home location configured; deferring to System-2");
+            return None;
+        }
+        let imperial = crate::directions::units_are_imperial(household.weather_units.as_deref());
+        let t0 = Instant::now();
+        let report = match tokio::time::timeout(
+            SYSTEM1_WEATHER_BUDGET,
+            provider.fetch(&location, imperial, crate::weather::ForecastWhen::Now),
+        )
+        .await
+        {
+            Ok(Ok(report)) => {
+                ctx.timing.fetch_ms = Some(t0.elapsed().as_millis() as u64);
+                log::info!(
+                    "system1 weather: fetch OK in {}ms (location {location:?})",
+                    t0.elapsed().as_millis(),
+                );
+                report
+            }
+            Ok(Err(e)) => {
+                log::warn!(
+                    "system1 weather fetch failed in {}ms ({e:#}); deferring to System-2",
+                    t0.elapsed().as_millis(),
+                );
+                return None;
+            }
+            Err(_) => {
+                log::warn!(
+                    "system1 weather fetch exceeded {}ms budget; deferring to System-2",
+                    SYSTEM1_WEATHER_BUDGET.as_millis(),
+                );
+                return None;
+            }
+        };
+        let text = weather_summary(&report);
+        // Widget first, so the screen changes the instant the intent resolves.
+        Some(FastReply::say(text).with_action(DeviceAction::ShowWeather(report)))
+    }
+}
+
+/// The System-1 `timer` fast path: parse an unambiguous duration from the transcript
+/// and start the timer. `None` (defer) when no clear duration is present (e.g. "cancel
+/// my timer", or a free-form request) or it is out of range (0 or over
+/// [`MAX_TIMER_SECS`]), so the robust System-2 timer tool still handles those.
+fn timer_reply(transcript: &str) -> Option<FastReply> {
+    let secs = crate::system1::parse_duration_secs(transcript)?; // unclear → defer
+    if secs == 0 || secs > MAX_TIMER_SECS {
+        log::debug!("system1 timer: duration {secs}s out of range; deferring to System-2");
+        return None;
+    }
+    Some(
+        FastReply::say(format!("Timer set for {}.", human_duration(secs))).with_action(
+            DeviceAction::StartTimer {
+                label: None,
+                duration_secs: secs,
+            },
+        ),
+    )
+}
+
+/// The System-1 `timer_cancel` fast path: cancel all running timers and confirm.
+/// **Precondition (ground truth):** a timer must actually be running — otherwise there
+/// is nothing to cancel, so defer to System-2 (which can tell the user there are no
+/// timers). Only unlabeled "cancel all" resolves here; a labeled cancel needs a
+/// free-form slot and stays on System-2.
+fn timer_cancel_reply(device_ctx: &DeviceContext) -> Option<FastReply> {
+    if !device_ctx.timers.any_running() {
+        return None; // nothing to cancel → defer
+    }
+    let text = if device_ctx.timers.running > 1 {
+        "Okay, I've cancelled your timers."
+    } else {
+        "Okay, I've cancelled your timer."
+    };
+    Some(FastReply::say(text).with_action(DeviceAction::CancelTimer { label: None }))
+}
+
+/// The System-1 `timer_query` fast path: answer "how much time is left?" from the
+/// device-reported remaining time. **Precondition:** a timer must be running (else
+/// defer). Labeled queries need a free-form slot and stay on System-2.
+fn timer_query_reply(device_ctx: &DeviceContext) -> Option<FastReply> {
+    if !device_ctx.timers.any_running() {
+        return None; // no timer → defer
+    }
+    Some(FastReply::say(
+        match device_ctx.timers.next_remaining_secs {
+            Some(secs) if secs > 0 => format!("You have {} left.", human_duration(secs)),
+            _ => "Your timer is just about up.".to_string(),
+        },
+    ))
+}
+
+/// The System-1 `weather_dismiss` / `recipe_dismiss` / `place_dismiss` fast path: close
+/// the named screen and give a brief ack. **Precondition:** that screen must actually be
+/// the foreground widget (ground truth from `device_ctx`), else defer — "close the
+/// recipe" with no recipe up is meaningless and better handled by System-2.
+fn screen_dismiss_reply(intent: Intent, device_ctx: &DeviceContext) -> Option<FastReply> {
+    let action = match (intent, device_ctx.widget.as_ref()) {
+        (Intent::WeatherDismiss, Some(DisplayContext::Weather(_))) => DeviceAction::DismissWeather,
+        (Intent::RecipeDismiss, Some(DisplayContext::Recipe(_))) => DeviceAction::DismissRecipe,
+        (Intent::PlaceDismiss, Some(DisplayContext::Place(_))) => DeviceAction::DismissPlace,
+        _ => return None,
+    };
+    Some(FastReply::say("Okay.").with_action(action))
+}
+
+/// The System-1 `stop_dismiss` fast path: a bare "stop"/"cancel"/"never mind" whose
+/// target is not named. The **deterministic priority ladder** picks the referent from
+/// live device state (ground truth) — the classifier never chooses it (§17). A rung
+/// with no valid target falls through; if nothing matches, return `None` (the
+/// **ground-truth veto**) so the turn defers to System-2 rather than guessing.
+///
+/// Rung 1 (alarm *ringing*) and rung 3 (media *playing*) are parked until those
+/// signals are reported (§19.7); rung 2 (running timer), rung 4 (open screen), and
+/// rung 5 (end an active follow-up) are live.
+fn stop_dismiss_reply(device_ctx: &DeviceContext, followup_depth: u32) -> Option<FastReply> {
+    // Rung 2: a running timer → cancel it.
+    if device_ctx.timers.any_running() {
+        return timer_cancel_reply(device_ctx);
+    }
+    // Rung 4: an open screen → dismiss it.
+    let dismiss = match device_ctx.widget {
+        Some(DisplayContext::Weather(_)) => Some(Intent::WeatherDismiss),
+        Some(DisplayContext::Recipe(_)) => Some(Intent::RecipeDismiss),
+        Some(DisplayContext::Place(_)) => Some(Intent::PlaceDismiss),
+        // The diagnostics and enrollment screens are suppressing contexts that never
+        // reach here (the turn short-circuits earlier), and have no voice dismiss.
+        Some(DisplayContext::Diagnostics) | Some(DisplayContext::Enroll(_)) | None => None,
+    };
+    if let Some(intent) = dismiss {
+        return screen_dismiss_reply(intent, device_ctx);
+    }
+    // Rung 5: mid-conversation with nothing active → end the follow-up chain.
+    if followup_depth > 0 {
+        return Some(FastReply::say("Okay.").ending_session());
+    }
+    // Ground-truth veto: nothing to act on → defer to System-2.
+    None
+}
+
+/// A short spoken reply for the System-1 `time` / `date` clock intents, formatted from
+/// the Mac's wall clock. `Time` → "It's 3:45 PM."; anything else → today's date.
+fn spoken_clock_reply(intent: Intent) -> String {
+    let now = chrono::Local::now();
+    match intent {
+        Intent::Time => format!("It's {}.", now.format("%-I:%M %p")),
+        _ => format!("Today is {}.", now.format("%A, %B %-d")),
+    }
+}
+
+/// A speakable duration, e.g. `600` → "10 minutes", `5400` → "1 hour 30 minutes",
+/// `90` → "1 minute 30 seconds". Used in the System-1 timer confirmations.
+fn human_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let mut parts = Vec::new();
+    let unit = |n: u64, singular: &str| {
+        if n == 1 {
+            format!("1 {singular}")
+        } else {
+            format!("{n} {singular}s")
+        }
+    };
+    if h > 0 {
+        parts.push(unit(h, "hour"));
+    }
+    if m > 0 {
+        parts.push(unit(m, "minute"));
+    }
+    if s > 0 {
+        parts.push(unit(s, "second"));
+    }
+    if parts.is_empty() {
+        return "0 seconds".to_string();
+    }
+    parts.join(" ")
+}
+
+/// A short, speakable one-line summary of a forecast for the System-1 weather fast path
+/// (the full detail is on the widget). Metric/imperial follows the report's units.
+fn weather_summary(report: &crate::weather::WeatherReport) -> String {
+    let deg = if report.units == "imperial" {
+        "°F"
+    } else {
+        "°C"
+    };
+    let c = &report.current;
+    let lead = {
+        let d = c.description.trim();
+        if d.is_empty() {
+            String::new()
+        } else {
+            format!("{d}, ")
+        }
+    };
+    format!(
+        "{lead}it's {}{deg} in {}. Today's high is {}{deg}, low {}{deg}.",
+        c.temp, report.location_label, c.high, c.low
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wyoming::protocol::{PlaceScreen, TimerContext};
+
+    fn ctx_with(widget: Option<DisplayContext>, running: u32) -> DeviceContext {
+        DeviceContext {
+            widget,
+            timers: TimerContext {
+                running,
+                next_remaining_secs: (running > 0).then_some(90),
+                labels: Vec::new(),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn timer_reply_respects_the_shared_cap() {
+        assert!(timer_reply("set a timer for 10 minutes").is_some());
+        assert!(timer_reply("set a timer for 25 hours").is_none());
+        assert!(timer_reply("set a timer").is_none());
+    }
+
+    #[test]
+    fn place_dismiss_routes_directly_when_the_card_is_open() {
+        let place = Some(DisplayContext::Place(PlaceScreen::default()));
+        let r = screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(place, 0)).unwrap();
+        assert!(matches!(r.action, Some(DeviceAction::DismissPlace)));
+        // Nothing open → defer.
+        assert!(screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(None, 0)).is_none());
+    }
+
+    #[test]
+    fn stop_ladder_prefers_a_running_timer_then_a_screen_then_ending_the_chain() {
+        let r = stop_dismiss_reply(&ctx_with(None, 1), 0).unwrap();
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::CancelTimer { label: None })
+        ));
+        let place = Some(DisplayContext::Place(PlaceScreen::default()));
+        let r = stop_dismiss_reply(&ctx_with(place, 0), 0).unwrap();
+        assert!(matches!(r.action, Some(DeviceAction::DismissPlace)));
+        let r = stop_dismiss_reply(&ctx_with(None, 0), 2).unwrap();
+        assert!(r.end_session && r.action.is_none());
+        assert!(stop_dismiss_reply(&ctx_with(None, 0), 0).is_none());
+    }
+
+    #[test]
+    fn human_duration_reads_naturally() {
+        assert_eq!(human_duration(600), "10 minutes");
+        assert_eq!(human_duration(5400), "1 hour 30 minutes");
+        assert_eq!(human_duration(90), "1 minute 30 seconds");
+        assert_eq!(human_duration(0), "0 seconds");
+    }
+}

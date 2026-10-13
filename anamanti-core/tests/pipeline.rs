@@ -18,7 +18,8 @@ use anamanti_core::llm::mock::MockLlm;
 use anamanti_core::llm::{LlmBackend, LlmTurn, ReplyStream};
 use anamanti_core::memory::chatlog::now_secs;
 use anamanti_core::memory::{ChatLog, ChatLogRecord, MemoryKind, MemoryStore};
-use anamanti_core::orchestrator::{Pipeline, ServiceConnector, TurnEvent};
+use anamanti_core::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome, TurnStart};
+use anamanti_core::server;
 use anamanti_core::speaker::{
     MockSpeakerEmbedder, SpeakerContext, SpeakerRegistry, SpeakerService, SpeakerThresholds,
 };
@@ -61,6 +62,25 @@ impl ServiceConnector for MockConnector {
         tokio::spawn(mock_tts(server, captured));
         let (r, w) = split(client);
         Ok(DynConnection::from_io(r, w))
+    }
+}
+
+/// Read frames until the device's `audio-start`, parse it with `TurnStart::from_event`,
+/// and run the turn through `server::drive_turn` — exactly what the production
+/// connection handler does.
+async fn run_turn(
+    pipeline: &Pipeline,
+    device: &mut DynConnection,
+    connector: &dyn ServiceConnector,
+    on_event: &mut (dyn FnMut(TurnEvent) + Send),
+) -> Result<TurnOutcome> {
+    loop {
+        let Some(ev) = device.read().await? else {
+            return Ok(TurnOutcome::Disconnected);
+        };
+        if let Some(start) = TurnStart::from_event(&ev) {
+            return server::drive_turn(pipeline, device, connector, start, None, on_event).await;
+        }
     }
 }
 
@@ -329,8 +349,7 @@ async fn run_one_turn(
     let mut events = Vec::new();
     {
         let mut on_event = |e: TurnEvent| events.push(e);
-        pipeline
-            .run_turn(&mut device, connector, &mut on_event)
+        run_turn(pipeline, &mut device, connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -447,8 +466,7 @@ async fn silent_turn_discards_stt_hallucination_and_ends_the_chain() {
     let mut events = Vec::new();
     {
         let mut on_event = |e: TurnEvent| events.push(e);
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -489,8 +507,7 @@ async fn diagnostics_screen_transcribes_but_never_invokes_the_llm() {
     let mut events = Vec::new();
     {
         let mut on_event = |e: TurnEvent| events.push(e);
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -657,7 +674,7 @@ async fn barge_in_aborts_an_in_flight_reply() {
     let mut on_event = |_e: TurnEvent| {};
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
-        pipeline.run_turn(&mut device, &connector, &mut on_event),
+        run_turn(&pipeline, &mut device, &connector, &mut on_event),
     )
     .await
     .expect("barge-in aborts the turn instead of hanging on the stalled LLM");
@@ -695,8 +712,7 @@ async fn multi_sentence_reply_is_synthesized_sentence_by_sentence() {
 
     {
         let mut on_event = |_e: TurnEvent| {};
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -800,8 +816,7 @@ async fn run_voiced_turn(
     let mut events = Vec::new();
     {
         let mut on_event = |e: TurnEvent| events.push(e);
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -969,8 +984,7 @@ async fn question_reply_reopens_the_mic_with_the_long_window() {
 
     {
         let mut on_event = |_e: TurnEvent| {};
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -1008,8 +1022,7 @@ async fn statement_reply_reopens_the_mic_with_the_short_window() {
 
     {
         let mut on_event = |_e: TurnEvent| {};
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -1053,8 +1066,7 @@ async fn followup_chain_stops_at_max_chain_when_capped() {
 
     {
         let mut on_event = |_e: TurnEvent| {};
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -1129,8 +1141,7 @@ async fn follow_up_turn_includes_recent_history_in_the_prompt() {
 
     {
         let mut on_event = |_e: TurnEvent| {};
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -1193,8 +1204,7 @@ async fn ordinary_turn_carries_no_history() {
 
     {
         let mut on_event = |_e: TurnEvent| {};
-        pipeline
-            .run_turn(&mut device, &connector, &mut on_event)
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -1502,8 +1512,7 @@ async fn run_turn_with_screen(
     let task = tokio::spawn(drive_device_ctx(dev_test, screen));
     {
         let mut on_event = |_e: TurnEvent| {};
-        pipeline
-            .run_turn(&mut device, connector, &mut on_event)
+        run_turn(pipeline, &mut device, connector, &mut on_event)
             .await
             .expect("turn runs");
     }
@@ -1588,4 +1597,340 @@ async fn system1_stop_dismiss_defers_when_nothing_active() {
     assert_eq!(transcript, "stop");
     // Veto → System-2 (the MockLlm echo) answers.
     assert_eq!(reply, "You said: stop");
+}
+
+/// `place_dismiss` is routed directly (it used to be reachable only through the
+/// `stop_dismiss` ladder): with the place card open it closes it on the fast path.
+#[tokio::test]
+async fn system1_place_dismiss_closes_the_place_card() {
+    let pipeline = panic_llm_system1("place_dismiss");
+    let connector = MockConnector::new("close the place card");
+    let screen = json!({ "kind": "place", "place": { "name": "Cafe Uno" } });
+    let (_transcript, reply, kinds, _listen) =
+        run_turn_with_screen(&pipeline, &connector, Some(screen)).await;
+
+    assert_eq!(reply, "Okay.");
+    assert!(
+        kinds.iter().any(|k| k == types::PLACE),
+        "expected an anamanti-place (dismiss) frame, got {kinds:?}"
+    );
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+}
+
+// ---------------------------------------------------------------------------
+// Turn exit paths: ducking restore, timeouts, fast-path barge-in, disconnects.
+// ---------------------------------------------------------------------------
+
+/// Records every duck/restore the per-connection ducking task applies, in order.
+#[derive(Default)]
+struct RecordingDucker(Mutex<Vec<&'static str>>);
+
+#[async_trait]
+impl server::Ducker for RecordingDucker {
+    async fn duck(&self) -> Result<()> {
+        self.0.lock().unwrap().push("duck");
+        Ok(())
+    }
+    async fn restore(&self) -> Result<()> {
+        self.0.lock().unwrap().push("restore");
+        Ok(())
+    }
+}
+
+/// Wait (bounded) until the ducking task has applied exactly `want`.
+async fn await_duck_ops(ducker: &RecordingDucker, want: &[&str]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if ducker.0.lock().unwrap().as_slice() == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ducking ops: got {:?}, want {want:?}",
+            ducker.0.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Run one turn through `server::drive_turn` with music ducking wired, the device side
+/// driven by `device`. Returns the turn result and the device task's output.
+async fn run_ducked_turn<F, T>(
+    pipeline: &Pipeline,
+    connector: &dyn ServiceConnector,
+    ducker: Arc<RecordingDucker>,
+    device: impl FnOnce(DuplexStream) -> F,
+) -> (Result<TurnOutcome>, T)
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut conn = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(device(dev_test));
+    let ducking = server::ConnectionDucking::spawn(ducker);
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let ev = conn.read().await?.expect("device sends audio-start");
+        let start = TurnStart::from_event(&ev).expect("an audio-start");
+        let mut on_event = |_e: TurnEvent| {};
+        server::drive_turn(
+            pipeline,
+            &mut conn,
+            connector,
+            start,
+            Some(&ducking),
+            &mut on_event,
+        )
+        .await
+    })
+    .await
+    .expect("the turn must end instead of hanging");
+    // Keep our end open until the device side is done, so its writes never race the
+    // socket closing.
+    let out = device_task.await.unwrap();
+    drop(conn);
+    (result, out)
+}
+
+/// A connector whose STT works but whose Piper is unreachable.
+struct NoTtsConnector(MockConnector);
+
+#[async_trait]
+impl ServiceConnector for NoTtsConnector {
+    async fn connect_stt(&self) -> Result<DynConnection> {
+        self.0.connect_stt().await
+    }
+    async fn connect_tts(&self) -> Result<DynConnection> {
+        anyhow::bail!("Piper is down")
+    }
+}
+
+/// Device side that tolerates the server ending the turn early: stream audio, take
+/// the transcript, then collect frame kinds until `audio-stop` or the socket closes.
+async fn drive_device_lenient(io: DuplexStream) -> Vec<String> {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+    let _ = write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0)).await;
+    let _ = write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
+    )
+    .await;
+    let mut kinds = Vec::new();
+    while let Some(ev) = read_event(&mut reader).await.unwrap_or(None) {
+        kinds.push(ev.event_type.clone());
+        if ev.event_type == types::AUDIO_STOP {
+            break;
+        }
+    }
+    kinds
+}
+
+#[tokio::test]
+async fn music_is_restored_when_tts_fails_after_speaking() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = build_pipeline(memory);
+    let connector = NoTtsConnector(MockConnector::new("hello there"));
+    let ducker = Arc::new(RecordingDucker::default());
+
+    let (result, kinds) =
+        run_ducked_turn(&pipeline, &connector, ducker.clone(), drive_device_lenient).await;
+
+    assert!(result.is_err(), "a hard TTS failure still fails the turn");
+    // The device was told the turn is over…
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+    // …and the music came back up, in order, even though `Finished` never fired.
+    await_duck_ops(&ducker, &["duck", "restore"]).await;
+}
+
+/// An LLM that speaks one sentence and then fails.
+struct FirstThenErrorLlm;
+
+#[async_trait]
+impl LlmBackend for FirstThenErrorLlm {
+    fn name(&self) -> &str {
+        "first-then-error"
+    }
+    async fn respond(&self, _turn: LlmTurn) -> Result<ReplyStream> {
+        let s = futures_util::stream::iter(vec![
+            Ok("First sentence. ".to_string()),
+            Err(anyhow::anyhow!("provider exploded")),
+        ]);
+        Ok(Box::pin(s))
+    }
+}
+
+#[tokio::test]
+async fn music_is_restored_when_the_llm_errors_after_speaking() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(FirstThenErrorLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    );
+    let connector = MockConnector::new("say something");
+    let ducker = Arc::new(RecordingDucker::default());
+
+    let (result, (_t, reply, kinds)) =
+        run_ducked_turn(&pipeline, &connector, ducker.clone(), drive_device).await;
+
+    assert!(result.is_err());
+    assert_eq!(reply, "First sentence. ");
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+    await_duck_ops(&ducker, &["duck", "restore"]).await;
+}
+
+#[tokio::test]
+async fn a_stalled_llm_stream_ends_the_turn_cleanly() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(FirstThenHangLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(30),
+    )
+    .with_llm_idle_timeout(Duration::from_millis(200));
+    let connector = MockConnector::new("say something");
+    let ducker = Arc::new(RecordingDucker::default());
+
+    let (result, (_t, reply, kinds)) =
+        run_ducked_turn(&pipeline, &connector, ducker.clone(), drive_device).await;
+
+    // A stall is not a failure: what was said stands and the turn completes.
+    assert_eq!(result.unwrap(), TurnOutcome::Completed);
+    assert_eq!(reply, "First sentence. ");
+    assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
+    assert_eq!(
+        *connector.synthesized.lock().unwrap(),
+        vec!["First sentence.".to_string()]
+    );
+    await_duck_ops(&ducker, &["duck", "restore"]).await;
+}
+
+/// A connector whose Piper accepts the request and then never answers.
+struct HangingTtsConnector(MockConnector);
+
+#[async_trait]
+impl ServiceConnector for HangingTtsConnector {
+    async fn connect_stt(&self) -> Result<DynConnection> {
+        self.0.connect_stt().await
+    }
+    async fn connect_tts(&self) -> Result<DynConnection> {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let (r, _w) = split(server);
+            let mut reader = BufReader::new(r);
+            let _ = read_event(&mut reader).await;
+            std::future::pending::<()>().await;
+        });
+        let (r, w) = split(client);
+        Ok(DynConnection::from_io(r, w))
+    }
+}
+
+/// Device side of a fast-path barge-in: stream audio, take the transcript, and as soon
+/// as the reply text shows up, interrupt.
+async fn drive_device_interrupt_on_reply(io: DuplexStream) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+    write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0))
+        .await
+        .unwrap();
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
+    )
+    .await
+    .unwrap();
+    let _transcript = read_event(&mut reader).await.unwrap().unwrap();
+    write_event(&mut writer, &WyomingEvent::audio_stop(40))
+        .await
+        .unwrap();
+    while let Some(ev) = read_event(&mut reader).await.unwrap_or(None) {
+        if ev.reply_token_text().is_some() {
+            write_event(&mut writer, &WyomingEvent::interrupt())
+                .await
+                .unwrap();
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_system1_fast_reply_can_be_barged_in() {
+    let pipeline = panic_llm_system1("time");
+    let connector = HangingTtsConnector(MockConnector::new("what time is it"));
+    let ducker = Arc::new(RecordingDucker::default());
+    let started = std::time::Instant::now();
+
+    let (result, ()) = run_ducked_turn(
+        &pipeline,
+        &connector,
+        ducker.clone(),
+        drive_device_interrupt_on_reply,
+    )
+    .await;
+
+    assert_eq!(result.unwrap(), TurnOutcome::Completed);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the interrupt must cut the stalled synthesis short"
+    );
+    await_duck_ops(&ducker, &["duck", "restore"]).await;
+}
+
+/// Device side that hangs up as soon as the reply's audio starts.
+async fn drive_device_hang_up_mid_reply(io: DuplexStream) {
+    let (r, w) = split(io);
+    let mut reader = BufReader::new(r);
+    let mut writer = w;
+    let fmt = AudioFormat::PCM_16K_MONO;
+    write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0))
+        .await
+        .unwrap();
+    write_event(
+        &mut writer,
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(180.0, 1500)),
+    )
+    .await
+    .unwrap();
+    let _transcript = read_event(&mut reader).await.unwrap().unwrap();
+    while let Some(ev) = read_event(&mut reader).await.unwrap_or(None) {
+        if ev.event_type == types::AUDIO_CHUNK {
+            break; // drop both halves: the socket closes
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_device_that_hangs_up_mid_reply_reports_disconnected() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(FirstThenHangLlm),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(30),
+    );
+    let connector = MockConnector::new("say something");
+    let ducker = Arc::new(RecordingDucker::default());
+
+    let (result, ()) = run_ducked_turn(
+        &pipeline,
+        &connector,
+        ducker.clone(),
+        drive_device_hang_up_mid_reply,
+    )
+    .await;
+
+    assert_eq!(result.unwrap(), TurnOutcome::Disconnected);
+    await_duck_ops(&ducker, &["duck", "restore"]).await;
 }
