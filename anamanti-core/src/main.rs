@@ -109,8 +109,9 @@ async fn run() -> Result<()> {
 
     // Selectable-model catalog for the settings dropdown (device + config page).
     // Live-fetched from the provider APIs (filtered to the last 12 months) with a
-    // curated static fallback; shared by both front doors.
-    let catalog = Arc::new(config.model_catalog());
+    // curated static fallback; shared by both front doors. Credentials are read live
+    // from the settings, so keys entered on the config page are used.
+    let catalog = Arc::new(config.model_catalog(&settings));
 
     // Chat log (always on): every completed turn is recorded here, both as the
     // durable source of truth and as the ingestion queue for GraphRAG memory.

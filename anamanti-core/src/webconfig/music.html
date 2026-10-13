@@ -49,14 +49,13 @@
 <script>
 async function proc(key, action){
   try{
-    const r = await fetch('/music/proc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proc:key, action})});
-    const j = await r.json();
+    const j = await postJSON('/music/proc', {proc:key, action});
     if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
   }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
   setTimeout(load, 500);
 }
 async function postAction(url){
-  try{ const r = await fetch(url, {method:'POST'}); const j = await r.json();
+  try{ const j = await postJSON(url);
     if(!j.ok) document.getElementById('meta').textContent = j.message || 'Error';
   }catch(e){ document.getElementById('meta').textContent = 'Request failed: ' + e; }
   setTimeout(load, 700);
@@ -67,14 +66,13 @@ async function play(){
   const url = document.getElementById('url').value.trim(); const msg = document.getElementById('webmsg');
   if(!url){ msg.textContent = 'Enter a URL.'; return; }
   try{
-    const r = await fetch('/music/play', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
-    const j = await r.json(); msg.textContent = j.ok ? 'Playing.' : (j.message || 'Error');
+    const j = await postJSON('/music/play', {url}); msg.textContent = j.ok ? 'Playing.' : (j.message || 'Error');
   }catch(e){ msg.textContent = 'Request failed: ' + e; }
   setTimeout(load, 500);
 }
 async function stopweb(){
   const msg = document.getElementById('webmsg');
-  try{ const r = await fetch('/music/stopweb', {method:'POST'}); const j = await r.json(); msg.textContent = j.ok ? 'Stopped.' : (j.message || 'Error'); }
+  try{ const j = await postJSON('/music/stopweb'); msg.textContent = j.ok ? 'Stopped.' : (j.message || 'Error'); }
   catch(e){ msg.textContent = 'Request failed: ' + e; }
 }
 async function load(){
@@ -138,8 +136,7 @@ async function spotifySave(){
     redirect_url: document.getElementById('sp_redirect').value.trim(),
   };
   try{
-    const r = await fetch('/spotify/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const j = await r.json(); msg.textContent = j.ok ? 'Saved.' : (j.message || 'Error');
+    const j = await postJSON('/spotify/save', body); msg.textContent = j.ok ? 'Saved.' : (j.message || 'Error');
     document.getElementById('sp_secret').value = '';
     spotifyLoad();
   }catch(e){ msg.textContent = 'Request failed: ' + e; }
@@ -148,8 +145,7 @@ async function spotifyLink(){
   const msg = document.getElementById('spmsg');
   msg.textContent = 'Opening a browser on the Mac — approve access, then return here…';
   try{
-    const r = await fetch('/spotify/link', {method:'POST'});
-    const j = await r.json(); msg.textContent = j.ok ? (j.message || 'Linked.') : (j.message || 'Error');
+    const j = await postJSON('/spotify/link'); msg.textContent = j.ok ? (j.message || 'Linked.') : (j.message || 'Error');
     spotifyLoad();
   }catch(e){ msg.textContent = 'Request failed: ' + e; }
 }

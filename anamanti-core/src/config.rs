@@ -24,17 +24,13 @@ use serde::Deserialize;
 use crate::calendar::{CalendarSpec, IcalSubscription};
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
 use crate::llm::catalog::ModelCatalog;
-use crate::llm::{
-    anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
-    LlmBackend,
-};
 use crate::music::{
     GroupSelector, ManagedProc, MpvControl, MusicDucker, MusicHub, MusicSupervisor, ProcSpec,
     SnapcastClient,
 };
 use crate::settings::{
     load_persisted, AppSaidConfig, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory,
-    Personality, RuntimeSettings, SharedSettings, SpotifyConfig,
+    PersistedSettings, Personality, RuntimeSettings, SharedSettings, SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -1575,33 +1571,6 @@ impl Config {
         })
     }
 
-    /// Build the selected System-1 decision engine (plans/system1-fast-decisions.md),
-    /// mirroring [`Config::build_llm`]. Default `none` reproduces today's behavior.
-    ///
-    /// Build the System-1 engine straight from the config file's `system1` block (the
-    /// OpenRouter key comes from the `OPENROUTER_API_KEY` env secret). The live boot path
-    /// is [`Self::shared_settings`], which also applies the persisted overlay and makes
-    /// the engine runtime-swappable; this helper is kept for direct/one-shot use.
-    pub fn build_system1(&self) -> Result<Arc<dyn crate::system1::DecisionEngine>> {
-        let key = env::var("OPENROUTER_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
-        if self.system1.backend.eq_ignore_ascii_case("jev") && key.is_none() {
-            log::warn!(
-                "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
-                 rejected until it is provided (env or config page)."
-            );
-        }
-        crate::system1::build(
-            &self.system1.backend,
-            &self.system1.base_url,
-            &self.system1.openrouter_model,
-            key,
-            self.system1.min_confidence,
-            self.system1.intents.clone(),
-        )
-    }
-
     /// Build the music ducker when music routing **and** duck-on-speech are both
     /// enabled; otherwise `None` (the whole path stays dormant). Best-effort at
     /// runtime — a missing/unreachable snapserver never breaks a turn.
@@ -1720,35 +1689,6 @@ impl Config {
         })
     }
 
-    /// Instantiate the selected LLM backend behind the trait object the pipeline
-    /// consumes. The Anthropic backend requires `ANTHROPIC_API_KEY`.
-    pub fn build_llm(&self) -> Result<Arc<dyn LlmBackend>> {
-        Ok(match &self.llm {
-            LlmChoice::Mock => Arc::new(MockLlm::default()),
-            LlmChoice::Ollama { url, model } => Arc::new(OllamaBackend::new(url, model)),
-            LlmChoice::Anthropic { model, max_tokens } => {
-                let key = env::var("ANTHROPIC_API_KEY")
-                    .context("the anthropic backend (llm.backend) requires ANTHROPIC_API_KEY")?;
-                Arc::new(AnthropicBackend::new(
-                    "https://api.anthropic.com",
-                    key,
-                    model,
-                    *max_tokens,
-                ))
-            }
-            LlmChoice::OpenAI { model, max_tokens } => {
-                let key = env::var("OPENAI_API_KEY")
-                    .context("the openai backend (llm.backend) requires OPENAI_API_KEY")?;
-                Arc::new(OpenAiBackend::new(
-                    self.graphrag.openai_base_url.clone(),
-                    key,
-                    model,
-                    *max_tokens,
-                ))
-            }
-        })
-    }
-
     /// Load the in-process whisper.cpp engine for a **live-swappable** STT setup, or
     /// `Ok(None)` when it isn't available. Mirroring the Silero model preload, this is
     /// called at boot **regardless of the selected engine** so a later config-page swap
@@ -1847,25 +1787,26 @@ impl Config {
             // Places backend (Google Places API New); present only when enabled AND a key
             // is set (no keyless fallback). Rebuilt from the live key on every swap.
             places: self.places_provider(),
+            places_enabled: self.places.enabled,
+            places_provider: self.places.provider.clone(),
         }
     }
 
     /// The selectable-model catalog for the settings dropdown, wired with the same
-    /// provider endpoints/keys the factory uses (keys read from the environment) and
-    /// the same Anthropic auth mode so subscription hosts list live models.
-    pub fn model_catalog(&self) -> ModelCatalog {
+    /// provider endpoints the factory uses. Credentials (provider keys + the Anthropic
+    /// auth mode) are read **live** from `settings` on every refresh, and subscription
+    /// listing shares the LLM's token provider, so keys and tokens entered on the config
+    /// page reach the dropdown without a restart.
+    pub fn model_catalog(&self, settings: &Arc<SharedSettings>) -> ModelCatalog {
+        let live = settings.clone();
         ModelCatalog::new(
             "https://api.anthropic.com",
-            env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty()),
+            None,
             self.graphrag.openai_base_url.clone(),
-            env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
+            None,
         )
-        .with_anthropic_auth(
-            self.anthropic_auth,
-            Some(Arc::new(AnthropicTokenProvider::new(
-                self.anthropic_token_cmd.clone(),
-            ))),
-        )
+        .with_anthropic_auth(self.anthropic_auth, settings.anthropic_token_provider())
+        .with_credential_source(Arc::new(move || live.catalog_credentials()))
     }
 
     /// The initial engine + web-search selection from the config. These seed the live
@@ -2007,412 +1948,156 @@ impl Config {
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
-    /// needs its key at startup, matching [`Self::build_llm`]).
+    /// needs its key at startup).
+    ///
+    /// Resolution order per value: built-in default → config file / env secret (the
+    /// **boot seed**) → the persisted settings file (page/device changes from a previous
+    /// run win across restarts; see [`RuntimeSettings::overlay_persisted`]). The seed is
+    /// also handed to [`SharedSettings`] so a seeded secret cleared on the page is
+    /// persisted as cleared rather than reverting to the env value at the next boot.
     pub fn shared_settings(&self) -> Result<Arc<SharedSettings>> {
         let factory = self.llm_factory();
         let persist_path = self.settings_path.clone();
 
-        // Environment/config defaults, then overlay a persisted file when present
-        // (page/device changes from a previous run win across restarts).
-        let (backend_default, model_default) = match &self.llm {
+        // ---- the boot seed: config file + env secrets ----
+        let (backend, model) = match &self.llm {
             LlmChoice::Mock => ("mock".to_string(), None),
             LlmChoice::Ollama { model, .. } => ("ollama".to_string(), Some(model.clone())),
             LlmChoice::Anthropic { model, .. } => ("anthropic".to_string(), Some(model.clone())),
             LlmChoice::OpenAI { model, .. } => ("openai".to_string(), Some(model.clone())),
         };
-        let mut engine = self.initial_engine();
-        let mut web_search = self.initial_web_search();
-        let mut search_provider = self.initial_search_provider();
-        let mut search_api_key = self.initial_search_api_key();
-        let mut backend = backend_default;
-        let mut model = model_default;
-        // Live provider keys start from the environment (the factory's boot seed) and
-        // become runtime-settable; a persisted key overlays them so a key entered on
-        // the config page enables the cloud backend without a restart.
-        let mut anthropic_api_key = factory.anthropic_api_key.clone();
-        let mut openai_api_key = factory.openai_api_key.clone();
-        // Subscription OAuth token + Mapbox token: env seed (secrets), overlaid by any
-        // persisted values below (a value entered on the config page wins).
-        let mut anthropic_oauth_token = self.initial_anthropic_oauth_token();
-        let mut mapbox_token = self.initial_mapbox_token();
-        // Weather provider label (config-file seed) + Visual Crossing key (env secret),
-        // each overlaid by any persisted value below (a config-page change wins).
-        let mut weather_provider = self.weather.provider.clone();
-        let mut visualcrossing_key = self.initial_visualcrossing_key();
-        // Google Places API key (env secret), overlaid by any persisted value below.
-        let mut google_places_key = self.initial_google_places_key();
-        let mut anthropic_auth = self.anthropic_auth;
-        let mut tts_voice = self.tts_voice.clone();
-
-        let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
-        let mut voice_rms_threshold = crate::settings::DEFAULT_VOICE_RMS_THRESHOLD;
-        // Silero neural-VAD threshold: config-file seed (`vad.silero.threshold`),
-        // overlaid by any persisted value below (config page / device win).
-        let mut silero_threshold = self.vad.silero.threshold;
-        // VAD engine selection: config-file seed (`vad.engine`), overlaid by persisted.
-        let mut vad_engine = self.vad.engine;
-        // STT engine selection + ElevenLabs config: config-file seed (`stt.*`), overlaid
-        // by persisted values below. The ElevenLabs API key is an env secret seed (like
-        // the other provider keys), overlaid by any persisted value.
-        let mut stt_engine = self.stt.engine;
-        let mut stt_el_model = self.stt.elevenlabs.model_id.clone();
-        let mut stt_el_base = self.stt.elevenlabs.base_url.clone();
-        let mut stt_el_key = env::var("ELEVENLABS_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
-        // Google Drive photo config: config-file seed (client creds/folders), overlaid
-        // by any persisted values below (the refresh token + page-set fields win).
-        let mut drive = self.initial_drive();
-        // Household + home info: config-file seed (address/units from home_address /
-        // weather_units), overlaid by any persisted values below so an address fixed on
-        // the config page — and the dashboard-only member roster — win.
-        let mut household = self.initial_household();
-        // Spotify voice-control config: same seed-then-persist-overlay pattern.
-        let mut spotify = self.initial_spotify();
-        // Cadora shopping-list config: same seed-then-persist-overlay pattern.
-        let mut cadora = self.initial_cadora();
-        // AppSaid phone-push config: worker URL + recipients + default seed from the
-        // config file; the secret app token seeds from `APPSAID_APP_TOKEN` (env), like
-        // the Mapbox token. Both are then overlaid by any persisted values below.
+        // AppSaid: worker URL + recipients + default seed from the config file; the
+        // secret app token seeds from `APPSAID_APP_TOKEN` (env), like the Mapbox token.
         let mut appsaid = self.initial_appsaid();
         appsaid.app_token = self.initial_appsaid_app_token();
-        // System-1 fast-decision selection: config-file seed, overlaid by persisted
-        // values below. The OpenRouter key is an env secret seed (like the other keys).
-        let mut system1_backend = self.system1.backend.clone();
-        let mut system1_base_url = self.system1.base_url.clone();
-        let mut system1_model = self.system1.openrouter_model.clone();
-        let mut system1_min_confidence = self.system1.min_confidence;
-        let mut system1_intents = self.system1.intents.clone();
-        let mut openrouter_api_key = env::var("OPENROUTER_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
-        // Output personality (on/off + selection + catalog). No config-file seed — it's a
-        // pure runtime/GUI concern — so it starts at the built-in default catalog (off) and
-        // is overlaid by any persisted value below.
-        let mut personality = Personality::default();
-        // STT pronunciation rewrite table (plans/stt-vocabulary-biasing.md). Like
-        // personality, a pure runtime/GUI concern with no config-file seed: starts empty
-        // and is overlaid by any persisted value below.
-        let mut pronunciations: Vec<crate::stt::PronunciationRule> = Vec::new();
-
-        if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
-            log::info!("loaded persisted settings");
-            engine = LlmEngine::from_label(&p.engine);
-            web_search = p.web_search;
-            search_provider = p.search_provider;
-            search_api_key = p.search_api_key;
-            backend = p.llm_backend;
-            model = p.llm_model;
-            // Only override the env key when the persisted file actually carries one,
-            // so a settings file without a key (serde default `None`) can't wipe a
-            // working `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the environment.
-            if p.anthropic_api_key.is_some() {
-                anthropic_api_key = p.anthropic_api_key;
-            }
-            if p.openai_api_key.is_some() {
-                openai_api_key = p.openai_api_key;
-            }
-            // Same guard for the OAuth / Mapbox tokens: only override the env seed when
-            // the persisted file actually carries one, so an older file (field absent →
-            // serde default `None`) can't wipe a working env token.
-            if p.anthropic_oauth_token.is_some() {
-                anthropic_oauth_token = p.anthropic_oauth_token;
-            }
-            if p.mapbox_token.is_some() {
-                mapbox_token = p.mapbox_token;
-            }
-            // Same guard for the weather provider/key: only override the seed when the
-            // persisted file actually carries a value.
-            if let Some(prov) = p.weather_provider.filter(|s| !s.trim().is_empty()) {
-                weather_provider = prov;
-            }
-            if p.visualcrossing_key.is_some() {
-                visualcrossing_key = p.visualcrossing_key.filter(|s| !s.is_empty());
-            }
-            if p.google_places_key.is_some() {
-                google_places_key = p.google_places_key.filter(|s| !s.is_empty());
-            }
-            anthropic_auth = AnthropicAuth::from_label(&p.anthropic_auth);
-            tts_voice = p.tts_voice;
-            end_silence_ms = p.end_silence_ms;
-            voice_rms_threshold = p.voice_rms_threshold;
-            // Only override the seed when the persisted file carries a value (older
-            // files leave it absent → keep the config-file seed).
-            if let Some(t) = p.silero_threshold {
-                silero_threshold = t;
-            }
-            if let Some(label) = p.vad_engine.as_deref() {
-                if let Some(e) = VadEngineKind::from_label(label) {
-                    vad_engine = e;
-                }
-            }
-            // STT selection: overlay only when the persisted file carries a real label
-            // (older files leave it absent → keep the config-file `stt.engine` seed).
-            if let Some(label) = p.stt_engine.as_deref().filter(|s| !s.trim().is_empty()) {
-                if let Some(e) = SttEngineKind::from_label(label) {
-                    stt_engine = e;
-                }
-            }
-            if let Some(m) = p.stt_elevenlabs_model_id.filter(|s| !s.trim().is_empty()) {
-                stt_el_model = m;
-            }
-            if let Some(b) = p.stt_elevenlabs_base_url.filter(|s| !s.trim().is_empty()) {
-                stt_el_base = b;
-            }
-            if p.stt_elevenlabs_api_key.is_some() {
-                stt_el_key = p.stt_elevenlabs_api_key.filter(|s| !s.is_empty());
-            }
-            // Overlay persisted Drive fields onto the config-file seed: a persisted
-            // value wins (refresh token, page-set creds/folders), but keep the seed for
-            // any field the persisted file leaves empty so setting a client id in
-            // anamanti.json still takes effect after an older file is loaded.
-            if p.drive.client_id.is_some() {
-                drive.client_id = p.drive.client_id;
-            }
-            if p.drive.client_secret.is_some() {
-                drive.client_secret = p.drive.client_secret;
-            }
-            if p.drive.refresh_token.is_some() {
-                drive.refresh_token = p.drive.refresh_token;
-            }
-            if !p.drive.folder_ids.is_empty() {
-                drive.folder_ids = p.drive.folder_ids;
-            }
-            if p.drive.scope.is_some() {
-                drive.scope = p.drive.scope;
-            }
-            // Overlay persisted household onto the config-file seed: a persisted
-            // address / units wins (fixed on the config page), but keep the seed for
-            // any field the persisted file leaves empty so the home address still applies
-            // after an older file (no household) is loaded. A persisted file written
-            // before the discrete-field split carries only the legacy single-line
-            // `location`; fold that in too (migrated to City by `sanitized()` below). The
-            // member roster is dashboard-only, so a persisted list always replaces the
-            // empty seed.
-            if !p.household.address.is_empty() {
-                household.address = p.household.address;
-            }
-            if p.household.location.is_some() {
-                household.location = p.household.location;
-            }
-            if p.household.weather_units.is_some() {
-                household.weather_units = p.household.weather_units;
-            }
-            if !p.household.members.is_empty() {
-                household.members = p.household.members;
-            }
-            // Overlay persisted Spotify fields onto the config-file seed (same rule as
-            // Drive: a persisted value wins; keep the seed for anything left empty).
-            if p.spotify.client_id.is_some() {
-                spotify.client_id = p.spotify.client_id;
-            }
-            if p.spotify.client_secret.is_some() {
-                spotify.client_secret = p.spotify.client_secret;
-            }
-            if p.spotify.refresh_token.is_some() {
-                spotify.refresh_token = p.spotify.refresh_token;
-            }
-            if p.spotify.device_name.is_some() {
-                spotify.device_name = p.spotify.device_name;
-            }
-            if p.spotify.scope.is_some() {
-                spotify.scope = p.spotify.scope;
-            }
-            // Overlay persisted Cadora fields onto the config-file seed (same rule).
-            if p.cadora.base_url.is_some() {
-                cadora.base_url = p.cadora.base_url;
-            }
-            if p.cadora.link_token.is_some() {
-                cadora.link_token = p.cadora.link_token;
-            }
-            // Overlay persisted AppSaid fields onto the config-file/env seed (same rule).
-            // Guard the app token like the Mapbox token: only override the env seed when
-            // the persisted file actually carries one, so an older file (field absent →
-            // serde default `None`) can't wipe a working `APPSAID_APP_TOKEN`.
-            if p.appsaid.worker_url.is_some() {
-                appsaid.worker_url = p.appsaid.worker_url;
-            }
-            if p.appsaid.app_token.is_some() {
-                appsaid.app_token = p.appsaid.app_token;
-            }
-            if !p.appsaid.recipients.is_empty() {
-                appsaid.recipients = p.appsaid.recipients;
-            }
-            if p.appsaid.default_recipient.is_some() {
-                appsaid.default_recipient = p.appsaid.default_recipient;
-            }
-            // Overlay persisted System-1 selection onto the config-file seed. Only when
-            // the persisted backend is non-empty (a real save), so an older settings
-            // file — which lacks these fields (serde default "") — can't disable a
-            // `system1.backend` set in anamanti.json.
-            if !p.system1_backend.is_empty() {
-                system1_backend = p.system1_backend;
-                system1_base_url = p.system1_base_url;
-                system1_model = p.system1_model;
-                system1_min_confidence = p.system1_min_confidence;
-                system1_intents = p.system1_intents;
-            }
-            if p.openrouter_api_key.is_some() {
-                openrouter_api_key = p.openrouter_api_key;
-            }
-            // Personality is a pure runtime/GUI concern (no config-file seed), so the
-            // persisted value always wins when present.
-            personality = p.personality;
-            // Same for the STT pronunciation table (no config-file seed).
-            pronunciations = p.pronunciations;
-        }
-
         // Whether the in-process whisper engine can be selected live: the feature must be
         // compiled in and the ggml model present on disk (it is loaded at boot regardless
         // of the seeded engine, mirroring Silero). Reported to the config page so it can
         // disable the `whisper-rs` option when unavailable.
         let whisper_available =
             cfg!(feature = "stt-whisper-local") && self.stt.resolved_model_path().exists();
+        let mut s = RuntimeSettings {
+            // Placeholder until the resolved settings are built below.
+            llm: Arc::new(crate::llm::mock::MockLlm::default()),
+            engine: self.initial_engine(),
+            web_search: self.initial_web_search(),
+            search_provider: self.initial_search_provider(),
+            search_api_key: self.initial_search_api_key(),
+            llm_backend: backend,
+            llm_model: model,
+            // Live provider keys start from the environment (the factory's boot seed).
+            anthropic_api_key: factory.anthropic_api_key.clone(),
+            openai_api_key: factory.openai_api_key.clone(),
+            anthropic_oauth_token: self.initial_anthropic_oauth_token(),
+            mapbox_token: self.initial_mapbox_token(),
+            anthropic_auth: self.anthropic_auth,
+            tts_voice: self.tts_voice.clone(),
+            end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
+            voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
+            silero_threshold: self.vad.silero.threshold,
+            vad_engine: self.vad.engine,
+            stt: crate::settings::SttRuntime {
+                engine: self.stt.engine,
+                elevenlabs_model_id: self.stt.elevenlabs.model_id.clone(),
+                elevenlabs_base_url: self.stt.elevenlabs.base_url.clone(),
+                elevenlabs_api_key: env::var("ELEVENLABS_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                language: self.stt.language.clone(),
+                whisper_available,
+            },
+            drive: self.initial_drive(),
+            household: self.initial_household(),
+            spotify: self.initial_spotify(),
+            cadora: self.initial_cadora(),
+            appsaid,
+            weather_provider: self.weather.provider.clone(),
+            visualcrossing_key: self.initial_visualcrossing_key(),
+            google_places_key: self.initial_google_places_key(),
+            system1: crate::settings::System1Runtime {
+                engine: crate::system1::none(),
+                backend: self.system1.backend.clone(),
+                base_url: self.system1.base_url.clone(),
+                model: self.system1.openrouter_model.clone(),
+                min_confidence: self.system1.min_confidence,
+                intents: self.system1.intents.clone(),
+                openrouter_api_key: env::var("OPENROUTER_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+            },
+            // Output personality + the pronunciation table are pure runtime/GUI state
+            // with no config-file seed.
+            personality: Personality::default(),
+            pronunciations: Vec::new(),
+        };
+        let seed = PersistedSettings::from_runtime(&s, None);
+
+        // ---- overlay the persisted file (a previous run's page/device changes) ----
+        if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
+            log::info!("loaded persisted settings");
+            s.overlay_persisted(p);
+        }
 
         // Sanitize the resolved household once: trims fields and **migrates** any legacy
         // single-line `location` (from an older config/persisted file) into `address.city`
         // so downstream only ever sees the discrete `address`.
-        let mut household = household.sanitized();
+        s.household = s.household.sanitized();
         // Unify AppSaid recipients onto the household (the single source of truth): fold
         // any legacy `appsaid.recipients` seed (config file / older persisted settings)
         // into the roster — upsert a member by name, which auto-adds them if absent — then
         // DERIVE the messenger roster from the household's members' `appsaid` addresses.
         // A member that already carries an AppSaid address (persisted household) wins over
         // the legacy seed, so re-runs are idempotent and never clobber a page/pairing edit.
-        for (name, key) in std::mem::take(&mut appsaid.recipients) {
-            let already_set = household
+        for (name, key) in std::mem::take(&mut s.appsaid.recipients) {
+            let already_set = s
+                .household
                 .member_matching(&name)
                 .and_then(|m| m.appsaid.as_deref())
-                .is_some_and(|s| !s.trim().is_empty());
+                .is_some_and(|v| !v.trim().is_empty());
             if !already_set {
-                household.set_member_appsaid(&name, &key);
+                s.household.set_member_appsaid(&name, &key);
             }
         }
-        appsaid.recipients = household.appsaid_roster();
-        // Seed the location-aware tools' live home address from the resolved household
-        // (config → household → this shared handle). The factory clone below shares the
-        // same cell, so the initial backend's tools — and every later rebuild — read it;
-        // `apply_household` updates it on a config-page edit.
-        factory.home_location.set(household.address.clone());
+        s.appsaid.recipients = s.household.appsaid_roster();
+        // Seed the location-aware tools' live home address from the resolved household.
+        // Every rebuilt backend's tools share this cell; `apply_household` updates it.
+        factory.home_location.set(s.household.address.clone());
         // Seed the shared token provider's override from the resolved subscription
-        // token (env overlaid by persisted). The Arc is shared with every rebuilt
-        // backend, so a token entered on the config page later takes effect in place.
+        // token. The Arc is shared with every rebuilt backend, so a token entered on the
+        // config page later takes effect in place.
         if let Some(provider) = &factory.anthropic_token {
-            provider.set_override(anthropic_oauth_token.clone());
+            provider.set_override(s.anthropic_oauth_token.clone());
         }
 
-        // Build the initial backend with the resolved live keys (env overlaid by any
-        // persisted key), never re-reading the environment during a later swap.
-        let mut build_factory = factory.clone();
-        build_factory.anthropic_api_key = anthropic_api_key.clone();
-        build_factory.openai_api_key = openai_api_key.clone();
-        // Seed the initial Spotify controller so the `spotify_control` tool is
-        // advertised at boot when the account is already linked (env or persisted).
-        build_factory.spotify = spotify.controller();
-        // Seed the initial Cadora controller so the `shopping_list_add` tool is
-        // advertised at boot when the shopping list is already linked.
-        build_factory.cadora = cadora.controller();
-        // Seed the initial AppSaid messenger so the `send_phone_message` tool is
-        // advertised at boot when the worker URL + app token + a recipient are all set.
-        build_factory.appsaid = appsaid.messenger();
-        // Seed the initial directions provider from the resolved Mapbox token so the
-        // `directions_lookup` tool is advertised at boot when a token is present.
-        build_factory.directions = crate::directions::from_token(
-            &build_factory.directions_provider,
-            mapbox_token.as_deref(),
-            build_factory.directions_imperial,
-        );
-        // Seed the initial weather provider from the resolved provider label + Visual
-        // Crossing key (env overlaid by persisted) so `weather_lookup` is advertised at
-        // boot with the right backend.
-        build_factory.weather = crate::weather::from_config(
-            build_factory.weather_enabled,
-            &weather_provider,
-            visualcrossing_key.as_deref(),
-        );
-        // Seed the initial places provider from the resolved Google Places key (env
-        // overlaid by persisted) so `places_lookup` is advertised at boot with a key set.
-        build_factory.places = if self.places.enabled {
-            crate::places::from_key(&self.places.provider, google_places_key.as_deref())
-        } else {
-            None
-        };
-        let (llm, llm_backend, llm_model) = build_factory
-            .build(
-                engine,
-                web_search,
-                &search_provider,
-                search_api_key.as_deref(),
-                &backend,
-                model.as_deref(),
-                anthropic_auth,
-            )
+        // Build the initial backend + its full tool set from the resolved settings via
+        // the same settings → factory mapping every runtime `apply_*` uses.
+        let (llm, llm_backend, llm_model) = factory
+            .build_for(&s)
             .context("building the initial LLM backend")?;
+        s.llm = llm;
+        s.llm_backend = llm_backend;
+        s.llm_model = llm_model;
         // Build the initial System-1 engine from the resolved (seed → persisted) config.
-        if system1_backend.eq_ignore_ascii_case("jev") && openrouter_api_key.is_none() {
+        if s.system1.backend.eq_ignore_ascii_case("jev") && s.system1.openrouter_api_key.is_none() {
             log::warn!(
                 "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
                  rejected until it is provided (env or config page)."
             );
         }
-        let system1 = crate::system1::build(
-            &system1_backend,
-            &system1_base_url,
-            &system1_model,
-            openrouter_api_key.clone(),
-            system1_min_confidence,
-            system1_intents.clone(),
+        s.system1.engine = crate::system1::build(
+            &s.system1.backend,
+            &s.system1.base_url,
+            &s.system1.model,
+            s.system1.openrouter_api_key.clone(),
+            s.system1.min_confidence,
+            s.system1.intents.clone(),
         )
         .context("building the initial System-1 engine")?;
-        Ok(SharedSettings::new_persistent(
+        Ok(SharedSettings::new_seeded(
             factory,
-            RuntimeSettings {
-                llm,
-                engine,
-                web_search,
-                search_provider,
-                search_api_key,
-                llm_backend,
-                llm_model,
-                anthropic_api_key,
-                openai_api_key,
-                anthropic_oauth_token,
-                mapbox_token,
-                anthropic_auth,
-                tts_voice,
-                end_silence_ms,
-                voice_rms_threshold,
-                silero_threshold,
-                vad_engine,
-                stt: crate::settings::SttRuntime {
-                    engine: stt_engine,
-                    elevenlabs_model_id: stt_el_model,
-                    elevenlabs_base_url: stt_el_base,
-                    elevenlabs_api_key: stt_el_key,
-                    language: self.stt.language.clone(),
-                    whisper_available,
-                },
-                drive,
-                household,
-                spotify,
-                cadora,
-                appsaid,
-                weather_provider,
-                visualcrossing_key,
-                google_places_key,
-                system1: crate::settings::System1Runtime {
-                    engine: system1,
-                    backend: system1_backend,
-                    base_url: system1_base_url,
-                    model: system1_model,
-                    min_confidence: system1_min_confidence,
-                    intents: system1_intents,
-                    openrouter_api_key,
-                },
-                personality,
-                pronunciations,
-            },
+            s,
             persist_path,
+            Some(seed),
         ))
     }
 
@@ -2863,5 +2548,172 @@ mod tests {
         let c = Config::load(Some(&path)).unwrap();
         assert_eq!(c.service_name, "Loaded Mac");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A settings file of exactly the shape a deployed Core has on disk (every key the
+    /// production `anamanti_settings.json` carries, with the same JSON types).
+    fn live_shape_settings_json() -> serde_json::Value {
+        serde_json::json!({
+            "engine": "rig",
+            "web_search": true,
+            "search_provider": "tavily",
+            "search_api_key": "tvly-live",
+            "llm_backend": "anthropic",
+            "llm_model": "claude-opus-5",
+            "anthropic_api_key": "sk-ant-live",
+            "openai_api_key": "sk-openai-live",
+            "anthropic_oauth_token": "oauth-live",
+            "mapbox_token": "pk.live",
+            "anthropic_auth": "apikey",
+            "tts_voice": null,
+            "end_silence_ms": 650,
+            "voice_rms_threshold": 210.5,
+            "silero_threshold": 0.5,
+            "vad_engine": "silero",
+            "stt_engine": "wyoming",
+            "stt_elevenlabs_model_id": "scribe_v2_realtime",
+            "stt_elevenlabs_base_url": "wss://api.elevenlabs.io",
+            "stt_elevenlabs_api_key": "xi-live",
+            "drive": {
+                "client_id": "cid.apps.googleusercontent.com",
+                "client_secret": "gocspx-live",
+                "refresh_token": "1//refresh-live",
+                "folder_ids": ["1AbC", "1XyZ"],
+                "scope": "https://www.googleapis.com/auth/drive.readonly"
+            },
+            "household": {
+                "address": {
+                    "address1": "123 Main St",
+                    "address2": null,
+                    "city": "Austin",
+                    "state": "TX",
+                    "postal": "78701",
+                    "country": "USA"
+                },
+                "location": null,
+                "weather_units": "imperial",
+                "members": [{
+                    "name": "Mom",
+                    "emails": ["mom@example.com"],
+                    "phones": ["+1 555 0100"],
+                    "appsaid": "key_mom",
+                    "relationship": "parent"
+                }]
+            },
+            "spotify": {
+                "client_id": "sp-cid",
+                "client_secret": "sp-secret",
+                "refresh_token": "sp-refresh",
+                "device_name": "Kitchen",
+                "redirect_url": null,
+                "scope": "user-modify-playback-state"
+            },
+            "cadora": { "base_url": null, "link_token": "vl_live" },
+            "appsaid": {
+                "worker_url": "https://appsaid.example.workers.dev",
+                "app_token": "appsaid-live",
+                "recipients": { "Mom": "key_mom" },
+                "default_recipient": "Mom"
+            },
+            "weather_provider": "visualcrossing",
+            "visualcrossing_key": "vc-live",
+            "google_places_key": "gp-live",
+            "system1_backend": "none",
+            "system1_base_url": "http://127.0.0.1:8000",
+            "system1_model": "typesafe/jev-1.13",
+            "system1_min_confidence": 0.85,
+            "system1_intents": [],
+            "openrouter_api_key": "or-live",
+            "personality": {
+                "enabled": true,
+                "active": "gangster",
+                "definitions": [
+                    { "key": "gangster", "label": "1940s Gangster", "description": "Talk tough." }
+                ]
+            },
+            "pronunciations": [
+                { "canonical": "Zehrs", "variants": ["zairs", "zay rz"] }
+            ]
+        })
+    }
+
+    fn settings_test_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("anamanti-cfg-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Boot a Core whose `settings_path` points at `path` (built-in config defaults).
+    fn boot_with_settings(path: &Path) -> Arc<SharedSettings> {
+        let fc = parse(&format!(
+            r#"{{ "settings_path": {} }}"#,
+            serde_json::to_string(&path.display().to_string()).unwrap()
+        ));
+        Config::from_file(fc)
+            .unwrap()
+            .shared_settings()
+            .expect("boot from the persisted settings")
+    }
+
+    #[test]
+    fn live_shape_settings_file_loads_and_round_trips_without_loss() {
+        let dir = settings_test_dir("live-shape");
+        let path = dir.join("anamanti_settings.json");
+        let original = live_shape_settings_json();
+        std::fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let s = boot_with_settings(&path);
+        // Spot-check the loaded values (secrets via the snapshot, never a view).
+        let snap = s.snapshot();
+        assert_eq!(snap.llm_backend, "anthropic");
+        assert_eq!(snap.llm_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(snap.anthropic_api_key.as_deref(), Some("sk-ant-live"));
+        assert_eq!(snap.search_api_key.as_deref(), Some("tvly-live"));
+        assert_eq!(snap.google_places_key.as_deref(), Some("gp-live"));
+        assert_eq!(snap.appsaid.app_token.as_deref(), Some("appsaid-live"));
+        assert_eq!(snap.cadora.link_token.as_deref(), Some("vl_live"));
+        assert_eq!(
+            snap.household.members[0].appsaid.as_deref(),
+            Some("key_mom")
+        );
+        assert!(snap.personality.enabled);
+
+        // Any save rewrites the file; every key must come back with the same value.
+        s.apply_personality(&s.personality());
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(
+                written.get(key),
+                Some(value),
+                "key `{key}` changed on rewrite"
+            );
+        }
+        // And the rewritten file boots to the same state.
+        let again = boot_with_settings(&path).snapshot();
+        assert_eq!(again.anthropic_api_key, snap.anthropic_api_key);
+        assert_eq!(again.household, snap.household);
+        assert_eq!(again.spotify, snap.spotify);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spotify_redirect_url_survives_a_restart() {
+        let dir = settings_test_dir("redirect");
+        let path = dir.join("anamanti_settings.json");
+        let mut v = live_shape_settings_json();
+        v["spotify"]["redirect_url"] = serde_json::json!("http://127.0.0.1:9999/callback");
+        std::fs::write(&path, v.to_string()).unwrap();
+        let s = boot_with_settings(&path);
+        assert_eq!(
+            s.spotify().redirect_url_or_default(),
+            "http://127.0.0.1:9999/callback"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

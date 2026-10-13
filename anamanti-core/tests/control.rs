@@ -47,6 +47,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         weather_imperial: false,
         weather_enabled: false,
         places: None,
+        places_enabled: true,
+        places_provider: "google".to_string(),
     };
     let (llm, backend, model) = factory
         .build(

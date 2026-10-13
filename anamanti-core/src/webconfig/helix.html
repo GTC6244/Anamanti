@@ -31,12 +31,7 @@ async function renameEntity(oldName){
   const newName = next.trim();
   if(!newName || newName === oldName) return;
   try{
-    const res = await fetch('/helix/rename-entity', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ old_name: oldName, new_name: newName }),
-    });
-    const j = await res.json();
+    const j = await postJSON('/helix/rename-entity', { old_name: oldName, new_name: newName });
     if(!j.ok){ alert(j.message || 'Rename failed'); return; }
     alert('Fixed "'+oldName+'" → "'+newName+'": '+(j.entities||0)+' entity, '+(j.turns||0)+' turn, '+(j.memories||0)+' memory node(s).');
     load();

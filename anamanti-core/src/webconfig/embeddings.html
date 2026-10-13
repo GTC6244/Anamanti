@@ -18,7 +18,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
 
   function applyStatus(j){
     if(j.available === false){
@@ -50,7 +49,7 @@
     show(true, 'Switching… (first switch to a backend rebuilds its index in the background)');
     $('save').disabled = true;
     try{
-      const j = await apiJSON('/embeddings/switch', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({backend: picked.value})});
+      const j = await postJSON('/embeddings/switch', {backend: picked.value});
       if(j.ok === false){ show(false, j.error || 'Switch rejected.'); }
       else { show(true, 'Switched to ' + j.active + '.'); applyStatus(j); }
     }catch(e){ show(false, 'Request failed: ' + e); }

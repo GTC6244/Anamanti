@@ -39,7 +39,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  async function apiJSON(url, opts){ const r = await fetch(url, opts); return r.json(); }
   function syncRows(){
     const jev = $('backend').value === 'jev';
     const off = $('backend').value === 'none';
@@ -71,7 +70,7 @@
     };
     if (Number.isNaN(body.min_confidence)) delete body.min_confidence;
     try{
-      const j = await apiJSON('/system1/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const j = await postJSON('/system1/save', body);
       if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Applied.'); }
       load();
     }catch(e){ show(false, 'Request failed: ' + e); }
