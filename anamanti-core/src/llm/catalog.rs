@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
-use super::anthropic_auth::{apply_auth, AnthropicAuth, AnthropicTokenProvider};
+use super::anthropic_auth::{apply_auth, AnthropicAuth, AnthropicTokenProvider, ANTHROPIC_VERSION};
 
 /// One selectable model for the dropdown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,8 +47,6 @@ impl ModelInfo {
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 /// The "last 12 months" window, in seconds.
 const TWELVE_MONTHS_SECS: i64 = 365 * 24 * 60 * 60;
-
-const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// The credentials the catalog lists models with. Read per refresh from the live
 /// settings (see [`ModelCatalog::with_credential_source`]) so a key entered on the

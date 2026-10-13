@@ -14,12 +14,14 @@
 //! serializes with file locks.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+
+use crate::clock::now_secs as now;
+use crate::ids::IdMinter;
+use crate::vecmath::{cosine, l2_normalize};
 
 /// One stored speaker profile (the settings "People" view; §4.5).
 #[derive(Debug, Clone, PartialEq)]
@@ -39,25 +41,24 @@ pub struct SpeakerProfile {
 /// The persistent voiceprint store.
 pub struct SpeakerRegistry {
     conn: Mutex<Connection>,
-    /// Disambiguates ids minted within the same millisecond.
-    counter: AtomicU64,
+    /// Mints `spk-{millis}-{n}` ids.
+    ids: IdMinter,
 }
 
 impl SpeakerRegistry {
-    /// Open (creating if needed) the registry in the SQLite database at `path`.
+    /// Open (creating if needed) the registry in the SQLite database at `path`,
+    /// through [`crate::db::open`] (busy timeout + WAL) — the same connection policy
+    /// as the memory store that shares this file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_conn(Connection::open(path).context("opening speaker registry database")?)
+        Self::from_conn(crate::db::open(path).context("opening speaker registry database")?)
     }
 
     /// An ephemeral in-memory registry (tests).
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_conn(Connection::open_in_memory()?)
+        Self::from_conn(crate::db::open_in_memory()?)
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
-        // Two connections may touch the same file (registry + memory store); wait
-        // rather than fail on a transient write lock.
-        conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS speakers (
@@ -75,7 +76,7 @@ impl SpeakerRegistry {
         .context("initializing speaker schema")?;
         Ok(Self {
             conn: Mutex::new(conn),
-            counter: AtomicU64::new(0),
+            ids: IdMinter::new(),
         })
     }
 
@@ -84,33 +85,70 @@ impl SpeakerRegistry {
     /// caller ([`super::SpeakerService`]) applies the match/new thresholds.
     pub fn identify(&self, embedding: &[f32]) -> Result<Option<(String, f32)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, centroid FROM speakers")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
-        let mut best: Option<(String, f32)> = None;
-        for row in rows {
-            let (id, blob) = row?;
-            let centroid = decode_vec(&blob);
-            let score = cosine(embedding, &centroid);
-            if best.as_ref().is_none_or(|(_, b)| score > *b) {
-                best = Some((id, score));
+        best_match(&conn, embedding)
+    }
+
+    /// Identify `embedding` **and act on the decision atomically**: one lock and
+    /// one SQLite write transaction cover the nearest-centroid scan and its outcome,
+    /// so two concurrent turns from the same new voice can't both see "no match" and
+    /// mint two clusters.
+    ///
+    /// - best cosine ≥ `match_threshold` ⇒ [`Attribution::Matched`]: the profile's
+    ///   centroid absorbs the sample;
+    /// - `new_threshold ≤ cosine < match_threshold` ⇒ [`Attribution::Tentative`]:
+    ///   attributed, centroid untouched;
+    /// - otherwise (or no profiles) ⇒ [`Attribution::Created`]: a new anonymous
+    ///   cluster seeded with `embedding`.
+    pub fn identify_or_create(
+        &self,
+        embedding: &[f32],
+        match_threshold: f32,
+        new_threshold: f32,
+    ) -> Result<Identified> {
+        let mut conn = self.conn.lock().unwrap();
+        // IMMEDIATE takes the write lock up front, so another process sharing the
+        // file can't interleave its own identify-or-create either.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = match best_match(&tx, embedding)? {
+            Some((id, score)) if score >= match_threshold => {
+                fold_into(&tx, &id, embedding)?;
+                let name = name_of(&tx, &id)?;
+                Identified {
+                    id,
+                    name,
+                    score,
+                    attribution: Attribution::Matched,
+                }
             }
-        }
-        Ok(best)
+            Some((id, score)) if score >= new_threshold => {
+                let name = name_of(&tx, &id)?;
+                Identified {
+                    id,
+                    name,
+                    score,
+                    attribution: Attribution::Tentative,
+                }
+            }
+            _ => {
+                let id = self.next_id();
+                insert_cluster(&tx, &id, embedding)?;
+                Identified {
+                    id,
+                    name: None,
+                    score: 0.0,
+                    attribution: Attribution::Created,
+                }
+            }
+        };
+        tx.commit().context("committing speaker identification")?;
+        Ok(out)
     }
 
     /// Create a new anonymous cluster seeded with `embedding`; returns its id.
     pub fn create_cluster(&self, embedding: &[f32]) -> Result<String> {
         let id = self.next_id();
-        let now = now();
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO speakers (id, name, labeled, centroid, dims, samples, created_at, updated_at) \
-             VALUES (?1, NULL, 0, ?2, ?3, 1, ?4, ?4)",
-            params![id, encode_vec(embedding), embedding.len() as i64, now],
-        )
-        .context("inserting speaker cluster")?;
+        insert_cluster(&conn, &id, embedding)?;
         Ok(id)
     }
 
@@ -143,23 +181,7 @@ impl SpeakerRegistry {
     /// vectors, then renormalize; bumps `samples`. A no-op if the id is unknown.
     pub fn update_centroid(&self, id: &str, embedding: &[f32]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let existing: Option<(Vec<u8>, i64)> = conn
-            .query_row(
-                "SELECT centroid, samples FROM speakers WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-        let Some((blob, samples)) = existing else {
-            return Ok(());
-        };
-        let centroid = decode_vec(&blob);
-        let merged = fold_mean(&centroid, samples as f32, embedding, 1.0);
-        conn.execute(
-            "UPDATE speakers SET centroid = ?1, samples = samples + 1, updated_at = ?2 WHERE id = ?3",
-            params![encode_vec(&merged), now(), id],
-        )?;
-        Ok(())
+        fold_into(&conn, id, embedding)
     }
 
     /// Give a cluster a name and mark it user-labeled. Returns whether a row changed.
@@ -204,35 +226,42 @@ impl SpeakerRegistry {
     }
 
     /// Merge `drop_id` into `keep_id`: fold the voiceprints (weighted by sample
-    /// counts) and delete the dropped profile. Reassigning that speaker's memory
-    /// rows is the caller's job (Phase B, `MemoryStore`). Returns whether a merge
-    /// happened. A user-given name on `keep` is preserved; if only `drop` was named,
-    /// its name carries over.
+    /// counts) and delete the dropped profile, in **one transaction** — a crash
+    /// leaves either both profiles untouched or the merge complete. Moving the
+    /// speaker's memories, clips and graph nodes is [`super::SpeakerService::merge`]'s
+    /// job. Returns whether a merge happened. A user-given name on `keep` is
+    /// preserved; if only `drop` was named, its name carries over.
     pub fn merge(&self, keep_id: &str, drop_id: &str) -> Result<bool> {
         if keep_id == drop_id {
             return Ok(false);
         }
-        let conn = self.conn.lock().unwrap();
-        let load = |id: &str| -> Option<(Vec<u8>, i64, Option<String>, i64)> {
-            conn.query_row(
-                "SELECT centroid, samples, name, labeled FROM speakers WHERE id = ?1",
-                params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .ok()
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // (centroid blob, samples, name, labeled)
+        type MergeRow = (Vec<u8>, i64, Option<String>, i64);
+        let load = |id: &str| -> Result<Option<MergeRow>> {
+            Ok(tx
+                .query_row(
+                    "SELECT centroid, samples, name, labeled FROM speakers WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?)
         };
-        let (Some((kb, ks, kn, kl)), Some((db, ds, dn, _))) = (load(keep_id), load(drop_id)) else {
+        let (Some((kb, ks, kn, kl)), Some((db, ds, dn, _))) = (load(keep_id)?, load(drop_id)?)
+        else {
             return Ok(false);
         };
         let merged = fold_mean(&decode_vec(&kb), ks as f32, &decode_vec(&db), ds as f32);
         let name = kn.or(dn);
         let labeled = if kl == 1 || name.is_some() { 1 } else { 0 };
-        conn.execute(
+        tx.execute(
             "UPDATE speakers SET centroid = ?1, samples = ?2, name = ?3, labeled = ?4, updated_at = ?5 \
              WHERE id = ?6",
             params![encode_vec(&merged), ks + ds, name, labeled, now(), keep_id],
         )?;
-        conn.execute("DELETE FROM speakers WHERE id = ?1", params![drop_id])?;
+        tx.execute("DELETE FROM speakers WHERE id = ?1", params![drop_id])?;
+        tx.commit().context("committing speaker merge")?;
         Ok(true)
     }
 
@@ -243,13 +272,93 @@ impl SpeakerRegistry {
     }
 
     fn next_id(&self) -> String {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        format!("spk-{millis}-{n}")
+        self.ids.mint("spk-")
     }
+}
+
+/// How [`SpeakerRegistry::identify_or_create`] attributed an utterance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attribution {
+    /// Confident match; the profile's centroid absorbed the sample.
+    Matched,
+    /// Borderline match; attributed without touching the centroid.
+    Tentative,
+    /// No usable match; a new anonymous cluster was created.
+    Created,
+}
+
+/// The outcome of [`SpeakerRegistry::identify_or_create`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Identified {
+    /// The attributed profile's id.
+    pub id: String,
+    /// Its name, if the cluster has been named.
+    pub name: Option<String>,
+    /// Cosine similarity to the matched centroid (`0.0` for a new cluster).
+    pub score: f32,
+    pub attribution: Attribution,
+}
+
+/// Nearest profile to `embedding` by cosine (`None` when there are no profiles).
+fn best_match(conn: &Connection, embedding: &[f32]) -> Result<Option<(String, f32)>> {
+    let mut stmt = conn.prepare("SELECT id, centroid FROM speakers")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut best: Option<(String, f32)> = None;
+    for row in rows {
+        let (id, blob) = row?;
+        let score = cosine(embedding, &decode_vec(&blob));
+        if best.as_ref().is_none_or(|(_, b)| score > *b) {
+            best = Some((id, score));
+        }
+    }
+    Ok(best)
+}
+
+/// Insert a new anonymous one-sample cluster `id` seeded with `embedding`.
+fn insert_cluster(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
+    let now = now();
+    conn.execute(
+        "INSERT INTO speakers (id, name, labeled, centroid, dims, samples, created_at, updated_at) \
+         VALUES (?1, NULL, 0, ?2, ?3, 1, ?4, ?4)",
+        params![id, encode_vec(embedding), embedding.len() as i64, now],
+    )
+    .context("inserting speaker cluster")?;
+    Ok(())
+}
+
+/// Fold `embedding` into `id`'s centroid (online mean, renormalized) and bump its
+/// sample count. A no-op if the id is unknown.
+fn fold_into(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
+    let existing: Option<(Vec<u8>, i64)> = conn
+        .query_row(
+            "SELECT centroid, samples FROM speakers WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((blob, samples)) = existing else {
+        return Ok(());
+    };
+    let merged = fold_mean(&decode_vec(&blob), samples as f32, embedding, 1.0);
+    conn.execute(
+        "UPDATE speakers SET centroid = ?1, samples = samples + 1, updated_at = ?2 WHERE id = ?3",
+        params![encode_vec(&merged), now(), id],
+    )?;
+    Ok(())
+}
+
+/// A profile's name (`None` when unnamed or unknown).
+fn name_of(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT name FROM speakers WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
 }
 
 fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<SpeakerProfile> {
@@ -263,23 +372,6 @@ fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<SpeakerProfile> {
     })
 }
 
-/// Cosine similarity. Vectors from the embedder are already L2-normalized, but we
-/// divide by norms defensively so a stray unnormalized input can't exceed 1.0.
-/// Mismatched lengths (e.g. a model/dims change) score 0 rather than panicking.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na <= f32::EPSILON || nb <= f32::EPSILON {
-        0.0
-    } else {
-        dot / (na * nb)
-    }
-}
-
 /// Weighted online mean of two normalized direction vectors, renormalized:
 /// `normalize(a·wa + b·wb)`. Used for centroid updates (wb=1) and merges.
 fn fold_mean(a: &[f32], wa: f32, b: &[f32], wb: f32) -> Vec<f32> {
@@ -290,7 +382,7 @@ fn fold_mean(a: &[f32], wa: f32, b: &[f32], wb: f32) -> Vec<f32> {
         let bv = b.get(i).copied().unwrap_or(0.0);
         *o = av * wa + bv * wb;
     }
-    super::embed::l2_normalize(out)
+    l2_normalize(out)
 }
 
 fn encode_vec(v: &[f32]) -> Vec<u8> {
@@ -308,17 +400,10 @@ fn decode_vec(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::speaker::embed::{l2_normalize, MockSpeakerEmbedder, SpeakerEmbedder};
+    use crate::speaker::embed::{MockSpeakerEmbedder, SpeakerEmbedder};
 
     fn tone(hz: f32, ms: usize) -> Vec<i16> {
         let n = 16_000usize * ms / 1000;
@@ -418,6 +503,58 @@ mod tests {
         assert_eq!(p.samples, 2);
         assert_eq!(p.name.as_deref(), Some("Dana"), "dropped name carries over");
         assert!(reg.get(&drop).unwrap().is_none());
+    }
+
+    /// A merge whose DELETE fails must not leave the kept profile half-updated.
+    #[test]
+    fn failed_merge_rolls_back_completely() {
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let keep = reg.create_cluster(&l2_normalize(vec![1.0, 0.0])).unwrap();
+        let drop = reg.create_cluster(&l2_normalize(vec![0.0, 1.0])).unwrap();
+        reg.rename(&drop, "Dana").unwrap();
+        reg.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER no_delete BEFORE DELETE ON speakers \
+                 BEGIN SELECT RAISE(ABORT, 'simulated crash'); END;",
+            )
+            .unwrap();
+
+        assert!(reg.merge(&keep, &drop).is_err());
+        let k = reg.get(&keep).unwrap().unwrap();
+        assert_eq!(k.samples, 1, "kept centroid/samples untouched");
+        assert_eq!(k.name, None, "dropped name not carried over");
+        assert_eq!(reg.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn identify_or_create_matches_tentatively_attributes_or_creates() {
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let a = l2_normalize(vec![1.0, 0.0]);
+        let first = reg.identify_or_create(&a, 0.9, 0.5).unwrap();
+        assert_eq!(first.attribution, Attribution::Created);
+
+        reg.rename(&first.id, "Sam").unwrap();
+        let again = reg.identify_or_create(&a, 0.9, 0.5).unwrap();
+        assert_eq!(again.attribution, Attribution::Matched);
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.name.as_deref(), Some("Sam"));
+        assert_eq!(reg.get(&first.id).unwrap().unwrap().samples, 2);
+
+        // cos(45°) ≈ 0.71: between the thresholds → attributed, centroid untouched.
+        let near = reg
+            .identify_or_create(&l2_normalize(vec![1.0, 1.0]), 0.9, 0.5)
+            .unwrap();
+        assert_eq!(near.attribution, Attribution::Tentative);
+        assert_eq!(near.id, first.id);
+        assert_eq!(reg.get(&first.id).unwrap().unwrap().samples, 2);
+
+        let other = reg
+            .identify_or_create(&l2_normalize(vec![-1.0, 0.2]), 0.9, 0.5)
+            .unwrap();
+        assert_eq!(other.attribution, Attribution::Created);
+        assert_eq!(reg.count().unwrap(), 2);
     }
 
     #[test]

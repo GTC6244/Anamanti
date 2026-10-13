@@ -19,11 +19,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+
+use crate::ids::IdMinter;
 
 /// How many of the most recent clips to keep per speaker. Older clips are evicted on
 /// each [`ClipStore::save`]. A handful of varied utterances is plenty for a human to
@@ -48,8 +48,8 @@ pub struct ClipInfo {
 /// safe: a single mutex serializes the (infrequent) mutating operations.
 pub struct ClipStore {
     root: PathBuf,
-    /// Disambiguates clip names minted within the same millisecond.
-    counter: AtomicU64,
+    /// Mints `<millis>-<seq>` clip names (see [`crate::ids`]).
+    ids: IdMinter,
     /// Serializes save/prune/delete/move so concurrent turns can't race the rolling
     /// eviction. Reads (`list`/`load`) don't take it — the filesystem is the source
     /// of truth and a stale listing is harmless.
@@ -64,7 +64,7 @@ impl ClipStore {
             .with_context(|| format!("creating voice-clip dir {}", root.display()))?;
         Ok(Self {
             root,
-            counter: AtomicU64::new(0),
+            ids: IdMinter::new(),
             write_lock: Mutex::new(()),
         })
     }
@@ -138,7 +138,7 @@ impl ClipStore {
             let src = from.join(format!("{}.pcm", clip.name));
             // Preserve the original capture-millis prefix so newest-first ordering
             // survives the move; only the dedup suffix is refreshed.
-            let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+            let seq = self.ids.next_seq();
             let dest = to.join(format!("{}-{seq}.pcm", clip.created_ms));
             if let Err(e) = fs::rename(&src, &dest) {
                 log::warn!("merging clip {} failed: {e:#}", src.display());
@@ -151,12 +151,7 @@ impl ClipStore {
 
     /// Mint a unique `<millis>-<seq>` clip stem.
     fn next_name(&self) -> String {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
-        format!("{millis}-{seq}")
+        self.ids.mint("")
     }
 
     /// Keep only the newest [`MAX_CLIPS_PER_SPEAKER`] clips in `dir`, deleting the
@@ -236,6 +231,8 @@ fn sanitize(component: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// A self-cleaning temporary directory (avoids a `tempfile` dev-dependency).
     struct TmpDir(PathBuf);
@@ -247,8 +244,10 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
             let seq = N.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("anamanti-clips-test-{}-{nanos}-{seq}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "anamanti-clips-test-{}-{nanos}-{seq}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
