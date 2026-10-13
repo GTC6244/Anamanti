@@ -476,7 +476,7 @@ pub const CANCEL_TIMER: &str = "cancel_timer";
 
 /// Hard cap on a timer duration (24h) so a mis-parsed request can't spin an
 /// effectively-infinite timer on the device.
-const MAX_TIMER_SECS: u64 = 24 * 60 * 60;
+use crate::timer::MAX_TIMER_SECS;
 
 /// Typed args for [`SET_TIMER`].
 #[derive(Debug, Deserialize)]

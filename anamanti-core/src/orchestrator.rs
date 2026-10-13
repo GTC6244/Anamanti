@@ -876,17 +876,9 @@ impl Pipeline {
                 // The foreground widget label ("recipe"/"weather"), so screen-relative
                 // commands can route; `None` on an idle display.
                 screen: device_ctx.widget_label().map(str::to_string),
-                history: Vec::new(), // M5: recent turns for follow-up disambiguation
-                // Home location grounds location-dependent intents (weather): the HTTP
-                // engine retries an otherwise-deferred turn with this folded into the query.
-                // Weather-scoped (City + State/Prov), matching the weather tool.
-                location: self.settings.home_location().weather(),
                 // Background timer state (running/remaining/labels), ground truth for the
                 // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
                 timers: device_ctx.timers.clone(),
-                // Font-scaling state, ground truth for the optional font_increase/decrease
-                // fast intents (resolve only when a resizable surface is on screen).
-                font: device_ctx.font.clone(),
             };
             let engine = runtime.system1.engine.name().to_string();
             log::info!("system1 ({engine}) call: deciding on {transcript:?}");

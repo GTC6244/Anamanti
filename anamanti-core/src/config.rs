@@ -613,10 +613,6 @@ pub struct System1Config {
     pub base_url: String,
     /// OpenRouter model id for the `jev` backend.
     pub openrouter_model: String,
-    /// Compute device for the in-process `laya-embedded` backend (`cpu` | `metal`).
-    pub device: String,
-    /// Checkpoint / Hugging Face repo id for the `laya-embedded` backend.
-    pub model: String,
     /// Strict confidence floor below which a decision defers to System-2.
     pub min_confidence: f64,
     /// The intent labels the router is allowed to resolve (empty = the built-in set,
@@ -630,8 +626,6 @@ impl Default for System1Config {
             backend: "none".to_string(),
             base_url: "http://127.0.0.1:8000".to_string(),
             openrouter_model: "typesafe/jev-1.13".to_string(),
-            device: "metal".to_string(),
-            model: "convaiinnovations/laya".to_string(),
             min_confidence: 0.85,
             intents: Vec::new(),
         }
@@ -1041,7 +1035,13 @@ pub struct FileSystem1 {
     pub backend: Option<String>,
     pub base_url: Option<String>,
     pub openrouter_model: Option<String>,
+    /// **Deprecated, ignored.** Was the compute device for the never-implemented
+    /// `laya-embedded` backend. Still accepted so an existing file keeps loading
+    /// (`deny_unknown_fields`); a value logs a deprecation warning at boot.
     pub device: Option<String>,
+    /// **Deprecated, ignored.** Was the checkpoint for the never-implemented
+    /// `laya-embedded` backend (the `jev` model is `openrouter_model`). Still accepted;
+    /// a value logs a deprecation warning at boot.
     pub model: Option<String>,
     pub min_confidence: Option<f64>,
     #[serde(default)]
@@ -1388,12 +1388,21 @@ impl Config {
         };
 
         let s1d = System1Config::default();
+        for (key, value) in [
+            ("system1.device", &fc.system1.device),
+            ("system1.model", &fc.system1.model),
+        ] {
+            if value.is_some() {
+                log::warn!(
+                    "config key `{key}` is deprecated and ignored (it configured the \
+                     unimplemented laya-embedded backend); remove it from the config file"
+                );
+            }
+        }
         let system1 = System1Config {
             backend: nonempty(fc.system1.backend).unwrap_or(s1d.backend),
             base_url: nonempty(fc.system1.base_url).unwrap_or(s1d.base_url),
             openrouter_model: nonempty(fc.system1.openrouter_model).unwrap_or(s1d.openrouter_model),
-            device: nonempty(fc.system1.device).unwrap_or(s1d.device),
-            model: nonempty(fc.system1.model).unwrap_or(s1d.model),
             min_confidence: fc.system1.min_confidence.unwrap_or(s1d.min_confidence),
             intents: if fc.system1.intents.is_empty() {
                 s1d.intents
@@ -2524,6 +2533,18 @@ mod tests {
 
     fn parse(json: &str) -> FileConfig {
         serde_json::from_str(json).expect("valid FileConfig JSON")
+    }
+
+    #[test]
+    fn deprecated_system1_device_and_model_keys_still_load() {
+        // A deployed file may still carry the retired laya-embedded keys; with
+        // `deny_unknown_fields` they must keep parsing (and are ignored).
+        let c = Config::from_file(parse(
+            r#"{ "system1": { "backend": "jev", "device": "metal", "model": "x/y" } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.system1.backend, "jev");
+        assert_eq!(c.system1.openrouter_model, "typesafe/jev-1.13");
     }
 
     #[test]
