@@ -21,7 +21,7 @@ use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{EmbedStatus, GraphRagController, MemoryStore};
 use crate::orchestrator::ServiceConnector;
-use crate::settings::{LlmEngine, SettingsUpdate, SharedSettings};
+use crate::settings::{SettingsUpdate, SharedSettings};
 use crate::speaker::{SpeakerRegistry, SpeakerService};
 use crate::wyoming::protocol::{types, WyomingEvent};
 use crate::wyoming::tts::{describe_voices, VoiceEntry};
@@ -167,7 +167,9 @@ async fn pair_phone_response(request: &WyomingEvent, settings: &SharedSettings) 
             let message = if cfg.active() {
                 format!("Linked {name}'s phone.")
             } else if !cfg.token_set() {
-                format!("Linked {name}, but set the AppSaid app token on the Core to send messages.")
+                format!(
+                    "Linked {name}, but set the AppSaid app token on the Core to send messages."
+                )
             } else {
                 format!("Linked {name}.")
             };
@@ -199,7 +201,10 @@ fn response_ok(response: &WyomingEvent) -> bool {
 }
 
 /// The `anamanti-speaker-clips` response listing one speaker's stored voice clips.
-fn speaker_clips_response(speaker: Option<&SpeakerService>, request: &WyomingEvent) -> WyomingEvent {
+fn speaker_clips_response(
+    speaker: Option<&SpeakerService>,
+    request: &WyomingEvent,
+) -> WyomingEvent {
     let id = request.data.get("id").and_then(Value::as_str).unwrap_or("");
     let Some(svc) = speaker else {
         return WyomingEvent::with_data(
@@ -235,7 +240,11 @@ fn speaker_clips_response(speaker: Option<&SpeakerService>, request: &WyomingEve
 /// The `anamanti-speaker-clip` response carrying one clip's raw PCM in the payload.
 fn speaker_clip_response(speaker: Option<&SpeakerService>, request: &WyomingEvent) -> WyomingEvent {
     let id = request.data.get("id").and_then(Value::as_str).unwrap_or("");
-    let clip = request.data.get("clip").and_then(Value::as_str).unwrap_or("");
+    let clip = request
+        .data
+        .get("clip")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let Some(svc) = speaker else {
         return WyomingEvent::with_data(
             types::SPEAKER_CLIP,
@@ -544,7 +553,11 @@ pub fn functions_response(settings: &SharedSettings, embed: Option<&EmbedStatus>
         } else if vc_key_set {
             ("cloud", "Visual Crossing", None)
         } else {
-            ("local", "Open-Meteo", Some("No Visual Crossing key — using Open-Meteo"))
+            (
+                "local",
+                "Open-Meteo",
+                Some("No Visual Crossing key — using Open-Meteo"),
+            )
         };
     fns.push(func_entry(
         "Tools",
@@ -723,10 +736,15 @@ pub fn respond(
         types::DELETE_SPEAKER => delete_speaker(request, speaker),
         types::GET_DRIVE_TOKEN => drive_token_response(settings),
         types::DESCRIBE_SETTINGS => settings_response(settings, true, "current settings"),
-        types::SET_SETTINGS => match settings.apply(&parse_update(&request.data)) {
-            Ok(_) => settings_response(settings, true, "settings applied"),
-            Err(e) => settings_response(settings, false, &format!("{e:#}")),
-        },
+        // The device path never accepts secrets (`allow_secrets = false`): provider keys
+        // are entered only on the orchestrator's loopback config page, so cloud secrets
+        // never travel from or live on the shared Echo Show screen.
+        types::SET_SETTINGS => {
+            match settings.apply(&SettingsUpdate::from_json(&request.data, false)) {
+                Ok(_) => settings_response(settings, true, "settings applied"),
+                Err(e) => settings_response(settings, false, &format!("{e:#}")),
+            }
+        }
         types::LIST_MEMORIES => memories_response(memory),
         types::DELETE_MEMORY => {
             let id = request.data.get("id").and_then(Value::as_i64);
@@ -746,99 +764,12 @@ pub fn respond(
     }
 }
 
-/// Parse a `SettingsUpdate` from the `ambient-set-settings` data block. An absent
-/// key leaves that setting unchanged; a present `tts_voice: null` clears the voice.
-fn parse_update(data: &Value) -> SettingsUpdate {
-    let string_field = |key: &str| {
-        data.get(key)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
-    let tts_voice = match data.get("tts_voice") {
-        None => None,                    // unchanged
-        Some(Value::Null) => Some(None), // clear
-        Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
-    };
-    let engine =
-        data.get("engine")
-            .and_then(Value::as_str)
-            .map(|e| match e.to_lowercase().as_str() {
-                "rig" | "rig-core" | "rigcore" => LlmEngine::Rig,
-                _ => LlmEngine::Native,
-            });
-    let web_search = data.get("web_search").and_then(Value::as_bool);
-    let search_api_key = match data.get("search_api_key") {
-        None => None,                    // unchanged
-        Some(Value::Null) => Some(None), // clear
-        Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
-    };
-    let anthropic_auth = data
-        .get("anthropic_auth")
-        .and_then(Value::as_str)
-        .map(AnthropicAuth::from_label);
-    SettingsUpdate {
-        llm_backend: string_field("llm_backend"),
-        llm_model: string_field("llm_model"),
-        // Provider API keys / tokens are intentionally NOT accepted from the device
-        // control path — they are entered only on the orchestrator's loopback config
-        // page, so cloud secrets never travel from or live on the shared Echo Show screen.
-        anthropic_api_key: None,
-        openai_api_key: None,
-        anthropic_oauth_token: None,
-        anthropic_auth,
-        tts_voice,
-        engine,
-        web_search,
-        search_provider: string_field("search_provider"),
-        search_api_key,
-        end_silence_ms: data.get("end_silence_ms").and_then(Value::as_u64),
-        voice_rms_threshold: data.get("voice_rms_threshold").and_then(Value::as_f64),
-        silero_threshold: data
-            .get("silero_threshold")
-            .and_then(Value::as_f64)
-            .map(|v| v as f32),
-        vad_engine: data
-            .get("vad_engine")
-            .and_then(Value::as_str)
-            .and_then(crate::config::VadEngineKind::from_label),
-    }
-}
-
+/// Build the `ambient-settings` response: the shared settings JSON view
+/// ([`crate::settings::SettingsView::to_json`], the same payload the config page
+/// serves) with an `ok`/`message` envelope. Read-only on the device: whether a provider
+/// key is configured, never the key itself.
 fn settings_response(settings: &SharedSettings, ok: bool, message: &str) -> WyomingEvent {
-    let v = settings.view();
-    WyomingEvent::with_data(
-        types::SETTINGS,
-        json!({
-            "ok": ok,
-            "message": message,
-            "llm_backend": v.llm_backend,
-            "llm_model": v.llm_model,
-            // Read-only on the device: whether a provider key is configured, never
-            // the key itself. Provider keys are entered only on the loopback config
-            // page (see `webconfig`), not from the shared device screen.
-            "anthropic_key_set": v.anthropic_key_set,
-            "openai_key_set": v.openai_key_set,
-            "anthropic_auth": v.anthropic_auth.as_str(),
-            "tts_voice": v.tts_voice,
-            "engine": engine_label(v.engine),
-            "web_search": v.web_search,
-            "search_provider": v.search_provider,
-            "search_key_set": v.search_key_set,
-            "end_silence_ms": v.end_silence_ms,
-            "voice_rms_threshold": v.voice_rms_threshold,
-            "silero_threshold": v.silero_threshold,
-            "vad_engine": v.vad_engine.as_label(),
-        }),
-    )
-}
-
-/// Canonical string label for an engine (for JSON responses).
-fn engine_label(engine: LlmEngine) -> &'static str {
-    match engine {
-        LlmEngine::Native => "native",
-        LlmEngine::Rig => "rig",
-    }
+    WyomingEvent::with_data(types::SETTINGS, settings.view().to_json(ok, Some(message)))
 }
 
 fn memories_response(memory: &MemoryStore) -> WyomingEvent {
@@ -1180,6 +1111,8 @@ mod tests {
                 weather_imperial: false,
                 weather_enabled: false,
                 places: None,
+                places_enabled: true,
+                places_provider: "google".to_string(),
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -1355,17 +1288,17 @@ mod tests {
 
         // The claimed user_key must never ride back down to the device.
         let wire = serde_json::to_string(&resp.data).unwrap();
-        assert!(!wire.contains("gdksxryuunome6dp"), "leaked user_key: {wire}");
+        assert!(
+            !wire.contains("gdksxryuunome6dp"),
+            "leaked user_key: {wire}"
+        );
     }
 
     #[tokio::test]
     async fn pair_phone_without_a_name_is_an_in_band_error() {
         let s = settings();
-        let resp = pair_phone_response(
-            &req(types::PAIR_PHONE, json!({ "code": "ab2k" })),
-            &s,
-        )
-        .await;
+        let resp =
+            pair_phone_response(&req(types::PAIR_PHONE, json!({ "code": "ab2k" })), &s).await;
         assert_eq!(resp.data["ok"], json!(false));
         assert!(s.appsaid().recipients.is_empty());
     }
@@ -1387,7 +1320,10 @@ mod tests {
         .await;
         assert_eq!(resp.event_type, types::PAIR_RESULT);
         assert_eq!(resp.data["ok"], json!(false));
-        assert!(s.appsaid().recipients.is_empty(), "nothing stored on failure");
+        assert!(
+            s.appsaid().recipients.is_empty(),
+            "nothing stored on failure"
+        );
     }
 
     #[test]
@@ -1580,7 +1516,10 @@ mod tests {
 
         // Disabled (no service) → an in-band failure, not a panic.
         let disabled = enroll_finish(
-            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            &req(
+                types::ENROLL_FINISH,
+                json!({ "session": "s", "name": "Dana" }),
+            ),
             None,
         );
         assert_eq!(disabled.event_type, types::ENROLL_RESULT);
@@ -1596,7 +1535,10 @@ mod tests {
         // Too few samples → commit refused, session preserved.
         svc.enroll_sample("s", &pcm).unwrap();
         let early = enroll_finish(
-            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            &req(
+                types::ENROLL_FINISH,
+                json!({ "session": "s", "name": "Dana" }),
+            ),
             Some(&svc),
         );
         assert_eq!(early.data["ok"], json!(false));
@@ -1605,7 +1547,10 @@ mod tests {
         svc.enroll_sample("s", &pcm).unwrap();
         svc.enroll_sample("s", &pcm).unwrap();
         let done = enroll_finish(
-            &req(types::ENROLL_FINISH, json!({ "session": "s", "name": "Dana" })),
+            &req(
+                types::ENROLL_FINISH,
+                json!({ "session": "s", "name": "Dana" }),
+            ),
             Some(&svc),
         );
         assert_eq!(done.event_type, types::ENROLL_RESULT);

@@ -50,18 +50,37 @@ const TWELVE_MONTHS_SECS: i64 = 365 * 24 * 60 * 60;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The credentials the catalog lists models with. Read per refresh from the live
+/// settings (see [`ModelCatalog::with_credential_source`]) so a key entered on the
+/// config page reaches the model dropdown without a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogCredentials {
+    /// Anthropic API key (API-key auth). `None` = unset.
+    pub anthropic_api_key: Option<String>,
+    /// How Anthropic authenticates (API key vs subscription OAuth).
+    pub anthropic_auth: AnthropicAuth,
+    /// OpenAI API key. `None` = unset.
+    pub openai_api_key: Option<String>,
+}
+
+/// A live source of [`CatalogCredentials`] (typically the shared runtime settings).
+pub type CredentialSource = Arc<dyn Fn() -> CatalogCredentials + Send + Sync>;
+
 /// Fetches + caches the selectable model list from the provider APIs, with a
 /// curated static fallback. Shared (behind an `Arc`) by the device control path
 /// and the web config page.
 pub struct ModelCatalog {
     client: reqwest::Client,
     anthropic_base_url: String,
-    anthropic_api_key: Option<String>,
-    anthropic_auth: AnthropicAuth,
+    /// Fixed credentials, used when no live [`CredentialSource`] is attached.
+    fixed: CatalogCredentials,
+    /// Live credentials (the runtime settings), consulted on every refresh.
+    source: Option<CredentialSource>,
     anthropic_token: Option<Arc<AnthropicTokenProvider>>,
     openai_base_url: String,
-    openai_api_key: Option<String>,
-    cache: Mutex<Option<(Instant, Vec<ModelInfo>)>>,
+    /// The cached list, tagged with the credentials it was fetched with so a key
+    /// change (e.g. entered on the config page) refetches instead of serving stale data.
+    cache: Mutex<Option<(Instant, CatalogCredentials, Vec<ModelInfo>)>>,
 }
 
 impl ModelCatalog {
@@ -74,56 +93,80 @@ impl ModelCatalog {
         Self {
             client: reqwest::Client::new(),
             anthropic_base_url: anthropic_base_url.into().trim_end_matches('/').to_string(),
-            anthropic_api_key: anthropic_api_key.filter(|k| !k.is_empty()),
-            anthropic_auth: AnthropicAuth::ApiKey,
+            fixed: CatalogCredentials {
+                anthropic_api_key: anthropic_api_key.filter(|k| !k.is_empty()),
+                anthropic_auth: AnthropicAuth::ApiKey,
+                openai_api_key: openai_api_key.filter(|k| !k.is_empty()),
+            },
+            source: None,
             anthropic_token: None,
             openai_base_url: openai_base_url.into().trim_end_matches('/').to_string(),
-            openai_api_key: openai_api_key.filter(|k| !k.is_empty()),
             cache: Mutex::new(None),
         }
     }
 
     /// Select the Anthropic auth mode for model listing (subscription needs the
-    /// token provider). Defaults to API-key mode.
+    /// token provider). Defaults to API-key mode. A live credential source, when
+    /// attached, overrides the mode with the live setting.
     pub fn with_anthropic_auth(
         mut self,
         auth: AnthropicAuth,
         token: Option<Arc<AnthropicTokenProvider>>,
     ) -> Self {
-        self.anthropic_auth = auth;
+        self.fixed.anthropic_auth = auth;
         self.anthropic_token = token;
         self
     }
 
+    /// Read the provider keys + Anthropic auth mode from `source` on every refresh
+    /// instead of the fixed values given to [`Self::new`], so runtime-entered keys
+    /// are used.
+    pub fn with_credential_source(mut self, source: CredentialSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// The credentials to list with right now.
+    fn credentials(&self) -> CatalogCredentials {
+        match &self.source {
+            Some(f) => f(),
+            None => self.fixed.clone(),
+        }
+    }
+
     /// The current selectable models (Anthropic then OpenAI, newest-first within
-    /// each provider). Served from the cache when fresh; otherwise fetched live
-    /// (falling back to the static list per provider on any failure).
+    /// each provider). Served from the cache when fresh and fetched with the same
+    /// credentials; otherwise fetched live (falling back to the static list per
+    /// provider on any failure).
     pub async fn models(&self) -> Vec<ModelInfo> {
+        let creds = self.credentials();
         {
             let cache = self.cache.lock().await;
-            if let Some((at, models)) = cache.as_ref() {
-                if at.elapsed() < CACHE_TTL {
+            if let Some((at, cached_creds, models)) = cache.as_ref() {
+                if at.elapsed() < CACHE_TTL && *cached_creds == creds {
                     return models.clone();
                 }
             }
         }
 
         let now = chrono::Utc::now().timestamp();
-        let (anthropic, openai) = tokio::join!(self.anthropic(now), self.openai(now));
+        let (anthropic, openai) =
+            tokio::join!(self.anthropic(&creds, now), self.openai(&creds, now));
         let mut models = anthropic;
         models.extend(openai);
 
         let mut cache = self.cache.lock().await;
-        *cache = Some((Instant::now(), models.clone()));
+        *cache = Some((Instant::now(), creds, models.clone()));
         models
     }
 
     /// Anthropic models from the last 12 months; static fallback on any failure.
-    async fn anthropic(&self, now: i64) -> Vec<ModelInfo> {
+    async fn anthropic(&self, creds: &CatalogCredentials, now: i64) -> Vec<ModelInfo> {
         // Resolve credentials per auth mode; without them, serve the fallback list.
-        let bearer = match self.anthropic_auth {
+        let api_key = creds.anthropic_api_key.as_deref().unwrap_or_default();
+        let bearer = match creds.anthropic_auth {
             AnthropicAuth::ApiKey => {
-                if self.anthropic_api_key.is_none() {
+                if creds.anthropic_api_key.is_none() {
                     return anthropic_fallback();
                 }
                 None
@@ -139,7 +182,10 @@ impl ModelCatalog {
                 },
             },
         };
-        match self.fetch_anthropic(bearer.as_deref(), now).await {
+        match self
+            .fetch_anthropic(creds.anthropic_auth, api_key, bearer.as_deref(), now)
+            .await
+        {
             Ok(models) if !models.is_empty() => models,
             Ok(_) => anthropic_fallback(),
             Err(e) => {
@@ -151,15 +197,16 @@ impl ModelCatalog {
 
     async fn fetch_anthropic(
         &self,
+        auth: AnthropicAuth,
+        api_key: &str,
         bearer: Option<&str>,
         now: i64,
     ) -> anyhow::Result<Vec<ModelInfo>> {
-        let api_key = self.anthropic_api_key.as_deref().unwrap_or_default();
         let req = self
             .client
             .get(format!("{}/v1/models?limit=1000", self.anthropic_base_url))
             .header("anthropic-version", ANTHROPIC_VERSION);
-        let v: serde_json::Value = apply_auth(req, self.anthropic_auth, api_key, bearer)
+        let v: serde_json::Value = apply_auth(req, auth, api_key, bearer)
             .send()
             .await?
             .error_for_status()?
@@ -198,8 +245,8 @@ impl ModelCatalog {
     }
 
     /// OpenAI chat models from the last 12 months; static fallback on any failure.
-    async fn openai(&self, now: i64) -> Vec<ModelInfo> {
-        let Some(key) = self.openai_api_key.as_deref() else {
+    async fn openai(&self, creds: &CatalogCredentials, now: i64) -> Vec<ModelInfo> {
+        let Some(key) = creds.openai_api_key.as_deref() else {
             return openai_fallback();
         };
         match self.fetch_openai(key, now).await {
@@ -367,7 +414,10 @@ mod tests {
             "http://unused",
             None,
         );
-        let models = catalog.fetch_anthropic(None, now).await.unwrap();
+        let models = catalog
+            .fetch_anthropic(AnthropicAuth::ApiKey, "k", None, now)
+            .await
+            .unwrap();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["claude-newest", "claude-newer"]);
     }
@@ -385,5 +435,56 @@ mod tests {
             .rposition(|m| m.provider == "anthropic")
             .unwrap();
         assert!(last_anthropic < first_openai);
+    }
+
+    #[tokio::test]
+    async fn live_credential_source_is_read_per_refresh_and_busts_the_cache() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // A one-shot Anthropic `/v1/models` stub with a model dated "now".
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let n = sock.read(&mut buf).await.unwrap();
+            // The live key (not a boot-time one) authenticates the request.
+            assert!(String::from_utf8_lossy(&buf[..n]).contains("page-key"));
+            let created = chrono::Utc::now().to_rfc3339();
+            let body = serde_json::json!({
+                "data": [{"id": "claude-live", "display_name": "Live", "created_at": created}]
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        let live = Arc::new(std::sync::Mutex::new(CatalogCredentials::default()));
+        let src = live.clone();
+        let catalog = ModelCatalog::new(format!("http://{addr}"), None, "http://unused", None)
+            .with_credential_source(Arc::new(move || src.lock().unwrap().clone()));
+
+        // No key yet → the static fallback (no network).
+        let before = catalog.models().await;
+        assert!(before.iter().any(|m| m.id == "claude-opus-5"));
+        assert!(!before.iter().any(|m| m.id == "claude-live"));
+
+        // A key entered at runtime is picked up on the next refresh even though the
+        // cached list is still fresh.
+        live.lock().unwrap().anthropic_api_key = Some("page-key".into());
+        let after = catalog.models().await;
+        assert_eq!(
+            after
+                .iter()
+                .filter(|m| m.provider == "anthropic")
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-live"]
+        );
     }
 }
