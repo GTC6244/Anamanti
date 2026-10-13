@@ -12,6 +12,7 @@
 //! voice leaves the LAN); Phases A–D exercise it with the deterministic
 //! [`MockSpeakerEmbedder`].
 
+pub mod aliases;
 pub mod clips;
 pub mod embed;
 pub mod features;
@@ -25,6 +26,7 @@ use anyhow::{Context, Result};
 use crate::memory::{MemoryStore, Recall};
 use crate::vecmath::{cosine, l2_normalize};
 
+pub use aliases::{AliasMap, SpeakerAliases};
 pub use clips::{ClipInfo, ClipStore};
 pub use embed::{MockSpeakerEmbedder, SpeakerEmbedder};
 pub use registry::{Attribution, Identified, SpeakerProfile, SpeakerRegistry};

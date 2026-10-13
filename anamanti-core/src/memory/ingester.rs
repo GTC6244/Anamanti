@@ -30,6 +30,7 @@ use super::chatlog::{self, ChatLogRecord, LogCursor};
 use super::embed::Embedder;
 use super::entity::EntityExtractor;
 use super::helix::{turn_text, HelixMemory, NewTurn};
+use crate::speaker::{AliasMap, SpeakerAliases};
 
 /// Drains the chat log into the HelixDB graph memory.
 pub struct MemoryIngester {
@@ -41,6 +42,10 @@ pub struct MemoryIngester {
     /// The cached read position matching the committed line index; `None` until the
     /// first run locates it.
     cursor: Mutex<Option<LogCursor>>,
+    /// Speaker-id aliases left by merges/forgets (`crate::speaker::aliases`). The chat
+    /// log keeps each turn's original speaker id, so every record is resolved through
+    /// these before it is written to the store. `None` = no alias table (ids as logged).
+    aliases: Option<Arc<SpeakerAliases>>,
 }
 
 impl MemoryIngester {
@@ -75,7 +80,16 @@ impl MemoryIngester {
             embedder,
             extractor,
             cursor: Mutex::new(None),
+            aliases: None,
         }
+    }
+
+    /// Resolve every record's speaker id through `aliases` before writing it, so a
+    /// merged-away or forgotten speaker's turns land on the surviving speaker (or the
+    /// household) in whichever store this ingester feeds.
+    pub fn with_aliases(mut self, aliases: Option<Arc<SpeakerAliases>>) -> Self {
+        self.aliases = aliases;
+        self
     }
 
     /// Process every chat-log record past the committed offset. Returns how many
@@ -102,6 +116,13 @@ impl MemoryIngester {
             }
             return Ok(0);
         }
+
+        // The current speaker aliases. A read failure fails the run (the offset is not
+        // advanced, so it retries) rather than ingesting under stale ids.
+        let aliases = match &self.aliases {
+            Some(a) => a.load().context("loading speaker aliases")?,
+            None => AliasMap::default(),
+        };
 
         // 1. Batch-embed all turn texts (transcript + reply) and memory strings in a
         //    single call. Track which vector belongs to which item.
@@ -158,6 +179,7 @@ impl MemoryIngester {
                         log::warn!("entity extraction failed for turn {}: {e}", r.id);
                         Vec::new()
                     });
+                    let (speaker_id, speaker_name) = attribution(r, &aliases);
                     self.helix
                         .ingest_turn(NewTurn {
                             ext_id: &r.id,
@@ -167,8 +189,8 @@ impl MemoryIngester {
                             reply: &r.reply,
                             embedding: vector,
                             entities: &entities,
-                            speaker_id: speaker_of(r),
-                            speaker_name: r.speaker_name.as_deref(),
+                            speaker_id,
+                            speaker_name,
                         })
                         .await
                         .with_context(|| format!("ingesting turn {}", r.id))?;
@@ -179,8 +201,9 @@ impl MemoryIngester {
                     let content = &r.memories_written[mi];
                     let entities = self.extractor.extract(content).await.unwrap_or_default();
                     let ext_id = format!("{}-mem-{}", r.id, mi);
+                    let (speaker_id, _) = attribution(r, &aliases);
                     self.helix
-                        .ingest_memory(&ext_id, "memory", content, vector, &entities, speaker_of(r))
+                        .ingest_memory(&ext_id, "memory", content, vector, &entities, speaker_id)
                         .await
                         .with_context(|| format!("ingesting memory {ext_id}"))?;
                 }
@@ -263,6 +286,20 @@ fn speaker_of(r: &ChatLogRecord) -> &str {
         "household"
     } else {
         &r.speaker_id
+    }
+}
+
+/// The `(speaker id, display name)` to store a record under: its logged speaker
+/// resolved through the merge/forget `aliases`. When the id was remapped, the logged
+/// name belonged to the old cluster, so it is dropped (the registry is the source of
+/// truth for names).
+fn attribution<'a>(r: &'a ChatLogRecord, aliases: &'a AliasMap) -> (&'a str, Option<&'a str>) {
+    let logged = speaker_of(r);
+    let resolved = aliases.resolve(logged);
+    if resolved == logged {
+        (logged, r.speaker_name.as_deref())
+    } else {
+        (resolved, None)
     }
 }
 
