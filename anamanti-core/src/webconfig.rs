@@ -3352,4 +3352,226 @@ mod tests {
         route("POST", "/config", br#"{"search_api_key":null}"#, &s);
         assert!(!s.view().search_key_set);
     }
+
+    // ---- Route inventory -------------------------------------------------------------
+
+    const HTML: &str = "text/html; charset=utf-8";
+    const JSON: &str = "application/json";
+    const TEXT: &str = "text/plain";
+
+    /// Every route the admin console serves, as `(method, path, body, status,
+    /// content type)` for one representative request (no network, no services). POSTs
+    /// are also listed with a malformed body to pin the invalid-JSON status. Requests
+    /// that are not routes (unknown path, wrong method, lower-case method) pin the 404.
+    const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
+        // Static assets + pages.
+        ("GET", "/", "", "200 OK", HTML),
+        ("GET", "/index.html", "", "200 OK", HTML),
+        ("GET", "/panel.css", "", "200 OK", "text/css; charset=utf-8"),
+        (
+            "GET",
+            "/shell.js",
+            "",
+            "200 OK",
+            "application/javascript; charset=utf-8",
+        ),
+        ("GET", "/household", "", "200 OK", HTML),
+        ("GET", "/personality", "", "200 OK", HTML),
+        ("GET", "/pronunciations", "", "200 OK", HTML),
+        ("GET", "/drive", "", "200 OK", HTML),
+        ("GET", "/tools", "", "200 OK", HTML),
+        ("GET", "/stt", "", "200 OK", HTML),
+        ("GET", "/system1", "", "200 OK", HTML),
+        ("GET", "/embeddings", "", "200 OK", HTML),
+        ("GET", "/notifications", "", "200 OK", HTML),
+        ("GET", "/chatlog", "", "200 OK", HTML),
+        ("GET", "/prompts", "", "200 OK", HTML),
+        ("GET", "/sqlite", "", "200 OK", HTML),
+        ("GET", "/helix", "", "200 OK", HTML),
+        ("GET", "/music", "", "200 OK", HTML),
+        ("GET", "/about", "", "200 OK", HTML),
+        // JSON reads.
+        ("GET", "/about.json", "", "200 OK", JSON),
+        ("GET", "/config", "", "200 OK", JSON),
+        ("GET", "/config?_=1", "", "200 OK", JSON),
+        ("GET", "/models", "", "200 OK", JSON),
+        ("GET", "/voices", "", "200 OK", JSON),
+        ("GET", "/household/status.json", "", "200 OK", JSON),
+        ("GET", "/personality/status.json", "", "200 OK", JSON),
+        ("GET", "/pronunciations/status.json", "", "200 OK", JSON),
+        ("GET", "/drive/status.json", "", "200 OK", JSON),
+        ("GET", "/drive/folders.json", "", "200 OK", JSON),
+        ("GET", "/tools/status.json", "", "200 OK", JSON),
+        ("GET", "/tools/weather/status.json", "", "200 OK", JSON),
+        ("GET", "/tools/places/status.json", "", "200 OK", JSON),
+        ("GET", "/stt/status.json", "", "200 OK", JSON),
+        ("GET", "/system1/status.json", "", "200 OK", JSON),
+        ("GET", "/embeddings/status.json", "", "200 OK", JSON),
+        ("GET", "/notifications/status.json", "", "200 OK", JSON),
+        ("GET", "/chatlog.json", "", "200 OK", JSON),
+        ("GET", "/chatlog.json?limit=5", "", "200 OK", JSON),
+        ("GET", "/prompts.json", "", "200 OK", JSON),
+        ("GET", "/sqlite.json", "", "200 OK", JSON),
+        ("GET", "/helix.json", "", "200 OK", JSON),
+        ("GET", "/music/status.json", "", "200 OK", JSON),
+        ("GET", "/spotify/status.json", "", "200 OK", JSON),
+        ("GET", "/cadora/status.json", "", "200 OK", JSON),
+        ("GET", "/appsaid/status.json", "", "200 OK", JSON),
+        // Mutations, each with a well-formed body …
+        ("POST", "/config", r#"{"tts_voice":"amy"}"#, "200 OK", JSON),
+        ("POST", "/household/save", "{}", "200 OK", JSON),
+        ("POST", "/personality/save", "{}", "200 OK", JSON),
+        ("POST", "/pronunciations/save", "{}", "200 OK", JSON),
+        ("POST", "/tools/save", "{}", "200 OK", JSON),
+        ("POST", "/tools/weather/save", "{}", "200 OK", JSON),
+        ("POST", "/tools/places/save", "{}", "200 OK", JSON),
+        ("POST", "/stt/save", "{}", "200 OK", JSON),
+        ("POST", "/system1/save", "{}", "200 OK", JSON),
+        (
+            "POST",
+            "/embeddings/switch",
+            r#"{"backend":"local"}"#,
+            "200 OK",
+            JSON,
+        ),
+        ("POST", "/notifications/test", "{}", "200 OK", JSON),
+        (
+            "POST",
+            "/helix/rename-entity",
+            r#"{"old_name":"a","new_name":"b"}"#,
+            "200 OK",
+            JSON,
+        ),
+        (
+            "POST",
+            "/music/proc",
+            r#"{"proc":"snapserver","action":"start"}"#,
+            "200 OK",
+            JSON,
+        ),
+        (
+            "POST",
+            "/music/play",
+            r#"{"url":"http://x"}"#,
+            "200 OK",
+            JSON,
+        ),
+        ("POST", "/music/stopweb", "{}", "200 OK", JSON),
+        ("POST", "/music/startall", "{}", "200 OK", JSON),
+        ("POST", "/music/stopall", "{}", "200 OK", JSON),
+        ("POST", "/drive/save", "{}", "200 OK", JSON),
+        ("POST", "/drive/link", "{}", "200 OK", JSON),
+        ("POST", "/spotify/save", "{}", "200 OK", JSON),
+        ("POST", "/spotify/link", "{}", "200 OK", JSON),
+        ("POST", "/cadora/save", "{}", "200 OK", JSON),
+        ("POST", "/cadora/link", "{}", "200 OK", JSON),
+        ("POST", "/appsaid/save", "{}", "200 OK", JSON),
+        ("POST", "/appsaid/token", "{}", "200 OK", JSON),
+        // … and with a malformed one (only /config answers 400; the page handlers
+        // report the parse error in-band with a 200).
+        ("POST", "/config", "not json", "400 Bad Request", JSON),
+        ("POST", "/household/save", "not json", "200 OK", JSON),
+        ("POST", "/personality/save", "not json", "200 OK", JSON),
+        ("POST", "/pronunciations/save", "not json", "200 OK", JSON),
+        ("POST", "/tools/save", "not json", "200 OK", JSON),
+        ("POST", "/tools/weather/save", "not json", "200 OK", JSON),
+        ("POST", "/tools/places/save", "not json", "200 OK", JSON),
+        ("POST", "/stt/save", "not json", "200 OK", JSON),
+        ("POST", "/system1/save", "not json", "200 OK", JSON),
+        ("POST", "/embeddings/switch", "not json", "200 OK", JSON),
+        ("POST", "/notifications/test", "not json", "200 OK", JSON),
+        ("POST", "/helix/rename-entity", "not json", "200 OK", JSON),
+        ("POST", "/music/proc", "not json", "200 OK", JSON),
+        ("POST", "/music/play", "not json", "200 OK", JSON),
+        ("POST", "/drive/save", "not json", "200 OK", JSON),
+        ("POST", "/spotify/save", "not json", "200 OK", JSON),
+        ("POST", "/cadora/save", "not json", "200 OK", JSON),
+        ("POST", "/cadora/link", "not json", "200 OK", JSON),
+        ("POST", "/appsaid/save", "not json", "200 OK", JSON),
+        ("POST", "/appsaid/token", "not json", "200 OK", JSON),
+        // Not routes.
+        ("GET", "/nope", "", "404 Not Found", TEXT),
+        ("GET", "/household/save", "", "404 Not Found", TEXT),
+        ("GET", "/music/stopall", "", "404 Not Found", TEXT),
+        ("POST", "/household", "{}", "404 Not Found", TEXT),
+        ("POST", "/models", "{}", "404 Not Found", TEXT),
+        ("POST", "/chatlog.json", "{}", "404 Not Found", TEXT),
+        ("PUT", "/config", "{}", "404 Not Found", TEXT),
+        ("get", "/", "", "404 Not Found", TEXT),
+    ];
+
+    /// Serve one raw request through the real connection handler (fresh services each
+    /// time) and split the response into `(status, content type, body)`.
+    async fn serve_raw(method: &str, path: &str, body: &str) -> (String, String, Vec<u8>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut dbg = debug();
+            dbg.chatlog_path = std::env::temp_dir().join("wc_inventory_missing_chatlog.jsonl");
+            dbg.promptlog_path = std::env::temp_dir().join("wc_inventory_missing_prompts.jsonl");
+            let _ = handle(
+                stream,
+                settings(),
+                catalog(),
+                connector(),
+                None,
+                dbg,
+                None,
+                notify(),
+                None,
+            )
+            .await;
+        });
+        let ctype = if method.eq_ignore_ascii_case("POST") {
+            "Content-Type: application/json\r\n"
+        } else {
+            ""
+        };
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{ctype}\
+             Content-Length: {len}\r\n\r\n{body}",
+            port = addr.port(),
+            len = body.len(),
+        );
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        client.read_to_end(&mut resp).await.unwrap();
+        let split = find(&resp, b"\r\n\r\n").expect("a complete response head");
+        let head = String::from_utf8_lossy(&resp[..split]).to_string();
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .unwrap()
+            .strip_prefix("HTTP/1.1 ")
+            .unwrap()
+            .to_string();
+        let ctype = lines
+            .find_map(|l| l.strip_prefix("Content-Type: "))
+            .unwrap_or_default()
+            .to_string();
+        (status, ctype, resp[split + 4..].to_vec())
+    }
+
+    /// Pins the status + content type of every route. When `WEBCONFIG_ROUTE_SNAPSHOT`
+    /// names a file, the full responses are also written there, so a refactor of the
+    /// router can be diffed byte-for-byte against the previous build.
+    #[tokio::test]
+    async fn every_route_keeps_its_status_and_content_type() {
+        let mut snapshot = String::new();
+        for &(method, path, body, status, ctype) in ROUTE_INVENTORY {
+            let (got_status, got_ctype, got_body) = serve_raw(method, path, body).await;
+            assert_eq!(got_status, status, "{method} {path} {body:?}");
+            assert_eq!(got_ctype, ctype, "{method} {path} {body:?}");
+            snapshot.push_str(&format!(
+                "=== {method} {path} {body}\n{got_status} | {got_ctype}\n{}\n",
+                String::from_utf8_lossy(&got_body)
+            ));
+        }
+        if let Ok(out) = std::env::var("WEBCONFIG_ROUTE_SNAPSHOT") {
+            std::fs::write(out, snapshot).unwrap();
+        }
+    }
 }
