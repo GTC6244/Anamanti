@@ -8,7 +8,7 @@
 //!
 //! - [`SqliteRecall`] — FTS keyword search over the SQLite [`MemoryStore`]. Always
 //!   available; the fallback when GraphRAG can't initialize.
-//! - `HelixRecall` — GraphRAG: embed the query, then vector KNN + graph expansion
+//! - [`HelixRecall`] — GraphRAG: embed the query, then vector KNN + graph expansion
 //!   in the embedded HelixDB.
 //!
 //! The explicit/inferred memory *writes* and the Phase-6 control protocol still go
@@ -18,9 +18,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 
+use super::embed::Embedder;
+use super::helix::HelixMemory;
 use super::MemoryStore;
 
 /// The outcome of a recall: the context snippets plus an optional per-stage latency
@@ -40,6 +42,13 @@ pub struct RecallResult {
 
 /// Produces the memory context lines for a turn. `Send + Sync` for sharing behind
 /// an `Arc` across concurrent turns.
+///
+/// Besides recall, the seam carries the **speaker-attribution hooks** a speaker
+/// merge/forget needs ([`reassign_speaker`](Recall::reassign_speaker),
+/// [`delete_speaker`](Recall::delete_speaker)): a backend that keeps its own copy of
+/// `speaker_id` (the HelixDB graph) must rewrite it, or the person's recall loses
+/// their history. Backends that read attribution straight from the SQLite
+/// [`MemoryStore`] (FTS) keep the no-op defaults — the caller updates SQLite itself.
 #[async_trait]
 pub trait Recall: Send + Sync {
     /// Return up to `limit` context snippets relevant to `transcript` for the given
@@ -55,28 +64,34 @@ pub trait Recall: Send + Sync {
     ) -> Result<RecallResult>;
 
     /// Short, stable id of this backend for the timing logs: `"helix"` (embedded
-    /// HelixDB GraphRAG) or `"sqlite-fts"`. Defaults to FTS so any future backend
-    /// opts in explicitly.
-    fn backend(&self) -> &'static str {
-        "sqlite-fts"
-    }
-
-    /// Whether a recall of a non-empty transcript issues a query-embedding network
-    /// call (OpenAI embeddings). `true` for GraphRAG, `false` for pure-local FTS.
-    /// This is the dominant, variable component of a recall's latency.
-    fn embeds_query(&self) -> bool {
-        false
-    }
+    /// HelixDB GraphRAG) or `"sqlite-fts"`.
+    fn backend(&self) -> &'static str;
 
     /// Which embedder produced the query vector (`"local"`, `"openai"`, `"mock"`), or
-    /// `None` for backends that don't embed (SQLite FTS). Recorded per turn so the
-    /// `/chatlog` timing view labels the embedding stage with the real backend.
+    /// `None` for backends that don't embed the query (SQLite FTS). Recorded per turn
+    /// so the `/chatlog` timing view labels the embedding stage with the real
+    /// backend; `is_some()` also says whether a recall pays a query-embedding cost.
     fn embedder_label(&self) -> Option<&'static str> {
         None
     }
+
+    /// Re-attribute everything this backend stores for speaker `from` to speaker `to`
+    /// (two voice clusters were merged). Returns how many stored items moved.
+    async fn reassign_speaker(&self, from: &str, to: &str) -> Result<u64> {
+        let _ = (from, to);
+        Ok(0)
+    }
+
+    /// Detach everything this backend stores for speaker `id` from that person (their
+    /// voiceprint was forgotten): it becomes shared/household, matching the SQLite
+    /// side. Returns how many stored items changed.
+    async fn delete_speaker(&self, id: &str) -> Result<u64> {
+        let _ = id;
+        Ok(0)
+    }
 }
 
-/// SQLite FTS recall — the default backend (unchanged Phase-4 behavior).
+/// SQLite FTS recall — the always-available keyword backend.
 pub struct SqliteRecall {
     memory: Arc<MemoryStore>,
 }
@@ -95,76 +110,85 @@ impl Recall for SqliteRecall {
         speaker_id: Option<&str>,
         limit: usize,
     ) -> Result<RecallResult> {
-        let hits = self.memory.search_scoped(transcript, speaker_id, limit)?;
+        // rusqlite is blocking (and serialized behind the store's mutex), so the FTS
+        // query runs on the blocking pool rather than stalling a tokio worker.
+        let memory = self.memory.clone();
+        let transcript = transcript.to_string();
+        let speaker_id = speaker_id.map(str::to_string);
+        let hits = tokio::task::spawn_blocking(move || {
+            memory.search_scoped(&transcript, speaker_id.as_deref(), limit)
+        })
+        .await
+        .context("joining the SQLite recall task")??;
         Ok(RecallResult {
             hits: hits.into_iter().map(|m| m.content).collect(),
             // FTS is purely local: no embedding, no separate graph stage to split out.
             ..Default::default()
         })
     }
+
+    fn backend(&self) -> &'static str {
+        "sqlite-fts"
+    }
 }
 
-pub use helix_recall::HelixRecall;
+/// GraphRAG recall over the embedded HelixDB: embed the query with the same
+/// embedder used at ingest time, then vector KNN + graph expansion.
+pub struct HelixRecall {
+    helix: Arc<HelixMemory>,
+    embedder: Arc<dyn Embedder>,
+    /// KNN fan-out per vector search (before graph expansion + capping).
+    k: usize,
+}
 
-mod helix_recall {
-    use super::*;
-    use crate::memory::embed::Embedder;
-    use crate::memory::helix::HelixMemory;
+impl HelixRecall {
+    pub fn new(helix: Arc<HelixMemory>, embedder: Arc<dyn Embedder>, k: usize) -> Self {
+        Self { helix, embedder, k }
+    }
+}
 
-    /// GraphRAG recall over the embedded HelixDB: embed the query with the same
-    /// embedder used at ingest time, then vector KNN + graph expansion.
-    pub struct HelixRecall {
-        helix: Arc<HelixMemory>,
-        embedder: Arc<dyn Embedder>,
-        /// KNN fan-out per vector search (before graph expansion + capping).
-        k: usize,
+#[async_trait]
+impl Recall for HelixRecall {
+    async fn recall(
+        &self,
+        transcript: &str,
+        speaker_id: Option<&str>,
+        limit: usize,
+    ) -> Result<RecallResult> {
+        if transcript.trim().is_empty() {
+            return Ok(RecallResult::default());
+        }
+        // Time the two stages separately: the query-embedding cost (local nomic
+        // inference, or an OpenAI round-trip) vs. the local vector KNN + graph hop.
+        // `embed_query` (not `embed_one`) so asymmetric models — nomic — apply the
+        // `search_query:` prefix rather than the `search_document:` one used at ingest.
+        let t0 = Instant::now();
+        let qvec = self.embedder.embed_query(transcript).await?;
+        let embed_ms = t0.elapsed().as_millis() as u64;
+        let t1 = Instant::now();
+        let hits = self.helix.recall(qvec, speaker_id, self.k, limit).await?;
+        let search_ms = t1.elapsed().as_millis() as u64;
+        Ok(RecallResult {
+            hits,
+            embed_ms: Some(embed_ms),
+            search_ms: Some(search_ms),
+        })
     }
 
-    impl HelixRecall {
-        pub fn new(helix: Arc<HelixMemory>, embedder: Arc<dyn Embedder>, k: usize) -> Self {
-            Self { helix, embedder, k }
-        }
+    fn backend(&self) -> &'static str {
+        "helix"
     }
 
-    #[async_trait]
-    impl Recall for HelixRecall {
-        async fn recall(
-            &self,
-            transcript: &str,
-            speaker_id: Option<&str>,
-            limit: usize,
-        ) -> Result<RecallResult> {
-            if transcript.trim().is_empty() {
-                return Ok(RecallResult::default());
-            }
-            // Time the two stages separately: the query-embedding cost (local nomic
-            // inference, or an OpenAI round-trip) vs. the local vector KNN + graph hop.
-            // `embed_query` (not `embed_one`) so asymmetric models — nomic — apply the
-            // `search_query:` prefix rather than the `search_document:` one used at ingest.
-            let t0 = Instant::now();
-            let qvec = self.embedder.embed_query(transcript).await?;
-            let embed_ms = t0.elapsed().as_millis() as u64;
-            let t1 = Instant::now();
-            let hits = self.helix.recall(qvec, speaker_id, self.k, limit).await?;
-            let search_ms = t1.elapsed().as_millis() as u64;
-            Ok(RecallResult {
-                hits,
-                embed_ms: Some(embed_ms),
-                search_ms: Some(search_ms),
-            })
-        }
+    fn embedder_label(&self) -> Option<&'static str> {
+        Some(self.embedder.label())
+    }
 
-        fn backend(&self) -> &'static str {
-            "helix"
-        }
+    async fn reassign_speaker(&self, from: &str, to: &str) -> Result<u64> {
+        self.helix.reassign_speaker(from, to).await
+    }
 
-        fn embeds_query(&self) -> bool {
-            true
-        }
-
-        fn embedder_label(&self) -> Option<&'static str> {
-            Some(self.embedder.label())
-        }
+    async fn delete_speaker(&self, id: &str) -> Result<u64> {
+        self.helix.delete_speaker(id).await
     }
 }
 
@@ -196,8 +220,13 @@ mod tests {
             .await
             .unwrap();
         assert!(res.hits.iter().any(|h| h.contains("jazz")));
-        // FTS reports no per-stage split.
+        // FTS reports no per-stage split and no query embedder.
         assert_eq!(res.embed_ms, None);
         assert_eq!(res.search_ms, None);
+        assert_eq!(recall.backend(), "sqlite-fts");
+        assert!(recall.embedder_label().is_none());
+        // The speaker hooks are no-ops: FTS reads attribution from SQLite directly.
+        assert_eq!(recall.reassign_speaker("spk-a", "spk-b").await.unwrap(), 0);
+        assert_eq!(recall.delete_speaker("spk-a").await.unwrap(), 0);
     }
 }

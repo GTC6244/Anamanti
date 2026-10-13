@@ -13,7 +13,6 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -26,6 +25,7 @@ pub mod embed;
 pub mod entity;
 pub mod graphrag_control;
 pub mod graphview;
+pub mod jsonl;
 pub mod promptlog;
 
 // GraphRAG memory (embedded HelixDB) — always compiled. See memory_plan.md.
@@ -106,27 +106,20 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     /// Open (creating if needed) the SQLite database at `path` and run migrations.
+    ///
+    /// The connection is opened through [`crate::db::open`] (busy timeout + WAL),
+    /// the same policy as the speaker registry that shares this file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path).context("opening memory database")?;
+        let conn = crate::db::open(path).context("opening memory database")?;
         Self::from_conn(conn)
     }
 
     /// An ephemeral in-memory store (tests).
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_conn(Connection::open_in_memory()?)
+        Self::from_conn(crate::db::open_in_memory()?)
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
-        // A second connection (the speaker registry) may touch the same file;
-        // wait on a transient write lock rather than failing.
-        conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
-        // WAL lets multiple *processes* share this file safely: several
-        // orchestrator instances (e.g. a "production" instance plus short-lived
-        // test instances) can point at the same `anamanti_memory.sqlite` with
-        // concurrent readers and a single writer, instead of hitting
-        // SQLITE_BUSY under the default rollback journal. A no-op for the
-        // in-memory test store (which stays in `memory` journal mode).
-        conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS memories (
@@ -190,7 +183,13 @@ impl MemoryStore {
         conn.execute(
             "INSERT INTO memories (kind, content, source, created_at, speaker_id) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![kind.as_str(), content, source.as_str(), now(), speaker_id],
+            params![
+                kind.as_str(),
+                content,
+                source.as_str(),
+                crate::clock::now_secs(),
+                speaker_id
+            ],
         )
         .context("inserting memory")?;
         Ok(conn.last_insert_rowid())
@@ -333,6 +332,17 @@ impl MemoryStore {
         )?)
     }
 
+    /// Make every memory owned by `id` shared/household (`speaker_id = NULL`) — used
+    /// when a speaker profile is forgotten, so their memories stay but are no longer
+    /// attributed to a person who no longer exists. Returns the number changed.
+    pub fn unassign_speaker(&self, id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE memories SET speaker_id = NULL WHERE speaker_id = ?1",
+            params![id],
+        )?)
+    }
+
     /// Remove all entries.
     pub fn clear(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
@@ -371,13 +381,6 @@ fn migrate_speaker_column(conn: &Connection) -> Result<()> {
             .context("adding memories.speaker_id column")?;
     }
     Ok(())
-}
-
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Build a safe FTS5 `MATCH` expression from free text: keep alphanumeric tokens,

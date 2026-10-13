@@ -785,16 +785,16 @@ async fn helix_rename_json(debug: &DebugSources, body: &[u8]) -> String {
     }
     match graph.rename_entity(old_name, new_name).await {
         Ok(counts) => {
-            let total = counts.get("total").and_then(Value::as_u64).unwrap_or(0);
+            let total = counts.total();
             if total == 0 {
                 json!({ "ok": false, "message": format!("no occurrences of {old_name:?} found") })
                     .to_string()
             } else {
                 json!({
                     "ok": true,
-                    "entities": counts.get("entities").cloned().unwrap_or(json!(0)),
-                    "turns": counts.get("turns").cloned().unwrap_or(json!(0)),
-                    "memories": counts.get("memories").cloned().unwrap_or(json!(0)),
+                    "entities": counts.entities,
+                    "turns": counts.turns,
+                    "memories": counts.memories,
                     "total": total,
                 })
                 .to_string()

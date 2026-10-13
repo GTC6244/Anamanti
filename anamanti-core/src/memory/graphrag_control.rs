@@ -19,7 +19,6 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -29,7 +28,9 @@ use super::backend::{HelixRecall, Recall, RecallResult};
 use super::chatlog::ChatLog;
 use super::embed::{Embedder, OpenAiEmbedder};
 use super::entity::{AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor};
-use super::graphview::GraphView;
+use super::graphview::{
+    EntityList, GraphSample, GraphStats, GraphView, NodeId, RenameOutcome, TurnList,
+};
 use super::helix::HelixMemory;
 use super::ingester::MemoryIngester;
 
@@ -65,13 +66,16 @@ impl Recall for SwappableRecall {
         self.current().recall(transcript, speaker_id, limit).await
     }
     fn backend(&self) -> &'static str {
-        "helix"
-    }
-    fn embeds_query(&self) -> bool {
-        true
+        self.current().backend()
     }
     fn embedder_label(&self) -> Option<&'static str> {
         self.current().embedder_label()
+    }
+    async fn reassign_speaker(&self, from: &str, to: &str) -> Result<u64> {
+        self.current().reassign_speaker(from, to).await
+    }
+    async fn delete_speaker(&self, id: &str) -> Result<u64> {
+        self.current().delete_speaker(id).await
     }
 }
 
@@ -96,13 +100,13 @@ impl SwappableGraphView {
 
 #[async_trait]
 impl GraphView for SwappableGraphView {
-    async fn stats(&self) -> Result<Value> {
+    async fn stats(&self) -> Result<GraphStats> {
         self.current().stats().await
     }
-    async fn sample(&self, limit: usize) -> Result<Value> {
+    async fn sample(&self, limit: usize) -> Result<GraphSample> {
         self.current().sample(limit).await
     }
-    async fn rename_entity(&self, old_name: &str, new_name: &str) -> Result<Value> {
+    async fn rename_entity(&self, old_name: &str, new_name: &str) -> Result<RenameOutcome> {
         self.current().rename_entity(old_name, new_name).await
     }
     async fn list_turns(
@@ -112,15 +116,15 @@ impl GraphView for SwappableGraphView {
         entity: Option<&str>,
         limit: usize,
         offset: usize,
-    ) -> Result<Value> {
+    ) -> Result<TurnList> {
         self.current()
             .list_turns(query, speaker_id, entity, limit, offset)
             .await
     }
-    async fn list_entities(&self, query: Option<&str>, limit: usize) -> Result<Value> {
+    async fn list_entities(&self, query: Option<&str>, limit: usize) -> Result<EntityList> {
         self.current().list_entities(query, limit).await
     }
-    async fn delete_node(&self, id: u64) -> Result<bool> {
+    async fn delete_node(&self, id: NodeId) -> Result<bool> {
         self.current().delete_node(id).await
     }
 }
@@ -474,6 +478,59 @@ mod tests {
         );
         assert_eq!(label(EmbedBackend::Local), "local");
         assert_eq!(label(EmbedBackend::OpenAi), "openai");
+    }
+
+    /// A fake GraphRAG backend that records the speaker hooks it receives.
+    #[derive(Default)]
+    struct FakeGraphRecall {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Recall for FakeGraphRecall {
+        async fn recall(&self, _: &str, _: Option<&str>, _: usize) -> Result<RecallResult> {
+            Ok(RecallResult::default())
+        }
+        fn backend(&self) -> &'static str {
+            "helix"
+        }
+        fn embedder_label(&self) -> Option<&'static str> {
+            Some("mock")
+        }
+        async fn reassign_speaker(&self, from: &str, to: &str) -> Result<u64> {
+            self.calls.lock().unwrap().push(format!("{from}->{to}"));
+            Ok(3)
+        }
+        async fn delete_speaker(&self, id: &str) -> Result<u64> {
+            self.calls.lock().unwrap().push(format!("del {id}"));
+            Ok(1)
+        }
+    }
+
+    /// The proxy reports and forwards to whatever backend is live, never a
+    /// hardcoded "helix" — including the speaker hooks a merge/forget relies on.
+    #[tokio::test]
+    async fn swappable_recall_delegates_to_the_live_backend() {
+        use crate::memory::{MemoryStore, SqliteRecall};
+
+        let fts: Arc<dyn Recall> = Arc::new(SqliteRecall::new(Arc::new(
+            MemoryStore::open_in_memory().unwrap(),
+        )));
+        let proxy = SwappableRecall::new(fts);
+        assert_eq!(proxy.backend(), "sqlite-fts");
+        assert_eq!(proxy.embedder_label(), None);
+        assert_eq!(proxy.reassign_speaker("a", "b").await.unwrap(), 0);
+
+        let graph = Arc::new(FakeGraphRecall::default());
+        proxy.set(graph.clone());
+        assert_eq!(proxy.backend(), "helix");
+        assert_eq!(proxy.embedder_label(), Some("mock"));
+        assert_eq!(proxy.reassign_speaker("spk-a", "spk-b").await.unwrap(), 3);
+        assert_eq!(proxy.delete_speaker("spk-b").await.unwrap(), 1);
+        assert_eq!(
+            *graph.calls.lock().unwrap(),
+            vec!["spk-a->spk-b".to_string(), "del spk-b".to_string()]
+        );
     }
 
     #[test]

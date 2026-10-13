@@ -474,7 +474,7 @@ impl Pipeline {
 
         // 2b. Identify who is speaking (or attribute to the shared household), so
         //     memory writes/recall and the reply are per-person.
-        let speaker = self.identify_speaker(&voiced_pcm);
+        let speaker = self.identify_speaker(&voiced_pcm).await;
         on_event(TurnEvent::Speaker(speaker.clone()));
 
         // 3 + 4. Memory + LLM → reply, relaying each token to the device for
@@ -991,7 +991,7 @@ impl Pipeline {
         // split so the chatlog page shows the network embedding separately from the
         // local graph search.
         let recall_backend = self.recall.backend();
-        let recall_embedded = self.recall.embeds_query();
+        let recall_embedded = self.recall.embedder_label().is_some();
         timing.recall_backend = Some(recall_backend.to_string());
         timing.recall_embedded = Some(recall_embedded);
         timing.recall_embedder = self.recall.embedder_label().map(str::to_string);
@@ -1408,11 +1408,15 @@ impl Pipeline {
 
     /// Identify the turn's speaker via the [`SpeakerService`], degrading gracefully
     /// to the shared household on any failure (or when identification is disabled).
-    fn identify_speaker(&self, voiced_pcm: &[i16]) -> SpeakerContext {
+    /// Runs on the blocking pool (feature extraction + embedding + SQLite + clip write).
+    async fn identify_speaker(&self, voiced_pcm: &[i16]) -> SpeakerContext {
         let Some(svc) = &self.speaker else {
             return SpeakerContext::household();
         };
-        match svc.identify_and_attribute(voiced_pcm) {
+        match svc
+            .identify_and_attribute_blocking(voiced_pcm.to_vec())
+            .await
+        {
             Ok(ctx) => ctx,
             Err(e) => {
                 log::warn!("speaker identification failed; attributing to household: {e:#}");

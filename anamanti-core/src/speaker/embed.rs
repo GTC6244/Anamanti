@@ -18,6 +18,8 @@
 use anyhow::Context;
 use anyhow::{ensure, Result};
 
+use crate::vecmath::l2_normalize;
+
 /// Sample rate the orchestrator streams at (architecture.md §2.1). The embedder
 /// assumes mono `i16` PCM at this rate.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -153,18 +155,6 @@ impl SpeakerEmbedder for OnnxSpeakerEmbedder {
     fn dims(&self) -> usize {
         self.dims
     }
-}
-
-/// L2-normalize a vector in place-ish (returns the normalized copy). A zero vector
-/// (silence) is returned unchanged so cosine against it is a well-defined 0.
-pub fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > f32::EPSILON {
-        for x in &mut v {
-            *x /= norm;
-        }
-    }
-    v
 }
 
 #[cfg(test)]

@@ -20,11 +20,14 @@ pub mod registry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+
+use crate::memory::{MemoryStore, Recall};
+use crate::vecmath::{cosine, l2_normalize};
 
 pub use clips::{ClipInfo, ClipStore};
 pub use embed::{MockSpeakerEmbedder, SpeakerEmbedder};
-pub use registry::{SpeakerProfile, SpeakerRegistry};
+pub use registry::{Attribution, Identified, SpeakerProfile, SpeakerRegistry};
 
 /// Minimum accepted samples before a guided enrollment can be committed to a
 /// profile (SpeakerEnrollmentPlan.md Phase 2). A few phrases give the centroid
@@ -144,6 +147,26 @@ pub struct EnrollFinishOutcome {
     pub samples: usize,
 }
 
+/// What a coordinated [`SpeakerService::merge`] / [`SpeakerService::delete`]
+/// changed besides the voiceprint itself.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpeakerChange {
+    /// SQLite memory rows re-attributed (merge) or made shared (delete).
+    pub memories: usize,
+    /// GraphRAG `Turn`/`Memory` nodes re-attributed (0 on the SQLite-only backend).
+    pub graph_nodes: u64,
+    /// Follow-up steps that failed after the registry change committed (memory,
+    /// clips, graph), as human-readable messages. Empty on full success.
+    pub warnings: Vec<String>,
+}
+
+impl SpeakerChange {
+    fn warn(&mut self, message: String) {
+        log::warn!("speaker change: {message}");
+        self.warnings.push(message);
+    }
+}
+
 /// Owns the embedder + registry + thresholds and turns an utterance into a
 /// [`SpeakerContext`]. Cheap to share behind an `Arc` across concurrent turns
 /// (the registry serializes its own SQLite access).
@@ -213,24 +236,6 @@ impl SpeakerService {
         }
     }
 
-    /// Discard every stored clip for `speaker_id` (called when a profile is deleted).
-    pub fn delete_clips(&self, speaker_id: &str) {
-        if let Some(store) = &self.clips {
-            if let Err(e) = store.delete_speaker(speaker_id) {
-                log::warn!("deleting voice clips for {speaker_id} failed: {e:#}");
-            }
-        }
-    }
-
-    /// Move `drop`'s clips onto `keep` (called when two clusters are merged).
-    pub fn merge_clips(&self, keep: &str, drop: &str) {
-        if let Some(store) = &self.clips {
-            if let Err(e) = store.merge_speakers(keep, drop) {
-                log::warn!("merging voice clips {drop}→{keep} failed: {e:#}");
-            }
-        }
-    }
-
     /// Persist one raw utterance for `speaker_id` into the rolling clip store, if
     /// enabled. Best-effort: a clip-IO failure is logged, never propagated (it must
     /// not break the turn).
@@ -242,15 +247,76 @@ impl SpeakerService {
         }
     }
 
-    /// Minimum voiced PCM length (samples) before identification/enrollment is
-    /// attempted — the orchestrator uses it to reject too-short captures.
-    pub fn min_speech_samples(&self) -> usize {
-        self.thresholds.min_speech_samples
+    /// Merge voice cluster `drop` into `keep` everywhere the person lives: the
+    /// voiceprints (one registry transaction), their SQLite memories, their stored
+    /// voice clips, and their GraphRAG history (`graph`, the live recall backend —
+    /// `None` or the SQLite-only backend is a no-op there). Returns `Ok(None)` when
+    /// the registry declined (unknown id, or `keep == drop`) and nothing changed.
+    ///
+    /// The registry merge is the commit point; the follow-ups run after it and are
+    /// best-effort — a failure is logged and reported in [`SpeakerChange::warnings`]
+    /// rather than undoing a merge the user asked for.
+    pub async fn merge(
+        &self,
+        keep: &str,
+        drop: &str,
+        memory: &MemoryStore,
+        graph: Option<&dyn Recall>,
+    ) -> Result<Option<SpeakerChange>> {
+        if !self.registry.merge(keep, drop)? {
+            return Ok(None);
+        }
+        let mut change = SpeakerChange::default();
+        match memory.reassign_speaker(drop, keep) {
+            Ok(n) => change.memories = n,
+            Err(e) => change.warn(format!("moving memories {drop}→{keep}: {e:#}")),
+        }
+        if let Some(store) = &self.clips {
+            if let Err(e) = store.merge_speakers(keep, drop) {
+                change.warn(format!("merging voice clips {drop}→{keep}: {e:#}"));
+            }
+        }
+        if let Some(graph) = graph {
+            match graph.reassign_speaker(drop, keep).await {
+                Ok(n) => change.graph_nodes = n,
+                Err(e) => change.warn(format!("re-attributing graph memory {drop}→{keep}: {e:#}")),
+            }
+        }
+        Ok(Some(change))
     }
 
-    /// Embed one utterance into a voiceprint vector (no registry side effects).
-    pub fn embed(&self, pcm: &[i16]) -> Result<Vec<f32>> {
-        self.embedder.embed(pcm)
+    /// Forget speaker `id`: delete their voiceprint and stored voice clips, and make
+    /// their memories shared/household — in SQLite and in the GraphRAG graph — so
+    /// nothing is left attributed to a person who no longer exists (the device's
+    /// "Forget" dialog: memories stay but become unattributed). Returns `Ok(None)`
+    /// when there is no such speaker. Follow-ups after the registry delete are
+    /// best-effort, as in [`merge`](Self::merge).
+    pub async fn delete(
+        &self,
+        id: &str,
+        memory: &MemoryStore,
+        graph: Option<&dyn Recall>,
+    ) -> Result<Option<SpeakerChange>> {
+        if !self.registry.delete(id)? {
+            return Ok(None);
+        }
+        let mut change = SpeakerChange::default();
+        match memory.unassign_speaker(id) {
+            Ok(n) => change.memories = n,
+            Err(e) => change.warn(format!("unassigning memories of {id}: {e:#}")),
+        }
+        if let Some(store) = &self.clips {
+            if let Err(e) = store.delete_speaker(id) {
+                change.warn(format!("deleting voice clips of {id}: {e:#}"));
+            }
+        }
+        if let Some(graph) = graph {
+            match graph.delete_speaker(id).await {
+                Ok(n) => change.graph_nodes = n,
+                Err(e) => change.warn(format!("detaching graph memory of {id}: {e:#}")),
+            }
+        }
+        Ok(Some(change))
     }
 
     /// **Read-only** identification: the best-matching profile and its cosine score,
@@ -344,7 +410,9 @@ impl SpeakerService {
             );
         }
         let centroid = mean_vector(&samples);
-        let id = self.registry.create_labeled(name, &centroid, samples.len() as u64)?;
+        let id = self
+            .registry
+            .create_labeled(name, &centroid, samples.len() as u64)?;
         sessions.remove(session_id);
         Ok(EnrollFinishOutcome {
             speaker_id: id,
@@ -364,52 +432,45 @@ impl SpeakerService {
     /// - cosine ≥ `match_threshold` ⇒ known speaker, centroid updated;
     /// - `new_threshold ≤ cosine < match_threshold` ⇒ tentative match, no update;
     /// - otherwise ⇒ a new anonymous cluster is created.
+    ///
+    /// The match-or-create decision is one registry transaction
+    /// ([`SpeakerRegistry::identify_or_create`]), so concurrent turns from the same
+    /// new voice yield one cluster, not several. Blocking (mel features + ECAPA
+    /// inference + SQLite + a clip write): async callers use
+    /// [`identify_and_attribute_blocking`](Self::identify_and_attribute_blocking).
     pub fn identify_and_attribute(&self, pcm: &[i16]) -> Result<SpeakerContext> {
         if pcm.len() < self.thresholds.min_speech_samples {
             return Ok(SpeakerContext::household());
         }
 
         let embedding = self.embedder.embed(pcm)?;
-        let best = self.registry.identify(&embedding)?;
+        let found = self.registry.identify_or_create(
+            &embedding,
+            self.thresholds.match_threshold,
+            self.thresholds.new_threshold,
+        )?;
+        // Keep this utterance in the rolling clip window so a human can play the
+        // voice back: for a brand-new cluster it is exactly what's needed to put a
+        // name to the anonymous "Speaker N"; a known person accumulates fresh ones.
+        self.save_clip(&found.id, pcm);
+        Ok(SpeakerContext {
+            speaker_id: found.id,
+            name: found.name,
+            is_new: found.attribution == Attribution::Created,
+            confidence: found.score,
+        })
+    }
 
-        match best {
-            Some((id, score)) if score >= self.thresholds.match_threshold => {
-                self.registry.update_centroid(&id, &embedding)?;
-                let name = self.registry.get(&id)?.and_then(|p| p.name);
-                // Keep this utterance in the rolling clip window so a human can play
-                // the voice back (and so a named person accumulates fresh samples).
-                self.save_clip(&id, pcm);
-                Ok(SpeakerContext {
-                    speaker_id: id,
-                    name,
-                    is_new: false,
-                    confidence: score,
-                })
-            }
-            Some((id, score)) if score >= self.thresholds.new_threshold => {
-                // Borderline: attribute this turn but don't poison the voiceprint.
-                let name = self.registry.get(&id)?.and_then(|p| p.name);
-                self.save_clip(&id, pcm);
-                Ok(SpeakerContext {
-                    speaker_id: id,
-                    name,
-                    is_new: false,
-                    confidence: score,
-                })
-            }
-            _ => {
-                let id = self.registry.create_cluster(&embedding)?;
-                // The first clip for a brand-new cluster — this is exactly what a
-                // human needs to hear to put a name to the anonymous "Speaker N".
-                self.save_clip(&id, pcm);
-                Ok(SpeakerContext {
-                    speaker_id: id,
-                    name: None,
-                    is_new: true,
-                    confidence: 0.0,
-                })
-            }
-        }
+    /// [`identify_and_attribute`](Self::identify_and_attribute) on tokio's blocking
+    /// pool, so the inference + SQLite + clip I/O never stalls an async worker.
+    pub async fn identify_and_attribute_blocking(
+        self: &Arc<Self>,
+        pcm: Vec<i16>,
+    ) -> Result<SpeakerContext> {
+        let svc = self.clone();
+        tokio::task::spawn_blocking(move || svc.identify_and_attribute(&pcm))
+            .await
+            .context("joining the speaker-identification task")?
     }
 }
 
@@ -423,23 +484,7 @@ fn mean_vector(vectors: &[Vec<f32>]) -> Vec<f32> {
             *a += *x;
         }
     }
-    embed::l2_normalize(acc)
-}
-
-/// Cosine similarity between two equal-length vectors (0.0 on a length mismatch or
-/// a zero vector), matching the registry's defensive definition.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na <= f32::EPSILON || nb <= f32::EPSILON {
-        0.0
-    } else {
-        dot / (na * nb)
-    }
+    l2_normalize(acc)
 }
 
 #[cfg(test)]
@@ -594,7 +639,11 @@ mod tests {
         let clips = svc.list_clips(&ctx.speaker_id).unwrap();
         assert_eq!(clips.len(), 1, "one clip captured for the new speaker");
         let bytes = svc.load_clip(&ctx.speaker_id, &clips[0].name).unwrap();
-        assert_eq!(bytes.len(), utterance.len() * 2, "raw i16 LE, 2 bytes/sample");
+        assert_eq!(
+            bytes.len(),
+            utterance.len() * 2,
+            "raw i16 LE, 2 bytes/sample"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -604,7 +653,218 @@ mod tests {
         let svc = service(); // no clip store
         assert!(svc.list_clips("spk-1").unwrap().is_empty());
         assert!(svc.load_clip("spk-1", "whatever").is_err());
-        svc.delete_clips("spk-1"); // no panic
-        svc.merge_clips("a", "b"); // no panic
+    }
+
+    /// An embedder that holds every caller at a barrier after embedding, so all of
+    /// them reach the registry's identify-or-create decision at the same moment.
+    struct BarrierEmbedder {
+        inner: MockSpeakerEmbedder,
+        barrier: std::sync::Barrier,
+    }
+
+    impl SpeakerEmbedder for BarrierEmbedder {
+        fn embed(&self, pcm: &[i16]) -> Result<Vec<f32>> {
+            let v = self.inner.embed(pcm);
+            self.barrier.wait();
+            v
+        }
+        fn dims(&self) -> usize {
+            self.inner.dims()
+        }
+    }
+
+    /// A20: concurrent turns from one new voice must create a single cluster.
+    #[test]
+    fn concurrent_new_voice_identifications_create_one_cluster() {
+        const N: usize = 8;
+        let svc = Arc::new(SpeakerService::new(
+            Arc::new(BarrierEmbedder {
+                inner: MockSpeakerEmbedder::default(),
+                barrier: std::sync::Barrier::new(N),
+            }),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default(),
+        ));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let svc = svc.clone();
+                std::thread::spawn(move || svc.identify_and_attribute(&tone(180.0, 1500)).unwrap())
+            })
+            .collect();
+        let ctxs: Vec<SpeakerContext> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(svc.registry().count().unwrap(), 1, "one voice, one cluster");
+        assert_eq!(ctxs.iter().filter(|c| c.is_new).count(), 1);
+        assert!(ctxs.iter().all(|c| c.speaker_id == ctxs[0].speaker_id));
+    }
+
+    #[tokio::test]
+    async fn blocking_wrapper_identifies_off_the_runtime() {
+        let svc = Arc::new(service());
+        let ctx = svc
+            .identify_and_attribute_blocking(tone(180.0, 1500))
+            .await
+            .unwrap();
+        assert!(ctx.is_new);
+        assert_eq!(svc.registry().count().unwrap(), 1);
+    }
+
+    fn tmp_clips() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "anamanti-svc-merge-{}-{}",
+            std::process::id(),
+            crate::clock::now_millis()
+        ))
+    }
+
+    /// A8: merge moves the voiceprint, SQLite memories and clips in one call; delete
+    /// drops the voiceprint and clips and makes the memories shared.
+    #[tokio::test]
+    async fn merge_and_delete_coordinate_registry_memory_and_clips() {
+        use crate::memory::{MemoryKind, MemorySource, SqliteRecall};
+
+        let tmp = tmp_clips();
+        let svc = SpeakerService::new_with_clips(
+            Arc::new(MockSpeakerEmbedder::default()),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default(),
+            Some(ClipStore::open(&tmp).unwrap()),
+        );
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let keep = svc.identify_and_attribute(&tone(150.0, 1500)).unwrap();
+        let drop = svc.identify_and_attribute(&tone(600.0, 1500)).unwrap();
+        memory
+            .add_scoped(
+                MemoryKind::Fact,
+                "likes tea",
+                MemorySource::Explicit,
+                Some(&drop.speaker_id),
+            )
+            .unwrap();
+        // The SQLite-only backend's graph hook is a no-op.
+        let fts = SqliteRecall::new(Arc::new(MemoryStore::open_in_memory().unwrap()));
+
+        let change = svc
+            .merge(&keep.speaker_id, &drop.speaker_id, &memory, Some(&fts))
+            .await
+            .unwrap()
+            .expect("merge happened");
+        assert_eq!(change.memories, 1);
+        assert_eq!(change.graph_nodes, 0);
+        assert!(change.warnings.is_empty(), "{:?}", change.warnings);
+        assert_eq!(svc.registry().count().unwrap(), 1);
+        assert!(memory
+            .search_scoped("tea", Some(&keep.speaker_id), 5)
+            .unwrap()
+            .iter()
+            .any(|m| m.content == "likes tea"));
+        assert_eq!(svc.list_clips(&keep.speaker_id).unwrap().len(), 2);
+        assert!(svc.list_clips(&drop.speaker_id).unwrap().is_empty());
+
+        // Merging an id that no longer exists changes nothing.
+        assert!(svc
+            .merge(&keep.speaker_id, &drop.speaker_id, &memory, None)
+            .await
+            .unwrap()
+            .is_none());
+
+        let gone = svc
+            .delete(&keep.speaker_id, &memory, None)
+            .await
+            .unwrap()
+            .expect("delete happened");
+        assert_eq!(gone.memories, 1);
+        assert_eq!(svc.registry().count().unwrap(), 0);
+        assert!(svc.list_clips(&keep.speaker_id).unwrap().is_empty());
+        // The memory survives, now shared (visible in household scope).
+        assert!(memory
+            .search_scoped("tea", None, 5)
+            .unwrap()
+            .iter()
+            .any(|m| m.content == "likes tea"));
+        assert!(svc
+            .delete(&keep.speaker_id, &memory, None)
+            .await
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A8: after a merge, the kept speaker's Helix-scoped recall — through the
+    /// hot-swappable proxy's seam — finds what the dropped speaker said.
+    #[test]
+    fn merge_rewrites_graph_so_kept_speaker_recalls_dropped_turns() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(merge_graph_body());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn merge_graph_body() {
+        use crate::memory::embed::{Embedder, MockEmbedder};
+        use crate::memory::helix::{turn_text, HelixMemory, NewTurn};
+        use crate::memory::HelixRecall;
+
+        let svc = service();
+        let memory = MemoryStore::open_in_memory().unwrap();
+        let keep = svc.identify_and_attribute(&tone(150.0, 1500)).unwrap();
+        let drop = svc.identify_and_attribute(&tone(600.0, 1500)).unwrap();
+
+        let embedder = Arc::new(MockEmbedder::new(32));
+        let helix = Arc::new(HelixMemory::open_in_memory("merge", 32).await.unwrap());
+        let (transcript, reply) = ("my sister lives in Lisbon", "Lovely city.");
+        helix
+            .ingest_turn(NewTurn {
+                ext_id: "t1",
+                session: "s",
+                ts: 1,
+                transcript,
+                reply,
+                embedding: embedder
+                    .embed_one(&turn_text(transcript, reply))
+                    .await
+                    .unwrap(),
+                entities: &[],
+                speaker_id: &drop.speaker_id,
+                speaker_name: None,
+            })
+            .await
+            .unwrap();
+        helix.flush().await.unwrap();
+        let recall: Arc<dyn Recall> = Arc::new(HelixRecall::new(helix, embedder, 4));
+
+        let before = recall
+            .recall("where does my sister live", Some(&keep.speaker_id), 8)
+            .await
+            .unwrap();
+        assert!(!before.hits.iter().any(|h| h.contains("Lisbon")));
+
+        let change = svc
+            .merge(
+                &keep.speaker_id,
+                &drop.speaker_id,
+                &memory,
+                Some(recall.as_ref()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.graph_nodes, 1);
+        let after = recall
+            .recall("where does my sister live", Some(&keep.speaker_id), 8)
+            .await
+            .unwrap();
+        assert!(
+            after.hits.iter().any(|h| h.contains("Lisbon")),
+            "kept speaker should recall the dropped speaker's turn, got {:?}",
+            after.hits
+        );
     }
 }

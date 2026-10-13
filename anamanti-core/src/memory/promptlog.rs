@@ -12,15 +12,12 @@
 //! semantics as the chat log: an append failure is logged and swallowed by the
 //! caller, never turned into a turn error.
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use super::jsonl::{self, JsonlLog};
 
 /// The prompt sent to the LLM for one turn, as persisted to the JSONL log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,92 +43,15 @@ pub struct PromptLogRecord {
     pub user_message: String,
 }
 
-/// Append-only JSONL writer, safe to share across concurrent turns behind an `Arc`.
-pub struct PromptLog {
-    path: PathBuf,
-    file: Mutex<File>,
-    counter: AtomicU64,
-}
+/// Append-only JSONL prompt log, safe to share across concurrent turns behind an
+/// `Arc` (see [`JsonlLog`] for the write/read guarantees).
+pub type PromptLog = JsonlLog<PromptLogRecord>;
 
-impl PromptLog {
-    /// Open (creating if needed) the log at `path` for appending.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).ok();
-            }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("opening prompt log at {}", path.display()))?;
-        Ok(Self {
-            path,
-            file: Mutex::new(file),
-            counter: AtomicU64::new(0),
-        })
-    }
-
-    /// The log's path.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Mint a fresh record id (`{unix_millis}-{counter}`).
-    pub fn next_id(&self) -> String {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        format!("{millis}-{n}")
-    }
-
-    /// Append one record as a single JSON line, flushing so a viewer sees it promptly.
-    pub fn append(&self, record: &PromptLogRecord) -> Result<()> {
-        let mut line = serde_json::to_string(record).context("serializing prompt log record")?;
-        line.push('\n');
-        let mut file = self.file.lock().unwrap();
-        file.write_all(line.as_bytes())
-            .context("appending to prompt log")?;
-        file.flush().context("flushing prompt log")?;
-        Ok(())
-    }
-}
-
-/// Read up to `limit` most-recent records from `path`, newest first. Malformed
-/// lines are skipped. A missing file yields an empty vec (nothing logged yet).
+/// Read up to `limit` most-recent records from `path`, newest first, reading
+/// backwards from EOF. Malformed lines are skipped. A missing file yields an empty
+/// vec (nothing logged yet).
 pub fn read_tail(path: impl AsRef<Path>, limit: usize) -> Result<Vec<PromptLogRecord>> {
-    let path = path.as_ref();
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("opening prompt log {}", path.display())),
-    };
-    let mut out = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.context("reading prompt log line")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<PromptLogRecord>(&line) {
-            Ok(rec) => out.push(rec),
-            Err(e) => log::warn!("skipping malformed prompt log line: {e}"),
-        }
-    }
-    out.reverse(); // newest first
-    out.truncate(limit);
-    Ok(out)
-}
-
-/// Current unix-seconds timestamp helper for building records.
-pub fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    jsonl::read_tail(path, limit)
 }
 
 #[cfg(test)]
