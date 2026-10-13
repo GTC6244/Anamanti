@@ -536,6 +536,29 @@ pub fn name_speaker(
     })
 }
 
+/// Link a family member's phone to AppSaid by redeeming the 4-character pairing
+/// `code` shown in their AppSaid app and storing it on the Core as a phone-message
+/// recipient under `name`. Returns the Core's confirmation on success; a rejected or
+/// expired code (or an unreachable Core) is an `Err` carrying the reason to show.
+pub fn pair_phone(
+    orchestrator_key: String,
+    name: String,
+    code: String,
+    discovery_timeout_secs: u64,
+) -> Result<String> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::pair_phone(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &name,
+            &code,
+        )
+        .await
+    })
+}
+
 /// Merge the `drop` speaker into `keep` (same person, two clusters). Returns
 /// whether the merge was applied.
 pub fn merge_speakers(

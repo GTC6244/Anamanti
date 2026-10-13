@@ -369,7 +369,13 @@ anamanti-core/scripts/build-webui-css.sh
 #     tool → push a message / Google Maps link to a family member's phone via AppSaid.
 #     The sender app token is a SECRET (env APPSAID_APP_TOKEN or config page → Household
 #     tab, stored 0600, NEVER in the JSON). The tool is advertised only when worker_url +
-#     the app token + at least one recipient are all present)
+#     the app token + at least one recipient are all present. RECIPIENTS ARE UNIFIED ON
+#     THE HOUSEHOLD: each person lives in the household roster with an `appsaid` address
+#     (their user_key) alongside emails/phones — settable on the config page → Household
+#     tab, or linked from the device Settings → "Link a phone" pairing flow (claims a
+#     4-char code → fills in the address; auto-adds the person if new). The roster is
+#     DERIVED from members with an appsaid address; the legacy `appsaid.recipients` config
+#     map is folded into the household at boot as a one-time seed.)
 #   tool_cache{"<tool>": <seconds>, …} — per-tool response-cache TTLs, a flat map keyed by
 #     tool name, overlaid on built-in defaults; `0` disables a tool's cache. Generic
 #     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults

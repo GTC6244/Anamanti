@@ -863,6 +863,24 @@ There are **two flavors** of tool:
   a secret (`APPSAID_APP_TOKEN` / config page, 0600), never in the JSON config; the tool
   is advertised only when the worker URL + app token + at least one recipient are all
   present, and relinks/withdraws live like `spotify_control`.
+  **Recipients are unified on the household.** Each person lives in the household roster
+  (`HouseholdMember`) with an **`appsaid` address** (their `user_key`) alongside their
+  emails/phones; the recipient roster is **derived** from members that have one (the
+  household is the single source of truth). Set it two ways: paste it per-person on the
+  config page → Household tab, or link it from the device.
+  **Recipient pairing (TV-style, device).** The family member opens the AppSaid app →
+  "Link another device" to show a 4-character code, and on the Echo Show, **Settings →
+  Link a phone** (`PairPhoneScreen`) takes that code plus a name. The device sends both to
+  the Core over a control round-trip (**`anamanti-pair-phone` → `anamanti-pair-result`**, a
+  clone of `anamanti-get-drive-token` handled in the async `control::handle_control`); the
+  Core redeems the code (`appsaid::claim_pairing_code` → `POST {worker_url}/v1/pair/claim`),
+  learns the phone's `user_key`, and stores it on the matching household member via
+  `SharedSettings::add_appsaid_recipient` — **auto-adding the person to the household** if
+  no member matches, so a paired contact is always in the roster. A household edit
+  re-derives the roster and rebuilds the tool (so `apply_household` now rebuilds the LLM,
+  like `apply_appsaid`). The claimed `user_key` never rides back to the device; only an
+  `ok`/`message` result does. A legacy `appsaid.recipients` config seed is folded into the
+  household at boot.
 - **Action tool** — additionally causes an effect on the Echo Show (e.g.
   `set_timer`). The tool cannot reach the device directly (it runs inside the LLM
   loop, which has no socket), so it emits a **`DeviceAction`** onto a per-turn

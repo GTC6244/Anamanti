@@ -50,6 +50,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_VOICES
             | types::GET_DRIVE_TOKEN
             | types::GET_FUNCTIONS
+            | types::PAIR_PHONE
     )
 }
 
@@ -81,6 +82,10 @@ pub async fn handle_control(
             None => None,
         };
         functions_response(settings, embed.as_ref())
+    } else if request.event_type == types::PAIR_PHONE {
+        // Linking a phone makes an outbound AppSaid claim call AND mutates settings, so
+        // it is answered here (async) rather than in the pure `respond`.
+        pair_phone_response(request, settings).await
     } else if request.event_type == types::LIST_TURNS
         || request.event_type == types::LIST_ENTITIES
         || request.event_type == types::DELETE_GRAPH_NODE
@@ -98,6 +103,61 @@ pub async fn handle_control(
         respond(request, memory, settings, speaker.map(|s| s.registry()))
     };
     device.send(&response).await
+}
+
+/// Build the `anamanti-pair-result` response for a device phone-pairing request.
+///
+/// Redeems the AppSaid pairing `code` (shown on the recipient's AppSaid app) against
+/// the Core's configured worker, then stores the returned `user_key` as a
+/// `send_phone_message` recipient under `name`. Every failure — a missing field, no
+/// worker URL configured on the Core, a bad/used/expired code — is reported in-band
+/// (`ok: false` + a speakable `message`) so a bad pairing never drops the device
+/// connection. The claimed `user_key` is never echoed back to the device.
+async fn pair_phone_response(request: &WyomingEvent, settings: &SharedSettings) -> WyomingEvent {
+    let name = request
+        .data
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let code = request
+        .data
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if name.is_empty() {
+        return pair_result(false, "enter the person's name".to_string(), None);
+    }
+
+    let worker_url = settings.appsaid().worker_url.unwrap_or_default();
+    match crate::appsaid::claim_pairing_code(&worker_url, code).await {
+        Ok(user_key) => {
+            let cfg = settings.add_appsaid_recipient(name, &user_key);
+            // The `send_phone_message` tool only activates with a worker URL + app token
+            // + at least one recipient; tell the user if a token is still missing so a
+            // "linked" phone isn't silently unusable.
+            let message = if cfg.active() {
+                format!("Linked {name}'s phone.")
+            } else if !cfg.token_set() {
+                format!("Linked {name}, but set the AppSaid app token on the Core to send messages.")
+            } else {
+                format!("Linked {name}.")
+            };
+            pair_result(true, message, Some(name.to_string()))
+        }
+        Err(e) => pair_result(false, format!("{e:#}"), None),
+    }
+}
+
+/// Build an `anamanti-pair-result` frame. On success `name` echoes the linked contact
+/// (for the device confirmation); it is omitted on failure. Never carries the
+/// `user_key`.
+fn pair_result(ok: bool, message: String, name: Option<String>) -> WyomingEvent {
+    let mut data = json!({ "ok": ok, "message": message });
+    if let Some(name) = name {
+        data["name"] = json!(name);
+    }
+    WyomingEvent::with_data(types::PAIR_RESULT, data)
 }
 
 /// Build the `ambient-voices` response: Piper's advertised voice catalog, filtered
@@ -1129,6 +1189,100 @@ mod tests {
                 "missing category {cat}"
             );
         }
+    }
+
+    /// Spawn a one-shot fake AppSaid worker that replies to `/v1/pair/claim` with
+    /// `status`/`body`, and return its `http://127.0.0.1:PORT` base URL.
+    async fn fake_worker(status: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn pair_phone_claims_a_code_and_stores_the_recipient() {
+        use crate::settings::AppSaidUpdate;
+        assert!(is_control_request(types::PAIR_PHONE));
+        let base = fake_worker("200 OK", r#"{"user_key":"gdksxryuunome6dp"}"#).await;
+        let s = settings();
+        s.apply_appsaid(&AppSaidUpdate {
+            worker_url: Some(Some(base)),
+            app_token: Some(Some("app-tok".into())),
+            ..Default::default()
+        });
+
+        let resp = pair_phone_response(
+            &req(types::PAIR_PHONE, json!({ "name": "Mom", "code": "ab-2k" })),
+            &s,
+        )
+        .await;
+        assert_eq!(resp.event_type, types::PAIR_RESULT);
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(resp.data["name"], json!("Mom"));
+
+        // The recipient is stored and the send tool is now fully configured.
+        let cfg = s.appsaid();
+        assert_eq!(
+            cfg.recipients.get("Mom").map(String::as_str),
+            Some("gdksxryuunome6dp")
+        );
+        assert!(cfg.active(), "worker + token + recipient ⇒ tool active");
+
+        // Pairing auto-adds the person to the household with their AppSaid address.
+        let member = s.household().member_matching("Mom").cloned();
+        assert_eq!(
+            member.and_then(|m| m.appsaid).as_deref(),
+            Some("gdksxryuunome6dp"),
+            "paired person is in the household"
+        );
+
+        // The claimed user_key must never ride back down to the device.
+        let wire = serde_json::to_string(&resp.data).unwrap();
+        assert!(!wire.contains("gdksxryuunome6dp"), "leaked user_key: {wire}");
+    }
+
+    #[tokio::test]
+    async fn pair_phone_without_a_name_is_an_in_band_error() {
+        let s = settings();
+        let resp = pair_phone_response(
+            &req(types::PAIR_PHONE, json!({ "code": "ab2k" })),
+            &s,
+        )
+        .await;
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(s.appsaid().recipients.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pair_phone_surfaces_a_bad_code_without_dropping() {
+        use crate::settings::AppSaidUpdate;
+        let base = fake_worker("404 Not Found", r#"{"error":"not_found"}"#).await;
+        let s = settings();
+        s.apply_appsaid(&AppSaidUpdate {
+            worker_url: Some(Some(base)),
+            app_token: Some(Some("app-tok".into())),
+            ..Default::default()
+        });
+        let resp = pair_phone_response(
+            &req(types::PAIR_PHONE, json!({ "name": "Mom", "code": "ZZZZ" })),
+            &s,
+        )
+        .await;
+        assert_eq!(resp.event_type, types::PAIR_RESULT);
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(s.appsaid().recipients.is_empty(), "nothing stored on failure");
     }
 
     #[test]

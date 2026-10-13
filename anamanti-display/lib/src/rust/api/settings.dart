@@ -178,6 +178,22 @@ Future<bool> nameSpeaker({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Link a family member's phone to AppSaid by redeeming the 4-character pairing
+/// `code` shown in their AppSaid app and storing it on the Core as a phone-message
+/// recipient under `name`. Returns the Core's confirmation on success; a rejected or
+/// expired code (or an unreachable Core) is an `Err` carrying the reason to show.
+Future<String> pairPhone({
+  required String orchestratorKey,
+  required String name,
+  required String code,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsPairPhone(
+  orchestratorKey: orchestratorKey,
+  name: name,
+  code: code,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// Merge the `drop` speaker into `keep` (same person, two clusters). Returns
 /// whether the merge was applied.
 Future<bool> mergeSpeakers({

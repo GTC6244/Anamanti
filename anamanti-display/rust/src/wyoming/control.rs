@@ -670,6 +670,47 @@ pub async fn name_speaker(
     speaker_ok(&resp)
 }
 
+/// Link a family member's phone to AppSaid by redeeming the short pairing `code` shown
+/// in their AppSaid app and storing it on the Core as a phone-message recipient under
+/// `name`. Returns the Core's speakable confirmation on success; a rejected/expired
+/// code (or an unreachable Core) is an `Err` carrying the reason to show the user.
+pub async fn pair_phone(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    name: &str,
+    code: &str,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request =
+        WyomingEvent::with_data(types::PAIR_PHONE, json!({ "name": name, "code": code }));
+    let resp = round_trip(&endpoint, request).await?;
+    let ok = resp.data.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let message = resp
+        .data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if ok {
+        Ok(if message.is_empty() {
+            "Linked.".to_string()
+        } else {
+            message
+        })
+    } else {
+        Err(anyhow!(
+            "{}",
+            if message.is_empty() {
+                "pairing failed — try a fresh code"
+            } else {
+                &message
+            }
+        ))
+    }
+}
+
 /// Merge the `drop` speaker into `keep`; returns whether it was applied.
 pub async fn merge_speakers(
     cache: &EndpointCache,
@@ -833,6 +874,45 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::GET_DRIVE_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn pair_phone_sends_name_and_code_and_returns_the_confirmation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::PAIR_RESULT,
+            json!({ "ok": true, "name": "Mom", "message": "Linked Mom's phone." }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let msg = pair_phone(&cache, Duration::from_millis(0), None, "Mom", "AB2K")
+            .await
+            .unwrap();
+        assert_eq!(msg, "Linked Mom's phone.");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::PAIR_PHONE);
+        assert_eq!(request.data.get("name").and_then(Value::as_str), Some("Mom"));
+        assert_eq!(request.data.get("code").and_then(Value::as_str), Some("AB2K"));
+    }
+
+    #[tokio::test]
+    async fn pair_phone_turns_an_ok_false_into_an_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::PAIR_RESULT,
+            json!({ "ok": false, "message": "that pairing code is invalid, already used, or expired" }),
+        );
+        let _server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = pair_phone(&cache, Duration::from_millis(0), None, "Mom", "ZZZZ")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
     }
 
     #[tokio::test]

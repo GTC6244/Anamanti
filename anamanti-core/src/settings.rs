@@ -169,6 +169,13 @@ pub struct HouseholdMember {
     /// Phone numbers for this person (any number). Empty = none known.
     #[serde(default)]
     pub phones: Vec<String>,
+    /// This person's **AppSaid address** (their public `user_key`) — the destination the
+    /// `send_phone_message` tool pushes to. `None`/empty = not linked (they won't appear
+    /// as a phone-message recipient). Set either by pasting it here on the config page, or
+    /// by the device "Link a phone" pairing flow (which claims a code and fills it in).
+    /// The household is the single source of truth for phone-message recipients.
+    #[serde(default)]
+    pub appsaid: Option<String>,
     /// Optional relationship / role note (e.g. "parent", "kid", "roommate").
     #[serde(default)]
     pub relationship: Option<String>,
@@ -260,11 +267,51 @@ impl Household {
                     name: m.name.trim().to_string(),
                     emails: clean_list(&m.emails),
                     phones: clean_list(&m.phones),
+                    appsaid: clean_opt(&m.appsaid),
                     relationship: clean_opt(&m.relationship),
                 })
                 .filter(|m| !m.name.is_empty())
                 .collect(),
         }
+    }
+
+    /// The AppSaid recipient roster derived from members that have a non-blank AppSaid
+    /// address: `display name → user_key`. This is the **single source of truth** for
+    /// `send_phone_message` recipients — the orchestrator rebuilds the messenger from
+    /// this whenever the household (or AppSaid worker/token) changes.
+    pub fn appsaid_roster(&self) -> std::collections::BTreeMap<String, String> {
+        self.members
+            .iter()
+            .filter_map(|m| {
+                let key = m.appsaid.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+                let name = m.name.trim();
+                (!name.is_empty()).then(|| (name.to_string(), key.to_string()))
+            })
+            .collect()
+    }
+
+    /// Set (or clear, with an empty `user_key`) a member's AppSaid address by name
+    /// (case-insensitive). **Auto-adds** the person as a new member if none matches, so a
+    /// paired or seeded contact is always in the household. Returns the canonical stored
+    /// name (existing members keep their original spelling).
+    pub fn set_member_appsaid(&mut self, name: &str, user_key: &str) -> String {
+        let name = name.trim();
+        let key = user_key.trim();
+        let value = (!key.is_empty()).then(|| key.to_string());
+        if let Some(m) = self
+            .members
+            .iter_mut()
+            .find(|m| m.name.trim().eq_ignore_ascii_case(name))
+        {
+            m.appsaid = value;
+            return m.name.clone();
+        }
+        self.members.push(HouseholdMember {
+            name: name.to_string(),
+            appsaid: value,
+            ..Default::default()
+        });
+        name.to_string()
     }
 }
 
@@ -429,15 +476,17 @@ pub struct CadoraUpdate {
 /// AppSaid phone-push linkage, owned by the orchestrator.
 ///
 /// Drives the rig-engine `send_phone_message` tool (`crate::llm::rig`) over AppSaid's
-/// HTML-push API (`crate::appsaid`). The orchestrator holds the worker URL, the
-/// recipient roster (family-member name → AppSaid `user_key`), an optional default
-/// recipient, and the secret sender **app token**. Like Spotify/Cadora, a change here
-/// rebuilds the backend so the tool is advertised/withdrawn live.
+/// HTML-push API (`crate::appsaid`). The orchestrator holds the worker URL, an optional
+/// default recipient, the secret sender **app token**, and the recipient roster — which
+/// is **derived from the household** (each member's `appsaid` address), not stored
+/// independently. Like Spotify/Cadora, a change here (or to the household) rebuilds the
+/// backend so the tool is advertised/withdrawn live.
 ///
-/// The recipients + worker URL + default seed from the config file's `appsaid` block;
-/// the `app_token` is a SECRET seeded from `APPSAID_APP_TOKEN` (never from the JSON
-/// config), config-page settable, and persisted here in plaintext (0600 settings
-/// file) — keep it on a trusted machine.
+/// The worker URL + default seed from the config file's `appsaid` block; the
+/// `app_token` is a SECRET seeded from `APPSAID_APP_TOKEN` (never from the JSON config),
+/// config-page settable, and persisted here in plaintext (0600 settings file) — keep it
+/// on a trusted machine. A legacy `appsaid.recipients` config seed is folded into the
+/// household at boot (each becomes a member), after which the household is authoritative.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AppSaidConfig {
     /// AppSaid worker base URL (e.g. `https://appsaid.you.workers.dev`). `None`/empty
@@ -448,8 +497,11 @@ pub struct AppSaidConfig {
     /// persisted 0600. Never seeded from `anamanti.json`.
     #[serde(default)]
     pub app_token: Option<String>,
-    /// Recipients: display name → AppSaid `user_key`. Ordered for stable output;
-    /// lookups are case-insensitive.
+    /// Recipients: display name → AppSaid `user_key`. **Derived** from the household
+    /// (each member's `appsaid` address) — the household is the source of truth; this is
+    /// re-computed on every household/AppSaid apply and at boot (folding the legacy
+    /// config seed into the household first). Ordered for stable output; lookups are
+    /// case-insensitive.
     #[serde(default)]
     pub recipients: std::collections::BTreeMap<String, String>,
     /// Optional default recipient name used when the model omits `recipient`.
@@ -526,14 +578,15 @@ impl AppSaidConfig {
 
 /// A requested change to the AppSaid config (tri-state per field, like
 /// [`CadoraUpdate`]). Applied by [`SharedSettings::apply_appsaid`], which rebuilds the
-/// backend so the `send_phone_message` tool is advertised/withdrawn live. `recipients`
-/// replaces the whole roster when `Some`.
+/// backend so the `send_phone_message` tool is advertised/withdrawn live. The recipient
+/// roster is **not** set here — it lives on the household members (each member's
+/// `appsaid` address) and is re-derived on apply; link a phone via
+/// [`SharedSettings::add_appsaid_recipient`] or the household editor.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AppSaidUpdate {
     pub worker_url: Option<Option<String>>,
     pub app_token: Option<Option<String>>,
     pub default_recipient: Option<Option<String>>,
-    pub recipients: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// A requested change to the directions tool config. `mapbox_token` is tri-state:
@@ -1822,17 +1875,54 @@ impl SharedSettings {
     /// Replace the whole household record and persist it (best-effort, 0600). The
     /// dashboard household form is a full-record save (edit location/units + the
     /// roster together), so this sets rather than field-diffs; the value is
-    /// [`Household::sanitized`] first (trim, drop blanks / nameless members). Never
-    /// rebuilds the LLM — household is orthogonal to the backend. Returns the cleaned
-    /// value that was stored.
+    /// [`Household::sanitized`] first (trim, drop blanks / nameless members). Returns
+    /// the cleaned value that was stored.
+    ///
+    /// Because the household is the **source of truth for AppSaid recipients** (each
+    /// member's `appsaid` address), a save re-derives the roster and rebuilds the LLM so
+    /// the `send_phone_message` tool is advertised/withdrawn to match — best-effort, like
+    /// [`Self::apply_appsaid`]: if the rebuild fails the config is still stored and takes
+    /// effect on the next successful rebuild or restart.
     pub fn apply_household(&self, household: &Household) -> Household {
         let cleaned = household.sanitized();
         // Point the location-aware tools' live home address at the new value. The
         // factory's handle is the same cell every rebuilt backend's tool clones, so this
-        // takes effect immediately without rebuilding the LLM.
+        // takes effect immediately.
         self.factory.home_location.set(cleaned.address.clone());
+
+        // Re-derive the AppSaid recipient roster from the members and rebuild the backend
+        // so the phone-message tool tracks the new roster. Build before taking the write
+        // lock; on failure, fall through and still store the household + roster.
+        let current = self.inner.read().unwrap().clone();
+        let mut appsaid = current.appsaid.clone();
+        appsaid.recipients = cleaned.appsaid_roster();
+        let mut factory = self.factory.clone();
+        factory.anthropic_api_key = current.anthropic_api_key.clone();
+        factory.openai_api_key = current.openai_api_key.clone();
+        factory.spotify = current.spotify.controller();
+        factory.cadora = current.cadora.controller();
+        factory.appsaid = appsaid.messenger();
+        let rebuilt = factory
+            .build(
+                current.engine,
+                current.web_search,
+                &current.search_provider,
+                current.search_api_key.as_deref(),
+                &current.llm_backend,
+                current.llm_model.as_deref(),
+                current.anthropic_auth,
+            )
+            .map_err(|e| log::warn!("household: applied config but LLM rebuild failed: {e:#}"))
+            .ok();
+
         let mut w = self.inner.write().unwrap();
+        if let Some((llm, label, model)) = rebuilt {
+            w.llm = llm;
+            w.llm_backend = label;
+            w.llm_model = model;
+        }
         w.household = cleaned.clone();
+        w.appsaid = appsaid;
         let snapshot = self
             .persist_path
             .is_some()
@@ -2304,10 +2394,42 @@ impl SharedSettings {
         self.inner.read().unwrap().appsaid.token_set()
     }
 
-    /// Apply an AppSaid config change, rebuild the LLM so the `send_phone_message` tool
-    /// is advertised/withdrawn to match, and persist (best-effort, 0600). Empty-string
-    /// sets are treated as clears; `recipients`, when present, replaces the whole
-    /// roster. Returns the resulting [`AppSaidConfig`].
+    /// Link (or re-link) a person's phone: set the matching **household member's**
+    /// AppSaid address to `user_key`, **auto-adding** them to the household if no member
+    /// matches the name (so a paired contact is always in the household). Persists +
+    /// rebuilds the tool via [`Self::apply_household`], which re-derives the recipient
+    /// roster. The way the device "Link a phone" pairing stores a claimed `user_key`.
+    /// Returns the resulting [`AppSaidConfig`] (its `recipients` reflect the new member).
+    pub fn add_appsaid_recipient(&self, name: &str, user_key: &str) -> AppSaidConfig {
+        let mut household = self.household();
+        household.set_member_appsaid(name, user_key);
+        self.apply_household(&household);
+        self.appsaid()
+    }
+
+    /// Unlink a person's phone: clear the matching household member's AppSaid address
+    /// (case-insensitive) so they drop off the recipient roster — the member record
+    /// itself is kept. No-op if no member matches. Returns the resulting config.
+    pub fn remove_appsaid_recipient(&self, name: &str) -> AppSaidConfig {
+        let needle = name.trim();
+        let mut household = self.household();
+        if household
+            .members
+            .iter()
+            .any(|m| m.name.trim().eq_ignore_ascii_case(needle))
+        {
+            household.set_member_appsaid(needle, "");
+            self.apply_household(&household);
+        }
+        self.appsaid()
+    }
+
+    /// Apply an AppSaid config change (worker URL, app token, default recipient),
+    /// rebuild the LLM so the `send_phone_message` tool is advertised/withdrawn to
+    /// match, and persist (best-effort, 0600). Empty-string sets are treated as clears.
+    /// The recipient **roster is not set here** — it is always re-derived from the
+    /// household (each member's `appsaid` address), the single source of truth. Returns
+    /// the resulting [`AppSaidConfig`].
     ///
     /// Like [`Self::apply_cadora`], the rebuild is best-effort: if it fails the new
     /// config is still stored and persisted, so the tool activates on the next
@@ -2324,9 +2446,8 @@ impl SharedSettings {
         if let Some(v) = &update.default_recipient {
             target.default_recipient = v.clone().filter(|s| !s.trim().is_empty());
         }
-        if let Some(r) = &update.recipients {
-            target.recipients = r.clone();
-        }
+        // Keep the roster in lockstep with the household (recipients live on members).
+        target.recipients = current.household.appsaid_roster();
 
         // Rebuild the backend so the tool set reflects the new linkage. Build before
         // taking the write lock; on failure, fall through and still store the config.
@@ -2712,6 +2833,41 @@ mod tests {
                 pronunciations: Vec::new(),
             },
         )
+    }
+
+    #[test]
+    fn add_appsaid_recipient_links_household_members_and_remove_unlinks() {
+        let s = shared(factory_with_key(None));
+        assert!(s.appsaid().recipients.is_empty());
+        assert!(s.household().members.is_empty());
+
+        // Linking auto-adds the person to the household (source of truth) and derives
+        // the recipient roster from members' AppSaid addresses.
+        s.add_appsaid_recipient("Mom", "key_mom_old");
+        s.add_appsaid_recipient("Dad", "key_dad");
+        // Re-link the first under different casing — it updates the existing member's
+        // address in place (keeping the original spelling), not a "mom"/"Mom" duplicate.
+        let cfg = s.add_appsaid_recipient("mom", "key_mom_new");
+        assert_eq!(cfg.recipients.len(), 2, "no duplicate for Mom/mom");
+        assert_eq!(cfg.recipients.get("Mom").map(String::as_str), Some("key_mom_new"));
+        assert_eq!(cfg.recipients.get("Dad").map(String::as_str), Some("key_dad"));
+
+        // Both are now household members, each carrying their AppSaid address.
+        let h = s.household();
+        assert_eq!(h.members.len(), 2, "paired people are in the household");
+        let mom = h.member_matching("mom").unwrap();
+        assert_eq!(mom.name, "Mom");
+        assert_eq!(mom.appsaid.as_deref(), Some("key_mom_new"));
+
+        // Unlink clears the member's address (keeps the person) and drops them off the
+        // roster; case-insensitive.
+        let cfg = s.remove_appsaid_recipient("MOM");
+        assert!(!cfg.recipients.keys().any(|k| k.eq_ignore_ascii_case("mom")));
+        assert_eq!(cfg.recipients.len(), 1);
+        assert!(cfg.recipients.contains_key("Dad"));
+        let h = s.household();
+        assert_eq!(h.members.len(), 2, "the person stays in the household");
+        assert_eq!(h.member_matching("Mom").unwrap().appsaid, None);
     }
 
     #[test]
@@ -3180,6 +3336,7 @@ mod tests {
                     name: "  Alice  ".into(),
                     emails: vec![" alice@example.com ".into(), "".into()],
                     phones: vec!["+1 555 0001".into()],
+                    appsaid: Some("  user_alice  ".into()),
                     relationship: Some(" parent ".into()),
                 },
                 // No name → dropped entirely.
@@ -3207,6 +3364,7 @@ mod tests {
         assert_eq!(clean.members.len(), 1);
         assert_eq!(clean.members[0].name, "Alice");
         assert_eq!(clean.members[0].emails, vec!["alice@example.com"]);
+        assert_eq!(clean.members[0].appsaid.as_deref(), Some("user_alice"));
         assert_eq!(clean.members[0].relationship.as_deref(), Some("parent"));
         assert!(!clean.is_empty());
         assert!(Household::default().is_empty());
@@ -3452,6 +3610,7 @@ mod tests {
                 name: "Bob".into(),
                 emails: vec!["bob@example.com".into()],
                 phones: vec!["+1 555 0002".into()],
+                appsaid: None,
                 relationship: None,
             }],
         });

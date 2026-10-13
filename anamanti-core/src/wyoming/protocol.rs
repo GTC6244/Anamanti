@@ -187,6 +187,16 @@ pub mod types {
     /// page.
     pub const FUNCTIONS: &str = "anamanti-functions";
 
+    /// device → orchestrator: link a family member's phone to AppSaid by redeeming a
+    /// short pairing code shown in the AppSaid app (data: `name`, `code`). The Core
+    /// claims the code against its configured AppSaid worker, learns the phone's
+    /// `user_key`, and stores it as a `send_phone_message` recipient under `name`. The
+    /// code rides the device↔orchestrator LAN hop only; no secret is returned.
+    pub const PAIR_PHONE: &str = "anamanti-pair-phone";
+    /// orchestrator → device: the pairing outcome (data: `ok`; on success `name`; on
+    /// failure a speakable `message`). Never carries the claimed `user_key`.
+    pub const PAIR_RESULT: &str = "anamanti-pair-result";
+
     // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
     //
     // A tool the LLM calls on the Mac emits a **device action** that the pipeline

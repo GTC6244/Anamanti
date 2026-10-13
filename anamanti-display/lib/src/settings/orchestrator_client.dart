@@ -376,6 +376,13 @@ abstract class OrchestratorClient {
 
   /// Discard an in-flight guided voice-enrollment session (the user backed out).
   Future<void> enrollCancel(String session);
+
+  /// Link a family member's phone to AppSaid by redeeming the 4-character pairing
+  /// [code] shown in their AppSaid app and storing it on the Core as a
+  /// `send_phone_message` recipient under [name]. Returns the Core's confirmation
+  /// message; throws with the reason on failure (bad/expired code, or the Mac is
+  /// unreachable).
+  Future<String> pairPhone(String name, String code);
 }
 
 /// Production client backed by the generated FRB control functions.
@@ -639,6 +646,14 @@ class FrbOrchestratorClient implements OrchestratorClient {
   Future<void> enrollCancel(String session) => frb.enrollCancel(
         orchestratorKey: orchestratorKey,
         session: session,
+        discoveryTimeoutSecs: _timeout,
+      );
+
+  @override
+  Future<String> pairPhone(String name, String code) => frb.pairPhone(
+        orchestratorKey: orchestratorKey,
+        name: name,
+        code: code,
         discoveryTimeoutSecs: _timeout,
       );
 

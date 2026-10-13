@@ -169,6 +169,15 @@ pub mod types {
     /// `key_required`, `key_set`). Byte-identical to the orchestrator's `FUNCTIONS`.
     pub const FUNCTIONS: &str = "anamanti-functions";
 
+    /// device → orchestrator: link a family member's phone to AppSaid by redeeming the
+    /// short pairing code shown in the AppSaid app (data: `name`, `code`). The Core
+    /// claims it, learns the phone's `user_key`, and stores it as a phone-message
+    /// recipient. Byte-identical to the orchestrator's `PAIR_PHONE`.
+    pub const PAIR_PHONE: &str = "anamanti-pair-phone";
+    /// orchestrator → device: the pairing outcome (data: `ok`; on success `name`; on
+    /// failure a speakable `message`). Byte-identical to the orchestrator's `PAIR_RESULT`.
+    pub const PAIR_RESULT: &str = "anamanti-pair-result";
+
     // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
     //
     // orchestrator → device: a tool the LLM called on the Mac emits a device action
