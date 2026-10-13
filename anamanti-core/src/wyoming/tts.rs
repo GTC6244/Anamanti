@@ -6,11 +6,13 @@
 //! relays those frames straight to the Echo Show over the device socket
 //! (architecture.md §4 SPEAKING).
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use super::protocol::{types, WyomingEvent};
-use super::Connection;
+use super::{Connection, TimedOut};
 use tokio::io::{AsyncBufRead, AsyncWrite};
 
 /// One voice advertised by a downstream Piper `describe`/`info` exchange.
@@ -90,10 +92,17 @@ pub fn parse_voice_catalog(data: &Value) -> Vec<VoiceEntry> {
     out
 }
 
+/// Budget for each read from Piper while a sentence synthesizes. Piper renders a
+/// sentence in well under a second on the Mac and then streams chunks back-to-back, so
+/// a gap this long means the server has stalled; the turn gives up on the sentence
+/// rather than leaving the device in SPEAKING indefinitely.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A single synthesis request over a downstream Piper connection.
 pub struct TtsSession<R, W> {
     conn: Connection<R, W>,
     done: bool,
+    read_timeout: Duration,
 }
 
 impl<R, W> TtsSession<R, W>
@@ -108,17 +117,31 @@ where
         voice: Option<&str>,
     ) -> Result<Self> {
         conn.send(&WyomingEvent::synthesize(text, voice)).await?;
-        Ok(Self { conn, done: false })
+        Ok(Self {
+            conn,
+            done: false,
+            read_timeout: READ_TIMEOUT,
+        })
+    }
+
+    /// Override the per-read budget ([`READ_TIMEOUT`] by default).
+    pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = timeout;
+        self
     }
 
     /// Read the next synthesized-audio event. Yields `audio-start` and each
     /// `audio-chunk`, yields the terminating `audio-stop` once, then `None`. The
-    /// caller relays every yielded event to the device unchanged.
+    /// caller relays every yielded event to the device unchanged. A read that takes
+    /// longer than the read budget fails with a [`TimedOut`] error.
     pub async fn next_audio(&mut self) -> Result<Option<WyomingEvent>> {
         if self.done {
             return Ok(None);
         }
-        match self.conn.read().await? {
+        let next = tokio::time::timeout(self.read_timeout, self.conn.read())
+            .await
+            .map_err(|_| TimedOut::new("TTS audio read", self.read_timeout))?;
+        match next? {
             Some(ev) => {
                 if ev.event_type == types::AUDIO_STOP {
                     self.done = true;
@@ -177,6 +200,42 @@ mod tests {
             ]
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_piper_read_times_out() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = split(client_io);
+        let conn = Connection::from_halves(BufReader::new(cr), cw);
+
+        // Mock Piper that accepts the request, sends `audio-start`, then goes silent
+        // while holding the socket open.
+        let server = tokio::spawn(async move {
+            let (sr, sw) = split(server_io);
+            let mut reader = BufReader::new(sr);
+            let mut writer = sw;
+            let _ = read_event(&mut reader).await;
+            write_event(
+                &mut writer,
+                &WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0),
+            )
+            .await
+            .unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let mut session = TtsSession::begin(conn, "hello", None)
+            .await
+            .unwrap()
+            .with_read_timeout(Duration::from_secs(2));
+        let first = session.next_audio().await.unwrap().unwrap();
+        assert_eq!(first.event_type, types::AUDIO_START);
+        let err = session
+            .next_audio()
+            .await
+            .expect_err("stalled read must time out");
+        assert!(TimedOut::is_in(&err), "expected TimedOut, got {err:#}");
+        server.abort();
     }
 
     #[test]

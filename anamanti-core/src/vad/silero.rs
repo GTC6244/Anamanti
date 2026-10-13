@@ -24,13 +24,12 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use super::SpeechGate;
+use crate::audio::pcm::{i16_to_f32, iter_i16_le};
 
 /// Silero v4 @ 16 kHz frame size (samples). 1536 samples = 96 ms.
 const WINDOW: usize = 1536;
 /// Each recurrent state tensor (`h`, `c`) is `[2, 1, 64]` → 128 f32.
 const STATE_LEN: usize = 2 * 64;
-/// i16 → f32 normalization.
-const I16_TO_F32: f32 = 1.0 / 32768.0;
 
 /// The shared, loaded Silero model. Load once at boot; clone the `Arc` into each
 /// per-turn [`SileroGate`]. The [`Session`] runs behind a `Mutex` because
@@ -122,10 +121,7 @@ impl SpeechGate for SileroGate {
         // The device always streams 16 kHz mono PCM16 (`PCM_16K_MONO`), which is what
         // Silero v4's 1536-sample window assumes; `sample_rate` is accepted for the
         // trait contract but not resampled here.
-        self.buf.extend(
-            pcm.chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 * I16_TO_F32),
-        );
+        self.buf.extend(iter_i16_le(pcm).map(i16_to_f32));
 
         let mut frames = 0;
         while (frames + 1) * WINDOW <= self.buf.len() {

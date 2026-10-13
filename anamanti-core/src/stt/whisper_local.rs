@@ -136,10 +136,7 @@ impl Transcriber for WhisperLocal {
         // Device PCM is little-endian i16 mono @ 16 kHz — accumulate whole samples.
         // A trailing odd byte (never expected from whole i16 frames) is dropped by
         // `chunks_exact`.
-        self.buffer.extend(
-            pcm.chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]])),
-        );
+        self.buffer.extend(crate::audio::pcm::iter_i16_le(&pcm));
         Ok(())
     }
 
@@ -185,7 +182,11 @@ fn decode(
         return Ok(String::new());
     }
     // whisper.cpp wants f32 mono in [-1.0, 1.0] at 16 kHz.
-    let audio: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.0).collect();
+    let audio: Vec<f32> = samples
+        .iter()
+        .copied()
+        .map(crate::audio::pcm::i16_to_f32)
+        .collect();
     // Decode-latency instrumentation (plans/python-to-rust-whisper.md Stage 5, M4
     // validation): time the blocking whisper.cpp decode and report it against the
     // utterance length as a real-time factor (RTF = decode_time / audio_time).

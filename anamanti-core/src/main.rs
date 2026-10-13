@@ -311,19 +311,16 @@ async fn run() -> Result<()> {
     // Dormant (no task) when weather is disabled in the config.
     let weather_svc = Arc::new(WeatherService::new());
     if config.weather.enabled {
-        let imperial =
-            anamanti_core::directions::units_are_imperial(config.weather_units.as_deref());
-        // The push builds its provider from the live settings each tick, so a config-page
-        // provider/key switch retargets it without a restart.
+        // Each tick reads the live household location + units and builds the provider
+        // from the live settings, so a config-page edit of any of them retargets the
+        // push without a restart.
         anamanti_core::weather::service::spawn_periodic(
             weather_svc.clone(),
             pipeline.settings().clone(),
-            pipeline.settings().home_location(),
-            imperial,
             config.weather.refresh_interval(),
         );
         log::info!(
-            "weather push: every {}s (imperial={imperial}, provider={})",
+            "weather push: every {}s (provider={})",
             config.weather.refresh_interval().as_secs(),
             config.weather.provider,
         );

@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
-use super::{Decision, DecisionEngine, DecisionRequest, Resolution};
+use super::{Decision, DecisionEngine, DecisionRequest, Intent, Resolution};
 
 /// The `noul` question id used to detect turns that need System-2 reasoning.
 const NEEDS_FULL: &str = "needs_full_understanding";
@@ -57,14 +57,6 @@ const TEMPORAL: &str = "temporal";
 
 /// The temporal label that forces a defer.
 const TEMPORAL_PAST: &str = "past";
-
-/// Intents whose answer changes with the place named, so a turn that names a *specific*
-/// place (high `names_place`) must defer to System-2 rather than fast-path against the home
-/// default: `weather` (the fast handler only knows the home forecast) and `time`/`date`
-/// (the wall clock is local — "what time is it in London" is a different timezone the fast
-/// path can't compute). Verified live (jev): "what's the weather" resolves but "…in Tokyo"
-/// defers; likewise "what time is it" resolves but "…in London" must defer.
-const PLACE_SENSITIVE_INTENTS: &[&str] = &["weather", "time", "date"];
 
 /// An HTTP System-1 engine speaking `/v1/systemone`.
 pub struct HttpDecider {
@@ -195,43 +187,13 @@ impl HttpDecider {
     }
 }
 
-/// Human-readable criteria for the built-in intents (M1: weather; M3 adds the rest).
-/// Unknown/custom labels fall back to the label itself as their description.
-fn intent_description(intent: &str) -> &str {
-    match intent {
-        "weather" => "current conditions or the forecast",
-        "timer" => "start a timer or alarm for a stated duration",
-        "time" => "the current time of day right now",
-        "date" => "today's date or the current day of the week",
-        "timer_cancel" => "cancel or stop a running timer or alarm",
-        "timer_query" => "ask how much time is left on a running timer",
-        "weather_dismiss" => "close or dismiss the weather screen",
-        "recipe_dismiss" => "close or dismiss the recipe screen",
-        "place" => {
-            "ask about a specific business, shop, restaurant, cafe, landmark, or point of \
-             interest — where it is, its address, hours, phone, or rating"
-        }
-        "end_session" => {
-            "the user is finished and wants no more replies — a sign-off or dismissal \
-             like \"that's all\", \"nothing else\", or \"goodbye\", including a bare \
-             standalone thanks used to close the conversation in any language \
-             (\"thank you\", \"thanks\", \"gracias\", \"merci\"); NOT stopping a timer \
-             or music, and NOT a thanks that is part of a continuing request \
-             (e.g. \"thanks, now what's the weather\")"
-        }
-        "stop_dismiss" => {
-            "a bare \"stop\", \"cancel\", \"never mind\", or \"dismiss\" with no named \
-             target (what it refers to depends on what is currently active)"
-        }
-        "recipe_nav" => "navigate or scroll the recipe already on screen",
-        "music" => "play, pause, skip, or change music volume",
-        "shopping_add" => "add an item to the shopping list",
-        "smalltalk" => {
-            "a greeting or acknowledgement needing no data (a bare sign-off thanks \
-             like \"thank you\" is end_session, not this)"
-        }
-        _ => "",
-    }
+/// The classifier criterion for an intent label: the built-in [`Intent`]'s description,
+/// or — for a custom label from the config — the label itself.
+fn intent_description(label: &str) -> &str {
+    label
+        .parse::<Intent>()
+        .map(Intent::description)
+        .unwrap_or(label)
 }
 
 /// The compact device-state fields folded into the request `state` for the 3B hybrid
@@ -266,13 +228,7 @@ pub fn build_request(
 ) -> Value {
     let mut criteria = Map::new();
     for intent in intents {
-        let desc = intent_description(intent);
-        let desc = if desc.is_empty() {
-            intent.as_str()
-        } else {
-            desc
-        };
-        criteria.insert(intent.clone(), json!(desc));
+        criteria.insert(intent.clone(), json!(intent_description(intent)));
     }
     criteria.insert(
         "other".to_string(),
@@ -392,14 +348,17 @@ fn names_place_prob(resp: &Value) -> f64 {
 }
 
 /// Whether a resolved decision must be re-routed to System-2 because the turn named a
-/// specific place a [place-sensitive intent](PLACE_SENSITIVE_INTENTS) can't fast-path.
+/// specific place a [place-sensitive intent](Intent::place_sensitive) can't fast-path.
 /// System-1 flags *that* a place was named but can't extract the string, and the fast-path
 /// handler only knows the home location / local clock — so resolving here would answer for
-/// the wrong place (wrong forecast, or the wrong timezone).
+/// the wrong place (wrong forecast, or the wrong timezone). Verified live (jev): "what's
+/// the weather" resolves but "…in Tokyo" defers; likewise "what time is it in London".
 fn names_place_forces_defer(decision: &Decision, resp: &Value) -> bool {
     match decision {
         Decision::Resolve(r) => {
-            PLACE_SENSITIVE_INTENTS.contains(&r.intent.as_str())
+            r.intent
+                .parse::<Intent>()
+                .is_ok_and(Intent::place_sensitive)
                 && names_place_prob(resp) >= NAMES_PLACE_THRESHOLD
         }
         _ => false,
@@ -462,10 +421,7 @@ mod tests {
         let bare = DecisionRequest {
             transcript: "stop".into(),
             screen: None,
-            history: Vec::new(),
-            location: None,
             timers: TimerContext::default(),
-            font: Default::default(),
         };
         assert!(device_state_fields(&bare).is_empty());
 
@@ -473,14 +429,11 @@ mod tests {
         let ctx = DecisionRequest {
             transcript: "stop".into(),
             screen: Some("recipe".into()),
-            history: Vec::new(),
-            location: None,
             timers: TimerContext {
                 running: 2,
                 next_remaining_secs: Some(90),
                 labels: vec![],
             },
-            font: Default::default(),
         };
         let fields = device_state_fields(&ctx);
         assert_eq!(fields.get("screen"), Some(&json!("recipe")));
@@ -633,6 +586,19 @@ mod tests {
             interpret(&legacy, &intents(), 0.85),
             Decision::Resolve(_)
         ));
+    }
+
+    #[test]
+    fn criteria_use_intent_descriptions_and_fall_back_to_custom_labels() {
+        let labels = vec!["place_dismiss".to_string(), "music".to_string()];
+        let body = build_request("close it", None, &labels, &Map::new());
+        let crit = &body["questions"]["intent"]["criteria"];
+        assert_eq!(
+            crit["place_dismiss"],
+            json!(Intent::PlaceDismiss.description())
+        );
+        // A custom label with no built-in intent describes itself.
+        assert_eq!(crit["music"], json!("music"));
     }
 
     #[test]

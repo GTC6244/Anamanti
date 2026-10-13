@@ -60,7 +60,10 @@ impl PronunciationRule {
 
 /// Clean a whole GUI-submitted table: sanitize each rule and drop the unusable ones.
 pub fn sanitize_rules(rules: &[PronunciationRule]) -> Vec<PronunciationRule> {
-    rules.iter().filter_map(PronunciationRule::sanitized).collect()
+    rules
+        .iter()
+        .filter_map(PronunciationRule::sanitized)
+        .collect()
 }
 
 /// Rewrite `text` by applying every rule, in order. Each rule's variants are tried
@@ -138,7 +141,10 @@ mod tests {
     #[test]
     fn rewrites_single_word_case_insensitively() {
         let rules = [rule("Zehrs", &["zairs"])];
-        assert_eq!(normalize("i went to zairs today", &rules), "i went to Zehrs today");
+        assert_eq!(
+            normalize("i went to zairs today", &rules),
+            "i went to Zehrs today"
+        );
         assert_eq!(normalize("ZAIRS has a sale", &rules), "Zehrs has a sale");
         assert_eq!(normalize("Zairs", &rules), "Zehrs");
     }
@@ -146,7 +152,10 @@ mod tests {
     #[test]
     fn preserves_surrounding_punctuation() {
         let rules = [rule("Zehrs", &["zairs", "zehr's"])];
-        assert_eq!(normalize("did you mean zairs?", &rules), "did you mean Zehrs?");
+        assert_eq!(
+            normalize("did you mean zairs?", &rules),
+            "did you mean Zehrs?"
+        );
         assert_eq!(normalize("(zehr's)", &rules), "(Zehrs)");
     }
 
@@ -154,14 +163,20 @@ mod tests {
     fn matches_whole_words_only() {
         let rules = [rule("Zehrs", &["zairs"])];
         // "zairs" inside a longer token must not be rewritten.
-        assert_eq!(normalize("zairsville is nice", &rules), "zairsville is nice");
+        assert_eq!(
+            normalize("zairsville is nice", &rules),
+            "zairsville is nice"
+        );
         assert_eq!(normalize("gozairs", &rules), "gozairs");
     }
 
     #[test]
     fn matches_multi_word_phrases() {
         let rules = [rule("Zehrs", &["zay rz"])];
-        assert_eq!(normalize("buy it at zay rz please", &rules), "buy it at Zehrs please");
+        assert_eq!(
+            normalize("buy it at zay rz please", &rules),
+            "buy it at Zehrs please"
+        );
     }
 
     #[test]
@@ -172,7 +187,10 @@ mod tests {
     #[test]
     fn no_match_passthrough() {
         let rules = [rule("Zehrs", &["zairs"])];
-        assert_eq!(normalize("the quick brown fox", &rules), "the quick brown fox");
+        assert_eq!(
+            normalize("the quick brown fox", &rules),
+            "the quick brown fox"
+        );
     }
 
     #[test]

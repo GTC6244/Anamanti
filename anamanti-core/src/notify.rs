@@ -42,13 +42,92 @@ impl Notification {
     }
 }
 
-/// One live notify channel: the sender feeding its write pump plus the identity the
-/// device announced in its `anamanti-hello` frame (so the config page can list which
-/// displays are connected, and a future phase can target a push per device).
-struct Conn {
-    tx: mpsc::UnboundedSender<WyomingEvent>,
-    device_id: String,
-    name: String,
+/// A registry of live persistent push channels (one per device connection), each an
+/// mpsc sender into the connection's write pump in [`crate::server`] plus per-channel
+/// metadata `M`. Shared by the notify channel ([`NotificationService`]) and the
+/// ambient weather push ([`crate::weather::WeatherService`]).
+///
+/// The registry never touches a socket: pushing is a channel send, and a channel whose
+/// receiver is gone (the device disconnected) is pruned on the next
+/// [`broadcast`](Self::broadcast).
+pub struct ChannelRegistry<M> {
+    /// conn_id → that connection's write-pump sender + metadata.
+    conns: Mutex<HashMap<u64, (mpsc::UnboundedSender<WyomingEvent>, M)>>,
+    /// Monotonic connection-handle allocator.
+    next_conn: AtomicU64,
+}
+
+impl<M> Default for ChannelRegistry<M> {
+    fn default() -> Self {
+        Self {
+            conns: Mutex::new(HashMap::new()),
+            next_conn: AtomicU64::new(0),
+        }
+    }
+}
+
+impl<M> ChannelRegistry<M> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a newly-opened channel carrying `meta`. `initial` (if any) is queued
+    /// before the channel becomes visible to [`broadcast`](Self::broadcast), so it is
+    /// always the first frame the device sees. Returns the connection handle (for
+    /// [`deregister`](Self::deregister)) and the receiver the connection task drains.
+    pub fn register(
+        &self,
+        meta: M,
+        initial: Option<WyomingEvent>,
+    ) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Some(ev) = initial {
+            let _ = tx.send(ev);
+        }
+        let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed);
+        self.conns.lock().unwrap().insert(conn_id, (tx, meta));
+        (conn_id, rx)
+    }
+
+    /// Drop a channel (its task is ending / the device closed).
+    pub fn deregister(&self, conn_id: u64) {
+        self.conns.lock().unwrap().remove(&conn_id);
+    }
+
+    /// How many channels are currently registered.
+    pub fn len(&self) -> usize {
+        self.conns.lock().unwrap().len()
+    }
+
+    /// Whether no channel is registered.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Send `event` to every channel, pruning the dead ones. Returns how many channels
+    /// it was delivered to.
+    pub fn broadcast(&self, event: &WyomingEvent) -> usize {
+        let mut conns = self.conns.lock().unwrap();
+        let mut delivered = 0usize;
+        conns.retain(|_, (tx, _)| match tx.send(event.clone()) {
+            Ok(()) => {
+                delivered += 1;
+                true
+            }
+            Err(_) => false, // receiver gone — prune this channel
+        });
+        delivered
+    }
+
+    /// Map every registered channel's metadata through `f` (unordered).
+    pub fn list<T>(&self, f: impl Fn(&M) -> T) -> Vec<T> {
+        self.conns
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, meta)| f(meta))
+            .collect()
+    }
 }
 
 /// A connected display's identity, for the config page's "Connected devices" list.
@@ -63,13 +142,12 @@ pub struct ConnectedDevice {
 
 /// Registry of connected notify channels. Cheap to share behind an `Arc`; construct
 /// once at boot and hand a clone to both the device-facing server (which registers
-/// live channels) and the config page (which enqueues test notifications).
+/// live channels) and the config page (which enqueues test notifications). Each
+/// channel remembers the identity the device announced in its `anamanti-hello` frame,
+/// so the config page can list which displays are connected.
 #[derive(Default)]
 pub struct NotificationService {
-    /// conn_id → that connection's write-pump sender + announced identity.
-    conns: Mutex<HashMap<u64, Conn>>,
-    /// Monotonic connection-handle allocator.
-    next_conn: AtomicU64,
+    channels: ChannelRegistry<ConnectedDevice>,
     /// Monotonic per-process notification sequence (for id minting).
     seq: AtomicU64,
 }
@@ -87,41 +165,32 @@ impl NotificationService {
         device_id: &str,
         name: &str,
     ) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        self.conns.lock().unwrap().insert(
-            conn_id,
-            Conn {
-                tx,
+        self.channels.register(
+            ConnectedDevice {
                 device_id: device_id.to_string(),
                 name: name.to_string(),
             },
-        );
-        (conn_id, rx)
+            None,
+        )
     }
 
     /// Drop a channel from the registry (its task is ending / the device closed).
     pub fn deregister(&self, conn_id: u64) {
-        self.conns.lock().unwrap().remove(&conn_id);
+        self.channels.deregister(conn_id);
     }
 
     /// How many notify channels are currently connected.
     pub fn connected(&self) -> usize {
-        self.conns.lock().unwrap().len()
+        self.channels.len()
     }
 
     /// The identities (device_id + name) of every connected display, de-duplicated by
     /// `device_id` and sorted by name then id — for the config page's device list. A
     /// device holds one notify channel, so this is the canonical "who's connected" view.
     pub fn connected_devices(&self) -> Vec<ConnectedDevice> {
-        let conns = self.conns.lock().unwrap();
         let mut seen = std::collections::BTreeMap::new();
-        for conn in conns.values() {
-            seen.entry(conn.device_id.clone())
-                .or_insert_with(|| ConnectedDevice {
-                    device_id: conn.device_id.clone(),
-                    name: conn.name.clone(),
-                });
+        for dev in self.channels.list(ConnectedDevice::clone) {
+            seen.entry(dev.device_id.clone()).or_insert(dev);
         }
         let mut out: Vec<ConnectedDevice> = seen.into_values().collect();
         out.sort_by(|a, b| {
@@ -138,17 +207,7 @@ impl NotificationService {
     /// Phase A fans out to all connected devices; per-device targeting arrives with
     /// the multi-display work.
     pub fn notify(&self, note: &Notification) -> usize {
-        let event = note.to_event();
-        let mut conns = self.conns.lock().unwrap();
-        let mut delivered = 0usize;
-        conns.retain(|_, conn| match conn.tx.send(event.clone()) {
-            Ok(()) => {
-                delivered += 1;
-                true
-            }
-            Err(_) => false, // receiver gone — prune this channel
-        });
-        delivered
+        self.channels.broadcast(&note.to_event())
     }
 
     /// Mint a unique notification id: milliseconds since the epoch plus a
@@ -215,6 +274,19 @@ mod tests {
         svc.deregister(id_a);
         assert_eq!(svc.connected(), 0);
         assert!(svc.connected_devices().is_empty());
+    }
+
+    #[test]
+    fn registry_queues_the_initial_frame_first_and_lists_metadata() {
+        let reg: ChannelRegistry<&'static str> = ChannelRegistry::new();
+        let (_id, mut rx) = reg.register("kitchen", Some(note().to_event()));
+        assert_eq!(reg.broadcast(&WyomingEvent::audio_stop(0)), 1);
+        assert_eq!(rx.try_recv().unwrap().event_type, types::ANAMANTI_NOTIFY);
+        assert_eq!(rx.try_recv().unwrap().event_type, types::AUDIO_STOP);
+        assert_eq!(reg.list(|m| m.to_string()), vec!["kitchen".to_string()]);
+        drop(rx);
+        assert_eq!(reg.broadcast(&WyomingEvent::audio_stop(0)), 0);
+        assert!(reg.is_empty(), "dead channel pruned on broadcast");
     }
 
     #[test]
