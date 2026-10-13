@@ -45,7 +45,6 @@ pub use providers::{OpenMeteoWeather, VisualCrossingWeather};
 pub use render::render_confirmation;
 pub use service::WeatherService;
 
-
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, Timelike, Weekday};
