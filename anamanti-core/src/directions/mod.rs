@@ -93,15 +93,6 @@ pub trait DirectionsProvider: Send + Sync {
     ) -> Result<Directions>;
 }
 
-/// The wired directions capability: the routing provider, the live home location
-/// used as the default origin when the user names only a destination, and whether to
-/// speak distances in imperial units.
-pub struct DirectionsConfig {
-    pub provider: Arc<dyn DirectionsProvider>,
-    pub home_location: LiveHomeLocation,
-    pub imperial: bool,
-}
-
 /// A [`DirectionsProvider`] backed by the Mapbox Geocoding v6 + Directions v5 APIs.
 /// Needs a `MAPBOX_TOKEN`. Driving routes use the `driving-traffic` profile, whose
 /// `duration` reflects live traffic and which also returns a typical (no-traffic)

@@ -45,7 +45,6 @@ pub use providers::{OpenMeteoWeather, VisualCrossingWeather};
 pub use render::render_confirmation;
 pub use service::WeatherService;
 
-use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -258,15 +257,6 @@ pub(crate) fn day_summary(daily: &[DailyForecast], date: NaiveDate) -> (CurrentC
         ),
         None => (CurrentConditions::default(), label),
     }
-}
-
-/// The wired weather capability for the `weather_lookup` tool: the forecast provider,
-/// the live home location used when the user names no place, and whether to report in
-/// imperial units. Mirrors [`crate::directions::DirectionsConfig`].
-pub struct WeatherConfig {
-    pub provider: Arc<dyn WeatherProvider>,
-    pub home_location: crate::household::LiveHomeLocation,
-    pub imperial: bool,
 }
 
 /// A source of weather. Abstracted so the tool + periodic push are testable offline

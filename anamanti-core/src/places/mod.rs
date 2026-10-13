@@ -84,13 +84,6 @@ pub trait PlacesProvider: Send + Sync {
     async fn details(&self, place_id: &str) -> Result<PlaceReport>;
 }
 
-/// The wired place capability for the `places_lookup` tool: the provider plus the live
-/// home location used to bias searches. Mirrors [`crate::weather::WeatherConfig`].
-pub struct PlacesConfig {
-    pub provider: Arc<dyn PlacesProvider>,
-    pub home_location: crate::household::LiveHomeLocation,
-}
-
 /// A [`PlacesProvider`] backed by the Google Places API (New). The API key is a
 /// **secret** (seeded from `GOOGLE_PLACES_API_KEY`); it is passed in at construction and
 /// sent as the `X-Goog-Api-Key` header, never as a query parameter, so it never lands in
