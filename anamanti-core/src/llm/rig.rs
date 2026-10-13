@@ -3386,6 +3386,96 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// A canned places provider so the fully-configured tool set needs no network.
+    struct StaticPlaces;
+    #[async_trait]
+    impl crate::places::PlacesProvider for StaticPlaces {
+        async fn search(
+            &self,
+            _query: &str,
+            _bias: Option<&str>,
+        ) -> Result<Vec<crate::places::PlaceCandidate>> {
+            Ok(Vec::new())
+        }
+        async fn details(&self, _place_id: &str) -> Result<crate::places::PlaceReport> {
+            anyhow::bail!("not used")
+        }
+    }
+
+    /// Every tool the Core can advertise, wired to offline mocks (search, calendar,
+    /// directions, Spotify, shopping list, phone, recipe, weather, places).
+    fn fully_configured_tools() -> Tools {
+        let home_location = home("Austin, TX");
+        Tools::new(
+            Some(Arc::new(StaticSearch("x"))),
+            Some(Arc::new(StaticCalendar(Vec::new()))),
+            Some(DirectionsConfig {
+                provider: Arc::new(StaticDirections {
+                    seen_origin: std::sync::Mutex::new(None),
+                }),
+                home_location: home_location.clone(),
+                imperial: true,
+            }),
+            Some(Arc::new(StaticSpotify {
+                last: std::sync::Mutex::new(None),
+            })),
+            Some(Arc::new(StaticGrocery {
+                last: std::sync::Mutex::new(None),
+            })),
+            Some(Arc::new(StaticPhone {
+                last: std::sync::Mutex::new(None),
+            })),
+            crate::recipe::from_search("tavily", Some("test-key")),
+            Some(crate::weather::WeatherConfig {
+                provider: Arc::new(StaticWeather),
+                home_location: home_location.clone(),
+                imperial: true,
+            }),
+            Some(crate::places::PlacesConfig {
+                provider: Arc::new(StaticPlaces),
+                home_location,
+            }),
+        )
+    }
+
+    /// Everything the model is told about tools for one turn: each advertised
+    /// definition (name, description, JSON schema) in order, plus the full system
+    /// preamble (base prompt + per-tool guidance).
+    fn advertised_snapshot(tools: &Tools) -> String {
+        let definitions: Vec<Value> = tools
+            .definitions
+            .iter()
+            .map(|d| json!({ "name": d.name, "description": d.description, "parameters": d.parameters }))
+            .collect();
+        let snapshot = json!({
+            "definitions": definitions,
+            "preamble": build_preamble("SYSTEM PROMPT", &tools.definitions),
+        });
+        serde_json::to_string_pretty(&snapshot).unwrap() + "\n"
+    }
+
+    /// The model must see exactly the same tool definitions and guidance as before
+    /// the tool-registry refactor. The snapshot file is the reference; regenerate it
+    /// deliberately with `ANAMANTI_UPDATE_SNAPSHOTS=1` only when a change to what the
+    /// model sees is intended.
+    #[test]
+    fn advertised_tools_and_guidance_match_the_snapshot() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/llm/testdata/advertised_tools.json"
+        );
+        let actual = advertised_snapshot(&fully_configured_tools());
+        if std::env::var_os("ANAMANTI_UPDATE_SNAPSHOTS").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
+            std::fs::write(path, &actual).unwrap();
+        }
+        let expected = std::fs::read_to_string(path).expect("snapshot file");
+        assert_eq!(
+            actual, expected,
+            "advertised tools/guidance changed; see {path}"
+        );
+    }
+
     /// Without tools, a turn still streams straight through in one pass.
     #[tokio::test]
     async fn rig_ollama_streams_text_deltas() {
