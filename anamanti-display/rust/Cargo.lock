@@ -72,6 +72,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anamanti_protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "android_log-sys"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1769,6 +1778,7 @@ dependencies = [
 name = "rust_lib_ambient_display"
 version = "0.1.0"
 dependencies = [
+ "anamanti_protocol",
  "anyhow",
  "cpal",
  "flutter_rust_bridge",

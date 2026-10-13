@@ -7,6 +7,10 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+# The Wyoming wire protocol, shared with the Mac-side Anamanti Core so the two
+# ends cannot drift. Pure Rust (serde/serde_json/tokio io-util); cargokit builds
+# this crate in place via --manifest-path, so the path outside rust/ resolves.
+anamanti_protocol = { path = "../../anamanti-protocol" }
 anyhow = "1.0.104"
 cpal = "0.18.2"
 flutter_rust_bridge = "=2.11.1"

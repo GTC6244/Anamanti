@@ -47,6 +47,16 @@ impl Default for AudioFormat {
     }
 }
 
+impl From<AudioFormat> for protocol::AudioFormat {
+    fn from(f: AudioFormat) -> Self {
+        Self {
+            rate: f.rate,
+            width_bytes: f.width_bytes,
+            channels: f.channels,
+        }
+    }
+}
+
 /// A live Wyoming connection: buffered reader + writer halves plus the PCM format
 /// for outgoing audio frames. Generic over the IO so it works with a real
 /// `TcpStream` in production and a duplex pipe in tests.
@@ -158,9 +168,7 @@ where
     /// includes recent history, bounds the chain, and sizes its no-speech window.
     pub async fn send_audio_start(&mut self) -> Result<()> {
         let mut ev = WyomingEvent::audio_start_followup(
-            self.format.rate,
-            self.format.width_bytes,
-            self.format.channels,
+            self.format.into(),
             self.timestamp_ms,
             self.followup_depth,
             self.followup_wait_secs,
@@ -201,13 +209,7 @@ where
         for &s in samples {
             pcm.extend_from_slice(&s.to_le_bytes());
         }
-        let ev = WyomingEvent::audio_chunk(
-            self.format.rate,
-            self.format.width_bytes,
-            self.format.channels,
-            self.timestamp_ms,
-            pcm,
-        );
+        let ev = WyomingEvent::audio_chunk(self.format.into(), self.timestamp_ms, pcm);
         // Advance the running timestamp by this chunk's wall-clock duration (ms).
         let frames = samples.len() as u64 / self.format.channels.max(1) as u64;
         self.timestamp_ms += frames * 1000 / self.format.rate.max(1) as u64;
@@ -452,8 +454,8 @@ where
 
     match event.event_type.as_str() {
         types::AUDIO_START => {
-            if let Some((rate, _width, _channels)) = protocol::audio_format(&event.data) {
-                *playback_rate = rate;
+            if let Some(fmt) = protocol::audio_format(&event.data) {
+                *playback_rate = fmt.rate;
             }
             on_update(TurnUpdate::Speaking);
         }
@@ -564,6 +566,13 @@ mod tests {
     use crate::wyoming::protocol::{read_event, types};
     use serde_json::json;
     use tokio::io::BufReader as TokioBufReader;
+
+    /// The PCM format a mock Piper TTS reply arrives in (22.05 kHz mono 16-bit).
+    const TTS_22K: protocol::AudioFormat = protocol::AudioFormat {
+        rate: 22_050,
+        width_bytes: 2,
+        channels: 1,
+    };
 
     /// Send an `audio-start` through a duplex pipe and return its parsed frame.
     async fn audio_start_frame(
@@ -726,8 +735,8 @@ mod tests {
                 .flat_map(|s| s.to_le_bytes())
                 .collect();
             for ev in [
-                WyomingEvent::audio_start(22_050, 2, 1, 0),
-                WyomingEvent::audio_chunk(22_050, 2, 1, 0, tts_pcm),
+                WyomingEvent::audio_start(TTS_22K, 0),
+                WyomingEvent::audio_chunk(TTS_22K, 0, tts_pcm),
                 WyomingEvent::audio_stop(0),
             ] {
                 protocol::write_event(&mut writer, &ev).await.unwrap();
@@ -798,7 +807,7 @@ mod tests {
             )
             .await
             .unwrap();
-            protocol::write_event(&mut writer, &WyomingEvent::audio_start(22_050, 2, 1, 0))
+            protocol::write_event(&mut writer, &WyomingEvent::audio_start(TTS_22K, 0))
                 .await
                 .unwrap();
             // The follow-up signal (depth 2, 10 s window), then the terminating audio-stop.
