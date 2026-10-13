@@ -40,10 +40,11 @@ use crate::music::{SpotifyController, SpotifyWebApi};
 /// (`llm.engine` unset ⇒ rig).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LlmEngine {
-    /// Hand-rolled `ollama.rs` / `anthropic.rs` / `openai.rs` HTTP clients (no tools).
+    /// Hand-rolled `ollama.rs` / `anthropic.rs` / `openai.rs` HTTP clients: plain
+    /// streamed text — no tools and no follow-up history (warned at build time).
     Native,
-    /// rig-core agents (`llm.engine="rig"`). rig is always compiled in; the OpenAI
-    /// backend and Anthropic subscription auth still use the native clients.
+    /// rig-core agents (`llm.engine="rig"`), always compiled in: every backend
+    /// (Ollama, Anthropic API key or subscription, OpenAI) with the full tool set.
     #[default]
     Rig,
 }
@@ -1271,7 +1272,8 @@ impl LlmFactory {
         }
     }
 
-    /// Default model for a backend label when the caller pins none.
+    /// Default model for a backend label when the caller pins none. The one place the
+    /// default model names live.
     fn default_model(backend: &str) -> Option<&'static str> {
         match backend {
             "ollama" => Some("llama3.2"),
@@ -1284,6 +1286,11 @@ impl LlmFactory {
     /// Build a backend from a label (`ollama` / `anthropic` / `openai` / `mock`) and
     /// an optional model. Returns the trait object plus the canonical label and the
     /// resolved model so callers can report exactly what took effect.
+    ///
+    /// Under the rig engine every provider (Ollama, Anthropic with an API key or a
+    /// subscription, OpenAI) runs on rig with the full tool set; the native engine
+    /// uses the plain-text HTTP clients. A backend that loses tools or history is
+    /// logged loudly here, at build/swap time.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         &self,
@@ -1304,89 +1311,119 @@ impl LlmFactory {
                 search_api_key,
             )))
         };
-        match backend.to_lowercase().as_str() {
-            "mock" => Ok((Arc::new(MockLlm::default()), "mock".to_string(), None)),
-            "anthropic" | "claude" => {
-                let model = model
-                    .or(Self::default_model("anthropic"))
-                    .unwrap_or("claude-opus-5")
-                    .to_string();
-                let backend: Arc<dyn LlmBackend> = match anthropic_auth {
-                    // Subscription (OAuth) uses the token provider; the rig engine has
-                    // no subscription path, so subscription always uses native HTTP.
-                    AnthropicAuth::Subscription => {
-                        let token = self.anthropic_token.clone().context(
-                            "the anthropic subscription backend needs a token — set \
+        let label = backend.to_lowercase();
+        let model = |label: &str| {
+            model
+                .or(Self::default_model(label))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let rig = engine == LlmEngine::Rig;
+        let (llm, label, model): (Arc<dyn LlmBackend>, &str, Option<String>) =
+            match label.as_str() {
+                "mock" => (Arc::new(MockLlm::default()), "mock", None),
+                "anthropic" | "claude" => {
+                    let model = model("anthropic");
+                    let llm: Arc<dyn LlmBackend> = match anthropic_auth {
+                        AnthropicAuth::Subscription => {
+                            let token = self.anthropic_token.clone().context(
+                                "the anthropic subscription backend needs a token — set \
                              ANTHROPIC_OAUTH_TOKEN (run `claude setup-token`) on the orchestrator",
-                        )?;
-                        Arc::new(AnthropicBackend::with_subscription(
-                            &self.anthropic_base_url,
-                            token,
-                            &model,
-                            self.anthropic_max_tokens,
-                        ))
-                    }
-                    AnthropicAuth::ApiKey => {
-                        let key = self.anthropic_api_key.clone().context(
+                            )?;
+                            if rig {
+                                Arc::new(crate::llm::rig::RigBackend::anthropic_subscription(
+                                    &self.anthropic_base_url,
+                                    token,
+                                    &model,
+                                    self.anthropic_max_tokens,
+                                    tools(),
+                                )?)
+                            } else {
+                                Arc::new(AnthropicBackend::with_subscription(
+                                    &self.anthropic_base_url,
+                                    token,
+                                    &model,
+                                    self.anthropic_max_tokens,
+                                ))
+                            }
+                        }
+                        AnthropicAuth::ApiKey => {
+                            let key = self.anthropic_api_key.clone().context(
                             "the anthropic backend requires ANTHROPIC_API_KEY on the orchestrator \
                              (or switch to subscription auth)",
                         )?;
-                        match engine {
-                            LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::anthropic(
-                                &self.anthropic_base_url,
-                                &key,
-                                &model,
-                                self.anthropic_max_tokens,
-                                tools(),
-                            )?),
-                            _ => Arc::new(AnthropicBackend::new(
-                                &self.anthropic_base_url,
-                                key,
-                                &model,
-                                self.anthropic_max_tokens,
-                            )),
+                            if rig {
+                                Arc::new(crate::llm::rig::RigBackend::anthropic(
+                                    &self.anthropic_base_url,
+                                    &key,
+                                    &model,
+                                    self.anthropic_max_tokens,
+                                    tools(),
+                                )?)
+                            } else {
+                                Arc::new(AnthropicBackend::new(
+                                    &self.anthropic_base_url,
+                                    key,
+                                    &model,
+                                    self.anthropic_max_tokens,
+                                ))
+                            }
                         }
-                    }
-                };
-                Ok((backend, "anthropic".to_string(), Some(model)))
-            }
-            "openai" | "gpt" => {
-                let key = self
-                    .openai_api_key
-                    .clone()
-                    .context("the openai backend requires OPENAI_API_KEY on the orchestrator")?;
-                let model = model
-                    .or(Self::default_model("openai"))
-                    .unwrap_or("gpt-4o-mini")
-                    .to_string();
-                // rig-openai is out of scope for v1: the OpenAI backend always uses
-                // the native HTTP client, even under the rig engine.
-                let backend: Arc<dyn LlmBackend> = Arc::new(OpenAiBackend::new(
-                    &self.openai_base_url,
-                    key,
-                    &model,
-                    self.openai_max_tokens,
-                ));
-                Ok((backend, "openai".to_string(), Some(model)))
-            }
-            "ollama" => {
-                let model = model.unwrap_or("llama3.2").to_string();
-                let backend: Arc<dyn LlmBackend> = match engine {
-                    LlmEngine::Rig => Arc::new(crate::llm::rig::RigBackend::ollama(
-                        &self.ollama_url,
-                        &model,
-                        tools(),
-                    )?),
-                    _ => Arc::new(OllamaBackend::new(&self.ollama_url, &model)),
-                };
-                Ok((backend, "ollama".to_string(), Some(model)))
-            }
-            other => {
-                anyhow::bail!(
-                    "unknown LLM backend `{other}` (expected ollama/anthropic/openai/mock)"
-                )
-            }
+                    };
+                    (llm, "anthropic", Some(model))
+                }
+                "openai" | "gpt" => {
+                    let key = self.openai_api_key.clone().context(
+                        "the openai backend requires OPENAI_API_KEY on the orchestrator",
+                    )?;
+                    let model = model("openai");
+                    let llm: Arc<dyn LlmBackend> = if rig {
+                        Arc::new(crate::llm::rig::RigBackend::openai(
+                            &self.openai_base_url,
+                            &key,
+                            &model,
+                            self.openai_max_tokens,
+                            tools(),
+                        )?)
+                    } else {
+                        Arc::new(OpenAiBackend::new(
+                            &self.openai_base_url,
+                            key,
+                            &model,
+                            self.openai_max_tokens,
+                        ))
+                    };
+                    (llm, "openai", Some(model))
+                }
+                "ollama" => {
+                    let model = model("ollama");
+                    let llm: Arc<dyn LlmBackend> = if rig {
+                        Arc::new(crate::llm::rig::RigBackend::ollama(
+                            &self.ollama_url,
+                            &model,
+                            tools(),
+                        )?)
+                    } else {
+                        Arc::new(OllamaBackend::new(&self.ollama_url, &model))
+                    };
+                    (llm, "ollama", Some(model))
+                }
+                other => {
+                    anyhow::bail!(
+                        "unknown LLM backend `{other}` (expected ollama/anthropic/openai/mock)"
+                    )
+                }
+            };
+        let missing = llm.capabilities().missing();
+        if !missing.is_empty() && label != "mock" {
+            log::warn!(
+                "LLM backend `{label}` on the {} engine runs WITHOUT {}. Set llm.engine=\"rig\" \
+                 (config file or config page) to restore them.",
+                engine.as_str(),
+                missing.join(" or "),
+            );
         }
+        Ok((llm, label.to_string(), model))
     }
 }
 
@@ -1647,6 +1684,9 @@ pub struct SettingsView {
     pub silero_threshold: f32,
     /// The active VAD engine (energy / silero).
     pub vad_engine: crate::config::VadEngineKind,
+    /// What the live LLM backend can do (tools / history / streaming), so the config
+    /// page can show what an engine choice loses.
+    pub llm_capabilities: crate::llm::Capabilities,
 }
 
 impl SettingsView {
@@ -1670,6 +1710,7 @@ impl SettingsView {
             voice_rms_threshold: s.voice_rms_threshold,
             silero_threshold: s.silero_threshold,
             vad_engine: s.vad_engine,
+            llm_capabilities: s.llm.capabilities(),
         }
     }
 
@@ -1695,6 +1736,7 @@ impl SettingsView {
             "voice_rms_threshold": self.voice_rms_threshold,
             "silero_threshold": self.silero_threshold,
             "vad_engine": self.vad_engine.as_label(),
+            "llm_capabilities": self.llm_capabilities,
         })
     }
 }
@@ -3211,6 +3253,71 @@ mod tests {
             .unwrap();
         assert_eq!(view.llm_backend, "anthropic");
         assert_eq!(view.llm_model.as_deref(), Some("claude-opus-5"));
+    }
+
+    /// Build `backend` on `engine` with every provider's credentials available.
+    fn build_on(
+        engine: LlmEngine,
+        backend: &str,
+        auth: AnthropicAuth,
+    ) -> (Arc<dyn LlmBackend>, String, Option<String>) {
+        let mut f = factory_with_key(Some("sk-ant"));
+        f.openai_api_key = Some("sk-openai".into());
+        f.anthropic_token = Some(Arc::new(AnthropicTokenProvider::with_fetcher(Arc::new(
+            || Ok("tok".to_string()),
+        ))));
+        f.build(engine, false, "duckduckgo", None, backend, None, auth)
+            .unwrap()
+    }
+
+    /// Every backend runs on rig with tools + history under the rig engine —
+    /// including Anthropic subscription auth and OpenAI — and the native engine is
+    /// still selectable (plain text, reported as such).
+    #[test]
+    fn engine_decides_capabilities_for_every_backend() {
+        let cases = [
+            ("ollama", AnthropicAuth::ApiKey, "llama3.2"),
+            ("anthropic", AnthropicAuth::ApiKey, "claude-opus-5"),
+            ("anthropic", AnthropicAuth::Subscription, "claude-opus-5"),
+            ("openai", AnthropicAuth::ApiKey, "gpt-4o-mini"),
+        ];
+        for (backend, auth, default_model) in cases {
+            let (llm, label, model) = build_on(LlmEngine::Rig, backend, auth);
+            assert_eq!(label, backend);
+            assert_eq!(model.as_deref(), Some(default_model));
+            let caps = llm.capabilities();
+            assert!(
+                caps.tools && caps.history && caps.streaming,
+                "{backend} {auth:?}"
+            );
+
+            let (llm, _, _) = build_on(LlmEngine::Native, backend, auth);
+            assert_eq!(
+                llm.capabilities(),
+                crate::llm::Capabilities::TEXT_ONLY,
+                "{backend} {auth:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_view_reports_the_live_backend_capabilities() {
+        let s = shared(factory_with_key(Some("sk-test")));
+        // `shared` boots on the native engine.
+        let view = s.view();
+        assert!(!view.llm_capabilities.tools);
+        let json = view.to_json(true, None);
+        assert_eq!(
+            json["llm_capabilities"],
+            serde_json::json!({"tools": false, "history": false, "streaming": true})
+        );
+        let view = s
+            .apply(&SettingsUpdate {
+                engine: Some(LlmEngine::Rig),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(view.llm_capabilities.tools && view.llm_capabilities.history);
     }
 
     #[test]

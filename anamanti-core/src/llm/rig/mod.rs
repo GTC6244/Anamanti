@@ -25,6 +25,7 @@
 //! non-streaming path remains for a provider whose [`RoundModel::streams_tool_calls`]
 //! is false.
 
+mod oauth;
 pub mod tools;
 
 use std::pin::Pin;
@@ -38,10 +39,11 @@ use futures_util::{Stream, StreamExt};
 use rig_core::client::completion::CompletionClient;
 use rig_core::completion::{CompletionModel, CompletionRequest, ToolDefinition};
 use rig_core::message::{AssistantContent, Message, ToolCall, ToolChoice};
-use rig_core::providers::{anthropic, ollama};
+use rig_core::providers::{anthropic, ollama, openai};
 use rig_core::streaming::StreamedAssistantContent;
 
-use super::{ActionSink, LlmBackend, LlmTurn, ReplyStream};
+use super::anthropic_auth::AnthropicTokenProvider;
+use super::{ActionSink, Capabilities, LlmBackend, LlmTurn, ReplyStream};
 pub use tools::{ToolDeps, Tools};
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
@@ -114,11 +116,31 @@ pub(crate) trait RoundModel: Send + Sync {
 #[derive(Clone)]
 enum Model {
     Ollama(Arc<ollama::CompletionModel>),
+    /// Anthropic with an API key (`x-api-key`).
     Anthropic(Arc<anthropic::completion::CompletionModel>),
+    /// Anthropic with a Claude subscription (OAuth Bearer token, refreshed per
+    /// request — see [`oauth`]).
+    AnthropicSubscription(Arc<anthropic::completion::CompletionModel<oauth::SubscriptionHttp>>),
+    /// OpenAI Chat Completions.
+    OpenAi(Arc<openai::completion::CompletionModel>),
+}
+
+/// How a provider spells the output cap.
+#[derive(Clone, Copy)]
+enum OutputCap {
+    /// rig's `max_tokens`.
+    MaxTokens,
+    /// `max_completion_tokens` (OpenAI: the legacy `max_tokens` is rejected by
+    /// o-series / reasoning models; the native client always sent this field).
+    MaxCompletionTokens,
 }
 
 /// Build the rig request for `r` on model `m`.
-fn rig_request<M: CompletionModel + Clone>(m: &M, r: RoundRequest) -> CompletionRequest {
+fn rig_request<M: CompletionModel + Clone>(
+    m: &M,
+    r: RoundRequest,
+    cap: OutputCap,
+) -> CompletionRequest {
     let mut messages = r.messages;
     let prompt = messages
         .pop()
@@ -134,14 +156,22 @@ fn rig_request<M: CompletionModel + Clone>(m: &M, r: RoundRequest) -> Completion
         }
     }
     if r.max_tokens > 0 {
-        builder = builder.max_tokens(r.max_tokens);
+        builder = match cap {
+            OutputCap::MaxTokens => builder.max_tokens(r.max_tokens),
+            OutputCap::MaxCompletionTokens => builder
+                .additional_params(serde_json::json!({ "max_completion_tokens": r.max_tokens })),
+        };
     }
     builder.build()
 }
 
-async fn stream_on<M: CompletionModel + Clone>(m: &M, r: RoundRequest) -> Result<RoundStream> {
+async fn stream_on<M: CompletionModel + Clone>(
+    m: &M,
+    r: RoundRequest,
+    cap: OutputCap,
+) -> Result<RoundStream> {
     let response = m
-        .stream(rig_request(m, r))
+        .stream(rig_request(m, r, cap))
         .await
         .context("opening rig completion stream")?;
     Ok(Box::pin(response.filter_map(|part| {
@@ -159,9 +189,10 @@ async fn stream_on<M: CompletionModel + Clone>(m: &M, r: RoundRequest) -> Result
 async fn complete_on<M: CompletionModel + Clone>(
     m: &M,
     r: RoundRequest,
+    cap: OutputCap,
 ) -> Result<(String, Vec<ToolCall>)> {
     let response = m
-        .completion(rig_request(m, r))
+        .completion(rig_request(m, r, cap))
         .await
         .context("rig completion request")?;
     let mut text = String::new();
@@ -179,27 +210,34 @@ async fn complete_on<M: CompletionModel + Clone>(
 #[async_trait]
 impl RoundModel for Model {
     fn streams_tool_calls(&self) -> bool {
-        // rig-core 0.42 surfaces streamed tool calls for both providers (Anthropic
-        // emits them at `content_block_stop`; Ollama from any record, final or not).
+        // rig-core 0.42 surfaces streamed tool calls for every provider used here:
+        // Anthropic emits them at `content_block_stop`, OpenAI accumulates the
+        // `tool_calls` deltas, and Ollama reads them from any record, final or not.
         true
     }
 
     fn honours_tool_choice_none(&self) -> bool {
         // rig's Ollama provider ignores `tool_choice` (it logs a warning).
-        matches!(self, Model::Anthropic(_))
+        !matches!(self, Model::Ollama(_))
     }
 
     async fn stream(&self, req: RoundRequest) -> Result<RoundStream> {
+        use OutputCap::*;
         match self {
-            Model::Ollama(m) => stream_on(m, req).await,
-            Model::Anthropic(m) => stream_on(m, req).await,
+            Model::Ollama(m) => stream_on(m, req, MaxTokens).await,
+            Model::Anthropic(m) => stream_on(m, req, MaxTokens).await,
+            Model::AnthropicSubscription(m) => stream_on(m, req, MaxTokens).await,
+            Model::OpenAi(m) => stream_on(m, req, MaxCompletionTokens).await,
         }
     }
 
     async fn complete(&self, req: RoundRequest) -> Result<(String, Vec<ToolCall>)> {
+        use OutputCap::*;
         match self {
-            Model::Ollama(m) => complete_on(m, req).await,
-            Model::Anthropic(m) => complete_on(m, req).await,
+            Model::Ollama(m) => complete_on(m, req, MaxTokens).await,
+            Model::Anthropic(m) => complete_on(m, req, MaxTokens).await,
+            Model::AnthropicSubscription(m) => complete_on(m, req, MaxTokens).await,
+            Model::OpenAi(m) => complete_on(m, req, MaxCompletionTokens).await,
         }
     }
 }
@@ -273,6 +311,65 @@ impl RigBackend {
         Ok(Self::with_model(
             "anthropic",
             Arc::new(Model::Anthropic(Arc::new(client.completion_model(model)))),
+            max_tokens as u64,
+            tools,
+        ))
+    }
+
+    /// Cloud Anthropic via rig with a **Claude subscription** (OAuth): every request
+    /// carries a Bearer token minted (and refreshed on a 401) by `token` — the same
+    /// provider the native backend and the model catalog use — plus the OAuth beta
+    /// header, and no `x-api-key`.
+    pub fn anthropic_subscription(
+        base_url: &str,
+        token: Arc<AnthropicTokenProvider>,
+        model: &str,
+        max_tokens: u32,
+        tools: Arc<Tools>,
+    ) -> Result<Self> {
+        // The key slot must be filled for rig's builder; `SubscriptionHttp` strips the
+        // resulting `x-api-key` header from every request.
+        let client = anthropic::Client::builder()
+            .http_client(oauth::SubscriptionHttp::new(rig_tuned_client(), token))
+            .api_key(anthropic::client::AnthropicKey::from(""))
+            .base_url(base_url)
+            .anthropic_version(anthropic::completion::ANTHROPIC_VERSION_LATEST)
+            .build()
+            .context("building rig Anthropic (subscription) client")?;
+        Ok(Self::with_model(
+            "anthropic",
+            Arc::new(Model::AnthropicSubscription(Arc::new(
+                client.completion_model(model),
+            ))),
+            max_tokens as u64,
+            tools,
+        ))
+    }
+
+    /// Cloud OpenAI (Chat Completions) via rig. `base_url` is the API root
+    /// (`https://api.openai.com`); `/v1` is appended when absent.
+    pub fn openai(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        max_tokens: u32,
+        tools: Arc<Tools>,
+    ) -> Result<Self> {
+        let root = base_url.trim_end_matches('/');
+        let v1 = if root.ends_with("/v1") {
+            root.to_string()
+        } else {
+            format!("{root}/v1")
+        };
+        let client = openai::CompletionsClient::builder()
+            .http_client(rig_tuned_client())
+            .api_key(rig_core::client::BearerAuth::from(api_key))
+            .base_url(&v1)
+            .build()
+            .context("building rig OpenAI client")?;
+        Ok(Self::with_model(
+            "openai",
+            Arc::new(Model::OpenAi(Arc::new(client.completion_model(model)))),
             max_tokens as u64,
             tools,
         ))
@@ -483,6 +580,14 @@ fn run_turn(
 impl LlmBackend for RigBackend {
     fn name(&self) -> &str {
         self.name
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            tools: true,
+            history: true,
+            streaming: true,
+        }
     }
 
     async fn respond(&self, turn: LlmTurn) -> Result<ReplyStream> {

@@ -11,16 +11,27 @@ use crate::music::{SearchKind, SpotifyCommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// Serve a fixed sequence of raw HTTP responses (one per inbound connection) with
-/// the given content type, recording each request.
+/// A recorded-requests handle from [`serve`].
+type Requests = Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Serve a fixed sequence of raw `200 OK` HTTP responses (one per inbound
+/// connection) with the given content type, recording each request.
 fn serve(
     content_type: &'static str,
     bodies: Vec<String>,
-) -> (
-    String,
-    Arc<std::sync::Mutex<Vec<String>>>,
-    tokio::task::JoinHandle<()>,
-) {
+) -> (String, Requests, tokio::task::JoinHandle<()>) {
+    serve_with(
+        bodies
+            .into_iter()
+            .map(|b| ("200 OK", content_type, b))
+            .collect(),
+    )
+}
+
+/// Like [`serve`], with a status line and content type per response.
+fn serve_with(
+    responses: Vec<(&'static str, &'static str, String)>,
+) -> (String, Requests, tokio::task::JoinHandle<()>) {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     std_listener.set_nonblocking(true).unwrap();
     let addr = std_listener.local_addr().unwrap();
@@ -28,12 +39,12 @@ fn serve(
     let seen = requests.clone();
     let handle = tokio::spawn(async move {
         let listener = TcpListener::from_std(std_listener).unwrap();
-        for body in bodies {
+        for (status, content_type, body) in responses {
             let (mut sock, _) = listener.accept().await.unwrap();
             let request = read_request(&mut sock).await;
             seen.lock().unwrap().push(request);
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -789,4 +800,190 @@ async fn rig_anthropic_streams_an_argumentless_tool_call() {
     server.await.unwrap();
     assert_eq!(out.concat(), "Cancelled.");
     assert_eq!(actions, vec![DeviceAction::CancelTimer { label: None }]);
+}
+
+// ===========================================================================
+// Subscription (OAuth) and OpenAI on rig; capabilities
+// ===========================================================================
+
+/// A token provider whose fetcher returns `tok-0`, `tok-1`, … on successive fetches.
+fn counting_token_provider() -> Arc<crate::llm::anthropic_auth::AnthropicTokenProvider> {
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Arc::new(
+        crate::llm::anthropic_auth::AnthropicTokenProvider::with_fetcher(Arc::new(move || {
+            Ok(format!(
+                "tok-{}",
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            ))
+        })),
+    )
+}
+
+/// A subscription turn on rig sends `Authorization: Bearer`, the OAuth beta header and
+/// no `x-api-key`; on a 401 it refreshes the token and retries once — exactly as the
+/// native subscription backend does — and the tools still run.
+#[tokio::test]
+async fn rig_anthropic_subscription_uses_bearer_auth_and_refreshes_on_401() {
+    let (url, requests, server) = serve_with(vec![
+        (
+            "401 Unauthorized",
+            "application/json",
+            r#"{"type":"error","error":{"type":"authentication_error","message":"expired"}}"#
+                .to_string(),
+        ),
+        ("200 OK", "text/event-stream", anthropic_timer_round()),
+        (
+            "200 OK",
+            "text/event-stream",
+            anthropic_text_round(&["Tea timer set."]),
+        ),
+    ]);
+    let backend = RigBackend::anthropic_subscription(
+        &url,
+        counting_token_provider(),
+        "claude-haiku-4-5",
+        256,
+        Arc::new(Tools::build(ToolDeps::default())),
+    )
+    .unwrap();
+    let (out, actions) = turn_chunks(&backend, "tea timer").await;
+    server.await.unwrap();
+    assert_eq!(out.concat(), "On it. Tea timer set.");
+    assert_eq!(actions.len(), 1);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let lower: Vec<String> = requests.iter().map(|r| r.to_lowercase()).collect();
+    // The first attempt used tok-0, was rejected, and the retry minted tok-1.
+    assert!(
+        lower[0].contains("authorization: bearer tok-0"),
+        "{}",
+        lower[0]
+    );
+    assert!(
+        lower[1].contains("authorization: bearer tok-1"),
+        "{}",
+        lower[1]
+    );
+    assert!(
+        lower[2].contains("authorization: bearer tok-1"),
+        "{}",
+        lower[2]
+    );
+    for r in &lower {
+        assert!(!r.contains("x-api-key"), "{r}");
+        assert!(r.contains("anthropic-beta: oauth-2025-04-20"), "{r}");
+        assert!(r.contains("anthropic-version: 2023-06-01"), "{r}");
+    }
+}
+
+/// One OpenAI Chat Completions SSE chunk.
+fn openai_chunk(delta: serde_json::Value, finish: Option<&str>) -> String {
+    let v = serde_json::json!({
+        "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1,
+        "model": "gpt-4o-mini",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+    });
+    format!("data: {v}\n\n")
+}
+
+#[tokio::test]
+async fn rig_openai_streams_a_tool_call_then_the_answer() {
+    let round1 = [
+        openai_chunk(
+            serde_json::json!({"role": "assistant", "content": null, "tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function",
+                 "function": {"name": "set_timer", "arguments": ""}}]}),
+            None,
+        ),
+        openai_chunk(
+            serde_json::json!({"tool_calls": [
+                {"index": 0, "function": {"arguments": "{\"duration_seconds\": 120}"}}]}),
+            None,
+        ),
+        openai_chunk(serde_json::json!({}), Some("tool_calls")),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .concat();
+    let round2 = [
+        openai_chunk(
+            serde_json::json!({"role": "assistant", "content": "Two minutes"}),
+            None,
+        ),
+        openai_chunk(serde_json::json!({"content": ", starting now."}), None),
+        openai_chunk(serde_json::json!({}), Some("stop")),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .concat();
+    let (url, requests, server) = serve("text/event-stream", vec![round1, round2]);
+    let backend = RigBackend::openai(
+        &url,
+        "sk-test",
+        "gpt-4o-mini",
+        200,
+        Arc::new(Tools::build(ToolDeps::default())),
+    )
+    .unwrap();
+    let (out, actions) = turn_chunks(&backend, "two minute timer").await;
+    server.await.unwrap();
+    assert_eq!(out, vec!["Two minutes", ", starting now."]);
+    assert_eq!(
+        actions,
+        vec![DeviceAction::StartTimer {
+            label: None,
+            duration_secs: 120
+        }]
+    );
+    let requests = requests.lock().unwrap();
+    for r in requests.iter() {
+        assert!(r.starts_with("POST /v1/chat/completions"), "{r}");
+        assert!(
+            r.to_lowercase().contains("authorization: bearer sk-test"),
+            "{r}"
+        );
+        // The cap is sent as max_completion_tokens (as the native client did).
+        assert!(r.contains("\"max_completion_tokens\":200"), "{r}");
+        assert!(!r.contains("\"max_tokens\""), "{r}");
+    }
+    assert!(requests[1].contains("call_1"), "{}", requests[1]);
+}
+
+#[test]
+fn rig_backends_report_full_capabilities_and_native_ones_text_only() {
+    let tools = || Arc::new(Tools::build(ToolDeps::default()));
+    let full = crate::llm::Capabilities {
+        tools: true,
+        history: true,
+        streaming: true,
+    };
+    let rig: Vec<RigBackend> = vec![
+        RigBackend::ollama("http://127.0.0.1:1", "m", tools()).unwrap(),
+        RigBackend::anthropic("http://127.0.0.1:1", "k", "m", 1, tools()).unwrap(),
+        RigBackend::anthropic_subscription(
+            "http://127.0.0.1:1",
+            counting_token_provider(),
+            "m",
+            1,
+            tools(),
+        )
+        .unwrap(),
+        RigBackend::openai("http://127.0.0.1:1", "k", "m", 1, tools()).unwrap(),
+    ];
+    for b in &rig {
+        assert_eq!(b.capabilities(), full, "{}", b.name());
+        assert!(b.capabilities().missing().is_empty());
+    }
+    let native: Vec<Box<dyn LlmBackend>> = vec![
+        Box::new(crate::llm::ollama::OllamaBackend::new("http://x", "m")),
+        Box::new(crate::llm::anthropic::AnthropicBackend::new(
+            "http://x", "k", "m", 1,
+        )),
+        Box::new(crate::llm::openai::OpenAiBackend::new(
+            "http://x", "k", "m", 1,
+        )),
+    ];
+    for b in &native {
+        let caps = b.capabilities();
+        assert_eq!(caps, crate::llm::Capabilities::TEXT_ONLY, "{}", b.name());
+        assert_eq!(caps.missing().len(), 2);
+    }
 }

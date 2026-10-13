@@ -119,12 +119,13 @@ pub struct LlmTurn {
     pub system_prompt: String,
     pub user_message: String,
     /// Prior `(user, assistant)` turn pairs, oldest first, prepended to the message
-    /// history for a follow-up turn. Empty for an ordinary single-shot turn. Only the
-    /// rig engine replays it; the plain-text backends ignore it.
+    /// history for a follow-up turn. Empty for an ordinary single-shot turn. Only
+    /// backends whose [`Capabilities::history`] is set replay it (the rig engine);
+    /// the native plain-text backends ignore it.
     pub history: Vec<(String, String)>,
     /// Where action tools emit [`DeviceAction`]s for the pipeline to relay to the
-    /// device. `None` disables device actions for this turn. Only the rig engine
-    /// reads it; the plain-text backends ignore it.
+    /// device. `None` disables device actions for this turn. Only backends whose
+    /// [`Capabilities::tools`] is set read it (the rig engine).
     pub actions: Option<ActionSink>,
 }
 
@@ -153,12 +154,56 @@ impl LlmTurn {
     }
 }
 
+/// What a backend can do with a turn. Engine/provider choice decides these, so they
+/// are reported (config page) and warned about (build time) rather than silently
+/// lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Capabilities {
+    /// Runs the tool set (timers, weather, device actions, …).
+    pub tools: bool,
+    /// Replays [`LlmTurn::history`] on follow-up turns.
+    pub history: bool,
+    /// Streams reply tokens as they are generated (vs. one whole reply).
+    pub streaming: bool,
+}
+
+impl Capabilities {
+    /// A plain streaming text backend: no tools, no follow-up history.
+    pub const TEXT_ONLY: Capabilities = Capabilities {
+        tools: false,
+        history: false,
+        streaming: true,
+    };
+
+    /// Human-readable names of what this backend lacks (empty when nothing is
+    /// lost), e.g. `["tools (timers, weather, device actions)", …]`.
+    pub fn missing(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if !self.tools {
+            out.push("tools (timers, weather, search, device actions)");
+        }
+        if !self.history {
+            out.push("follow-up conversation history");
+        }
+        if !self.streaming {
+            out.push("token streaming");
+        }
+        out
+    }
+}
+
 /// A swappable LLM backend. Implementations are `Send + Sync` so one instance is
 /// shared across concurrent turns behind an `Arc`.
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     /// A short backend label for logs/settings (e.g. `"ollama"`, `"anthropic"`).
     fn name(&self) -> &str;
+
+    /// What this backend does with a turn. Defaults to [`Capabilities::TEXT_ONLY`];
+    /// a backend that runs tools or replays history overrides it.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::TEXT_ONLY
+    }
 
     /// Produce a streaming reply to `turn`. Errors surface either here (request
     /// setup failed) or as an `Err` item inside the stream (mid-stream failure).
