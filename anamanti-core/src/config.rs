@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::calendar::{CalendarSpec, IcalSubscription};
+use crate::calendar::CalendarSpec;
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
 use crate::llm::catalog::ModelCatalog;
 use crate::music::{
@@ -197,8 +197,10 @@ pub struct Config {
     pub openai_max_tokens: u32,
     /// Web-calendar subscriptions for the `calendar_lookup` tool (empty → no tool).
     pub calendar_specs: Vec<CalendarSpec>,
-    /// Cache TTL for fetched `.ics` feeds.
-    pub calendar_cache_ttl: Duration,
+    /// Explicit cache TTL for fetched `.ics` feeds (`calendar.cache_ttl_secs`; `0` =
+    /// no cache). `None` when the key is absent ⇒ `tool_cache.calendar_lookup` (default
+    /// 5 min) applies.
+    pub calendar_cache_ttl: Option<Duration>,
     /// Routing provider label for the `directions_lookup` tool (empty → `mapbox`).
     pub directions_provider: String,
     /// Google Drive photo-slideshow seed (client creds + folders; the refresh token is
@@ -744,7 +746,7 @@ impl Default for Config {
             anthropic_max_tokens: 1024,
             openai_max_tokens: 1024,
             calendar_specs: Vec::new(),
-            calendar_cache_ttl: IcalSubscription::DEFAULT_TTL,
+            calendar_cache_ttl: None,
             directions_provider: String::new(),
             drive: DriveConfig {
                 scope: Some(DEFAULT_DRIVE_SCOPE.to_string()),
@@ -1434,11 +1436,9 @@ impl Config {
             .unwrap_or_else(|| sanitize_id(&service_name));
 
         let calendar_specs = calendar_specs_from_file(fc.calendar.subscriptions);
-        let calendar_cache_ttl = fc
-            .calendar
-            .cache_ttl_secs
-            .map(Duration::from_secs)
-            .unwrap_or(d.calendar_cache_ttl);
+        // Kept raw: an absent key must stay distinguishable from an explicit value
+        // (which wins over tool_cache.calendar_lookup, even when it equals the default).
+        let calendar_cache_ttl = fc.calendar.cache_ttl_secs.map(Duration::from_secs);
 
         let drive = DriveConfig {
             client_id: nonempty(fc.drive.client_id),
@@ -1778,7 +1778,10 @@ impl Config {
             // secret here but is runtime-settable (Tools tab) — `shared_settings`
             // rebuilds `directions` from the resolved token, and `apply_directions`
             // rebuilds it on a config-page change.
-            calendar: crate::calendar::build(self.calendar_specs.clone(), self.calendar_cache_ttl),
+            calendar: crate::calendar::build_with(
+                self.calendar_specs.clone(),
+                self.calendar_cache_ttl,
+            ),
             directions: crate::directions::from_token(
                 &self.directions_provider,
                 self.initial_mapbox_token().as_deref(),
@@ -2369,6 +2372,23 @@ mod tests {
     }
 
     #[test]
+    fn calendar_cache_ttl_is_passed_through_raw() {
+        let ttl = |json: &str| Config::from_file(parse(json)).unwrap().calendar_cache_ttl;
+        // Absent ⇒ None, so tool_cache.calendar_lookup decides.
+        assert_eq!(ttl("{}"), None);
+        assert_eq!(ttl(r#"{ "calendar": {} }"#), None);
+        // Set ⇒ it wins, including a value equal to the 300 s default and 0 (no cache).
+        assert_eq!(
+            ttl(r#"{ "calendar": { "cache_ttl_secs": 300 } }"#),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            ttl(r#"{ "calendar": { "cache_ttl_secs": 0 } }"#),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
     fn full_file_overlays_every_layer() {
         let c = Config::from_file(parse(
             r#"{
@@ -2457,7 +2477,7 @@ mod tests {
         assert_eq!(c.calendar_specs.len(), 2);
         assert_eq!(c.calendar_specs[0].name, "Calendar 1");
         assert_eq!(c.calendar_specs[1].name, "Work");
-        assert_eq!(c.calendar_cache_ttl, Duration::from_secs(600));
+        assert_eq!(c.calendar_cache_ttl, Some(Duration::from_secs(600)));
         // Drive: blank folder id dropped; refresh token never seeded.
         assert_eq!(c.drive.client_id.as_deref(), Some("cid"));
         assert_eq!(c.drive.folder_ids, vec!["f1", "f2"]);
