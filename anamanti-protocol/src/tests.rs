@@ -144,6 +144,9 @@ fn type_constants_are_stable() {
         (types::WEATHER, "anamanti-weather"),
         (types::PLACE, "anamanti-place"),
         (types::FONT, "anamanti-font"),
+        (types::MUSIC, "anamanti-music"),
+        (types::MUSIC_CONTROL, "anamanti-music-control"),
+        (types::MUSIC_RESULT, "anamanti-music-result"),
         (types::PAIR_PHONE, "anamanti-pair-phone"),
         (types::PAIR_RESULT, "anamanti-pair-result"),
     ];
@@ -305,6 +308,40 @@ async fn place_frame_roundtrips_and_decodes_command() {
     assert_eq!(WyomingEvent::interrupt().place_command(), None);
     let bad = WyomingEvent::with_data(types::PLACE, json!({ "action": "show" }));
     assert_eq!(bad.place_command(), None);
+}
+
+#[tokio::test]
+async fn music_frames_roundtrip_and_decode() {
+    let snapshot = json!({ "playing": true, "track_title": "Paranoid Android" });
+    let np = roundtrip(&WyomingEvent::music_now_playing(snapshot.clone())).await;
+    assert_eq!(np.music_command(), Some(MusicCommand::NowPlaying(snapshot)));
+    let dismiss = roundtrip(&WyomingEvent::music_dismiss()).await;
+    assert_eq!(dismiss.music_command(), Some(MusicCommand::Dismiss));
+    let screen = roundtrip(&WyomingEvent::music_screen("up_next")).await;
+    assert_eq!(
+        screen.music_command(),
+        Some(MusicCommand::Screen("up_next".to_string()))
+    );
+    // Malformed / foreign frames decode to None.
+    let bad = WyomingEvent::with_data(types::MUSIC, json!({ "action": "now_playing" }));
+    assert_eq!(bad.music_command(), None);
+    assert_eq!(WyomingEvent::interrupt().music_command(), None);
+
+    let ctl = roundtrip(&WyomingEvent::music_control("volume", Some(40))).await;
+    assert_eq!(
+        ctl.music_control_command(),
+        Some(("volume".to_string(), Some(40)))
+    );
+    let pause = roundtrip(&WyomingEvent::music_control("pause", None)).await;
+    assert_eq!(
+        pause.music_control_command(),
+        Some(("pause".to_string(), None))
+    );
+    assert_eq!(WyomingEvent::music_dismiss().music_control_command(), None);
+
+    let hello = WyomingEvent::hello_music("dev", "core", "Kitchen");
+    assert_eq!(hello.data["role"], json!("music"));
+    assert_eq!(hello.hello_device_id(), Some("dev"));
 }
 
 #[tokio::test]

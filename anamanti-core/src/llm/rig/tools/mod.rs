@@ -15,7 +15,7 @@
 //!
 //! Layout: `search` (web search providers + `internet_search`), `device` (timers,
 //! personality, font), `display` (recipe / weather / places screens and their
-//! `close_*` tools), `services` (calendar, directions, Spotify, shopping list, phone).
+//! `close_*` tools, and the music player's `music_screen`), `services` (calendar, directions, Spotify, shopping list, phone).
 
 mod device;
 mod display;
@@ -212,6 +212,7 @@ const GUIDANCE_ORDER: &[&str] = &[
     services::CALENDAR_LOOKUP,
     services::DIRECTIONS_LOOKUP,
     services::SPOTIFY_CONTROL,
+    display::MUSIC_SCREEN,
     display::RECIPE_LOOKUP,
     display::WEATHER_LOOKUP,
     display::PLACES_LOOKUP,
@@ -253,6 +254,8 @@ impl Tools {
         }
         if let Some(controller) = deps.spotify {
             tools.push(services::spotify_control(controller));
+            // The on-screen music player is voice-driven wherever Spotify is.
+            tools.push(display::music_screen());
         }
         if let Some(controller) = deps.grocery {
             tools.push(services::shopping_list_add(controller));

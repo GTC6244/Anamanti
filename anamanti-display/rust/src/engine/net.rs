@@ -430,6 +430,10 @@ async fn run_turn_task(
                     WakeWordEvent::dismiss_place()
                 }
             },
+            TurnUpdate::Music(screen) => {
+                log::info!("turn: music screen -> {screen}");
+                WakeWordEvent::music_screen(screen)
+            }
             // A font command relayed on the voice socket: step the global font scale. The
             // UI owns + persists the scale, so just surface the direction.
             TurnUpdate::Font(cmd) => match cmd {

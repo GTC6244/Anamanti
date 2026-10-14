@@ -10,6 +10,12 @@
 > ship on top of PR 38's Snapcast transport + `librespot` supervisor. Remaining:
 > just a Premium account + a one-time click-through consent. No Spotify audio flows
 > through the Wyoming TTS pipeline or the device — the tool is control-only.
+>
+> **Update (now-playing UI, P6 — done):** the display now has a full music UI — a
+> compact control overlay plus `NowPlayingView` / `NextUpView` full screens — fed by a
+> persistent `role="music"` channel (`anamanti-music` now-playing/dismiss pushes) and
+> driving the controls back over `anamanti-music-control`, and drivable by voice via
+> the `music_screen` tool. Still control-only; no audio on the device. See §5 P6 and [`DisplayUI.md`](./DisplayUI.md) §4b.
 
 This plan reads together with [`Plan.MD`](./Plan.MD) (the tool-calling / rig
 engine decisions), [`architecture.md`](./architecture.md) (the design), and the
@@ -24,7 +30,7 @@ in-flight **Snapcast routing PR** (not yet in this tree).
 | **What is a "skill" here** | Not an Alexa skill and not a gstack dev skill — it is an **LLM tool** in the rig engine, alongside `internet_search` / `calendar_lookup`. |
 | **Account tier** | **Spotify Premium** (confirmed available). Required: both librespot streaming *and* the Web API playback-control endpoints are Premium-only. Free is not supported and no hacky fallback will be built. |
 | **Audio path** | **Not through our pipeline.** Spotify audio is DRM'd — it cannot be synthesized/streamed as PCM by Piper. Music is produced by **librespot** (Spotify Connect client) → raw PCM → Snapcast. |
-| **Control plane** | **Anamanti Core (Mac).** A `spotify_control` rig `PortableTool` in `anamanti-core/src/llm/rig.rs` calls the **Spotify Web API** (search, play, pause, skip, queue, volume) targeting the librespot `device_id`. |
+| **Control plane** | **Anamanti Core (Mac).** A `spotify_control` `VoiceTool` in `anamanti-core/src/llm/rig/tools/services.rs` calls the **Spotify Web API** (search, play, pause, skip, queue, volume) targeting the librespot `device_id`. |
 | **librespot placement** | **Mac host, as a sibling process** to the Anamanti Core — **not** compiled into the `anamanti_core` binary. The Anamanti Core only issues Web API calls; it never touches the audio. |
 | **Multi-device sync** | Owned by **snapserver** (the Snapcast PR), recommended to run **on the Mac** so it is the always-on hub. Every speaker is a snapclient. |
 | **Echo Show as output** | **Default: NO** — the Echo Show stays voice-control + display only (respects the ~1 GB RAM budget and the "Flutter owns presentation only" boundary). **Optional, off by default:** run a snapclient on the device and add it to the group (`ANAMANTI_SPOTIFY_INCLUDE_DEVICE`). |
@@ -68,19 +74,20 @@ and be tested (queue a track from a phone onto the "Ambient" Connect device)
 
 | Piece | Where | Form |
 | --- | --- | --- |
-| Intent + Web API calls | Anamanti Core (Mac) | New rig `PortableTool` in `llm/rig.rs` (`definition()` + guidance text, twin of `InternetSearch`) |
+| Intent + Web API calls | Anamanti Core (Mac) | A `VoiceTool` in `llm/rig/tools/services.rs` (`definition()` + guidance text, twin of `InternetSearch`) |
 | OAuth / refresh token / secrets | Anamanti Core (Mac) | The `spotify` block in `anamanti.json` (boot seed) + config-page consent, mirroring the Google flow; persisted 0600 in `anamanti_settings.json` |
 | librespot (PCM producer) | Mac, **beside** Anamanti Core | Separate process — Snapcast's `librespot`/`spotify` stream source, or launchd |
 | snapserver (multi-room sync) | Mac (recommended) | **Snapcast PR** (external to this plan) |
-| Echo Show | Device | snapclient + optional now-playing UI via a state stream — **opt-in** |
+| Echo Show | Device | Now-playing UI over the persistent `role="music"` channel (P6, done); snapclient output stays **opt-in** (P5) |
 
 ---
 
 ## 3. `spotify_control` tool (control plane) — **implemented**
 
 A single tool with an `action` enum keeps the LLM surface small and the guidance
-tight (same pattern as `internet_search`). Lives in `anamanti-core/src/llm/rig.rs`
-(`SpotifyControl`, a real `PortableTool`) over the Web API client in
+tight (same pattern as `internet_search`). Lives in
+`anamanti-core/src/llm/rig/tools/services.rs` (`SpotifyControl`, a `VoiceTool` in the
+name-keyed `Tools` registry) over the Web API client in
 `anamanti-core/src/music/spotify.rs` (the `SpotifyController` trait — injected, so
 it is unit-tested with a fake, no network).
 
@@ -152,16 +159,37 @@ who started playback — no extra work here.
    (`spotify_consent.rs`, loopback Authorization-Code + PKCE) that stores the
    refresh token in settings and activates the tool live — no restart, no `curl`.
    The env/manual path (§8) still works for headless setup.
-3. **P3 — `spotify_control` tool.** ✅ **Done (this change).** `PortableTool` +
-   `definition()` + guidance in `llm/rig.rs` over `music/spotify.rs`; all actions
+3. **P3 — `spotify_control` tool.** ✅ **Done.** `VoiceTool` +
+   `definition()` + guidance in `llm/rig/tools/services.rs` over `music/spotify.rs`
+   (transport actions parsed by the shared `SpotifyCommand::transport`, also used by the
+   display's on-screen controls); all actions
    (`play`/`pause`/`resume`/`next`/`previous`/`queue`/`volume`); unit + end-to-end
    rig tests with a mocked controller (no network).
 4. **P4 — Ducking.** ✅ **Done (PR 38).** Turn lifecycle ducks the music group; no
    Spotify-specific work needed (the group volume covers the librespot stream).
 5. **P5 (optional) — Echo Show as snapclient.** ⏳ PR 38 gates it behind
    `ANAMANTI_MUSIC_INCLUDE_DEVICE` (default off). No control-plane change.
-6. **P6 (nice-to-have) — Now-playing UI.** Not started. Push current track/artist
-   to the device via a state stream and render on the idle/active screen.
+6. **P6 — Now-playing UI.** ✅ **Done.** The Core reads current playback +
+   up-next queue from the Spotify Web API (`SpotifyController::now_playing` over
+   `GET /v1/me/player` + `/queue`) and a periodic `NowPlayingService` fans it out over a
+   **persistent `role="music"` channel** as `anamanti-music` frames (the twin of the
+   ambient weather push; gated behind `music.enabled`, no-ops until Spotify is linked
+   and skips the Spotify read while no display has the channel open, poll interval `music.nowplaying_refresh_secs`, default 5). The display renders three
+   surfaces — a compact `MusicControlOverlay` that rides the ambient screen while a track
+   plays, a full `NowPlayingView` (artwork + transport + volume), and a `NextUpView`
+   queue list — folded from `AssistantState.music`. On-screen controls go **device→Core**
+   as a short-lived `anamanti-music-control` request/response (play/pause/next/previous/
+   volume) handled by `control::music_control_response`, which parses actions with the
+   same `SpotifyCommand::transport` as the `spotify_control` tool and reuses the
+   `NowPlayingService`'s cached controller. See [`DisplayUI.md`](./DisplayUI.md) §4b.
+   **Voice control (done):** the music screen is drivable by voice too — a new
+   `music_screen` `VoiceTool` (`llm/rig/tools/display.rs`; show now-playing / show
+   up-next / close) emits a
+   `DeviceAction::MusicScreen` → `anamanti-music` `screen` frame → device
+   `WakeWordEventKind.musicScreen`, and the device stamps a `DisplayContext::Music`
+   block (`set_music_context`) on `audio-start` so the LLM knows what's on the music
+   screen. Playback-by-voice remains the existing `spotify_control` tool. Mirrors the
+   recipe voice-nav pattern (Plan.MD 2026-09-25).
 
 ---
 

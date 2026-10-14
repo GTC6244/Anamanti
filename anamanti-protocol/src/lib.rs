@@ -303,6 +303,23 @@ pub mod types {
     /// the `adjust_font` tool / System-1 intent when the turn's `screen.font` context says
     /// a resizable surface is on screen.
     pub const FONT: &str = "anamanti-font";
+
+    /// orchestrator → device: the music player (data: `action` = `"now_playing"` (the
+    /// `music` object carries `playing`, `track_title`, `artist`, `album`, `artwork_uri`,
+    /// `position_secs`, `duration_secs`, `volume_percent`, and a `next_up[]` queue) /
+    /// `"dismiss"` (nothing is playing) — both pushed over the persistent `role="music"`
+    /// channel — or `"screen"` (`screen` = `"now_playing"`/`"up_next"`/`"hidden"`, a
+    /// device action on the per-turn socket driven by the `music_screen` tool)).
+    pub const MUSIC: &str = "anamanti-music";
+
+    /// device → orchestrator: a music transport/volume command from the on-screen
+    /// controls (data: `action` = `"pause"`/`"resume"`/`"next"`/`"previous"`/`"volume"`,
+    /// with `value` the 0–100 percent for `"volume"`). Answered with [`MUSIC_RESULT`].
+    pub const MUSIC_CONTROL: &str = "anamanti-music-control";
+
+    /// orchestrator → device: the result of a [`MUSIC_CONTROL`] command (data: `ok`
+    /// bool + a short `message`).
+    pub const MUSIC_RESULT: &str = "anamanti-music-result";
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +435,18 @@ pub enum PlaceCommand {
     Show(Value),
     /// Dismiss the full-screen place card and return to the idle/ambient display.
     Dismiss,
+}
+
+/// A music command decoded from an `anamanti-music` frame.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MusicCommand {
+    /// Render this now-playing snapshot (track + up-next queue). Persistent channel.
+    NowPlaying(Value),
+    /// Nothing is playing — close the music UI. Persistent channel.
+    Dismiss,
+    /// Voice screen command (per-turn socket): which music screen to show —
+    /// `"now_playing"` / `"up_next"` / `"hidden"`.
+    Screen(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +684,17 @@ impl WyomingEvent {
         name: impl Into<String>,
     ) -> Self {
         Self::hello_with_role("weather", device_id, instance_id, name)
+    }
+
+    /// An `anamanti-hello` frame opening the persistent **music** channel (device →
+    /// orchestrator): `role = "music"`, so the orchestrator registers it with the
+    /// now-playing push service.
+    pub fn hello_music(
+        device_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self::hello_with_role("music", device_id, instance_id, name)
     }
 
     fn hello_with_role(
@@ -943,6 +983,80 @@ impl WyomingEvent {
                 .map(|d| FontCommand::Adjust(d.to_string())),
             _ => None,
         }
+    }
+
+    // ---- music ----
+
+    /// An `anamanti-music` **now_playing** push (orchestrator → device): render `music`
+    /// (a serialized now-playing snapshot). Persistent `role="music"` channel.
+    pub fn music_now_playing(music: Value) -> Self {
+        Self::with_data(
+            types::MUSIC,
+            json!({ "action": "now_playing", "music": music }),
+        )
+    }
+
+    /// An `anamanti-music` **dismiss** push (orchestrator → device): nothing is playing.
+    pub fn music_dismiss() -> Self {
+        Self::with_data(types::MUSIC, json!({ "action": "dismiss" }))
+    }
+
+    /// An `anamanti-music` **screen** action (orchestrator → device): show the music
+    /// screen `screen` ∈ `"now_playing"` / `"up_next"` / `"hidden"` by voice.
+    pub fn music_screen(screen: &str) -> Self {
+        Self::with_data(
+            types::MUSIC,
+            json!({ "action": "screen", "screen": screen }),
+        )
+    }
+
+    /// Decode an `anamanti-music` frame into a [`MusicCommand`], or `None` if this is not
+    /// a music frame or its `action` is unrecognized. A `now_playing` with no `music`
+    /// object (or a `screen` with no `screen` field) is rejected.
+    pub fn music_command(&self) -> Option<MusicCommand> {
+        if self.event_type != types::MUSIC {
+            return None;
+        }
+        let snapshot = || self.data.get("music").filter(|v| v.is_object()).cloned();
+        match self.data.get("action").and_then(Value::as_str)? {
+            "now_playing" => snapshot().map(MusicCommand::NowPlaying),
+            "dismiss" => Some(MusicCommand::Dismiss),
+            "screen" => self
+                .data
+                .get("screen")
+                .and_then(Value::as_str)
+                .map(|s| MusicCommand::Screen(s.to_string())),
+            _ => None,
+        }
+    }
+
+    /// An `anamanti-music-control` command (device → orchestrator): a transport/volume
+    /// action from the on-screen controls. `value` is the 0–100 percent for `"volume"`.
+    pub fn music_control(action: impl Into<String>, value: Option<i64>) -> Self {
+        Self::with_data(
+            types::MUSIC_CONTROL,
+            json!({ "action": action.into(), "value": value }),
+        )
+    }
+
+    /// Decode an `anamanti-music-control` frame into `(action, value)`; `None` for a
+    /// frame of another type or with no `action`.
+    pub fn music_control_command(&self) -> Option<(String, Option<i64>)> {
+        if self.event_type != types::MUSIC_CONTROL {
+            return None;
+        }
+        let action = self.data.get("action").and_then(Value::as_str)?.to_string();
+        let value = self.data.get("value").and_then(Value::as_i64);
+        Some((action, value))
+    }
+
+    /// An `anamanti-music-result` response (orchestrator → device): the outcome of a
+    /// [`music_control`](Self::music_control) command.
+    pub fn music_result(ok: bool, message: impl Into<String>) -> Self {
+        Self::with_data(
+            types::MUSIC_RESULT,
+            json!({ "ok": ok, "message": message.into() }),
+        )
     }
 
     // ---- encoding ----

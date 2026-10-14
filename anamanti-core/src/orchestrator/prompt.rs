@@ -5,7 +5,8 @@
 use crate::settings::{Household, HouseholdMember, Personality, PersonalityDef, RuntimeSettings};
 use crate::speaker::{SpeakerContext, SpeakerResolution};
 use crate::wyoming::protocol::{
-    DeviceContext, DisplayContext, FontContext, PlaceScreen, RecipeScreen, WeatherScreen,
+    DeviceContext, DisplayContext, FontContext, MusicScreen, PlaceScreen, RecipeScreen,
+    WeatherScreen,
 };
 
 /// The recalled memory for one turn, split by who it is true for
@@ -294,6 +295,7 @@ pub(crate) fn display_context_line(ctx: &DisplayContext) -> String {
         DisplayContext::Recipe(screen) => recipe_screen_line(screen),
         DisplayContext::Weather(screen) => weather_screen_line(screen),
         DisplayContext::Place(screen) => place_screen_line(screen),
+        DisplayContext::Music(screen) => music_screen_line(screen),
         // Diagnostics and enrollment are suppressing contexts: the turn never reaches the
         // LLM, so there is no prompt line to contribute. (These arms are unreachable in
         // practice — the orchestrator short-circuits such turns before building the prompt.)
@@ -317,6 +319,30 @@ pub(crate) fn font_context_line(font: &FontContext) -> String {
     format!(
         "The on-screen text is resizable (currently {pct}% of normal). Use the `adjust_font` \
          tool to make it bigger or smaller when the user asks.{bound}"
+    )
+}
+
+/// The prompt line for the music player: names the track on screen and which music view is
+/// open, so the model can drive it with `music_screen` (show now-playing / up-next / close)
+/// and answer "what's this song?". Transport stays on `spotify_control`.
+fn music_screen_line(screen: &MusicScreen) -> String {
+    let title = screen.title.trim();
+    let artist = screen.artist.trim();
+    let track = match (title.is_empty(), artist.is_empty()) {
+        (true, _) => "a track".to_string(),
+        (false, true) => format!("\"{title}\""),
+        (false, false) => format!("\"{title}\" by {artist}"),
+    };
+    let state = if screen.playing { "playing" } else { "paused" };
+    let view = match screen.screen.as_str() {
+        "now_playing" => "the now-playing screen is open",
+        "up_next" => "the up-next queue is open",
+        _ => "only the compact control bar is showing",
+    };
+    format!(
+        "The music player is on the display ({view}), {state} {track}. Use the \
+         `music_screen` tool to show the now-playing view, show the up-next queue, or close \
+         it, and `spotify_control` to play/pause/skip or change the volume."
     )
 }
 

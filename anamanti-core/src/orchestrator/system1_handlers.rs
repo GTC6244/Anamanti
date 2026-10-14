@@ -277,6 +277,9 @@ fn stop_dismiss_reply(device_ctx: &DeviceContext, followup_depth: u32) -> Option
         Some(DisplayContext::Weather(_)) => Some(Intent::WeatherDismiss),
         Some(DisplayContext::Recipe(_)) => Some(Intent::RecipeDismiss),
         Some(DisplayContext::Place(_)) => Some(Intent::PlaceDismiss),
+        // The music player has no System-1 dismiss intent — defer to the LLM, whose
+        // `music_screen` / `spotify_control` tools cover close vs. stop-the-music.
+        Some(DisplayContext::Music(_)) => None,
         // The diagnostics and enrollment screens are suppressing contexts that never
         // reach here (the turn short-circuits earlier), and have no voice dismiss.
         Some(DisplayContext::Diagnostics) | Some(DisplayContext::Enroll(_)) | None => None,

@@ -770,24 +770,23 @@ pub async fn link_speaker(
     let request =
         WyomingEvent::with_data(types::LINK_SPEAKER, json!({ "id": id, "member": member }));
     let resp = round_trip(&endpoint, request).await?;
-    let message = resp
-        .data
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if resp
-        .data
-        .get("ok")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        Ok(message)
-    } else if message.is_empty() {
-        Err(anyhow!("linking failed"))
-    } else {
-        Err(anyhow!("{message}"))
-    }
+    ok_message(&resp, "linking failed")
+}
+
+/// Issue a music transport/volume command (`pause`/`resume`/`next`/`previous`/`volume`)
+/// from the display's on-screen controls. Returns the Core's short spoken confirmation;
+/// an in-band failure (Spotify not linked, device asleep, unknown action) is an `Err`
+/// carrying its reason. `value` is the 0–100 percent for `"volume"`.
+pub async fn music_control(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    action: &str,
+    value: Option<i64>,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::music_control(action, value)).await?;
+    ok_message(&resp, "music control failed")
 }
 
 /// Delete a speaker profile; returns whether one was removed.
@@ -877,28 +876,27 @@ pub async fn fetch_speaker_clip(
 /// The `message` from an `ENROLL_RESULT`, surfacing a rejected request's in-band
 /// message as an error (parallels [`speaker_ok`]).
 fn enroll_message(resp: &WyomingEvent) -> Result<String> {
+    ok_message(resp, "enrollment failed")
+}
+
+/// The `message` from an in-band `{ok, message}` response: `Ok(message)` when `ok`,
+/// else an `Err` carrying the message (or `fallback` when the Core sent none).
+fn ok_message(resp: &WyomingEvent, fallback: &str) -> Result<String> {
     let ok = resp
         .data
         .get("ok")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let msg = resp
+    let message = resp
         .data
         .get("message")
         .and_then(Value::as_str)
-        .unwrap_or("")
+        .unwrap_or_default()
         .to_string();
-    if ok {
-        Ok(msg)
-    } else {
-        Err(anyhow!(
-            "{}",
-            if msg.is_empty() {
-                "enrollment failed".to_string()
-            } else {
-                msg
-            }
-        ))
+    match (ok, message.is_empty()) {
+        (true, _) => Ok(message),
+        (false, true) => Err(anyhow!("{fallback}")),
+        (false, false) => Err(anyhow!("{message}")),
     }
 }
 
@@ -1597,6 +1595,40 @@ mod tests {
         assert_eq!(request.event_type, types::NAME_SPEAKER);
         assert_eq!(request.data["id"], json!("spk-2"));
         assert_eq!(request.data["name"], json!("Dana"));
+    }
+
+    #[tokio::test]
+    async fn music_control_sends_action_and_value_and_returns_message() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::music_result(true, "Set the volume to 40 percent.");
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let msg = music_control(&cache, Duration::from_millis(0), None, "volume", Some(40))
+            .await
+            .unwrap();
+        assert_eq!(msg, "Set the volume to 40 percent.");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::MUSIC_CONTROL);
+        assert_eq!(request.data["action"], json!("volume"));
+        assert_eq!(request.data["value"], json!(40));
+    }
+
+    #[tokio::test]
+    async fn music_control_surfaces_in_band_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response =
+            WyomingEvent::music_result(false, "Spotify isn't linked on the Anamanti Core");
+        serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = music_control(&cache, Duration::from_millis(0), None, "pause", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("linked"));
     }
 
     #[tokio::test]

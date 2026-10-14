@@ -110,6 +110,23 @@ Future<int> clearMemories({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Issue a music transport/volume command from the display's on-screen controls
+/// (`action` = `pause`/`resume`/`next`/`previous`/`volume`). Returns the orchestrator's
+/// short confirmation; an in-band failure (Spotify not linked, device asleep, unknown
+/// action) surfaces as an `Err`. `value` is the 0–100 percent for `"volume"` and ignored
+/// otherwise.
+Future<String> musicControl({
+  required String orchestratorKey,
+  required String action,
+  PlatformInt64? value,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsMusicControl(
+  orchestratorKey: orchestratorKey,
+  action: action,
+  value: value,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// Browse stored conversation turns from the GraphRAG graph (Memory screen →
 /// Conversations), newest first. All filters optional: `query` (substring over the
 /// turn text), `speaker_id` (that speaker only), `entity` (turns mentioning that

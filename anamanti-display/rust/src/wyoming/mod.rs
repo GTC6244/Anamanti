@@ -22,8 +22,10 @@
 pub mod client;
 pub mod control;
 pub mod discovery;
+pub mod music;
 pub mod notify;
 pub mod protocol;
+pub mod push_channel;
 pub mod state;
 pub mod weather;
 

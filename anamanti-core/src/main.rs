@@ -24,6 +24,7 @@ use anamanti_core::app::AppServices;
 use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind, VadEngineKind};
 use anamanti_core::discovery::MdnsAdvertiser;
 use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
+use anamanti_core::music::NowPlayingService;
 use anamanti_core::notify::NotificationService;
 use anamanti_core::orchestrator::{self, Pipeline, TcpConnector};
 use anamanti_core::server;
@@ -333,6 +334,24 @@ async fn run() -> Result<()> {
         );
     }
 
+    // Ambient music now-playing push: the registry of persistent `role="music"` channels
+    // the device dials, plus a periodic task that reads the current Spotify playback
+    // (track + up-next queue) from the live settings and fans it out so the display's
+    // music screen stays fresh without a voice turn. The poll no-ops while Spotify isn't
+    // linked, so a later config-page relink activates it with no restart. Dormant (no
+    // task) when music is disabled in the config.
+    let music_svc = Arc::new(NowPlayingService::new());
+    if config.music.enabled {
+        anamanti_core::music::nowplaying_service::spawn_periodic(
+            music_svc.clone(),
+            pipeline.settings().clone(),
+            config.music.nowplaying_refresh(),
+        );
+        log::info!(
+            "music now-playing push: every {}s",
+            config.music.nowplaying_refresh().as_secs(),
+        );
+    }
     // House-wide music routing (Snapcast) control plane. Dormant unless music is
     // enabled in the config file; when on, the ducker lowers the music group's volume
     // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
@@ -347,6 +366,7 @@ async fn run() -> Result<()> {
             .with_voices_dir(config.tts_voices_dir.clone())
             .with_notify(notify)
             .with_weather(weather_svc)
+            .with_now_playing(music_svc)
             .with_graphrag(graphrag)
             .with_ducker(ducker)
             .with_music(music_hub.clone())

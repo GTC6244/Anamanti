@@ -527,6 +527,17 @@ pub struct MusicConfig {
     /// orchestrator boots, and stop them on shutdown (`music.autostart`,
     /// default on when music is enabled). The Music tab's manual buttons still work.
     pub autostart: bool,
+    /// How often (seconds) the now-playing push polls Spotify for the current track +
+    /// queue and fans it out to the display's music screen (`music.nowplaying_refresh_secs`,
+    /// default 5). Clamped to a 1s floor at use.
+    pub nowplaying_refresh_secs: u64,
+}
+
+impl MusicConfig {
+    /// The now-playing push poll interval (`music.nowplaying_refresh_secs`), floored at 1s.
+    pub fn nowplaying_refresh(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.nowplaying_refresh_secs.max(1))
+    }
 }
 
 impl Default for MusicConfig {
@@ -544,6 +555,7 @@ impl Default for MusicConfig {
             snapserver_conf: PathBuf::from("/opt/homebrew/etc/snapserver.conf"),
             spotify_device_name: "Ambient".to_string(),
             autostart: true,
+            nowplaying_refresh_secs: 5,
         }
     }
 }
@@ -1024,6 +1036,7 @@ pub struct FileMusic {
     pub conf: Option<PathBuf>,
     pub spotify_device_name: Option<String>,
     pub autostart: Option<bool>,
+    pub nowplaying_refresh_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1399,6 +1412,10 @@ impl Config {
             spotify_device_name: nonempty(fc.music.spotify_device_name)
                 .unwrap_or_else(|| md.spotify_device_name.clone()),
             autostart: fc.music.autostart.unwrap_or(md.autostart),
+            nowplaying_refresh_secs: fc
+                .music
+                .nowplaying_refresh_secs
+                .unwrap_or(md.nowplaying_refresh_secs),
         };
 
         let wd = WeatherSettings::default();

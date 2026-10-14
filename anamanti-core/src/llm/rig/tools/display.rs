@@ -1,6 +1,7 @@
 //! Display-screen tools: the recipe screen (`recipe_lookup`, `recipe_control`,
 //! `close_recipe`), the weather screen (`weather_lookup`, `close_weather`) and the
-//! place card (`places_lookup`, `close_places`). Each fetches through an injected
+//! place card (`places_lookup`, `close_places`), and the music player (`music_screen`,
+//! screen-only — playback is `spotify_control`). Each fetches through an injected
 //! provider (testable offline), pushes the result to the display as a
 //! [`DeviceAction`], and returns a short spoken confirmation.
 
@@ -15,7 +16,7 @@ use serde_json::{json, Value};
 
 use super::{close_tool, definition, emit, parse_args, ToolCtx, VoiceTool};
 use crate::directions::LiveHomeLocation;
-use crate::llm::{ActionSink, DeviceAction, RecipeNav};
+use crate::llm::{ActionSink, DeviceAction, MusicNav, RecipeNav};
 use crate::recipe::RecipeProvider;
 
 /// Tool name: show a recipe on the display.
@@ -32,6 +33,8 @@ const CLOSE_WEATHER: &str = "close_weather";
 pub(super) const PLACES_LOOKUP: &str = "places_lookup";
 /// Tool name: dismiss the place card.
 const CLOSE_PLACES: &str = "close_places";
+/// Tool name: drive the on-screen music player (show now-playing / up-next / close).
+pub(super) const MUSIC_SCREEN: &str = "music_screen";
 
 // ---------------------------------------------------------------------------
 // Recipe
@@ -200,6 +203,86 @@ impl VoiceTool for RecipeControl {
             ctx.actions,
             DeviceAction::RecipeControl(nav),
             "the recipe could update",
+        )?;
+        Ok(confirmation.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Music player
+// ---------------------------------------------------------------------------
+
+/// The `music_screen` tool. Advertised wherever `spotify_control` is (screen-only;
+/// transport stays on `spotify_control`).
+pub(super) fn music_screen() -> Arc<dyn VoiceTool> {
+    Arc::new(MusicScreen)
+}
+
+/// Typed arguments for `music_screen`.
+#[derive(Debug, Deserialize)]
+struct MusicScreenArgs {
+    /// One of the fixed screen actions.
+    action: String,
+}
+
+/// Show / switch / close the on-screen music player ([`DeviceAction::MusicScreen`]).
+/// The device decides whether anything is playing.
+struct MusicScreen;
+
+#[async_trait]
+impl VoiceTool for MusicScreen {
+    fn name(&self) -> &'static str {
+        MUSIC_SCREEN
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        definition(
+            MUSIC_SCREEN,
+            "Control what the music player shows on the display: open the full \
+             now-playing screen, open the up-next queue, or close the player back to the \
+             ambient screen. Use this for requests like \"show me what's playing\", \"show \
+             the queue / what's up next\", or \"hide the music\". This only changes the \
+             SCREEN — to play/pause/skip/change volume use spotify_control instead.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["show", "show_queue", "close"],
+                        "description": "The screen action: `show` opens the now-playing view, \
+                                        `show_queue` opens the up-next list, `close` returns to \
+                                        the ambient display."
+                    }
+                },
+                "required": ["action"]
+            }),
+        )
+    }
+
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "You can also control what the music player SHOWS on the display with the \
+             `music_screen` tool (separate from `spotify_control`, which changes playback). \
+             Call `music_screen` with action=show when the user says things like \"show me \
+             what's playing\" or \"pull up the music\", action=show_queue for \"what's up \
+             next\" or \"show the queue\", and action=close for \"hide the music\" or \"close \
+             the player\". The turn context will tell you when the music screen is already \
+             open and what's on it. Relay its short spoken confirmation.",
+        )
+    }
+
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: MusicScreenArgs = parse_args(args, MUSIC_SCREEN)?;
+        let (nav, confirmation) = match args.action.as_str() {
+            "show" => (MusicNav::NowPlaying, "Here's what's playing."),
+            "show_queue" => (MusicNav::Queue, "Here's what's up next."),
+            "close" => (MusicNav::Close, "Closing the music player."),
+            other => anyhow::bail!("unknown music_screen action `{other}`"),
+        };
+        emit(
+            ctx.actions,
+            DeviceAction::MusicScreen(nav),
+            "the music screen could update",
         )?;
         Ok(confirmation.to_string())
     }
@@ -574,5 +657,32 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "unknown recipe_control action `dance`");
+    }
+
+    #[tokio::test]
+    async fn music_screen_maps_actions_and_rejects_unknown_ones() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolCtx { actions: Some(&tx) };
+        for (action, nav) in [
+            ("show", MusicNav::NowPlaying),
+            ("show_queue", MusicNav::Queue),
+            ("close", MusicNav::Close),
+        ] {
+            MusicScreen
+                .invoke(&json!({ "action": action }), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(rx.try_recv().unwrap(), DeviceAction::MusicScreen(nav));
+        }
+        let err = MusicScreen
+            .invoke(&json!({ "action": "teleport" }), &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "unknown music_screen action `teleport`");
+        // With no display attached a valid action reports so (and emits nothing).
+        assert!(MusicScreen
+            .invoke(&json!({ "action": "show" }), &ToolCtx { actions: None })
+            .await
+            .is_err());
     }
 }

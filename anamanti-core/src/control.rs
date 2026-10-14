@@ -22,6 +22,7 @@ use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::graphview::NodeId;
 use crate::memory::{EmbedStatus, GraphRagController, MemoryStore};
+use crate::music::{NowPlayingService, SpotifyCommand};
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{SettingsUpdate, SharedSettings};
 use crate::speaker::{SpeakerRegistry, SpeakerService};
@@ -54,6 +55,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MODELS
             | types::LIST_VOICES
             | types::GET_DRIVE_TOKEN
+            | types::MUSIC_CONTROL
             | types::GET_FUNCTIONS
             | types::PAIR_PHONE
     )
@@ -76,6 +78,8 @@ pub async fn handle_control(
         models_response(&services.catalog).await
     } else if request.event_type == types::LIST_VOICES {
         voices_response(services.connector.as_ref(), services.voices_dir.as_deref()).await
+    } else if request.event_type == types::MUSIC_CONTROL {
+        music_control_response(request, settings, &services.now_playing).await
     } else if request.event_type == types::GET_FUNCTIONS {
         // The embeddings entry needs the live GraphRAG backend status (async), so this
         // request is answered here rather than in the pure `respond`.
@@ -123,6 +127,35 @@ pub async fn handle_control(
         respond(request, memory, settings, speaker.map(|s| s.registry()))
     };
     device.send(&response).await
+}
+
+/// Handle an `anamanti-music-control` command from the display's on-screen transport
+/// controls: map the action to a [`SpotifyCommand`] and issue it against the live
+/// controller. Answered in-band (`ok`/`message`) so a failure (not linked, device
+/// asleep, bad action) never drops the device connection — mirroring the other control
+/// responses. The spoken confirmation `command` returns is surfaced as the `message`.
+pub async fn music_control_response(
+    request: &WyomingEvent,
+    settings: &SharedSettings,
+    now_playing: &NowPlayingService,
+) -> WyomingEvent {
+    let Some((action, value)) = request.music_control_command() else {
+        return WyomingEvent::music_result(false, "music-control request missing `action`");
+    };
+    let cmd = match SpotifyCommand::transport(&action, value) {
+        Ok(Some(cmd)) => cmd,
+        Ok(None) => {
+            return WyomingEvent::music_result(false, format!("unknown music action `{action}`"))
+        }
+        Err(e) => return WyomingEvent::music_result(false, format!("{e:#}")),
+    };
+    let Some(controller) = now_playing.controller(settings) else {
+        return WyomingEvent::music_result(false, "Spotify isn't linked on the Anamanti Core");
+    };
+    match controller.command(cmd).await {
+        Ok(msg) => WyomingEvent::music_result(true, msg),
+        Err(e) => WyomingEvent::music_result(false, format!("{e:#}")),
+    }
 }
 
 /// Build the `anamanti-pair-result` response for a device phone-pairing request.
@@ -1597,8 +1630,49 @@ mod tests {
         assert!(is_control_request(types::ENROLL_CANCEL));
         assert!(is_control_request(types::LIST_MODELS));
         assert!(is_control_request(types::LIST_VOICES));
+        assert!(is_control_request(types::MUSIC_CONTROL));
         assert!(!is_control_request(types::AUDIO_START));
         assert!(!is_control_request(types::TRANSCRIPT));
+    }
+
+    #[tokio::test]
+    async fn music_control_reports_unlinked_in_band() {
+        // The fixture settings have no Spotify link, so any valid action is answered
+        // ok:false with a speakable reason rather than dropping the connection.
+        let s = settings();
+        let np = NowPlayingService::new();
+        let resp =
+            music_control_response(&WyomingEvent::music_control("pause", None), &s, &np).await;
+        assert_eq!(resp.event_type, types::MUSIC_RESULT);
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data["message"].as_str().unwrap().contains("linked"));
+    }
+
+    #[tokio::test]
+    async fn music_control_rejects_missing_and_unknown_actions() {
+        let s = settings();
+        let np = NowPlayingService::new();
+        // Missing action.
+        let resp = music_control_response(
+            &WyomingEvent::with_data(types::MUSIC_CONTROL, json!({ "value": 50 })),
+            &s,
+            &np,
+        )
+        .await;
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data["message"].as_str().unwrap().contains("action"));
+
+        // Unknown action (recognized before the link check, so it reports the action).
+        let resp =
+            music_control_response(&WyomingEvent::music_control("teleport", None), &s, &np).await;
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data["message"].as_str().unwrap().contains("teleport"));
+
+        // `volume` with no level is rejected rather than silently muting.
+        let resp =
+            music_control_response(&WyomingEvent::music_control("volume", None), &s, &np).await;
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data["message"].as_str().unwrap().contains("level"));
     }
 
     #[test]

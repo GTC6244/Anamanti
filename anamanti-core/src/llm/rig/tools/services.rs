@@ -304,7 +304,7 @@ struct SpotifyArgs {
     kind: Option<String>,
     /// For `volume`: the target level, 0–100.
     #[serde(default)]
-    volume_percent: Option<u8>,
+    volume_percent: Option<i64>,
 }
 
 impl SpotifyArgs {
@@ -323,16 +323,8 @@ impl SpotifyArgs {
             "queue" | "add" => Ok(SpotifyCommand::Queue {
                 query: query.context("queue needs the name of a song to add")?,
             }),
-            "pause" | "stop" => Ok(SpotifyCommand::Pause),
-            "resume" | "unpause" => Ok(SpotifyCommand::Resume),
-            "next" | "skip" | "forward" => Ok(SpotifyCommand::Next),
-            "previous" | "prev" | "back" => Ok(SpotifyCommand::Previous),
-            "volume" | "set_volume" => Ok(SpotifyCommand::SetVolume {
-                percent: self
-                    .volume_percent
-                    .context("volume needs a level from 0 to 100")?,
-            }),
-            other => anyhow::bail!("unknown action `{other}`"),
+            other => SpotifyCommand::transport(other, self.volume_percent)?
+                .with_context(|| format!("unknown action `{other}`")),
         }
     }
 }

@@ -35,6 +35,8 @@ pub enum DisplayContext {
     Weather(WeatherScreen),
     /// The place card is up (`kind: "place"`).
     Place(PlaceScreen),
+    /// The music player is up (`kind: "music"`).
+    Music(MusicScreen),
     /// The audio-diagnostics screen is up (`kind: "diagnostics"`). This is a
     /// **transcription-only** context: the turn pipeline echoes the STT transcript to
     /// the device for on-screen display and then stops — no speaker ID, no System-1, no
@@ -103,6 +105,22 @@ pub struct PlaceScreen {
     pub address: String,
 }
 
+/// The music player's state, as carried in a [`DisplayContext::Music`]. Tells the model
+/// a music screen is up (and what's on it), so it can drive it with `music_screen`
+/// (show now-playing / show up-next / close) and answer "what's this song?".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MusicScreen {
+    /// Whether playback is currently running (vs. paused).
+    pub playing: bool,
+    /// The current track title (empty if unknown).
+    pub title: String,
+    /// The current track's artist (empty if unknown).
+    pub artist: String,
+    /// Which music screen is open: `"now_playing"` / `"up_next"` / `"hidden"` (the
+    /// compact overlay only).
+    pub screen: String,
+}
+
 /// Pull the display context out of an `audio-start` data block's `screen` object, or
 /// `None` when the display reports nothing (an idle screen, or a device that doesn't
 /// stamp context). Dispatches on `screen.kind`; an unknown kind (e.g. a newer device
@@ -117,6 +135,7 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
             parse_weather_screen(screen.get("weather")?.as_object()?).map(DisplayContext::Weather)
         }
         "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
+        "music" => parse_music_screen(screen.get("music")?.as_object()?).map(DisplayContext::Music),
         // The audio-diagnostics screen carries no state — its presence alone switches the
         // turn to transcription-only (the orchestrator short-circuits before any LLM work).
         "diagnostics" => Some(DisplayContext::Diagnostics),
@@ -228,6 +247,7 @@ impl DeviceContext {
             Some(DisplayContext::Recipe(_)) => Some("recipe"),
             Some(DisplayContext::Weather(_)) => Some("weather"),
             Some(DisplayContext::Place(_)) => Some("place"),
+            Some(DisplayContext::Music(_)) => Some("music"),
             // Diagnostics never reaches System-1/System-2 (the turn short-circuits before
             // them), so it reports no widget label — nothing can leak into a decision or
             // prompt even if that ordering changes later. Enrollment is the same: the turn
@@ -351,6 +371,31 @@ fn parse_place_screen(place: &Map<String, Value>) -> Option<PlaceScreen> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+    })
+}
+
+/// Parse the `music` sub-object of a `screen` block into a [`MusicScreen`].
+fn parse_music_screen(music: &Map<String, Value>) -> Option<MusicScreen> {
+    let s = |k: &str| {
+        music
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let screen = music
+        .get("screen")
+        .and_then(Value::as_str)
+        .unwrap_or("hidden")
+        .to_string();
+    Some(MusicScreen {
+        playing: music
+            .get("playing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        title: s("title"),
+        artist: s("artist"),
+        screen,
     })
 }
 
@@ -518,6 +563,27 @@ mod tests {
             }))
         );
 
+        // A device with the music screen up stamps a `music` block.
+        let music = json!({
+            "screen": {
+                "kind": "music",
+                "music": {
+                    "playing": true,
+                    "title": "Paranoid Android",
+                    "artist": "Radiohead",
+                    "screen": "now_playing",
+                },
+            },
+        });
+        assert_eq!(
+            display_context(&music),
+            Some(DisplayContext::Music(MusicScreen {
+                playing: true,
+                title: "Paranoid Android".to_string(),
+                artist: "Radiohead".to_string(),
+                screen: "now_playing".to_string(),
+            }))
+        );
         // The audio-diagnostics screen carries no state — its bare `kind` is enough, and
         // `widget_label()` reports nothing (it must never route a decision or prompt).
         let diag = json!({ "screen": { "kind": "diagnostics" } });
@@ -525,8 +591,21 @@ mod tests {
         assert_eq!(device_context(&diag).widget_label(), None);
 
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
-        let other = json!({ "screen": { "kind": "music" } });
+        let other = json!({ "screen": { "kind": "photos" } });
         assert_eq!(display_context(&other), None);
+    }
+
+    #[test]
+    fn music_screen_frame_roundtrips_and_decodes() {
+        let ev = WyomingEvent::music_screen("up_next");
+        assert_eq!(ev.event_type, types::MUSIC);
+        assert_eq!(ev.data["action"], json!("screen"));
+        assert_eq!(ev.data["screen"], json!("up_next"));
+        // widget_label reflects the music screen.
+        let ctx = device_context(&json!({
+            "screen": { "kind": "music", "music": { "playing": false, "screen": "up_next" } }
+        }));
+        assert_eq!(ctx.widget_label(), Some("music"));
     }
 
     #[test]

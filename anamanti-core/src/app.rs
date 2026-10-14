@@ -4,7 +4,7 @@
 //! ([`crate::control`]) and the loopback config page ([`crate::webconfig`]) all need
 //! the same handful of services — the turn pipeline (and through it the settings,
 //! memory and speaker service), the model catalog, the STT/TTS connector, the
-//! notification + weather push registries, the GraphRAG controller, music. They are
+//! notification / weather / now-playing push registries, the GraphRAG controller, music. They are
 //! built once in `main`, bundled into one [`AppServices`], and shared as an
 //! `Arc<AppServices>`: a connection clones one `Arc`, and a new service is one new
 //! field here rather than a new argument threaded through every signature.
@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::{GraphRagController, MemoryStore};
-use crate::music::MusicHub;
+use crate::music::{MusicHub, NowPlayingService};
 use crate::notify::NotificationService;
 use crate::orchestrator::{Pipeline, ServiceConnector};
 use crate::server::Ducker;
@@ -44,6 +44,9 @@ pub struct AppServices {
     pub notify: Arc<NotificationService>,
     /// Ambient weather push channels.
     pub weather: Arc<WeatherService>,
+    /// Music now-playing push channels + the shared live Spotify controller (also used
+    /// by the display's on-screen transport controls).
+    pub now_playing: Arc<NowPlayingService>,
     /// The live-swappable GraphRAG controller; `None` on the SQLite backend or when
     /// GraphRAG failed to start.
     pub graphrag: Option<Arc<GraphRagController>>,
@@ -70,6 +73,7 @@ impl AppServices {
             voices_dir: None,
             notify: Arc::new(NotificationService::new()),
             weather: Arc::new(WeatherService::new()),
+            now_playing: Arc::new(NowPlayingService::new()),
             graphrag: None,
             ducker: None,
             music: None,
@@ -89,6 +93,11 @@ impl AppServices {
 
     pub fn with_weather(mut self, weather: Arc<WeatherService>) -> Self {
         self.weather = weather;
+        self
+    }
+
+    pub fn with_now_playing(mut self, now_playing: Arc<NowPlayingService>) -> Self {
+        self.now_playing = now_playing;
         self
     }
 

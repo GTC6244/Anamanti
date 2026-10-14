@@ -10,7 +10,7 @@ use tokio::time::Instant;
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
-use crate::llm::{DeviceAction, FontDirection, RecipeNav};
+use crate::llm::{DeviceAction, FontDirection, MusicNav, RecipeNav};
 use crate::settings::{RuntimeSettings, SharedSettings};
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
 use crate::wyoming::tts::TtsSession;
@@ -150,6 +150,11 @@ pub(crate) fn device_action_event(action: &DeviceAction) -> Option<WyomingEvent>
             RecipeNav::ScrollTop => WyomingEvent::recipe_scroll("top"),
             RecipeNav::ScrollBottom => WyomingEvent::recipe_scroll("bottom"),
         },
+        DeviceAction::MusicScreen(nav) => WyomingEvent::music_screen(match nav {
+            MusicNav::NowPlaying => "now_playing",
+            MusicNav::Queue => "up_next",
+            MusicNav::Close => "hidden",
+        }),
         DeviceAction::AdjustFont(dir) => WyomingEvent::font_adjust(match dir {
             FontDirection::Increase => "increase",
             FontDirection::Decrease => "decrease",

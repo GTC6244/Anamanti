@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::app::AppServices;
 use crate::control;
-use crate::music::MusicDucker;
+use crate::music::{MusicDucker, NowPlayingService};
 use crate::notify::NotificationService;
 use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome, TurnStart};
 use crate::weather::WeatherService;
@@ -213,12 +213,11 @@ async fn handle_connection(stream: TcpStream, services: &AppServices) -> Result<
             Some(ev) if ev.event_type == types::ANAMANTI_HELLO => {
                 let device_id = ev.hello_device_id().unwrap_or_default().to_string();
                 let device_name = ev.hello_name().unwrap_or_default().to_string();
-                // The persistent channel serves either proactive notifications
-                // (`role=notify`, the default) or the ambient weather push
-                // (`role=weather`); the write pump below is identical for both — it
-                // just drains whichever service's receiver.
-                let channel =
-                    PushChannel::for_role(ev.hello_role(), &services.notify, &services.weather);
+                // The persistent channel serves proactive notifications (`role=notify`,
+                // the default), the ambient weather push (`role=weather`), or the music
+                // now-playing push (`role=music`); the write pump below is identical for
+                // all three — it just drains whichever service's receiver.
+                let channel = PushChannel::for_role(ev.hello_role(), services);
                 log::info!(
                     "[{}] {} channel opened (device_id={device_id:?}, name={device_name:?})",
                     peer_str(peer.as_ref()),
@@ -266,18 +265,20 @@ async fn handle_connection(stream: TcpStream, services: &AppServices) -> Result<
 }
 
 /// The persistent push service an `anamanti-hello` frame opens, looked up by its
-/// `role`: `weather` → the ambient weather push, anything else (the default `notify`)
-/// → proactive notifications.
+/// `role`: `weather` → the ambient weather push, `music` → the now-playing push,
+/// anything else (the default `notify`) → proactive notifications.
 enum PushChannel<'a> {
     Notify(&'a NotificationService),
     Weather(&'a WeatherService),
+    Music(&'a NowPlayingService),
 }
 
 impl<'a> PushChannel<'a> {
-    fn for_role(role: &str, notify: &'a NotificationService, weather: &'a WeatherService) -> Self {
+    fn for_role(role: &str, services: &'a AppServices) -> Self {
         match role {
-            "weather" => PushChannel::Weather(weather),
-            _ => PushChannel::Notify(notify),
+            "weather" => PushChannel::Weather(&services.weather),
+            "music" => PushChannel::Music(&services.now_playing),
+            _ => PushChannel::Notify(&services.notify),
         }
     }
 
@@ -285,6 +286,7 @@ impl<'a> PushChannel<'a> {
         match self {
             PushChannel::Notify(_) => "notify",
             PushChannel::Weather(_) => "weather",
+            PushChannel::Music(_) => "music",
         }
     }
 
@@ -301,6 +303,7 @@ impl<'a> PushChannel<'a> {
         match self {
             PushChannel::Notify(svc) => svc.register(device_id, name),
             PushChannel::Weather(svc) => svc.register(),
+            PushChannel::Music(svc) => svc.register(),
         }
     }
 
@@ -308,6 +311,7 @@ impl<'a> PushChannel<'a> {
         match self {
             PushChannel::Notify(svc) => svc.deregister(conn_id),
             PushChannel::Weather(svc) => svc.deregister(conn_id),
+            PushChannel::Music(svc) => svc.deregister(conn_id),
         }
     }
 }
