@@ -543,7 +543,7 @@ Remaining:
       --target-platform android-arm` must succeed — proves `ring` cross-compiles for
       32-bit armv7 via cargokit/NDK (the one real build risk). (`cargo ndk -t
       armeabi-v7a -p 30 build --release` is a faster Rust-only pre-check.)
-- [ ] **End-to-end on hardware:** set a real `updateBaseUrl` (Settings → Updates),
+- [ ] **End-to-end on hardware:** set a real `updateBaseUrl` (Settings → Device → Updates),
       publish a higher-`versionCode` signed APK + `latest.json` via
       `anamanti-display/scripts/release-r2.sh`, then confirm: banner appears → download
       with progress → SHA-256 passes → unknown-sources prompt → system install →

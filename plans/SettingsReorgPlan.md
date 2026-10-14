@@ -421,10 +421,44 @@ None. All questions are answered in §0 (decisions #6–#8 resolved the last thr
 
 ## 7. Implementation status
 
-| Phase | Status |
-|---|---|
-| 0 — fixes (bug #20, copy) | pending |
-| 1 — shell + regroup | pending |
-| 2 — apply immediately | pending |
-| 3 — Advanced mode | pending |
-| 4 — fit to screen | pending |
+All phases are implemented on branch `ws-d9b483-d9b4832b` (2026-10-13/14), pending
+on-device QA. Phases 1, 2 and 4 landed as one change: the section widgets were
+written new, so building them single-column with a Save button first (and then
+reworking them) would have been throwaway work.
+
+| Phase | Status | Commit |
+|---|---|---|
+| 0 — fixes: bug #20 (capture-path settings now restart the engine) | done | `fix(display): restart the engine when capture-path settings change` |
+| 0 — copy fixes #16–#19 ("Anamanti Core", Silero default, AEC help, header) | done | folded into the Settings rewrite |
+| Live "sensitivity while speaking" (decision #6): `update_diagnostics_tuning(gain, threshold, active_threshold)`, FRB regenerated; `main.dart` live-tunes instead of restarting and serializes applies | done | `feat(display): live-apply wake-word sensitivity while speaking` |
+| 3 — `AppSettings.advancedMode` (default on, decision #8) | done | `feat(display): AppSettings.advancedMode (default on)` |
+| 1 + 2 + 4 — rail + tabs, regroup, apply immediately, Advanced gating, two-column fit, no-scroll test | done | `feat(display): reorganize Settings — 6-section rail, …` |
+| Docs — `DisplayUI.md` §9–§10, `Plan.MD` decision row, `architecture.md`, README / Updater / FontScale / TODO references | done | `docs: …` |
+
+**Deviations from §3, decided during implementation:**
+- **Dim delay** is a row of 8 chips (wrapping to two rows), not a segmented button: 8
+  segments don't fit legibly in a ~400 dp column.
+- **Audio Diagnostics** needed layout work to fit beside the rail (864 dp instead of
+  960 dp wide): readouts are three across, "Recent detections" moved to the left
+  column as a compact two-per-row list capped at the last 4 (was 8), and "Heard words"
+  is capped at two lines. A test pins the worst case (full history + long transcript)
+  to one screen.
+- The **Capabilities** tab uses one 3-across grid (category order preserved) rather than
+  per-category headers, which wouldn't fit ~15 capabilities on one screen.
+- **Device → Connection** shows Core reachability (from the settings fetch) rather than
+  a separate live connection indicator.
+- The fit tests load the **real Material fonts** from the Flutter SDK
+  (`test/support/real_fonts.dart`); the default test font draws every glyph as a
+  full-width square, which would make height checks meaningless. The tests skip if the
+  SDK fonts can't be found.
+
+**Known limitation:** a voice "increase font" while Settings is open is overwritten by
+the next Settings apply (Settings holds its own copy of the device-local settings).
+This was also true with the old Save button.
+
+**On-device QA checklist:** open each section and tab on the Echo Show (no scrolling,
+readable); change the wake word (one listener restart, "Saved" shown); drag
+sensitivity in Audio Diagnostics and watch the meter respond live; flip NS/AGC/AEC
+quickly (one restart); change the LLM backend with the Mac up, then with it down
+(control disabled, banner shown); edit the device name and leave Settings mid-edit
+(the name is kept); switch Advanced mode off and confirm the household view.
