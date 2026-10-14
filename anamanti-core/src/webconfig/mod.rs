@@ -50,6 +50,7 @@ mod household;
 mod memory;
 mod music;
 mod routes;
+mod speakers;
 mod system;
 mod tools;
 

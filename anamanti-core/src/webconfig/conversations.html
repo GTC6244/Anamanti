@@ -28,6 +28,15 @@
   .cv-pre { max-height: 260px; overflow: auto; }
   .cv-fold-tools { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
   .cv-lg { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.74rem; color: var(--muted); }
+  .cv-mems.tagged { list-style: none; padding-left: 0; }
+  .cv-mems.tagged li { display: flex; gap: 0.5rem; align-items: baseline; }
+  .cv-mems.tagged li > .spk-tag, .cv-mems.tagged li > .chip, .cv-mems.tagged li > .muted { flex: 0 0 auto; }
+  .cv-spk { display: grid; grid-template-columns: 7.5rem 1fr; gap: 0.3rem 0.8rem; font-size: 0.84rem; align-items: center; }
+  .cv-spk dt { color: var(--muted); }
+  .cv-spk dd { margin: 0; }
+  .cv-fix { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.6rem; }
+  .cv-fix select { width: auto; max-width: 14rem; padding: 0.22rem 0.5rem; font-size: 0.8rem; }
+  .cv-hl { display: block; background: var(--accent-soft); border-left: 3px solid var(--accent); margin: 0 -0.4rem; padding: 0 0.4rem; }
 </style>
 
 <div class="page-fill">
@@ -36,7 +45,7 @@
     <section class="card fill cv-card">
       <div class="cv-tb">
         <input type="search" id="cvSearch" placeholder="Search transcript or reply…" aria-label="Search turns">
-        <select id="cvSpeaker" aria-label="Filter by speaker"><option value="">All speakers</option></select>
+        <select id="cvSpeaker" aria-label="Filter by speaker"><option value="">Everyone</option></select>
         <select id="cvLimit" aria-label="Number of turns to load">
           <option value="50">50</option><option value="100" selected>100</option><option value="250">250</option><option value="1000">1000</option>
         </select>
@@ -69,7 +78,7 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('#cvOrphans')) ui.drawer.open('orphanDrawer');
   if (e.target.closest('#orphanClose')) ui.drawer.close();
 });
-let TURNS = [], PROMPTS = [], BOOT = {}, cvSel = null, cvFirst = true;
+let TURNS = [], PROMPTS = [], BOOT = {}, SPK = null, cvSel = null, cvFirst = true;
 
 // Prompts no loaded turn claims (e.g. a turn that errored or timed out before it was
 // logged) — the old /prompts page listed every prompt, so keep them reachable.
@@ -92,7 +101,14 @@ function renderOrphans(){
 
 function errMsg(e){ return String((e && e.message) || e); }
 function firstLine(s){ return String(s || '').split('\n').find(l => l.trim()) || ''; }
-function who(r){ return r.speaker_name || r.speaker_id || ''; }
+// The turn's resolved speaker (live name, corrections applied) from /chatlog.json.
+// Older servers without tags fall back to the logged name/id.
+function spk(r){
+  if (r.speaker) return r.speaker;
+  const legacy = !r.speaker_id || r.speaker_id === 'household' || r.speaker_id === 'unknown';
+  return legacy ? { kind: 'unknown', label: 'Unknown speaker' } : { kind: 'person', id: r.speaker_id, name: r.speaker_name, label: r.speaker_name || r.speaker_id };
+}
+function spkKey(r){ const t = spk(r); return t.kind === 'person' ? (t.id || t.label) : '__' + t.kind; }
 function keyOf(r){ return String(r.turn_id || r.id); }
 const STAGE = {}; (ui.STAGES || []).forEach(s => { STAGE[s.key] = s; });
 function color(k){ return (STAGE[k] && STAGE[k].color) || 'var(--accent)'; }
@@ -116,13 +132,19 @@ $('cvLegend').innerHTML = (ui.STAGES || []).map(s => '<span class="cv-lg"><span 
 function filtered(){
   const q = $('cvSearch').value.trim().toLowerCase(), sp = $('cvSpeaker').value;
   return TURNS.filter(r => (!q || String(r.transcript || '').toLowerCase().includes(q) || String(r.reply || '').toLowerCase().includes(q))
-    && (!sp || (who(r) || '__none') === sp));
+    && (!sp || spkKey(r) === sp));
 }
+// Name-based speaker filter: every person seen in the loaded turns (live names),
+// then the explicit Unknown speaker / Household entries.
 function buildSpeakers(){
   const sel = $('cvSpeaker'), cur = sel.value;
-  const vals = [...new Set(TURNS.map(r => who(r) || '__none'))].sort();
-  sel.innerHTML = '<option value="">All speakers</option>' + vals.map(v => '<option value="' + escAttr(v) + '">' + esc(v === '__none' ? 'unknown' : v) + '</option>').join('');
-  if (vals.includes(cur)) sel.value = cur;
+  const ppl = new Map();
+  TURNS.forEach(r => { const t = spk(r); if (t.kind === 'person') ppl.set(spkKey(r), t.label); });
+  const count = (k) => TURNS.filter(r => spkKey(r) === k).length;
+  sel.innerHTML = '<option value="">Everyone</option>'
+    + (ppl.size ? '<optgroup label="People">' + [...ppl].sort((a, b) => a[1].localeCompare(b[1])).map(([k, label]) => '<option value="' + escAttr(k) + '">' + esc(label) + ' (' + count(k) + ')</option>').join('') + '</optgroup>' : '')
+    + '<optgroup label="Other"><option value="__unknown">Unknown speaker (' + count('__unknown') + ')</option><option value="__household">Household (' + count('__household') + ')</option></optgroup>';
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 function renderList(){
   const list = $('cvList'), rows = filtered();
@@ -138,7 +160,7 @@ function renderList(){
       + '<div class="t-meta">'
       + (tier ? '<span class="cv-locdot ' + tier + '" title="' + escAttr(ui.TIER[tier].long) + '"></span>' : '')
       + '<span title="' + escAttr(fmtTime(r.ts)) + '">' + esc(ui.fmtAgo(r.ts)) + '</span>'
-      + (who(r) ? '<span class="cv-who">' + esc(who(r)) + '</span>' : '')
+      + ui.speakerTag(spk(r), { hints: false })
       + (model ? '<span class="chip neutral ellipsis" style="max-width:14rem" title="' + escAttr(model) + '">' + esc(r.model || r.llm_backend) + '</span>' : '')
       + (t.path ? '<span class="chip">' + esc(t.path) + '</span>' : '')
       + '</div>'
@@ -230,6 +252,64 @@ function matchPrompt(r){
   return best ? { p: best, exact: false } : null;
 }
 
+// ---------------------------------------------------------------- Speaker
+const RES_TEXT = { identified: 'Identified', tentative: 'Probable match', 'new': 'New voice', unknown: 'Not identified', corrected: 'Corrected by hand' };
+function speakerBlock(r){
+  const t = spk(r), cfg = (BOOT && BOOT.speaker) || {};
+  const conf = t.confidence != null ? Number(t.confidence).toFixed(3) : null;
+  const th = [];
+  if (cfg.match_threshold != null) th.push('match ≥ ' + cfg.match_threshold);
+  if (cfg.new_threshold != null) th.push('new < ' + cfg.new_threshold);
+  if (cfg.min_identify_ms != null) th.push('min identify ' + cfg.min_identify_ms + ' ms');
+  if (cfg.min_speech_ms != null) th.push('min enroll ' + cfg.min_speech_ms + ' ms');
+  let h = '<div class="cv-section"><div class="section-label">Speaker</div><dl class="cv-spk">'
+    + '<dt>Speaker</dt><dd>' + ui.speakerChip(t) + '</dd>'
+    + '<dt>Resolution</dt><dd>' + (t.resolution ? ui.resolutionBadge(t) + ' <span class="hint">' + esc(RES_TEXT[t.resolution] || t.resolution) + '</span>' : '<span class="muted">not recorded</span>') + '</dd>'
+    + '<dt>Confidence</dt><dd>' + (conf != null && t.resolution !== 'unknown' ? '<span class="mono">' + esc(conf) + '</span>' : '<span class="muted">—</span>') + (th.length ? ' <span class="hint">(' + esc(th.join(', ')) + ')</span>' : '') + '</dd>'
+    + '<dt>Inherited</dt><dd>' + (t.inherited ? 'Yes — too short to identify, carried over from the follow-up conversation' : '<span class="muted">No</span>') + '</dd>'
+    + '<dt>Short clip</dt><dd>' + (t.short_clip ? 'Yes — matched by the read-only short-clip path' : '<span class="muted">No</span>') + '</dd>';
+  if (r.speaker_override) {
+    const orig = r.speaker_name || r.speaker_id || 'unknown';
+    h += '<dt>Logged as</dt><dd><span class="mono">' + esc(orig) + '</span> <span class="hint">(' + esc(r.speaker_resolution || 'no resolution') + ')</span></dd>';
+  }
+  h += '</dl>';
+  // Correction: "This was → person | Unknown". Re-attributes the turn and the memories
+  // it wrote; never trains a voiceprint.
+  if (r.turn_id) {
+    const cur = t.kind === 'person' ? t.id : 'unknown';
+    const opts = ((SPK && SPK.speakers) || []).map(p => '<option value="' + escAttr(p.id) + '"' + (p.id === cur ? ' disabled' : '') + '>' + esc(p.label) + '</option>').join('');
+    h += '<div class="cv-fix"><span class="hint">This was</span><select id="cvFixTo" aria-label="Who said this turn"><option value="">choose…</option>' + opts
+      + '<option value="unknown"' + (cur === 'unknown' ? ' disabled' : '') + '>Unknown speaker</option></select>'
+      + '<button type="button" class="sm" id="cvFix">' + ui.icon('edit') + 'Re-attribute</button>'
+      + '<span class="hint">Moves this turn and the personal memories it wrote. Never trains a voiceprint.</span></div>';
+  }
+  return h + '</div>';
+}
+async function fixSpeaker(r){
+  const to = $('cvFixTo') && $('cvFixTo').value;
+  if (!to) { ui.toast(false, 'Pick who said it first.'); return; }
+  const btn = $('cvFix'); btn.disabled = true;
+  try {
+    const j = await ui.req(postJSON('/conversations/attribute', { turn_id: r.turn_id, to }));
+    ui.toast(true, j.message || 'Re-attributed.');
+    await load();
+  } catch (e) { ui.toast(false, 'Could not re-attribute: ' + errMsg(e)); btn.disabled = false; }
+}
+// Escape the system prompt and highlight the speaker sections that were sent: the
+// identity line ("# Who is speaking"), "# About this person" and "# Household facts".
+function highlightPrompt(text){
+  const HL = /^# (Who is speaking|About this person|Household facts)/;
+  let out = '', open = false;
+  String(text).split('\n').forEach((line, i) => {
+    const head = /^# /.test(line);
+    if (head && open) { out += '</span>'; open = false; }
+    if (HL.test(line)) { out += '<span class="cv-hl">'; open = true; }
+    out += esc(line) + '\n';
+  });
+  if (open) out += '</span>';
+  return out.replace(/\n$/, '');
+}
+
 // ---------------------------------------------------------------- Detail
 function renderDetail(){
   const d = $('cvDetail');
@@ -243,7 +323,7 @@ function renderDetail(){
   let h = '<div class="cv-head">'
     + '<span class="cv-title" title="' + escAttr(fmtTime(r.ts)) + '">' + esc(fmtTime(r.ts)) + '</span>'
     + '<span class="hint">' + esc(ui.fmtAgo(r.ts)) + '</span>'
-    + (who(r) ? '<span class="chip accent">' + ui.icon('users') + esc(who(r)) + '</span>' : '')
+    + ui.speakerTag(spk(r))
     + '<span class="grow"></span>'
     + (model ? '<span class="chip neutral mono">' + esc(model) + '</span>' : '')
     + loc
@@ -252,9 +332,14 @@ function renderDetail(){
     + '</div>';
   h += '<div class="bubble-label">Heard</div><div class="bubble user">' + esc(r.transcript || '—') + '</div>';
   h += '<div class="bubble-label">Replied</div><div class="bubble bot">' + esc(r.reply || '—') + '</div>';
-  const mems = r.memories_written || [];
-  h += '<div class="cv-section"><div class="section-label">Memories written</div>'
-    + (mems.length ? '<ul class="cv-mems">' + mems.map(m => '<li>' + esc(m) + '</li>').join('') + '</ul>' : '<p class="hint">None this turn.</p>') + '</div>';
+  h += speakerBlock(r);
+  // Each memory with who it is FOR (person / Household / Unknown); records that
+  // predate scoped memories only have the text.
+  const mems = r.memories_tagged || (r.memories_written || []).map(c => ({ content: c, for: null }));
+  h += '<div class="cv-section"><div class="section-label">Memories written this turn</div>'
+    + (mems.length ? '<ul class="cv-mems tagged">' + mems.map(m => '<li>' + (m.for ? ui.speakerChip(m.for) : '<span class="muted" title="Logged before memory scopes">—</span>') + '<span>' + esc(m.content) + '</span></li>').join('') + '</ul>'
+      + (mems.some(m => m.for && m.for.kind === 'unknown') ? '<p class="hint" style="margin-top:.3rem"><a href="/memory#unknown">Review unknown-speaker memories</a></p>' : '')
+      : '<p class="hint">None this turn.</p>') + '</div>';
   h += '<div class="cv-section"><div class="section-label">Latency</div>' + waterfall(t) + '</div>';
 
   const m = matchPrompt(r);
@@ -266,13 +351,15 @@ function renderDetail(){
     const pm = [m.p.llm_backend, m.p.model].filter(Boolean).join(' / ');
     h += '<p class="hint" style="margin-bottom:.4rem">' + esc(fmtTime(m.p.ts)) + (pm ? ' · ' + esc(pm) : '') + '</p>'
       + '<div class="bubble-label">User message</div><pre class="cv-pre">' + esc(m.p.user_message || '') + '</pre>'
-      + '<div class="bubble-label">System prompt</div><pre class="cv-pre">' + esc(m.p.system_prompt || '') + '</pre>';
+      + '<div class="bubble-label">System prompt <span class="hint">· speaker sections highlighted</span></div><pre class="cv-pre">' + highlightPrompt(m.p.system_prompt || '') + '</pre>';
   } else {
     h += '<p class="hint">No prompt recorded (fast-path or command turn).</p>';
   }
   h += '</div></details></div>';
   d.innerHTML = h;
   d.scrollTop = 0;
+  const fix = $('cvFix');
+  if (fix) fix.addEventListener('click', () => fixSpeaker(r));
   const copy = $('cvCopy');
   if (copy) copy.addEventListener('click', async (e) => {
     e.preventDefault(); e.stopPropagation();
@@ -287,11 +374,13 @@ async function load(){
   const n = $('cvLimit').value;
   const btn = $('cvRefresh'); btn.disabled = true;
   try {
-    const [cl, pr, sys] = await Promise.all([
+    const [cl, pr, sys, sp] = await Promise.all([
       getJSON('/chatlog.json?limit=' + n),
       getJSON('/prompts.json?limit=' + n).catch(() => ({ ok: false })),
       cvFirst ? getJSON('/system.json').catch(() => null) : Promise.resolve(null),
+      getJSON('/speakers.json').catch(() => null),
     ]);
+    if (sp && sp.ok) SPK = sp;
     if (sys && sys.config) BOOT = sys.config;
     if (!cl.ok) throw new Error(cl.message || 'chat log unavailable');
     TURNS = cl.records || [];
@@ -303,6 +392,7 @@ async function load(){
     if (cvFirst && location.hash.length > 1) {
       let h = location.hash.slice(1);
       try { h = decodeURIComponent(h); } catch (e) { /* keep raw */ }
+      h = h.replace(/^turn=/, ''); // /conversations#turn=<turn_id> (memory page links)
       const hit = TURNS.find(r => r.turn_id === h) || TURNS.find(r => String(r.id) === h);
       if (hit) want = keyOf(hit);
       else ui.toast(false, 'That turn is not in the last ' + n + ' turns.');

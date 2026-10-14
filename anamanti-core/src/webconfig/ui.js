@@ -15,6 +15,8 @@
 //   ui.drawer.open(id) / ui.drawer.close()
 //   ui.confirm(btn, fn, label?)           → two-step inline confirm (no window.confirm)
 //   ui.fmtMs / ui.fmtAgo / ui.fmtDuration / ui.reveal(hash)
+//   ui.speakerChip(tag) / ui.resolutionBadge(tag) / ui.speakerTag(tag, {badge, hints, conf})
+//                                         → speaker chips from a server SpeakerTag (/speakers.json)
 //   ui.LOCALITY                           → the option → tier/sends map (plans/CoreWebUIPlan.md §3.3)
 
 (function(){
@@ -439,6 +441,63 @@
     return r;
   }
 
+  // ---------------------------------------------------------------- Speakers
+  // A resolved speaker tag from the server (SpeakerScopedMemoryPlan.md §8.1:
+  // {id, kind: person|household|unknown, name, label, relationship, resolution,
+  // confidence, candidate, has_clips, name_source, color, inherited, short_clip})
+  // rendered as a chip. Person: name + their stable colour, relationship on hover.
+  // Unnamed voice: "Speaker N (unnamed)". Household: neutral house chip. Unknown:
+  // dashed chip, "Unknown · maybe Brendon?" when there is a best guess.
+  function speakerChip(tag){
+    if (!tag) return '<span class="muted" title="Not recorded for older entries">not recorded</span>';
+    const kind = tag.kind === 'person' || tag.kind === 'household' ? tag.kind : 'unknown';
+    const tip = [];
+    let cls = 'chip spk ' + kind, style = '', lead = '';
+    if (kind === 'person') {
+      if (!tag.name) { cls += ' unnamed'; tip.push('An unnamed voice. Name it on the display’s People screen.'); }
+      if (tag.relationship) tip.push(tag.relationship);
+      if (tag.name_source) tip.push('name ' + ({ enrolled: 'from enrollment', admin: 'set by hand', spoken: 'heard in speech' })[tag.name_source]);
+      if (tag.has_clips) tip.push('voice clips on the display’s People screen');
+      if (tag.id) tip.push(tag.id);
+      if (tag.color) style = ' style="--spk:' + escAttr(tag.color) + '"';
+      lead = '<span class="spk-dot"></span>';
+    } else if (kind === 'household') {
+      lead = icon('home'); tip.push('True for everyone in the home');
+    } else {
+      lead = icon('users');
+      tip.push(tag.candidate ? 'Could not confirm the voice. Best guess: ' + tag.candidate.label : 'A voice that could not be identified');
+    }
+    return '<span class="' + cls + '"' + style + ' title="' + escAttr(tip.join(' · ')) + '">' + lead + '<span class="spk-name">' + esc(tag.label) + '</span></span>';
+  }
+  const RES = {
+    identified: { mark: '✓', text: 'identified', tip: 'Voice identified' },
+    tentative: { mark: '~', text: 'probable', tip: 'Probable match (below the match threshold)' },
+    'new': { mark: '★', text: 'new voice', tip: 'A voice not heard before' },
+    unknown: { mark: '?', text: 'unknown', tip: 'Voice could not be identified' },
+    corrected: { mark: '✎', text: 'corrected', tip: 'Speaker corrected by hand on Conversations' },
+  };
+  // The resolution badge: ✓ identified / ~ probable / ★ new / ? unknown, with the
+  // confidence on hover (and inline when `opts.conf`).
+  function resolutionBadge(tag, opts){
+    if (!tag || !tag.resolution || !RES[tag.resolution]) return '';
+    const r = RES[tag.resolution];
+    const conf = tag.confidence != null && tag.resolution !== 'unknown' ? Number(tag.confidence).toFixed(2) : null;
+    const tip = r.tip + (conf != null ? ' · cosine ' + conf : '');
+    return '<span class="chip res ' + escAttr(tag.resolution) + '" title="' + escAttr(tip) + '">' + r.mark + ' ' + esc(opts && opts.conf && conf != null ? conf : r.text) + '</span>';
+  }
+  // Chip + badge + the "inherited" / "short clip" hints, as one inline group.
+  function speakerTag(tag, opts){
+    if (!tag) return speakerChip(null);
+    opts = opts || {};
+    let h = speakerChip(tag);
+    if (opts.badge !== false) h += resolutionBadge(tag, opts);
+    if (opts.hints !== false) {
+      if (tag.inherited) h += '<span class="spk-hint" title="Too short to identify; identity carried over from the follow-up conversation">inherited</span>';
+      if (tag.short_clip) h += '<span class="spk-hint" title="Matched by the read-only short-clip path">short clip</span>';
+    }
+    return '<span class="spk-tag">' + h + '</span>';
+  }
+
   // Turn-latency stages, in pipeline order, with one fixed colour each — shared by the
   // Overview latency chart and the Conversations waterfall so a stage reads the same
   // everywhere. Mid-saturation hues that hold contrast on both light and dark surfaces.
@@ -463,5 +522,5 @@
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => hydrate());
 
-  window.ui = { hydrate, icon, loc, status, sends, sendsFor, tierOf, classify, toast, choices, secret, tags, savebar, tabs, drawer, confirm, fmtMs, fmtAgo, fmtDuration, reveal, req, LOCALITY, TIER, STAGES };
+  window.ui = { hydrate, icon, loc, status, sends, speakerChip, resolutionBadge, speakerTag, sendsFor, tierOf, classify, toast, choices, secret, tags, savebar, tabs, drawer, confirm, fmtMs, fmtAgo, fmtDuration, reveal, req, LOCALITY, TIER, STAGES };
 })();

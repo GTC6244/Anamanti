@@ -3,29 +3,82 @@
 //! the deterministic personality-switch voice intent.
 
 use crate::settings::{Household, HouseholdMember, Personality, PersonalityDef, RuntimeSettings};
-use crate::speaker::SpeakerContext;
+use crate::speaker::{SpeakerContext, SpeakerResolution};
 use crate::wyoming::protocol::{
     DeviceContext, DisplayContext, FontContext, PlaceScreen, RecipeScreen, WeatherScreen,
 };
 
+/// The recalled memory for one turn, split by who it is true for
+/// (SpeakerScopedMemoryPlan.md §5): the speaker's own memories and household facts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RecalledMemory {
+    /// About the person speaking (only ever non-empty for a recognized speaker).
+    pub personal: Vec<String>,
+    /// True for everyone in the home.
+    pub household: Vec<String>,
+}
+
+impl RecalledMemory {
+    /// Split recall `hits` into personal and household using the `household` subset,
+    /// dropping identity assertions ("The user's name is …") from the personal block:
+    /// the voiceprint registry is the only source of who is speaking.
+    pub fn split(hits: &[String], household: &[String]) -> Self {
+        let mut out = Self::default();
+        for h in hits {
+            if household.contains(h) {
+                out.household.push(h.clone());
+            } else if !asserts_identity(h) {
+                out.personal.push(h.clone());
+            }
+        }
+        out
+    }
+
+    /// Total characters of recalled context (for the timing log).
+    pub fn chars(&self) -> usize {
+        self.personal
+            .iter()
+            .chain(&self.household)
+            .map(String::len)
+            .sum()
+    }
+}
+
+/// Whether a recalled snippet asserts who the speaker *is* ("The user's name is
+/// Brendan", "My name is Brendan"). Such text must never decide identity — a mis-scoped
+/// or stale one is exactly how one person got told they were someone else.
+fn asserts_identity(snippet: &str) -> bool {
+    let l = snippet.to_lowercase();
+    [
+        "the user's name is",
+        "the user’s name is",
+        "my name is",
+        "call me ",
+    ]
+    .iter()
+    .any(|p| l.contains(p))
+}
+
 /// Assemble the full System-2 system prompt for one turn: the configured `base` prompt,
-/// the wall clock, who is speaking, where "here" is, who lives here, the recalled
-/// memory `context`, what the display shows, the font gate, and the personality block.
-/// Every setting is read from the turn's `runtime` snapshot, so config-page edits apply
-/// from the next turn without a restart.
+/// the wall clock, who is speaking (from the voiceprint, by resolution), where "here"
+/// is, who lives here, what is known about this person and the household, what the
+/// display shows, the font gate, and the personality block. `has_history` adds the note
+/// that earlier (follow-up) messages are labelled by speaker. Every setting is read from
+/// the turn's `runtime` snapshot, so config-page edits apply from the next turn.
 pub(crate) fn build_system_prompt(
     base: &str,
     speaker: &SpeakerContext,
     runtime: &RuntimeSettings,
     device_ctx: &DeviceContext,
-    context: &str,
+    memory: &RecalledMemory,
+    has_history: bool,
 ) -> String {
     let household = &runtime.household;
     // Ground the model in the real wall-clock (it has no clock) and tell it who it is
     // speaking with, so time/date questions are answered from fact and it can address
     // the person by name / apply the right person's memory.
     let mut prompt = format!(
-        "{base}\n\n{}\n\n{}",
+        "{base}\n\n{}\n\n# Who is speaking\n{}",
         current_datetime_line(),
         speaker_identity_line(speaker, household)
     );
@@ -40,9 +93,23 @@ pub(crate) fn build_system_prompt(
         prompt.push_str("\n\n");
         prompt.push_str(&line);
     }
-    if !context.is_empty() {
-        prompt.push_str("\n\nWhat you remember about this person:\n");
-        prompt.push_str(context);
+    // Personal memory only for a recognized speaker (recall already enforces this; the
+    // guard keeps the prompt honest if a caller passes more).
+    if speaker.reader().is_some() && !memory.personal.is_empty() {
+        prompt.push_str("\n\n# About this person\n");
+        prompt.push_str(&bullets(&memory.personal));
+    }
+    if !memory.household.is_empty() {
+        prompt.push_str("\n\n# Household facts (true for everyone here)\n");
+        prompt.push_str(&bullets(&memory.household));
+    }
+    if has_history {
+        prompt.push_str(
+            "\n\nEarlier messages in this conversation are labelled with who said them: \
+             [you] is the person speaking now; other names are other people in the home. \
+             Only [you] messages describe the current speaker — never apply another \
+             person's \"I am…\" or \"I like…\" to them.",
+        );
     }
     // What the display is currently showing, so the model can drive that screen by
     // voice with the matching tool. Absent on an idle display.
@@ -62,37 +129,74 @@ pub(crate) fn build_system_prompt(
     prompt
 }
 
-/// The system-prompt line telling the model who it is speaking with. When the
-/// identified speaker's name matches a [`Household`] member (speaker_id_plan.md
-/// reconciliation), the line notes that they live here — and their relationship when
-/// one is recorded — so the model has the right context for that specific person.
+fn bullets(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|c| format!("- {c}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The speaker's display name: the household roster's canonical spelling when the
+/// voiceprint name matches a member, else the voiceprint name; `None` while anonymous.
+fn canonical_name<'a>(
+    speaker: &'a SpeakerContext,
+    household: &'a Household,
+) -> Option<(String, Option<&'a HouseholdMember>)> {
+    let name = speaker
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())?;
+    match household.member_matching_spoken(name) {
+        Some(m) => Some((m.name.trim().to_string(), Some(m))),
+        None => Some((name.to_string(), None)),
+    }
+}
+
+/// The system-prompt line telling the model who it is speaking with, by how confidently
+/// the voiceprint resolved (SpeakerScopedMemoryPlan.md §5). The name always comes from
+/// the voiceprint registry (reconciled with the household roster, relationship
+/// included) — never from remembered text.
 pub(crate) fn speaker_identity_line(speaker: &SpeakerContext, household: &Household) -> String {
-    match &speaker.name {
-        Some(name) => match household.member_matching(name) {
-            // Prefer the household's canonical name (correct spelling/capitalization)
-            // over the raw voiceprint label — that's the point of the roster.
-            Some(m) => {
-                let canonical = m.name.trim();
-                match m
-                    .relationship
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    Some(rel) => {
-                        format!("You are speaking with {canonical} ({rel}), who lives here.")
-                    }
-                    None => format!("You are speaking with {canonical}, who lives here."),
+    const DONT_GUESS: &str = "Do not guess who they are from the household list or anything \
+         else. If they ask who they are or what their name is, say you don't recognise their \
+         voice yet and suggest Settings → People → Add a voice on the display. Do not use any \
+         one person's personal details or preferences.";
+    match (speaker.resolution, canonical_name(speaker, household)) {
+        (SpeakerResolution::Identified, Some((name, member))) => {
+            let rel = member
+                .and_then(|m| m.relationship.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let who = match (member, rel) {
+                (Some(_), Some(rel)) => {
+                    format!("You are speaking with {name} ({rel}), who lives here.")
                 }
-            }
-            None => format!("You are speaking with {name}."),
-        },
-        None if speaker.is_household() => {
-            "You are speaking with a member of the household.".to_string()
+                (Some(_), None) => format!("You are speaking with {name}, who lives here."),
+                (None, _) => format!("You are speaking with {name}."),
+            };
+            format!(
+                "{who} When they say \"me\" or \"my phone\", as in \"text me\", that means {name}."
+            )
         }
-        None => "You are speaking with a household member you haven't been introduced to yet. \
-                 If they tell you their name, greet them by it."
-            .to_string(),
+        (SpeakerResolution::Tentative, Some((name, _))) => format!(
+            "You are probably speaking with {name}, but the voice match is not certain. Don't \
+             state their identity as fact; if they ask who they are, say you think it's {name} \
+             but aren't sure. If they ask to send something to \"me\", confirm it's for {name} \
+             first."
+        ),
+        (SpeakerResolution::Identified | SpeakerResolution::Tentative, None) => {
+            "You are speaking with a household member whose voice you recognise but whose name \
+             you don't know yet. Don't guess their name; if they tell you, greet them by it."
+                .to_string()
+        }
+        (SpeakerResolution::New | SpeakerResolution::Unknown, _) => {
+            format!(
+                "You do not know who is speaking: their voice was not recognised. {DONT_GUESS} If \
+                 they ask to send something to \"me\", ask who they are first."
+            )
+        }
     }
 }
 
@@ -153,7 +257,8 @@ pub(crate) fn household_line(members: &[HouseholdMember]) -> Option<String> {
     }
     let mut block = String::from(
         "The people who live in this home (use only when a request needs to know who \
-         is here or how to reach them; do not recite this otherwise):",
+         is here or how to reach them; do not recite this otherwise; never use this list \
+         to guess who is speaking):",
     );
     for m in named {
         let mut detail = Vec::new();
@@ -396,9 +501,9 @@ mod location_tests {
 
 #[cfg(test)]
 mod household_tests {
-    use super::{household_line, speaker_identity_line};
+    use super::{household_line, speaker_identity_line, RecalledMemory};
     use crate::settings::{Household, HouseholdMember};
-    use crate::speaker::SpeakerContext;
+    use crate::speaker::{SpeakerContext, SpeakerResolution};
 
     fn member(name: &str, emails: &[&str], phones: &[&str], rel: Option<&str>) -> HouseholdMember {
         HouseholdMember {
@@ -411,12 +516,12 @@ mod household_tests {
     }
 
     fn named_speaker(name: &str) -> SpeakerContext {
-        SpeakerContext {
-            speaker_id: "spk-1".to_string(),
-            name: Some(name.to_string()),
-            is_new: false,
-            confidence: 0.9,
-        }
+        SpeakerContext::known(
+            "spk-1",
+            Some(name.to_string()),
+            SpeakerResolution::Identified,
+            0.9,
+        )
     }
 
     #[test]
@@ -480,7 +585,60 @@ mod household_tests {
     #[test]
     fn identity_line_stays_plain_for_a_non_member() {
         let line = speaker_identity_line(&named_speaker("Zoe"), &Household::default());
-        assert_eq!(line, "You are speaking with Zoe.");
+        assert!(line.starts_with("You are speaking with Zoe."), "{line}");
+        assert!(
+            line.contains("that means Zoe"),
+            "\"me\" resolves to the speaker: {line}"
+        );
+    }
+
+    #[test]
+    fn identity_line_reconciles_a_misspelled_voiceprint_name() {
+        let hh = Household {
+            members: vec![member("Kristina", &[], &[], Some("Mother"))],
+            ..Default::default()
+        };
+        let line = speaker_identity_line(&named_speaker("Christina"), &hh);
+        assert!(
+            line.starts_with("You are speaking with Kristina (Mother), who lives here."),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn identity_line_follows_the_resolution() {
+        let hh = Household {
+            members: vec![member("Brendon", &[], &[], Some("Father"))],
+            ..Default::default()
+        };
+        let mut s = named_speaker("Brendon");
+        s.resolution = SpeakerResolution::Tentative;
+        let line = speaker_identity_line(&s, &hh);
+        assert!(line.contains("probably speaking with Brendon"), "{line}");
+        assert!(line.contains("not certain"), "{line}");
+
+        for unknown in [SpeakerContext::unknown(), {
+            let mut n = named_speaker("Brendon");
+            n.resolution = SpeakerResolution::New;
+            n
+        }] {
+            let line = speaker_identity_line(&unknown, &hh);
+            assert!(line.contains("do not know who is speaking"), "{line}");
+            assert!(line.contains("Do not guess"), "{line}");
+            assert!(!line.contains("Brendon"), "never names anyone: {line}");
+        }
+    }
+
+    #[test]
+    fn identity_facts_never_reach_the_personal_block() {
+        let hits = vec![
+            "The user's name is Brendan".to_string(),
+            "The user likes jazz".to_string(),
+            "The wifi is FastNet".to_string(),
+        ];
+        let m = RecalledMemory::split(&hits, &["The wifi is FastNet".to_string()]);
+        assert_eq!(m.personal, vec!["The user likes jazz".to_string()]);
+        assert_eq!(m.household, vec!["The wifi is FastNet".to_string()]);
     }
 }
 

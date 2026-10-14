@@ -25,6 +25,10 @@ use super::music::{
     music_play_json, music_proc_json, music_startall_json, music_status_json, music_stopall_json,
     music_stopweb_json, spotify_link_json, spotify_save_json, spotify_status_json,
 };
+use super::speakers::{
+    conversations_attribute_async, memory_attribute_async, memory_delete_async, speakers_json,
+    SpeakerDirectory,
+};
 use super::system::{
     extraction_save_json, extraction_status_json, keys_json, overview_json, system_json,
 };
@@ -380,19 +384,69 @@ pub(super) static ROUTES: &[Route] = &[
     // Debug views (read-only) + the one debug mutation.
     get(
         "/chatlog.json",
-        Sync(|s, r| Reply::json(chatlog_json(&s.debug, limit_param(r.target)))),
+        Sync(|s, r| {
+            let dir = SpeakerDirectory::build(s);
+            Reply::json(chatlog_json(&s.debug, &dir, limit_param(r.target)))
+        }),
     ),
     get(
         "/prompts.json",
-        Sync(|s, r| Reply::json(prompts_json(&s.debug, limit_param(r.target)))),
+        Sync(|s, r| {
+            let dir = SpeakerDirectory::build(s);
+            Reply::json(prompts_json(&s.debug, &dir, limit_param(r.target)))
+        }),
     ),
     get(
         "/sqlite.json",
-        Sync(|s, _| Reply::json(sqlite_json(s.memory(), &s.debug))),
+        Sync(|s, _| {
+            let dir = SpeakerDirectory::build(s);
+            Reply::json(sqlite_json(s.memory(), &s.debug, &dir))
+        }),
     ),
     get(
         "/helix.json",
-        Async(|s, _| Box::pin(async move { Reply::json(helix_json(&s.debug).await) })),
+        Async(|s, _| {
+            Box::pin(async move {
+                let dir = SpeakerDirectory::build(s);
+                Reply::json(helix_json(&s.debug, Some(&dir)).await)
+            })
+        }),
+    ),
+    // Speaker tagging + the memory review / turn correction actions
+    // (SpeakerScopedMemoryPlan.md §8).
+    get("/speakers.json", Sync(|s, _| Reply::json(speakers_json(s)))),
+    post(
+        "/memory/attribute",
+        Async(|s, r| {
+            Box::pin(async move {
+                Reply::json(match super::parse_json_body(r.body) {
+                    Ok(data) => memory_attribute_async(s, &data).await,
+                    Err(invalid) => invalid,
+                })
+            })
+        }),
+    ),
+    post(
+        "/memory/delete",
+        Async(|s, r| {
+            Box::pin(async move {
+                Reply::json(match super::parse_json_body(r.body) {
+                    Ok(data) => memory_delete_async(s, &data).await,
+                    Err(invalid) => invalid,
+                })
+            })
+        }),
+    ),
+    post(
+        "/conversations/attribute",
+        Async(|s, r| {
+            Box::pin(async move {
+                Reply::json(match super::parse_json_body(r.body) {
+                    Ok(data) => conversations_attribute_async(s, &data).await,
+                    Err(invalid) => invalid,
+                })
+            })
+        }),
     ),
     post(
         "/helix/rename-entity",

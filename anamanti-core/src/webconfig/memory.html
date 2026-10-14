@@ -3,6 +3,7 @@
   <div class="tabs" id="memTabs">
     <button type="button" data-tab="settings"><i data-icon="layers"></i>Recall settings</button>
     <button type="button" data-tab="facts"><i data-icon="db"></i>Facts <span class="count" id="cntFacts"></span></button>
+    <button type="button" data-tab="unknown" title="Facts said by a voice that could not be identified"><i data-icon="users"></i>Unknown speaker <span class="count" id="cntUnknown"></span></button>
     <button type="button" data-tab="graph"><i data-icon="graph"></i>Graph <span class="count" id="cntGraph"></span></button>
   </div>
 </div>
@@ -27,6 +28,13 @@
   .mem-rename { display: flex; gap: 0.35rem; align-items: center; }
   .mem-rename input { padding: 0.3rem 0.5rem; font-size: 0.84rem; min-width: 10rem; }
   .mem-state { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.2rem 0 0.6rem; }
+  .mem-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.9rem; padding-top: 0.8rem; border-top: 1px solid var(--border); }
+  .mem-actions select { width: auto; max-width: 12rem; padding: 0.22rem 0.5rem; font-size: 0.8rem; }
+  .mem-actions .grow { flex: 1; }
+  .mem-heard { font-size: 0.8rem; color: var(--muted); }
+  .mem-heard a { color: inherit; }
+  .mem-bulk { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.6rem; }
+  .mem-unk td { vertical-align: top; }
   @media (max-width: 1180px) { .mem-split { grid-template-columns: 1fr; height: auto; } }
 </style>
 
@@ -87,14 +95,14 @@
         <div class="mem-tb">
           <input type="search" id="fSearch" placeholder="Search content…" aria-label="Search facts">
           <select id="fKind" aria-label="Filter by kind"><option value="">All kinds</option></select>
-          <select id="fSpeaker" aria-label="Filter by speaker"><option value="">All speakers</option></select>
+          <select id="fSpeaker" aria-label="Filter by speaker"><option value="">Everyone</option></select>
           <span class="grow"></span>
           <span class="hint" id="fCount"></span>
           <button type="button" class="sm" id="fRefresh"><i data-icon="refresh"></i>Refresh</button>
         </div>
         <div class="table-wrap">
           <table class="mem-facts">
-            <thead><tr><th class="num" style="width:4.5rem">ID</th><th style="width:7rem">Kind</th><th style="width:8rem">Source</th><th style="width:8rem">Speaker</th><th style="width:11rem">Created</th><th>Content</th></tr></thead>
+            <thead><tr><th class="num" style="width:4rem">ID</th><th style="width:6rem">Kind</th><th style="width:10rem" title="Who the fact is true for">For</th><th style="width:12rem" title="Who said it, and how sure the voice match was">Said by</th><th style="width:9rem">Created</th><th>Content</th></tr></thead>
             <tbody id="fRows"><tr><td colspan="6"><div class="skeleton"></div></td></tr></tbody>
           </table>
           <div id="fEmpty" class="empty" hidden></div>
@@ -107,6 +115,25 @@
         </div>
       </section>
     </div>
+  </section>
+
+  <!-- ============================== Unknown-speaker review -->
+  <section id="tab-unknown" class="mem-panel" hidden>
+    <section class="card fill">
+      <div class="card-head">
+        <h2><i data-icon="users"></i>Unknown-speaker review</h2>
+        <div class="tools"><span class="hint" id="uCount"></span><button type="button" class="sm" id="uRefresh"><i data-icon="refresh"></i>Refresh</button></div>
+      </div>
+      <p class="desc">Things someone said about <b>themselves</b> when their voice could not be confirmed. They are kept but <b>never recalled for anyone</b> until you say whose they are. Attributing a fact changes who it is true for; it never trains a voiceprint.</p>
+      <div class="mem-bulk" id="uBulk"></div>
+      <div class="table-wrap">
+        <table class="mem-unk">
+          <thead><tr><th>Fact</th><th style="width:9rem">When</th><th style="width:12rem">Best guess</th><th style="width:26rem">Action</th></tr></thead>
+          <tbody id="uRows"><tr><td colspan="4"><div class="skeleton"></div></td></tr></tbody>
+        </table>
+        <div id="uEmpty" class="empty" hidden></div>
+      </div>
+    </section>
   </section>
 
   <!-- ============================== Graph -->
@@ -128,7 +155,7 @@
 <script>
 ui.hydrate();
 
-let EMB = null, EXT = null, SQL = null, HELIX = null;
+let EMB = null, EXT = null, SQL = null, HELIX = null, SPK = null, TRANSCRIPTS = {};
 let embCards = null, factSel = null, graphLabel = null, editingId = null;
 
 function errMsg(e){ return String((e && e.message) || e); }
@@ -247,7 +274,7 @@ function renderExt(){
     + '<input type="checkbox" id="extToggle"' + (on ? ' checked' : '') + '></label>'
     + (on ? ui.sendsFor('extract.anthropic')
           : ui.sends('Recall is pure vector search; <b>no turn text leaves the Mac</b> for extraction.', 'local'))
-    + (on && !EXT.key_present ? '<p class="hint" style="margin-top:.5rem">Extraction reads <code>ANTHROPIC_API_KEY</code> from the environment at boot. It was missing, so nothing is sent until you restart with it set.</p>' : ''
+    + (on && !EXT.key_present ? '<p class="hint" style="margin-top:.5rem">Extraction reads <code>ANTHROPIC_API_KEY</code> from the environment at boot. It was missing, so nothing is sent until you restart with it set.</p>' : '')
     + '<p class="hint" style="margin-top:.5rem">Turns ingested while extraction is off are indexed without entities and are not back-filled later. Setting <code>"graphrag": {"extract": "off"}</code> in <code>anamanti.json</code> keeps it off at every boot regardless of this switch.</p>';
   $('extToggle').addEventListener('change', saveExt);
 }
@@ -278,13 +305,38 @@ function renderStore(){
         : 'SQLite full-text (keyword) search. No embedder runs.');
 }
 
+// ---------------------------------------------------------------- Speakers
+// Who each fact is FOR (its scope) and who SAID it come resolved from /sqlite.json
+// (`speaker`, `said_by`); /speakers.json lists the people for the menus.
+function people(){ return ((SPK && SPK.speakers) || []); }
+function personOptions(selected){
+  return people().map(p => '<option value="' + escAttr(p.id) + '"' + (p.id === selected ? ' selected' : '') + '>' + esc(p.label) + '</option>').join('');
+}
+function forKind(m){ return (m.speaker && m.speaker.kind) || (m.speaker_id ? 'person' : 'household'); }
+function saidUnknown(m){ return !!(m.said_by && m.said_by.kind === 'unknown') || (!!m.said_by && m.said_by.resolution && m.said_by.resolution !== 'identified' && m.said_by.resolution !== 'corrected'); }
+function turnLink(m, text){
+  if (!m.turn_id) return '';
+  return '<a href="/conversations#turn=' + encodeURIComponent(m.turn_id) + '">' + (text || 'Source turn') + '</a>';
+}
+function heard(m){
+  const t = m.turn_id && TRANSCRIPTS[m.turn_id];
+  if (!m.turn_id) return '<span class="faint">No source turn recorded</span>';
+  return turnLink(m, t ? '“' + esc(t) + '”' : 'Source turn') + (t ? '' : ' <span class="faint">(older than the loaded log)</span>');
+}
+
 // ---------------------------------------------------------------- Facts
 function factsFiltered(){
   const q = $('fSearch').value.trim().toLowerCase(), k = $('fKind').value, sp = $('fSpeaker').value;
-  return ((SQL && SQL.memories) || []).filter(m =>
-    (!q || String(m.content || '').toLowerCase().includes(q))
-    && (!k || m.kind === k)
-    && (!sp || (m.speaker_id || '') === (sp === '__household' ? '' : sp)));
+  return ((SQL && SQL.memories) || []).filter(m => {
+    if (q && !String(m.content || '').toLowerCase().includes(q)) return false;
+    if (k && m.kind !== k) return false;
+    if (!sp) return true;
+    if (sp === '__household') return forKind(m) === 'household';
+    if (sp === '__unreviewed') return forKind(m) === 'unknown';
+    if (sp === '__unknown') return forKind(m) === 'unknown' || saidUnknown(m);
+    // A person: facts true for them, or said by them.
+    return (m.speaker && m.speaker.id === sp) || (m.said_by && m.said_by.id === sp);
+  });
 }
 function fillSelect(sel, values, allText, labelFn){
   const cur = sel.value;
@@ -294,8 +346,17 @@ function fillSelect(sel, values, allText, labelFn){
 function buildFactFilters(){
   const mems = (SQL && SQL.memories) || [];
   fillSelect($('fKind'), [...new Set(mems.map(m => m.kind).filter(Boolean))].sort(), 'All kinds');
-  const sp = [...new Set(mems.map(m => m.speaker_id ? m.speaker_id : '__household'))].sort();
-  fillSelect($('fSpeaker'), sp, 'All speakers', v => v === '__household' ? 'household' : v);
+  // People (from the directory, plus anyone only the rows know), then the fixed scopes.
+  const byId = new Map();
+  people().forEach(p => byId.set(p.id, p.label));
+  mems.forEach(m => [m.speaker, m.said_by].forEach(t => { if (t && t.kind === 'person' && t.id && !byId.has(t.id)) byId.set(t.id, t.label); }));
+  const sel = $('fSpeaker'), cur = sel.value;
+  const unrev = mems.filter(m => forKind(m) === 'unknown').length;
+  sel.innerHTML = '<option value="">Everyone</option>'
+    + (byId.size ? '<optgroup label="People">' + [...byId].sort((a, b) => a[1].localeCompare(b[1])).map(([id, label]) => '<option value="' + escAttr(id) + '">' + esc(label) + '</option>').join('') + '</optgroup>' : '')
+    + '<optgroup label="Scope"><option value="__household">Household</option><option value="__unknown">Unknown speaker (said or for)</option>'
+    + '<option value="__unreviewed">Unreviewed unknown' + (unrev ? ' (' + unrev + ')' : '') + '</option></optgroup>';
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 function renderFacts(){
   const body = $('fRows'), empty = $('fEmpty');
@@ -318,10 +379,27 @@ function renderFacts(){
     '<tr data-id="' + escAttr(m.id) + '"' + (String(m.id) === String(factSel) ? ' class="selected"' : '') + '>'
     + '<td class="num faint">' + esc(m.id) + '</td>'
     + '<td><span class="chip neutral">' + esc(m.kind || '—') + '</span></td>'
-    + '<td class="nowrap">' + esc(m.source || '') + '</td>'
-    + '<td class="nowrap">' + (m.speaker_id ? esc(m.speaker_id) : '<span class="muted">household</span>') + '</td>'
-    + '<td class="nowrap muted">' + esc(fmtTime(m.created_at)) + '</td>'
+    + '<td class="nowrap">' + ui.speakerChip(m.speaker) + '</td>'
+    + '<td class="nowrap">' + ui.speakerTag(m.said_by, { hints: false }) + '</td>'
+    + '<td class="nowrap muted" title="' + escAttr(fmtTime(m.created_at)) + '">' + esc(ui.fmtAgo(m.created_at)) + '</td>'
     + '<td><div class="clamp-2">' + esc(m.content) + '</div></td></tr>').join('');
+}
+// The actions for one fact: attribute to a person, make household, (back to) unknown, delete.
+function factActions(m, compact){
+  const k = forKind(m);
+  const cand = m.candidate && m.candidate.id;
+  let h = '<div class="' + (compact ? 'btn-row' : 'mem-actions') + '" data-mid="' + escAttr(m.id) + '">';
+  if (people().length) {
+    h += '<select data-role="to" aria-label="Attribute to">' + '<option value="">Attribute to…</option>' + personOptions(cand || '') + '</select>'
+      + '<button type="button" class="sm primary" data-act="attr">Attribute</button>';
+  } else if (!compact) {
+    h += '<span class="hint">No voiceprints yet. Enroll people on the display to attribute facts.</span>';
+  }
+  if (k !== 'household') h += '<button type="button" class="sm" data-act="household">' + ui.icon('home') + 'Make household</button>';
+  if (k !== 'unknown' && !compact) h += '<button type="button" class="sm ghost" data-act="unknown">Mark unknown</button>';
+  if (!compact) h += '<span class="grow"></span>';
+  h += '<button type="button" class="sm ghost danger-text" data-act="delete">' + ui.icon('trash') + 'Delete</button></div>';
+  return h;
 }
 function renderFactDetail(){
   const m = ((SQL && SQL.memories) || []).find(x => String(x.id) === String(factSel));
@@ -331,9 +409,71 @@ function renderFactDetail(){
     + '<dt>ID</dt><dd class="mono">' + esc(m.id) + '</dd>'
     + '<dt>Kind</dt><dd><span class="chip neutral">' + esc(m.kind || '—') + '</span></dd>'
     + '<dt>Source</dt><dd>' + esc(m.source || '—') + '</dd>'
-    + '<dt>Speaker</dt><dd>' + (m.speaker_id ? esc(m.speaker_id) : '<span class="muted">household</span>') + '</dd>'
+    + '<dt>For</dt><dd>' + ui.speakerChip(m.speaker) + (m.candidate ? ' <span class="hint">best guess ' + ui.speakerChip(m.candidate) + '</span>' : '') + '</dd>'
+    + '<dt>Said by</dt><dd>' + ui.speakerTag(m.said_by, { conf: true }) + '</dd>'
+    + '<dt>Turn</dt><dd class="mem-heard">' + heard(m) + '</dd>'
     + '<dt>Created</dt><dd>' + esc(fmtTime(m.created_at)) + ' <span class="hint">' + esc(ui.fmtAgo(m.created_at)) + '</span></dd>'
-    + '</dl><div class="mem-content">' + esc(m.content) + '</div>';
+    + '</dl><div class="mem-content">' + esc(m.content) + '</div>'
+    + factActions(m, false);
+}
+
+// ---------------------------------------------------------------- Unknown review
+function unknownRows(){ return ((SQL && SQL.memories) || []).filter(m => forKind(m) === 'unknown'); }
+function renderUnknown(){
+  const rows = unknownRows(), body = $('uRows'), empty = $('uEmpty');
+  $('cntUnknown').textContent = rows.length ? String(rows.length) : '';
+  $('uCount').textContent = rows.length ? rows.length + ' to review' : '';
+  // "Confirm all for <candidate>" — one button per best-guess person.
+  const groups = new Map();
+  rows.forEach(m => { const c = m.candidate; if (c && c.id) { const g = groups.get(c.id) || { tag: c, ids: [] }; g.ids.push(m.id); groups.set(c.id, g); } });
+  $('uBulk').innerHTML = [...groups.values()].map(g =>
+    '<button type="button" class="sm" data-bulk="' + escAttr(g.tag.id) + '" data-ids="' + escAttr(g.ids.join(',')) + '">' + ui.icon('check') + 'Confirm all ' + g.ids.length + ' for ' + esc(g.tag.label) + '</button>').join('');
+  if (!SQL || !SQL.ok) { body.innerHTML = ''; return; }
+  if (!rows.length) {
+    body.innerHTML = ''; empty.hidden = false;
+    empty.innerHTML = ui.icon('check') + '<div>Nothing to review. Every fact belongs to a person or the household.</div>';
+    return;
+  }
+  empty.hidden = true;
+  body.innerHTML = rows.map(m =>
+    '<tr><td><div>' + esc(m.content) + '</div><div class="mem-heard">' + heard(m) + '</div></td>'
+    + '<td class="nowrap muted" title="' + escAttr(fmtTime(m.created_at)) + '">' + esc(ui.fmtAgo(m.created_at)) + '</td>'
+    + '<td>' + (m.candidate ? ui.speakerChip(m.candidate) + (m.said_by ? ' ' + ui.resolutionBadge(m.said_by, { conf: true }) : '') : '<span class="faint">no guess</span>') + '</td>'
+    + '<td>' + factActions(m, true) + '</td></tr>').join('');
+}
+async function attribute(ids, to){
+  try {
+    const j = await ui.req(postJSON('/memory/attribute', ids.length === 1 ? { id: ids[0], to } : { ids, to }));
+    ui.toast(true, j.message || 'Moved.');
+    await loadSql();
+  } catch (e) { ui.toast(false, 'Could not move: ' + errMsg(e)); }
+}
+async function deleteFact(id){
+  try {
+    const j = await ui.req(postJSON('/memory/delete', { id }));
+    ui.toast(true, j.message || 'Deleted.');
+    if (String(factSel) === String(id)) factSel = null;
+    await loadSql();
+  } catch (e) { ui.toast(false, 'Could not delete: ' + errMsg(e)); }
+}
+// One delegated handler for the action rows in the detail panel and the review table.
+function onFactAction(e){
+  const b = e.target.closest('button[data-act], button[data-bulk]'); if (!b) return;
+  if (b.dataset.bulk) { attribute(b.dataset.ids.split(',').map(Number), b.dataset.bulk); return; }
+  const row = b.closest('[data-mid]'); if (!row) return;
+  const id = Number(row.dataset.mid);
+  const act = b.dataset.act;
+  if (act === 'attr') {
+    const to = row.querySelector('select[data-role="to"]').value;
+    if (!to) { ui.toast(false, 'Pick a person first.'); return; }
+    attribute([id], to);
+  } else if (act === 'household') attribute([id], 'household');
+  else if (act === 'unknown') attribute([id], 'unknown');
+  else if (act === 'delete') {
+    if (b.classList.contains('confirming')) { deleteFact(id); return; }
+    b.classList.add('confirming'); b.textContent = 'Delete?';
+    setTimeout(() => { if (b.isConnected) { b.classList.remove('confirming'); b.innerHTML = ui.icon('trash') + 'Delete'; } }, 3500);
+  }
 }
 
 // ---------------------------------------------------------------- Graph
@@ -358,12 +498,15 @@ function renderGraphTable(){
   const rows = (HELIX.nodes || {})[graphLabel] || [];
   if (!rows.length) { wrap.innerHTML = '<div class="empty">' + ui.icon('graph') + '<div>No ' + esc(graphLabel) + ' nodes sampled.</div></div>'; return; }
   const cols = [];
-  rows.forEach(r => Object.keys(r).forEach(k => { if (k !== '$id' && !cols.includes(k)) cols.push(k); }));
+  rows.forEach(r => Object.keys(r).forEach(k => { if (k !== '$id' && k !== '$speaker' && !cols.includes(k)) cols.push(k); }));
   const editable = graphLabel === 'Entity' && cols.includes('name');
-  let h = '<table><thead><tr><th>$id</th>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + (editable ? '<th style="width:7rem"></th>' : '') + '</tr></thead><tbody>';
+  // Nodes that carry a speaker_id get a resolved name chip (server-side `$speaker`).
+  const tagged = rows.some(r => r['$speaker']);
+  let h = '<table><thead><tr><th>$id</th>' + (tagged ? '<th>Speaker</th>' : '') + cols.map(c => '<th>' + esc(c) + '</th>').join('') + (editable ? '<th style="width:7rem"></th>' : '') + '</tr></thead><tbody>';
   rows.forEach((r, i) => {
     const rid = String(r['$id'] ?? i);
     h += '<tr data-row="' + i + '"><td class="mono faint nowrap">' + esc(r['$id']) + '</td>';
+    if (tagged) h += '<td class="nowrap">' + (r['$speaker'] ? ui.speakerChip(r['$speaker']) : '') + '</td>';
     cols.forEach(c => {
       let v = r[c];
       if (v != null && typeof v === 'object') v = JSON.stringify(v);
@@ -402,8 +545,21 @@ async function saveRename(row){
 
 // ---------------------------------------------------------------- Loading
 async function loadSql(){
-  try { SQL = await getJSON('/sqlite.json'); } catch (e) { SQL = { ok: false, message: 'Request failed: ' + errMsg(e) }; }
-  buildFactFilters(); renderFacts(); renderFactDetail(); renderStats(); renderStore();
+  const [sql, spk] = await Promise.all([
+    getJSON('/sqlite.json').catch(e => ({ ok: false, message: 'Request failed: ' + errMsg(e) })),
+    getJSON('/speakers.json').catch(() => null),
+  ]);
+  SQL = sql; SPK = spk;
+  buildFactFilters(); renderFacts(); renderFactDetail(); renderUnknown(); renderStats(); renderStore();
+}
+// The transcripts behind facts' source turns (best effort; the newest 1000 turns).
+async function loadTranscripts(){
+  try {
+    const cl = await getJSON('/chatlog.json?limit=1000');
+    TRANSCRIPTS = {};
+    ((cl && cl.ok && cl.records) || []).forEach(r => { if (r.turn_id) TRANSCRIPTS[r.turn_id] = r.transcript || ''; });
+    renderFactDetail(); renderUnknown();
+  } catch (e) { /* the turn link still works without the text */ }
 }
 async function loadHelix(){
   try { HELIX = await getJSON('/helix.json'); } catch (e) { HELIX = null; ui.toast(false, 'Could not load the graph: ' + errMsg(e)); }
@@ -427,6 +583,9 @@ $('embSwitch').addEventListener('click', switchEmb);
 $('fKind').addEventListener('change', renderFacts);
 $('fSpeaker').addEventListener('change', renderFacts);
 $('fRefresh').addEventListener('click', loadSql);
+$('uRefresh').addEventListener('click', () => { loadSql(); loadTranscripts(); });
+$('fDetail').addEventListener('click', onFactAction);
+$('tab-unknown').addEventListener('click', onFactAction);
 $('fRows').addEventListener('click', (e) => {
   const tr = e.target.closest('tr[data-id]'); if (!tr) return;
   factSel = tr.dataset.id;
@@ -451,7 +610,7 @@ $('gWrap').addEventListener('keydown', (e) => {
 });
 
 ui.tabs($('memTabs'));
-Promise.all([loadSettings(), loadSql(), loadHelix()])
+Promise.all([loadSettings(), loadSql(), loadHelix(), loadTranscripts()])
   .then(() => { const h = location.hash.slice(1); if (h === 'embeddings' || h === 'extraction' || h === 'store') ui.reveal(); })
   .catch(e => ui.toast(false, 'Could not load: ' + errMsg(e)));
 </script>

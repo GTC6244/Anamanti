@@ -30,7 +30,10 @@ use super::chatlog::{self, ChatLogRecord, LogCursor};
 use super::embed::Embedder;
 use super::entity::EntityExtractor;
 use super::helix::{turn_text, HelixMemory, NewTurn};
-use crate::speaker::{AliasMap, SpeakerAliases};
+use std::collections::HashMap;
+
+use super::chatlog::WrittenMemory;
+use crate::speaker::{AliasMap, SpeakerAliases, HOUSEHOLD_SPEAKER, UNKNOWN_SPEAKER};
 
 /// Drains the chat log into the HelixDB graph memory.
 pub struct MemoryIngester {
@@ -145,8 +148,8 @@ impl MemoryIngester {
                     truncate_for_log(&r.reply),
                 );
             }
-            for (mi, m) in r.memories_written.iter().enumerate() {
-                texts.push(m.clone());
+            for (mi, m) in written_memories(r).iter().enumerate() {
+                texts.push(m.content.clone());
                 items.push(Item::Memory(ri, mi));
             }
         }
@@ -166,9 +169,13 @@ impl MemoryIngester {
         // that commits mid-run is still honoured for this batch. A read failure fails the
         // run (the offset is not advanced, so it retries) rather than ingesting under
         // stale ids.
-        let aliases = match &self.aliases {
-            Some(a) => a.load().context("loading speaker aliases")?,
-            None => AliasMap::default(),
+        let (aliases, overrides) = match &self.aliases {
+            Some(a) => (
+                a.load().context("loading speaker aliases")?,
+                a.load_turn_overrides()
+                    .context("loading turn speaker corrections")?,
+            ),
+            None => (AliasMap::default(), HashMap::new()),
         };
 
         // 2 + 3. Extract entities and upsert, in log order.
@@ -181,7 +188,7 @@ impl MemoryIngester {
                         log::warn!("entity extraction failed for turn {}: {e}", r.id);
                         Vec::new()
                     });
-                    let (speaker_id, speaker_name) = attribution(r, &aliases);
+                    let (speaker_id, speaker_name) = attribution(r, &aliases, &overrides);
                     self.helix
                         .ingest_turn(NewTurn {
                             ext_id: &r.id,
@@ -200,12 +207,13 @@ impl MemoryIngester {
                 }
                 Item::Memory(ri, mi) => {
                     let r = &records[ri];
-                    let content = &r.memories_written[mi];
-                    let entities = self.extractor.extract(content).await.unwrap_or_default();
+                    let written = written_memories(r);
+                    let m = &written[mi];
+                    let entities = self.extractor.extract(&m.content).await.unwrap_or_default();
                     let ext_id = format!("{}-mem-{}", r.id, mi);
-                    let (speaker_id, _) = attribution(r, &aliases);
+                    let owner = memory_owner(r, m, &aliases, &overrides);
                     self.helix
-                        .ingest_memory(&ext_id, "memory", content, vector, &entities, speaker_id)
+                        .ingest_memory(&ext_id, "memory", &m.content, vector, &entities, &owner)
                         .await
                         .with_context(|| format!("ingesting memory {ext_id}"))?;
                 }
@@ -281,27 +289,82 @@ fn write_offset(path: &Path, line: u64) -> Result<()> {
         .with_context(|| format!("writing offset {}", path.display()))
 }
 
-/// The speaker id to attribute a record to, normalizing a missing id (pre-speaker-ID
-/// logs) to the shared household user.
+/// The speaker id a record was **logged** under, normalizing the pre-scope sentinels:
+/// a missing id (pre-speaker-ID logs) and `"household"` (pre-SpeakerScopedMemoryPlan
+/// logs) both meant an *unattributed* turn, which is the unknown speaker now.
 fn speaker_of(r: &ChatLogRecord) -> &str {
-    if r.speaker_id.is_empty() {
-        "household"
+    if r.speaker_id.is_empty() || r.speaker_id == HOUSEHOLD_SPEAKER {
+        UNKNOWN_SPEAKER
     } else {
         &r.speaker_id
     }
 }
 
-/// The `(speaker id, display name)` to store a record under: its logged speaker
-/// resolved through the merge/forget `aliases`. When the id was remapped, the logged
-/// name belonged to the old cluster, so it is dropped (the registry is the source of
-/// truth for names).
-fn attribution<'a>(r: &'a ChatLogRecord, aliases: &'a AliasMap) -> (&'a str, Option<&'a str>) {
-    let logged = speaker_of(r);
+/// The `(speaker id, display name)` to store a turn under (SpeakerScopedMemoryPlan.md
+/// §3.2). A turn is speaker-relative raw text, so only a **confidently identified**
+/// speaker owns it; a tentative/new/unknown turn is the unknown speaker's (never
+/// recalled). An admin correction (`overrides`, by `turn_id`) wins. Records logged
+/// before resolutions were recorded keep their logged speaker. The id is then resolved
+/// through the merge/forget `aliases`; when it was remapped, the logged name belonged to
+/// the old cluster and is dropped (the registry is the source of truth for names).
+fn attribution<'a>(
+    r: &'a ChatLogRecord,
+    aliases: &'a AliasMap,
+    overrides: &'a HashMap<String, String>,
+) -> (&'a str, Option<&'a str>) {
+    if let Some(fixed) = r.turn_id.as_ref().and_then(|t| overrides.get(t)) {
+        return (aliases.resolve(fixed), None);
+    }
+    let logged = match r.speaker_resolution.as_deref() {
+        Some("identified") | None => speaker_of(r),
+        Some(_) => UNKNOWN_SPEAKER,
+    };
     let resolved = aliases.resolve(logged);
-    if resolved == logged {
+    if resolved == logged && logged == r.speaker_id {
         (logged, r.speaker_name.as_deref())
     } else {
         (resolved, None)
+    }
+}
+
+/// The memories a record wrote, with their scopes. Records logged before scopes were
+/// recorded only carry `memories_written`; those take the turn's attribution (an
+/// unattributed legacy turn's facts land on the unknown speaker, never recalled).
+fn written_memories(r: &ChatLogRecord) -> Vec<WrittenMemory> {
+    if !r.memories.is_empty() {
+        return r.memories.clone();
+    }
+    r.memories_written
+        .iter()
+        .map(|c| WrittenMemory {
+            content: c.clone(),
+            scope: "turn".to_string(),
+            speaker_id: None,
+        })
+        .collect()
+}
+
+/// The graph `speaker_id` a written memory is stored under: `household` for a household
+/// fact; the owner (alias-resolved) for a person fact; `unknown` for an unknown-scope
+/// fact; and the turn's own attribution for a legacy (`"turn"`) entry. A corrected turn
+/// moves its person/unknown facts to the corrected speaker.
+fn memory_owner(
+    r: &ChatLogRecord,
+    m: &WrittenMemory,
+    aliases: &AliasMap,
+    overrides: &HashMap<String, String>,
+) -> String {
+    let corrected = r.turn_id.as_ref().and_then(|t| overrides.get(t));
+    match (m.scope.as_str(), corrected) {
+        ("household", _) => HOUSEHOLD_SPEAKER.to_string(),
+        ("person" | "unknown", Some(fixed)) => aliases.resolve(fixed).to_string(),
+        ("person", None) => m
+            .speaker_id
+            .as_deref()
+            .map_or(UNKNOWN_SPEAKER, |id| aliases.resolve(id))
+            .to_string(),
+        ("unknown", None) => UNKNOWN_SPEAKER.to_string(),
+        _ => attribution(r, aliases, overrides).0.to_string(),
     }
 }
 
@@ -426,7 +489,70 @@ mod tests {
             speaker_id: String::new(),
             speaker_name: None,
             timing: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn only_identified_turns_are_attributed_to_a_person() {
+        let aliases = AliasMap::default();
+        let none = HashMap::new();
+        let mut r = rec("1", "my name is Brendan");
+        // Legacy unattributed records (`""` / `"household"`) are the unknown speaker.
+        assert_eq!(attribution(&r, &aliases, &none).0, UNKNOWN_SPEAKER);
+        r.speaker_id = "household".into();
+        assert_eq!(attribution(&r, &aliases, &none).0, UNKNOWN_SPEAKER);
+        // A legacy attributed record (no resolution recorded) keeps its speaker.
+        r.speaker_id = "spk-b".into();
+        r.speaker_name = Some("Brendon".into());
+        assert_eq!(attribution(&r, &aliases, &none), ("spk-b", Some("Brendon")));
+        // A tentative / new turn is not the person's.
+        r.speaker_resolution = Some("tentative".into());
+        assert_eq!(attribution(&r, &aliases, &none).0, UNKNOWN_SPEAKER);
+        r.speaker_resolution = Some("new".into());
+        assert_eq!(attribution(&r, &aliases, &none).0, UNKNOWN_SPEAKER);
+        r.speaker_resolution = Some("identified".into());
+        assert_eq!(attribution(&r, &aliases, &none).0, "spk-b");
+        // An admin correction wins.
+        r.turn_id = Some("t-1".into());
+        let fixed = HashMap::from([("t-1".to_string(), "spk-k".to_string())]);
+        assert_eq!(attribution(&r, &aliases, &fixed), ("spk-k", None));
+    }
+
+    #[test]
+    fn written_memories_keep_their_scope_in_the_graph() {
+        let aliases = AliasMap::default();
+        let none = HashMap::new();
+        let mut r = rec("1", "x");
+        r.speaker_id = "spk-b".into();
+        r.speaker_resolution = Some("tentative".into());
+        r.memories = vec![
+            WrittenMemory {
+                content: "wifi".into(),
+                scope: "household".into(),
+                speaker_id: None,
+            },
+            WrittenMemory {
+                content: "name".into(),
+                scope: "unknown".into(),
+                speaker_id: Some("spk-b".into()),
+            },
+            WrittenMemory {
+                content: "jazz".into(),
+                scope: "person".into(),
+                speaker_id: Some("spk-b".into()),
+            },
+        ];
+        let owners: Vec<String> = written_memories(&r)
+            .iter()
+            .map(|m| memory_owner(&r, m, &aliases, &none))
+            .collect();
+        assert_eq!(owners, ["household", "unknown", "spk-b"]);
+        // Legacy `memories_written` follow the turn (unattributed → unknown).
+        let mut legacy = rec("2", "x");
+        legacy.memories_written = vec!["The user's name is Brendan".into()];
+        let m = &written_memories(&legacy)[0];
+        assert_eq!(memory_owner(&legacy, m, &aliases, &none), UNKNOWN_SPEAKER);
     }
 
     /// An existing install's sidecar holds a plain LINE index. The ingester must

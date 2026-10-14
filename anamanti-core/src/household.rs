@@ -159,9 +159,78 @@ pub fn units_are_imperial(units: Option<&str>) -> bool {
     }
 }
 
+/// A spelling-insensitive key for a spoken name: lowercase letters only, with the
+/// common English sound-alike spellings folded together (`ch`/`c`/`q`/`ck` → `k`,
+/// `ph` → `f`, `th` → `t`, `y` → `i`, `z` → `s`) and doubled letters collapsed — so
+/// "Christina" and "Kristina", or "Matthew" and "Mathew", share a key.
+fn spoken_name_key(name: &str) -> String {
+    let lower: String = name
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .collect();
+    let folded = lower
+        .replace("ph", "f")
+        .replace("ck", "k")
+        .replace("ch", "k")
+        .replace("th", "t")
+        .replace(['c', 'q'], "k")
+        .replace('y', "i")
+        .replace('z', "s");
+    let mut out = String::with_capacity(folded.len());
+    for c in folded.chars() {
+        if !out.ends_with(c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Edit distance between the [sound-alike keys](spoken_name_key) of two names — how
+/// far an STT spelling ("Brendan") is from a roster spelling ("Brendon"). Used to
+/// reconcile a spoken name with the household roster.
+pub fn spoken_name_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (
+        spoken_name_key(a).chars().collect(),
+        spoken_name_key(b).chars().collect(),
+    );
+    if a.is_empty() || b.is_empty() {
+        return a.len().max(b.len()).max(1) * 10;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = sub.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// How many key edits still count as "the same spoken name": one for a short name,
+/// two from six letters up.
+pub fn spoken_name_tolerance(name: &str) -> usize {
+    if spoken_name_key(name).chars().count() >= 6 {
+        2
+    } else {
+        1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spoken_names_fold_sound_alike_spellings() {
+        assert_eq!(spoken_name_distance("Christina", "Kristina"), 0);
+        assert_eq!(spoken_name_distance("Matthew", "Mathew"), 0);
+        assert_eq!(spoken_name_distance("Brendan", "Brendon"), 1);
+        assert!(spoken_name_distance("Brendan", "Kristina") > 2);
+        assert!(spoken_name_distance("", "Kristina") > 2);
+    }
 
     fn addr(
         a1: &str,
