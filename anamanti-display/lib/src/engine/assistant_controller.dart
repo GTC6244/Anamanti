@@ -482,8 +482,49 @@ class AssistantController extends ChangeNotifier {
   static Stream<WakeWordEvent> _defaultEngineStream(WakeWordConfig config) =>
       startWakeWordEngine(config: config);
 
-  final WakeWordConfig _config;
+  /// The engine config, reused on every reconnect ([_listen]). Not final: live
+  /// tuning ([updateLiveTuning]) folds new values in so a reconnect doesn't revert
+  /// them to what the controller was created with.
+  WakeWordConfig _config;
   final EngineStreamFactory _startEngine;
+
+  /// The engine config currently in use (reflects live tuning).
+  WakeWordConfig get config => _config;
+
+  /// Record live-tuned capture gain + wake-word thresholds (already pushed to the
+  /// running engine via `update_diagnostics_tuning`) in the config, so an engine
+  /// reconnect re-seeds these values instead of the ones this controller started
+  /// with.
+  void updateLiveTuning({
+    required double gainDb,
+    required double threshold,
+    required double activeThreshold,
+  }) {
+    final c = _config;
+    _config = WakeWordConfig(
+      melspecModelPath: c.melspecModelPath,
+      embeddingModelPath: c.embeddingModelPath,
+      wakewordModelPath: c.wakewordModelPath,
+      modelName: c.modelName,
+      threshold: threshold,
+      activeThreshold: activeThreshold,
+      discoveryTimeoutSecs: c.discoveryTimeoutSecs,
+      orchestratorKey: c.orchestratorKey,
+      turnTimeoutSecs: c.turnTimeoutSecs,
+      smoothingWindow: c.smoothingWindow,
+      fireOnPeak: c.fireOnPeak,
+      playbackBufferSecs: c.playbackBufferSecs,
+      captureGainDb: gainDb,
+      useAudiorecord: c.useAudiorecord,
+      micSource: c.micSource,
+      platformAec: c.platformAec,
+      platformAgc: c.platformAgc,
+      platformNs: c.platformNs,
+      cameraProximity: c.cameraProximity,
+      proximityMotionThreshold: c.proximityMotionThreshold,
+      proximityReleaseSecs: c.proximityReleaseSecs,
+    );
+  }
 
   /// Reachability probe used to auto-recover the online status while idle, instead
   /// of waiting for the next wake word. Null disables the poll (e.g. in tests).

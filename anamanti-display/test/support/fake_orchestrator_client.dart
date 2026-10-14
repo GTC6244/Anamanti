@@ -2,6 +2,8 @@
 // Records calls and returns canned data so the settings/memory screens can be
 // driven deterministically.
 
+import 'dart:async';
+
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 
 class FakeOrchestratorClient implements OrchestratorClient {
@@ -18,45 +20,70 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<EntityView>? entities,
     Map<String, List<SpeakerClipView>>? clipsBySpeaker,
     this.throwOnFetch = false,
-  })  : _turns = turns ?? <TurnView>[],
-        _clipsBySpeaker = clipsBySpeaker ?? <String, List<SpeakerClipView>>{},
-        _entities = entities ?? <EntityView>[],
-        _functions = functions ?? <FunctionStatusView>[],
-        _driveToken = driveToken ??
-            const DriveTokenView(
-              linked: false,
-              configured: false,
-              clientId: '',
-              clientSecret: '',
-              refreshToken: '',
-              folderIds: <String>[],
-              scope: '',
-            ),
-        _orchestrators = orchestrators ??
-            const <OrchestratorOption>[
-              OrchestratorOption(
-                  key: 'mac-mini', name: 'Mac Mini', host: '192.168.1.10', port: 10700),
-            ],
-        _models = models ??
-            const <ModelOption>[
-              ModelOption(provider: 'anthropic', id: 'claude-opus-5', label: 'Claude Opus 5'),
-              ModelOption(provider: 'openai', id: 'gpt-4o-mini', label: 'gpt-4o-mini'),
-            ],
-        _voices = voices ??
-            const <VoiceOption>[
-              VoiceOption(name: 'en_US-amy-medium', label: 'amy (medium)', language: 'en_US'),
-              VoiceOption(name: 'en_US-lessac-medium', label: 'lessac (medium)', language: 'en_US'),
-            ],
-        _settings = settings ??
-            const OrchestratorSettingsView(
-              ok: true,
-              message: 'ok',
-              llmBackend: 'ollama',
-              llmModel: 'llama3.2',
-              ttsVoice: null,
-            ),
-        _memories = memories ?? <MemoryView>[],
-        _speakers = speakers ?? <SpeakerView>[];
+  }) : _turns = turns ?? <TurnView>[],
+       _clipsBySpeaker = clipsBySpeaker ?? <String, List<SpeakerClipView>>{},
+       _entities = entities ?? <EntityView>[],
+       _functions = functions ?? <FunctionStatusView>[],
+       _driveToken =
+           driveToken ??
+           const DriveTokenView(
+             linked: false,
+             configured: false,
+             clientId: '',
+             clientSecret: '',
+             refreshToken: '',
+             folderIds: <String>[],
+             scope: '',
+           ),
+       _orchestrators =
+           orchestrators ??
+           const <OrchestratorOption>[
+             OrchestratorOption(
+               key: 'mac-mini',
+               name: 'Mac Mini',
+               host: '192.168.1.10',
+               port: 10700,
+             ),
+           ],
+       _models =
+           models ??
+           const <ModelOption>[
+             ModelOption(
+               provider: 'anthropic',
+               id: 'claude-opus-5',
+               label: 'Claude Opus 5',
+             ),
+             ModelOption(
+               provider: 'openai',
+               id: 'gpt-4o-mini',
+               label: 'gpt-4o-mini',
+             ),
+           ],
+       _voices =
+           voices ??
+           const <VoiceOption>[
+             VoiceOption(
+               name: 'en_US-amy-medium',
+               label: 'amy (medium)',
+               language: 'en_US',
+             ),
+             VoiceOption(
+               name: 'en_US-lessac-medium',
+               label: 'lessac (medium)',
+               language: 'en_US',
+             ),
+           ],
+       _settings =
+           settings ??
+           const OrchestratorSettingsView(
+             ok: true,
+             message: 'ok',
+             llmBackend: 'ollama',
+             llmModel: 'llama3.2',
+             ttsVoice: null,
+           ),
+       _memories = memories ?? <MemoryView>[],
+       _speakers = speakers ?? <SpeakerView>[];
 
   OrchestratorSettingsView _settings;
   final List<MemoryView> _memories;
@@ -94,6 +121,17 @@ class FakeOrchestratorClient implements OrchestratorClient {
   /// When non-null, [enrollFinish] throws this instead of succeeding (simulates the
   /// orchestrator rejecting the commit, e.g. too few samples).
   String? enrollFinishError;
+
+  /// When set, [applySettings] records the call and then waits for this to complete
+  /// (simulates an apply still in flight on the Mac).
+  Completer<void>? applyGate;
+
+  /// When true, [applySettings] throws (simulates the Mac dropping off mid-edit).
+  bool throwOnApply = false;
+
+  /// When non-null, [applySettings] returns `ok: false` with this message
+  /// (simulates the Core rejecting a change).
+  String? rejectApply;
 
   /// When set, [pairPhone] throws with this message (simulates a bad/expired code
   /// or an unreachable Mac).
@@ -137,6 +175,17 @@ class FakeOrchestratorClient implements OrchestratorClient {
       'vadEngine': vadEngine,
       'sileroThreshold': sileroThreshold,
     });
+    final gate = applyGate;
+    if (gate != null) await gate.future;
+    if (throwOnApply) throw Exception('offline');
+    final reject = rejectApply;
+    if (reject != null) {
+      return OrchestratorSettingsView(
+        ok: false,
+        message: reject,
+        llmBackend: _settings.llmBackend,
+      );
+    }
     _settings = OrchestratorSettingsView(
       ok: true,
       message: 'applied',
@@ -211,9 +260,11 @@ class FakeOrchestratorClient implements OrchestratorClient {
     Iterable<TurnView> out = _turns;
     if (query.isNotEmpty) {
       final q = query.toLowerCase();
-      out = out.where((t) =>
-          t.transcript.toLowerCase().contains(q) ||
-          t.reply.toLowerCase().contains(q));
+      out = out.where(
+        (t) =>
+            t.transcript.toLowerCase().contains(q) ||
+            t.reply.toLowerCase().contains(q),
+      );
     }
     if (speakerId.isNotEmpty) {
       out = out.where((t) => t.speakerId == speakerId);
@@ -225,7 +276,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
   }
 
   @override
-  Future<List<EntityView>> listEntities({String query = '', int limit = 200}) async {
+  Future<List<EntityView>> listEntities({
+    String query = '',
+    int limit = 200,
+  }) async {
     listEntitiesCalls.add({'query': query, 'limit': limit});
     if (throwOnFetch) throw Exception('offline');
     if (query.isEmpty) return List.of(_entities);
@@ -261,7 +315,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
   }
 
   @override
-  Future<bool> mergeSpeakers({required String keep, required String drop}) async {
+  Future<bool> mergeSpeakers({
+    required String keep,
+    required String drop,
+  }) async {
     mergeCalls.add({'keep': keep, 'drop': drop});
     _speakers.removeWhere((s) => s.id == drop);
     return true;
@@ -292,13 +349,15 @@ class FakeOrchestratorClient implements OrchestratorClient {
     enrollFinishCalls.add({'session': session, 'name': name});
     final err = enrollFinishError;
     if (err != null) throw Exception(err);
-    _speakers.add(SpeakerView(
-      id: 'spk-$session',
-      name: name,
-      labeled: true,
-      samples: 3,
-      createdAt: 0,
-    ));
+    _speakers.add(
+      SpeakerView(
+        id: 'spk-$session',
+        name: name,
+        labeled: true,
+        samples: 3,
+        createdAt: 0,
+      ),
+    );
     return 'enrolled $name from 3 samples';
   }
 

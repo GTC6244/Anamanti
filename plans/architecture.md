@@ -250,7 +250,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - The **wake word, thresholds, and photo source** are device-local: the Flutter
   settings screen persists them (`SettingsStore` → JSON) and applies them by
   rebuilding the `WakeWordConfig` and restarting the engine / refreshing the
-  slideshow.
+  slideshow. Settings **applies changes immediately** (no Save button): device-local
+  changes are debounced + serialized so a burst costs at most one engine restart;
+  capture gain and both wake-word thresholds are pushed to the running engine live
+  (`update_diagnostics_tuning`, no restart); Core-managed changes are debounced and
+  revert on failure. Layout: a six-section side rail with two-column tabs that fit the
+  960×600 dp screen — see [`SettingsReorgPlan.md`](./SettingsReorgPlan.md) and
+  [`DisplayUI.md`](./DisplayUI.md) §9.
 - The **LLM backend + model and TTS voice** live on the Mac and are read/changed
   over a **project-local control protocol** on the device↔Anamanti Core hop —
   `anamanti-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
@@ -291,7 +297,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   render a dropdown (with a "Server default" entry) and fall back to a free-text
   field when the list is unavailable; a hand-set voice not in the list stays
   selectable.
-- **Functions status snapshot** (device Settings → Functions): a **read-only**
+- **Functions status snapshot** (device Settings → Assistant → Capabilities): a **read-only**
   aggregate of what the Anamanti Core is configured to use for every capability —
   cloud vs local, the model, and whether each required API key is set — so a user at
   the display can see the assistant's setup (and spot a missing key) without the Mac
@@ -724,7 +730,7 @@ design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
   the networking stays in Rust, consistent with the interop boundary (§3).
 - **Flutter owns orchestration + presentation**: `UpdateController` (a
   `ChangeNotifier` sidecar) checks on boot + every 6 h, compares versionCodes,
-  drives the `UpdateBanner` and the Settings → Updates page, and triggers
+  drives the `UpdateBanner` and the Settings → Device → Updates tab, and triggers
   download/install.
 - **Build flavors** `selfUpdate` (ships it) / `fdroid` (ships without it) keep the
   same signing key + `applicationId`; the key must never change (a self-update needs

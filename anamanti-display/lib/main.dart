@@ -41,7 +41,8 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         setFontContext,
         setPlaceContext,
         setRecipeContext,
-        setWeatherContext;
+        setWeatherContext,
+        updateDiagnosticsTuning;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -94,6 +95,12 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   AppSettings _settings = const AppSettings();
   AssistantController? _assistant;
+
+  /// [_assistant], as a listenable for Settings: applying a setting there can
+  /// restart the engine (replacing the controller) while Settings stays open, and
+  /// Audio Diagnostics must follow the new one.
+  final ValueNotifier<AssistantController?> _assistantListenable =
+      ValueNotifier<AssistantController?>(null);
 
   /// Proactive-notification channel (Approach A). Rebuilt alongside the assistant so
   /// it re-pins to the selected orchestrator when that changes.
@@ -397,22 +404,48 @@ class _AmbientHomeState extends State<AmbientHome> {
       _notifications = notifications;
       _weather = weather;
     });
+    _assistantListenable.value = assistant;
   }
 
   /// Apply settings changed on the [SettingsScreen] (already persisted there):
-  /// refresh the slideshow if the photo source changed and restart the engine if a
-  /// wake-word/threshold knob changed. Assistant + memory settings are applied on
-  /// the Mac by the settings screen itself.
-  Future<void> _onSettingsApplied(AppSettings next) async {
+  /// refresh the slideshow if the photo source changed, restart the engine if a
+  /// setting baked into its config changed, and push capture gain / wake-word
+  /// thresholds to the running engine live otherwise. Assistant + VAD settings are
+  /// applied on the Mac by the settings screen itself.
+  Future<void> _onSettingsApplied(AppSettings next) {
+    // Settings applies changes as they're made, so applies can arrive while an
+    // earlier one (e.g. an engine restart) is still running. Chain them so each
+    // diff is computed against the fully-applied previous state.
+    final applied = _applyChain.then((_) => _applySettingsNow(next));
+    _applyChain = applied.catchError((Object _) {});
+    return applied;
+  }
+
+  /// Serializes [_onSettingsApplied] calls (see there).
+  Future<void> _applyChain = Future<void>.value();
+
+  Future<void> _applySettingsNow(AppSettings next) async {
+    if (!mounted) return;
+    // Capture gain and both wake-word thresholds are live-tunable on the running
+    // engine (no restart): push them straight to it. They're also persisted in
+    // `_settings`, so the next engine start re-seeds the same values.
+    final liveTuneChanged =
+        next.captureGainDb != _settings.captureGainDb ||
+        next.threshold != _settings.threshold ||
+        next.activeThreshold != _settings.activeThreshold;
     final engineChanged =
         next.orchestratorKey != _settings.orchestratorKey ||
         next.deviceName != _settings.deviceName ||
         next.wakeWord != _settings.wakeWord ||
-        next.threshold != _settings.threshold ||
-        next.activeThreshold != _settings.activeThreshold ||
         next.smoothingWindow != _settings.smoothingWindow ||
         next.fireOnPeak != _settings.fireOnPeak ||
         next.playbackBufferSecs != _settings.playbackBufferSecs ||
+        // Capture-path settings are baked into the engine config at start
+        // (buildWakeWordConfigFrom), so they need a restart to take effect.
+        next.useAudioRecord != _settings.useAudioRecord ||
+        next.platformNs != _settings.platformNs ||
+        next.platformAgc != _settings.platformAgc ||
+        next.platformAec != _settings.platformAec ||
         next.endpointCueEnabled != _settings.endpointCueEnabled ||
         next.endpointSilenceMs != _settings.endpointSilenceMs ||
         next.endpointRmsThreshold != _settings.endpointRmsThreshold ||
@@ -447,7 +480,22 @@ class _AmbientHomeState extends State<AmbientHome> {
       await _refreshGoogleTokens();
       await _applyPhotoSource();
     }
-    if (engineChanged) await _startEngine();
+    if (engineChanged) {
+      await _startEngine();
+    } else if (liveTuneChanged && _assistant != null) {
+      updateDiagnosticsTuning(
+        gainDb: next.captureGainDb,
+        threshold: next.threshold,
+        activeThreshold: next.activeThreshold,
+      );
+      // Also fold them into the controller's config, which an engine reconnect
+      // reuses — otherwise a reconnect would re-seed the old values.
+      _assistant!.updateLiveTuning(
+        gainDb: next.captureGainDb,
+        threshold: next.threshold,
+        activeThreshold: next.activeThreshold,
+      );
+    }
     // Push the (possibly changed) update base URL / auto-update toggle to the updater.
     await _updates?.updateConfig(
       baseUrl: next.updateBaseUrl,
@@ -478,8 +526,19 @@ class _AmbientHomeState extends State<AmbientHome> {
           store: _store,
           client: _client,
           onApplied: _onSettingsApplied,
-          // The live engine controller powers the Audio Diagnostics page's meters.
-          assistant: _assistant,
+          // The live engine controller powers Audio Diagnostics' meters + voice
+          // enrollment; a listenable so it follows engine restarts.
+          assistant: _assistantListenable,
+          // Re-pinning the Core in Settings switches Settings to the new Mac.
+          clientForCore: (key) => FrbOrchestratorClient(orchestratorKey: key),
+          // Capture gain + wake-word thresholds apply to the running engine as the
+          // sliders move (no restart).
+          onLiveTune: (gainDb, threshold, activeThreshold) =>
+              updateDiagnosticsTuning(
+                gainDb: gainDb,
+                threshold: threshold,
+                activeThreshold: activeThreshold,
+              ),
           // The updater controller powers the Updates page (null on fdroid).
           updates: _updates,
           // Restart the engine after a Camera grant so the proximity sensor +
@@ -494,6 +553,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   void dispose() {
     _photoRefreshTimer?.cancel();
     _assistant?.dispose();
+    _assistantListenable.dispose();
     _notifications?.dispose();
     _weather?.dispose();
     _updates?.dispose();

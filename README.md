@@ -159,7 +159,8 @@ NOTES="Bug fixes" \
 anamanti-display/scripts/release-r2.sh
 ```
 
-Point each device at your domain in **Settings → Updates** (the default is a
+Point each device at your domain in **Settings → Device → Updates** (the Update URL
+field shows in Advanced mode; the default is a
 placeholder). On the LineageOS kiosk, grant the app "install unknown apps" once.
 
 ### Run the Mac Mini Anamanti Core (the brain)

@@ -81,6 +81,7 @@ class AppSettings {
     this.autoUpdateEnabled = true,
     this.updateBaseUrl = kDefaultUpdateBaseUrl,
     this.fontScale = 1.0,
+    this.advancedMode = true,
   });
 
   /// Stable selection key (`instance_id` TXT) of the orchestrator this display is
@@ -243,6 +244,13 @@ class AppSettings {
   /// [[kFontScaleMin], [kFontScaleMax]]; `1.0` = unscaled.
   final double fontScale;
 
+  /// Whether Settings shows the expert/tuning controls (smoothing window, the
+  /// Microphone tab, VAD engine + thresholds, ring attack/release/auto-range, raw
+  /// Drive folder IDs, the update URL, …). Off gives a simpler household view.
+  /// Purely presentational — it never changes how the device behaves. Defaults to
+  /// on (plans/SettingsReorgPlan.md decision #8).
+  final bool advancedMode;
+
   /// True when both Drive client credentials are present — the device can mint Drive
   /// access tokens. Runtime replacement for the old build-time `kGoogleDriveConfigured`.
   bool get driveConfigured =>
@@ -284,6 +292,7 @@ class AppSettings {
     bool? autoUpdateEnabled,
     String? updateBaseUrl,
     double? fontScale,
+    bool? advancedMode,
   }) {
     return AppSettings(
       orchestratorKey: orchestratorKey ?? this.orchestratorKey,
@@ -321,6 +330,7 @@ class AppSettings {
       autoUpdateEnabled: autoUpdateEnabled ?? this.autoUpdateEnabled,
       updateBaseUrl: updateBaseUrl ?? this.updateBaseUrl,
       fontScale: fontScale ?? this.fontScale,
+      advancedMode: advancedMode ?? this.advancedMode,
     );
   }
 
@@ -360,6 +370,7 @@ class AppSettings {
     'autoUpdateEnabled': autoUpdateEnabled,
     'updateBaseUrl': updateBaseUrl,
     'fontScale': fontScale,
+    'advancedMode': advancedMode,
   };
 
   /// Parse from persisted JSON, tolerating missing/invalid keys by falling back to
@@ -493,6 +504,9 @@ class AppSettings {
               kFontScaleMax,
             )
           : defaults.fontScale,
+      advancedMode: json['advancedMode'] is bool
+          ? json['advancedMode'] as bool
+          : defaults.advancedMode,
     );
   }
 
@@ -534,7 +548,8 @@ class AppSettings {
       driveClientSecret == other.driveClientSecret &&
       autoUpdateEnabled == other.autoUpdateEnabled &&
       updateBaseUrl == other.updateBaseUrl &&
-      fontScale == other.fontScale;
+      fontScale == other.fontScale &&
+      advancedMode == other.advancedMode;
 
   @override
   int get hashCode => Object.hash(
@@ -576,6 +591,7 @@ class AppSettings {
       autoUpdateEnabled,
       updateBaseUrl,
       fontScale,
+      advancedMode,
     ),
   );
 }

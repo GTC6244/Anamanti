@@ -22,7 +22,7 @@ prepares an `fdroid` flavor that ships without the updater.
 - **Keep the GitHub Releases + Obtainium path too** (`.github/workflows/release.yml`)
   for now; retire Obtainium once the in-app path is hardware-proven.
 - **Base URL is a device-local setting** (`AppSettings.updateBaseUrl`, default
-  placeholder `https://dl.example.com`), editable in Settings → Updates.
+  placeholder `https://dl.example.com`), editable in Settings → Device → Updates (Advanced mode).
 - **Client = `ureq` (blocking) + rustls/`ring` + `webpki-roots` + `sha2`**, NOT
   reqwest: reqwest's default aws-lc-rs / native-tls don't reliably cross-compile for
   32-bit armv7 Android; ring does, and ureq fits the codebase's dedicated-`std::thread`
@@ -34,7 +34,7 @@ prepares an `fdroid` flavor that ships without the updater.
 | --- | --- | --- |
 | **Rust engine** | Fetch `latest.json`, stream-download the APK, incremental SHA-256 verify, progress stream | `rust/src/update/mod.rs` (impl), `rust/src/api/updater.rs` (FRB: `check_for_update`, `download_update`, `cancel_download`) |
 | **Kotlin channel** | `PackageInstaller` session, unknown-sources redirect, running `versionCode`, flavor flag | `MainActivity.kt` (`anamanti_display/updater`), `InstallReceiver.kt` |
-| **Flutter** | Periodic check, version compare, banner + Settings page, orchestration | `lib/src/engine/update_controller.dart`, `lib/src/update/updater_channel.dart`, `lib/src/ui/update_banner.dart`, Settings → Updates in `settings_screen.dart`; wired in `main.dart` |
+| **Flutter** | Periodic check, version compare, banner + Settings page, orchestration | `lib/src/engine/update_controller.dart`, `lib/src/update/updater_channel.dart`, `lib/src/ui/update_banner.dart`, Settings → Device → Updates (`lib/src/ui/settings/device_section.dart`); wired in `main.dart` |
 
 ### Flow
 1. On boot + every 6 h (a Dart `Timer`, only on the `selfUpdate` flavor and when

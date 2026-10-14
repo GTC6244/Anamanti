@@ -1,4 +1,4 @@
-// Tests for the Settings → Permissions page and its PermissionsController.
+// Tests for the Settings → Device → Maintenance permissions list and its PermissionsController.
 //
 // The native `anamanti_display/permissions` channel (MainActivity) is faked via the
 // test binary messenger, so these run on the host with no device: the controller's
@@ -13,6 +13,7 @@ import 'package:anamanti_display/src/engine/permissions.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/ui/settings_screen.dart';
 
+import 'support/display_size.dart';
 import 'support/fake_orchestrator_client.dart';
 import 'support/in_memory_settings_store.dart';
 
@@ -61,22 +62,17 @@ void main() {
   group('Permissions page', () {
     tearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
+    /// Permissions live on Settings → Device → Maintenance.
     Future<void> openPermissions(WidgetTester tester) async {
-      final tile = find.byKey(const Key('settings-menu-permissions'));
-      // The menu's ListView builds lazily; a tile below the viewport+cacheExtent
-      // isn't in the element tree until scrolled into view.
-      await tester.scrollUntilVisible(
-        tile,
-        120,
-        scrollable: find.byType(Scrollable).first,
-      );
+      await tester.tap(find.byKey(const Key('settings-rail-device')));
       await tester.pumpAndSettle();
-      await tester.tap(tile);
+      await tester.tap(find.byKey(const Key('settings-tab-maintenance')));
       await tester.pumpAndSettle();
     }
 
-    testWidgets('lists grants; a missing runtime permission shows Grant',
-        (tester) async {
+    testWidgets('lists grants; a missing runtime permission shows Grant', (
+      tester,
+    ) async {
       messenger.setMockMethodCallHandler(channel, (call) async {
         if (call.method == 'status') {
           return <String, bool>{
@@ -88,14 +84,17 @@ void main() {
         return null;
       });
 
-      await tester.pumpWidget(MaterialApp(
-        home: SettingsScreen(
-          initial: const AppSettings(),
-          store: InMemorySettingsStore(),
-          client: FakeOrchestratorClient(),
-          onApplied: (_) {},
+      useEchoShowDisplay(tester);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SettingsScreen(
+            initial: const AppSettings(),
+            store: InMemorySettingsStore(),
+            client: FakeOrchestratorClient(),
+            onApplied: (_) {},
+          ),
         ),
-      ));
+      );
       await tester.pumpAndSettle();
       await openPermissions(tester);
 
@@ -105,65 +104,75 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.byKey(const Key(
-            'settings-permission-grant-android.permission.RECORD_AUDIO')),
+        find.byKey(
+          const Key(
+            'settings-permission-grant-android.permission.RECORD_AUDIO',
+          ),
+        ),
         findsNothing,
       );
       // Install-time INTERNET is shown read-only (row present, no Grant button).
       expect(
-        find.byKey(const Key('settings-permission-android.permission.INTERNET')),
+        find.byKey(
+          const Key('settings-permission-android.permission.INTERNET'),
+        ),
         findsOneWidget,
       );
     });
 
-    testWidgets('Grant requests the permission and restarts the engine on camera',
-        (tester) async {
-      var engineRestarts = 0;
-      var requestCalls = 0;
-      final state = <String, bool>{
-        'android.permission.CAMERA': false,
-        'android.permission.RECORD_AUDIO': true,
-      };
-      messenger.setMockMethodCallHandler(channel, (call) async {
-        switch (call.method) {
-          case 'status':
-            return Map<String, bool>.from(state);
-          case 'request':
-            requestCalls++;
-            final names =
-                ((call.arguments as Map)['permissions'] as List).cast<String>();
-            for (final n in names) {
-              state[n] = true;
-            }
-            return Map<String, bool>.from(state);
-        }
-        return null;
-      });
+    testWidgets(
+      'Grant requests the permission and restarts the engine on camera',
+      (tester) async {
+        var engineRestarts = 0;
+        var requestCalls = 0;
+        final state = <String, bool>{
+          'android.permission.CAMERA': false,
+          'android.permission.RECORD_AUDIO': true,
+        };
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          switch (call.method) {
+            case 'status':
+              return Map<String, bool>.from(state);
+            case 'request':
+              requestCalls++;
+              final names = ((call.arguments as Map)['permissions'] as List)
+                  .cast<String>();
+              for (final n in names) {
+                state[n] = true;
+              }
+              return Map<String, bool>.from(state);
+          }
+          return null;
+        });
 
-      await tester.pumpWidget(MaterialApp(
-        home: SettingsScreen(
-          initial: const AppSettings(),
-          store: InMemorySettingsStore(),
-          client: FakeOrchestratorClient(),
-          onApplied: (_) {},
-          onRequestEngineRestart: () => engineRestarts++,
-        ),
-      ));
-      await tester.pumpAndSettle();
-      await openPermissions(tester);
+        useEchoShowDisplay(tester);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: SettingsScreen(
+              initial: const AppSettings(),
+              store: InMemorySettingsStore(),
+              client: FakeOrchestratorClient(),
+              onApplied: (_) {},
+              onRequestEngineRestart: () => engineRestarts++,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await openPermissions(tester);
 
-      await tester.tap(
-        find.byKey(Key('settings-permission-grant-$kCameraPermission')),
-      );
-      await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(Key('settings-permission-grant-$kCameraPermission')),
+        );
+        await tester.pumpAndSettle();
 
-      expect(requestCalls, 1);
-      expect(engineRestarts, 1); // a camera grant restarts the engine
-      // The Grant button is gone now the permission is granted.
-      expect(
-        find.byKey(Key('settings-permission-grant-$kCameraPermission')),
-        findsNothing,
-      );
-    });
+        expect(requestCalls, 1);
+        expect(engineRestarts, 1); // a camera grant restarts the engine
+        // The Grant button is gone now the permission is granted.
+        expect(
+          find.byKey(Key('settings-permission-grant-$kCameraPermission')),
+          findsNothing,
+        );
+      },
+    );
   });
 }

@@ -86,10 +86,12 @@ changes; never hand-edit `frb_generated.*`.
 
 ## 3a. Manual override — Settings slider
 
-A touch alternative to the voice commands: **Settings → Device Config → Display → "Font
-size"** (`_rangeSlider`, key `settings-font-scale`), shown as a percentage across
-`[85%, 160%]` in 5% stops (finer than the 0.1 voice step). It edits the same
-`AppSettings.fontScale`; on **Save**, `main.dart`'s `_onSettingsApplied` re-reads it (the
+A touch alternative to the voice commands: **Settings → Display → Screen → "Font
+size"** (`SettingsSlider`, key `settings-font-scale`), shown as a percentage across
+`[85%, 160%]` in 5% stops (finer than the 0.1 voice step), with a live preview line. It
+edits the same `AppSettings.fontScale`; when the slider is released (Settings applies
+changes immediately — [`SettingsReorgPlan.md`](./SettingsReorgPlan.md)), `main.dart`'s
+`_onSettingsApplied` re-reads it (the
 root `MediaQuery` re-scales via `setState`) and mirrors it to the controller
 (`updateFontScale`) so the next turn's font context reports the new value. Voice and slider
 are the same persisted value, so they stay in sync.
