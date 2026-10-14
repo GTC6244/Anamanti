@@ -261,6 +261,52 @@ impl Household {
             .find(|m| m.name.trim().eq_ignore_ascii_case(needle))
     }
 
+    /// The roster member a **spoken** name most plausibly refers to — for a name taken
+    /// from an STT transcript, which often misspells it ("Christina" for *Kristina*,
+    /// "Brendan" for *Brendon*). Tries an exact (case-insensitive) match on the full
+    /// name, then on each member's first name, then a sound-alike match
+    /// ([`crate::household::spoken_name_distance`]) — returning a member only when
+    /// exactly one is closest, so an ambiguous name never picks the wrong person.
+    pub fn member_matching_spoken(&self, name: &str) -> Option<&HouseholdMember> {
+        if let Some(m) = self.member_matching(name) {
+            return Some(m);
+        }
+        let needle = name.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        let first =
+            |m: &HouseholdMember| m.name.split_whitespace().next().unwrap_or("").to_string();
+        let by_first: Vec<&HouseholdMember> = self
+            .members
+            .iter()
+            .filter(|m| first(m).eq_ignore_ascii_case(needle))
+            .collect();
+        if by_first.len() == 1 {
+            return Some(by_first[0]);
+        }
+        let mut best: Option<(usize, &HouseholdMember)> = None;
+        let mut tied = false;
+        for m in &self.members {
+            let d = crate::household::spoken_name_distance(needle, &m.name)
+                .min(crate::household::spoken_name_distance(needle, &first(m)));
+            match best {
+                Some((b, _)) if d > b => {}
+                Some((b, _)) if d == b => tied = true,
+                _ => {
+                    best = Some((d, m));
+                    tied = false;
+                }
+            }
+        }
+        match best {
+            Some((d, m)) if !tied && d <= crate::household::spoken_name_tolerance(needle) => {
+                Some(m)
+            }
+            _ => None,
+        }
+    }
+
     /// True when nothing is configured — no address, units, or members. (Checks the
     /// legacy single-line `location` too, since it may still hold a pre-migration value.)
     pub fn is_empty(&self) -> bool {
@@ -2705,6 +2751,30 @@ impl SharedSettings {
         })
     }
 
+    /// Make sure `name` is in the household roster, **auto-adding** a bare member (no
+    /// contact details) if none matches (case-insensitive). Used by guided voice
+    /// enrollment's "new person" path so a freshly enrolled voice is a household member
+    /// the prompt can reconcile. Returns the canonical stored name (an existing member
+    /// keeps their spelling). A no-op — no persist, no LLM rebuild — when already present.
+    pub fn ensure_household_member(&self, name: &str) -> String {
+        let name = name.trim();
+        if let Some(m) = self.household().member_matching(name) {
+            return m.name.clone();
+        }
+        self.mutate(Some("household"), |c| {
+            if let Some(m) = c.household.member_matching(name) {
+                return m.name.clone();
+            }
+            let mut household = c.household.clone();
+            household.members.push(HouseholdMember {
+                name: name.to_string(),
+                ..Default::default()
+            });
+            self.set_household(c, &household);
+            name.to_string()
+        })
+    }
+
     /// Unlink a person's phone: clear the matching household member's AppSaid address
     /// (case-insensitive) so they drop off the recipient roster — the member record
     /// itself is kept. No-op if no member matches. Returns the resulting config.
@@ -2971,6 +3041,35 @@ mod tests {
         let h = s.household();
         assert_eq!(h.members.len(), 2, "the person stays in the household");
         assert_eq!(h.member_matching("Mom").unwrap().appsaid, None);
+    }
+
+    #[test]
+    fn spoken_names_reconcile_to_the_roster_spelling() {
+        let member = |name: &str| HouseholdMember {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let h = Household {
+            members: vec![
+                member("Brendon"),
+                member("Kristina"),
+                member("Isabelle Adia"),
+                member("Mathew"),
+            ],
+            ..Default::default()
+        };
+        let canon = |spoken: &str| h.member_matching_spoken(spoken).map(|m| m.name.clone());
+        assert_eq!(canon("Christina").as_deref(), Some("Kristina"));
+        assert_eq!(canon("Brendan").as_deref(), Some("Brendon"));
+        assert_eq!(canon("isabelle").as_deref(), Some("Isabelle Adia"));
+        assert_eq!(canon("Matthew").as_deref(), Some("Mathew"));
+        assert_eq!(canon("Zoe"), None, "no sound-alike member");
+        // Two equally close members → ambiguous → no match.
+        let twins = Household {
+            members: vec![member("Jon"), member("Jen")],
+            ..Default::default()
+        };
+        assert!(twins.member_matching_spoken("Jan").is_none());
     }
 
     #[test]

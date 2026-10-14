@@ -64,10 +64,18 @@ const E_MENTIONS: &str = "MENTIONS";
 const E_ABOUT: &str = "ABOUT";
 const E_FOLLOWS: &str = "FOLLOWS";
 const E_KNOWS: &str = "KNOWS";
-// The shared/unattributed user, used for turns without a specific speaker (and as
-// the sentinel `speaker_id` on such nodes). Per-person `User` nodes are keyed by
-// their `spk-…` id (speaker_id_plan.md Phase D).
+// The shared-household owner: `Memory` nodes deliberately true for everyone carry it
+// as their `speaker_id` and are recalled for every speaker. Per-person `User` nodes are
+// keyed by their `spk-…` id (speaker_id_plan.md Phase D). Before
+// SpeakerScopedMemoryPlan.md it also marked *unattributed* turns — see `UNKNOWN`.
 const HOUSEHOLD: &str = "household";
+// The unknown speaker: turns (and personal facts) whose speaker could not be
+// confirmed. Kept, never recalled for anyone.
+const UNKNOWN: &str = "unknown";
+// Label + key of the marker node recording that the one-time household → unknown
+// migration of legacy nodes has run on this store.
+const L_META: &str = "Meta";
+const META_SCOPE_MIGRATION: &str = "speaker_scope_v1";
 // Property on a tombstoned `User`: the speaker id it was merged into.
 const P_MERGED_INTO: &str = "merged_into";
 // The node id pseudo-property in a projection.
@@ -110,7 +118,7 @@ pub struct NewTurn<'a> {
     /// Embedding of [`turn_text`]`(transcript, reply)`.
     pub embedding: Vec<f32>,
     pub entities: &'a [Entity],
-    /// `spk-…`, or `household` when unattributed.
+    /// `spk-…`, or `unknown` when unattributed.
     pub speaker_id: &'a str,
     pub speaker_name: Option<&'a str>,
 }
@@ -217,8 +225,18 @@ impl HelixMemory {
         // Vector indexes are built asynchronously by the secondary-index worker;
         // block until they're queryable so the first recall can't race the build.
         me.ensure_indexes_ready().await?;
-        // Ensure the shared household user exists (keyed by speaker_id).
+        // Ensure the shared household and unknown users exist (keyed by speaker_id).
         me.ensure_user(HOUSEHOLD, None).await?;
+        me.ensure_user(UNKNOWN, None).await?;
+        match me.migrate_speaker_scopes().await {
+            Ok(0) => {}
+            Ok(n) => {
+                log::info!("helix: moved {n} unattributed legacy node(s) to the unknown speaker")
+            }
+            Err(e) => {
+                log::warn!("helix: speaker-scope migration failed (will retry next open): {e:#}")
+            }
+        }
         Ok(me)
     }
 
@@ -403,7 +421,7 @@ impl HelixMemory {
     pub async fn reassign_speaker(&self, from: &str, to: &str) -> Result<u64> {
         // Follow any earlier merge of the target so we never point at a tombstone.
         let to = self.resolve_speaker(to).await?;
-        if from == to || from == HOUSEHOLD {
+        if from == to || from == HOUSEHOLD || from == UNKNOWN {
             return Ok(0);
         }
 
@@ -488,8 +506,8 @@ impl HelixMemory {
                 (P_MERGED_INTO, PropertyInput::from(to.as_str())),
             ];
             // Keep the display name only for a merge into another person; a forget
-            // (target = household) must not leave the forgotten person's name behind.
-            if to != HOUSEHOLD {
+            // (target = unknown) must not leave the forgotten person's name behind.
+            if to != HOUSEHOLD && to != UNKNOWN {
                 if let Some(name) = from_name.as_deref() {
                     tomb.push(("name", PropertyInput::from(name)));
                 }
@@ -503,11 +521,250 @@ impl HelixMemory {
     }
 
     /// Detach everything speaker `id` owns in the graph from that person (their
-    /// voiceprint was forgotten): their turns and memories become shared household
-    /// nodes, mirroring the SQLite side where their memories become unattributed.
+    /// voiceprint was forgotten): their turns and memories move to the **unknown**
+    /// speaker — kept, but never recalled for anyone — mirroring the SQLite side. A
+    /// forgotten person's private history must not become the household's.
     /// Returns the number of `Turn` + `Memory` nodes changed.
     pub async fn delete_speaker(&self, id: &str) -> Result<u64> {
-        self.reassign_speaker(id, HOUSEHOLD).await
+        self.reassign_speaker(id, UNKNOWN).await
+    }
+
+    /// Re-attribute one conversation turn (chat-log record `ext_id`) and the person/
+    /// unknown facts it wrote (`{ext_id}-mem-*`) to `to` — the admin console's
+    /// "This was → person" correction. Household facts are left alone. Returns the
+    /// number of nodes changed. (The turn's `SAID` edge keeps its original user; recall
+    /// and browsing read the `speaker_id` property.)
+    pub async fn reattribute_turn(&self, ext_id: &str, to: &str) -> Result<u64> {
+        let to = self.resolve_speaker(to).await?;
+        self.ensure_user(&to, None).await?;
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "t",
+                        g().n_with_label(L_TURN)
+                            .where_(Predicate::eq("ext_id", ext_id))
+                            .value_map(Some(vec![P_ID])),
+                    )
+                    .var_as(
+                        "m",
+                        g().n_with_label(L_MEMORY).value_map(Some(vec![
+                            P_ID,
+                            "ext_id",
+                            "speaker_id",
+                        ])),
+                    )
+                    .returning(["t", "m"]),
+            )
+            .await?;
+        let prefix = format!("{ext_id}-mem-");
+        let mut ids = ids_of(&found, "t");
+        ids.extend(items_of(&found, "m").iter().filter_map(|m| {
+            let mine = m
+                .get("ext_id")
+                .and_then(Value::as_str)
+                .is_some_and(|e| e.starts_with(&prefix));
+            let personal = m.get("speaker_id").and_then(Value::as_str) != Some(HOUSEHOLD);
+            (mine && personal)
+                .then(|| m.get(P_ID).and_then(Value::as_u64))
+                .flatten()
+        }));
+        self.set_speaker_of(&ids, &to).await
+    }
+
+    /// Move `Memory` nodes with exactly this `content` from owner `from` to owner `to`
+    /// (`spk-…`, `household` or `unknown`) — the admin review queue's attribute /
+    /// make-household actions, mirroring the SQLite row. Returns the number changed.
+    pub async fn retag_memory(&self, content: &str, from: &str, to: &str) -> Result<u64> {
+        let to = self.resolve_speaker(to).await?;
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "m",
+                        g().n_with_label(L_MEMORY)
+                            .where_(Predicate::eq("content", content))
+                            .value_map(Some(vec![P_ID, "speaker_id"])),
+                    )
+                    .returning(["m"]),
+            )
+            .await?;
+        let ids: Vec<u64> = items_of(&found, "m")
+            .iter()
+            .filter(|m| {
+                m.get("speaker_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(UNKNOWN)
+                    == from
+            })
+            .filter_map(|m| m.get(P_ID).and_then(Value::as_u64))
+            .collect();
+        self.set_speaker_of(&ids, &to).await
+    }
+
+    /// Drop `Memory` nodes with exactly this `content` owned by `owner` (`spk-…`,
+    /// `household` or `unknown`) — the admin console's delete. Returns how many.
+    pub async fn forget_memory(&self, content: &str, owner: &str) -> Result<u64> {
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "m",
+                        g().n_with_label(L_MEMORY)
+                            .where_(Predicate::eq("content", content))
+                            .value_map(Some(vec![P_ID, "speaker_id"])),
+                    )
+                    .returning(["m"]),
+            )
+            .await?;
+        let ids: Vec<u64> = items_of(&found, "m")
+            .iter()
+            .filter(|m| {
+                m.get("speaker_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(UNKNOWN)
+                    == owner
+            })
+            .filter_map(|m| m.get(P_ID).and_then(Value::as_u64))
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.write(
+            batch::write_batch()
+                .var_as("_d", g().n(NodeRef::ids(ids.clone())).drop())
+                .returning(["_d"]),
+        )
+        .await?;
+        self.flush().await?;
+        Ok(ids.len() as u64)
+    }
+
+    /// Set `speaker_id = to` on the nodes `ids`; returns how many.
+    async fn set_speaker_of(&self, ids: &[u64], to: &str) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.write(
+            batch::write_batch()
+                .var_as(
+                    "_s",
+                    g().n(NodeRef::ids(ids.to_vec()))
+                        .set_property("speaker_id", to),
+                )
+                .returning(["_s"]),
+        )
+        .await?;
+        self.flush().await?;
+        Ok(ids.len() as u64)
+    }
+
+    /// One-time migration of a store built before SpeakerScopedMemoryPlan.md, where
+    /// `household` marked an **unattributed** turn rather than a shared fact: every
+    /// `household` `Turn` moves to the unknown speaker (with its `SAID`/`KNOWS` edges),
+    /// and every `household` `Memory` that is speaker-relative ("The user's name is
+    /// Brendan") does too — house-wide ones stay household. Recorded by a marker node,
+    /// so a later admin "make household" is never undone. Returns the nodes moved.
+    async fn migrate_speaker_scopes(&self) -> Result<u64> {
+        let marker = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "k",
+                        g().n_with_label(L_META)
+                            .where_(Predicate::eq("key", META_SCOPE_MIGRATION))
+                            .value_map(Some(vec![P_ID])),
+                    )
+                    .var_as(
+                        "t",
+                        g().n_with_label(L_TURN)
+                            .where_(Predicate::eq("speaker_id", HOUSEHOLD))
+                            .value_map(Some(vec![P_ID])),
+                    )
+                    .var_as(
+                        "m",
+                        g().n_with_label(L_MEMORY)
+                            .where_(Predicate::eq("speaker_id", HOUSEHOLD))
+                            .value_map(Some(vec![P_ID, "content"])),
+                    )
+                    .returning(["k", "t", "m"]),
+            )
+            .await?;
+        if !ids_of(&marker, "k").is_empty() {
+            return Ok(0);
+        }
+        let mut ids = ids_of(&marker, "t");
+        ids.extend(items_of(&marker, "m").iter().filter_map(|m| {
+            let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+            (crate::memory::classify_scope(content) == crate::memory::FactScope::Personal)
+                .then(|| m.get(P_ID).and_then(Value::as_u64))
+                .flatten()
+        }));
+        let moved = self.set_speaker_of(&ids, UNKNOWN).await?;
+
+        // Move the household user's SAID/KNOWS edges to the unknown user, then replace
+        // the household node with a fresh one (dropping a node drops its edges).
+        if let Some((household_user, _)) = self.find_user(HOUSEHOLD).await? {
+            let (unknown_user, _) = self.ensure_user(UNKNOWN, None).await?;
+            let edges = self
+                .read(
+                    batch::read_batch()
+                        .var_as(
+                            "said",
+                            g().n(NodeRef::id(household_user))
+                                .out(Some(E_SAID))
+                                .value_map(Some(vec![P_ID])),
+                        )
+                        .var_as(
+                            "knows",
+                            g().n(NodeRef::id(household_user))
+                                .out(Some(E_KNOWS))
+                                .value_map(Some(vec![P_ID])),
+                        )
+                        .returning(["said", "knows"]),
+                )
+                .await?;
+            let mut b = batch::write_batch();
+            for (i, tid) in ids_of(&edges, "said").iter().enumerate() {
+                b = b.var_as(
+                    &format!("_s{i}"),
+                    g().n(NodeRef::id(unknown_user))
+                        .add_e(E_SAID, NodeRef::id(*tid), no_props()),
+                );
+            }
+            let mut seen = HashSet::new();
+            for (i, eid) in ids_of(&edges, "knows")
+                .into_iter()
+                .filter(|e| seen.insert(*e))
+                .enumerate()
+            {
+                b = b.var_as(
+                    &format!("_k{i}"),
+                    g().n(NodeRef::id(unknown_user))
+                        .add_e(E_KNOWS, NodeRef::id(eid), no_props()),
+                );
+            }
+            b = b.var_as("_d", g().n(NodeRef::id(household_user)).drop());
+            b = b.var_as(
+                "_h",
+                g().add_n(L_USER, vec![("speaker_id", PropertyInput::from(HOUSEHOLD))]),
+            );
+            self.write(b.returning(["_h"])).await?;
+        }
+        self.write(
+            batch::write_batch()
+                .var_as(
+                    "_meta",
+                    g().add_n(
+                        L_META,
+                        vec![("key", PropertyInput::from(META_SCOPE_MIGRATION))],
+                    ),
+                )
+                .returning(["_meta"]),
+        )
+        .await?;
+        self.flush().await?;
+        Ok(moved)
     }
 
     // ---- edits ------------------------------------------------------------
@@ -726,7 +983,7 @@ impl HelixMemory {
     ///    in-scope memories `ABOUT` those entities.
     ///
     /// In scope means the speaker's own nodes plus shared household ones (`None` =
-    /// household only). The vector index has no speaker partition, so each KNN
+    /// household only); the unknown speaker's nodes are never in scope. The vector index has no speaker partition, so each KNN
     /// over-fetches (`k ×` [`RECALL_OVERFETCH`], capped at [`RECALL_MAX_FETCH`]) before
     /// scoping, so a quiet speaker isn't crowded out by everyone else's turns. Both
     /// searches run in one read; the entity hop reuses the turn hits (no second KNN).
@@ -739,6 +996,19 @@ impl HelixMemory {
         k: usize,
         max_items: usize,
     ) -> Result<Vec<String>> {
+        Ok(self.recall_scoped(query, speaker_id, k, max_items).await?.0)
+    }
+
+    /// [`recall`](Self::recall), also returning which of the hits are **household**
+    /// facts (true for everyone) rather than the speaker's own — so the prompt can
+    /// present "about this person" and "household facts" separately.
+    pub async fn recall_scoped(
+        &self,
+        query: Vec<f32>,
+        speaker_id: Option<&str>,
+        k: usize,
+        max_items: usize,
+    ) -> Result<(Vec<String>, Vec<String>)> {
         self.check_dims(&query)?;
         let fetch = k
             .saturating_mul(RECALL_OVERFETCH)
@@ -764,6 +1034,9 @@ impl HelixMemory {
             .await?;
 
         let mut out: Vec<String> = Vec::new();
+        let mut household: Vec<String> = Vec::new();
+        let is_household =
+            |i: &Value| i.get("speaker_id").and_then(Value::as_str) == Some(HOUSEHOLD);
         let mut turn_ids: Vec<u64> = Vec::new();
         for item in items_of(&hits, "t")
             .iter()
@@ -771,20 +1044,27 @@ impl HelixMemory {
             .take(k)
         {
             if let Some(text) = item.get("text").and_then(Value::as_str) {
+                if is_household(item) {
+                    household.push(text.to_string());
+                }
                 out.push(text.to_string());
             }
             if let Some(id) = item.get(P_ID).and_then(Value::as_u64) {
                 turn_ids.push(id);
             }
         }
-        out.extend(
-            items_of(&hits, "m")
-                .iter()
-                .filter(|i| in_scope(i, speaker_id))
-                .take(k)
-                .filter_map(|i| i.get("content").and_then(Value::as_str))
-                .map(str::to_string),
-        );
+        for item in items_of(&hits, "m")
+            .iter()
+            .filter(|i| in_scope(i, speaker_id))
+            .take(k)
+        {
+            if let Some(content) = item.get("content").and_then(Value::as_str) {
+                if is_household(item) {
+                    household.push(content.to_string());
+                }
+                out.push(content.to_string());
+            }
+        }
 
         // 3. Graph hop from the turns already found: → MENTIONS → Entity → (ABOUT,
         //    incoming) → Memory.
@@ -802,20 +1082,26 @@ impl HelixMemory {
                         .returning(["e"]),
                 )
                 .await?;
-            out.extend(
-                items_of(&expanded, "e")
-                    .iter()
-                    .filter(|i| in_scope(i, speaker_id))
-                    .filter_map(|i| i.get("content").and_then(Value::as_str))
-                    .map(str::to_string),
-            );
+            for item in items_of(&expanded, "e")
+                .iter()
+                .filter(|i| in_scope(i, speaker_id))
+            {
+                if let Some(content) = item.get("content").and_then(Value::as_str) {
+                    if is_household(item) {
+                        household.push(content.to_string());
+                    }
+                    out.push(content.to_string());
+                }
+            }
         }
 
         // dedupe (stable, keep first occurrence) and cap
         let mut seen = HashSet::new();
         out.retain(|s| !s.trim().is_empty() && seen.insert(s.clone()));
         out.truncate(max_items);
-        Ok(out)
+        household.retain(|h| out.contains(h));
+        household.dedup();
+        Ok((out, household))
     }
 
     /// Total node count (tests/logging).
@@ -882,8 +1168,8 @@ impl HelixMemory {
     /// Filters (all optional, AND-combined):
     /// - `query` — case-insensitive substring match on the turn text
     ///   (`"{transcript}\n{reply}"`).
-    /// - `speaker_id` — keep only turns said by this speaker (`spk-…`); a turn with no
-    ///   `speaker_id` is treated as `household`.
+    /// - `speaker_id` — keep only turns said by this speaker (`spk-…`, or `unknown`); a
+    ///   turn with no `speaker_id` is treated as `unknown`.
     /// - `entity` — keep only turns that `MENTIONS` an `Entity` with this exact `name`
     ///   (the graph hop `Entity ← MENTIONS ← Turn`).
     ///
@@ -949,7 +1235,7 @@ impl HelixMemory {
             let sid = item
                 .get("speaker_id")
                 .and_then(Value::as_str)
-                .unwrap_or(HOUSEHOLD);
+                .unwrap_or(UNKNOWN);
             if let Some(want) = want_speaker {
                 if sid != want {
                     continue;
@@ -1491,10 +1777,14 @@ fn first_id(value: &Value, var: &str) -> Option<u64> {
 /// shared (`household`) ones; `None` (household scope) sees only shared. A node missing
 /// a `speaker_id` property is treated as shared (covers pre-Phase-D nodes).
 fn in_scope(item: &Value, want: Option<&str>) -> bool {
+    // A node without a speaker was never attributed: the unknown speaker's.
     let sid = item
         .get("speaker_id")
         .and_then(Value::as_str)
-        .unwrap_or(HOUSEHOLD);
+        .unwrap_or(UNKNOWN);
+    if sid == UNKNOWN {
+        return false;
+    }
     match want {
         Some(w) => sid == w || sid == HOUSEHOLD,
         None => sid == HOUSEHOLD,
@@ -1853,6 +2143,83 @@ mod tests {
     /// recall finds the dropped speaker's history), re-points SAID, and leaves a
     /// tombstone so a late ingest under the old id lands on the kept speaker. A forget
     /// moves the person's nodes to the household.
+    /// The admin console's corrections reach the graph: a turn (and its personal
+    /// facts) re-attributed, an unknown fact attributed, a fact deleted — and recall
+    /// follows.
+    #[test]
+    fn admin_corrections_rewrite_graph_recall() {
+        on_big_stack(corrections_body());
+    }
+
+    async fn corrections_body() {
+        let mem = HelixMemory::open_in_memory("corrections", 3).await.unwrap();
+        let emb = vec![0.0f32, 1.0, 0.0];
+        mem.ingest_turn(turn(
+            "r1",
+            1,
+            "my name is Brendan",
+            "Hi.",
+            emb.clone(),
+            &[],
+            "unknown",
+            None,
+        ))
+        .await
+        .unwrap();
+        for (ext, content, owner) in [
+            ("r1-mem-0", "The user's name is Brendan", "unknown"),
+            ("r1-mem-1", "the wifi is FastNet", "household"),
+            ("x-mem-0", "The user likes jazz", "unknown"),
+        ] {
+            mem.ingest_memory(ext, "memory", content, emb.clone(), &[], owner)
+                .await
+                .unwrap();
+        }
+        mem.flush().await.unwrap();
+        let recalled = |who: Option<&'static str>| {
+            let mem = &mem;
+            let emb = emb.clone();
+            async move { mem.recall(emb, who, 10, 20).await.unwrap() }
+        };
+        assert!(!recalled(Some("spk-b"))
+            .await
+            .iter()
+            .any(|h| h.contains("Brendan")));
+
+        // Turn correction: the turn + its personal fact move; the household fact stays.
+        assert_eq!(mem.reattribute_turn("r1", "spk-b").await.unwrap(), 2);
+        let b = recalled(Some("spk-b")).await;
+        assert!(b.iter().any(|h| h.contains("my name is Brendan")));
+        assert!(b.iter().any(|h| h == "The user's name is Brendan"));
+        assert!(
+            b.iter().any(|h| h.contains("FastNet")),
+            "household still shared"
+        );
+
+        // Review queue: attribute an unknown fact, then delete it.
+        assert_eq!(
+            mem.retag_memory("The user likes jazz", "unknown", "spk-b")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(recalled(Some("spk-b"))
+            .await
+            .iter()
+            .any(|h| h.contains("jazz")));
+        assert_eq!(
+            mem.forget_memory("The user likes jazz", "spk-b")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!recalled(Some("spk-b"))
+            .await
+            .iter()
+            .any(|h| h.contains("jazz")));
+        assert_eq!(mem.forget_memory("nope", "spk-b").await.unwrap(), 0);
+    }
+
     #[test]
     fn reassign_and_delete_speaker_rewrite_graph_attribution() {
         on_big_stack(reassign_body());
@@ -1946,10 +2313,21 @@ mod tests {
             .turns;
         assert_eq!(kept.len(), 2);
 
-        // Forgetting the kept speaker makes their nodes shared household ones.
+        // Forgetting the kept speaker moves their nodes to the unknown speaker: kept,
+        // but recalled for no one (a forgotten person's history is not the household's).
         assert_eq!(mem.delete_speaker("spk-keep").await.unwrap(), 3);
-        let shared = mem.recall(emb, None, 5, 8).await.unwrap();
-        assert!(shared.iter().any(|h| h.contains("cello")));
+        let shared = mem.recall(emb.clone(), None, 5, 8).await.unwrap();
+        assert!(!shared.iter().any(|h| h.contains("cello")));
+        let theirs = mem.recall(emb, Some("spk-keep"), 5, 8).await.unwrap();
+        assert!(!theirs.iter().any(|h| h.contains("cello")));
+        assert_eq!(
+            mem.list_turns(None, Some("unknown"), None, 10, 0)
+                .await
+                .unwrap()
+                .turns
+                .len(),
+            2
+        );
         assert!(mem
             .list_turns(None, Some("spk-keep"), None, 10, 0)
             .await

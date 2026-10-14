@@ -54,8 +54,12 @@ seam alongside `wyoming` and `whisper-rs`; boot-time `stt.engine=elevenlabs`, th
 (per-person voice recognition: an always-compiled ECAPA-TDNN voiceprint embedder
 identifies who is speaking on **every** turn's voiced PCM — not the wake word — and
 scopes memory/prompt per person; opt-in via `speaker.enabled`+`speaker.model_path`, with
-a device **People** screen whose guided "Add a person" flow actively enrolls + verifies a
-voice via an `enroll` display context on the ordinary turn — no second audio path).
+a device **People** screen whose guided "Add a voice" flow (existing household member or new person) actively enrolls + verifies a
+voice via an `enroll` display context on the ordinary turn — no second audio path), and
+[`SpeakerScopedMemoryPlan.md`](./plans/SpeakerScopedMemoryPlan.md) (memory scopes
+`person` / `household` / `unknown`: a fact said by an unrecognized voice is kept but never
+recalled for anyone; per-turn speaker resolution `identified|tentative|new|unknown`;
+"who am I?" answered from the voiceprint; admin-console speaker tags + unknown-fact review).
 
 ---
 
@@ -650,6 +654,17 @@ NOTES="<user-facing release notes — shown in the device update banner>" \
 WRANGLER="npx -y wrangler" \
 ./scripts/release-r2.sh
 ```
+
+**Stale-UI guard (2026-10-14).** The script deletes `build/app` before building and,
+before uploading, compares the new APK's compiled Dart UI (`lib/armeabi-v7a/libapp.so`)
+with the currently published APK's — **identical ⇒ it refuses to publish** (nothing is
+uploaded). This exists because an incremental build shipped 1.0.18 with 1.0.17's UI:
+Gradle's `mergeSelfUpdateReleaseJniLibFolders` kept a stale `libapp.so` while Flutter's
+fresh AOT output had changed, and only the Rust `.so` updated. If it trips, `flutter
+clean` and rebuild; for a deliberate Rust/native-only release with no Dart change, re-run
+with `ALLOW_SAME_DART=1`. When verifying an APK by hand, note that Dart stores strings
+containing non-Latin-1 characters (e.g. `…`, `—`) as UTF-16, so a plain `grep -a` won't
+find those — check an ASCII-only string, or compare `libapp.so` hashes.
 
 Verify it went live (devices pick it up on their next check, within the `latest.json`
 edge-cache TTL — purge/short-TTL it if a device lags):

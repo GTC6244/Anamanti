@@ -559,15 +559,45 @@ phone, → Memory).
   (`speaker-play-<id>`, ▶) that replays that person's recorded voice clips through the
   assistant's speaker so a human can listen and recognize who it is before naming them
   (`OrchestratorClient.playSpeakerClips` → the Core streams the clips back; a snackbar
-  reports how many played, or that none are saved yet). Per-row menu: Name/rename,
-  Merge with…, Forget. An **"Add person"** FAB (`people-add`, shown when the live engine
+  reports how many played, or that none are saved yet). Rows are badged against the Mac's
+  household roster (`OrchestratorClient.listHouseholdMembers`): a home avatar + "Household
+  member" when the voice's name matches a member, "Not linked to household" for a named
+  voice outside the roster. Per-row menu: **Link to household member…**
+  (`speaker-link-<id>` → a member picker `link-member-<name>`: "This voice becomes X", or
+  "Merge into X's voiceprint" (→ confirm `link-merge-confirm`) when X already has one;
+  "Already linked" disabled; empty roster → a snackbar pointing to the Mac's Household
+  page; calls `OrchestratorClient.linkSpeaker`), Name/rename,
+  **Add voice samples** (`speaker-add-samples-<id>`, only when the live engine controller is
+  wired — opens `SpeakerEnrollScreen` in add-samples mode for that person), Merge with…, Forget. An **"Add voice"** FAB (`people-add`, shown when the live engine
   controller is wired) opens the guided enrollment flow below. Constructed with an
   `OrchestratorClient` (+ the `AssistantController` and native `setEnrollContext` for
   enrollment). See [`speaker_id_plan.md`](./speaker_id_plan.md).
 
 **`SpeakerEnrollScreen`** — `lib/src/ui/speaker_enroll_screen.dart`
-- `Scaffold` + `AppBar("Add a person")`. The guided "train a new voice" flow
-  (SpeakerEnrollmentPlan.md Phase 2): a name step → a capture step that prompts the user to
+- `Scaffold` + `AppBar("Add a voice")`. The guided "train a voice" flow
+  (SpeakerEnrollmentPlan.md Phase 2): a "Whose voice is this?" step — **household members**
+  as `ChoiceChip`s (`enroll-member-<name>`; a voice icon marks members who already have a
+  voiceprint) fetched via `OrchestratorClient.listHouseholdMembers`, **or** a new name in the
+  `enroll-name` field (a typed name matching a member resolves to that member's spelling); an
+  `enroll-name-hint` line says whether the voice will be linked to an existing member, added to
+  their existing voiceprint, or added to the household as a new person — → a capture step
+  with a **phrase guide** (`enroll-guide-<i>`: the session's phrases, captured ones ticked off,
+  the current one highlighted; beside the controls on landscape ≥700 px, stacked below on
+  narrow screens). Cancel / Save are **pinned** under the scrolling content so they stay
+  on the ~960×600 screen. Both the capture and verify steps show a live **capture-status
+  panel** (`EnrollCaptureStatus`, `lib/src/ui/enroll_capture_status.dart`, key
+  `enroll-capture-status`) mapped by `enrollCueFor` from `AssistantState.phase` /
+  `captureReady` / `online` + the last sample result: *Starting microphone…* → *Waiting for
+  "<wake word>"* → **Listening — read the phrase now** (red, recording dot, "Heard
+  "<wake word>"", an auto-ranged `MicLevelMeter` fed `micLevel`) → *Checking that sample…*
+  (spinner, from the on-device end-of-speech cue) → *Sample captured* / *Sample not used* +
+  the Core's reason (flashed for `kEnrollResultFlash` = 3 s, cleared early by the next wake
+  word); plus *Can't reach the assistant* and *Microphone restarting…*. Presentation only —
+  no new engine events; implicit animations only.
+  **Add-samples mode** (`speakerId` + `personLabel`, from the People ⋮ menu): `AppBar("Add
+  voice samples")`, skips the name step, starts the guide later in `kEnrollPhrases` so a
+  re-train reads fresh sentences, and commits via `enrollFinish(…, speakerId:)` into that exact
+  voiceprint. Then the shared flow: a capture step that prompts the user to
   say the wake word and read short phrases (progress dots, per-sample accept/retry feedback)
   → commit → a verify step that confirms recognition ("Recognized Dana!", with confidence).
   Captures reuse the ordinary wake-word turn via an `enroll` display context (stamped by the

@@ -41,6 +41,10 @@ class PeopleScreen extends StatefulWidget {
 
 class _PeopleScreenState extends State<PeopleScreen> {
   List<SpeakerView>? _people;
+
+  /// The Mac's household roster (names), for "Link to household member…" and the
+  /// per-row household badge. Best-effort: empty when unavailable.
+  List<String> _members = const [];
   String? _error;
   bool _busy = false;
 
@@ -57,9 +61,14 @@ class _PeopleScreenState extends State<PeopleScreen> {
     });
     try {
       final people = await widget.client.listSpeakers();
+      List<String> members = const [];
+      try {
+        members = await widget.client.listHouseholdMembers();
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _people = people;
+        _members = members;
         _busy = false;
       });
     } catch (e) {
@@ -110,6 +119,118 @@ class _PeopleScreenState extends State<PeopleScreen> {
       _snack('Rename failed: $e');
       return;
     }
+    await _reload();
+  }
+
+  /// The roster member a voice is linked to (its name matches, case-insensitive).
+  String? _memberOf(SpeakerView s) {
+    final n = s.name?.trim().toLowerCase();
+    if (n == null || n.isEmpty) return null;
+    for (final m in _members) {
+      if (m.trim().toLowerCase() == n) return m;
+    }
+    return null;
+  }
+
+  /// Another voiceprint (not [s]) already linked to [member], if any — linking [s]
+  /// to that member merges into it.
+  SpeakerView? _voiceOf(String member, {required SpeakerView except}) {
+    final m = member.trim().toLowerCase();
+    for (final p in _people ?? const <SpeakerView>[]) {
+      if (p.id != except.id && p.name?.trim().toLowerCase() == m) return p;
+    }
+    return null;
+  }
+
+  /// "Link to household member…": associate this voice with a person in the Mac's
+  /// household roster. If that member already has a voiceprint, this voice is merged
+  /// into it (after a confirm) so each household member has one voiceprint; otherwise
+  /// this voice is named as them. The Core makes the final call
+  /// (`OrchestratorClient.linkSpeaker`).
+  Future<void> _linkToMember(SpeakerView s, int index) async {
+    if (_members.isEmpty) {
+      _snack(
+        'No household members yet — add people on the Mac (Household page) first.',
+      );
+      return;
+    }
+    final label = _label(s, index);
+    final current = _memberOf(s);
+    final member = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text('Link $label to…'),
+        children: [
+          for (final m in _members)
+            Builder(
+              builder: (context) {
+                final existing = _voiceOf(m, except: s);
+                final isCurrent = current == m && existing == null;
+                return SimpleDialogOption(
+                  key: ValueKey('link-member-$m'),
+                  onPressed: isCurrent ? null : () => Navigator.pop(context, m),
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      existing != null
+                          ? Icons.call_merge
+                          : Icons.person_add_alt,
+                    ),
+                    title: Text(m),
+                    subtitle: Text(
+                      isCurrent
+                          ? 'Already linked'
+                          : existing != null
+                          ? 'Merge into $m\'s voiceprint'
+                          : 'This voice becomes $m',
+                    ),
+                    enabled: !isCurrent,
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
+    if (member == null || !mounted) return;
+    final existing = _voiceOf(member, except: s);
+    if (existing != null) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Merge $label into $member?'),
+          content: Text(
+            "$label's voice clips and memories move to $member, and the two "
+            'voiceprints become one. This can\'t be undone.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              key: const Key('link-merge-confirm'),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Merge'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+    }
+    try {
+      await widget.client.linkSpeaker(s.id, member);
+    } catch (e) {
+      if (!mounted) return;
+      _snack('Couldn\'t link: $e');
+      return;
+    }
+    if (!mounted) return;
+    _snack(
+      existing != null
+          ? 'Merged $label into $member.'
+          : '$label is now linked to $member.',
+    );
     await _reload();
   }
 
@@ -206,8 +327,8 @@ class _PeopleScreenState extends State<PeopleScreen> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// Open the guided "Add a person" enrollment flow, then refresh so the new,
-  /// pre-named voiceprint appears. Only available when the engine controller is wired.
+  /// Open the guided "Add a voice" enrollment flow (for an existing household member
+  /// or a new person), then refresh so the new/updated voiceprint appears. Only available when the engine controller is wired.
   Future<void> _addPerson() async {
     final controller = widget.controller;
     if (controller == null) return;
@@ -218,6 +339,27 @@ class _PeopleScreenState extends State<PeopleScreen> {
           controller: controller,
           setEnrollContext: widget.setEnrollContext,
           wakeWord: widget.wakeWord,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _reload();
+  }
+
+  /// "Add voice samples" for a person already on the list: run the guided phrase
+  /// capture and fold the samples into *their* voiceprint (by id), then refresh.
+  Future<void> _addSamples(SpeakerView s, int index) async {
+    final controller = widget.controller;
+    if (controller == null) return;
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => SpeakerEnrollScreen(
+          client: widget.client,
+          controller: controller,
+          setEnrollContext: widget.setEnrollContext,
+          wakeWord: widget.wakeWord,
+          speakerId: s.id,
+          personLabel: _label(s, index),
         ),
       ),
     );
@@ -244,8 +386,8 @@ class _PeopleScreenState extends State<PeopleScreen> {
           ? FloatingActionButton.extended(
               key: const Key('people-add'),
               onPressed: _addPerson,
-              icon: const Icon(Icons.person_add_alt_1),
-              label: const Text('Add person'),
+              icon: const Icon(Icons.record_voice_over),
+              label: const Text('Add voice'),
             )
           : null,
       body: _buildBody(people),
@@ -282,13 +424,29 @@ class _PeopleScreenState extends State<PeopleScreen> {
         final clips = s.samples == 1
             ? '1 voice clip'
             : '${s.samples} voice clips';
+        final member = _memberOf(s);
+        // Household-linked voices say so; named voices outside the roster (and the
+        // roster is known) are flagged so they can be linked.
+        final status = member != null
+            ? 'Household member · $clips'
+            : !s.labeled
+            ? 'Not named yet · $clips'
+            : _members.isNotEmpty
+            ? 'Not linked to household · $clips'
+            : clips;
         return ListTile(
           key: ValueKey('speaker-${s.id}'),
           leading: CircleAvatar(
-            child: Icon(s.labeled ? Icons.person : Icons.person_outline),
+            child: Icon(
+              member != null
+                  ? Icons.home
+                  : s.labeled
+                  ? Icons.person
+                  : Icons.person_outline,
+            ),
           ),
           title: Text(label),
-          subtitle: Text(s.labeled ? clips : 'Not named yet · $clips'),
+          subtitle: Text(status),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -304,16 +462,38 @@ class _PeopleScreenState extends State<PeopleScreen> {
                   switch (action) {
                     case 'rename':
                       _rename(s, i);
+                    case 'link':
+                      _linkToMember(s, i);
+                    case 'samples':
+                      _addSamples(s, i);
                     case 'merge':
                       _merge(s, i);
                     case 'delete':
                       _delete(s, i);
                   }
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'rename', child: Text('Name / rename')),
-                  PopupMenuItem(value: 'merge', child: Text('Merge with…')),
-                  PopupMenuItem(value: 'delete', child: Text('Forget')),
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    key: ValueKey('speaker-link-${s.id}'),
+                    value: 'link',
+                    child: const Text('Link to household member…'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'rename',
+                    child: Text('Name / rename'),
+                  ),
+                  // Needs the live engine (captures ride the wake-word turn).
+                  if (widget.controller != null)
+                    PopupMenuItem(
+                      key: ValueKey('speaker-add-samples-${s.id}'),
+                      value: 'samples',
+                      child: const Text('Add voice samples'),
+                    ),
+                  const PopupMenuItem(
+                    value: 'merge',
+                    child: Text('Merge with…'),
+                  ),
+                  const PopupMenuItem(value: 'delete', child: Text('Forget')),
                 ],
               ),
             ],

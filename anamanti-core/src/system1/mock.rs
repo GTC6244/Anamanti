@@ -50,6 +50,7 @@ mod tests {
             transcript: t.to_string(),
             screen: None,
             timers: Default::default(),
+            speaker: Default::default(),
         }
     }
 

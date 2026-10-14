@@ -42,11 +42,12 @@ use crate::llm::{DeviceAction, LlmBackend, LlmTurn, ReplyStream};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
-    infer_memories, parse_command, ChatLog, ChatLogRecord, MemoryCommand, MemoryKind, MemorySource,
-    MemoryStore, PromptLog, Recall, SqliteRecall,
+    classify_scope, infer_memories, parse_command, ChatLog, ChatLogRecord, FactScope,
+    MemoryCommand, MemoryKind, MemoryScope, MemorySource, MemoryStore, PromptLog, Recall,
+    SqliteRecall, WrittenMemory,
 };
 use crate::settings::{RuntimeSettings, SharedSettings};
-use crate::speaker::{SpeakerContext, SpeakerService};
+use crate::speaker::{SpeakerContext, SpeakerResolution, SpeakerService, UNKNOWN_SPEAKER};
 use crate::stt::{SttEngine, Transcriber, WyomingTranscriber};
 use crate::vad::SpeechGate;
 use crate::wyoming::protocol::{self, types, AudioFormat, WyomingEvent};
@@ -81,7 +82,7 @@ pub enum TurnEvent {
     Streaming,
     /// The final transcript arrived from STT.
     Transcript(String),
-    /// The turn's speaker was identified (or attributed to the shared household).
+    /// The turn's speaker was resolved (identified, probable, new, or unknown).
     Speaker(SpeakerContext),
     /// One reply-token fragment from the LLM (or a command confirmation).
     ReplyToken(String),
@@ -136,7 +137,7 @@ impl ServiceConnector for TcpConnector {
 /// What the reply phase of a turn produced.
 struct Reply {
     text: String,
-    memories_written: Vec<String>,
+    memories_written: Vec<WrittenMemory>,
     delivery: Delivery,
 }
 
@@ -155,10 +156,14 @@ pub struct Pipeline {
     /// Optional append-only prompt log; the exact assembled LLM prompt per turn,
     /// for the debug GUI. `None` disables prompt logging.
     promptlog: Option<Arc<PromptLog>>,
-    /// Optional per-person speaker identification (speaker_id_plan.md). `None`
-    /// preserves the shared-household behavior — every turn attributes to
-    /// [`crate::speaker::HOUSEHOLD_SPEAKER`].
+    /// Optional per-person speaker identification (speaker_id_plan.md). `None` makes
+    /// every turn's speaker [`crate::speaker::UNKNOWN_SPEAKER`]: nothing personal is
+    /// recalled, and personal facts are kept unattributed.
     speaker: Option<Arc<SpeakerService>>,
+    /// The last confidently identified speaker and when (unix secs), so a follow-up
+    /// turn too short to identify on its own can inherit them as *tentative*
+    /// (SpeakerScopedMemoryPlan.md §4.2). Shared across clones (one per Core).
+    last_speaker: Arc<std::sync::Mutex<Option<(SpeakerContext, i64)>>>,
     /// Debug-only per-turn audio capture directory. `None` disables capture
     /// entirely; set from the config file's `audio_dump_dir`.
     audio_dump_dir: Option<PathBuf>,
@@ -210,6 +215,7 @@ impl Pipeline {
             chatlog: None,
             promptlog: None,
             speaker: None,
+            last_speaker: Arc::new(std::sync::Mutex::new(None)),
             audio_dump_dir: None,
             system_prompt: system_prompt.into(),
             turn_timeout,
@@ -261,8 +267,8 @@ impl Pipeline {
         self
     }
 
-    /// Enable per-person speaker identification. Without this the pipeline keeps the
-    /// shared-household behavior (all turns → `household`).
+    /// Enable per-person speaker identification. Without this every turn's speaker is
+    /// unknown.
     pub fn with_speaker(mut self, speaker: Arc<SpeakerService>) -> Self {
         self.speaker = Some(speaker);
         self
@@ -461,9 +467,23 @@ impl Pipeline {
             return Ok(TurnOutcome::Completed);
         }
 
-        // 2. Identify who is speaking (or attribute to the shared household), so memory
-        //    writes/recall and the reply are per-person.
+        // 2. Identify who is speaking (and how sure we are), so memory writes/recall and
+        //    the reply are per-person. A follow-up turn too short to identify may
+        //    inherit the previous turn's identified speaker as tentative.
         let speaker = self.identify_speaker(&voiced_pcm).await;
+        let speaker = self.with_follow_up_continuity(speaker, ctx.followup_depth);
+        log::info!(
+            "speaker: {} {} ({:.2}{}{})",
+            speaker.speaker_id,
+            speaker.resolution.as_str(),
+            speaker.confidence,
+            if speaker.short_clip {
+                ", short clip"
+            } else {
+                ""
+            },
+            if speaker.inherited { ", inherited" } else { "" },
+        );
         (ctx.on_event)(TurnEvent::Speaker(speaker.clone()));
 
         // 3 + 4. Fast paths, or memory + LLM → reply, spoken sentence by sentence.
@@ -596,24 +616,23 @@ impl Pipeline {
         transcript: &str,
         speaker: &SpeakerContext,
     ) -> Result<Reply> {
-        // Memory entries written this turn (for the chat log / ingester).
-        let mut memories_written = Vec::new();
-        // The scope memory writes/recall use: this person, or shared (household).
-        let scope = speaker_scope(speaker);
+        // Memory entries written this turn, with their scopes (for the chat log /
+        // ingester).
+        let mut memories_written: Vec<WrittenMemory> = Vec::new();
 
         // Explicit command → apply, confirm, and speak the confirmation in one chunk,
         // skipping the LLM. Like every fast reply it closes on a bare `audio-stop` (no
         // follow-up listen) and is barge-in-interruptible.
         if let Some(cmd) = parse_command(transcript) {
             ctx.timing.path = Some("command".to_string());
-            match &cmd {
-                MemoryCommand::Remember { content, .. } => memories_written.push(content.clone()),
-                MemoryCommand::NameSpeaker(name) => {
-                    memories_written.push(format!("The user's name is {name}"))
-                }
-                _ => {}
-            }
-            let text = self.apply_command(cmd, scope, ctx.on_event)?;
+            let text = self.apply_command(
+                cmd,
+                speaker,
+                &ctx.runtime,
+                &ctx.turn_id,
+                &mut memories_written,
+                ctx.on_event,
+            )?;
             let reply = FastReply::say(text).ending_session();
             let delivery = self.speak_fast_reply(ctx, &reply).await;
             return Ok(Reply {
@@ -626,7 +645,7 @@ impl Pipeline {
         // System-1 fast-decision fork (plans/system1-fast-decisions.md). Runs *before*
         // memory recall + the LLM; skipped entirely for the default `none` engine. On a
         // confident Resolve with a matching handler the turn is answered there.
-        if let Some((text, delivery)) = self.run_system1(ctx, transcript).await {
+        if let Some((text, delivery)) = self.run_system1(ctx, transcript, speaker).await {
             return Ok(Reply {
                 text,
                 memories_written,
@@ -643,31 +662,34 @@ impl Pipeline {
             ctx.runtime.llm_model.as_deref().unwrap_or("?"),
         );
 
-        // Inferred capture from an ordinary turn — attributed to this speaker.
+        // Inferred capture from an ordinary turn — stored for whoever it is true for:
+        // this person only when confidently identified (SpeakerScopedMemoryPlan.md §2).
         for (kind, content) in infer_memories(transcript) {
-            self.memory
-                .add_scoped(kind, &content, MemorySource::Inferred, scope)?;
-            memories_written.push(content.clone());
+            let written = self.store_memory(
+                kind,
+                &content,
+                MemorySource::Inferred,
+                speaker,
+                &ctx.turn_id,
+            )?;
+            memories_written.push(written);
             (ctx.on_event)(TurnEvent::MemoryStored(content));
         }
 
-        // Build per-person memory context. A recall failure (e.g. a transient GraphRAG
-        // backend error) must not sink the turn — proceed with no memory context.
+        // Build per-person memory context: the speaker's own memories (when recognized)
+        // plus household ones — never the unknown speaker's. A recall failure (e.g. a
+        // transient GraphRAG backend error) must not sink the turn.
         let recall_start = Instant::now();
         let recalled = self
-            .build_context(transcript, scope)
+            .build_context(transcript, speaker.reader())
             .await
             .unwrap_or_else(|e| {
                 log::warn!("memory recall failed; answering without context: {e:#}");
                 crate::memory::RecallResult::default()
             });
         let recall_ms = recall_start.elapsed().as_millis() as u64;
-        let context = recalled
-            .hits
-            .iter()
-            .map(|c| format!("- {c}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let memory = prompt::RecalledMemory::split(&recalled.hits, &recalled.household);
+        let context_chars = memory.chars();
         ctx.timing.recall_ms = Some(recall_ms);
         // Record which backend actually answered (the boot fallback is silent, so this
         // is the only per-turn proof that a helix-configured instance ran GraphRAG vs
@@ -684,18 +706,29 @@ impl Pipeline {
              (embed {:?}ms, search {:?}ms, {} ctx chars)",
             recalled.embed_ms,
             recalled.search_ms,
-            context.len(),
+            context_chars,
         );
+
+        // A follow-up turn (the device auto-opened the mic after a reply) is fed the
+        // recent conversation so the answer has context — every speaker's turns, each
+        // labelled with who said it (decision D3); an ordinary single-shot turn carries
+        // no history (locked "single-turn v1" decision). See plans/Plan.MD.
+        let prompt_start = Instant::now();
+        let history = if ctx.followup_depth > 0 {
+            self.recent_history(speaker)
+        } else {
+            Vec::new()
+        };
 
         // Prompt assembly (system prompt + grounding + recalled context), all from the
         // turn snapshot.
-        let prompt_start = Instant::now();
         let system_prompt = prompt::build_system_prompt(
             &self.system_prompt,
             speaker,
             &ctx.runtime,
             &ctx.device_ctx,
-            &context,
+            &memory,
+            !history.is_empty(),
         );
         // Record the exact prompt the model is about to see (debug GUI). Best-effort.
         self.log_prompt(
@@ -706,14 +739,6 @@ impl Pipeline {
             transcript,
         );
 
-        // A follow-up turn (the device auto-opened the mic after a reply) is fed the
-        // recent conversation so the answer has context; an ordinary single-shot turn
-        // carries no history (locked "single-turn v1" decision). See plans/Plan.MD.
-        let history = if ctx.followup_depth > 0 {
-            self.recent_history()
-        } else {
-            Vec::new()
-        };
         let prompt_ms = prompt_start.elapsed().as_millis() as u64;
         ctx.timing.prompt_ms = Some(prompt_ms);
         log::info!(
@@ -923,7 +948,7 @@ impl Pipeline {
         speaker: &SpeakerContext,
         transcript: &str,
         reply: &str,
-        memories_written: Vec<String>,
+        memories_written: Vec<WrittenMemory>,
         timing: crate::memory::TurnTiming,
     ) {
         let Some(log) = &self.chatlog else {
@@ -937,11 +962,16 @@ impl Pipeline {
             ts: now_secs(),
             transcript: transcript.to_string(),
             reply: reply.to_string(),
-            memories_written,
+            memories_written: memories_written.iter().map(|m| m.content.clone()).collect(),
+            memories: memories_written,
             llm_backend: runtime.llm_backend.clone(),
             model: runtime.llm_model.clone(),
             speaker_id: speaker.speaker_id.clone(),
             speaker_name: speaker.name.clone(),
+            speaker_resolution: Some(speaker.resolution.as_str().to_string()),
+            speaker_confidence: Some(speaker.confidence),
+            speaker_inherited: speaker.inherited,
+            speaker_short_clip: speaker.short_clip,
             timing: Some(timing),
         };
         if let Err(e) = log.append(&record) {
@@ -970,6 +1000,7 @@ impl Pipeline {
             model: runtime.llm_model.clone(),
             speaker_id: speaker.speaker_id.clone(),
             speaker_name: speaker.name.clone(),
+            speaker_resolution: Some(speaker.resolution.as_str().to_string()),
             system_prompt: system_prompt.to_string(),
             user_message: user_message.to_string(),
         };
@@ -978,51 +1009,205 @@ impl Pipeline {
         }
     }
 
-    /// Apply an explicit memory command; returns the spoken confirmation.
+    /// Store one memory said in this turn, in the scope it is true for — household
+    /// facts to the household; personal ones to the speaker only when confidently
+    /// identified, else unattributed with the best guess as candidate (D1) — with this
+    /// turn's provenance. Returns the scoped record for the chat log.
+    fn store_memory(
+        &self,
+        kind: MemoryKind,
+        content: &str,
+        source: MemorySource,
+        speaker: &SpeakerContext,
+        turn_id: &str,
+    ) -> Result<WrittenMemory> {
+        let scope = speaker.write_scope(classify_scope(content));
+        self.store_in(kind, content, source, scope, speaker, turn_id)
+    }
+
+    /// [`store_memory`](Self::store_memory) into an explicit `scope`.
+    fn store_in(
+        &self,
+        kind: MemoryKind,
+        content: &str,
+        source: MemorySource,
+        scope: MemoryScope,
+        speaker: &SpeakerContext,
+        turn_id: &str,
+    ) -> Result<WrittenMemory> {
+        self.memory
+            .add_in(kind, content, source, &scope, &speaker.provenance(turn_id))?;
+        Ok(WrittenMemory {
+            content: content.trim().to_string(),
+            scope: scope.kind().as_str().to_string(),
+            speaker_id: scope.speaker_id().or(scope.candidate()).map(str::to_string),
+        })
+    }
+
+    /// Apply an explicit memory command; returns the spoken confirmation. Anything it
+    /// stores is appended to `written`.
     fn apply_command(
         &self,
         cmd: MemoryCommand,
-        speaker_id: Option<&str>,
+        speaker: &SpeakerContext,
+        runtime: &RuntimeSettings,
+        turn_id: &str,
+        written: &mut Vec<WrittenMemory>,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
     ) -> Result<String> {
         Ok(match cmd {
             MemoryCommand::Remember { kind, content } => {
-                self.memory
-                    .add_scoped(kind, &content, MemorySource::Explicit, speaker_id)?;
+                written.push(self.store_memory(
+                    kind,
+                    &content,
+                    MemorySource::Explicit,
+                    speaker,
+                    turn_id,
+                )?);
                 on_event(TurnEvent::MemoryStored(content));
                 "Okay, I'll remember that.".to_string()
             }
             MemoryCommand::ForgetMatching(query) => {
-                let n = self.memory.forget_matching(&query)?;
+                // Only the asker's own memories — plus household ones when they
+                // explicitly said "we"/"our"/"everyone".
+                let household = classify_scope(&query) == FactScope::Household;
+                let n = self
+                    .memory
+                    .forget_matching_for(&query, speaker.forgetter(), household)?;
                 if n > 0 {
                     "Okay, I've forgotten that.".to_string()
                 } else {
                     "I didn't have anything about that.".to_string()
                 }
             }
-            MemoryCommand::ForgetLast => match self.memory.forget_last()? {
+            MemoryCommand::ForgetLast => match self.memory.forget_last_for(speaker.forgetter())? {
                 Some(_) => "Okay, I've forgotten that.".to_string(),
                 None => "There was nothing to forget.".to_string(),
             },
+            MemoryCommand::WhoAmI => who_am_i_reply(speaker, &runtime.household),
             MemoryCommand::NameSpeaker(name) => {
-                // Record the name as a per-person fact (parity with inferred capture)…
-                let fact = format!("The user's name is {name}");
-                self.memory.add_scoped(
-                    MemoryKind::Fact,
-                    &fact,
-                    MemorySource::Explicit,
-                    speaker_id,
-                )?;
-                on_event(TurnEvent::MemoryStored(fact));
-                // …and attach it to the voiceprint profile, when a person was identified.
-                if let (Some(svc), Some(id)) = (&self.speaker, speaker_id) {
-                    if let Err(e) = svc.registry().rename(id, &name) {
-                        log::warn!("failed to name speaker {id}: {e:#}");
-                    }
+                let reply =
+                    self.name_speaker_by_voice(&name, speaker, runtime, turn_id, written)?;
+                if let Some(w) = written.last() {
+                    on_event(TurnEvent::MemoryStored(w.content.clone()));
                 }
-                format!("Nice to meet you, {name}!")
+                reply
             }
         })
+    }
+
+    /// "My name is X" by voice (SpeakerScopedMemoryPlan.md §4.3, decision D7). Guided
+    /// enrollment is how a voiceprint gets a trusted name; speech only names a
+    /// **confidently identified, still-anonymous** voiceprint, and only with the
+    /// household roster's spelling. Everything else is stored as an unattributed fact
+    /// and answered with a pointer to enrollment. Never renames a named voiceprint and
+    /// never takes a name another voiceprint already has.
+    fn name_speaker_by_voice(
+        &self,
+        spoken: &str,
+        speaker: &SpeakerContext,
+        runtime: &RuntimeSettings,
+        turn_id: &str,
+        written: &mut Vec<WrittenMemory>,
+    ) -> Result<String> {
+        let canonical = runtime
+            .household
+            .member_matching_spoken(spoken)
+            .map(|m| m.name.trim().to_string());
+        let display = canonical.clone().unwrap_or_else(|| spoken.to_string());
+        let fact = format!("The user's name is {display}");
+        let unattributed = MemoryScope::Unknown {
+            candidate: speaker.best_guess().map(str::to_string),
+        };
+        let enroll_hint = "On the display, go to Settings, People, Add a voice, and pick your \
+                           name so I'll recognise you.";
+
+        let identified = speaker.resolution == SpeakerResolution::Identified;
+        if !identified {
+            written.push(self.store_in(
+                MemoryKind::Fact,
+                &fact,
+                MemorySource::Explicit,
+                unattributed,
+                speaker,
+                turn_id,
+            )?);
+            return Ok(format!(
+                "Nice to meet you, {display}. I don't know your voice yet. {enroll_hint}"
+            ));
+        }
+
+        // A confidently identified voice that already has a name keeps it.
+        if let Some(known) = speaker.name.as_deref().filter(|n| !n.trim().is_empty()) {
+            let same = known.trim().eq_ignore_ascii_case(display.trim())
+                || crate::household::spoken_name_distance(known, &display)
+                    <= crate::household::spoken_name_tolerance(known);
+            if same {
+                return Ok(format!("Yes, I know. Hi, {}!", known.trim()));
+            }
+            return Ok(format!(
+                "I know your voice as {}. If that's wrong, you can rename it under Settings, \
+                 People on the display.",
+                known.trim()
+            ));
+        }
+
+        let Some(name) = canonical else {
+            // Not in the household roster: keep the fact unattributed rather than
+            // labelling a voiceprint with a transcript spelling.
+            written.push(self.store_in(
+                MemoryKind::Fact,
+                &fact,
+                MemorySource::Explicit,
+                unattributed,
+                speaker,
+                turn_id,
+            )?);
+            return Ok(format!(
+                "Nice to meet you, {display}. I couldn't find you in the household list. \
+                 {enroll_hint}"
+            ));
+        };
+
+        if let Some(svc) = &self.speaker {
+            match svc.registry().find_named(&name)? {
+                Some(other) if other.id != speaker.speaker_id => {
+                    log::warn!(
+                        "speaker {} said their name is {name}, which voiceprint {} already has \
+                         — possible duplicate; consider merging them on the admin console",
+                        speaker.speaker_id,
+                        other.id
+                    );
+                    written.push(self.store_in(
+                        MemoryKind::Fact,
+                        &fact,
+                        MemorySource::Explicit,
+                        unattributed,
+                        speaker,
+                        turn_id,
+                    )?);
+                    return Ok(format!(
+                        "I already know a {name} with a different voice, so I won't change \
+                         anything yet. {name}, you can add more voice samples under Settings, \
+                         People on the display."
+                    ));
+                }
+                _ => {
+                    if let Err(e) = svc.registry().name_from_voice(&speaker.speaker_id, &name) {
+                        log::warn!("failed to name speaker {}: {e:#}", speaker.speaker_id);
+                    }
+                }
+            }
+        }
+        written.push(self.store_in(
+            MemoryKind::Fact,
+            &format!("The user's name is {name}"),
+            MemorySource::Explicit,
+            MemoryScope::Person(speaker.speaker_id.clone()),
+            speaker,
+            turn_id,
+        )?);
+        Ok(format!("Nice to meet you, {name}!"))
     }
 
     /// Recall memory entries relevant to the transcript for this speaker (their own
@@ -1048,7 +1233,12 @@ impl Pipeline {
     /// on one display thread correctly; two displays talking at once could interleave
     /// (an accepted v1 limitation — see plans/Plan.MD). A read failure yields no history
     /// rather than breaking the turn.
-    fn recent_history(&self) -> Vec<(String, String)> {
+    ///
+    /// Every speaker's turns are kept (decision D3), but each user message is
+    /// **labelled** with who said it — `[you]` for the current speaker, the person's
+    /// live name otherwise (`[unknown speaker]` when unattributed) — so the model never
+    /// applies one person's "I am…" to another.
+    fn recent_history(&self, current: &SpeakerContext) -> Vec<(String, String)> {
         let Some(log) = &self.chatlog else {
             return Vec::new();
         };
@@ -1067,17 +1257,79 @@ impl Pipeline {
             .into_iter()
             .filter(|r| r.ts >= cutoff)
             .filter(|r| !r.transcript.trim().is_empty() && !r.reply.trim().is_empty())
-            .map(|r| (r.transcript, r.reply))
+            .map(|r| {
+                let label = self.history_label(&r, current);
+                (format!("[{label}]: {}", r.transcript.trim()), r.reply)
+            })
             .rev()
             .collect()
     }
 
+    /// Who said a logged turn, as a short label for the follow-up history.
+    fn history_label(&self, r: &ChatLogRecord, current: &SpeakerContext) -> String {
+        let id = r.speaker_id.as_str();
+        let unattributed = id.is_empty() || id == UNKNOWN_SPEAKER || id == "household";
+        if unattributed {
+            return "unknown speaker".to_string();
+        }
+        if current.reader() == Some(id) {
+            return "you".to_string();
+        }
+        // The live registry name (renames apply retroactively), else the logged one.
+        let name = self
+            .speaker
+            .as_ref()
+            .and_then(|svc| svc.registry().get(id).ok().flatten())
+            .and_then(|p| p.name)
+            .or_else(|| r.speaker_name.clone());
+        let probable = matches!(r.speaker_resolution.as_deref(), Some("tentative"));
+        match (name, probable) {
+            (Some(n), false) => n,
+            (Some(n), true) => format!("{n} (probably)"),
+            (None, _) => "another household member".to_string(),
+        }
+    }
+
+    /// Follow-up continuity (SpeakerScopedMemoryPlan.md §4.2): remember a confidently
+    /// identified speaker, and let a follow-up turn that was **too short to identify**
+    /// (no voiceprint comparison was possible) inherit them as *tentative* — it may read
+    /// their memories but not write to them. Never upgrades a voice that was compared
+    /// and did not match, never chains an inherited identity, and expires with the
+    /// follow-up history window.
+    fn with_follow_up_continuity(
+        &self,
+        speaker: SpeakerContext,
+        followup_depth: u32,
+    ) -> SpeakerContext {
+        let now = now_secs();
+        if speaker.resolution == SpeakerResolution::Identified && !speaker.inherited {
+            *self.last_speaker.lock().unwrap() = Some((speaker.clone(), now));
+            return speaker;
+        }
+        let uncompared = speaker.is_unknown() && speaker.confidence == 0.0;
+        if followup_depth == 0 || !uncompared {
+            return speaker;
+        }
+        let last = self.last_speaker.lock().unwrap().clone();
+        match last {
+            Some((prev, at)) if now - at <= self.follow_up.history_window_secs => {
+                let mut inherited = prev;
+                inherited.resolution = SpeakerResolution::Tentative;
+                inherited.inherited = true;
+                inherited.short_clip = speaker.short_clip;
+                inherited.is_new = false;
+                inherited
+            }
+            _ => speaker,
+        }
+    }
+
     /// Identify the turn's speaker via the [`SpeakerService`], degrading gracefully
-    /// to the shared household on any failure (or when identification is disabled).
+    /// to the unknown speaker on any failure (or when identification is disabled).
     /// Runs on the blocking pool (feature extraction + embedding + SQLite + clip write).
     async fn identify_speaker(&self, voiced_pcm: &[i16]) -> SpeakerContext {
         let Some(svc) = &self.speaker else {
-            return SpeakerContext::household();
+            return SpeakerContext::unknown();
         };
         match svc
             .identify_and_attribute_blocking(voiced_pcm.to_vec())
@@ -1085,8 +1337,8 @@ impl Pipeline {
         {
             Ok(ctx) => ctx,
             Err(e) => {
-                log::warn!("speaker identification failed; attributing to household: {e:#}");
-                SpeakerContext::household()
+                log::warn!("speaker identification failed; treating the speaker as unknown: {e:#}");
+                SpeakerContext::unknown()
             }
         }
     }
@@ -1186,12 +1438,33 @@ impl Pipeline {
     }
 }
 
-/// The memory scope for a speaker: `None` (shared/household) for the sentinel
-/// household context, else the concrete `speaker_id`.
-fn speaker_scope(speaker: &SpeakerContext) -> Option<&str> {
-    if speaker.is_household() {
-        None
-    } else {
-        Some(speaker.speaker_id.as_str())
+/// The deterministic answer to "who am I?" (SpeakerScopedMemoryPlan.md §5): from the
+/// voiceprint resolution, never from memory text, with the household roster's spelling.
+fn who_am_i_reply(speaker: &SpeakerContext, household: &crate::settings::Household) -> String {
+    let name = speaker
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(|n| {
+            household
+                .member_matching_spoken(n)
+                .map_or_else(|| n.to_string(), |m| m.name.trim().to_string())
+        });
+    let enroll = "To teach me, go to Settings, People, Add a voice on the display.";
+    match (speaker.resolution, name) {
+        (SpeakerResolution::Identified, Some(n)) => format!("You're {n}."),
+        (SpeakerResolution::Tentative, Some(n)) => {
+            format!("I think you're {n}, but I'm not completely sure.")
+        }
+        (SpeakerResolution::Identified, None) => {
+            format!("I recognise your voice, but I don't know your name yet. {enroll}")
+        }
+        (SpeakerResolution::Tentative, None) => {
+            format!("I'm not sure who you are yet. {enroll}")
+        }
+        (SpeakerResolution::New | SpeakerResolution::Unknown, _) => {
+            format!("I don't recognise your voice yet. {enroll}")
+        }
     }
 }

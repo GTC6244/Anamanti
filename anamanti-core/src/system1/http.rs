@@ -225,6 +225,19 @@ pub fn device_state_fields(req: &DecisionRequest) -> Map<String, Value> {
             m.insert("timer_remaining_secs".to_string(), json!(secs));
         }
     }
+    // The speaker (decision D4: sent to every engine, local or cloud), only when
+    // recognized — an unrecognized speaker keeps the state byte-identical, and its
+    // absence means "unknown".
+    if req.speaker.known() {
+        m.insert("speaker_known".to_string(), json!(true));
+        m.insert(
+            "speaker_resolution".to_string(),
+            json!(req.speaker.resolution),
+        );
+        if let Some(name) = req.speaker.name.as_deref().filter(|n| !n.is_empty()) {
+            m.insert("speaker_name".to_string(), json!(name));
+        }
+    }
     m
 }
 
@@ -447,6 +460,7 @@ mod tests {
             transcript: "stop".into(),
             screen: None,
             timers: TimerContext::default(),
+            speaker: Default::default(),
         };
         assert!(device_state_fields(&bare).is_empty());
 
@@ -459,13 +473,34 @@ mod tests {
                 next_remaining_secs: Some(90),
                 labels: vec![],
             },
+            speaker: Default::default(),
         };
         let fields = device_state_fields(&ctx);
         assert_eq!(fields.get("screen"), Some(&json!("recipe")));
         assert_eq!(fields.get("timers_running"), Some(&json!(2)));
         assert_eq!(fields.get("timer_remaining_secs"), Some(&json!(90)));
+        assert!(
+            fields.get("speaker_known").is_none(),
+            "unknown speaker adds nothing"
+        );
+
+        // A recognized speaker is sent to every engine: resolution + household name,
+        // never the internal voiceprint id.
+        let known = DecisionRequest {
+            speaker: crate::system1::SpeakerSummary {
+                resolution: "identified".into(),
+                name: Some("Brendon".into()),
+            },
+            ..bare.clone()
+        };
+        let fields = device_state_fields(&known);
+        assert_eq!(fields.get("speaker_known"), Some(&json!(true)));
+        assert_eq!(fields.get("speaker_resolution"), Some(&json!("identified")));
+        assert_eq!(fields.get("speaker_name"), Some(&json!("Brendon")));
+        assert!(!serde_json::to_string(&fields).unwrap().contains("spk-"));
 
         // The fields ride inside the request `state` alongside `message`.
+        let fields = device_state_fields(&ctx);
         let body = build_request("stop", None, &intents(), &fields);
         assert_eq!(body["state"]["message"], json!("stop"));
         assert_eq!(body["state"]["screen"], json!("recipe"));

@@ -530,6 +530,23 @@ pub fn list_speakers(
     })
 }
 
+/// The household roster's member names, for the voice-enrollment "existing person"
+/// picker. Empty when the roster is empty (or the Core predates this field).
+pub fn list_household_members(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+) -> Result<Vec<String>> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::list_household_members(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+        )
+        .await
+    })
+}
+
 /// Name (or rename) a speaker. Returns whether the change was applied.
 pub fn name_speaker(
     orchestrator_key: String,
@@ -589,6 +606,28 @@ pub fn merge_speakers(
             preferred(&orchestrator_key),
             &keep,
             &drop,
+        )
+        .await
+    })
+}
+
+/// Link a voice to a household member on the Core (People → "Link to household
+/// member"): merged into the member's existing voiceprint, or named as them. Returns
+/// the Core's confirmation message; errors carry the reason.
+pub fn link_speaker(
+    orchestrator_key: String,
+    id: String,
+    member: String,
+    discovery_timeout_secs: u64,
+) -> Result<String> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::link_speaker(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &id,
+            &member,
         )
         .await
     })
@@ -702,10 +741,14 @@ fn decode_pcm_le(bytes: &[u8]) -> Vec<i16> {
 /// ordinary wake-word turns while the enroll screen was foreground; this averages
 /// them into a voiceprint. Returns the orchestrator's confirmation message, or an
 /// error carrying the reason (e.g. too few samples).
+///
+/// With `speaker_id` set (the People screen's "Add voice samples"), the samples are
+/// folded into that existing person's voiceprint instead and `name` is ignored.
 pub fn enroll_finish(
     orchestrator_key: String,
     session: String,
     name: String,
+    speaker_id: Option<String>,
     discovery_timeout_secs: u64,
 ) -> Result<String> {
     block_on(async move {
@@ -716,6 +759,7 @@ pub fn enroll_finish(
             preferred(&orchestrator_key),
             &session,
             &name,
+            speaker_id.as_deref(),
         )
         .await
     })

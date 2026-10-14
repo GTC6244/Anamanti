@@ -167,15 +167,49 @@ predictable memory use and no GC pauses under the 1 GB limit.
   recall **falls back to SQLite FTS** (writes are unaffected); `ANAMANTI_MEMORY_BACKEND=sqlite`
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
-  memory writes/recall and the prompt to that person (a shared "household" scope is
-  the floor); see `speaker_id_plan.md`. The embedder is a real ECAPA-TDNN ONNX
+  memory writes/recall and the prompt to that person; see `speaker_id_plan.md`.
+  **Speaker-scoped memory** (`SpeakerScopedMemoryPlan.md`): every memory has a **scope**
+  — `person` (true for one identified person, recalled only for them), `household`
+  (deliberately true for everyone, recalled for every speaker), or `unknown` (said about
+  themselves by a voice that could not be confirmed — **kept but never recalled**, shown
+  in the admin console's review queue for attribution). An unattributed turn is the
+  `unknown` speaker, never the household. Each turn's speaker has a **resolution** —
+  `identified` (match ≥ `match_threshold`), `tentative` (between the thresholds, or a
+  short follow-up turn inheriting the previous identified speaker), `new` (a fresh
+  anonymous cluster) or `unknown`: identified/tentative speakers *read* their own +
+  household memories; only an identified speaker *writes* personal facts to themselves
+  (others' personal facts go to `unknown` with the best guess as `candidate_speaker_id`).
+  Facts are classified personal vs household by `memory::classify_scope` ("I/my/the
+  user" → personal; "we/our/the house/the wifi/everyone" → household). Every memory
+  records provenance (`said_by_speaker_id`, resolution, confidence, `turn_id`). A
+  **read-only short-clip match** (`speaker.min_identify_ms`, default 600 ms, plus
+  `short_clip_margin`) identifies short questions like "who am I?" without creating or
+  updating voiceprints. The prompt's identity line comes from the **voiceprint name**
+  (reconciled to the household roster's spelling — "Christina" → *Kristina*), never from
+  memory text; "who am I?" is a deterministic fast path; "my name is X" only names an
+  identified, still-anonymous voiceprint with the roster spelling (`speakers.name_source`
+  = `enrolled | admin | spoken`; enrollment-by-name never folds into a spoken-named
+  profile). Forgetting a voiceprint moves its memories to `unknown`. The embedder is a real ECAPA-TDNN ONNX
   (WeSpeaker `voxceleb_ECAPA512`, 192-dim, pure-Rust `tract-onnx`) selected at runtime
   by `speaker.model_path`. Beyond passive auto-clustering, the device **People** screen
-  has a guided **"Add a person"** enrollment flow: it stamps an `enroll` display context
+  has a guided **"Add a voice"** enrollment flow: it stamps an `enroll` display context
   on ordinary wake-word turns (same suppress-the-LLM mechanism as the diagnostics screen —
   **no second audio path**), the Core accumulates the captured samples into a named
   voiceprint (`anamanti-enroll-finish`/`-cancel` → `anamanti-enroll-result`), then a verify
-  capture confirms recognition; see `SpeakerEnrollmentPlan.md`.
+  capture confirms recognition; see `SpeakerEnrollmentPlan.md`. The voice is **tied to the
+  household roster**: the device picks an existing member (the `anamanti-speakers` reply
+  carries the roster's `members` — names only, no contact PII) or enters a new name; the
+  Core saves under the member's canonical name, auto-adds a new name to the household, and
+  folds the samples into a person's existing same-named voiceprint instead of duplicating it.
+  A person's People-row menu also offers **"Add voice samples"**: the same guided phrase
+  capture, committed with a `speaker_id` on `anamanti-enroll-finish` so the samples fold into
+  that exact profile (keeping its name — an anonymous cluster stays anonymous; the household
+  roster is untouched). **Link to household member:** the People row menu sends
+  `anamanti-link-speaker {id, member}`; the Core (whose household roster is the authority)
+  rejects a non-member, otherwise merges `id` into that member's existing voiceprint via the
+  coordinated `SpeakerService::merge` (voiceprint + SQLite memories + clips + GraphRAG
+  history) or — if they have none — names `id` as the member, so each household member ends
+  up with one voiceprint.
 - **End-of-speech / VAD** — runs in the **Anamanti Core**, for **both** STT engines
   (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
   `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The

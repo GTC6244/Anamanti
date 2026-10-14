@@ -23,6 +23,46 @@ use crate::clock::now_secs as now;
 use crate::ids::IdMinter;
 use crate::vecmath::{cosine, l2_normalize};
 
+/// Where a profile's **name** came from (SpeakerScopedMemoryPlan.md §4a). Guided
+/// enrollment folds new samples into an existing profile *by name*, so a name taken
+/// from an STT transcript ("my name is …") must never be a fold target — otherwise a
+/// mis-heard spoken label could capture another person's enrollment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameSource {
+    /// Named by guided enrollment (the device "Add a voice" flow).
+    Enrolled,
+    /// Named or renamed by a person on the People screen / admin console.
+    Admin,
+    /// Named by voice ("my name is …") — the weakest provenance.
+    Spoken,
+}
+
+impl NameSource {
+    /// Stable storage/wire label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NameSource::Enrolled => "enrolled",
+            NameSource::Admin => "admin",
+            NameSource::Spoken => "spoken",
+        }
+    }
+
+    /// Parse a stored label (`None` for an unknown/absent value).
+    pub fn parse(s: &str) -> Option<NameSource> {
+        match s {
+            "enrolled" => Some(NameSource::Enrolled),
+            "admin" => Some(NameSource::Admin),
+            "spoken" => Some(NameSource::Spoken),
+            _ => None,
+        }
+    }
+
+    /// Whether a profile named this way may receive a guided enrollment by name.
+    pub fn is_trusted(self) -> bool {
+        matches!(self, NameSource::Enrolled | NameSource::Admin)
+    }
+}
+
 /// One stored speaker profile (the settings "People" view; §4.5).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeakerProfile {
@@ -30,6 +70,8 @@ pub struct SpeakerProfile {
     pub id: String,
     /// User-given name, or `None` while the cluster is still anonymous.
     pub name: Option<String>,
+    /// Where `name` came from (`None` while anonymous).
+    pub name_source: Option<NameSource>,
     /// Whether a person has named this cluster (`true`) vs. auto-created (`false`).
     pub labeled: bool,
     /// How many embeddings back this centroid (online-mean weight).
@@ -74,6 +116,7 @@ impl SpeakerRegistry {
             "#,
         )
         .context("initializing speaker schema")?;
+        migrate_name_source(&conn)?;
         super::aliases::ensure_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -113,19 +156,21 @@ impl SpeakerRegistry {
         let out = match best_match(&tx, embedding)? {
             Some((id, score)) if score >= match_threshold => {
                 fold_into(&tx, &id, embedding)?;
-                let name = name_of(&tx, &id)?;
+                let (name, name_source) = name_of(&tx, &id)?;
                 Identified {
                     id,
                     name,
+                    name_source,
                     score,
                     attribution: Attribution::Matched,
                 }
             }
             Some((id, score)) if score >= new_threshold => {
-                let name = name_of(&tx, &id)?;
+                let (name, name_source) = name_of(&tx, &id)?;
                 Identified {
                     id,
                     name,
+                    name_source,
                     score,
                     attribution: Attribution::Tentative,
                 }
@@ -136,6 +181,7 @@ impl SpeakerRegistry {
                 Identified {
                     id,
                     name: None,
+                    name_source: None,
                     score: 0.0,
                     attribution: Attribution::Created,
                 }
@@ -163,8 +209,8 @@ impl SpeakerRegistry {
         let now = now();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO speakers (id, name, labeled, centroid, dims, samples, created_at, updated_at) \
-             VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?6)",
+            "INSERT INTO speakers (id, name, name_source, labeled, centroid, dims, samples, created_at, updated_at) \
+             VALUES (?1, ?2, 'enrolled', 1, ?3, ?4, ?5, ?6, ?6)",
             params![
                 id,
                 name.trim(),
@@ -178,6 +224,73 @@ impl SpeakerRegistry {
         Ok(id)
     }
 
+    /// The oldest profile whose name matches `name` (case-insensitive, trimmed) **and
+    /// was named by enrollment or by a person** ([`NameSource::is_trusted`]), if any.
+    /// Used by guided enrollment to attach a new voiceprint to a person who already has
+    /// one instead of minting a same-named duplicate. A **spoken** name (from an STT
+    /// transcript) is never a fold target: a mis-heard "my name is …" must not let one
+    /// person's enrollment train another person's voiceprint.
+    pub fn find_by_name(&self, name: &str) -> Result<Option<String>> {
+        Ok(self.find_named(name)?.and_then(|p| {
+            p.name_source
+                .is_some_and(NameSource::is_trusted)
+                .then_some(p.id)
+        }))
+    }
+
+    /// The oldest profile carrying `name` (case-insensitive, trimmed), whatever its
+    /// [`NameSource`] — e.g. to tell a speaker that a name is already taken.
+    pub fn find_named(&self, name: &str) -> Result<Option<SpeakerProfile>> {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        Ok(self.list()?.into_iter().find(|p| {
+            p.name
+                .as_deref()
+                .is_some_and(|n| n.trim().eq_ignore_ascii_case(needle))
+        }))
+    }
+
+    /// Fold a guided-enrollment `centroid` (backed by `samples` utterances) into the
+    /// existing profile `id` — a sample-weighted mean, renormalized. `Some(name)`
+    /// (re)labels it; `None` keeps its current name and labeled flag (e.g. adding
+    /// samples to a still-anonymous cluster). Returns whether the profile existed.
+    pub fn absorb(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        centroid: &[f32],
+        samples: u64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let existing: Option<(Vec<u8>, i64)> = conn
+            .query_row(
+                "SELECT centroid, samples FROM speakers WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((blob, have)) = existing else {
+            return Ok(false);
+        };
+        let samples = samples.max(1) as i64;
+        let merged = fold_mean(&decode_vec(&blob), have as f32, centroid, samples as f32);
+        match name {
+            Some(name) => conn.execute(
+                "UPDATE speakers SET centroid = ?1, samples = ?2, name = ?3, labeled = 1, \
+                 name_source = 'enrolled', updated_at = ?4 WHERE id = ?5",
+                params![encode_vec(&merged), have + samples, name.trim(), now(), id],
+            ),
+            None => conn.execute(
+                "UPDATE speakers SET centroid = ?1, samples = ?2, updated_at = ?3 WHERE id = ?4",
+                params![encode_vec(&merged), have + samples, now(), id],
+            ),
+        }
+        .context("folding enrollment into speaker")?;
+        Ok(true)
+    }
+
     /// Fold `embedding` into `id`'s centroid via an online mean over normalized
     /// vectors, then renormalize; bumps `samples`. A no-op if the id is unknown.
     pub fn update_centroid(&self, id: &str, embedding: &[f32]) -> Result<()> {
@@ -185,11 +298,27 @@ impl SpeakerRegistry {
         fold_into(&conn, id, embedding)
     }
 
-    /// Give a cluster a name and mark it user-labeled. Returns whether a row changed.
+    /// Give a cluster a name **as a person's deliberate edit** (People screen / admin
+    /// console) and mark it user-labeled ([`NameSource::Admin`]). Returns whether a row
+    /// changed.
     pub fn rename(&self, id: &str, name: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
-            "UPDATE speakers SET name = ?1, labeled = 1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE speakers SET name = ?1, labeled = 1, name_source = 'admin', updated_at = ?2 \
+             WHERE id = ?3",
+            params![name.trim(), now(), id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Name a still-**anonymous** cluster from speech ("my name is …";
+    /// [`NameSource::Spoken`]). Never overwrites an existing name. Returns whether the
+    /// profile was named (false when it is unknown or already has a name).
+    pub fn name_from_voice(&self, id: &str, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE speakers SET name = ?1, labeled = 1, name_source = 'spoken', updated_at = ?2 \
+             WHERE id = ?3 AND (name IS NULL OR TRIM(name) = '')",
             params![name.trim(), now(), id],
         )?;
         Ok(n > 0)
@@ -200,7 +329,8 @@ impl SpeakerRegistry {
         let conn = self.conn.lock().unwrap();
         let p = conn
             .query_row(
-                "SELECT id, name, labeled, samples, created_at, updated_at FROM speakers WHERE id = ?1",
+                "SELECT id, name, labeled, samples, created_at, updated_at, name_source \
+                 FROM speakers WHERE id = ?1",
                 params![id],
                 row_to_profile,
             )
@@ -212,8 +342,8 @@ impl SpeakerRegistry {
     pub fn list(&self) -> Result<Vec<SpeakerProfile>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, labeled, samples, created_at, updated_at FROM speakers \
-             ORDER BY created_at ASC, id ASC",
+            "SELECT id, name, labeled, samples, created_at, updated_at, name_source \
+             FROM speakers ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([], row_to_profile)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -251,28 +381,41 @@ impl SpeakerRegistry {
         }
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // (centroid blob, samples, name, labeled)
-        type MergeRow = (Vec<u8>, i64, Option<String>, i64);
+        // (centroid blob, samples, name, labeled, name_source)
+        type MergeRow = (Vec<u8>, i64, Option<String>, i64, Option<String>);
         let load = |id: &str| -> Result<Option<MergeRow>> {
             Ok(tx
                 .query_row(
-                    "SELECT centroid, samples, name, labeled FROM speakers WHERE id = ?1",
+                    "SELECT centroid, samples, name, labeled, name_source FROM speakers WHERE id = ?1",
                     params![id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()?)
         };
-        let (Some((kb, ks, kn, kl)), Some((db, ds, dn, _))) = (load(keep_id)?, load(drop_id)?)
+        let (Some((kb, ks, kn, kl, ksrc)), Some((db, ds, dn, _, dsrc))) =
+            (load(keep_id)?, load(drop_id)?)
         else {
             return Ok(false);
         };
         let merged = fold_mean(&decode_vec(&kb), ks as f32, &decode_vec(&db), ds as f32);
-        let name = kn.or(dn);
+        // The kept name wins; its provenance travels with it.
+        let (name, source) = match kn {
+            Some(n) => (Some(n), ksrc),
+            None => (dn, dsrc),
+        };
         let labeled = if kl == 1 || name.is_some() { 1 } else { 0 };
         tx.execute(
-            "UPDATE speakers SET centroid = ?1, samples = ?2, name = ?3, labeled = ?4, updated_at = ?5 \
-             WHERE id = ?6",
-            params![encode_vec(&merged), ks + ds, name, labeled, now(), keep_id],
+            "UPDATE speakers SET centroid = ?1, samples = ?2, name = ?3, labeled = ?4, \
+             name_source = ?5, updated_at = ?6 WHERE id = ?7",
+            params![
+                encode_vec(&merged),
+                ks + ds,
+                name,
+                labeled,
+                source,
+                now(),
+                keep_id
+            ],
         )?;
         tx.execute("DELETE FROM speakers WHERE id = ?1", params![drop_id])?;
         super::aliases::record(&tx, drop_id, Some(keep_id))?;
@@ -309,6 +452,8 @@ pub struct Identified {
     pub id: String,
     /// Its name, if the cluster has been named.
     pub name: Option<String>,
+    /// Where that name came from.
+    pub name_source: Option<NameSource>,
     /// Cosine similarity to the matched centroid (`0.0` for a new cluster).
     pub score: f32,
     pub attribution: Attribution,
@@ -364,27 +509,63 @@ fn fold_into(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
     Ok(())
 }
 
-/// A profile's name (`None` when unnamed or unknown).
-fn name_of(conn: &Connection, id: &str) -> Result<Option<String>> {
+/// A profile's name and its provenance (`(None, None)` when unnamed or unknown).
+fn name_of(conn: &Connection, id: &str) -> Result<(Option<String>, Option<NameSource>)> {
     Ok(conn
         .query_row(
-            "SELECT name FROM speakers WHERE id = ?1",
+            "SELECT name, name_source FROM speakers WHERE id = ?1",
             params![id],
-            |r| r.get::<_, Option<String>>(0),
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .optional()?
-        .flatten())
+        .map(|(n, s)| (n, s.as_deref().and_then(NameSource::parse)))
+        .unwrap_or((None, None)))
 }
 
 fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<SpeakerProfile> {
+    let name: Option<String> = row.get(1)?;
+    let source: Option<String> = row.get(6)?;
     Ok(SpeakerProfile {
         id: row.get(0)?,
-        name: row.get(1)?,
+        name_source: name
+            .as_ref()
+            .and(source.as_deref().and_then(NameSource::parse)),
+        name,
         labeled: row.get::<_, i64>(2)? != 0,
         samples: row.get::<_, i64>(3)? as u64,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
     })
+}
+
+/// Add `speakers.name_source` to a pre-provenance registry. Legacy named profiles are
+/// backfilled by how they were most plausibly named: one backed by at least
+/// [`super::MIN_ENROLL_SAMPLES`] samples went through guided enrollment (or was trained
+/// up after a People-screen rename) → `enrolled`; a thinner one was named by voice →
+/// `spoken`. Idempotent: a no-op once the column exists.
+fn migrate_name_source(conn: &Connection) -> Result<()> {
+    let has_column = conn
+        .prepare("PRAGMA table_info(speakers)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == "name_source");
+    if has_column {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE speakers ADD COLUMN name_source TEXT", [])
+        .context("adding speakers.name_source")?;
+    conn.execute(
+        "UPDATE speakers SET name_source = CASE WHEN samples >= ?1 THEN 'enrolled' ELSE 'spoken' END \
+         WHERE name IS NOT NULL AND TRIM(name) <> ''",
+        params![super::MIN_ENROLL_SAMPLES as i64],
+    )
+    .context("backfilling speakers.name_source")?;
+    Ok(())
 }
 
 /// Weighted online mean of two normalized direction vectors, renormalized:
@@ -504,6 +685,71 @@ mod tests {
         let p = reg.get(&id).unwrap().unwrap();
         assert_eq!(p.name.as_deref(), Some("Sam"));
         assert!(p.labeled);
+    }
+
+    #[test]
+    fn name_provenance_guards_enrollment_by_name() {
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        // A spoken label is never a fold target for enrollment-by-name …
+        let spoken = reg.create_cluster(&l2_normalize(vec![1.0, 0.0])).unwrap();
+        assert!(reg.name_from_voice(&spoken, "Brendon").unwrap());
+        let p = reg.get(&spoken).unwrap().unwrap();
+        assert_eq!(p.name_source, Some(NameSource::Spoken));
+        assert_eq!(reg.find_by_name("brendon").unwrap(), None);
+        assert_eq!(
+            reg.find_named("brendon").unwrap().map(|p| p.id),
+            Some(spoken.clone())
+        );
+        // … a voice never overwrites an existing name …
+        assert!(!reg.name_from_voice(&spoken, "Kristina").unwrap());
+        assert_eq!(
+            reg.get(&spoken).unwrap().unwrap().name.as_deref(),
+            Some("Brendon")
+        );
+        // … but an admin rename and an enrollment are trusted.
+        assert!(reg.rename(&spoken, "Brendon").unwrap());
+        assert_eq!(reg.find_by_name("Brendon").unwrap(), Some(spoken.clone()));
+        let enrolled = reg
+            .create_labeled("Kristina", &l2_normalize(vec![0.0, 1.0]), 3)
+            .unwrap();
+        assert_eq!(
+            reg.get(&enrolled).unwrap().unwrap().name_source,
+            Some(NameSource::Enrolled)
+        );
+        assert_eq!(reg.find_by_name("kristina").unwrap(), Some(enrolled));
+    }
+
+    #[test]
+    fn legacy_names_are_backfilled_by_sample_support() {
+        let conn = crate::db::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE speakers (id TEXT PRIMARY KEY, name TEXT, labeled INTEGER NOT NULL DEFAULT 0, \
+             centroid BLOB NOT NULL, dims INTEGER NOT NULL, samples INTEGER NOT NULL DEFAULT 0, \
+             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+             INSERT INTO speakers VALUES ('spk-a', 'Christina', 1, x'0000803f', 1, 1, 1, 1);
+             INSERT INTO speakers VALUES ('spk-b', 'Kristina', 1, x'0000803f', 1, 5, 2, 2);
+             INSERT INTO speakers VALUES ('spk-c', NULL, 0, x'0000803f', 1, 1, 3, 3);",
+        )
+        .unwrap();
+        let reg = SpeakerRegistry::from_conn(conn).unwrap();
+        let src = |id: &str| reg.get(id).unwrap().unwrap().name_source;
+        assert_eq!(src("spk-a"), Some(NameSource::Spoken));
+        assert_eq!(src("spk-b"), Some(NameSource::Enrolled));
+        assert_eq!(src("spk-c"), None);
+    }
+
+    #[test]
+    fn merge_keeps_the_kept_names_provenance() {
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let keep = reg.create_cluster(&l2_normalize(vec![1.0, 0.0])).unwrap();
+        let drop = reg.create_cluster(&l2_normalize(vec![0.0, 1.0])).unwrap();
+        reg.name_from_voice(&drop, "Christina").unwrap();
+        reg.merge(&keep, &drop).unwrap();
+        assert_eq!(
+            reg.get(&keep).unwrap().unwrap().name_source,
+            Some(NameSource::Spoken),
+            "a carried-over name keeps its (spoken) provenance"
+        );
     }
 
     #[test]

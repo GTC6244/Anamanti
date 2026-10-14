@@ -31,6 +31,12 @@ speaks the reply back through the Echo Show's speakers.
   stops instantly and a fresh turn begins (the Anamanti Core also aborts the in-flight
   LLM + TTS via an `anamanti-interrupt` frame). The assistant remembers
   facts/preferences across sessions (stored on the Mac).
+- 🗣️ **Knows who's talking** — with speaker ID on, each person's voiceprint scopes
+  what the assistant remembers and recalls: "I like jazz" is remembered for the person
+  who said it, "the wifi is FastNet" for the whole household, and something said by a
+  voice it doesn't recognise is kept for review on the Mac but never treated as true for
+  anyone. "Who am I?" is answered from the voice, not from memory. Enroll on the
+  display under Settings → People → Add a voice.
 - 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder.
 - 🔔 **Proactive notifications** — the Mac can push a visual notification to the

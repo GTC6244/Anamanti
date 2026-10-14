@@ -656,6 +656,32 @@ pub async fn list_speakers(
         .unwrap_or_default())
 }
 
+/// The household roster's member names (Core → Household), for the enrollment
+/// flow's "existing person" picker. Rides the `list-speakers` round trip — the Core
+/// attaches `members` (names only) to that response — and is read even when speaker
+/// ID is off. An older Core that sends no `members` yields an empty list.
+pub async fn list_household_members(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<String>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_SPEAKERS)).await?;
+    Ok(resp
+        .data
+        .get("members")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Name (or rename) a speaker; returns whether it was applied.
 pub async fn name_speaker(
     cache: &EndpointCache,
@@ -682,10 +708,13 @@ pub async fn pair_phone(
     code: &str,
 ) -> Result<String> {
     let endpoint = resolve(cache, timeout, preferred).await?;
-    let request =
-        WyomingEvent::with_data(types::PAIR_PHONE, json!({ "name": name, "code": code }));
+    let request = WyomingEvent::with_data(types::PAIR_PHONE, json!({ "name": name, "code": code }));
     let resp = round_trip(&endpoint, request).await?;
-    let ok = resp.data.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let message = resp
         .data
         .get("message")
@@ -724,6 +753,41 @@ pub async fn merge_speakers(
         WyomingEvent::with_data(types::MERGE_SPEAKERS, json!({ "keep": keep, "drop": drop }));
     let resp = round_trip(&endpoint, request).await?;
     speaker_ok(&resp)
+}
+
+/// Link voice `id` to household member `member` on the Core: merged into that
+/// member's existing voiceprint if they have one, otherwise named as them. Returns
+/// the Core's confirmation message; an in-band rejection (not a household member,
+/// speaker ID off) is an error carrying its reason.
+pub async fn link_speaker(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: &str,
+    member: &str,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request =
+        WyomingEvent::with_data(types::LINK_SPEAKER, json!({ "id": id, "member": member }));
+    let resp = round_trip(&endpoint, request).await?;
+    let message = resp
+        .data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        Ok(message)
+    } else if message.is_empty() {
+        Err(anyhow!("linking failed"))
+    } else {
+        Err(anyhow!("{message}"))
+    }
 }
 
 /// Delete a speaker profile; returns whether one was removed.
@@ -847,10 +911,14 @@ pub async fn enroll_finish(
     preferred: Option<&str>,
     session: &str,
     name: &str,
+    speaker_id: Option<&str>,
 ) -> Result<String> {
     let endpoint = resolve(cache, timeout, preferred).await?;
-    let request =
-        WyomingEvent::with_data(types::ENROLL_FINISH, json!({ "session": session, "name": name }));
+    let mut data = json!({ "session": session, "name": name });
+    if let Some(id) = speaker_id {
+        data["speaker_id"] = json!(id);
+    }
+    let request = WyomingEvent::with_data(types::ENROLL_FINISH, data);
     let resp = round_trip(&endpoint, request).await?;
     enroll_message(&resp)
 }
@@ -965,8 +1033,14 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::PAIR_PHONE);
-        assert_eq!(request.data.get("name").and_then(Value::as_str), Some("Mom"));
-        assert_eq!(request.data.get("code").and_then(Value::as_str), Some("AB2K"));
+        assert_eq!(
+            request.data.get("name").and_then(Value::as_str),
+            Some("Mom")
+        );
+        assert_eq!(
+            request.data.get("code").and_then(Value::as_str),
+            Some("AB2K")
+        );
     }
 
     #[tokio::test]
@@ -1030,12 +1104,18 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::LIST_TURNS);
-        assert_eq!(request.data.get("query").and_then(Value::as_str), Some("library"));
+        assert_eq!(
+            request.data.get("query").and_then(Value::as_str),
+            Some("library")
+        );
         assert_eq!(
             request.data.get("speaker_id").and_then(Value::as_str),
             Some("household")
         );
-        assert_eq!(request.data.get("entity").and_then(Value::as_str), Some("library"));
+        assert_eq!(
+            request.data.get("entity").and_then(Value::as_str),
+            Some("library")
+        );
         assert_eq!(request.data.get("limit").and_then(Value::as_u64), Some(50));
     }
 
@@ -1412,6 +1492,89 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::LIST_SPEAKERS);
+    }
+
+    #[tokio::test]
+    async fn list_household_members_reads_roster_names() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Speaker ID off on the Core still lists the roster.
+        let response = WyomingEvent::with_data(
+            types::SPEAKERS,
+            json!({ "ok": false, "message": "disabled", "speakers": [],
+                    "members": ["Dana", "  ", "Sam"] }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let members = list_household_members(&cache, Duration::from_millis(0), None)
+            .await
+            .unwrap();
+        assert_eq!(members, vec!["Dana".to_string(), "Sam".to_string()]);
+        assert_eq!(server.await.unwrap().event_type, types::LIST_SPEAKERS);
+    }
+
+    #[tokio::test]
+    async fn enroll_finish_targets_a_speaker_id_when_given() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::ENROLL_RESULT,
+            json!({ "ok": true, "phase": "finish", "message": "added 3 samples to Sam's voiceprint" }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let msg = enroll_finish(
+            &cache,
+            Duration::from_millis(0),
+            None,
+            "s",
+            "Sam",
+            Some("spk-1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(msg, "added 3 samples to Sam's voiceprint");
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::ENROLL_FINISH);
+        assert_eq!(request.data["speaker_id"], json!("spk-1"));
+        assert_eq!(request.data["session"], json!("s"));
+    }
+
+    #[tokio::test]
+    async fn link_speaker_sends_id_and_member_and_surfaces_rejection() {
+        for (resp, want_ok) in [
+            (
+                json!({ "ok": true, "message": "merged into Christina (2 memories moved)",
+                     "speaker_id": "spk-1", "merged": true }),
+                true,
+            ),
+            (
+                json!({ "ok": false, "message": "Zed isn't in the household" }),
+                false,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = serve_once(
+                listener,
+                WyomingEvent::with_data(types::SPEAKER_RESULT, resp),
+            )
+            .await;
+            let cache = cache_for(addr);
+            let out =
+                link_speaker(&cache, Duration::from_millis(0), None, "spk-2", "Christina").await;
+            if want_ok {
+                assert_eq!(out.unwrap(), "merged into Christina (2 memories moved)");
+            } else {
+                assert_eq!(out.unwrap_err().to_string(), "Zed isn't in the household");
+            }
+            let request = server.await.unwrap();
+            assert_eq!(request.event_type, types::LINK_SPEAKER);
+            assert_eq!(request.data["id"], json!("spk-2"));
+            assert_eq!(request.data["member"], json!("Christina"));
+        }
     }
 
     #[tokio::test]
