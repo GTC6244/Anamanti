@@ -54,7 +54,7 @@ seam alongside `wyoming` and `whisper-rs`; boot-time `stt.engine=elevenlabs`, th
 (per-person voice recognition: an always-compiled ECAPA-TDNN voiceprint embedder
 identifies who is speaking on **every** turn's voiced PCM — not the wake word — and
 scopes memory/prompt per person; opt-in via `speaker.enabled`+`speaker.model_path`, with
-a device **People** screen whose guided "Add a person" flow actively enrolls + verifies a
+a device **People** screen whose guided "Add a voice" flow (existing household member or new person) actively enrolls + verifies a
 voice via an `enroll` display context on the ordinary turn — no second audio path).
 
 ---

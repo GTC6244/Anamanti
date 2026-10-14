@@ -560,14 +560,27 @@ phone, → Memory).
   assistant's speaker so a human can listen and recognize who it is before naming them
   (`OrchestratorClient.playSpeakerClips` → the Core streams the clips back; a snackbar
   reports how many played, or that none are saved yet). Per-row menu: Name/rename,
-  Merge with…, Forget. An **"Add person"** FAB (`people-add`, shown when the live engine
+  **Add voice samples** (`speaker-add-samples-<id>`, only when the live engine controller is
+  wired — opens `SpeakerEnrollScreen` in add-samples mode for that person), Merge with…, Forget. An **"Add voice"** FAB (`people-add`, shown when the live engine
   controller is wired) opens the guided enrollment flow below. Constructed with an
   `OrchestratorClient` (+ the `AssistantController` and native `setEnrollContext` for
   enrollment). See [`speaker_id_plan.md`](./speaker_id_plan.md).
 
 **`SpeakerEnrollScreen`** — `lib/src/ui/speaker_enroll_screen.dart`
-- `Scaffold` + `AppBar("Add a person")`. The guided "train a new voice" flow
-  (SpeakerEnrollmentPlan.md Phase 2): a name step → a capture step that prompts the user to
+- `Scaffold` + `AppBar("Add a voice")`. The guided "train a voice" flow
+  (SpeakerEnrollmentPlan.md Phase 2): a "Whose voice is this?" step — **household members**
+  as `ChoiceChip`s (`enroll-member-<name>`; a voice icon marks members who already have a
+  voiceprint) fetched via `OrchestratorClient.listHouseholdMembers`, **or** a new name in the
+  `enroll-name` field (a typed name matching a member resolves to that member's spelling); an
+  `enroll-name-hint` line says whether the voice will be linked to an existing member, added to
+  their existing voiceprint, or added to the household as a new person — → a capture step
+  with a **phrase guide** (`enroll-guide-<i>`: the session's phrases, captured ones ticked off,
+  the current one highlighted; beside the controls on landscape ≥700 px, stacked below on
+  narrow screens).
+  **Add-samples mode** (`speakerId` + `personLabel`, from the People ⋮ menu): `AppBar("Add
+  voice samples")`, skips the name step, starts the guide later in `kEnrollPhrases` so a
+  re-train reads fresh sentences, and commits via `enrollFinish(…, speakerId:)` into that exact
+  voiceprint. Then the shared flow: a capture step that prompts the user to
   say the wake word and read short phrases (progress dots, per-sample accept/retry feedback)
   → commit → a verify step that confirms recognition ("Recognized Dana!", with confidence).
   Captures reuse the ordinary wake-word turn via an `enroll` display context (stamped by the

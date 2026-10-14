@@ -1,7 +1,14 @@
 // Guided voice-enrollment screen (SpeakerEnrollmentPlan.md Phase 2).
 //
-// "Add a person": enter a name, then read a few short phrases so the assistant
-// builds a strong voiceprint, and finally confirm it recognizes the voice. Each
+// "Add a voice": pick an existing household member (or enter a new person's name),
+// then read a few short phrases so the assistant builds a strong voiceprint, and
+// finally confirm it recognizes the voice. Choosing an existing member ties the
+// voiceprint to that person in the household roster (and adds to their voiceprint if
+// they already have one); a new name is also added to the household by the Core.
+//
+// "Add voice samples" (People → a person's ⋮ menu): the same capture flow, opened with
+// a [SpeakerEnrollScreen.speakerId] — it skips the name step, guides the user through a
+// fresh set of phrases, and folds the samples into that exact person's voiceprint. Each
 // phrase capture reuses the ordinary wake-word turn — the screen stamps an
 // `enroll` display context (via [EnrollContextSink]) so the Core routes the spoken
 // audio to the voiceprint accumulator instead of the assistant, and relays the
@@ -35,13 +42,18 @@ typedef EnrollContextSink =
 /// `MIN_ENROLL_SAMPLES` so the UI enables "Save" at the same point the Core accepts.
 const int kMinEnrollSamples = 3;
 
-/// A few short, phonetically varied prompts to read during enrollment.
+/// Short, phonetically varied prompts to read during enrollment. A first enrollment
+/// starts at the top; "Add voice samples" starts after the first
+/// [kMinEnrollSamples] so a re-train hears different sentences.
 const List<String> kEnrollPhrases = [
   'The quick brown fox jumps over the lazy dog.',
   'How are you doing this fine morning?',
   'I would like to listen to some music, please.',
   'Set a timer for ten minutes and remind me later.',
   'What is the weather going to be like tomorrow?',
+  'Please add milk, eggs, and bread to the shopping list.',
+  'Turn the volume down a little and play something relaxing.',
+  'Remind me to call my brother on Saturday afternoon.',
 ];
 
 enum _Stage { name, capturing, committing, verifying, done }
@@ -53,6 +65,8 @@ class SpeakerEnrollScreen extends StatefulWidget {
     required this.controller,
     this.setEnrollContext,
     this.wakeWord = '',
+    this.speakerId,
+    this.personLabel = '',
   });
 
   /// Control-plane client for commit / cancel.
@@ -66,6 +80,13 @@ class SpeakerEnrollScreen extends StatefulWidget {
 
   /// The configured wake word, shown in the capture instructions ("Say '…'").
   final String wakeWord;
+
+  /// "Add voice samples" mode: the existing speaker profile to add samples to. When
+  /// set, the name step is skipped and the commit folds into this profile by id.
+  final String? speakerId;
+
+  /// How to refer to the [speakerId] person on screen (their name, or "Speaker N").
+  final String personLabel;
 
   @override
   State<SpeakerEnrollScreen> createState() => _SpeakerEnrollScreenState();
@@ -88,12 +109,76 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
 
   int _lastSeq = 0;
 
+  /// Household roster names from the Core (empty while loading / when unreachable /
+  /// when the roster is empty — the new-person field always works).
+  List<String> _members = const [];
+
+  /// Lower-cased names that already have a voiceprint (a named speaker profile).
+  Set<String> _voiced = const {};
+
+  /// The existing member picked in the name step, or null for "someone new".
+  String? _selectedMember;
+
   @override
   void initState() {
     super.initState();
     _lastSeq = widget.controller.state.enrollSeq;
     widget.controller.addListener(_onControllerTick);
+    if (_addingSamples) {
+      // Straight to the phrase guide for a person who's already on the People list.
+      _name = widget.personLabel;
+      _stage = _Stage.capturing;
+      _pushContext('sample');
+    } else {
+      _loadMembers();
+    }
   }
+
+  /// Whether this is "Add voice samples" for an existing person (vs. a new enrollment).
+  bool get _addingSamples => widget.speakerId != null;
+
+  /// Where in [kEnrollPhrases] this session's guide starts.
+  int get _phraseOffset => _addingSamples ? kMinEnrollSamples : 0;
+
+  /// The phrase for guide slot [i] of this session.
+  String _phraseAt(int i) =>
+      kEnrollPhrases[(_phraseOffset + i) % kEnrollPhrases.length];
+
+  /// Fetch the household roster (and which names already have a voiceprint) for the
+  /// "existing person" picker. Best-effort: a failure leaves only the new-name field.
+  Future<void> _loadMembers() async {
+    List<String> members = const [];
+    Set<String> voiced = const {};
+    try {
+      members = await widget.client.listHouseholdMembers();
+    } catch (_) {}
+    try {
+      final speakers = await widget.client.listSpeakers();
+      voiced = {
+        for (final s in speakers)
+          if (s.name != null && s.name!.trim().isNotEmpty)
+            s.name!.trim().toLowerCase(),
+      };
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _members = members;
+      _voiced = voiced;
+    });
+  }
+
+  /// The roster member matching [name] (case-insensitive), or null.
+  String? _memberMatching(String name) {
+    final needle = name.trim().toLowerCase();
+    if (needle.isEmpty) return null;
+    for (final m in _members) {
+      if (m.trim().toLowerCase() == needle) return m;
+    }
+    return null;
+  }
+
+  /// The name the enrollment will be saved under: the picked member, else the typed one.
+  String get _chosenName => _selectedMember ?? _nameCtl.text.trim();
 
   @override
   void dispose() {
@@ -174,7 +259,9 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
   }
 
   Future<void> _start() async {
-    final name = _nameCtl.text.trim();
+    // A typed name that matches a roster member is that member (canonical spelling).
+    final typed = _nameCtl.text.trim();
+    final name = _selectedMember ?? _memberMatching(typed) ?? typed;
     if (name.isEmpty) return;
     setState(() {
       _name = name;
@@ -190,7 +277,11 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
       _stage = _Stage.committing;
     });
     try {
-      final msg = await widget.client.enrollFinish(_session, _name);
+      final msg = await widget.client.enrollFinish(
+        _session,
+        _name,
+        speakerId: widget.speakerId,
+      );
       _committed = true;
       if (!mounted) return;
       // Only advance if we're still committing — a verify result could already have
@@ -216,7 +307,9 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Add a person')),
+      appBar: AppBar(
+        title: Text(_addingSamples ? 'Add voice samples' : 'Add a voice'),
+      ),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -233,37 +326,89 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
   }
 
   Widget _nameStep() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    final theme = Theme.of(context);
+    final chosen = _chosenName;
+    final member = _selectedMember ?? _memberMatching(chosen);
+    final hasVoice =
+        member != null && _voiced.contains(member.trim().toLowerCase());
+    final String? hint = member == null
+        ? (chosen.isEmpty
+              ? null
+              : '$chosen will be added to the household as a new person.')
+        : hasVoice
+        ? '$member already has a voiceprint — these samples will be added to it.'
+        : 'This voice will be linked to $member in the household.';
+    return ListView(
       children: [
-        Text(
-          "Who are we adding?",
-          style: Theme.of(context).textTheme.headlineSmall,
-        ),
+        Text("Whose voice is this?", style: theme.textTheme.headlineSmall),
         const SizedBox(height: 8),
         Text(
-          "Enter a name, then read a few short phrases so the assistant learns this "
-          "voice. It'll confirm it can recognize them at the end.",
-          style: Theme.of(context).textTheme.bodyMedium,
+          _members.isEmpty
+              ? "Enter a name, then read a few short phrases so the assistant learns "
+                    "this voice. It'll confirm it can recognize them at the end."
+              : "Pick someone already in the household, or add someone new. Then "
+                    "read a few short phrases so the assistant learns their voice.",
+          style: theme.textTheme.bodyMedium,
         ),
-        const SizedBox(height: 20),
+        if (_members.isNotEmpty) ...[
+          const SizedBox(height: 20),
+          Text('Household members', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final m in _members)
+                ChoiceChip(
+                  key: Key('enroll-member-$m'),
+                  avatar: Icon(
+                    _voiced.contains(m.trim().toLowerCase())
+                        ? Icons.record_voice_over
+                        : Icons.person_outline,
+                    size: 18,
+                  ),
+                  label: Text(m),
+                  selected: _selectedMember == m,
+                  onSelected: (on) => setState(() {
+                    _selectedMember = on ? m : null;
+                    if (on) _nameCtl.clear();
+                  }),
+                ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Text('Or someone new', style: theme.textTheme.titleSmall),
+        ],
+        const SizedBox(height: 12),
         TextField(
           key: const Key('enroll-name'),
           controller: _nameCtl,
-          autofocus: true,
+          autofocus: _members.isEmpty,
           textCapitalization: TextCapitalization.words,
           decoration: const InputDecoration(
             labelText: 'Name',
             hintText: 'e.g. Dana',
             border: OutlineInputBorder(),
           ),
-          onChanged: (_) => setState(() {}),
+          onChanged: (v) => setState(() {
+            if (v.trim().isNotEmpty) _selectedMember = null;
+          }),
           onSubmitted: (_) => _start(),
         ),
+        if (hint != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            hint,
+            key: const Key('enroll-name-hint'),
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.primary,
+            ),
+          ),
+        ],
         const SizedBox(height: 20),
         FilledButton.icon(
           key: const Key('enroll-start'),
-          onPressed: _nameCtl.text.trim().isEmpty ? null : _start,
+          onPressed: chosen.isEmpty ? null : _start,
           icon: const Icon(Icons.mic),
           label: const Text('Start'),
         ),
@@ -277,78 +422,110 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
       kMinEnrollSamples,
     );
     final ready = _accepted >= kMinEnrollSamples;
-    final phrase = kEnrollPhrases[_accepted % kEnrollPhrases.length];
+    final phrase = _phraseAt(_accepted);
+    // The guide lists the minimum set of phrases (growing by one per extra sample),
+    // ticking off the ones already captured.
+    final guideCount = _accepted + 1 > kMinEnrollSamples
+        ? _accepted + 1
+        : kMinEnrollSamples;
     final wake = widget.wakeWord.isEmpty
         ? 'the wake word'
         : '"${widget.wakeWord}"';
-    return ListView(
-      children: [
-        Text(
-          'Enrolling $_name',
-          style: Theme.of(context).textTheme.headlineSmall,
-        ),
-        const SizedBox(height: 4),
-        Text(
-          ready
-              ? 'Enough samples captured — add more for accuracy, or save.'
-              : 'Say $remaining more phrase${remaining == 1 ? '' : 's'}.',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 16),
-        _ProgressDots(accepted: _accepted, min: kMinEnrollSamples),
-        const SizedBox(height: 20),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.record_voice_over),
-                    const SizedBox(width: 8),
-                    Text(
+    final main = <Widget>[
+      Text(
+        _addingSamples ? 'More samples for $_name' : 'Enrolling $_name',
+        style: Theme.of(context).textTheme.headlineSmall,
+      ),
+      const SizedBox(height: 4),
+      Text(
+        ready
+            ? 'Enough samples captured — add more for accuracy, or save.'
+            : 'Say $remaining more phrase${remaining == 1 ? '' : 's'}.',
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
+      const SizedBox(height: 16),
+      _ProgressDots(accepted: _accepted, min: kMinEnrollSamples),
+      const SizedBox(height: 20),
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.record_voice_over),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
                       'Say $wake, then read:',
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  phrase,
-                  key: const Key('enroll-phrase'),
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-              ],
-            ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                phrase,
+                key: const Key('enroll-phrase'),
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 12),
-        if (_message.isNotEmpty)
-          Text(
-            _message,
-            key: const Key('enroll-message'),
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: Theme.of(context).colorScheme.primary,
-            ),
-          ),
-        const SizedBox(height: 20),
-        FilledButton.icon(
-          key: const Key('enroll-finish'),
-          onPressed: ready && !_busy ? _finish : null,
-          icon: const Icon(Icons.check),
-          label: Text(
-            ready
-                ? 'Save & check voice'
-                : 'Save (need ${kMinEnrollSamples - _accepted} more)',
+      ),
+      const SizedBox(height: 12),
+      if (_message.isNotEmpty)
+        Text(
+          _message,
+          key: const Key('enroll-message'),
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            color: Theme.of(context).colorScheme.primary,
           ),
         ),
-        const SizedBox(height: 8),
-        TextButton(
-          onPressed: () => Navigator.of(context).maybePop(),
-          child: const Text('Cancel'),
+      const SizedBox(height: 20),
+      FilledButton.icon(
+        key: const Key('enroll-finish'),
+        onPressed: ready && !_busy ? _finish : null,
+        icon: const Icon(Icons.check),
+        label: Text(
+          ready
+              ? 'Save & check voice'
+              : 'Save (need ${kMinEnrollSamples - _accepted} more)',
         ),
-      ],
+      ),
+      const SizedBox(height: 8),
+      TextButton(
+        onPressed: () => Navigator.of(context).maybePop(),
+        child: const Text('Cancel'),
+      ),
+    ];
+    final guide = _PhraseGuide(
+      phrases: [for (var i = 0; i < guideCount; i++) _phraseAt(i)],
+      done: _accepted,
+    );
+    // Landscape-first: the phrase guide sits beside the capture controls so the
+    // Save button stays above the fold on the 8" screen; narrow screens stack it.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 700) {
+          return ListView(
+            children: [
+              ...main.take(main.length - 5),
+              guide,
+              ...main.skip(main.length - 5),
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(flex: 3, child: ListView(children: main)),
+            const SizedBox(width: 24),
+            Expanded(flex: 2, child: ListView(children: [guide])),
+          ],
+        );
+      },
     );
   }
 
@@ -412,6 +589,8 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
           Text(
             recognized
                 ? 'Recognized ${_verifyName.isEmpty ? _name : _verifyName}!'
+                : _addingSamples
+                ? 'Added samples for $_name'
                 : '$_name is enrolled',
             key: const Key('enroll-done-title'),
             style: theme.textTheme.headlineSmall,
@@ -434,6 +613,61 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The session's phrase checklist: captured phrases ticked off, the current one
+/// highlighted, the rest still to come — so the user sees the whole set up front.
+class _PhraseGuide extends StatelessWidget {
+  const _PhraseGuide({required this.phrases, required this.done});
+
+  final List<String> phrases;
+  final int done;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Phrase guide', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 4),
+        for (var i = 0; i < phrases.length; i++)
+          Padding(
+            key: Key('enroll-guide-$i'),
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  i < done
+                      ? Icons.check_circle
+                      : i == done
+                      ? Icons.arrow_right_alt
+                      : Icons.radio_button_unchecked,
+                  size: 20,
+                  color: i < done
+                      ? Colors.green
+                      : i == done
+                      ? theme.colorScheme.primary
+                      : theme.disabledColor,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    phrases[i],
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: i == done ? FontWeight.w600 : null,
+                      color: i < done ? theme.disabledColor : null,
+                      decoration: i < done ? TextDecoration.lineThrough : null,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

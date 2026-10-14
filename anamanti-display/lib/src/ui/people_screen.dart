@@ -206,8 +206,8 @@ class _PeopleScreenState extends State<PeopleScreen> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// Open the guided "Add a person" enrollment flow, then refresh so the new,
-  /// pre-named voiceprint appears. Only available when the engine controller is wired.
+  /// Open the guided "Add a voice" enrollment flow (for an existing household member
+  /// or a new person), then refresh so the new/updated voiceprint appears. Only available when the engine controller is wired.
   Future<void> _addPerson() async {
     final controller = widget.controller;
     if (controller == null) return;
@@ -218,6 +218,27 @@ class _PeopleScreenState extends State<PeopleScreen> {
           controller: controller,
           setEnrollContext: widget.setEnrollContext,
           wakeWord: widget.wakeWord,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _reload();
+  }
+
+  /// "Add voice samples" for a person already on the list: run the guided phrase
+  /// capture and fold the samples into *their* voiceprint (by id), then refresh.
+  Future<void> _addSamples(SpeakerView s, int index) async {
+    final controller = widget.controller;
+    if (controller == null) return;
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => SpeakerEnrollScreen(
+          client: widget.client,
+          controller: controller,
+          setEnrollContext: widget.setEnrollContext,
+          wakeWord: widget.wakeWord,
+          speakerId: s.id,
+          personLabel: _label(s, index),
         ),
       ),
     );
@@ -244,8 +265,8 @@ class _PeopleScreenState extends State<PeopleScreen> {
           ? FloatingActionButton.extended(
               key: const Key('people-add'),
               onPressed: _addPerson,
-              icon: const Icon(Icons.person_add_alt_1),
-              label: const Text('Add person'),
+              icon: const Icon(Icons.record_voice_over),
+              label: const Text('Add voice'),
             )
           : null,
       body: _buildBody(people),
@@ -304,16 +325,31 @@ class _PeopleScreenState extends State<PeopleScreen> {
                   switch (action) {
                     case 'rename':
                       _rename(s, i);
+                    case 'samples':
+                      _addSamples(s, i);
                     case 'merge':
                       _merge(s, i);
                     case 'delete':
                       _delete(s, i);
                   }
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'rename', child: Text('Name / rename')),
-                  PopupMenuItem(value: 'merge', child: Text('Merge with…')),
-                  PopupMenuItem(value: 'delete', child: Text('Forget')),
+                itemBuilder: (context) => [
+                  const PopupMenuItem(
+                    value: 'rename',
+                    child: Text('Name / rename'),
+                  ),
+                  // Needs the live engine (captures ride the wake-word turn).
+                  if (widget.controller != null)
+                    PopupMenuItem(
+                      key: ValueKey('speaker-add-samples-${s.id}'),
+                      value: 'samples',
+                      child: const Text('Add voice samples'),
+                    ),
+                  const PopupMenuItem(
+                    value: 'merge',
+                    child: Text('Merge with…'),
+                  ),
+                  const PopupMenuItem(value: 'delete', child: Text('Forget')),
                 ],
               ),
             ],

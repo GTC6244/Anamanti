@@ -165,6 +165,16 @@ Future<List<SpeakerInfo>> listSpeakers({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// The household roster's member names, for the voice-enrollment "existing person"
+/// picker. Empty when the roster is empty (or the Core predates this field).
+Future<List<String>> listHouseholdMembers({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListHouseholdMembers(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// Name (or rename) a speaker. Returns whether the change was applied.
 Future<bool> nameSpeaker({
   required String orchestratorKey,
@@ -255,15 +265,20 @@ Future<int> playSpeakerClips({
 /// ordinary wake-word turns while the enroll screen was foreground; this averages
 /// them into a voiceprint. Returns the orchestrator's confirmation message, or an
 /// error carrying the reason (e.g. too few samples).
+///
+/// With `speaker_id` set (the People screen's "Add voice samples"), the samples are
+/// folded into that existing person's voiceprint instead and `name` is ignored.
 Future<String> enrollFinish({
   required String orchestratorKey,
   required String session,
   required String name,
+  String? speakerId,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsEnrollFinish(
   orchestratorKey: orchestratorKey,
   session: session,
   name: name,
+  speakerId: speakerId,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 

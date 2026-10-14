@@ -97,7 +97,7 @@ pub async fn handle_control(
     } else if request.event_type == types::ENROLL_FINISH {
         // Enrollment commit/cancel touch the SpeakerService's in-flight session map
         // (not just the registry), so they are handled here rather than in `respond`.
-        enroll_finish(request, speaker)
+        enroll_finish(request, speaker, settings)
     } else if request.event_type == types::ENROLL_CANCEL {
         enroll_cancel(request, speaker)
     } else if request.event_type == types::LIST_SPEAKER_CLIPS {
@@ -704,7 +704,7 @@ pub fn respond(
     speaker: Option<&SpeakerRegistry>,
 ) -> WyomingEvent {
     match request.event_type.as_str() {
-        types::LIST_SPEAKERS => speakers_response(speaker),
+        types::LIST_SPEAKERS => speakers_response(speaker, settings),
         types::NAME_SPEAKER => name_speaker(request, speaker),
         types::GET_DRIVE_TOKEN => drive_token_response(settings),
         types::DESCRIBE_SETTINGS => settings_response(settings, true, "current settings"),
@@ -881,12 +881,20 @@ async fn graph_response(
 
 // ---- speaker identification control (speaker_id_plan.md Phase C) ----
 
-/// The `ambient-speakers` response listing identified speakers.
-fn speakers_response(speaker: Option<&SpeakerRegistry>) -> WyomingEvent {
+/// The `ambient-speakers` response listing identified speakers, plus `members`: the
+/// household roster's **names only** (no contact PII leaves the Mac), so the device's
+/// enrollment flow can attach a voiceprint to an existing home member.
+fn speakers_response(speaker: Option<&SpeakerRegistry>, settings: &SharedSettings) -> WyomingEvent {
+    let members: Vec<String> = settings
+        .household()
+        .members
+        .into_iter()
+        .map(|m| m.name)
+        .collect();
     let Some(reg) = speaker else {
         return WyomingEvent::with_data(
             types::SPEAKERS,
-            json!({ "ok": false, "message": SPEAKER_DISABLED, "speakers": [] }),
+            json!({ "ok": false, "message": SPEAKER_DISABLED, "speakers": [], "members": members }),
         );
     };
     match reg.list() {
@@ -903,11 +911,14 @@ fn speakers_response(speaker: Option<&SpeakerRegistry>) -> WyomingEvent {
                     })
                 })
                 .collect();
-            WyomingEvent::with_data(types::SPEAKERS, json!({ "ok": true, "speakers": speakers }))
+            WyomingEvent::with_data(
+                types::SPEAKERS,
+                json!({ "ok": true, "speakers": speakers, "members": members }),
+            )
         }
         Err(e) => WyomingEvent::with_data(
             types::SPEAKERS,
-            json!({ "ok": false, "message": format!("{e:#}"), "speakers": [] }),
+            json!({ "ok": false, "message": format!("{e:#}"), "speakers": [], "members": members }),
         ),
     }
 }
@@ -992,7 +1003,16 @@ fn speaker_result(ok: bool, message: &str) -> WyomingEvent {
 /// Commit the current guided-enrollment session (SpeakerEnrollmentPlan.md Phase 2)
 /// into a named, labeled voiceprint. The session's samples were accumulated by the
 /// enroll-context capture turns; this averages them into a centroid.
-fn enroll_finish(request: &WyomingEvent, speaker: Option<&SpeakerService>) -> WyomingEvent {
+///
+/// The voiceprint is tied to the **household roster**: a `name` matching an existing
+/// member (case-insensitive) is saved under that member's canonical spelling; a new
+/// name is added to the roster once the commit succeeds. A person who already has a
+/// voiceprint under that name gets the samples folded into it (no duplicate).
+fn enroll_finish(
+    request: &WyomingEvent,
+    speaker: Option<&SpeakerService>,
+    settings: &SharedSettings,
+) -> WyomingEvent {
     let session = request
         .data
         .get("session")
@@ -1003,6 +1023,39 @@ fn enroll_finish(request: &WyomingEvent, speaker: Option<&SpeakerService>) -> Wy
             "ok": false, "phase": "finish", "session": session, "message": SPEAKER_DISABLED,
         }));
     };
+    // "Add voice samples" for a person already on the People list: fold into that
+    // exact profile by id (keeps its name; never touches the household roster).
+    let speaker_id = request
+        .data
+        .get("speaker_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(id) = speaker_id {
+        return match svc.enroll_into(session, id) {
+            Ok(out) => {
+                let who = if out.name.is_empty() {
+                    "this person's".to_string()
+                } else {
+                    format!("{}'s", out.name)
+                };
+                enroll_result(json!({
+                    "ok": true,
+                    "phase": "finish",
+                    "session": session,
+                    "speaker_id": out.speaker_id,
+                    "name": out.name,
+                    "samples": out.samples,
+                    "updated": true,
+                    "existing_member": false,
+                    "message": format!("added {} samples to {who} voiceprint", out.samples),
+                }))
+            }
+            Err(e) => enroll_result(json!({
+                "ok": false, "phase": "finish", "session": session, "message": format!("{e:#}"),
+            })),
+        };
+    }
     let name = request
         .data
         .get("name")
@@ -1015,16 +1068,33 @@ fn enroll_finish(request: &WyomingEvent, speaker: Option<&SpeakerService>) -> Wy
             "message": "a name is required to finish enrollment",
         }));
     }
+    let existing_member = settings
+        .household()
+        .member_matching(name)
+        .map(|m| m.name.clone());
+    let name = existing_member.as_deref().unwrap_or(name);
     match svc.enroll_finish(session, name) {
-        Ok(out) => enroll_result(json!({
-            "ok": true,
-            "phase": "finish",
-            "session": session,
-            "speaker_id": out.speaker_id,
-            "name": out.name,
-            "samples": out.samples,
-            "message": format!("enrolled {} from {} samples", out.name, out.samples),
-        })),
+        Ok(out) => {
+            if existing_member.is_none() {
+                settings.ensure_household_member(&out.name);
+            }
+            let message = if out.updated {
+                format!("added {} samples to {}'s voiceprint", out.samples, out.name)
+            } else {
+                format!("enrolled {} from {} samples", out.name, out.samples)
+            };
+            enroll_result(json!({
+                "ok": true,
+                "phase": "finish",
+                "session": session,
+                "speaker_id": out.speaker_id,
+                "name": out.name,
+                "samples": out.samples,
+                "updated": out.updated,
+                "existing_member": existing_member.is_some(),
+                "message": message,
+            }))
+        }
         Err(e) => enroll_result(json!({
             "ok": false, "phase": "finish", "session": session, "message": format!("{e:#}"),
         })),
@@ -1537,6 +1607,7 @@ mod tests {
         };
         use std::sync::Arc;
 
+        let s = settings();
         // Disabled (no service) → an in-band failure, not a panic.
         let disabled = enroll_finish(
             &req(
@@ -1544,6 +1615,7 @@ mod tests {
                 json!({ "session": "s", "name": "Dana" }),
             ),
             None,
+            &s,
         );
         assert_eq!(disabled.event_type, types::ENROLL_RESULT);
         assert_eq!(disabled.data["ok"], json!(false));
@@ -1563,8 +1635,13 @@ mod tests {
                 json!({ "session": "s", "name": "Dana" }),
             ),
             Some(&svc),
+            &s,
         );
         assert_eq!(early.data["ok"], json!(false));
+        assert!(
+            s.household().member_matching("Dana").is_none(),
+            "a failed commit adds no one to the household"
+        );
 
         // Enough samples → a named, labeled profile is created.
         svc.enroll_sample("s", &pcm).unwrap();
@@ -1575,12 +1652,16 @@ mod tests {
                 json!({ "session": "s", "name": "Dana" }),
             ),
             Some(&svc),
+            &s,
         );
         assert_eq!(done.event_type, types::ENROLL_RESULT);
         assert_eq!(done.data["ok"], json!(true));
         assert_eq!(done.data["phase"], json!("finish"));
         assert_eq!(done.data["name"], json!("Dana"));
+        assert_eq!(done.data["existing_member"], json!(false));
         assert_eq!(svc.registry().count().unwrap(), 1);
+        // A new person is added to the household roster.
+        assert!(s.household().member_matching("Dana").is_some());
 
         // Cancel discards an in-flight session.
         svc.enroll_sample("s2", &pcm).unwrap();
@@ -1590,6 +1671,92 @@ mod tests {
         );
         assert_eq!(cancelled.data["ok"], json!(true));
         assert_eq!(svc.enroll_count("s2"), 0);
+    }
+
+    #[test]
+    fn enroll_finish_attaches_to_an_existing_household_member() {
+        use crate::settings::{Household, HouseholdMember};
+        use crate::speaker::{
+            MockSpeakerEmbedder, SpeakerRegistry, SpeakerService, SpeakerThresholds,
+        };
+        use std::sync::Arc;
+
+        let s = settings();
+        s.apply_household(&Household {
+            members: vec![HouseholdMember {
+                name: "Dana Smith".into(),
+                emails: vec!["dana@example.com".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        // The People listing carries the roster's names (and no contact details).
+        let list = respond(
+            &WyomingEvent::new(types::LIST_SPEAKERS),
+            &MemoryStore::open_in_memory().unwrap(),
+            &s,
+            None,
+        );
+        assert_eq!(list.data["members"], json!(["Dana Smith"]));
+        assert!(!list.data.to_string().contains("dana@example.com"));
+
+        let svc = SpeakerService::new(
+            Arc::new(MockSpeakerEmbedder::default()),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default(),
+        );
+        let pcm = vec![1200i16; 20_000];
+        let enroll = |session: &str, name: &str| {
+            for _ in 0..3 {
+                svc.enroll_sample(session, &pcm).unwrap();
+            }
+            enroll_finish(
+                &req(
+                    types::ENROLL_FINISH,
+                    json!({ "session": session, "name": name }),
+                ),
+                Some(&svc),
+                &s,
+            )
+        };
+
+        // Picking the member (any case) saves under their canonical name and doesn't
+        // touch the roster.
+        let first = enroll("a", "dana smith");
+        assert_eq!(first.data["ok"], json!(true));
+        assert_eq!(first.data["name"], json!("Dana Smith"));
+        assert_eq!(first.data["existing_member"], json!(true));
+        assert_eq!(first.data["updated"], json!(false));
+        let roster = s.household().members;
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].emails, vec!["dana@example.com".to_string()]);
+
+        // Enrolling them again folds into the same voiceprint — no duplicate.
+        let again = enroll("b", "Dana Smith");
+        assert_eq!(again.data["updated"], json!(true));
+        assert_eq!(again.data["speaker_id"], first.data["speaker_id"]);
+        assert_eq!(svc.registry().count().unwrap(), 1);
+        // "Add voice samples" targets the profile by id, needs no name, and leaves the
+        // household roster alone.
+        for _ in 0..3 {
+            svc.enroll_sample("c", &pcm).unwrap();
+        }
+        let id = first.data["speaker_id"].as_str().unwrap().to_string();
+        let more = enroll_finish(
+            &req(
+                types::ENROLL_FINISH,
+                json!({ "session": "c", "speaker_id": id }),
+            ),
+            Some(&svc),
+            &s,
+        );
+        assert_eq!(more.data["ok"], json!(true));
+        assert_eq!(more.data["speaker_id"], json!(id));
+        assert_eq!(more.data["name"], json!("Dana Smith"));
+        assert_eq!(svc.registry().count().unwrap(), 1);
+        assert_eq!(svc.registry().get(&id).unwrap().unwrap().samples, 9);
+        assert_eq!(s.household().members.len(), 1);
     }
 
     #[tokio::test]

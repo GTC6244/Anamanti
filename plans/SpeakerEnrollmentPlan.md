@@ -157,6 +157,20 @@ a deferred polish.
     page already scrolled) — fixed with distinct `PageStorageKey`s.
   - Green: `cargo test` (416) + `cargo clippy` + `flutter test` (144) + `flutter analyze`.
 
+- 2026-10-14: **Enroll an existing household member.** The device flow ("Add a voice") now
+  offers the household roster as pickable chips alongside the new-name field. Core: the
+  `anamanti-speakers` reply carries `members` (names only); `enroll_finish` resolves the name
+  to the member's canonical spelling, auto-adds a new name to the household, and folds into
+  an existing same-named voiceprint rather than duplicating it. Device: FRB
+  `list_household_members`, `OrchestratorClient.listHouseholdMembers`. Tests: Core 559,
+  device Rust 92, Flutter 179 — all green, clippy/analyze clean.
+
+- 2026-10-14: **Add voice samples (re-train).** People ⋮ → "Add voice samples" opens the
+  capture flow in add-samples mode (no name step; a phrase guide checklist that starts at a
+  different point in the phrase list). `anamanti-enroll-finish` takes an optional `speaker_id`
+  → `SpeakerService::enroll_into` folds into that profile by id. Tests: Core 560, device Rust
+  93, Flutter 182 — green; clippy/analyze clean.
+
 ## Owed / not done (hardware-gated — needs the Echo Show + real voices)
 
 1. **Threshold calibration.** `match_threshold`/`new_threshold`/`min_speech_ms` and the

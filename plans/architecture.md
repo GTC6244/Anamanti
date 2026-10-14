@@ -171,11 +171,19 @@ predictable memory use and no GC pauses under the 1 GB limit.
   the floor); see `speaker_id_plan.md`. The embedder is a real ECAPA-TDNN ONNX
   (WeSpeaker `voxceleb_ECAPA512`, 192-dim, pure-Rust `tract-onnx`) selected at runtime
   by `speaker.model_path`. Beyond passive auto-clustering, the device **People** screen
-  has a guided **"Add a person"** enrollment flow: it stamps an `enroll` display context
+  has a guided **"Add a voice"** enrollment flow: it stamps an `enroll` display context
   on ordinary wake-word turns (same suppress-the-LLM mechanism as the diagnostics screen —
   **no second audio path**), the Core accumulates the captured samples into a named
   voiceprint (`anamanti-enroll-finish`/`-cancel` → `anamanti-enroll-result`), then a verify
-  capture confirms recognition; see `SpeakerEnrollmentPlan.md`.
+  capture confirms recognition; see `SpeakerEnrollmentPlan.md`. The voice is **tied to the
+  household roster**: the device picks an existing member (the `anamanti-speakers` reply
+  carries the roster's `members` — names only, no contact PII) or enters a new name; the
+  Core saves under the member's canonical name, auto-adds a new name to the household, and
+  folds the samples into a person's existing same-named voiceprint instead of duplicating it.
+  A person's People-row menu also offers **"Add voice samples"**: the same guided phrase
+  capture, committed with a `speaker_id` on `anamanti-enroll-finish` so the samples fold into
+  that exact profile (keeping its name — an anonymous cluster stays anonymous; the household
+  roster is untouched).
 - **End-of-speech / VAD** — runs in the **Anamanti Core**, for **both** STT engines
   (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
   `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The

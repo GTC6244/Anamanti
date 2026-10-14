@@ -19,8 +19,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
     List<TurnView>? turns,
     List<EntityView>? entities,
     Map<String, List<SpeakerClipView>>? clipsBySpeaker,
+    List<String>? householdMembers,
     this.throwOnFetch = false,
-  }) : _turns = turns ?? <TurnView>[],
+  }) : _householdMembers = householdMembers ?? <String>[],
+       _turns = turns ?? <TurnView>[],
        _clipsBySpeaker = clipsBySpeaker ?? <String, List<SpeakerClipView>>{},
        _entities = entities ?? <EntityView>[],
        _functions = functions ?? <FunctionStatusView>[],
@@ -83,11 +85,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
              ttsVoice: null,
            ),
        _memories = memories ?? <MemoryView>[],
-       _speakers = speakers ?? <SpeakerView>[];
+       _speakers = List.of(speakers ?? const <SpeakerView>[]);
 
   OrchestratorSettingsView _settings;
   final List<MemoryView> _memories;
   final List<SpeakerView> _speakers;
+  final List<String> _householdMembers;
   final List<ModelOption> _models;
   final List<VoiceOption> _voices;
   final List<OrchestratorOption> _orchestrators;
@@ -299,6 +302,12 @@ class FakeOrchestratorClient implements OrchestratorClient {
   Future<List<SpeakerView>> listSpeakers() async => List.of(_speakers);
 
   @override
+  Future<List<String>> listHouseholdMembers() async {
+    if (throwOnFetch) throw Exception('offline');
+    return List.of(_householdMembers);
+  }
+
+  @override
   Future<bool> nameSpeaker(String id, String name) async {
     namedCalls.add({'id': id, 'name': name});
     final i = _speakers.indexWhere((s) => s.id == id);
@@ -345,10 +354,31 @@ class FakeOrchestratorClient implements OrchestratorClient {
   }
 
   @override
-  Future<String> enrollFinish(String session, String name) async {
-    enrollFinishCalls.add({'session': session, 'name': name});
+  Future<String> enrollFinish(
+    String session,
+    String name, {
+    String? speakerId,
+  }) async {
+    enrollFinishCalls.add({
+      'session': session,
+      'name': name,
+      'speakerId': ?speakerId,
+    });
     final err = enrollFinishError;
     if (err != null) throw Exception(err);
+    if (speakerId != null) {
+      final i = _speakers.indexWhere((s) => s.id == speakerId);
+      if (i < 0) throw Exception("that person's voiceprint no longer exists");
+      final s = _speakers[i];
+      _speakers[i] = SpeakerView(
+        id: s.id,
+        name: s.name,
+        labeled: s.labeled,
+        samples: s.samples + 3,
+        createdAt: s.createdAt,
+      );
+      return 'added 3 samples to ${s.name ?? 'this person'}\'s voiceprint';
+    }
     _speakers.add(
       SpeakerView(
         id: 'spk-$session',
