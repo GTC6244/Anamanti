@@ -9,6 +9,38 @@
 > voice samples", shipped in device 1.0.17+18). See §4a for what that PR changes here.
 > **Owner decisions recorded 2026-10-14** (§11, D1–D8). No open questions remain.
 
+## Implementation status (2026-10-14)
+
+| Phase | Status |
+|-------|--------|
+| 0. Clean up, enroll, calibrate | **Owed on hardware** (TODO.md §5.0) |
+| 0b. Name provenance | **Done**: `speakers.name_source`, trusted-only `find_by_name`, `name_from_voice`, `Household::member_matching_spoken` |
+| 1. Scope model + SQLite | **Done**: `memory/scope.rs`, scope + provenance columns, one-time classification, scoped forget, `unassign → unknown`, `turn_attribution_overrides` |
+| 2. Prompt + who-am-I | **Done**: resolution-driven identity line, person/household blocks, identity-fact filter, `MemoryCommand::WhoAmI`, labelled follow-up history (D3), restricted voice naming (D7) |
+| 3. Short-utterance identification | **Done**: `speaker.min_identify_ms` (600) + `short_clip_margin` (0.10), follow-up inheritance |
+| 4. Helix graph | **Done**: `unknown` user, `in_scope` excludes it, ingester attributes only identified turns + honours corrections, marker-guarded `household → unknown` migration, `reattribute_turn` / `retag_memory` |
+| 5. System-1 + tools | **Done**: `DecisionRequest.speaker`; "me" handled via the identity line + `send_phone_message` guidance; `pending_unknown` on the enroll result |
+| 6a/6b. Core UI tagging + review | See the commit history (implemented after this table was written) |
+
+**Where the implementation differs from the text below (deliberately):**
+- **No tentative cap for spoken names** (§4a.2, last bullet). Personal writes are keyed by
+  voiceprint *id*, not by name, so a spoken-named profile that matches confidently is still
+  that person. The real risk, enrollment folding into the wrong profile, is closed by
+  `find_by_name` ignoring spoken names, and names are reconciled to the roster spelling.
+- **Legacy name backfill:** a named profile with ≥ `MIN_ENROLL_SAMPLES` (3) samples is
+  treated as `enrolled`, a thinner one as `spoken`. This way an enrollment done on the
+  pre-provenance Core (for example today's) counts as trusted.
+- **System-1 speaker fields are sent only when the speaker is recognized.** When the speaker
+  is unknown, nothing is added, which keeps the request byte-identical (absence = unknown).
+  Handlers keep their signature; a future personal intent reads `req.speaker`.
+- **"Send it to me"** is solved in the prompt (the identity line maps "me" to the
+  identified speaker; probable → confirm; unknown → ask) and in the tool's recipient
+  guidance, rather than by threading the speaker into the tool context.
+- **Short-clip inheritance** only applies when no voiceprint comparison was possible (the
+  clip was too short to embed). A short clip that *was* compared and didn't match stays unknown.
+- **Unknown voices may "forget that"** only what an unrecognized voice said in the
+  last 10 minutes (`UNKNOWN_FORGET_WINDOW_SECS`).
+
 ## 0. The problem
 
 Some facts are only true **relative to the speaker**. "I am Brendan" is true when Brendan

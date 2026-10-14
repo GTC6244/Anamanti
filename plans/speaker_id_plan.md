@@ -187,6 +187,11 @@ unattributed/too-short turns, preserving today's behavior as the floor.
 
 ### 3.2 Per-person memory (SQLite `memories`)
 
+> **Superseded (2026-10-14):** "NULL = shared/household" below is replaced by an
+> explicit `scope` (`person` / `household` / `unknown`) — an unattributed turn is the
+> **unknown** speaker, whose personal facts are never recalled. See
+> [`SpeakerScopedMemoryPlan.md`](./SpeakerScopedMemoryPlan.md).
+
 Add a nullable column; NULL == shared/household (all existing rows migrate to
 shared, so nothing is lost):
 
