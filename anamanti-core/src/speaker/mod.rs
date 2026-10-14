@@ -29,7 +29,7 @@ use crate::vecmath::{cosine, l2_normalize};
 pub use aliases::{AliasMap, SpeakerAliases};
 pub use clips::{ClipInfo, ClipStore};
 pub use embed::{MockSpeakerEmbedder, SpeakerEmbedder};
-pub use registry::{Attribution, Identified, SpeakerProfile, SpeakerRegistry};
+pub use registry::{Attribution, Identified, NameSource, SpeakerProfile, SpeakerRegistry};
 
 /// Minimum accepted samples before a guided enrollment can be committed to a
 /// profile (SpeakerEnrollmentPlan.md Phase 2). A few phrases give the centroid

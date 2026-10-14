@@ -905,6 +905,7 @@ fn speakers_response(speaker: Option<&SpeakerRegistry>, settings: &SharedSetting
                     json!({
                         "id": p.id,
                         "name": p.name,
+                        "name_source": p.name_source.map(|s| s.as_str()),
                         "labeled": p.labeled,
                         "samples": p.samples as i64,
                         "created_at": p.created_at,
