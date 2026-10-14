@@ -413,6 +413,13 @@ class _AmbientHomeState extends State<AmbientHome> {
         next.smoothingWindow != _settings.smoothingWindow ||
         next.fireOnPeak != _settings.fireOnPeak ||
         next.playbackBufferSecs != _settings.playbackBufferSecs ||
+        // Capture-path settings are baked into the engine config at start
+        // (buildWakeWordConfigFrom), so they need a restart to take effect.
+        next.captureGainDb != _settings.captureGainDb ||
+        next.useAudioRecord != _settings.useAudioRecord ||
+        next.platformNs != _settings.platformNs ||
+        next.platformAgc != _settings.platformAgc ||
+        next.platformAec != _settings.platformAec ||
         next.endpointCueEnabled != _settings.endpointCueEnabled ||
         next.endpointSilenceMs != _settings.endpointSilenceMs ||
         next.endpointRmsThreshold != _settings.endpointRmsThreshold ||
