@@ -204,7 +204,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   A person's People-row menu also offers **"Add voice samples"**: the same guided phrase
   capture, committed with a `speaker_id` on `anamanti-enroll-finish` so the samples fold into
   that exact profile (keeping its name — an anonymous cluster stays anonymous; the household
-  roster is untouched).
+  roster is untouched). **Link to household member:** the People row menu sends
+  `anamanti-link-speaker {id, member}`; the Core (whose household roster is the authority)
+  rejects a non-member, otherwise merges `id` into that member's existing voiceprint via the
+  coordinated `SpeakerService::merge` (voiceprint + SQLite memories + clips + GraphRAG
+  history) or — if they have none — names `id` as the member, so each household member ends
+  up with one voiceprint.
 - **End-of-speech / VAD** — runs in the **Anamanti Core**, for **both** STT engines
   (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
   `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The
