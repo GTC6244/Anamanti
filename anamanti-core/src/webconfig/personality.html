@@ -1,0 +1,183 @@
+<p class="sub" data-head="sub">Give the assistant a speaking style. Pure output tuning: it changes how replies sound, never what the assistant knows, remembers or does. Changes apply live from the next turn.</p>
+<div class="btn-row" data-head="actions">
+  <i data-loc="local" data-text="On this Mac"></i>
+</div>
+
+<div class="grid-12" id="personality">
+  <!-- Catalog -->
+  <section class="card span-4" id="catalog">
+    <div class="card-head">
+      <h2><i data-icon="smile"></i>Personalities</h2>
+      <div class="tools" id="pStatus"></div>
+    </div>
+    <label class="switch" style="margin:.35rem 0 .8rem">
+      <span class="switch-text">Personality enabled<span class="hint">Off = the normal voice, whatever is selected below.</span></span>
+      <input id="p_enabled" type="checkbox">
+    </label>
+    <div class="section-label">Active style <span class="hint" style="text-transform:none;letter-spacing:0">pick a row to edit it</span></div>
+    <div class="list scroll-y" id="pList" role="radiogroup" aria-label="Active personality" style="max-height:520px">
+      <div class="skeleton" style="height:36px;margin:.3rem 0"></div>
+      <div class="skeleton" style="height:36px;margin:.3rem 0"></div>
+    </div>
+    <div class="card-foot" style="justify-content:flex-start">
+      <button type="button" class="sm" id="pAdd"><i data-icon="plus"></i>Add personality</button>
+    </div>
+  </section>
+
+  <div class="stack span-8">
+    <!-- Editor -->
+    <section class="card" id="editor">
+      <div class="card-head">
+        <h2><i data-icon="edit"></i><span id="edTitle">Edit personality</span></h2>
+        <div class="tools">
+          <span id="edActive"></span>
+          <button type="button" class="sm ghost danger-text" id="edDelete"><i data-icon="trash"></i>Delete</button>
+        </div>
+      </div>
+      <p class="desc">The <b>key</b> is the short name you say ("talk like a <code>gangster</code>"). The <b>style instruction</b> is added to the prompt to shape every reply.</p>
+      <div id="edForm">
+        <div class="field-grid">
+          <div class="field">
+            <label for="ed_key">Key <span class="hint">short spoken name, e.g. gangster</span></label>
+            <input id="ed_key" type="text" placeholder="gangster" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="ed_label">Display name</label>
+            <input id="ed_label" type="text" placeholder="1940s gangster" autocomplete="off">
+          </div>
+          <div class="field full">
+            <label for="ed_desc">Style instruction <span class="hint">how the reply should sound</span></label>
+            <textarea id="ed_desc" rows="8" placeholder="Respond in the style of…"></textarea>
+          </div>
+        </div>
+        <div id="edWarn"></div>
+      </div>
+      <div id="edEmpty" class="empty" hidden><i data-icon="smile"></i><div>Pick a personality on the left, or add one.</div></div>
+    </section>
+
+    <!-- Hint -->
+    <section class="card" id="hint">
+      <div class="card-head">
+        <h2><i data-icon="mic"></i>Switch by voice</h2>
+        <i data-loc="local" data-text="On this Mac"></i>
+      </div>
+      <div class="callout">
+        <i data-icon="info"></i>
+        <div>Say <b>“talk like a gangster”</b> to switch to a style by its key, or <b>“go back to normal”</b> to turn it off. This only shapes the prompt the assistant already sends; it never touches memory, facts or tools, and nothing extra leaves this Mac. Deleting the active personality falls back to the normal voice.</div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+ui.hydrate();
+
+// DEFS: [{_id, key, label, description}]. Active / selection track _id so a key can be
+// renamed in the editor without losing the "active" radio. ACTIVE = null → Normal.
+let DEFS = [], ACTIVE = null, SELECTED = null, NEXT_ID = 1;
+
+function selectedDef(){ return DEFS.find(d => d._id === SELECTED) || null; }
+function touch(){ $('personality').dispatchEvent(new Event('change', {bubbles: true})); }
+
+function renderList(){
+  const row = (id, title, keyChip, extra) => {
+    const on = id === ACTIVE, sel = id !== null && id === SELECTED;
+    return '<div class="list-row p-row' + (sel ? ' p-sel' : '') + '" data-id="' + (id === null ? '' : id) + '" style="cursor:pointer;padding:.45rem .55rem;border-radius:8px' + (sel ? ';background:var(--accent-soft)' : '') + '">'
+      + '<input type="radio" name="p_active" value="' + (id === null ? '' : id) + '"' + (on ? ' checked' : '') + ' aria-label="Make ' + escAttr(title) + ' active">'
+      + '<div class="grow"><div class="title ellipsis">' + esc(title) + '</div>' + (extra ? '<div class="meta">' + extra + '</div>' : '') + '</div>'
+      + keyChip + (on ? ui.status('ok', 'active') : '') + '</div>';
+  };
+  let html = row(null, 'Normal', '', 'no style, the default voice');
+  html += DEFS.map(d => row(d._id, d.label || d.key || '(untitled)',
+    d.key ? '<span class="chip mono">' + esc(d.key) + '</span>' : ui.status('warn', 'no key'), '')).join('');
+  if (!DEFS.length) html += '<div class="empty">' + ui.icon('smile') + '<div>No personalities yet. Add one to give the assistant a style.</div></div>';
+  $('pList').innerHTML = html;
+  const act = DEFS.find(d => d._id === ACTIVE);
+  $('pStatus').innerHTML = !$('p_enabled').checked ? ui.status('off', 'off')
+    : act ? ui.status('ok', act.label || act.key) : ui.status('off', 'normal');
+}
+
+function renderEditor(){
+  const d = selectedDef();
+  $('edForm').hidden = !d; $('edDelete').hidden = !d; $('edEmpty').hidden = !!d;
+  if (!d) { $('edTitle').textContent = 'Edit personality'; $('edActive').innerHTML = ''; return; }
+  $('ed_key').value = d.key || '';
+  $('ed_label').value = d.label || '';
+  $('ed_desc').value = d.description || '';
+  paintEditorMeta();
+}
+function paintEditorMeta(){
+  const d = selectedDef(); if (!d) return;
+  $('edTitle').textContent = d.label || d.key || 'New personality';
+  $('edActive').innerHTML = d._id === ACTIVE ? ui.status('ok', 'active') : '';
+  const warn = [];
+  if (!d.key || !d.label) warn.push('A personality needs both a key and a display name; one missing either is dropped on save.');
+  if (d.key && DEFS.some(o => o !== d && o.key.trim().toLowerCase() === d.key.trim().toLowerCase())) warn.push('Another personality already uses this key.');
+  $('edWarn').innerHTML = warn.length ? '<div class="callout warn" style="margin-top:.7rem">' + ui.icon('alert') + '<div>' + warn.map(esc).join(' ') + '</div></div>' : '';
+}
+
+function select(id){ SELECTED = id; renderList(); renderEditor(); }
+
+// Editor → model (live; the list label follows as you type).
+['ed_key', 'ed_label', 'ed_desc'].forEach(f => $(f).addEventListener('input', () => {
+  const d = selectedDef(); if (!d) return;
+  d.key = $('ed_key').value; d.label = $('ed_label').value; d.description = $('ed_desc').value;
+  renderList(); paintEditorMeta();
+}));
+
+// Activation is handled on click (the list re-renders, which would detach the radio
+// before its `change` fires), then the save bar is marked explicitly.
+$('pList').addEventListener('click', (e) => {
+  const r = e.target.closest('.p-row'); if (!r) return;
+  const id = r.dataset.id === '' ? null : +r.dataset.id;
+  if (e.target.name === 'p_active' && id !== ACTIVE) { ACTIVE = id; touch(); }
+  if (id !== null && id !== SELECTED) select(id);
+  else { renderList(); paintEditorMeta(); }
+});
+$('p_enabled').addEventListener('change', renderList);
+
+$('pAdd').addEventListener('click', () => {
+  const d = { _id: NEXT_ID++, key: '', label: '', description: '' };
+  DEFS.push(d); select(d._id); touch();
+  $('ed_key').focus();
+});
+ui.confirm($('edDelete'), () => {
+  const d = selectedDef(); if (!d) return;
+  const wasActive = d._id === ACTIVE;
+  DEFS = DEFS.filter(o => o !== d);
+  if (wasActive) ACTIVE = null;
+  select(DEFS.length ? DEFS[0]._id : null); touch();
+  ui.toast(true, (d.label || d.key || 'Personality') + ' removed' + (wasActive ? '; back to the normal voice' : '') + '. Save to keep the change.');
+}, 'Delete?');
+
+async function load(){
+  const j = await getJSON('/personality/status.json');
+  if (!j || j.ok === false) throw new Error((j && j.message) || 'bad reply');
+  NEXT_ID = 1;
+  DEFS = (j.definitions || []).map(d => ({ _id: NEXT_ID++, key: d.key || '', label: d.label || '', description: d.description || '' }));
+  const act = DEFS.find(d => d.key === (j.active || ''));
+  ACTIVE = act ? act._id : null;
+  $('p_enabled').checked = !!j.enabled;
+  const keep = DEFS.find(d => d._id === SELECTED);
+  select(keep ? keep._id : (act ? act._id : (DEFS[0] ? DEFS[0]._id : null)));
+}
+
+const bar = ui.savebar([
+  { name: 'Personality', el: $('personality'), save: async () => {
+      const definitions = DEFS.map(d => ({ key: d.key.trim(), label: d.label.trim(), description: d.description.trim() }))
+        .filter(d => d.key && d.label);
+      const act = DEFS.find(d => d._id === ACTIVE);
+      const active = act && act.key.trim() && act.label.trim() ? act.key.trim() : '';
+      const enabled = $('p_enabled').checked;
+      const r = await postJSON('/personality/save', { enabled, active, definitions });
+      if (r && r.ok === false) return r;
+      return { ok: true, message: definitions.length + ' saved · ' + (enabled && active ? 'speaking as ' + active : 'normal voice') };
+  } },
+], { afterSave: () => bar.quiet(load), onDiscard: () => load(), canSave: () => P_LOADED });
+let P_LOADED = false;
+
+bar.quiet(load).then(() => { P_LOADED = true; ui.reveal(); }).catch(e => {
+  $('pList').innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load personalities.</div></div>';
+  ui.toast(false, 'Could not load: ' + (e.message || e));
+});
+</script>

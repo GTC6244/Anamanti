@@ -7,6 +7,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/music_data.dart';
+import 'package:anamanti_display/src/ui/album_art.dart';
 
 class NextUpView extends StatelessWidget {
   const NextUpView({
@@ -42,9 +43,7 @@ class NextUpView extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _header(),
-              Expanded(
-                child: music.nextUp.isEmpty ? _empty() : _list(),
-              ),
+              Expanded(child: music.nextUp.isEmpty ? _empty() : _list()),
             ],
           ),
         ),
@@ -63,7 +62,10 @@ class NextUpView extends StatelessWidget {
               tooltip: 'Back',
               onPressed: onBack,
               iconSize: 32,
-              icon: Icon(Icons.arrow_back, color: Colors.white.withValues(alpha: 0.85)),
+              icon: Icon(
+                Icons.arrow_back,
+                color: Colors.white.withValues(alpha: 0.85),
+              ),
             )
           else
             const SizedBox(width: 16),
@@ -85,7 +87,10 @@ class NextUpView extends StatelessWidget {
             tooltip: 'Close',
             onPressed: onClose,
             iconSize: 32,
-            icon: Icon(Icons.close, color: Colors.white.withValues(alpha: 0.85)),
+            icon: Icon(
+              Icons.close,
+              color: Colors.white.withValues(alpha: 0.85),
+            ),
           ),
         ],
       ),
@@ -117,7 +122,7 @@ class NextUpView extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        _thumb(track),
+        AlbumArt(uri: track.artworkUri, size: 56, radius: 8, iconSize: 28),
         const SizedBox(width: 16),
         Expanded(
           child: Column(
@@ -150,39 +155,6 @@ class NextUpView extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-
-  Widget _thumb(QueueTrack track) {
-    if (!track.hasArtwork) return _thumbFallback();
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: Image.network(
-        track.artworkUri,
-        width: 56,
-        height: 56,
-        fit: BoxFit.cover,
-        gaplessPlayback: true,
-        errorBuilder: (_, _, _) => _thumbFallback(),
-        loadingBuilder: (context, child, progress) =>
-            progress == null ? child : _thumbFallback(),
-      ),
-    );
-  }
-
-  Widget _thumbFallback() {
-    return Container(
-      width: 56,
-      height: 56,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Icon(
-        Icons.music_note,
-        size: 28,
-        color: Colors.white.withValues(alpha: 0.5),
-      ),
     );
   }
 }

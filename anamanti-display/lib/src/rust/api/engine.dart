@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `error`, `level_diag`, `level`, `listening_followup`, `music_screen`, `music_slot`, `notify_slot`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `started`, `status`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`, `weather_slot`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `MusicHandle`, `NotifyHandle`, `WeatherHandle`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChannelHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
 /// A friendly greeting from the native Rust engine.
@@ -45,19 +45,22 @@ Future<void> stopWakeWordEngine() =>
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
 
-/// Live-adjust the capture gain (dB) and idle wake-word detection threshold on the
-/// **running** engine without restarting it, so the audio-diagnostics screen's
-/// sliders take effect instantly while the user watches the meters. The engine
-/// re-reads both values each audio block. They are re-seeded from [`WakeWordConfig`]
-/// on the next engine start, so persist the chosen values to settings to keep them
-/// across restarts. A harmless no-op when no engine is running. `gain_db` is clamped
-/// to `[0, 36]`; `threshold` to `[0, 1]`.
+/// Live-adjust the capture gain (dB), the idle wake-word detection threshold and the
+/// active (in-turn, "sensitivity while speaking") threshold on the **running** engine
+/// without restarting it, so Settings and the audio-diagnostics screen take effect
+/// instantly. The engine re-reads the values each audio block. They are re-seeded from
+/// [`WakeWordConfig`] on the next engine start, so persist the chosen values to
+/// settings to keep them across restarts. A harmless no-op when no engine is running.
+/// `gain_db` is clamped to `[0, 36]`; both thresholds to `[0, 1]`. While a turn is
+/// active the effective threshold is `max(active_threshold, threshold)`.
 void updateDiagnosticsTuning({
   required double gainDb,
   required double threshold,
+  required double activeThreshold,
 }) => RustLib.instance.api.crateApiEngineUpdateDiagnosticsTuning(
   gainDb: gainDb,
   threshold: threshold,
+  activeThreshold: activeThreshold,
 );
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
@@ -162,6 +165,62 @@ void setMusicContext({
   screen: screen,
 );
 
+/// Report that the **audio-diagnostics** screen is (or is no longer) foreground as the
+/// device's display context. Unlike the recipe/weather/place screens — which enrich the
+/// LLM turn — this context makes the next voice turn **transcription-only**: the
+/// orchestrator echoes the STT transcript to the device for on-screen display and then
+/// stops, never running the LLM/TTS. It carries no state (the bare `kind` is the signal).
+///
+/// The diagnostics screen's setter for the general display-context mechanism (see
+/// [`set_recipe_context`] / [`crate::engine::set_display_context`]). Flutter calls it with
+/// `active == true` when the Audio Diagnostics screen opens and `active == false` when it
+/// closes (clearing the context back to an idle screen).
+void setDiagnosticsContext({required bool active}) =>
+    RustLib.instance.api.crateApiEngineSetDiagnosticsContext(active: active);
+
+/// Report that the **voice-enrollment** screen is foreground (SpeakerEnrollmentPlan.md
+/// Phase 2) as the device's display context, so the next voice turn's `audio-start`
+/// routes the captured speech to the orchestrator's enrollment accumulator instead of
+/// the assistant. Like diagnostics, this is a **suppressing** context — no LLM/TTS — but
+/// it carries the session grouping the captures, the name being enrolled, the sample
+/// index (progress), and the `phase` (`"sample"` to train, `"verify"` for the read-only
+/// recognition check after commit).
+///
+/// Flutter sets it (`active == true`) just before each phrase capture and clears it
+/// (`active == false`) when the enroll screen closes. The enroll screen reuses the
+/// ordinary wake-word turn for capture, so there is no second audio path.
+void setEnrollContext({
+  required bool active,
+  required String session,
+  required String name,
+  required int sampleIndex,
+  required String phase,
+}) => RustLib.instance.api.crateApiEngineSetEnrollContext(
+  active: active,
+  session: session,
+  name: name,
+  sampleIndex: sampleIndex,
+  phase: phase,
+);
+
+/// Report the device's **font-scaling context** so the next voice turn's `audio-start`
+/// carries it to the orchestrator as the `screen.font` sibling (orthogonal to the
+/// foreground widget, like `screen.timers`). Lets "increase font" / "decrease font"
+/// resolve only when a resizable surface is on screen (`scalable`), and lets the assistant
+/// say when the text is already at the maximum/minimum. `scale` is the current global
+/// multiplier (1.0 = unscaled). Flutter calls this at startup and after each adjustment.
+void setFontContext({
+  required bool scalable,
+  required double scale,
+  required bool atMin,
+  required bool atMax,
+}) => RustLib.instance.api.crateApiEngineSetFontContext(
+  scalable: scalable,
+  scale: scale,
+  atMin: atMin,
+  atMax: atMax,
+);
+
 /// Open the persistent proactive-notification channel and stream pushed
 /// notifications to Dart. Replaces any channel already running (so it can be
 /// restarted when the pinned orchestrator changes). The channel dials the pinned
@@ -209,17 +268,23 @@ class MusicConfig {
   /// A stable identifier for this display, sent in the `anamanti-hello` frame.
   final String deviceId;
 
+  /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+  /// `device_id` in the `anamanti-hello` frame (may be empty).
+  final String deviceName;
+
   const MusicConfig({
     required this.orchestratorKey,
     required this.discoveryTimeoutSecs,
     required this.deviceId,
+    required this.deviceName,
   });
 
   @override
   int get hashCode =>
       orchestratorKey.hashCode ^
       discoveryTimeoutSecs.hashCode ^
-      deviceId.hashCode;
+      deviceId.hashCode ^
+      deviceName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -228,7 +293,8 @@ class MusicConfig {
           runtimeType == other.runtimeType &&
           orchestratorKey == other.orchestratorKey &&
           discoveryTimeoutSecs == other.discoveryTimeoutSecs &&
-          deviceId == other.deviceId;
+          deviceId == other.deviceId &&
+          deviceName == other.deviceName;
 }
 
 /// One now-playing push from the orchestrator, streamed to Flutter. `now_playing_json`
@@ -606,9 +672,9 @@ class WakeWordEvent {
   /// scroll direction (`RecipeScroll`). Empty for every other kind.
   final String recipeAction;
 
-  /// The music screen target for a `MusicScreen` voice command (`"now_playing"` /
-  /// `"up_next"` / `"hidden"`). Empty for every other kind.
-  final String musicScreen;
+  /// The enrollment-step result as a JSON string (`EnrollResult`); empty for every
+  /// other kind. The enroll screen decodes it to show progress / the verify outcome.
+  final String enrollJson;
 
   const WakeWordEvent({
     required this.kind,
@@ -632,7 +698,7 @@ class WakeWordEvent {
     required this.weatherJson,
     required this.placeJson,
     required this.recipeAction,
-    required this.musicScreen,
+    required this.enrollJson,
   });
 
   @override
@@ -658,7 +724,7 @@ class WakeWordEvent {
       weatherJson.hashCode ^
       placeJson.hashCode ^
       recipeAction.hashCode ^
-      musicScreen.hashCode;
+      enrollJson.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -686,7 +752,7 @@ class WakeWordEvent {
           weatherJson == other.weatherJson &&
           placeJson == other.placeJson &&
           recipeAction == other.recipeAction &&
-          musicScreen == other.musicScreen;
+          enrollJson == other.enrollJson;
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -801,8 +867,15 @@ enum WakeWordEventKind {
   /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
   recipeScroll,
 
-  /// Music mode: a voice `music_screen` command. `music_screen` is the target screen
-  /// (`"now_playing"` / `"up_next"` / `"hidden"`). Only acts when music is playing.
+  /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
+  /// command. The direction (`"increase"` / `"decrease"`) rides the generic
+  /// `recipe_action` field (the same string carrier as `RecipeScroll`). The UI bumps the
+  /// global font scale and persists it.
+  fontAdjust,
+
+  /// Music mode: a voice `music_screen` command. The target screen (`"now_playing"` /
+  /// `"up_next"` / `"hidden"`) rides the generic `recipe_action` string carrier (as
+  /// `FontAdjust` does). Only acts when music is playing.
   musicScreen,
 
   /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
@@ -810,6 +883,12 @@ enum WakeWordEventKind {
   /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
   /// transitions, never per frame.
   presence,
+
+  /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
+  /// guided capture (a training sample or the verify check). `enroll_json` carries the
+  /// raw `anamanti-enroll-result` data block (phase / accepted / samples / consistency /
+  /// confidence / speaker_id / name / message); the enroll screen parses it to advance.
+  enrollResult,
 }
 
 /// Config for the persistent weather channel. Mirrors [`NotifyConfig`]; the

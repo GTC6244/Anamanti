@@ -330,6 +330,11 @@ async fn run_turn_task(
     // `timers` block) when nothing is running. See plans/system1-fast-decisions.md §17/§19.
     let timer_snapshot = shared.timers.snapshot();
     conn.set_timer_context((timer_snapshot.running > 0).then(|| timer_snapshot.to_json()));
+    // Stamp the orthogonal font-scaling state (`scalable` + current global scale) as
+    // `screen.font`, set by the UI via `api::engine::set_font_context`, so the Core can
+    // resolve "increase/decrease font" only when there's something to resize. `None`
+    // (no `font` block) until the UI first reports it.
+    conn.set_font_context(crate::engine::font_context());
 
     // Idle watchdog for this turn: a follow-up turn keeps the mic open for the listen
     // window; give the device a small margin past it so the orchestrator's no-speech
@@ -429,6 +434,14 @@ async fn run_turn_task(
                 log::info!("turn: music screen -> {screen}");
                 WakeWordEvent::music_screen(screen)
             }
+            // A font command relayed on the voice socket: step the global font scale. The
+            // UI owns + persists the scale, so just surface the direction.
+            TurnUpdate::Font(cmd) => match cmd {
+                wyoming::protocol::FontCommand::Adjust(direction) => {
+                    log::info!("turn: font adjust {direction}");
+                    WakeWordEvent::font_adjust(direction)
+                }
+            },
             // Record the request to reopen the mic after this reply. Acted on only after
             // this turn's reply audio drains (drain watcher below), so the follow-up mic
             // never records the tail of the TTS. Nothing to add here.
@@ -437,6 +450,13 @@ async fn run_turn_task(
                 pending_followup_depth.store(depth, Ordering::SeqCst);
                 pending_followup_wait.store(wait_secs, Ordering::SeqCst);
                 return;
+            }
+            // The orchestrator's reply to an enrollment capture (sample/verify). Surface
+            // the raw JSON result to the UI (the enroll screen owns the flow + outlives
+            // the turn). Does not touch the turn state machine.
+            TurnUpdate::EnrollResult(json) => {
+                log::info!("turn: enroll result {json}");
+                WakeWordEvent::enroll_result(json)
             }
             TurnUpdate::Finished => {
                 log::info!("turn: finished cleanly");

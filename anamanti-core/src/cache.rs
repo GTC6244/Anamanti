@@ -16,8 +16,9 @@
 //!   are set in the `tool_cache` config block (see [`ToolCacheConfig`]); `0` disables
 //!   caching for that tool.
 //!
-//! The first application is weather (`weather::from_config` wraps its provider). Other
-//! read-only tools can opt in at their call site.
+//! Users: weather (`weather::from_config` wraps its provider) and calendar (the fetched
+//! `.ics` feed bodies, `calendar::IcalSubscription`). Other read-only tools can opt in at
+//! their call site.
 //!
 //! **Do NOT cache** mutating or side-effecting tools (timers, shopping-list writes), or
 //! results that depend on hidden/per-user state not present in the key. Caching is opt-in
@@ -39,6 +40,11 @@ const DEFAULT_MAX_ENTRIES: usize = 256;
 /// The built-in weather TTL (60 minutes) used when the `tool_cache` config omits it.
 /// Weather changes slowly; a manual re-ask still reflects reality within the hour.
 pub const DEFAULT_WEATHER_TTL_SECS: u64 = 3600;
+
+/// The built-in calendar TTL (5 minutes) used when neither `calendar.cache_ttl_secs` nor
+/// `tool_cache.calendar_lookup` is set. The feed fetch dominates a lookup's cost and
+/// calendars don't change second-to-second.
+pub const DEFAULT_CALENDAR_TTL_SECS: u64 = 300;
 
 /// A thread-safe cache of tool-call responses keyed by a string derived from the tool's
 /// outgoing arguments. Each entry carries its own TTL (chosen per tool). Cheap to share
@@ -162,7 +168,14 @@ pub struct ToolCacheConfig {
 impl Default for ToolCacheConfig {
     fn default() -> Self {
         let mut ttl_secs = HashMap::new();
-        ttl_secs.insert("weather_lookup".to_string(), DEFAULT_WEATHER_TTL_SECS);
+        ttl_secs.insert(
+            crate::weather::WEATHER_TOOL.to_string(),
+            DEFAULT_WEATHER_TTL_SECS,
+        );
+        ttl_secs.insert(
+            crate::calendar::CALENDAR_TOOL.to_string(),
+            DEFAULT_CALENDAR_TTL_SECS,
+        );
         Self { ttl_secs }
     }
 }
@@ -267,6 +280,7 @@ mod tests {
     fn config_defaults_weather_to_an_hour_and_overlays_file_entries() {
         let mut cfg = ToolCacheConfig::default();
         assert_eq!(cfg.ttl("weather_lookup"), Duration::from_secs(3600));
+        assert_eq!(cfg.ttl("calendar_lookup"), Duration::from_secs(300));
         assert_eq!(
             cfg.ttl("directions_lookup"),
             Duration::ZERO,

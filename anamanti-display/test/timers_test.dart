@@ -61,8 +61,7 @@ WakeWordEvent _ev(
       weatherJson: '',
       placeJson: '',
       recipeAction: '',
-      musicScreen: '',
-    );
+      enrollJson: '',    );
 
 void main() {
   test('controller folds start/finish/cancel/dismiss into timer state', () async {

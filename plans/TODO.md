@@ -44,11 +44,14 @@ full loop has not been exercised against real services on the device.
       mid-reply flushes playback and starts a fresh turn (flush-on-wake + the
       `anamanti-interrupt` frame aborts the Anamanti Core's in-flight LLM+TTS). Detection
       over loud playback takes a try or two without AEC.
-- [ ] Exercise **memory** on-device (voice "remember…"/"forget that" + the settings
-      memory list).
+- [ ] Exercise **memory** on-device (voice "remember…"/"forget that" + the Settings →
+      Memory screen).
 - [ ] Verify the Phase-6 **settings control protocol** on-device: change LLM
       backend / model / TTS voice from the settings screen and see it take effect on
-      the next turn; view/delete memory entries.
+      the next turn; and exercise **Settings → Memory** all three tabs — Facts
+      (SQLite view/delete/forget-all), Conversations (search + person/keyword filter +
+      delete a turn), Keywords (delete an entity) — confirming a deleted turn/keyword no
+      longer recalls (Helix-index-only: a backend-switch/rebuild can re-import it).
 
 ## 2. AEC / self-triggering (investigated on hardware — Plan §4)
 
@@ -310,6 +313,19 @@ no longer a `speaker` build feature — so with no `speaker.model_path` set it j
 falls back to the dev-only mock embedder.) To take it from dormant code to a real
 feature:
 
+### 5.0 Speaker-scoped memory — hardware follow-up (SpeakerScopedMemoryPlan.md Phase 0)
+
+The code is in (scopes, resolutions, short-clip match, prompt, admin tags/review). Owed on
+hardware:
+- [ ] Rename the "Christina" voiceprint to **Kristina** (People screen) before/as she enrolls;
+      delete the six single-sample anonymous clusters.
+- [ ] Brendon + Kristina: Settings → People → **Add a voice** → pick their roster chip.
+- [ ] Calibrate `speaker.match_threshold` / `new_threshold` / `min_identify_ms` /
+      `short_clip_margin` from real far-field turns (the Conversations page shows each turn's
+      resolution + confidence).
+- [ ] Review the unknown-speaker queue on the Memory page after deploying (the legacy
+      "The user's name is Brendan" row migrates there).
+
 ### 6a. Real embedding model (Phase E — the blocker for accuracy)
 
 - [ ] Obtain/export an **ECAPA-TDNN** (or WeSpeaker) speaker-embedding model to
@@ -459,7 +475,7 @@ actions".
       follow-up loop; a **route-only System-1 `place` intent** classifies then defers to
       System-2. Suites green (Core lib 320+places, device-rust 96, Flutter 107); clippy +
       `dart analyze` clean; FRB codegen clean. **Pending on-device QA** (§4 of the plan):
-      release APK, set `GOOGLE_PLACES_API_KEY` + a `home_location`, ask "what are the hours
+      release APK, set `GOOGLE_PLACES_API_KEY` + a `home_address`, ask "what are the hours
       for <cafe>" → card with photo + hours; confirm disambiguation and voice/touch close.
 - [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
       tool returns real distance, travel time, and **live traffic** between two places
@@ -540,7 +556,7 @@ Remaining:
       --target-platform android-arm` must succeed — proves `ring` cross-compiles for
       32-bit armv7 via cargokit/NDK (the one real build risk). (`cargo ndk -t
       armeabi-v7a -p 30 build --release` is a faster Rust-only pre-check.)
-- [ ] **End-to-end on hardware:** set a real `updateBaseUrl` (Settings → Updates),
+- [ ] **End-to-end on hardware:** set a real `updateBaseUrl` (Settings → Device → Updates),
       publish a higher-`versionCode` signed APK + `latest.json` via
       `anamanti-display/scripts/release-r2.sh`, then confirm: banner appears → download
       with progress → SHA-256 passes → unknown-sources prompt → system install →

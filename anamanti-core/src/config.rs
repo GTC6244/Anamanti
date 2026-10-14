@@ -21,20 +21,16 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::calendar::{CalendarSpec, IcalSubscription};
+use crate::calendar::CalendarSpec;
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
 use crate::llm::catalog::ModelCatalog;
-use crate::llm::{
-    anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
-    LlmBackend,
-};
 use crate::music::{
     GroupSelector, ManagedProc, MpvControl, MusicDucker, MusicHub, MusicSupervisor, ProcSpec,
     SnapcastClient,
 };
 use crate::settings::{
-    load_persisted, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
-    SharedSettings, SpotifyConfig,
+    load_persisted, AppSaidConfig, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory,
+    PersistedSettings, Personality, RuntimeSettings, SharedSettings, SpotifyConfig,
 };
 
 /// Default Google Drive OAuth scope for the photo slideshow (read-only).
@@ -54,6 +50,27 @@ fn disable_sentinel(v: &str) -> Option<&str> {
     match v.trim() {
         s if matches!(s.to_lowercase().as_str(), "off" | "none" | "") => None,
         s => Some(s),
+    }
+}
+
+/// Resolve the boot-seed home address from the config file: prefer the structured
+/// `home_address` object; otherwise fold the legacy single-line `home_location` string
+/// into `city` (which preserves the old weather behavior of passing the whole string to
+/// the provider). Blank in → empty `HomeAddress`.
+fn resolve_home_address(
+    structured: Option<crate::household::HomeAddress>,
+    legacy: Option<String>,
+) -> crate::household::HomeAddress {
+    match structured.map(|a| a.sanitized()) {
+        Some(a) if !a.is_empty() => a,
+        _ => crate::household::HomeAddress {
+            city: legacy
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            ..Default::default()
+        },
     }
 }
 
@@ -113,13 +130,14 @@ pub struct Config {
     pub db_path: PathBuf,
     /// Base system prompt/persona.
     pub system_prompt: String,
-    /// The device's physical home location (e.g. "Austin, Texas"), injected into the
-    /// prompt so location-relative questions (weather, sunset, nearby places) resolve
-    /// an unqualified "here". `None` omits the location grounding. Set via the config
-    /// file's `home_location`.
-    pub home_location: Option<String>,
+    /// The device's physical home location as discrete fields (Address 1/2, City,
+    /// State/Prov, Zip/Postal, Country). Directions + nearby-places use the full combined
+    /// address; weather + the prompt's "here" grounding use only City + State/Prov. An
+    /// all-blank value omits the location grounding. Seeded from the config file's
+    /// `home_address` object (or the legacy single-line `home_location` string → City).
+    pub home_address: crate::household::HomeAddress,
     /// Preferred measurement units for answers (e.g. "imperial" / "metric"), paired
-    /// with `home_location`. Set via the config file's `weather_units`.
+    /// with `home_address`. Set via the config file's `weather_units`.
     pub weather_units: Option<String>,
     /// Idle timeout for a stalled turn.
     pub turn_timeout: Duration,
@@ -179,8 +197,10 @@ pub struct Config {
     pub openai_max_tokens: u32,
     /// Web-calendar subscriptions for the `calendar_lookup` tool (empty → no tool).
     pub calendar_specs: Vec<CalendarSpec>,
-    /// Cache TTL for fetched `.ics` feeds.
-    pub calendar_cache_ttl: Duration,
+    /// Explicit cache TTL for fetched `.ics` feeds (`calendar.cache_ttl_secs`; `0` =
+    /// no cache). `None` when the key is absent ⇒ `tool_cache.calendar_lookup` (default
+    /// 5 min) applies.
+    pub calendar_cache_ttl: Option<Duration>,
     /// Routing provider label for the `directions_lookup` tool (empty → `mapbox`).
     pub directions_provider: String,
     /// Google Drive photo-slideshow seed (client creds + folders; the refresh token is
@@ -192,6 +212,10 @@ pub struct Config {
     /// Cadora shopping-list seed (base URL + voice-link token). The token is normally
     /// minted by the config-page pairing flow. Overlaid by the persisted settings file.
     pub cadora: CadoraConfig,
+    /// AppSaid phone-push seed (worker URL + recipients + default recipient). The
+    /// secret app token is NOT here — it seeds from `APPSAID_APP_TOKEN`. Overlaid by
+    /// the persisted settings file.
+    pub appsaid: AppSaidConfig,
     /// Per-tool response-cache TTLs (`tool_cache` in the file), keyed by tool name (e.g.
     /// `weather_lookup`, default 3600 s). Installed process-wide at boot; see
     /// [`crate::cache`]. `0` disables caching for a tool.
@@ -210,8 +234,15 @@ pub struct SpeakerConfig {
     pub match_threshold: f32,
     /// Cosine below this ⇒ mint a new anonymous cluster.
     pub new_threshold: f32,
-    /// Minimum voiced audio (ms) before attempting identification.
+    /// Minimum voiced audio (ms) before a turn may **create or update** a voiceprint.
     pub min_speech_ms: u32,
+    /// Minimum voiced audio (ms) for a **read-only** short-clip match ("who am I?" is
+    /// well under `min_speech_ms`). Below it the speaker is unknown. `0` disables the
+    /// short-clip path. See SpeakerScopedMemoryPlan.md §4.
+    pub min_identify_ms: u32,
+    /// Extra cosine a short-clip match needs above `match_threshold` to count as
+    /// identified (short clips embed less reliably); otherwise it is at most tentative.
+    pub short_clip_margin: f32,
     /// Embedding dimensionality the ONNX model produces (ECAPA-TDNN → 192).
     pub embed_dims: usize,
 }
@@ -224,6 +255,8 @@ impl Default for SpeakerConfig {
             match_threshold: 0.55,
             new_threshold: 0.40,
             min_speech_ms: 1200,
+            min_identify_ms: 600,
+            short_clip_margin: 0.10,
             embed_dims: 192,
         }
     }
@@ -237,16 +270,31 @@ pub enum SttEngineKind {
     /// In-process whisper.cpp via `whisper-rs` (requires the `stt-whisper-local`
     /// build feature).
     WhisperLocal,
+    /// ElevenLabs Scribe v2 Realtime over WebSocket (always compiled; requires the
+    /// `ELEVENLABS_API_KEY` secret + network). See `plans/ElevenLabsSttPlan.md`.
+    ElevenLabs,
 }
 
 impl SttEngineKind {
     /// Parse the config label. `wyoming` (or `faster-whisper`) → the downstream
-    /// server; `whisper-rs` / `whisper-local` / `local` → in-process.
+    /// server; `whisper-rs` / `whisper-local` / `local` → in-process;
+    /// `elevenlabs` / `eleven-labs` / `11labs` → ElevenLabs realtime.
     pub fn from_label(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "wyoming" | "faster-whisper" | "whisper-wyoming" => Some(Self::Wyoming),
             "whisper-rs" | "whisper-local" | "whisper_local" | "local" => Some(Self::WhisperLocal),
+            "elevenlabs" | "eleven-labs" | "eleven_labs" | "11labs" => Some(Self::ElevenLabs),
             _ => None,
+        }
+    }
+
+    /// The canonical label (round-trips with [`from_label`](Self::from_label)); used to
+    /// persist the selection and report it to the config page.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Wyoming => "wyoming",
+            Self::WhisperLocal => "whisper-rs",
+            Self::ElevenLabs => "elevenlabs",
         }
     }
 }
@@ -256,7 +304,7 @@ impl SttEngineKind {
 /// top-level `stt_addr` (used when `engine = wyoming`).
 #[derive(Debug, Clone)]
 pub struct SttConfig {
-    /// Which engine transcribes (`wyoming` default, or `whisper-rs`).
+    /// Which engine transcribes (`wyoming` default, `whisper-rs`, or `elevenlabs`).
     pub engine: SttEngineKind,
     /// Named model size for the in-process engine: `base` (default) or `small`,
     /// resolved to `<model_dir>/ggml-<model>.en.bin` unless `model_path` overrides.
@@ -265,10 +313,33 @@ pub struct SttConfig {
     pub model_dir: PathBuf,
     /// Explicit ggml model file; overrides `model`/`model_dir` when set.
     pub model_path: Option<PathBuf>,
-    /// Decode language (`Some("en")`); `None` ⇒ auto-detect.
+    /// Decode language (`Some("en")`); `None` ⇒ auto-detect. Shared by the in-process
+    /// Whisper engine and the ElevenLabs engine (passed as `language_code`).
     pub language: Option<String>,
     /// Decode thread cap; `0` ⇒ a sensible default from host parallelism.
     pub num_threads: u32,
+    /// ElevenLabs realtime settings (used only when `engine = elevenlabs`).
+    pub elevenlabs: ElevenLabsSttConfig,
+}
+
+/// ElevenLabs Scribe v2 Realtime settings (`stt.elevenlabs` block). The API key is a
+/// **secret** and never lives here — it comes from `ELEVENLABS_API_KEY`.
+#[derive(Debug, Clone)]
+pub struct ElevenLabsSttConfig {
+    /// Model id; only `scribe_v2_realtime` is accepted by this endpoint today.
+    pub model_id: String,
+    /// WebSocket host base, e.g. `wss://api.elevenlabs.io` (regional residency hosts
+    /// like `wss://api.eu.residency.elevenlabs.io` also exist).
+    pub base_url: String,
+}
+
+impl Default for ElevenLabsSttConfig {
+    fn default() -> Self {
+        Self {
+            model_id: crate::stt::elevenlabs::DEFAULT_MODEL_ID.to_string(),
+            base_url: crate::stt::elevenlabs::DEFAULT_BASE_URL.to_string(),
+        }
+    }
 }
 
 impl SttConfig {
@@ -290,6 +361,7 @@ impl Default for SttConfig {
             model_path: None,
             language: Some("en".to_string()),
             num_threads: 0,
+            elevenlabs: ElevenLabsSttConfig::default(),
         }
     }
 }
@@ -560,10 +632,6 @@ pub struct System1Config {
     pub base_url: String,
     /// OpenRouter model id for the `jev` backend.
     pub openrouter_model: String,
-    /// Compute device for the in-process `laya-embedded` backend (`cpu` | `metal`).
-    pub device: String,
-    /// Checkpoint / Hugging Face repo id for the `laya-embedded` backend.
-    pub model: String,
     /// Strict confidence floor below which a decision defers to System-2.
     pub min_confidence: f64,
     /// The intent labels the router is allowed to resolve (empty = the built-in set,
@@ -577,8 +645,6 @@ impl Default for System1Config {
             backend: "none".to_string(),
             base_url: "http://127.0.0.1:8000".to_string(),
             openrouter_model: "typesafe/jev-1.13".to_string(),
-            device: "metal".to_string(),
-            model: "convaiinnovations/laya".to_string(),
             min_confidence: 0.85,
             intents: Vec::new(),
         }
@@ -628,6 +694,12 @@ pub struct GraphRagConfig {
     pub anthropic_base_url: String,
     /// Entity-extraction chat model (default Claude Haiku 4.5).
     pub extract_model: String,
+    /// Boot seed for cloud entity extraction (`graphrag.extract`: `"auto"` → on when
+    /// `ANTHROPIC_API_KEY` is set, the default; `"off"` → never send turn text to
+    /// Anthropic for extraction). Runtime-switchable from the config page (Memory →
+    /// Recall settings); the live choice persists in `helix_path/extract_mode` and wins
+    /// over `auto` at the next boot — but an explicit `"off"` here always wins.
+    pub extract_enabled: bool,
     /// How often the background ingester drains the chat log.
     pub ingest_interval: Duration,
     /// KNN fan-out per vector search at recall time.
@@ -648,6 +720,7 @@ impl Default for GraphRagConfig {
             embed_dims: 768,
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             extract_model: "claude-haiku-4-5".to_string(),
+            extract_enabled: true,
             ingest_interval: Duration::from_secs(30),
             recall_k: 6,
         }
@@ -674,7 +747,7 @@ impl Default for Config {
             },
             db_path: PathBuf::from("anamanti_memory.sqlite"),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            home_location: None,
+            home_address: crate::household::HomeAddress::default(),
             weather_units: None,
             turn_timeout: Duration::from_secs(30),
             memory_backend: MemoryBackendChoice::Helix,
@@ -701,7 +774,7 @@ impl Default for Config {
             anthropic_max_tokens: 1024,
             openai_max_tokens: 1024,
             calendar_specs: Vec::new(),
-            calendar_cache_ttl: IcalSubscription::DEFAULT_TTL,
+            calendar_cache_ttl: None,
             directions_provider: String::new(),
             drive: DriveConfig {
                 scope: Some(DEFAULT_DRIVE_SCOPE.to_string()),
@@ -709,6 +782,7 @@ impl Default for Config {
             },
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
+            appsaid: AppSaidConfig::default(),
             tool_cache: crate::cache::ToolCacheConfig::default(),
         }
     }
@@ -780,6 +854,12 @@ pub struct FileConfig {
     pub settings_path: Option<String>,
     pub audio_dump_dir: Option<PathBuf>,
     pub system_prompt: Option<String>,
+    /// Discrete home-address fields (Address 1/2, City, State/Prov, Zip/Postal, Country).
+    #[serde(default)]
+    pub home_address: Option<crate::household::HomeAddress>,
+    /// **Legacy** single-line home location, kept for backward compatibility with config
+    /// files written before the discrete-field split. When `home_address` is absent, this
+    /// seeds `HomeAddress.city`.
     pub home_location: Option<String>,
     pub weather_units: Option<String>,
     pub turn_timeout_secs: Option<u64>,
@@ -814,6 +894,8 @@ pub struct FileConfig {
     pub spotify: FileSpotify,
     #[serde(default)]
     pub cadora: FileCadora,
+    #[serde(default)]
+    pub appsaid: FileAppSaid,
     /// Per-tool cache TTLs in seconds, keyed by tool name (e.g. `weather_lookup`). A flat
     /// map so it stays generic; overlaid on the built-in defaults, `0` disables a tool's
     /// cache. Absent ⇒ defaults only (see [`crate::cache::ToolCacheConfig`]).
@@ -872,6 +954,8 @@ pub struct FileGraphRag {
     pub embed_dims: Option<usize>,
     pub anthropic_base_url: Option<String>,
     pub extract_model: Option<String>,
+    /// `"auto"` (default) or `"off"` — see [`GraphRagConfig::extract_enabled`].
+    pub extract: Option<String>,
     pub ingest_interval_secs: Option<u64>,
     pub recall_k: Option<usize>,
 }
@@ -884,6 +968,8 @@ pub struct FileSpeaker {
     pub match_threshold: Option<f32>,
     pub new_threshold: Option<f32>,
     pub min_speech_ms: Option<u32>,
+    pub min_identify_ms: Option<u32>,
+    pub short_clip_margin: Option<f32>,
     pub embed_dims: Option<usize>,
 }
 
@@ -896,6 +982,15 @@ pub struct FileStt {
     pub model_path: Option<PathBuf>,
     pub language: Option<String>,
     pub num_threads: Option<u32>,
+    #[serde(default)]
+    pub elevenlabs: FileElevenLabsStt,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileElevenLabsStt {
+    pub model_id: Option<String>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -971,7 +1066,13 @@ pub struct FileSystem1 {
     pub backend: Option<String>,
     pub base_url: Option<String>,
     pub openrouter_model: Option<String>,
+    /// **Deprecated, ignored.** Was the compute device for the never-implemented
+    /// `laya-embedded` backend. Still accepted so an existing file keeps loading
+    /// (`deny_unknown_fields`); a value logs a deprecation warning at boot.
     pub device: Option<String>,
+    /// **Deprecated, ignored.** Was the checkpoint for the never-implemented
+    /// `laya-embedded` backend (the `jev` model is `openrouter_model`). Still accepted;
+    /// a value logs a deprecation warning at boot.
     pub model: Option<String>,
     pub min_confidence: Option<f64>,
     #[serde(default)]
@@ -1030,6 +1131,22 @@ pub struct FileCadora {
     /// A `vl_…` voice-link token, if seeded directly (normally minted via the
     /// config-page pairing flow instead).
     pub link_token: Option<String>,
+}
+
+/// The `appsaid` block of the config file. The secret sender app token is
+/// deliberately NOT a field here — it is env-only (`APPSAID_APP_TOKEN`) and
+/// config-page settable, never written to `anamanti.json` (the secrets-are-env-only
+/// convention).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileAppSaid {
+    /// AppSaid worker base URL (e.g. `https://appsaid.you.workers.dev`).
+    pub worker_url: Option<String>,
+    /// Recipients: family-member name → AppSaid `user_key`.
+    #[serde(default)]
+    pub recipients: std::collections::BTreeMap<String, String>,
+    /// Optional default recipient name used when the model omits `recipient`.
+    pub default_recipient: Option<String>,
 }
 
 /// Trim a config string and drop it when empty.
@@ -1179,6 +1296,16 @@ impl Config {
         if let Some(v) = nonempty(fc.graphrag.extract_model) {
             graphrag.extract_model = v;
         }
+        if let Some(v) = nonempty(fc.graphrag.extract) {
+            graphrag.extract_enabled = match v.to_lowercase().as_str() {
+                "off" | "false" | "none" | "disabled" => false,
+                "auto" | "on" | "true" | "anthropic" => true,
+                other => {
+                    log::warn!("unknown graphrag.extract {other:?}; using the default (auto)");
+                    true
+                }
+            };
+        }
         if let Some(v) = nonempty(fc.graphrag.openai_base_url) {
             graphrag.openai_base_url = v;
         }
@@ -1199,6 +1326,8 @@ impl Config {
             match_threshold: fc.speaker.match_threshold.unwrap_or(sd.match_threshold),
             new_threshold: fc.speaker.new_threshold.unwrap_or(sd.new_threshold),
             min_speech_ms: fc.speaker.min_speech_ms.unwrap_or(sd.min_speech_ms),
+            min_identify_ms: fc.speaker.min_identify_ms.unwrap_or(sd.min_identify_ms),
+            short_clip_margin: fc.speaker.short_clip_margin.unwrap_or(sd.short_clip_margin),
             embed_dims: fc.speaker.embed_dims.unwrap_or(sd.embed_dims),
         };
 
@@ -1207,7 +1336,9 @@ impl Config {
             engine: match fc.stt.engine.as_deref() {
                 None => sttd.engine,
                 Some(label) => SttEngineKind::from_label(label).with_context(|| {
-                    format!("unknown stt.engine {label:?} (expected `wyoming` or `whisper-rs`)")
+                    format!(
+                        "unknown stt.engine {label:?} (expected `wyoming`, `whisper-rs`, or `elevenlabs`)"
+                    )
                 })?,
             },
             model: nonempty(fc.stt.model).unwrap_or(sttd.model),
@@ -1221,6 +1352,12 @@ impl Config {
                 Some(s) => Some(s),
             },
             num_threads: fc.stt.num_threads.unwrap_or(sttd.num_threads),
+            elevenlabs: ElevenLabsSttConfig {
+                model_id: nonempty(fc.stt.elevenlabs.model_id)
+                    .unwrap_or(sttd.elevenlabs.model_id),
+                base_url: nonempty(fc.stt.elevenlabs.base_url)
+                    .unwrap_or(sttd.elevenlabs.base_url),
+            },
         };
 
         let vadd = VadConfig::default();
@@ -1298,12 +1435,21 @@ impl Config {
         };
 
         let s1d = System1Config::default();
+        for (key, value) in [
+            ("system1.device", &fc.system1.device),
+            ("system1.model", &fc.system1.model),
+        ] {
+            if value.is_some() {
+                log::warn!(
+                    "config key `{key}` is deprecated and ignored (it configured the \
+                     unimplemented laya-embedded backend); remove it from the config file"
+                );
+            }
+        }
         let system1 = System1Config {
             backend: nonempty(fc.system1.backend).unwrap_or(s1d.backend),
             base_url: nonempty(fc.system1.base_url).unwrap_or(s1d.base_url),
             openrouter_model: nonempty(fc.system1.openrouter_model).unwrap_or(s1d.openrouter_model),
-            device: nonempty(fc.system1.device).unwrap_or(s1d.device),
-            model: nonempty(fc.system1.model).unwrap_or(s1d.model),
             min_confidence: fc.system1.min_confidence.unwrap_or(s1d.min_confidence),
             intents: if fc.system1.intents.is_empty() {
                 s1d.intents
@@ -1339,11 +1485,9 @@ impl Config {
             .unwrap_or_else(|| sanitize_id(&service_name));
 
         let calendar_specs = calendar_specs_from_file(fc.calendar.subscriptions);
-        let calendar_cache_ttl = fc
-            .calendar
-            .cache_ttl_secs
-            .map(Duration::from_secs)
-            .unwrap_or(d.calendar_cache_ttl);
+        // Kept raw: an absent key must stay distinguishable from an explicit value
+        // (which wins over tool_cache.calendar_lookup, even when it equals the default).
+        let calendar_cache_ttl = fc.calendar.cache_ttl_secs.map(Duration::from_secs);
 
         let drive = DriveConfig {
             client_id: nonempty(fc.drive.client_id),
@@ -1374,6 +1518,23 @@ impl Config {
         let cadora = CadoraConfig {
             base_url: nonempty(fc.cadora.base_url),
             link_token: nonempty(fc.cadora.link_token),
+        };
+
+        let appsaid = AppSaidConfig {
+            // Trim a trailing slash so the client can join `/v1/messages` cleanly.
+            worker_url: nonempty(fc.appsaid.worker_url)
+                .map(|s| s.trim_end_matches('/').to_string()),
+            // The sender app token is a SECRET: never seeded from the JSON config. It
+            // seeds from `APPSAID_APP_TOKEN` in `shared_settings` instead.
+            app_token: None,
+            recipients: fc
+                .appsaid
+                .recipients
+                .into_iter()
+                .map(|(name, key)| (name.trim().to_string(), key.trim().to_string()))
+                .filter(|(name, key)| !name.is_empty() && !key.is_empty())
+                .collect(),
+            default_recipient: nonempty(fc.appsaid.default_recipient),
         };
 
         let ollama_url = match &llm {
@@ -1410,7 +1571,7 @@ impl Config {
             llm,
             db_path: fc.db_path.unwrap_or(d.db_path),
             system_prompt: nonempty(fc.system_prompt).unwrap_or(d.system_prompt),
-            home_location: nonempty(fc.home_location),
+            home_address: resolve_home_address(fc.home_address, fc.home_location),
             weather_units: nonempty(fc.weather_units),
             turn_timeout: fc
                 .turn_timeout_secs
@@ -1459,39 +1620,13 @@ impl Config {
             drive,
             spotify,
             cadora,
+            appsaid,
             tool_cache: {
                 let mut tc = crate::cache::ToolCacheConfig::default();
                 tc.overlay(fc.tool_cache);
                 tc
             },
         })
-    }
-
-    /// Build the selected System-1 decision engine (plans/system1-fast-decisions.md),
-    /// mirroring [`Config::build_llm`]. Default `none` reproduces today's behavior.
-    ///
-    /// Build the System-1 engine straight from the config file's `system1` block (the
-    /// OpenRouter key comes from the `OPENROUTER_API_KEY` env secret). The live boot path
-    /// is [`Self::shared_settings`], which also applies the persisted overlay and makes
-    /// the engine runtime-swappable; this helper is kept for direct/one-shot use.
-    pub fn build_system1(&self) -> Result<Arc<dyn crate::system1::DecisionEngine>> {
-        let key = env::var("OPENROUTER_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
-        if self.system1.backend.eq_ignore_ascii_case("jev") && key.is_none() {
-            log::warn!(
-                "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
-                 rejected until it is provided (env or config page)."
-            );
-        }
-        crate::system1::build(
-            &self.system1.backend,
-            &self.system1.base_url,
-            &self.system1.openrouter_model,
-            key,
-            self.system1.min_confidence,
-            self.system1.intents.clone(),
-        )
     }
 
     /// Build the music ducker when music routing **and** duck-on-speech are both
@@ -1542,6 +1677,8 @@ impl Config {
                 program: bin("snapserver"),
                 args: vec!["-c".into(), m.snapserver_conf.display().to_string()],
                 log_path: log("ambient-snapserver.log"),
+                // Guarded by the "already reachable" check in start_all; no reap.
+                reap_pattern: None,
             },
         );
         specs.insert(
@@ -1559,8 +1696,20 @@ impl Config {
                     "320".into(),
                     "--initial-volume".into(),
                     "100".into(),
+                    // Persist the Spotify account session across restarts: the
+                    // one-time Connect hand-off authenticates this device, and the
+                    // cached credentials let it re-authenticate on every respawn so
+                    // it keeps appearing in the Web API device list that
+                    // `spotify_control` targets. `--disable-audio-cache` keeps only
+                    // the credentials/volume cache (no on-disk audio files).
+                    "--cache".into(),
+                    m.run_dir.join("librespot-cache").display().to_string(),
+                    "--disable-audio-cache".into(),
                 ],
                 log_path: log("ambient-librespot.log"),
+                // Reap any orphaned librespot for this device name before spawning
+                // (specific enough it can't match the Core or an unrelated proc).
+                reap_pattern: Some(format!("librespot --name {}", m.spotify_device_name)),
             },
         );
         specs.insert(
@@ -1579,6 +1728,8 @@ impl Config {
                     "--audio-format=s16".into(),
                 ],
                 log_path: log("ambient-mpv-web.log"),
+                // Reap any orphaned mpv bound to this IPC socket before spawning.
+                reap_pattern: Some(format!("input-ipc-server={}", mpv_ipc.display())),
             },
         );
         Some(Arc::new(MusicSupervisor::new(specs)))
@@ -1596,33 +1747,47 @@ impl Config {
         })
     }
 
-    /// Instantiate the selected LLM backend behind the trait object the pipeline
-    /// consumes. The Anthropic backend requires `ANTHROPIC_API_KEY`.
-    pub fn build_llm(&self) -> Result<Arc<dyn LlmBackend>> {
-        Ok(match &self.llm {
-            LlmChoice::Mock => Arc::new(MockLlm::default()),
-            LlmChoice::Ollama { url, model } => Arc::new(OllamaBackend::new(url, model)),
-            LlmChoice::Anthropic { model, max_tokens } => {
-                let key = env::var("ANTHROPIC_API_KEY")
-                    .context("the anthropic backend (llm.backend) requires ANTHROPIC_API_KEY")?;
-                Arc::new(AnthropicBackend::new(
-                    "https://api.anthropic.com",
-                    key,
-                    model,
-                    *max_tokens,
-                ))
+    /// Load the in-process whisper.cpp engine for a **live-swappable** STT setup, or
+    /// `Ok(None)` when it isn't available. Mirroring the Silero model preload, this is
+    /// called at boot **regardless of the selected engine** so a later config-page swap
+    /// to `whisper-rs` works without a restart: the model is loaded once and held on the
+    /// pipeline (`Pipeline::with_whisper_engine`), and the per-turn
+    /// `build_stt_transcriber` picks it when the live selection is `whisper-rs`. Returns
+    /// `None` when the `stt-whisper-local` feature is off or the model file is absent (a
+    /// later swap to `whisper-rs` then falls back to Wyoming with a warning, like VAD).
+    /// The `wyoming` and `elevenlabs` engines need no boot resource (Wyoming dials the
+    /// connector per turn; ElevenLabs opens its WebSocket per turn from the live
+    /// snapshot). See `plans/ElevenLabsSttPlan.md`.
+    pub fn build_whisper_engine(&self) -> Result<Option<Arc<dyn crate::stt::SttEngine>>> {
+        #[cfg(feature = "stt-whisper-local")]
+        {
+            let model = self.stt.resolved_model_path();
+            if !model.exists() {
+                log::info!(
+                    "in-process whisper model {} not present; whisper-rs STT unavailable \
+                     (wyoming/elevenlabs still selectable)",
+                    model.display()
+                );
+                return Ok(None);
             }
-            LlmChoice::OpenAI { model, max_tokens } => {
-                let key = env::var("OPENAI_API_KEY")
-                    .context("the openai backend (llm.backend) requires OPENAI_API_KEY")?;
-                Arc::new(OpenAiBackend::new(
-                    self.graphrag.openai_base_url.clone(),
-                    key,
-                    model,
-                    *max_tokens,
-                ))
-            }
-        })
+            let model_str = model.to_string_lossy().into_owned();
+            let engine = crate::stt::WhisperEngine::open(
+                &model_str,
+                self.stt.language.clone(),
+                self.stt.num_threads as i32,
+            )
+            .with_context(|| format!("loading in-process Whisper model {model_str}"))?;
+            log::info!(
+                "in-process whisper engine loaded (model {model_str}, {} threads); \
+                 live-swappable",
+                self.stt.num_threads
+            );
+            Ok(Some(Arc::new(crate::stt::WhisperSttEngine::new(engine))))
+        }
+        #[cfg(not(feature = "stt-whisper-local"))]
+        {
+            Ok(None)
+        }
     }
 
     /// The inputs a runtime backend swap (Phase 6) needs, captured from the config
@@ -1654,12 +1819,18 @@ impl Config {
             // Seeded per-build from the resolved Cadora config in `shared_settings`
             // (and refreshed by `apply`/`apply_cadora`).
             cadora: None,
+            // Seeded per-build from the resolved AppSaid config in `shared_settings`
+            // (and refreshed by `apply`/`apply_appsaid`).
+            appsaid: None,
             // Prebuilt from the config: the calendar source (web .ics) and the
             // directions provider (Mapbox). The Mapbox token is seeded from the env
             // secret here but is runtime-settable (Tools tab) — `shared_settings`
             // rebuilds `directions` from the resolved token, and `apply_directions`
             // rebuilds it on a config-page change.
-            calendar: crate::calendar::build(self.calendar_specs.clone(), self.calendar_cache_ttl),
+            calendar: crate::calendar::build_with(
+                self.calendar_specs.clone(),
+                self.calendar_cache_ttl,
+            ),
             directions: crate::directions::from_token(
                 &self.directions_provider,
                 self.initial_mapbox_token().as_deref(),
@@ -1677,25 +1848,26 @@ impl Config {
             // Places backend (Google Places API New); present only when enabled AND a key
             // is set (no keyless fallback). Rebuilt from the live key on every swap.
             places: self.places_provider(),
+            places_enabled: self.places.enabled,
+            places_provider: self.places.provider.clone(),
         }
     }
 
     /// The selectable-model catalog for the settings dropdown, wired with the same
-    /// provider endpoints/keys the factory uses (keys read from the environment) and
-    /// the same Anthropic auth mode so subscription hosts list live models.
-    pub fn model_catalog(&self) -> ModelCatalog {
+    /// provider endpoints the factory uses. Credentials (provider keys + the Anthropic
+    /// auth mode) are read **live** from `settings` on every refresh, and subscription
+    /// listing shares the LLM's token provider, so keys and tokens entered on the config
+    /// page reach the dropdown without a restart.
+    pub fn model_catalog(&self, settings: &Arc<SharedSettings>) -> ModelCatalog {
+        let live = settings.clone();
         ModelCatalog::new(
             "https://api.anthropic.com",
-            env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty()),
+            None,
             self.graphrag.openai_base_url.clone(),
-            env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
+            None,
         )
-        .with_anthropic_auth(
-            self.anthropic_auth,
-            Some(Arc::new(AnthropicTokenProvider::new(
-                self.anthropic_token_cmd.clone(),
-            ))),
-        )
+        .with_anthropic_auth(self.anthropic_auth, settings.anthropic_token_provider())
+        .with_credential_source(Arc::new(move || live.catalog_credentials()))
     }
 
     /// The initial engine + web-search selection from the config. These seed the live
@@ -1788,13 +1960,14 @@ impl Config {
     }
 
     /// The initial household + home information seeded from the config file
-    /// (`home_location` / `weather_units`). The member roster has no config form — it
+    /// (`home_address` / `weather_units`). The member roster has no config form — it
     /// is dashboard-only — so it starts empty. A persisted file overlays these at boot
-    /// (see [`Self::shared_settings`]), so a location edited on the config page wins
+    /// (see [`Self::shared_settings`]), so an address edited on the config page wins
     /// over the config-file seed.
     pub fn initial_household(&self) -> Household {
         Household {
-            location: self.home_location.clone(),
+            address: self.home_address.clone(),
+            location: None,
             weather_units: self.weather_units.clone(),
             members: Vec::new(),
         }
@@ -1816,309 +1989,176 @@ impl Config {
         self.cadora.clone()
     }
 
+    /// Initial AppSaid phone-push config seeded from the config file's `appsaid` block
+    /// (worker URL + recipients + default recipient). The secret app token is not here —
+    /// see [`Self::initial_appsaid_app_token`]. A persisted file overlays these at boot
+    /// (see [`Self::shared_settings`]).
+    pub fn initial_appsaid(&self) -> AppSaidConfig {
+        self.appsaid.clone()
+    }
+
+    /// Initial AppSaid sender app token — a secret, seeded from `APPSAID_APP_TOKEN`.
+    /// Runtime-settable from the config page; persisted to the settings file (0600).
+    pub fn initial_appsaid_app_token(&self) -> Option<String> {
+        env::var("APPSAID_APP_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Build the shared, runtime-swappable settings (Phase 6): the initial backend
     /// selected by config plus the factory that rebuilds backends when the device
     /// changes them. The initial backend must build successfully (anthropic still
-    /// needs its key at startup, matching [`Self::build_llm`]).
+    /// needs its key at startup).
+    ///
+    /// Resolution order per value: built-in default → config file / env secret (the
+    /// **boot seed**) → the persisted settings file (page/device changes from a previous
+    /// run win across restarts; see [`RuntimeSettings::overlay_persisted`]). The seed is
+    /// also handed to [`SharedSettings`] so a seeded secret cleared on the page is
+    /// persisted as cleared rather than reverting to the env value at the next boot.
     pub fn shared_settings(&self) -> Result<Arc<SharedSettings>> {
         let factory = self.llm_factory();
         let persist_path = self.settings_path.clone();
 
-        // Environment/config defaults, then overlay a persisted file when present
-        // (page/device changes from a previous run win across restarts).
-        let (backend_default, model_default) = match &self.llm {
+        // ---- the boot seed: config file + env secrets ----
+        let (backend, model) = match &self.llm {
             LlmChoice::Mock => ("mock".to_string(), None),
             LlmChoice::Ollama { model, .. } => ("ollama".to_string(), Some(model.clone())),
             LlmChoice::Anthropic { model, .. } => ("anthropic".to_string(), Some(model.clone())),
             LlmChoice::OpenAI { model, .. } => ("openai".to_string(), Some(model.clone())),
         };
-        let mut engine = self.initial_engine();
-        let mut web_search = self.initial_web_search();
-        let mut search_provider = self.initial_search_provider();
-        let mut search_api_key = self.initial_search_api_key();
-        let mut backend = backend_default;
-        let mut model = model_default;
-        // Live provider keys start from the environment (the factory's boot seed) and
-        // become runtime-settable; a persisted key overlays them so a key entered on
-        // the config page enables the cloud backend without a restart.
-        let mut anthropic_api_key = factory.anthropic_api_key.clone();
-        let mut openai_api_key = factory.openai_api_key.clone();
-        // Subscription OAuth token + Mapbox token: env seed (secrets), overlaid by any
-        // persisted values below (a value entered on the config page wins).
-        let mut anthropic_oauth_token = self.initial_anthropic_oauth_token();
-        let mut mapbox_token = self.initial_mapbox_token();
-        // Weather provider label (config-file seed) + Visual Crossing key (env secret),
-        // each overlaid by any persisted value below (a config-page change wins).
-        let mut weather_provider = self.weather.provider.clone();
-        let mut visualcrossing_key = self.initial_visualcrossing_key();
-        // Google Places API key (env secret), overlaid by any persisted value below.
-        let mut google_places_key = self.initial_google_places_key();
-        let mut anthropic_auth = self.anthropic_auth;
-        let mut tts_voice = self.tts_voice.clone();
+        // AppSaid: worker URL + recipients + default seed from the config file; the
+        // secret app token seeds from `APPSAID_APP_TOKEN` (env), like the Mapbox token.
+        let mut appsaid = self.initial_appsaid();
+        appsaid.app_token = self.initial_appsaid_app_token();
+        // Whether the in-process whisper engine can be selected live: the feature must be
+        // compiled in and the ggml model present on disk (it is loaded at boot regardless
+        // of the seeded engine, mirroring Silero). Reported to the config page so it can
+        // disable the `whisper-rs` option when unavailable.
+        let whisper_available =
+            cfg!(feature = "stt-whisper-local") && self.stt.resolved_model_path().exists();
+        let mut s = RuntimeSettings {
+            // Placeholder until the resolved settings are built below.
+            llm: Arc::new(crate::llm::mock::MockLlm::default()),
+            engine: self.initial_engine(),
+            web_search: self.initial_web_search(),
+            search_provider: self.initial_search_provider(),
+            search_api_key: self.initial_search_api_key(),
+            llm_backend: backend,
+            llm_model: model,
+            // Live provider keys start from the environment (the factory's boot seed).
+            anthropic_api_key: factory.anthropic_api_key.clone(),
+            openai_api_key: factory.openai_api_key.clone(),
+            anthropic_oauth_token: self.initial_anthropic_oauth_token(),
+            mapbox_token: self.initial_mapbox_token(),
+            anthropic_auth: self.anthropic_auth,
+            tts_voice: self.tts_voice.clone(),
+            end_silence_ms: crate::settings::DEFAULT_END_SILENCE_MS,
+            voice_rms_threshold: crate::settings::DEFAULT_VOICE_RMS_THRESHOLD,
+            silero_threshold: self.vad.silero.threshold,
+            vad_engine: self.vad.engine,
+            stt: crate::settings::SttRuntime {
+                engine: self.stt.engine,
+                elevenlabs_model_id: self.stt.elevenlabs.model_id.clone(),
+                elevenlabs_base_url: self.stt.elevenlabs.base_url.clone(),
+                elevenlabs_api_key: env::var("ELEVENLABS_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                language: self.stt.language.clone(),
+                whisper_available,
+            },
+            drive: self.initial_drive(),
+            household: self.initial_household(),
+            spotify: self.initial_spotify(),
+            cadora: self.initial_cadora(),
+            appsaid,
+            weather_provider: self.weather.provider.clone(),
+            visualcrossing_key: self.initial_visualcrossing_key(),
+            google_places_key: self.initial_google_places_key(),
+            system1: crate::settings::System1Runtime {
+                engine: crate::system1::none(),
+                backend: self.system1.backend.clone(),
+                base_url: self.system1.base_url.clone(),
+                model: self.system1.openrouter_model.clone(),
+                min_confidence: self.system1.min_confidence,
+                intents: self.system1.intents.clone(),
+                openrouter_api_key: env::var("OPENROUTER_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+            },
+            // Output personality + the pronunciation table are pure runtime/GUI state
+            // with no config-file seed.
+            personality: Personality::default(),
+            pronunciations: Vec::new(),
+        };
+        let seed = PersistedSettings::from_runtime(&s, None);
 
-        let mut end_silence_ms = crate::settings::DEFAULT_END_SILENCE_MS;
-        let mut voice_rms_threshold = crate::settings::DEFAULT_VOICE_RMS_THRESHOLD;
-        // Silero neural-VAD threshold: config-file seed (`vad.silero.threshold`),
-        // overlaid by any persisted value below (config page / device win).
-        let mut silero_threshold = self.vad.silero.threshold;
-        // VAD engine selection: config-file seed (`vad.engine`), overlaid by persisted.
-        let mut vad_engine = self.vad.engine;
-        // Google Drive photo config: config-file seed (client creds/folders), overlaid
-        // by any persisted values below (the refresh token + page-set fields win).
-        let mut drive = self.initial_drive();
-        // Household + home info: config-file seed (location/units from home_location /
-        // weather_units), overlaid by any persisted values below so a location fixed on
-        // the config page — and the dashboard-only member roster — win.
-        let mut household = self.initial_household();
-        // Spotify voice-control config: same seed-then-persist-overlay pattern.
-        let mut spotify = self.initial_spotify();
-        // Cadora shopping-list config: same seed-then-persist-overlay pattern.
-        let mut cadora = self.initial_cadora();
-        // System-1 fast-decision selection: config-file seed, overlaid by persisted
-        // values below. The OpenRouter key is an env secret seed (like the other keys).
-        let mut system1_backend = self.system1.backend.clone();
-        let mut system1_base_url = self.system1.base_url.clone();
-        let mut system1_model = self.system1.openrouter_model.clone();
-        let mut system1_min_confidence = self.system1.min_confidence;
-        let mut system1_intents = self.system1.intents.clone();
-        let mut openrouter_api_key = env::var("OPENROUTER_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
-
+        // ---- overlay the persisted file (a previous run's page/device changes) ----
         if let Some(p) = persist_path.as_deref().and_then(load_persisted) {
             log::info!("loaded persisted settings");
-            engine = LlmEngine::from_label(&p.engine);
-            web_search = p.web_search;
-            search_provider = p.search_provider;
-            search_api_key = p.search_api_key;
-            backend = p.llm_backend;
-            model = p.llm_model;
-            // Only override the env key when the persisted file actually carries one,
-            // so a settings file without a key (serde default `None`) can't wipe a
-            // working `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the environment.
-            if p.anthropic_api_key.is_some() {
-                anthropic_api_key = p.anthropic_api_key;
-            }
-            if p.openai_api_key.is_some() {
-                openai_api_key = p.openai_api_key;
-            }
-            // Same guard for the OAuth / Mapbox tokens: only override the env seed when
-            // the persisted file actually carries one, so an older file (field absent →
-            // serde default `None`) can't wipe a working env token.
-            if p.anthropic_oauth_token.is_some() {
-                anthropic_oauth_token = p.anthropic_oauth_token;
-            }
-            if p.mapbox_token.is_some() {
-                mapbox_token = p.mapbox_token;
-            }
-            // Same guard for the weather provider/key: only override the seed when the
-            // persisted file actually carries a value.
-            if let Some(prov) = p.weather_provider.filter(|s| !s.trim().is_empty()) {
-                weather_provider = prov;
-            }
-            if p.visualcrossing_key.is_some() {
-                visualcrossing_key = p.visualcrossing_key.filter(|s| !s.is_empty());
-            }
-            if p.google_places_key.is_some() {
-                google_places_key = p.google_places_key.filter(|s| !s.is_empty());
-            }
-            anthropic_auth = AnthropicAuth::from_label(&p.anthropic_auth);
-            tts_voice = p.tts_voice;
-            end_silence_ms = p.end_silence_ms;
-            voice_rms_threshold = p.voice_rms_threshold;
-            // Only override the seed when the persisted file carries a value (older
-            // files leave it absent → keep the config-file seed).
-            if let Some(t) = p.silero_threshold {
-                silero_threshold = t;
-            }
-            if let Some(label) = p.vad_engine.as_deref() {
-                if let Some(e) = VadEngineKind::from_label(label) {
-                    vad_engine = e;
-                }
-            }
-            // Overlay persisted Drive fields onto the config-file seed: a persisted
-            // value wins (refresh token, page-set creds/folders), but keep the seed for
-            // any field the persisted file leaves empty so setting a client id in
-            // anamanti.json still takes effect after an older file is loaded.
-            if p.drive.client_id.is_some() {
-                drive.client_id = p.drive.client_id;
-            }
-            if p.drive.client_secret.is_some() {
-                drive.client_secret = p.drive.client_secret;
-            }
-            if p.drive.refresh_token.is_some() {
-                drive.refresh_token = p.drive.refresh_token;
-            }
-            if !p.drive.folder_ids.is_empty() {
-                drive.folder_ids = p.drive.folder_ids;
-            }
-            if p.drive.scope.is_some() {
-                drive.scope = p.drive.scope;
-            }
-            // Overlay persisted household onto the config-file seed: a persisted
-            // location / units wins (fixed on the config page), but keep the seed for
-            // any field the persisted file leaves empty so home_location still applies
-            // after an older file (no household) is loaded. The member roster is
-            // dashboard-only, so a persisted list always replaces the empty seed.
-            if p.household.location.is_some() {
-                household.location = p.household.location;
-            }
-            if p.household.weather_units.is_some() {
-                household.weather_units = p.household.weather_units;
-            }
-            if !p.household.members.is_empty() {
-                household.members = p.household.members;
-            }
-            // Overlay persisted Spotify fields onto the config-file seed (same rule as
-            // Drive: a persisted value wins; keep the seed for anything left empty).
-            if p.spotify.client_id.is_some() {
-                spotify.client_id = p.spotify.client_id;
-            }
-            if p.spotify.client_secret.is_some() {
-                spotify.client_secret = p.spotify.client_secret;
-            }
-            if p.spotify.refresh_token.is_some() {
-                spotify.refresh_token = p.spotify.refresh_token;
-            }
-            if p.spotify.device_name.is_some() {
-                spotify.device_name = p.spotify.device_name;
-            }
-            if p.spotify.scope.is_some() {
-                spotify.scope = p.spotify.scope;
-            }
-            // Overlay persisted Cadora fields onto the config-file seed (same rule).
-            if p.cadora.base_url.is_some() {
-                cadora.base_url = p.cadora.base_url;
-            }
-            if p.cadora.link_token.is_some() {
-                cadora.link_token = p.cadora.link_token;
-            }
-            // Overlay persisted System-1 selection onto the config-file seed. Only when
-            // the persisted backend is non-empty (a real save), so an older settings
-            // file — which lacks these fields (serde default "") — can't disable a
-            // `system1.backend` set in anamanti.json.
-            if !p.system1_backend.is_empty() {
-                system1_backend = p.system1_backend;
-                system1_base_url = p.system1_base_url;
-                system1_model = p.system1_model;
-                system1_min_confidence = p.system1_min_confidence;
-                system1_intents = p.system1_intents;
-            }
-            if p.openrouter_api_key.is_some() {
-                openrouter_api_key = p.openrouter_api_key;
-            }
+            s.overlay_persisted(p);
         }
 
-        // Seed the directions tool's live default origin from the resolved household
-        // location (config → household → this shared handle). The factory clone below
-        // shares the same cell, so the initial backend's tool — and every later
-        // rebuild — reads it; `apply_household` updates it on a config-page edit.
-        factory.home_location.set(household.location.clone());
+        // Sanitize the resolved household once: trims fields and **migrates** any legacy
+        // single-line `location` (from an older config/persisted file) into `address.city`
+        // so downstream only ever sees the discrete `address`.
+        s.household = s.household.sanitized();
+        // Unify AppSaid recipients onto the household (the single source of truth): fold
+        // any legacy `appsaid.recipients` seed (config file / older persisted settings)
+        // into the roster — upsert a member by name, which auto-adds them if absent — then
+        // DERIVE the messenger roster from the household's members' `appsaid` addresses.
+        // A member that already carries an AppSaid address (persisted household) wins over
+        // the legacy seed, so re-runs are idempotent and never clobber a page/pairing edit.
+        for (name, key) in std::mem::take(&mut s.appsaid.recipients) {
+            let already_set = s
+                .household
+                .member_matching(&name)
+                .and_then(|m| m.appsaid.as_deref())
+                .is_some_and(|v| !v.trim().is_empty());
+            if !already_set {
+                s.household.set_member_appsaid(&name, &key);
+            }
+        }
+        s.appsaid.recipients = s.household.appsaid_roster();
+        // Seed the location-aware tools' live home address from the resolved household.
+        // Every rebuilt backend's tools share this cell; `apply_household` updates it.
+        factory.home_location.set(s.household.address.clone());
         // Seed the shared token provider's override from the resolved subscription
-        // token (env overlaid by persisted). The Arc is shared with every rebuilt
-        // backend, so a token entered on the config page later takes effect in place.
+        // token. The Arc is shared with every rebuilt backend, so a token entered on the
+        // config page later takes effect in place.
         if let Some(provider) = &factory.anthropic_token {
-            provider.set_override(anthropic_oauth_token.clone());
+            provider.set_override(s.anthropic_oauth_token.clone());
         }
 
-        // Build the initial backend with the resolved live keys (env overlaid by any
-        // persisted key), never re-reading the environment during a later swap.
-        let mut build_factory = factory.clone();
-        build_factory.anthropic_api_key = anthropic_api_key.clone();
-        build_factory.openai_api_key = openai_api_key.clone();
-        // Seed the initial Spotify controller so the `spotify_control` tool is
-        // advertised at boot when the account is already linked (env or persisted).
-        build_factory.spotify = spotify.controller();
-        // Seed the initial Cadora controller so the `shopping_list_add` tool is
-        // advertised at boot when the shopping list is already linked.
-        build_factory.cadora = cadora.controller();
-        // Seed the initial directions provider from the resolved Mapbox token so the
-        // `directions_lookup` tool is advertised at boot when a token is present.
-        build_factory.directions = crate::directions::from_token(
-            &build_factory.directions_provider,
-            mapbox_token.as_deref(),
-            build_factory.directions_imperial,
-        );
-        // Seed the initial weather provider from the resolved provider label + Visual
-        // Crossing key (env overlaid by persisted) so `weather_lookup` is advertised at
-        // boot with the right backend.
-        build_factory.weather = crate::weather::from_config(
-            build_factory.weather_enabled,
-            &weather_provider,
-            visualcrossing_key.as_deref(),
-        );
-        // Seed the initial places provider from the resolved Google Places key (env
-        // overlaid by persisted) so `places_lookup` is advertised at boot with a key set.
-        build_factory.places = if self.places.enabled {
-            crate::places::from_key(&self.places.provider, google_places_key.as_deref())
-        } else {
-            None
-        };
-        let (llm, llm_backend, llm_model) = build_factory
-            .build(
-                engine,
-                web_search,
-                &search_provider,
-                search_api_key.as_deref(),
-                &backend,
-                model.as_deref(),
-                anthropic_auth,
-            )
+        // Build the initial backend + its full tool set from the resolved settings via
+        // the same settings → factory mapping every runtime `apply_*` uses.
+        let (llm, llm_backend, llm_model) = factory
+            .build_for(&s)
             .context("building the initial LLM backend")?;
+        s.llm = llm;
+        s.llm_backend = llm_backend;
+        s.llm_model = llm_model;
         // Build the initial System-1 engine from the resolved (seed → persisted) config.
-        if system1_backend.eq_ignore_ascii_case("jev") && openrouter_api_key.is_none() {
+        if s.system1.backend.eq_ignore_ascii_case("jev") && s.system1.openrouter_api_key.is_none() {
             log::warn!(
                 "system1.backend=jev but OPENROUTER_API_KEY is unset; Jev requests will be \
                  rejected until it is provided (env or config page)."
             );
         }
-        let system1 = crate::system1::build(
-            &system1_backend,
-            &system1_base_url,
-            &system1_model,
-            openrouter_api_key.clone(),
-            system1_min_confidence,
-            system1_intents.clone(),
+        s.system1.engine = crate::system1::build(
+            &s.system1.backend,
+            &s.system1.base_url,
+            &s.system1.model,
+            s.system1.openrouter_api_key.clone(),
+            s.system1.min_confidence,
+            s.system1.intents.clone(),
         )
         .context("building the initial System-1 engine")?;
-        Ok(SharedSettings::new_persistent(
+        Ok(SharedSettings::new_seeded(
             factory,
-            RuntimeSettings {
-                llm,
-                engine,
-                web_search,
-                search_provider,
-                search_api_key,
-                llm_backend,
-                llm_model,
-                anthropic_api_key,
-                openai_api_key,
-                anthropic_oauth_token,
-                mapbox_token,
-                anthropic_auth,
-                tts_voice,
-                end_silence_ms,
-                voice_rms_threshold,
-                silero_threshold,
-                vad_engine,
-                drive,
-                household,
-                spotify,
-                cadora,
-                weather_provider,
-                visualcrossing_key,
-                google_places_key,
-                system1: crate::settings::System1Runtime {
-                    engine: system1,
-                    backend: system1_backend,
-                    base_url: system1_base_url,
-                    model: system1_model,
-                    min_confidence: system1_min_confidence,
-                    intents: system1_intents,
-                    openrouter_api_key,
-                },
-            },
+            s,
             persist_path,
+            Some(seed),
         ))
     }
 
@@ -2141,7 +2181,8 @@ impl Config {
             self.speaker.match_threshold,
             self.speaker.new_threshold,
             self.speaker.min_speech_ms,
-        );
+        )
+        .with_short_clip(self.speaker.min_identify_ms, self.speaker.short_clip_margin);
         let embedder: Arc<dyn SpeakerEmbedder> = match &self.speaker.model_path {
             Some(path) => {
                 use crate::speaker::embed::OnnxSpeakerEmbedder;
@@ -2173,8 +2214,30 @@ impl Config {
                 Arc::new(MockSpeakerEmbedder::default())
             }
         };
-        Ok(Some(Arc::new(SpeakerService::new(
-            embedder, registry, thresholds,
+        // Rolling raw-clip store (the People screen's "play" button): keep the newest
+        // few utterances per speaker next to the registry database so a human can
+        // listen to an anonymous cluster and name it. Clip capture is best-effort — a
+        // store that can't be opened just means there's nothing to play back.
+        let clips_root = self
+            .db_path
+            .parent()
+            .map(|dir| dir.join("anamanti_clips"))
+            .unwrap_or_else(|| std::path::PathBuf::from("anamanti_clips"));
+        let clips = match crate::speaker::ClipStore::open(&clips_root) {
+            Ok(store) => {
+                log::info!("voice-clip store: {}", clips_root.display());
+                Some(store)
+            }
+            Err(e) => {
+                log::warn!(
+                    "voice-clip store unavailable at {} ({e:#}); clips won't be saved",
+                    clips_root.display()
+                );
+                None
+            }
+        };
+        Ok(Some(Arc::new(SpeakerService::new_with_clips(
+            embedder, registry, thresholds, clips,
         ))))
     }
 
@@ -2208,6 +2271,18 @@ mod tests {
 
     fn parse(json: &str) -> FileConfig {
         serde_json::from_str(json).expect("valid FileConfig JSON")
+    }
+
+    #[test]
+    fn deprecated_system1_device_and_model_keys_still_load() {
+        // A deployed file may still carry the retired laya-embedded keys; with
+        // `deny_unknown_fields` they must keep parsing (and are ignored).
+        let c = Config::from_file(parse(
+            r#"{ "system1": { "backend": "jev", "device": "metal", "model": "x/y" } }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.system1.backend, "jev");
+        assert_eq!(c.system1.openrouter_model, "typesafe/jev-1.13");
     }
 
     #[test]
@@ -2347,6 +2422,23 @@ mod tests {
     }
 
     #[test]
+    fn calendar_cache_ttl_is_passed_through_raw() {
+        let ttl = |json: &str| Config::from_file(parse(json)).unwrap().calendar_cache_ttl;
+        // Absent ⇒ None, so tool_cache.calendar_lookup decides.
+        assert_eq!(ttl("{}"), None);
+        assert_eq!(ttl(r#"{ "calendar": {} }"#), None);
+        // Set ⇒ it wins, including a value equal to the 300 s default and 0 (no cache).
+        assert_eq!(
+            ttl(r#"{ "calendar": { "cache_ttl_secs": 300 } }"#),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            ttl(r#"{ "calendar": { "cache_ttl_secs": 0 } }"#),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
     fn full_file_overlays_every_layer() {
         let c = Config::from_file(parse(
             r#"{
@@ -2392,7 +2484,17 @@ mod tests {
         );
         assert_eq!(c.service_name, "Test Mac");
         assert_eq!(c.instance_id, "test-key");
-        assert_eq!(c.home_location.as_deref(), Some("Austin, Texas")); // trimmed
+        // Legacy single-line `home_location` folds into City (trimmed), so weather still
+        // resolves and the full address is the same string.
+        assert_eq!(c.home_address.city.as_deref(), Some("Austin, Texas"));
+        assert_eq!(
+            c.home_address.weather_location().as_deref(),
+            Some("Austin, Texas")
+        );
+        assert_eq!(
+            c.home_address.full_address().as_deref(),
+            Some("Austin, Texas")
+        );
         assert_eq!(c.weather_units.as_deref(), Some("imperial"));
         assert_eq!(c.turn_timeout, Duration::from_secs(45));
         assert_eq!(c.memory_backend, MemoryBackendChoice::Sqlite);
@@ -2425,7 +2527,7 @@ mod tests {
         assert_eq!(c.calendar_specs.len(), 2);
         assert_eq!(c.calendar_specs[0].name, "Calendar 1");
         assert_eq!(c.calendar_specs[1].name, "Work");
-        assert_eq!(c.calendar_cache_ttl, Duration::from_secs(600));
+        assert_eq!(c.calendar_cache_ttl, Some(Duration::from_secs(600)));
         // Drive: blank folder id dropped; refresh token never seeded.
         assert_eq!(c.drive.client_id.as_deref(), Some("cid"));
         assert_eq!(c.drive.folder_ids, vec!["f1", "f2"]);
@@ -2537,5 +2639,172 @@ mod tests {
         let c = Config::load(Some(&path)).unwrap();
         assert_eq!(c.service_name, "Loaded Mac");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A settings file of exactly the shape a deployed Core has on disk (every key the
+    /// production `anamanti_settings.json` carries, with the same JSON types).
+    fn live_shape_settings_json() -> serde_json::Value {
+        serde_json::json!({
+            "engine": "rig",
+            "web_search": true,
+            "search_provider": "tavily",
+            "search_api_key": "tvly-live",
+            "llm_backend": "anthropic",
+            "llm_model": "claude-opus-5",
+            "anthropic_api_key": "sk-ant-live",
+            "openai_api_key": "sk-openai-live",
+            "anthropic_oauth_token": "oauth-live",
+            "mapbox_token": "pk.live",
+            "anthropic_auth": "apikey",
+            "tts_voice": null,
+            "end_silence_ms": 650,
+            "voice_rms_threshold": 210.5,
+            "silero_threshold": 0.5,
+            "vad_engine": "silero",
+            "stt_engine": "wyoming",
+            "stt_elevenlabs_model_id": "scribe_v2_realtime",
+            "stt_elevenlabs_base_url": "wss://api.elevenlabs.io",
+            "stt_elevenlabs_api_key": "xi-live",
+            "drive": {
+                "client_id": "cid.apps.googleusercontent.com",
+                "client_secret": "gocspx-live",
+                "refresh_token": "1//refresh-live",
+                "folder_ids": ["1AbC", "1XyZ"],
+                "scope": "https://www.googleapis.com/auth/drive.readonly"
+            },
+            "household": {
+                "address": {
+                    "address1": "123 Main St",
+                    "address2": null,
+                    "city": "Austin",
+                    "state": "TX",
+                    "postal": "78701",
+                    "country": "USA"
+                },
+                "location": null,
+                "weather_units": "imperial",
+                "members": [{
+                    "name": "Mom",
+                    "emails": ["mom@example.com"],
+                    "phones": ["+1 555 0100"],
+                    "appsaid": "key_mom",
+                    "relationship": "parent"
+                }]
+            },
+            "spotify": {
+                "client_id": "sp-cid",
+                "client_secret": "sp-secret",
+                "refresh_token": "sp-refresh",
+                "device_name": "Kitchen",
+                "redirect_url": null,
+                "scope": "user-modify-playback-state"
+            },
+            "cadora": { "base_url": null, "link_token": "vl_live" },
+            "appsaid": {
+                "worker_url": "https://appsaid.example.workers.dev",
+                "app_token": "appsaid-live",
+                "recipients": { "Mom": "key_mom" },
+                "default_recipient": "Mom"
+            },
+            "weather_provider": "visualcrossing",
+            "visualcrossing_key": "vc-live",
+            "google_places_key": "gp-live",
+            "system1_backend": "none",
+            "system1_base_url": "http://127.0.0.1:8000",
+            "system1_model": "typesafe/jev-1.13",
+            "system1_min_confidence": 0.85,
+            "system1_intents": [],
+            "openrouter_api_key": "or-live",
+            "personality": {
+                "enabled": true,
+                "active": "gangster",
+                "definitions": [
+                    { "key": "gangster", "label": "1940s Gangster", "description": "Talk tough." }
+                ]
+            },
+            "pronunciations": [
+                { "canonical": "Zehrs", "variants": ["zairs", "zay rz"] }
+            ]
+        })
+    }
+
+    fn settings_test_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("anamanti-cfg-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Boot a Core whose `settings_path` points at `path` (built-in config defaults).
+    fn boot_with_settings(path: &Path) -> Arc<SharedSettings> {
+        let fc = parse(&format!(
+            r#"{{ "settings_path": {} }}"#,
+            serde_json::to_string(&path.display().to_string()).unwrap()
+        ));
+        Config::from_file(fc)
+            .unwrap()
+            .shared_settings()
+            .expect("boot from the persisted settings")
+    }
+
+    #[test]
+    fn live_shape_settings_file_loads_and_round_trips_without_loss() {
+        let dir = settings_test_dir("live-shape");
+        let path = dir.join("anamanti_settings.json");
+        let original = live_shape_settings_json();
+        std::fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let s = boot_with_settings(&path);
+        // Spot-check the loaded values (secrets via the snapshot, never a view).
+        let snap = s.snapshot();
+        assert_eq!(snap.llm_backend, "anthropic");
+        assert_eq!(snap.llm_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(snap.anthropic_api_key.as_deref(), Some("sk-ant-live"));
+        assert_eq!(snap.search_api_key.as_deref(), Some("tvly-live"));
+        assert_eq!(snap.google_places_key.as_deref(), Some("gp-live"));
+        assert_eq!(snap.appsaid.app_token.as_deref(), Some("appsaid-live"));
+        assert_eq!(snap.cadora.link_token.as_deref(), Some("vl_live"));
+        assert_eq!(
+            snap.household.members[0].appsaid.as_deref(),
+            Some("key_mom")
+        );
+        assert!(snap.personality.enabled);
+
+        // Any save rewrites the file; every key must come back with the same value.
+        s.apply_personality(&s.personality());
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(
+                written.get(key),
+                Some(value),
+                "key `{key}` changed on rewrite"
+            );
+        }
+        // And the rewritten file boots to the same state.
+        let again = boot_with_settings(&path).snapshot();
+        assert_eq!(again.anthropic_api_key, snap.anthropic_api_key);
+        assert_eq!(again.household, snap.household);
+        assert_eq!(again.spotify, snap.spotify);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spotify_redirect_url_survives_a_restart() {
+        let dir = settings_test_dir("redirect");
+        let path = dir.join("anamanti_settings.json");
+        let mut v = live_shape_settings_json();
+        v["spotify"]["redirect_url"] = serde_json::json!("http://127.0.0.1:9999/callback");
+        std::fs::write(&path, v.to_string()).unwrap();
+        let s = boot_with_settings(&path);
+        assert_eq!(
+            s.spotify().redirect_url_or_default(),
+            "http://127.0.0.1:9999/callback"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

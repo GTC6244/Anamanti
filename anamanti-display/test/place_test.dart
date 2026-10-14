@@ -73,8 +73,7 @@ WakeWordEvent _ev(
   weatherJson: weatherJson,
   placeJson: placeJson,
   recipeAction: '',
-  musicScreen: '',
-);
+  enrollJson: '',);
 
 void main() {
   group('PlaceData.tryParse', () {

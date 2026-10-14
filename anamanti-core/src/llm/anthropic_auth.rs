@@ -22,6 +22,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+/// The `anthropic-version` header value pinned per the claude-api skill. The one
+/// definition every Anthropic call site (chat backend, model catalog, entity
+/// extraction) sends.
+pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+
 /// The `anthropic-beta` value required for OAuth (subscription) tokens.
 pub const OAUTH_BETA: &str = "oauth-2025-04-20";
 

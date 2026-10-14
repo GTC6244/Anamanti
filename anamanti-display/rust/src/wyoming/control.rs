@@ -19,8 +19,8 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 use crate::api::settings::{
-    DriveToken, MemoryEntry, ModelInfo, OrchestratorSettings, SettingsUpdate, SpeakerInfo,
-    VoiceInfo,
+    DriveToken, EntityInfo, EntityRef, FunctionStatus, MemoryEntry, ModelInfo,
+    OrchestratorSettings, SettingsUpdate, SpeakerClipInfo, SpeakerInfo, TurnInfo, VoiceInfo,
 };
 
 use super::discovery::{resolve, EndpointCache, WyomingEndpoint};
@@ -181,6 +181,26 @@ fn parse_drive_token(ev: &WyomingEvent) -> DriveToken {
     }
 }
 
+fn parse_function(v: &Value) -> FunctionStatus {
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let b = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    FunctionStatus {
+        category: s("category"),
+        name: s("name"),
+        mode: s("mode"),
+        provider: s("provider"),
+        model: s("model"),
+        key_required: b("key_required"),
+        key_set: b("key_set"),
+        note: s("note"),
+    }
+}
+
 fn parse_entry(v: &Value) -> MemoryEntry {
     let s = |k: &str| {
         v.get(k)
@@ -194,6 +214,61 @@ fn parse_entry(v: &Value) -> MemoryEntry {
         content: s("content"),
         source: s("source"),
         created_at: v.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+    }
+}
+
+fn parse_turn(v: &Value) -> TurnInfo {
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let entities = v
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|e| EntityRef {
+                    name: e
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    kind: e
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    TurnInfo {
+        id: v.get("id").and_then(Value::as_i64).unwrap_or(0),
+        ext_id: s("ext_id"),
+        session: s("session"),
+        ts: v.get("ts").and_then(Value::as_i64).unwrap_or(0),
+        transcript: s("transcript"),
+        reply: s("reply"),
+        speaker_id: s("speaker_id"),
+        entities,
+    }
+}
+
+fn parse_entity(v: &Value) -> EntityInfo {
+    EntityInfo {
+        id: v.get("id").and_then(Value::as_i64).unwrap_or(0),
+        name: v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        kind: v
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -328,6 +403,34 @@ pub async fn get_drive_token(
     Ok(parse_drive_token(&resp))
 }
 
+/// Fetch the Core's read-only "functions" snapshot (one row per configured
+/// capability: cloud/local, model, and whether a required key is set). Used by the
+/// device Settings screen. An `ok: false` body surfaces as an error.
+pub async fn get_functions(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<FunctionStatus>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::GET_FUNCTIONS)).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("fetching the functions snapshot failed")
+        ));
+    }
+    let functions = resp
+        .data
+        .get("functions")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_function).collect())
+        .unwrap_or_default();
+    Ok(functions)
+}
+
 /// List every persistent memory entry.
 pub async fn list_memories(
     cache: &EndpointCache,
@@ -389,6 +492,113 @@ pub async fn clear_memories(
         .max(0) as u32)
 }
 
+/// Browse stored conversation turns from the GraphRAG graph, newest first. Empty
+/// filter strings are omitted from the request (treated as "no filter"). An
+/// `ok: false` body (older Core, or SQLite recall backend) surfaces as an error.
+pub async fn list_turns(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    query: &str,
+    speaker_id: &str,
+    entity: &str,
+    limit: u32,
+) -> Result<Vec<TurnInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let mut data = Map::new();
+    if !query.trim().is_empty() {
+        data.insert("query".into(), json!(query.trim()));
+    }
+    if !speaker_id.trim().is_empty() {
+        data.insert("speaker_id".into(), json!(speaker_id.trim()));
+    }
+    if !entity.trim().is_empty() {
+        data.insert("entity".into(), json!(entity.trim()));
+    }
+    if limit > 0 {
+        data.insert("limit".into(), json!(limit));
+    }
+    let request = WyomingEvent::with_data(types::LIST_TURNS, Value::Object(data));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing turns failed")
+        ));
+    }
+    Ok(resp
+        .data
+        .get("turns")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_turn).collect())
+        .unwrap_or_default())
+}
+
+/// Browse stored entities / "keywords" from the GraphRAG graph. An `ok: false` body
+/// (older Core, or SQLite recall backend) surfaces as an error.
+pub async fn list_entities(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<EntityInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let mut data = Map::new();
+    if !query.trim().is_empty() {
+        data.insert("query".into(), json!(query.trim()));
+    }
+    if limit > 0 {
+        data.insert("limit".into(), json!(limit));
+    }
+    let request = WyomingEvent::with_data(types::LIST_ENTITIES, Value::Object(data));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing entities failed")
+        ));
+    }
+    Ok(resp
+        .data
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_entity).collect())
+        .unwrap_or_default())
+}
+
+/// Drop one graph node by id (a turn or entity). Surfaces an in-band `message` as an
+/// error when the Core rejected the delete.
+pub async fn delete_graph_node(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: i64,
+) -> Result<bool> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request = WyomingEvent::with_data(types::DELETE_GRAPH_NODE, json!({ "id": id }));
+    let resp = round_trip(&endpoint, request).await?;
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !ok {
+        if let Some(msg) = resp.data.get("message").and_then(Value::as_str) {
+            if !msg.is_empty() {
+                return Err(anyhow!("{msg}"));
+            }
+        }
+    }
+    Ok(ok)
+}
+
 fn parse_speaker(v: &Value) -> SpeakerInfo {
     SpeakerInfo {
         id: v
@@ -446,6 +656,32 @@ pub async fn list_speakers(
         .unwrap_or_default())
 }
 
+/// The household roster's member names (Core → Household), for the enrollment
+/// flow's "existing person" picker. Rides the `list-speakers` round trip — the Core
+/// attaches `members` (names only) to that response — and is read even when speaker
+/// ID is off. An older Core that sends no `members` yields an empty list.
+pub async fn list_household_members(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+) -> Result<Vec<String>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::new(types::LIST_SPEAKERS)).await?;
+    Ok(resp
+        .data
+        .get("members")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Name (or rename) a speaker; returns whether it was applied.
 pub async fn name_speaker(
     cache: &EndpointCache,
@@ -458,6 +694,50 @@ pub async fn name_speaker(
     let request = WyomingEvent::with_data(types::NAME_SPEAKER, json!({ "id": id, "name": name }));
     let resp = round_trip(&endpoint, request).await?;
     speaker_ok(&resp)
+}
+
+/// Link a family member's phone to AppSaid by redeeming the short pairing `code` shown
+/// in their AppSaid app and storing it on the Core as a phone-message recipient under
+/// `name`. Returns the Core's speakable confirmation on success; a rejected/expired
+/// code (or an unreachable Core) is an `Err` carrying the reason to show the user.
+pub async fn pair_phone(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    name: &str,
+    code: &str,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request = WyomingEvent::with_data(types::PAIR_PHONE, json!({ "name": name, "code": code }));
+    let resp = round_trip(&endpoint, request).await?;
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let message = resp
+        .data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if ok {
+        Ok(if message.is_empty() {
+            "Linked.".to_string()
+        } else {
+            message
+        })
+    } else {
+        Err(anyhow!(
+            "{}",
+            if message.is_empty() {
+                "pairing failed — try a fresh code"
+            } else {
+                &message
+            }
+        ))
+    }
 }
 
 /// Merge the `drop` speaker into `keep`; returns whether it was applied.
@@ -475,10 +755,28 @@ pub async fn merge_speakers(
     speaker_ok(&resp)
 }
 
-/// Issue a music transport/volume command (play/pause/next/previous/volume) from the
-/// display's on-screen controls. Returns the orchestrator's short spoken confirmation;
-/// an in-band failure (Spotify not linked, device asleep, unknown action) surfaces as an
-/// error so the caller can log it. `value` is the 0–100 percent for `"volume"`.
+/// Link voice `id` to household member `member` on the Core: merged into that
+/// member's existing voiceprint if they have one, otherwise named as them. Returns
+/// the Core's confirmation message; an in-band rejection (not a household member,
+/// speaker ID off) is an error carrying its reason.
+pub async fn link_speaker(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: &str,
+    member: &str,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request =
+        WyomingEvent::with_data(types::LINK_SPEAKER, json!({ "id": id, "member": member }));
+    let resp = round_trip(&endpoint, request).await?;
+    ok_message(&resp, "linking failed")
+}
+
+/// Issue a music transport/volume command (`pause`/`resume`/`next`/`previous`/`volume`)
+/// from the display's on-screen controls. Returns the Core's short spoken confirmation;
+/// an in-band failure (Spotify not linked, device asleep, unknown action) is an `Err`
+/// carrying its reason. `value` is the 0–100 percent for `"volume"`.
 pub async fn music_control(
     cache: &EndpointCache,
     timeout: Duration,
@@ -488,29 +786,7 @@ pub async fn music_control(
 ) -> Result<String> {
     let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, WyomingEvent::music_control(action, value)).await?;
-    let ok = resp
-        .data
-        .get("ok")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let message = resp
-        .data
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if ok {
-        Ok(message)
-    } else {
-        Err(anyhow!(
-            "{}",
-            if message.is_empty() {
-                "music control failed".to_string()
-            } else {
-                message
-            }
-        ))
-    }
+    ok_message(&resp, "music control failed")
 }
 
 /// Delete a speaker profile; returns whether one was removed.
@@ -524,6 +800,138 @@ pub async fn delete_speaker(
     let request = WyomingEvent::with_data(types::DELETE_SPEAKER, json!({ "id": id }));
     let resp = round_trip(&endpoint, request).await?;
     speaker_ok(&resp)
+}
+
+fn parse_speaker_clip(v: &Value) -> SpeakerClipInfo {
+    SpeakerClipInfo {
+        name: v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        created_ms: v.get("created_ms").and_then(Value::as_i64).unwrap_or(0),
+        samples: v.get("samples").and_then(Value::as_i64).unwrap_or(0),
+        sample_rate: v
+            .get("sample_rate")
+            .and_then(Value::as_u64)
+            .unwrap_or(16_000) as u32,
+    }
+}
+
+/// List a speaker's stored voice clips (newest first), for the People screen's
+/// playback.
+pub async fn list_speaker_clips(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: &str,
+) -> Result<Vec<SpeakerClipInfo>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request = WyomingEvent::with_data(types::LIST_SPEAKER_CLIPS, json!({ "id": id }));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("listing voice clips failed")
+        ));
+    }
+    Ok(resp
+        .data
+        .get("clips")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(parse_speaker_clip).collect())
+        .unwrap_or_default())
+}
+
+/// Fetch one clip's raw little-endian `i16` mono PCM bytes (the `payload` of the
+/// `anamanti-speaker-clip` response). Errors if the Core reports failure or sends no
+/// audio.
+pub async fn fetch_speaker_clip(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    id: &str,
+    clip: &str,
+) -> Result<Vec<u8>> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request =
+        WyomingEvent::with_data(types::GET_SPEAKER_CLIP, json!({ "id": id, "clip": clip }));
+    let resp = round_trip(&endpoint, request).await?;
+    if !resp.data.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+        return Err(anyhow!(
+            "{}",
+            resp.data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("fetching the voice clip failed")
+        ));
+    }
+    resp.payload
+        .ok_or_else(|| anyhow!("the orchestrator returned no audio for this clip"))
+}
+
+/// The `message` from an `ENROLL_RESULT`, surfacing a rejected request's in-band
+/// message as an error (parallels [`speaker_ok`]).
+fn enroll_message(resp: &WyomingEvent) -> Result<String> {
+    ok_message(resp, "enrollment failed")
+}
+
+/// The `message` from an in-band `{ok, message}` response: `Ok(message)` when `ok`,
+/// else an `Err` carrying the message (or `fallback` when the Core sent none).
+fn ok_message(resp: &WyomingEvent, fallback: &str) -> Result<String> {
+    let ok = resp
+        .data
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let message = resp
+        .data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match (ok, message.is_empty()) {
+        (true, _) => Ok(message),
+        (false, true) => Err(anyhow!("{fallback}")),
+        (false, false) => Err(anyhow!("{message}")),
+    }
+}
+
+/// Commit the current guided-enrollment session into a named profile
+/// (SpeakerEnrollmentPlan.md Phase 2); returns the orchestrator's confirmation
+/// message, or an error carrying the in-band reason (e.g. too few samples).
+pub async fn enroll_finish(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    session: &str,
+    name: &str,
+    speaker_id: Option<&str>,
+) -> Result<String> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let mut data = json!({ "session": session, "name": name });
+    if let Some(id) = speaker_id {
+        data["speaker_id"] = json!(id);
+    }
+    let request = WyomingEvent::with_data(types::ENROLL_FINISH, data);
+    let resp = round_trip(&endpoint, request).await?;
+    enroll_message(&resp)
+}
+
+/// Discard an in-flight guided-enrollment session (the user backed out).
+pub async fn enroll_cancel(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    session: &str,
+) -> Result<()> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let request = WyomingEvent::with_data(types::ENROLL_CANCEL, json!({ "session": session }));
+    round_trip(&endpoint, request).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -603,6 +1011,173 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::GET_DRIVE_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn pair_phone_sends_name_and_code_and_returns_the_confirmation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::PAIR_RESULT,
+            json!({ "ok": true, "name": "Mom", "message": "Linked Mom's phone." }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let msg = pair_phone(&cache, Duration::from_millis(0), None, "Mom", "AB2K")
+            .await
+            .unwrap();
+        assert_eq!(msg, "Linked Mom's phone.");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::PAIR_PHONE);
+        assert_eq!(
+            request.data.get("name").and_then(Value::as_str),
+            Some("Mom")
+        );
+        assert_eq!(
+            request.data.get("code").and_then(Value::as_str),
+            Some("AB2K")
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_phone_turns_an_ok_false_into_an_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::PAIR_RESULT,
+            json!({ "ok": false, "message": "that pairing code is invalid, already used, or expired" }),
+        );
+        let _server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = pair_phone(&cache, Duration::from_millis(0), None, "Mom", "ZZZZ")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_turns_parses_turns_and_sends_filters() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::TURNS,
+            json!({
+                "ok": true,
+                "turns": [{
+                    "id": 7,
+                    "ext_id": "r1",
+                    "session": "sess",
+                    "ts": 123,
+                    "transcript": "where is the library?",
+                    "reply": "On Main Street.",
+                    "speaker_id": "household",
+                    "entities": [{ "name": "library", "kind": "place" }],
+                }],
+            }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let turns = list_turns(
+            &cache,
+            Duration::from_millis(0),
+            None,
+            "library",
+            "household",
+            "library",
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, 7);
+        assert_eq!(turns[0].transcript, "where is the library?");
+        assert_eq!(turns[0].reply, "On Main Street.");
+        assert_eq!(turns[0].entities.len(), 1);
+        assert_eq!(turns[0].entities[0].name, "library");
+        assert_eq!(turns[0].entities[0].kind, "place");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::LIST_TURNS);
+        assert_eq!(
+            request.data.get("query").and_then(Value::as_str),
+            Some("library")
+        );
+        assert_eq!(
+            request.data.get("speaker_id").and_then(Value::as_str),
+            Some("household")
+        );
+        assert_eq!(
+            request.data.get("entity").and_then(Value::as_str),
+            Some("library")
+        );
+        assert_eq!(request.data.get("limit").and_then(Value::as_u64), Some(50));
+    }
+
+    #[tokio::test]
+    async fn list_turns_surfaces_an_error_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::TURNS,
+            json!({ "ok": false, "message": "graph memory is unavailable", "turns": [] }),
+        );
+        let _server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let err = list_turns(&cache, Duration::from_millis(0), None, "", "", "", 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unavailable"));
+    }
+
+    #[tokio::test]
+    async fn list_entities_parses_entities() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::ENTITIES,
+            json!({
+                "ok": true,
+                "entities": [
+                    { "id": 1, "name": "jazz", "kind": "topic" },
+                    { "id": 2, "name": "Portland", "kind": "place" },
+                ],
+            }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let entities = list_entities(&cache, Duration::from_millis(0), None, "", 0)
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[0].name, "jazz");
+        assert_eq!(entities[1].kind, "place");
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::LIST_ENTITIES);
+    }
+
+    #[tokio::test]
+    async fn delete_graph_node_sends_id_and_reads_ok() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(types::GRAPH_RESULT, json!({ "ok": true }));
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let ok = delete_graph_node(&cache, Duration::from_millis(0), None, 42)
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::DELETE_GRAPH_NODE);
+        assert_eq!(request.data.get("id").and_then(Value::as_i64), Some(42));
     }
 
     #[tokio::test]
@@ -918,6 +1493,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_household_members_reads_roster_names() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Speaker ID off on the Core still lists the roster.
+        let response = WyomingEvent::with_data(
+            types::SPEAKERS,
+            json!({ "ok": false, "message": "disabled", "speakers": [],
+                    "members": ["Dana", "  ", "Sam"] }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let members = list_household_members(&cache, Duration::from_millis(0), None)
+            .await
+            .unwrap();
+        assert_eq!(members, vec!["Dana".to_string(), "Sam".to_string()]);
+        assert_eq!(server.await.unwrap().event_type, types::LIST_SPEAKERS);
+    }
+
+    #[tokio::test]
+    async fn enroll_finish_targets_a_speaker_id_when_given() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::ENROLL_RESULT,
+            json!({ "ok": true, "phase": "finish", "message": "added 3 samples to Sam's voiceprint" }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let msg = enroll_finish(
+            &cache,
+            Duration::from_millis(0),
+            None,
+            "s",
+            "Sam",
+            Some("spk-1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(msg, "added 3 samples to Sam's voiceprint");
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::ENROLL_FINISH);
+        assert_eq!(request.data["speaker_id"], json!("spk-1"));
+        assert_eq!(request.data["session"], json!("s"));
+    }
+
+    #[tokio::test]
+    async fn link_speaker_sends_id_and_member_and_surfaces_rejection() {
+        for (resp, want_ok) in [
+            (
+                json!({ "ok": true, "message": "merged into Christina (2 memories moved)",
+                     "speaker_id": "spk-1", "merged": true }),
+                true,
+            ),
+            (
+                json!({ "ok": false, "message": "Zed isn't in the household" }),
+                false,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = serve_once(
+                listener,
+                WyomingEvent::with_data(types::SPEAKER_RESULT, resp),
+            )
+            .await;
+            let cache = cache_for(addr);
+            let out =
+                link_speaker(&cache, Duration::from_millis(0), None, "spk-2", "Christina").await;
+            if want_ok {
+                assert_eq!(out.unwrap(), "merged into Christina (2 memories moved)");
+            } else {
+                assert_eq!(out.unwrap_err().to_string(), "Zed isn't in the household");
+            }
+            let request = server.await.unwrap();
+            assert_eq!(request.event_type, types::LINK_SPEAKER);
+            assert_eq!(request.data["id"], json!("spk-2"));
+            assert_eq!(request.data["member"], json!("Christina"));
+        }
+    }
+
+    #[tokio::test]
     async fn name_speaker_sends_id_and_name() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -943,10 +1601,7 @@ mod tests {
     async fn music_control_sends_action_and_value_and_returns_message() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let response = WyomingEvent::with_data(
-            types::MUSIC_RESULT,
-            json!({ "ok": true, "message": "Set the volume to 40 percent." }),
-        );
+        let response = WyomingEvent::music_result(true, "Set the volume to 40 percent.");
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
@@ -965,10 +1620,8 @@ mod tests {
     async fn music_control_surfaces_in_band_error() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let response = WyomingEvent::with_data(
-            types::MUSIC_RESULT,
-            json!({ "ok": false, "message": "Spotify isn't linked on the orchestrator" }),
-        );
+        let response =
+            WyomingEvent::music_result(false, "Spotify isn't linked on the Anamanti Core");
         serve_once(listener, response).await;
 
         let cache = cache_for(addr);

@@ -19,8 +19,7 @@
 //!   OPENROUTER_API_KEY=sk-... cargo test ... --test system1_calibration -- --ignored --nocapture
 //!
 //! Env: SYSTEM1_BASE_URL (default http://127.0.0.1:8000), SYSTEM1_MODEL (empty → laya-serve,
-//! set → jev), OPENROUTER_API_KEY (jev auth), SYSTEM1_MIN_CONFIDENCE (default 0.85),
-//! SYSTEM1_HOME (default "Austin, Texas", grounds location intents).
+//! set → jev), OPENROUTER_API_KEY (jev auth), SYSTEM1_MIN_CONFIDENCE (default 0.85).
 
 use anamanti_core::system1::{build, Decision, DecisionRequest};
 use anamanti_core::wyoming::protocol::TimerContext;
@@ -103,6 +102,11 @@ fn corpus() -> Vec<Case> {
         // end session
         case("that's all thanks", Resolve(endsess)),
         case("nothing else", Resolve(endsess)),
+        // a bare standalone sign-off thanks ends the session (any language)
+        case("thank you", Resolve(endsess)),
+        case("thanks", Resolve(endsess)),
+        case("gracias", Resolve(endsess)),
+        case("merci", Resolve(endsess)),
         // must-defer precision anchors
         case("who was the sixteenth president", Defer),
         case("what's fifteen percent of two hundred forty", Defer),
@@ -128,7 +132,6 @@ async fn calibrate_against_corpus() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.85);
-    let home = std::env::var("SYSTEM1_HOME").unwrap_or_else(|_| "Austin, Texas".to_string());
 
     let engine = build(backend, &base_url, &model, api_key, min_conf, vec![])
         .expect("build System-1 engine");
@@ -147,13 +150,12 @@ async fn calibrate_against_corpus() {
         let req = DecisionRequest {
             transcript: c.utterance.to_string(),
             screen: c.screen.map(String::from),
-            history: Vec::new(),
-            location: Some(home.clone()),
             timers: TimerContext {
                 running: c.timers_running,
                 next_remaining_secs: (c.timers_running > 0).then_some(300),
                 labels: Vec::new(),
             },
+            speaker: Default::default(),
         };
         let decision = engine.decide(&req).await.unwrap_or(Decision::Defer);
         let (got_resolve, got_intent) = match &decision {

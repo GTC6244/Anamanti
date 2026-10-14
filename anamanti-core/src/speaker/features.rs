@@ -28,6 +28,12 @@ pub struct FbankConfig {
     pub fmax: f32,
     /// Pre-emphasis coefficient (0 disables).
     pub preemphasis: f32,
+    /// Subtract the per-utterance mean of each mel band across frames (cepstral/
+    /// filterbank mean normalization, "CMN"). WeSpeaker, SpeechBrain, and most
+    /// Kaldi-trained ECAPA / x-vector exports mean-normalize the fbank at inference,
+    /// so the model expects zero-mean features; leaving it off noticeably degrades
+    /// real-voice accuracy. Default on.
+    pub mean_normalize: bool,
 }
 
 impl Default for FbankConfig {
@@ -41,6 +47,7 @@ impl Default for FbankConfig {
             fmin: 20.0,
             fmax: 7600.0,
             preemphasis: 0.97,
+            mean_normalize: true,
         }
     }
 }
@@ -103,6 +110,21 @@ pub fn log_mel_fbank(pcm: &[i16], cfg: &FbankConfig) -> Fbank {
                 }
             }
             data[f * cfg.n_mels + m] = (e + 1e-6).ln();
+        }
+    }
+
+    // Per-utterance mean normalization: subtract each mel band's mean across all
+    // frames so the features are zero-mean, matching how the model was trained.
+    if cfg.mean_normalize && frames > 0 {
+        for m in 0..cfg.n_mels {
+            let mut sum = 0.0f32;
+            for f in 0..frames {
+                sum += data[f * cfg.n_mels + m];
+            }
+            let mean = sum / frames as f32;
+            for f in 0..frames {
+                data[f * cfg.n_mels + m] -= mean;
+            }
         }
     }
 

@@ -311,8 +311,8 @@ async fn speak_via_orchestrator(
     while let Some(ev) = protocol::read_event(&mut reader).await? {
         match ev.event_type.as_str() {
             types::AUDIO_START => {
-                if let Some((r, _width, _channels)) = protocol::audio_format(&ev.data) {
-                    rate = r;
+                if let Some(fmt) = protocol::audio_format(&ev.data) {
+                    rate = fmt.rate;
                 }
             }
             types::AUDIO_CHUNK => {

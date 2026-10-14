@@ -40,10 +40,12 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         WeatherConfig,
         deviceHardwareId,
         noteUserActivity,
+        setFontContext,
         setMusicContext,
         setPlaceContext,
         setRecipeContext,
-        setWeatherContext;
+        setWeatherContext,
+        updateDiagnosticsTuning;
 import 'package:anamanti_display/src/rust/api/settings.dart' show musicControl;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
 
@@ -97,6 +99,12 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   AppSettings _settings = const AppSettings();
   AssistantController? _assistant;
+
+  /// [_assistant], as a listenable for Settings: applying a setting there can
+  /// restart the engine (replacing the controller) while Settings stays open, and
+  /// Audio Diagnostics must follow the new one.
+  final ValueNotifier<AssistantController?> _assistantListenable =
+      ValueNotifier<AssistantController?>(null);
 
   /// Proactive-notification channel (Approach A). Rebuilt alongside the assistant so
   /// it re-pins to the selected orchestrator when that changes.
@@ -351,6 +359,11 @@ class _AmbientHomeState extends State<AmbientHome> {
       // Tell the orchestrator what the music screen is showing (track + which view) so it
       // can drive it by voice (`music_screen`) and answer "what's this song?".
       setMusicContext: setMusicContext,
+      // Voice "increase font" / "decrease font": tell the orchestrator the current
+      // global scale each turn, and apply + persist a requested adjustment here.
+      setFontContext: setFontContext,
+      onFontAdjust: _onFontAdjust,
+      fontScale: _settings.fontScale,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
       // flip to a "processing" indicator the instant the user stops talking.
       endpointCueEnabled: _settings.endpointCueEnabled,
@@ -421,7 +434,8 @@ class _AmbientHomeState extends State<AmbientHome> {
       config: MusicConfig(
         orchestratorKey: _settings.orchestratorKey,
         discoveryTimeoutSecs: BigInt.zero,
-        deviceId: 'anamanti-display',
+        deviceId: _settings.deviceId,
+        deviceName: _settings.deviceName,
       ),
       onPush: assistant.applyMusicPush,
     )..start();
@@ -432,22 +446,48 @@ class _AmbientHomeState extends State<AmbientHome> {
       _weather = weather;
       _music = music;
     });
+    _assistantListenable.value = assistant;
   }
 
   /// Apply settings changed on the [SettingsScreen] (already persisted there):
-  /// refresh the slideshow if the photo source changed and restart the engine if a
-  /// wake-word/threshold knob changed. Assistant + memory settings are applied on
-  /// the Mac by the settings screen itself.
-  Future<void> _onSettingsApplied(AppSettings next) async {
+  /// refresh the slideshow if the photo source changed, restart the engine if a
+  /// setting baked into its config changed, and push capture gain / wake-word
+  /// thresholds to the running engine live otherwise. Assistant + VAD settings are
+  /// applied on the Mac by the settings screen itself.
+  Future<void> _onSettingsApplied(AppSettings next) {
+    // Settings applies changes as they're made, so applies can arrive while an
+    // earlier one (e.g. an engine restart) is still running. Chain them so each
+    // diff is computed against the fully-applied previous state.
+    final applied = _applyChain.then((_) => _applySettingsNow(next));
+    _applyChain = applied.catchError((Object _) {});
+    return applied;
+  }
+
+  /// Serializes [_onSettingsApplied] calls (see there).
+  Future<void> _applyChain = Future<void>.value();
+
+  Future<void> _applySettingsNow(AppSettings next) async {
+    if (!mounted) return;
+    // Capture gain and both wake-word thresholds are live-tunable on the running
+    // engine (no restart): push them straight to it. They're also persisted in
+    // `_settings`, so the next engine start re-seeds the same values.
+    final liveTuneChanged =
+        next.captureGainDb != _settings.captureGainDb ||
+        next.threshold != _settings.threshold ||
+        next.activeThreshold != _settings.activeThreshold;
     final engineChanged =
         next.orchestratorKey != _settings.orchestratorKey ||
         next.deviceName != _settings.deviceName ||
         next.wakeWord != _settings.wakeWord ||
-        next.threshold != _settings.threshold ||
-        next.activeThreshold != _settings.activeThreshold ||
         next.smoothingWindow != _settings.smoothingWindow ||
         next.fireOnPeak != _settings.fireOnPeak ||
         next.playbackBufferSecs != _settings.playbackBufferSecs ||
+        // Capture-path settings are baked into the engine config at start
+        // (buildWakeWordConfigFrom), so they need a restart to take effect.
+        next.useAudioRecord != _settings.useAudioRecord ||
+        next.platformNs != _settings.platformNs ||
+        next.platformAgc != _settings.platformAgc ||
+        next.platformAec != _settings.platformAec ||
         next.endpointCueEnabled != _settings.endpointCueEnabled ||
         next.endpointSilenceMs != _settings.endpointSilenceMs ||
         next.endpointRmsThreshold != _settings.endpointRmsThreshold ||
@@ -460,26 +500,64 @@ class _AmbientHomeState extends State<AmbientHome> {
         next.driveRefreshToken != _settings.driveRefreshToken ||
         !listEquals(next.driveFolderIds, _settings.driveFolderIds) ||
         next.driveLinked != _settings.driveLinked;
+    // Computed before the setState below reassigns `_settings`.
+    final fontChanged = next.fontScale != _settings.fontScale;
 
     // setState so purely-presentational changes (e.g. the listening-ring toggle and
-    // its reactivity/attack/release/decay dials) repaint AmbientScreen even when
-    // neither the engine nor the photo source changed.
+    // its reactivity/attack/release/decay dials, and the font-size slider) repaint
+    // AmbientScreen even when neither the engine nor the photo source changed.
     setState(() {
       _settings = next;
       // Re-pin the control client to the (possibly new) orchestrator selection.
       _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
     });
+    // A manual font-size change (the Settings slider) applies to the UI via the setState
+    // above (the root MediaQuery re-reads `_settings.fontScale`); also mirror it to the
+    // controller so the next turn's font context reports the new scale.
+    if (fontChanged) {
+      _assistant?.updateFontScale(next.fontScale);
+    }
     if (photoChanged) {
       // A new/changed link means new refresh tokens: re-mint before rebuilding.
       await _refreshGoogleTokens();
       await _applyPhotoSource();
     }
-    if (engineChanged) await _startEngine();
+    if (engineChanged) {
+      await _startEngine();
+    } else if (liveTuneChanged && _assistant != null) {
+      updateDiagnosticsTuning(
+        gainDb: next.captureGainDb,
+        threshold: next.threshold,
+        activeThreshold: next.activeThreshold,
+      );
+      // Also fold them into the controller's config, which an engine reconnect
+      // reuses — otherwise a reconnect would re-seed the old values.
+      _assistant!.updateLiveTuning(
+        gainDb: next.captureGainDb,
+        threshold: next.threshold,
+        activeThreshold: next.activeThreshold,
+      );
+    }
     // Push the (possibly changed) update base URL / auto-update toggle to the updater.
     await _updates?.updateConfig(
       baseUrl: next.updateBaseUrl,
       autoUpdateEnabled: next.autoUpdateEnabled,
     );
+  }
+
+  /// Apply a voice font-size command ("increase font" / "decrease font"): bump the global
+  /// [AppSettings.fontScale] by one step (clamped), persist it, rebuild so the root
+  /// [MediaQuery] re-scales all ambient text, and tell the controller the new value so the
+  /// next turn's context reports it. A no-op at the min/max bound.
+  Future<void> _onFontAdjust(String direction) async {
+    final step = direction == 'decrease' ? -kFontScaleStep : kFontScaleStep;
+    final next = (_settings.fontScale + step).clamp(kFontScaleMin, kFontScaleMax);
+    if (next == _settings.fontScale) return; // already at the bound
+    _settings = _settings.copyWith(fontScale: next);
+    await _store.save(_settings);
+    if (!mounted) return;
+    setState(() {});
+    _assistant?.updateFontScale(next);
   }
 
   void _openSettings() {
@@ -490,10 +568,24 @@ class _AmbientHomeState extends State<AmbientHome> {
           store: _store,
           client: _client,
           onApplied: _onSettingsApplied,
-          // The live engine controller powers the Audio Diagnostics page's meters.
-          assistant: _assistant,
+          // The live engine controller powers Audio Diagnostics' meters + voice
+          // enrollment; a listenable so it follows engine restarts.
+          assistant: _assistantListenable,
+          // Re-pinning the Core in Settings switches Settings to the new Mac.
+          clientForCore: (key) => FrbOrchestratorClient(orchestratorKey: key),
+          // Capture gain + wake-word thresholds apply to the running engine as the
+          // sliders move (no restart).
+          onLiveTune: (gainDb, threshold, activeThreshold) =>
+              updateDiagnosticsTuning(
+                gainDb: gainDb,
+                threshold: threshold,
+                activeThreshold: activeThreshold,
+              ),
           // The updater controller powers the Updates page (null on fdroid).
           updates: _updates,
+          // Restart the engine after a Camera grant so the proximity sensor +
+          // auto-brightness start immediately (Settings → Permissions).
+          onRequestEngineRestart: _startEngine,
         ),
       ),
     );
@@ -503,6 +595,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   void dispose() {
     _photoRefreshTimer?.cancel();
     _assistant?.dispose();
+    _assistantListenable.dispose();
     _notifications?.dispose();
     _weather?.dispose();
     _music?.dispose();
@@ -524,17 +617,27 @@ class _AmbientHomeState extends State<AmbientHome> {
         body: SlideshowView(controller: _slideshow),
       );
     } else {
-      content = AmbientScreen(
-        assistant: assistant,
-        slideshow: _slideshow,
-        notifications: _notifications,
-        updates: _updates,
-        onOpenSettings: _openSettings,
-        listeningRingEnabled: _settings.listeningRingEnabled,
-        ringReactivity: _settings.ringReactivity,
-        ringAttack: _settings.ringAttack,
-        ringRelease: _settings.ringRelease,
-        ringDecay: _settings.ringDecay,
+      // Apply the global voice-controlled font scale to every piece of ambient text at
+      // once: Flutter's `Text` reads `textScaler` from the ambient `MediaQuery`, so this
+      // single override scales all hardcoded font sizes under `AmbientScreen`. The pushed
+      // `SettingsScreen` is a separate `Navigator` route (see `_openSettings`), outside
+      // this subtree, so it stays at the default size.
+      content = MediaQuery(
+        data: MediaQuery.of(context).copyWith(
+          textScaler: TextScaler.linear(_settings.fontScale),
+        ),
+        child: AmbientScreen(
+          assistant: assistant,
+          slideshow: _slideshow,
+          notifications: _notifications,
+          updates: _updates,
+          onOpenSettings: _openSettings,
+          listeningRingEnabled: _settings.listeningRingEnabled,
+          ringReactivity: _settings.ringReactivity,
+          ringAttack: _settings.ringAttack,
+          ringRelease: _settings.ringRelease,
+          ringDecay: _settings.ringDecay,
+        ),
       );
     }
     // Kiosk guard: never let the hardware/gesture Back button pop the root route,

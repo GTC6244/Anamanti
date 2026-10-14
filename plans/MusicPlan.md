@@ -176,10 +176,12 @@ who started playback — no extra work here.
    plays, a full `NowPlayingView` (artwork + transport + volume), and a `NextUpView`
    queue list — folded from `AssistantState.music`. On-screen controls go **device→Core**
    as a short-lived `anamanti-music-control` request/response (play/pause/next/previous/
-   volume) handled by `control::music_control_response`, which drives the same
-   `spotify_control` controller. See [`DisplayUI.md`](./DisplayUI.md) §4b.
+   volume) handled by `control::music_control_response`, which parses actions with the
+   same `SpotifyCommand::transport` as the `spotify_control` tool and reuses the
+   `NowPlayingService`'s cached controller. See [`DisplayUI.md`](./DisplayUI.md) §4b.
    **Voice control (done):** the music screen is drivable by voice too — a new
-   `music_screen` rig tool (show now-playing / show up-next / close) emits a
+   `music_screen` `VoiceTool` (`llm/rig/tools/display.rs`; show now-playing / show
+   up-next / close) emits a
    `DeviceAction::MusicScreen` → `anamanti-music` `screen` frame → device
    `WakeWordEventKind.musicScreen`, and the device stamps a `DisplayContext::Music`
    block (`set_music_context`) on `audio-start` so the LLM knows what's on the music

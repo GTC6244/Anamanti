@@ -50,8 +50,8 @@ pub trait SpeechGate: Send {
 pub(crate) fn rms_i16_le(pcm: &[u8]) -> f64 {
     let mut sum_sq = 0f64;
     let mut n = 0u64;
-    for c in pcm.chunks_exact(2) {
-        let s = i16::from_le_bytes([c[0], c[1]]) as f64;
+    for s in crate::audio::pcm::iter_i16_le(pcm) {
+        let s = s as f64;
         sum_sq += s * s;
         n += 1;
     }

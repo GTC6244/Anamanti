@@ -64,7 +64,11 @@ pub fn check_for_update(base_url: String) -> anyhow::Result<UpdateManifest> {
 }
 
 struct DownloadHandle {
-    running: Arc<AtomicBool>,
+    /// Cancellation flag polled by [`crate::update::download_and_verify`]: `false`
+    /// while the download should proceed, flipped to `true` to abort it. This MUST
+    /// match the `cancel` semantics in `update/mod.rs` (true == stop) — initializing
+    /// it the other way makes every download bail instantly with "download cancelled".
+    cancel: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -86,8 +90,8 @@ pub fn download_update(
 ) -> anyhow::Result<()> {
     cancel_download();
 
-    let running = Arc::new(AtomicBool::new(true));
-    let loop_running = running.clone();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let loop_cancel = cancel.clone();
     let join = std::thread::Builder::new()
         .name("apk-download".to_string())
         .spawn(move || {
@@ -96,7 +100,7 @@ pub fn download_update(
                 &apk_url,
                 &expected_sha256,
                 &dest,
-                &loop_running,
+                &loop_cancel,
                 |pr| {
                     let _ = sink.add(DownloadProgress {
                         downloaded: pr.downloaded,
@@ -127,7 +131,7 @@ pub fn download_update(
         })?;
 
     *download_slot().lock().unwrap() = Some(DownloadHandle {
-        running,
+        cancel,
         join: Some(join),
     });
     Ok(())
@@ -137,7 +141,7 @@ pub fn download_update(
 pub fn cancel_download() {
     let handle = download_slot().lock().unwrap().take();
     if let Some(mut h) = handle {
-        h.running.store(false, Ordering::SeqCst);
+        h.cancel.store(true, Ordering::SeqCst);
         if let Some(join) = h.join.take() {
             let _ = join.join();
         }

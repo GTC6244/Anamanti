@@ -101,34 +101,39 @@ fn slot() -> &'static Mutex<Option<EngineHandle>> {
     ENGINE.get_or_init(|| Mutex::new(None))
 }
 
-/// Live-tunable capture gain (dB) and idle wake-word threshold, stored as `f32`
-/// bits so the audio-diagnostics screen can adjust them on the running engine
-/// **without a restart** (`update_tuning`, exposed to Dart as
-/// `update_diagnostics_tuning`). The run loop re-reads both each audio block and
-/// re-seeds them from the [`WakeWordConfig`] every time the engine starts, so a
-/// persisted settings value always wins on the next launch.
+/// Live-tunable capture gain (dB), idle wake-word threshold and active (in-turn)
+/// threshold, stored as `f32` bits so Settings / the audio-diagnostics screen can
+/// adjust them on the running engine **without a restart** (`update_tuning`, exposed
+/// to Dart as `update_diagnostics_tuning`). The run loop re-reads them each audio
+/// block and re-seeds them from the [`WakeWordConfig`] every time the engine starts,
+/// so a persisted settings value always wins on the next launch.
 static TUNE_GAIN_DB: AtomicU32 = AtomicU32::new(0);
 static TUNE_THRESHOLD: AtomicU32 = AtomicU32::new(0);
+static TUNE_ACTIVE_THRESHOLD: AtomicU32 = AtomicU32::new(0);
 
-fn set_tuning(gain_db: f32, threshold: f32) {
+fn set_tuning(gain_db: f32, threshold: f32, active_threshold: f32) {
     TUNE_GAIN_DB.store(gain_db.to_bits(), Ordering::Relaxed);
     TUNE_THRESHOLD.store(threshold.to_bits(), Ordering::Relaxed);
+    TUNE_ACTIVE_THRESHOLD.store(active_threshold.to_bits(), Ordering::Relaxed);
 }
 
-fn load_tuning() -> (f32, f32) {
+/// `(gain_db, idle_threshold, active_threshold)` as last set.
+fn load_tuning() -> (f32, f32, f32) {
     (
         f32::from_bits(TUNE_GAIN_DB.load(Ordering::Relaxed)),
         f32::from_bits(TUNE_THRESHOLD.load(Ordering::Relaxed)),
+        f32::from_bits(TUNE_ACTIVE_THRESHOLD.load(Ordering::Relaxed)),
     )
 }
 
-/// Live-adjust the capture gain (dB) and idle detection threshold on the running
-/// engine without restarting it (the audio-diagnostics screen). Clamped to sane
+/// Live-adjust the capture gain (dB), the idle detection threshold and the active
+/// (in-turn) threshold on the running engine without restarting it. Clamped to sane
 /// ranges. The values are re-seeded from config on the next engine start.
-pub fn update_tuning(gain_db: f32, threshold: f32) {
+pub fn update_tuning(gain_db: f32, threshold: f32, active_threshold: f32) {
     set_tuning(
         gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB),
         threshold.clamp(0.0, 1.0),
+        active_threshold.clamp(0.0, 1.0),
     );
 }
 
@@ -158,6 +163,54 @@ pub fn set_display_context(screen: Option<serde_json::Value>) {
 /// when the display is idle.
 pub fn display_context() -> Option<serde_json::Value> {
     display_slot().lock().unwrap().clone()
+}
+
+/// The font-scaling context — whether a resizable text surface is on screen and the
+/// current global font scale — stamped as the `screen.font` sibling of every turn's
+/// `audio-start` (orthogonal to the foreground widget, exactly like `screen.timers`).
+/// Lets the orchestrator resolve "increase font" / "decrease font" only when there is
+/// something to resize, and report when it is already at the max/min. The UI sets it via
+/// `api::engine::set_font_context`; held globally so it survives across turns and restarts.
+static FONT_CONTEXT: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+
+fn font_slot() -> &'static Mutex<Option<serde_json::Value>> {
+    FONT_CONTEXT.get_or_init(|| Mutex::new(None))
+}
+
+/// Set (or clear, with `None`) the font context stamped on subsequent turns'
+/// `audio-start` frames. Called from the FRB layer whenever the global font scale changes
+/// or a resizable surface opens/closes.
+pub fn set_font_context(font: Option<serde_json::Value>) {
+    *font_slot().lock().unwrap() = font;
+}
+
+/// The current font context to stamp on a starting turn's `audio-start`, or `None` when
+/// it has never been set.
+pub fn font_context() -> Option<serde_json::Value> {
+    font_slot().lock().unwrap().clone()
+}
+
+/// The running engine's shared speaker [`PlaybackSink`], published so UI actions
+/// *other* than a voice turn can play audio through the one existing output path
+/// (no second audio stack — the locked decision). Today that's the People screen's
+/// "play" button replaying a person's stored voice clips. `None` while the engine
+/// isn't running or audio output was unavailable at start; set when playback opens in
+/// [`run_loop`] and cleared on teardown so a stale sink is never handed out.
+static PLAYBACK: OnceLock<Mutex<Option<Arc<crate::audio::playback::PlaybackSink>>>> =
+    OnceLock::new();
+
+fn playback_slot() -> &'static Mutex<Option<Arc<crate::audio::playback::PlaybackSink>>> {
+    PLAYBACK.get_or_init(|| Mutex::new(None))
+}
+
+fn set_playback_sink(sink: Option<Arc<crate::audio::playback::PlaybackSink>>) {
+    *playback_slot().lock().unwrap() = sink;
+}
+
+/// The running engine's playback sink, or `None` when no engine / no audio output is
+/// available. Callers submit mono `i16` PCM via [`PlaybackSink::submit_pcm`].
+pub fn playback_sink() -> Option<Arc<crate::audio::playback::PlaybackSink>> {
+    playback_slot().lock().unwrap().clone()
 }
 
 /// True while a wake-word engine thread is active.
@@ -370,7 +423,11 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                 "playback ready on '{}' ({} Hz, {} ch)",
                 stream.info.device_name, stream.info.sample_rate, stream.info.channels
             )));
-            (Some(stream), Some(Arc::new(sink_handle)))
+            let shared = Arc::new(sink_handle);
+            // Publish the sink so non-turn UI (the People screen's clip "play" button)
+            // can reuse this one output path.
+            set_playback_sink(Some(shared.clone()));
+            (Some(stream), Some(shared))
         }
         Ok(Err(e)) => {
             let _ = sink.add(WakeWordEvent::status(format!(
@@ -402,6 +459,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // Idle detections use `threshold`; once a turn is active, require the higher
     // `active_threshold` (never below `threshold`) to curb self-triggering while
     // the device streams/speaks (AEC-interim mitigation, Plan.MD §4).
+    // Both are seeds: the loop re-reads the live values (`load_tuning`) each block.
     let idle_threshold = config.threshold;
     let active_threshold = config.active_threshold.max(config.threshold);
 
@@ -472,7 +530,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // Seed the live-tunable knobs (capture gain + idle threshold) from config so the
     // audio-diagnostics screen can adjust them on the running engine without a restart
     // (`update_tuning`); the loop re-reads them each block below.
-    set_tuning(capture_gain_db, idle_threshold);
+    set_tuning(capture_gain_db, idle_threshold, active_threshold);
 
     while running.load(Ordering::SeqCst) {
         let n = consumer.pop_slice(&mut scratch);
@@ -493,7 +551,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
 
         // Read the live-tunable capture gain + idle threshold (adjustable from the
         // audio-diagnostics screen without restarting the engine).
-        let (gain_db, idle_thr) = load_tuning();
+        let (gain_db, idle_thr, active_thr) = load_tuning();
         let capture_gain = if gain_db > 0.0 {
             10f32.powf(gain_db / 20.0)
         } else {
@@ -530,7 +588,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                     // While a turn is active keep the raised active-threshold floor, but
                     // never below the live idle threshold the user may be tuning.
                     let threshold = if turn_active {
-                        active_threshold.max(idle_thr)
+                        active_thr.max(idle_thr)
                     } else {
                         idle_thr
                     };
@@ -621,6 +679,9 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     }
 
+    // Stop handing out the shared sink before the stream it drains is torn down, so a
+    // late clip-playback call can't enqueue into a ring nobody reads.
+    set_playback_sink(None);
     // Drop the network first so its runtime stops forwarding (and stops handing
     // audio to the playback sink) before the streams are torn down; then drop the
     // playback and capture streams.

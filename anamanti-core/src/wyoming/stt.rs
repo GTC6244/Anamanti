@@ -8,8 +8,9 @@
 //!
 //! **End-of-speech is decided by the Anamanti Core, not the server.**
 //! `wyoming-faster-whisper` does no streaming VAD — it transcribes only after it
-//! receives `audio-stop` — so the orchestrator runs an energy VAD over the incoming
-//! PCM and sends `audio-stop` to finalize (`orchestrator::stream_to_transcript`).
+//! receives `audio-stop` — so the orchestrator runs its VAD gate (Silero by default,
+//! energy as the fallback) over the incoming PCM and sends `audio-stop` to finalize
+//! (`orchestrator::stream_to_transcript`).
 //! The device streams continuously and runs no VAD of its own.
 
 use anyhow::Result;
@@ -64,7 +65,7 @@ where
         self.conn.read().await
     }
 
-    /// Send `audio-stop` to finalize once the Core's energy VAD detected
+    /// Send `audio-stop` to finalize once the Core's VAD detected
     /// end-of-speech (this is what makes faster-whisper emit the `transcript`).
     pub async fn finish(&mut self) -> Result<()> {
         self.conn

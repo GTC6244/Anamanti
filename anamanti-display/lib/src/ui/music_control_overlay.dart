@@ -13,6 +13,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/music_data.dart';
+import 'package:anamanti_display/src/ui/album_art.dart';
 
 class MusicControlOverlay extends StatelessWidget {
   const MusicControlOverlay({
@@ -53,7 +54,7 @@ class MusicControlOverlay extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _thumb(),
+          AlbumArt(uri: music.artworkUri, size: 40, radius: 6, iconSize: 22),
           const SizedBox(width: 10),
           Flexible(
             child: GestureDetector(
@@ -94,7 +95,10 @@ class MusicControlOverlay extends StatelessWidget {
             onPressed: () =>
                 onVolume((music.volumePercent - _step).clamp(0, 100)),
             iconSize: 22,
-            icon: Icon(Icons.volume_down, color: Colors.white.withValues(alpha: 0.85)),
+            icon: Icon(
+              Icons.volume_down,
+              color: Colors.white.withValues(alpha: 0.85),
+            ),
           ),
           IconButton(
             key: const Key('music-overlay-volume-up'),
@@ -102,7 +106,10 @@ class MusicControlOverlay extends StatelessWidget {
             onPressed: () =>
                 onVolume((music.volumePercent + _step).clamp(0, 100)),
             iconSize: 22,
-            icon: Icon(Icons.volume_up, color: Colors.white.withValues(alpha: 0.85)),
+            icon: Icon(
+              Icons.volume_up,
+              color: Colors.white.withValues(alpha: 0.85),
+            ),
           ),
         ],
       ),
@@ -135,39 +142,6 @@ class MusicControlOverlay extends StatelessWidget {
             ),
           ),
       ],
-    );
-  }
-
-  Widget _thumb() {
-    if (!music.hasArtwork) return _thumbFallback();
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(6),
-      child: Image.network(
-        music.artworkUri,
-        width: 40,
-        height: 40,
-        fit: BoxFit.cover,
-        gaplessPlayback: true,
-        errorBuilder: (_, _, _) => _thumbFallback(),
-        loadingBuilder: (context, child, progress) =>
-            progress == null ? child : _thumbFallback(),
-      ),
-    );
-  }
-
-  Widget _thumbFallback() {
-    return Container(
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Icon(
-        Icons.music_note,
-        size: 22,
-        color: Colors.white.withValues(alpha: 0.5),
-      ),
     );
   }
 }

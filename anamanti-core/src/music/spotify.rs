@@ -98,6 +98,30 @@ pub enum SpotifyCommand {
     },
 }
 
+impl SpotifyCommand {
+    /// Parse a bare **transport** action — `pause`/`stop`, `resume`/`unpause`,
+    /// `next`/`skip`/`forward`, `previous`/`prev`/`back`, `volume`/`set_volume` (which
+    /// needs `volume_percent`, clamped to 0–100). Case- and whitespace-insensitive.
+    /// `Ok(None)` when `action` is not a transport action (e.g. `play`/`queue`, which
+    /// need a search query); `Err` (speakable) for `volume` with no level. Shared by the
+    /// `spotify_control` tool and the display's on-screen controls so both accept the
+    /// same vocabulary.
+    pub fn transport(action: &str, volume_percent: Option<i64>) -> Result<Option<Self>> {
+        Ok(Some(match action.trim().to_lowercase().as_str() {
+            "pause" | "stop" => SpotifyCommand::Pause,
+            "resume" | "unpause" => SpotifyCommand::Resume,
+            "next" | "skip" | "forward" => SpotifyCommand::Next,
+            "previous" | "prev" | "back" => SpotifyCommand::Previous,
+            "volume" | "set_volume" => SpotifyCommand::SetVolume {
+                percent: volume_percent
+                    .context("volume needs a level from 0 to 100")?
+                    .clamp(0, 100) as u8,
+            },
+            _ => return Ok(None),
+        }))
+    }
+}
+
 /// One queued track ("up next"), as the display's Next Up list renders it. Field
 /// names are the snake_case JSON keys the device's `QueueTrack.tryParse` expects.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -152,13 +176,20 @@ struct SearchHit {
     is_context: bool,
 }
 
+/// Per-request budget for every Spotify Web API / accounts call, so a stalled Spotify
+/// can't hang a voice turn.
+const SPOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `User-Agent` component label for Spotify requests.
+const COMPONENT: &str = "spotify";
+
 /// Live Spotify Web API implementation of [`SpotifyController`].
 ///
 /// Holds long-lived credentials (client id/secret + refresh token) and caches a
 /// short-lived access token, refreshing it on demand. Every playback call targets
-/// the librespot Connect device resolved by name.
+/// the librespot Connect device resolved by name. Requests ride the shared
+/// [`crate::http::shared_client`] pool with a per-request timeout.
 pub struct SpotifyWebApi {
-    http: reqwest::Client,
     client_id: String,
     client_secret: String,
     refresh_token: String,
@@ -198,7 +229,6 @@ impl SpotifyWebApi {
         api_base: impl Into<String>,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
             client_id: client_id.into(),
             client_secret: client_secret.into(),
             refresh_token: refresh_token.into(),
@@ -218,24 +248,17 @@ impl SpotifyWebApi {
                 return Ok(tok.clone());
             }
         }
-        let resp: Value = self
-            .http
-            .post(format!("{}/api/token", self.accounts_base))
-            .basic_auth(&self.client_id, Some(&self.client_secret))
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", self.refresh_token.as_str()),
-            ])
-            .send()
-            .await
-            .context("requesting Spotify access token")?
-            .error_for_status()
-            .context(
-                "Spotify token endpoint returned an error (check client id/secret/refresh token)",
-            )?
-            .json()
-            .await
-            .context("parsing Spotify token response")?;
+        let resp: Value = crate::http::send_json(
+            crate::http::post(format!("{}/api/token", self.accounts_base), COMPONENT)
+                .basic_auth(&self.client_id, Some(&self.client_secret))
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", self.refresh_token.as_str()),
+                ]),
+            SPOTIFY_TIMEOUT,
+            "Spotify token endpoint (check client id/secret/refresh token)",
+        )
+        .await?;
 
         let access = resp
             .get("access_token")
@@ -254,18 +277,13 @@ impl SpotifyWebApi {
     /// with a speakable message when the device is not present (e.g. librespot is
     /// down or the speaker is asleep).
     async fn device_id(&self, token: &str) -> Result<String> {
-        let resp: Value = self
-            .http
-            .get(format!("{}/v1/me/player/devices", self.api_base))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("listing Spotify devices")?
-            .error_for_status()
-            .context("Spotify devices endpoint returned an error")?
-            .json()
-            .await
-            .context("parsing Spotify devices response")?;
+        let resp: Value = crate::http::send_json(
+            crate::http::get(format!("{}/v1/me/player/devices", self.api_base), COMPONENT)
+                .bearer_auth(token),
+            SPOTIFY_TIMEOUT,
+            "Spotify devices",
+        )
+        .await?;
 
         let devices = resp
             .get("devices")
@@ -293,19 +311,14 @@ impl SpotifyWebApi {
 
     /// Search for the top matching entity of `kind`.
     async fn search(&self, token: &str, query: &str, kind: SearchKind) -> Result<SearchHit> {
-        let resp: Value = self
-            .http
-            .get(format!("{}/v1/search", self.api_base))
-            .bearer_auth(token)
-            .query(&[("q", query), ("type", kind.as_query()), ("limit", "1")])
-            .send()
-            .await
-            .context("searching Spotify")?
-            .error_for_status()
-            .context("Spotify search returned an error")?
-            .json()
-            .await
-            .context("parsing Spotify search response")?;
+        let resp: Value = crate::http::send_json(
+            crate::http::get(format!("{}/v1/search", self.api_base), COMPONENT)
+                .bearer_auth(token)
+                .query(&[("q", query), ("type", kind.as_query()), ("limit", "1")]),
+            SPOTIFY_TIMEOUT,
+            "Spotify search",
+        )
+        .await?;
 
         let item = resp
             .get(kind.results_key())
@@ -339,22 +352,25 @@ impl SpotifyWebApi {
     ) -> Result<()> {
         let mut query: Vec<(&str, &str)> = vec![("device_id", device_id)];
         query.extend_from_slice(extra_query);
-        let mut req = self
-            .http
-            .request(method, format!("{}/v1/me/player{path}", self.api_base))
-            .bearer_auth(token)
-            .query(&query);
+        let mut req = crate::http::request(
+            method,
+            format!("{}/v1/me/player{path}", self.api_base),
+            COMPONENT,
+        )
+        .bearer_auth(token)
+        .query(&query);
         if let Some(b) = body {
             req = req.json(&b);
         } else {
             // Spotify's play/pause endpoints want a JSON content-type even empty.
             req = req.header(reqwest::header::CONTENT_LENGTH, "0");
         }
-        req.send()
-            .await
-            .with_context(|| format!("Spotify player call {path}"))?
-            .error_for_status()
-            .with_context(|| format!("Spotify player endpoint {path} returned an error"))?;
+        crate::http::send_ok(
+            req,
+            SPOTIFY_TIMEOUT,
+            &format!("Spotify player endpoint {path}"),
+        )
+        .await?;
         Ok(())
     }
 
@@ -363,27 +379,20 @@ impl SpotifyWebApi {
     /// `/v1/me/player`. These reads are account-wide, so (unlike [`player_call`]) they
     /// take no `device_id`.
     async fn player_get(&self, token: &str, path: &str) -> Result<Option<Value>> {
-        let resp = self
-            .http
-            .get(format!("{}/v1/me/player{path}", self.api_base))
-            .bearer_auth(token)
-            .send()
-            .await
-            .with_context(|| format!("Spotify player read {path}"))?
-            .error_for_status()
-            .with_context(|| format!("Spotify player read {path} returned an error"))?;
-        if resp.status() == reqwest::StatusCode::NO_CONTENT {
-            return Ok(None);
-        }
-        let body = resp
-            .text()
-            .await
-            .with_context(|| format!("reading Spotify player {path} body"))?;
+        let what = format!("Spotify player read {path}");
+        let body = crate::http::send_text(
+            crate::http::get(format!("{}/v1/me/player{path}", self.api_base), COMPONENT)
+                .bearer_auth(token),
+            SPOTIFY_TIMEOUT,
+            &what,
+        )
+        .await?;
+        // A `204 No Content` (nothing playing) arrives as an empty body.
         if body.trim().is_empty() {
             return Ok(None);
         }
-        let value: Value = serde_json::from_str(&body)
-            .with_context(|| format!("parsing Spotify player {path} response"))?;
+        let value: Value =
+            serde_json::from_str(&body).with_context(|| format!("parsing the {what} response"))?;
         Ok(Some(value))
     }
 
@@ -394,21 +403,7 @@ impl SpotifyWebApi {
             Ok(Some(v)) => v
                 .get("queue")
                 .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .take(QUEUE_LIMIT)
-                        .map(|item| {
-                            let t = track_fields(item);
-                            QueueItem {
-                                track_title: t.0,
-                                artist: t.1,
-                                album: t.2,
-                                artwork_uri: t.3,
-                            }
-                        })
-                        .collect()
-                })
+                .map(|items| items.iter().take(QUEUE_LIMIT).map(track_fields).collect())
                 .unwrap_or_default(),
             Ok(None) => Vec::new(),
             Err(e) => {
@@ -422,9 +417,9 @@ impl SpotifyWebApi {
 /// Maximum number of up-next tracks surfaced to the display.
 const QUEUE_LIMIT: usize = 20;
 
-/// Extract `(title, artist, album, artwork_uri)` from a Spotify track object (the
-/// shape shared by `/me/player`'s `item` and `/me/player/queue`'s entries).
-fn track_fields(item: &Value) -> (String, String, String, String) {
+/// Extract title / artist / album / artwork from a Spotify track object (the shape
+/// shared by `/me/player`'s `item` and `/me/player/queue`'s entries).
+fn track_fields(item: &Value) -> QueueItem {
     let title = item
         .get("name")
         .and_then(Value::as_str)
@@ -453,7 +448,12 @@ fn track_fields(item: &Value) -> (String, String, String, String) {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    (title, artist, album, artwork_uri)
+    QueueItem {
+        track_title: title,
+        artist,
+        album,
+        artwork_uri,
+    }
 }
 
 /// Build a speakable label for a search hit ("Karma Police by Radiohead",
@@ -572,7 +572,12 @@ impl SpotifyController for SpotifyWebApi {
         let Some(item) = state.get("item").filter(|v| v.is_object()) else {
             return Ok(None); // playing an ad / local file with no track object
         };
-        let (track_title, artist, album, artwork_uri) = track_fields(item);
+        let QueueItem {
+            track_title,
+            artist,
+            album,
+            artwork_uri,
+        } = track_fields(item);
         let playing = state
             .get("is_playing")
             .and_then(Value::as_bool)

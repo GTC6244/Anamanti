@@ -10,10 +10,10 @@
 //! ([`DecisionEngine`]), so a local `laya-serve` sidecar or Jev/OpenRouter (both speak
 //! the shared `/v1/systemone` contract) are swappable without touching the pipeline.
 //!
-//! **Status: M0 scaffold.** Only the trait, the no-op [`NoDecision`] default, and the
-//! test [`mock::MockDecider`] exist. The `laya-serve`/`jev` HTTP backend and the intent
-//! handlers land in M1 (see the plan). The default `backend = "none"` reproduces
-//! today's behavior exactly.
+//! Implemented: the [`NoDecision`] default (`backend = "none"`, which skips the stage
+//! entirely), the `laya-serve` / `jev` HTTP backend ([`http::HttpDecider`]), the test
+//! [`mock::MockDecider`], and the closed [`Intent`] set the orchestrator's fast-path
+//! handlers serve. `laya-embedded` (in-process) is not implemented yet.
 
 pub mod http;
 pub mod mock;
@@ -23,30 +23,152 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// The built-in intents the router may resolve when the config leaves `intents` empty.
-/// Grows as handlers land (M1: weather; M3: timer; M5.2: clock queries). An intent listed
-/// here still only resolves if the orchestrator has a handler for it *and* the handler's
-/// preconditions hold (e.g. timer needs a parseable duration), otherwise the turn defers
-/// to System-2.
-///
-/// `place` is a deliberate **route-only** member: it has a free-form slot (the place
-/// name), so the classifier recognizes it but the orchestrator has **no** handler — the
-/// turn defers to the System-2 LLM, which calls the `places_lookup` tool with the extracted
-/// place name (see `plans/system1-fast-decisions.md` §15.2, Tier C).
+/// The closed set of intents System-1 knows how to route. The wire carries them as
+/// their [`as_str`](Intent::as_str) labels (the `criteria` keys of the `/v1/systemone`
+/// request, and [`Resolution::intent`]); the orchestrator parses a resolution back with
+/// [`FromStr`](std::str::FromStr) and dispatches with an exhaustive `match`, so adding a
+/// variant forces a decision about its handler. A config-supplied label that is not an
+/// `Intent` can still be routed, but it never has a handler and always defers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Intent {
+    /// Current conditions or the forecast for home (fast path: the weather widget).
+    Weather,
+    /// Start a timer for a stated duration.
+    Timer,
+    /// The current time of day.
+    Time,
+    /// Today's date / day of the week.
+    Date,
+    /// Cancel the running timer(s).
+    TimerCancel,
+    /// How much time is left on the running timer.
+    TimerQuery,
+    /// Close the weather screen.
+    WeatherDismiss,
+    /// Close the recipe screen.
+    RecipeDismiss,
+    /// Close the place card.
+    PlaceDismiss,
+    /// The user is done: end the follow-up chain.
+    EndSession,
+    /// A bare "stop"/"cancel" whose target comes from live device state.
+    StopDismiss,
+    /// A question about a specific place. **Route-only:** it has a free-form slot (the
+    /// place name), so it has no fast-path handler and always defers to the System-2
+    /// LLM, which calls `places_lookup` (`plans/system1-fast-decisions.md` §15.2, Tier C).
+    Place,
+}
+
+impl Intent {
+    /// Every intent, in the order the default router offers them.
+    pub const ALL: [Intent; 12] = [
+        Intent::Weather,
+        Intent::Timer,
+        Intent::Time,
+        Intent::Date,
+        Intent::TimerCancel,
+        Intent::TimerQuery,
+        Intent::WeatherDismiss,
+        Intent::RecipeDismiss,
+        Intent::PlaceDismiss,
+        Intent::EndSession,
+        Intent::StopDismiss,
+        Intent::Place,
+    ];
+
+    /// The wire label (`"weather"`, `"timer_cancel"`, …).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Intent::Weather => "weather",
+            Intent::Timer => "timer",
+            Intent::Time => "time",
+            Intent::Date => "date",
+            Intent::TimerCancel => "timer_cancel",
+            Intent::TimerQuery => "timer_query",
+            Intent::WeatherDismiss => "weather_dismiss",
+            Intent::RecipeDismiss => "recipe_dismiss",
+            Intent::PlaceDismiss => "place_dismiss",
+            Intent::EndSession => "end_session",
+            Intent::StopDismiss => "stop_dismiss",
+            Intent::Place => "place",
+        }
+    }
+
+    /// The human-readable criterion the classifier sees for this intent.
+    pub fn description(self) -> &'static str {
+        match self {
+            Intent::Weather => "current conditions or the forecast",
+            Intent::Timer => "start a timer or alarm for a stated duration",
+            Intent::Time => "the current time of day right now",
+            Intent::Date => "today's date or the current day of the week",
+            Intent::TimerCancel => "cancel or stop a running timer or alarm",
+            Intent::TimerQuery => "ask how much time is left on a running timer",
+            Intent::WeatherDismiss => "close or dismiss the weather screen",
+            Intent::RecipeDismiss => "close or dismiss the recipe screen",
+            Intent::PlaceDismiss => "close or dismiss the place card",
+            Intent::Place => {
+                "ask about a specific business, shop, restaurant, cafe, landmark, or point of \
+                 interest — where it is, its address, hours, phone, or rating"
+            }
+            Intent::EndSession => {
+                "the user is finished and wants no more replies — a sign-off or dismissal \
+                 like \"that's all\", \"nothing else\", or \"goodbye\", including a bare \
+                 standalone thanks used to close the conversation in any language \
+                 (\"thank you\", \"thanks\", \"gracias\", \"merci\"); NOT stopping a timer \
+                 or music, and NOT a thanks that is part of a continuing request \
+                 (e.g. \"thanks, now what's the weather\")"
+            }
+            Intent::StopDismiss => {
+                "a bare \"stop\", \"cancel\", \"never mind\", or \"dismiss\" with no named \
+                 target (what it refers to depends on what is currently active)"
+            }
+        }
+    }
+
+    /// Whether the answer changes with a place named in the turn, so a turn that names a
+    /// *specific* place must defer to System-2 rather than fast-path against home:
+    /// `weather` (the fast handler only knows the home forecast) and `time`/`date` (the
+    /// wall clock is local — "what time is it in London" is a different timezone).
+    pub fn place_sensitive(self) -> bool {
+        matches!(self, Intent::Weather | Intent::Time | Intent::Date)
+    }
+}
+
+impl std::fmt::Display for Intent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A label that is not one of the built-in [`Intent`]s (e.g. a custom config entry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownIntent(pub String);
+
+impl std::fmt::Display for UnknownIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown System-1 intent `{}`", self.0)
+    }
+}
+
+impl std::error::Error for UnknownIntent {}
+
+impl std::str::FromStr for Intent {
+    type Err = UnknownIntent;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Intent::ALL
+            .into_iter()
+            .find(|i| i.as_str() == s)
+            .ok_or_else(|| UnknownIntent(s.to_string()))
+    }
+}
+
+/// The built-in intents the router may resolve when the config leaves `intents` empty:
+/// every [`Intent`]. An intent listed here still only resolves if the orchestrator's
+/// handler preconditions hold (e.g. timer needs a parseable duration), otherwise the
+/// turn defers to System-2; the route-only [`Intent::Place`] always defers.
 pub fn default_intents() -> Vec<String> {
-    vec![
-        "weather".to_string(),
-        "timer".to_string(),
-        "time".to_string(),
-        "date".to_string(),
-        "timer_cancel".to_string(),
-        "timer_query".to_string(),
-        "weather_dismiss".to_string(),
-        "recipe_dismiss".to_string(),
-        "end_session".to_string(),
-        "stop_dismiss".to_string(),
-        "place".to_string(),
-    ]
+    Intent::ALL.iter().map(|i| i.as_str().to_string()).collect()
 }
 
 /// Parse a spoken timer/alarm duration into whole seconds, or `None` when the text has
@@ -142,28 +264,50 @@ pub struct DecisionRequest {
     pub transcript: String,
     /// A short label for what the display is currently showing (e.g. `"recipe"`), so
     /// screen-relative commands ("scroll down") can route. `None` on an idle display.
-    /// Populated in M1 from the turn's `DisplayContext`.
+    /// From the turn's `DisplayContext`; sent in the request `state` as `screen`.
     pub screen: Option<String>,
-    /// Recent `(user, assistant)` turns for follow-up disambiguation. Empty for an
-    /// ordinary single-shot turn. Populated in M1.
-    pub history: Vec<(String, String)>,
-    /// The household home location (e.g. `"Austin, Texas"`), from `LiveHomeLocation`.
-    /// Location-dependent intents like `weather` are ambiguous without a place, so the
-    /// HTTP engine uses this to retry an otherwise-deferred turn with the location folded
-    /// into the question. `None` when unset — no retry, the turn just defers.
-    pub location: Option<String>,
     /// Active-timer state the device reported this turn (running count / soonest
     /// remaining / labels), **orthogonal to `screen`** — a timer can run behind another
     /// widget. Ground truth for the `timer_query` / `timer_cancel` / `stop_dismiss`
     /// decisions (plans/system1-fast-decisions.md §17, §19). Empty when nothing runs.
     pub timers: crate::wyoming::protocol::TimerContext,
+    /// Who is asking (SpeakerScopedMemoryPlan.md §6, decision D4): how confidently the
+    /// voiceprint resolved and the person's household name. Never the internal
+    /// `spk-…` id, the match score or any embedding. A personal fast intent with an
+    /// unknown speaker must defer to System-2.
+    pub speaker: SpeakerSummary,
 }
 
-/// A resolved fast intent. M1+ extends this with structured args so the orchestrator
-/// can dispatch the matching tool / `DeviceAction`.
+/// The speaker as System-1 sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeakerSummary {
+    /// `identified | tentative | new | unknown`.
+    pub resolution: String,
+    /// The canonical household name, when the speaker is recognized and named.
+    pub name: Option<String>,
+}
+
+impl Default for SpeakerSummary {
+    fn default() -> Self {
+        Self {
+            resolution: "unknown".to_string(),
+            name: None,
+        }
+    }
+}
+
+impl SpeakerSummary {
+    /// Whether the speaker is recognized (identified or probable).
+    pub fn known(&self) -> bool {
+        matches!(self.resolution.as_str(), "identified" | "tentative")
+    }
+}
+
+/// A resolved fast intent: the routed label plus its calibrated confidence. The
+/// orchestrator parses `intent` into an [`Intent`] to pick a handler.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolution {
-    /// The routed intent id, e.g. `"weather"`, `"timer"`.
+    /// The routed intent label, e.g. `"weather"`, `"timer"` (see [`Intent::as_str`]).
     pub intent: String,
     /// The engine's calibrated confidence in this resolution (`0.0..=1.0`).
     pub confidence: f64,
@@ -269,10 +413,34 @@ mod tests {
         DecisionRequest {
             transcript: t.to_string(),
             screen: None,
-            history: Vec::new(),
-            location: None,
             timers: Default::default(),
+            speaker: Default::default(),
         }
+    }
+
+    #[test]
+    fn intent_labels_round_trip_and_unknown_labels_are_rejected() {
+        for intent in Intent::ALL {
+            assert_eq!(intent.as_str().parse::<Intent>(), Ok(intent));
+            assert!(
+                !intent.description().is_empty(),
+                "{intent} needs a criterion"
+            );
+        }
+        assert_eq!(
+            "music".parse::<Intent>(),
+            Err(UnknownIntent("music".to_string()))
+        );
+        assert!(Intent::Weather.place_sensitive());
+        assert!(Intent::Time.place_sensitive() && Intent::Date.place_sensitive());
+        assert!(!Intent::Timer.place_sensitive());
+    }
+
+    #[test]
+    fn default_intents_cover_every_intent_including_place_dismiss() {
+        let defaults = default_intents();
+        assert_eq!(defaults.len(), Intent::ALL.len());
+        assert!(defaults.iter().any(|i| i == "place_dismiss"));
     }
 
     #[tokio::test]

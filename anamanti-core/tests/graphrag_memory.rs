@@ -14,7 +14,7 @@ use anamanti_core::memory::backend::Recall;
 use anamanti_core::memory::chatlog::{ChatLog, ChatLogRecord};
 use anamanti_core::memory::embed::{Embedder, MockEmbedder};
 use anamanti_core::memory::entity::MockEntityExtractor;
-use anamanti_core::memory::helix::HelixMemory;
+use anamanti_core::memory::helix::{HelixMemory, NewTurn};
 use anamanti_core::memory::ingester::MemoryIngester;
 use anamanti_core::memory::HelixRecall;
 
@@ -52,9 +52,32 @@ fn unique_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// A turn by one identified person (`spk-test`) with an empty reply (so its stored
+/// text is just `transcript`).
+fn turn<'a>(
+    ext_id: &'a str,
+    ts: i64,
+    transcript: &'a str,
+    embedding: Vec<f32>,
+    entities: &'a [anamanti_core::memory::entity::Entity],
+) -> NewTurn<'a> {
+    NewTurn {
+        ext_id,
+        session: "s",
+        ts,
+        transcript,
+        reply: "",
+        embedding,
+        entities,
+        speaker_id: "spk-test",
+        speaker_name: None,
+    }
+}
+
 fn record(id: &str, transcript: &str, reply: &str, memories: &[&str]) -> ChatLogRecord {
     ChatLogRecord {
         id: id.to_string(),
+        turn_id: None,
         ts: 1,
         session_id: "sess-1".to_string(),
         transcript: transcript.to_string(),
@@ -62,9 +85,10 @@ fn record(id: &str, transcript: &str, reply: &str, memories: &[&str]) -> ChatLog
         memories_written: memories.iter().map(|s| s.to_string()).collect(),
         llm_backend: "mock".to_string(),
         model: None,
-        speaker_id: "household".to_string(),
+        speaker_id: "spk-test".to_string(),
         speaker_name: None,
         timing: None,
+        ..Default::default()
     }
 }
 
@@ -110,7 +134,7 @@ async fn full_pipeline_body() {
     let n = ingester.run_once().await.unwrap();
     assert_eq!(n, 3, "all three turns should ingest");
 
-    // Nodes: 1 household user + 3 turns + 1 memory + entities (jazz, music, weather,
+    // Nodes: the household/unknown/person users + 3 turns + 1 memory + entities (jazz, music, weather,
     // coffee) → well over the turn count.
     let nodes = helix.node_count().await.unwrap();
     assert!(
@@ -126,7 +150,7 @@ async fn full_pipeline_body() {
     //    jazz memory (graph expansion turn→MENTIONS→Entity→ABOUT→Memory).
     let recall = HelixRecall::new(helix.clone(), embedder.clone(), 6);
     let res = recall
-        .recall("what music do I like", None, 8)
+        .recall("what music do I like", Some("spk-test"), 8)
         .await
         .unwrap();
     let hits = res.hits;
@@ -156,16 +180,7 @@ async fn disk_store_body() {
         let helix = HelixMemory::open_disk(&dir, "persist", dims).await.unwrap();
         let vec = embedder.embed_one("remember the alamo").await.unwrap();
         helix
-            .ingest_turn(
-                "d1",
-                "s",
-                1,
-                "remember the alamo",
-                vec,
-                &[],
-                "household",
-                None,
-            )
+            .ingest_turn(turn("d1", 1, "remember the alamo", vec, &[]))
             .await
             .unwrap();
         let before = helix.node_count().await.unwrap();
@@ -208,16 +223,7 @@ async fn rename_entity_body() {
     }];
     let vec = embedder.embed_one("I live in Portlnad").await.unwrap();
     helix
-        .ingest_turn(
-            "t1",
-            "s",
-            1,
-            "I live in Portlnad",
-            vec,
-            &ents,
-            "household",
-            None,
-        )
+        .ingest_turn(turn("t1", 1, "I live in Portlnad", vec, &ents))
         .await
         .unwrap();
     let mvec = embedder
@@ -248,7 +254,7 @@ async fn rename_entity_body() {
     assert_eq!(fixed.memories, 1, "the memory's free text is corrected");
 
     // The graph now shows the corrected name and no trace of the misspelling.
-    let sample = helix.sample(10).await.unwrap();
+    let sample = serde_json::to_value(helix.sample(10).await.unwrap()).unwrap();
     let entities = sample["Entity"].as_array().unwrap();
     assert_eq!(entities.len(), 1, "rename edits in place, not a new node");
     assert_eq!(entities[0]["name"], "Portland");
@@ -263,7 +269,7 @@ async fn rename_entity_body() {
         kind: "thing".to_string(),
     }];
     helix
-        .ingest_turn("t2", "s", 2, "coffee", vec2, &coffee, "household", None)
+        .ingest_turn(turn("t2", 2, "coffee", vec2, &coffee))
         .await
         .unwrap();
     assert!(
@@ -297,28 +303,21 @@ async fn graph_view_body() {
 
     let vec = embedder.embed_one("I love jazz music").await.unwrap();
     helix
-        .ingest_turn(
-            "t1",
-            "s",
-            1,
-            "I love jazz music",
-            vec,
-            &[],
-            "household",
-            None,
-        )
+        .ingest_turn(turn("t1", 1, "I love jazz music", vec, &[]))
         .await
         .unwrap();
 
-    // Stats: a total plus a per-label breakdown that includes the ingested Turn.
-    let stats = helix.stats().await.unwrap();
+    // Stats: a total plus a per-label breakdown that includes the ingested Turn. The
+    // typed results serialize to the JSON shape the `/helix` page reads.
+    let stats = serde_json::to_value(helix.stats().await.unwrap()).unwrap();
     assert!(stats["total"].as_u64().unwrap() >= 2, "user + turn nodes");
     assert_eq!(stats["by_label"]["Turn"].as_u64().unwrap(), 1);
-    assert_eq!(stats["by_label"]["User"].as_u64().unwrap(), 1);
+    // The shared household + unknown users, plus the speaker.
+    assert_eq!(stats["by_label"]["User"].as_u64().unwrap(), 3);
 
     // Sample: the Turn node carries its text (a projected property) and no
     // `embedding` (deliberately excluded — it must never be dumped to the page).
-    let sample = helix.sample(10).await.unwrap();
+    let sample = serde_json::to_value(helix.sample(10).await.unwrap()).unwrap();
     let turns = sample["Turn"].as_array().unwrap();
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0]["text"], "I love jazz music");

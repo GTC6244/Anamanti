@@ -125,6 +125,7 @@ async fn run() -> anyhow::Result<()> {
     let log = ChatLog::open(&log_path)?;
     let mk = |id: &str, t: &str, r: &str, mem: &[&str]| ChatLogRecord {
         id: id.to_string(),
+        turn_id: None,
         ts: 1,
         session_id: "live".to_string(),
         transcript: t.to_string(),
@@ -132,9 +133,10 @@ async fn run() -> anyhow::Result<()> {
         memories_written: mem.iter().map(|s| s.to_string()).collect(),
         llm_backend: "mock".to_string(),
         model: None,
-        speaker_id: "household".to_string(),
+        speaker_id: "spk-live".to_string(),
         speaker_name: None,
         timing: None,
+        ..Default::default()
     };
     log.append(&mk(
         "l1",
@@ -166,7 +168,7 @@ async fn run() -> anyhow::Result<()> {
 
     let recall = HelixRecall::new(helix.clone(), embedder.clone(), 6);
     let query = "what kind of music am I into";
-    let res = recall.recall(query, None, 8).await?;
+    let res = recall.recall(query, Some("spk-live"), 8).await?;
     let hits = res.hits;
     println!("   query: {query:?}");
     println!(

@@ -146,12 +146,70 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `anamanti_chatlog.jsonl` and a background ingester (`memory/ingester.rs`) embeds
   it (OpenAI `text-embedding-3-small`, `OPENAI_API_KEY`) into a graph of
   `User/Turn/Memory/Entity` nodes, so recall does vector KNN + a graph hop rather
-  than keyword FTS. If `OPENAI_API_KEY` is absent or the graph fails to open,
+  than keyword FTS. **Non-answer turns are excluded from recall:** the ingester's
+  `is_non_answer(reply)` gate skips making a declined/"I can't find that"/clarification
+  turn a recallable `Turn` node — otherwise a run of them resurfaces under the prompt's
+  "What you remember about this person" block and few-shot-primes the model to repeat the
+  failure (a self-reinforcing loop on a mis-transcribed proper noun). The turn still lands
+  in the chat log (source of truth) and any **facts** it wrote are still ingested as
+  `Memory` nodes; only its raw `transcript\nreply` node is withheld. Graphs built before
+  the gate are cleaned once per backend start by `HelixMemory::purge_non_answer_turns`
+  (drops matching `Turn` nodes + their edges + vector-index entries; `Memory` facts
+  untouched). Beyond that automatic prune, the device **Memory** screen (Settings →
+  Memory) can **manually browse and delete** the graph: `anamanti-list-turns` /
+  `anamanti-list-entities` return `Turn` / `Entity` ("keyword") rows (filterable by
+  text, speaker, or mentioned entity), and `anamanti-delete-graph-node` drops a chosen
+  node. These are **Helix-index-only** edits (the chat log stays the source of truth, so
+  a rebuild/backend-switch can re-import a deleted turn); they ride the existing
+  device↔Core control path and need the HelixDB backend (SQLite recall answers
+  `ok:false`). The screen's third surface is the durable SQLite facts via the existing
+  `anamanti-list-memories`/`-delete-memory`/`-clear-memories` frames. If `OPENAI_API_KEY` is absent or the graph fails to open,
   recall **falls back to SQLite FTS** (writes are unaffected); `ANAMANTI_MEMORY_BACKEND=sqlite`
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
-  memory writes/recall and the prompt to that person (a shared "household" scope is
-  the floor); see `speaker_id_plan.md`.
+  memory writes/recall and the prompt to that person; see `speaker_id_plan.md`.
+  **Speaker-scoped memory** (`SpeakerScopedMemoryPlan.md`): every memory has a **scope**
+  — `person` (true for one identified person, recalled only for them), `household`
+  (deliberately true for everyone, recalled for every speaker), or `unknown` (said about
+  themselves by a voice that could not be confirmed — **kept but never recalled**, shown
+  in the admin console's review queue for attribution). An unattributed turn is the
+  `unknown` speaker, never the household. Each turn's speaker has a **resolution** —
+  `identified` (match ≥ `match_threshold`), `tentative` (between the thresholds, or a
+  short follow-up turn inheriting the previous identified speaker), `new` (a fresh
+  anonymous cluster) or `unknown`: identified/tentative speakers *read* their own +
+  household memories; only an identified speaker *writes* personal facts to themselves
+  (others' personal facts go to `unknown` with the best guess as `candidate_speaker_id`).
+  Facts are classified personal vs household by `memory::classify_scope` ("I/my/the
+  user" → personal; "we/our/the house/the wifi/everyone" → household). Every memory
+  records provenance (`said_by_speaker_id`, resolution, confidence, `turn_id`). A
+  **read-only short-clip match** (`speaker.min_identify_ms`, default 600 ms, plus
+  `short_clip_margin`) identifies short questions like "who am I?" without creating or
+  updating voiceprints. The prompt's identity line comes from the **voiceprint name**
+  (reconciled to the household roster's spelling — "Christina" → *Kristina*), never from
+  memory text; "who am I?" is a deterministic fast path; "my name is X" only names an
+  identified, still-anonymous voiceprint with the roster spelling (`speakers.name_source`
+  = `enrolled | admin | spoken`; enrollment-by-name never folds into a spoken-named
+  profile). Forgetting a voiceprint moves its memories to `unknown`. The embedder is a real ECAPA-TDNN ONNX
+  (WeSpeaker `voxceleb_ECAPA512`, 192-dim, pure-Rust `tract-onnx`) selected at runtime
+  by `speaker.model_path`. Beyond passive auto-clustering, the device **People** screen
+  has a guided **"Add a voice"** enrollment flow: it stamps an `enroll` display context
+  on ordinary wake-word turns (same suppress-the-LLM mechanism as the diagnostics screen —
+  **no second audio path**), the Core accumulates the captured samples into a named
+  voiceprint (`anamanti-enroll-finish`/`-cancel` → `anamanti-enroll-result`), then a verify
+  capture confirms recognition; see `SpeakerEnrollmentPlan.md`. The voice is **tied to the
+  household roster**: the device picks an existing member (the `anamanti-speakers` reply
+  carries the roster's `members` — names only, no contact PII) or enters a new name; the
+  Core saves under the member's canonical name, auto-adds a new name to the household, and
+  folds the samples into a person's existing same-named voiceprint instead of duplicating it.
+  A person's People-row menu also offers **"Add voice samples"**: the same guided phrase
+  capture, committed with a `speaker_id` on `anamanti-enroll-finish` so the samples fold into
+  that exact profile (keeping its name — an anonymous cluster stays anonymous; the household
+  roster is untouched). **Link to household member:** the People row menu sends
+  `anamanti-link-speaker {id, member}`; the Core (whose household roster is the authority)
+  rejects a non-member, otherwise merges `id` into that member's existing voiceprint via the
+  coordinated `SpeakerService::merge` (voiceprint + SQLite memories + clips + GraphRAG
+  history) or — if they have none — names `id` as the member, so each household member ends
+  up with one voiceprint.
 - **End-of-speech / VAD** — runs in the **Anamanti Core**, for **both** STT engines
   (neither does streaming VAD: `wyoming-faster-whisper` transcribes only on
   `audio-stop`, and whisper.cpp transcribes the buffered utterance on finalize). The
@@ -166,7 +224,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   engine-independent:
   after speech (a 250 ms onset debounce) followed by ~700 ms of trailing silence (or a
   6 s no-speech fallback), it finalizes the transcriber
-  (`anamanti-core/src/orchestrator.rs`, `stream_to_transcript`). The Echo Show device
+  (`anamanti-core/src/orchestrator/vad_loop.rs`, `stream_to_transcript`). The Echo Show device
   still runs **no VAD of its own** — it streams continuously and waits for the
   transcript.
 - **Wyoming TTS (Piper)** — synthesizes the reply into audio frames streamed back
@@ -226,7 +284,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - The **wake word, thresholds, and photo source** are device-local: the Flutter
   settings screen persists them (`SettingsStore` → JSON) and applies them by
   rebuilding the `WakeWordConfig` and restarting the engine / refreshing the
-  slideshow.
+  slideshow. Settings **applies changes immediately** (no Save button): device-local
+  changes are debounced + serialized so a burst costs at most one engine restart;
+  capture gain and both wake-word thresholds are pushed to the running engine live
+  (`update_diagnostics_tuning`, no restart); Core-managed changes are debounced and
+  revert on failure. Layout: a six-section side rail with two-column tabs that fit the
+  960×600 dp screen — see [`SettingsReorgPlan.md`](./SettingsReorgPlan.md) and
+  [`DisplayUI.md`](./DisplayUI.md) §9.
 - The **LLM backend + model and TTS voice** live on the Mac and are read/changed
   over a **project-local control protocol** on the device↔Anamanti Core hop —
   `anamanti-*` Wyoming frames (`describe`/`set` settings; `list`/`delete`/`clear`
@@ -267,6 +331,23 @@ predictable memory use and no GC pauses under the 1 GB limit.
   render a dropdown (with a "Server default" entry) and fall back to a free-text
   field when the list is unavailable; a hand-set voice not in the list stays
   selectable.
+- **Functions status snapshot** (device Settings → Assistant → Capabilities): a **read-only**
+  aggregate of what the Anamanti Core is configured to use for every capability —
+  cloud vs local, the model, and whether each required API key is set — so a user at
+  the display can see the assistant's setup (and spot a missing key) without the Mac
+  config page. The device fetches it over a dedicated control round trip
+  `anamanti-get-functions` → `anamanti-functions` (byte-identical `types` in both
+  crates; FRB `get_functions` → `OrchestratorClient.fetchFunctions()`). The Core's
+  `control::functions_response` builds one row per capability from the existing
+  `SharedSettings` accessors (`view`, `system1_view`, `stt_view`, the weather/places/
+  directions/Spotify/Cadora/AppSaid/calendar accessors) plus the live
+  `GraphRagController::status` for embeddings (threaded into the device server
+  alongside `catalog`/`notify`/`weather`). It covers LLM + web search + TTS (Config),
+  speech-to-text (Speech), directions/weather/places + Spotify/shopping list/phone
+  messages/calendar (Tools), fast decisions (System1), and embeddings (Memory). Like
+  the rest of the control path it never carries secret values — only each key's
+  set/unset bit — so the red "API key missing" warning on the device is driven by the
+  same `*_key_set` booleans the loopback config page uses.
 - **Anthropic auth mode** (`llm::anthropic_auth`): a per-provider toggle selects
   **API key** (`x-api-key` from `ANTHROPIC_API_KEY`) or **subscription OAuth**
   (`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`). Subscription tokens
@@ -276,6 +357,47 @@ predictable memory use and no GC pauses under the 1 GB limit.
   chat backend and the catalog share the provider so listing + turns authenticate
   identically. The mode rides the settings protocol (`anthropic_auth` field) and the
   config page toggle; OpenAI is API-key-only.
+- **Admin-console front-end** (`webconfig.rs` + `src/webconfig/*`): the whole config
+  UI is **plain static HTML in a Material Design layout styled with Tailwind CSS**,
+  served by the same hand-rolled loopback HTTP server — no page markup is generated in
+  Rust. Each page is an authored `.html` body (`overview.html`, `voice.html`, …)
+  wrapped by a static shell (`shell_head.html` + `shell_foot.html`: the top app bar
+  with status pills + theme toggle, and the collapsible navigation rail, with a
+  `{{TITLE}}` token `page()` fills in); shell behavior lives in `shell.js` and the
+  component kit (save bar, choice cards, locality chips, secret fields, drawers, tabs,
+  toasts) plus the **locality map** in `ui.js`. **Information architecture
+  (2026-10-14, `plans/CoreWebUIPlan.md`):** ten task-grouped pages — Overview, Voice,
+  Intelligence, Personality, Household, Integrations, Music & Devices, Memory,
+  Conversations, Keys & Accounts, System — each laid out on a 12-column grid to fit one
+  1920×1080 screen (data pages scroll inside their panes). Every option that can run
+  on this Mac, on the LAN or in the cloud carries a **locality chip**; address-backed
+  stages (Wyoming STT/TTS, Ollama, laya-serve) are classified from their configured
+  address by `webconfig/system.rs` (loopback → local, RFC 1918/`.local` → LAN, else
+  cloud), and cloud options show a **"Sends:"** line naming what leaves the house.
+  Legacy page routes 302 to their new homes; JSON/POST endpoints are unchanged. Tailwind is **vendored
+  precompiled**: `webconfig/tailwind/input.css` (theme + `@layer components`) is built
+  by `scripts/build-webui-css.sh` (the `tailwindcss` CLI) into the committed
+  `webconfig/panel.css`. All assets (`panel.css`, `shell.js`) are compiled into the
+  binary via `include_str!` and served as their own routes (`GET /panel.css`,
+  `GET /shell.js`) — so the single copied release binary still serves the entire UI
+  offline, with no CDN and nothing beside it. Page data flows through the existing
+  `*.json` endpoints the bodies fetch, plus three read-only aggregators:
+  `/overview.json` (every pipeline stage with engine + tier + health probe, the
+  integrations, connected displays, recent-turn latency), `/keys.json` (every secret /
+  OAuth link: set or not, seed env var, what uses it — never a value) and `/system.json`
+  (build, runtime, and a curated **redacted** snapshot of the boot config,
+  `webconfig::BootInfo`, built once in `main`).
+- **Cloud entity extraction toggle** (`memory/graphrag_control.rs`): GraphRAG entity
+  extraction is the one memory step that calls a cloud model (Anthropic,
+  `graphrag.extract_model`) even when the LLM and embedder are local. It sits behind a
+  `GatedExtractor` with a live on/off switch: `graphrag.extract` (`auto` default | `off`)
+  seeds it, the Memory page flips it (`POST /extraction/save`), and the choice persists
+  in `helix_path/extract_mode` (wins over the seed at boot). Off ⇒ ingested turns get no
+  entities and no turn text leaves the Mac for extraction; recall is pure vector KNN.
+- **Turn ↔ prompt join:** each turn mints a `turn_id` (`t-{unix_millis}-{n}`,
+  `orchestrator::turn::TURN_IDS`) at start and writes it to both its chat-log and
+  prompt-log record (`turn_id`, optional for older records), so the Conversations page
+  shows the exact prompt for a turn without timestamp guessing.
 - **Debug/inspection pages** (`webconfig.rs`, same loopback HTTP server as the
   config page, strictly read-only): `GET /chatlog`, `/prompts`, `/sqlite`, `/helix`
   render the recent chat log, the exact assembled LLM prompt per turn (captured to
@@ -512,11 +634,17 @@ predictable memory use and no GC pauses under the 1 GB limit.
   Steps, or `scroll` up/down/top/bottom). The device owns the resulting screen state —
   it persists across turns and idle while you cook — so, like timers, this is
   fire-and-forget from the Mac. See `plans/RecipePlan.md`.
+- **`anamanti-font`** (Anamanti Core → device): a project-local **device-action** frame
+  for the global on-screen font scale (`data.action` = `adjust`, `direction` =
+  `increase`/`decrease`). Emitted by the LLM `adjust_font` tool (and, optionally later, a
+  System-1 `font_increase`/`font_decrease` fast intent). The device owns + persists the
+  scale (one device-wide `TextScaler` on all ambient text), so this is fire-and-forget. See
+  `plans/FontScalePlan.md`.
 - **Display context on `audio-start`** (device → Anamanti Core): a **general,
   extensible** mechanism that tells the Core **what the display is currently showing**, so
   the model can *drive that screen by voice*. The device stamps a `data.screen` block on
   every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload.
-  Two kinds ship today:
+  The kinds that ship today:
   - **recipe:** `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
     ingredient_count, step_count}}` — the model can `recipe_control` (switch tab / scroll)
     or `close_recipe`.
@@ -524,13 +652,25 @@ predictable memory use and no GC pauses under the 1 GB limit.
     model knows the forecast is up and for where, so it answers follow-ups in context
     ("what about tomorrow" → `weather_lookup` for the same place) and closes it on "close
     it" (`close_weather`).
+  - **place:** `{kind:"place", place:{name, address}}` — a place card is up, so the model
+    answers follow-ups about it and closes it on request.
+  - **diagnostics:** `{kind:"diagnostics"}` (no payload) — the **Audio Diagnostics**
+    screen is foreground. Unlike the kinds above, this one does not enrich the turn; it
+    **suppresses** it. The orchestrator still runs STT and relays the transcript to the
+    device (so the recognized words show on the diagnostics screen), but then
+    **short-circuits the turn** — no speaker ID, no System-1, no LLM, no TTS, no
+    memory/chat-log — and sends a bare `audio-stop`. The screen is a diagnostic surface
+    only: a voice tone it hears must be shown but never processed by the assistant. It
+    reuses the ordinary wake-word turn (no second audio path).
 
   Absent on an idle screen (and the small weather clock chip is **not** a screen — only
   the full-screen forecast sets weather context). The orchestrator parses the block
   (`protocol::display_context` → a `DisplayContext` enum) and injects a one-line
   description into that turn's system prompt (`orchestrator::display_context_line`, one
-  arm per screen). **Adding a new voice-controllable screen** (music, photos) is a
-  `DisplayContext` variant + a prompt-line arm + a device-side `set_<screen>_context`
+  arm per screen) — except a **suppressing** context like `diagnostics`, which the
+  orchestrator handles by ending the turn early (before any LLM work) rather than by
+  contributing a prompt line. **Adding a new voice-controllable screen** (music, photos) is
+  a `DisplayContext` variant + a prompt-line arm + a device-side `set_<screen>_context`
   setter — the transport is unchanged; an unknown `kind` is ignored, so a newer device
   never breaks an older Core.
 
@@ -544,8 +684,9 @@ predictable memory use and no GC pauses under the 1 GB limit.
   follow-up turn, recent chat history — is assembled **Core-side** into the same system
   prompt; the display-context line is appended to it.) On the device, Rust holds the
   current block in a global slot (`engine::display_context` / `set_display_context`) set by
-  the FRB layer (`set_recipe_context` / `set_weather_context`) whenever a screen opens,
-  closes, or changes, and stamps it in `WyomingConnection::send_audio_start`.
+  the FRB layer (`set_recipe_context` / `set_weather_context` / `set_place_context` /
+  `set_diagnostics_context`) whenever a screen opens, closes, or changes, and stamps it in
+  `WyomingConnection::send_audio_start`.
 
 ### Proactive notifications (Approach A — persistent device-dialed channel)
 
@@ -599,6 +740,12 @@ mDNS + `instance_id` pin the voice path uses):
   ones, handled by `control::music_control_response` → the `spotify_control` controller),
   **not** on the persistent channel. Gated behind `music.enabled` + a linked Spotify; see
   `MusicPlan.md` (P6) and `DisplayUI.md` §4b.
+- All three persistent channels share one implementation per side: on the device,
+  `rust/src/wyoming/push_channel.rs` owns dial → hello → read → backoff (each channel
+  module only supplies its hello frame + a frame decoder) and `api/engine.rs` has one
+  `start_channel`/`stop_channel` pair behind the per-channel FRB entry points; on the Core,
+  each service wraps the generic `notify::ChannelRegistry`, and `server.rs` dispatches the
+  hello `role` via `PushChannel`. The frames themselves live once in `anamanti-protocol`.
 - The music screen is also **voice-controllable** via the "Display context" mechanism
   below: the device stamps a `DisplayContext::Music` block (`set_music_context`) on
   `audio-start` when a music screen is open, and the Core's `music_screen` rig tool emits a
@@ -640,7 +787,7 @@ design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
   the networking stays in Rust, consistent with the interop boundary (§3).
 - **Flutter owns orchestration + presentation**: `UpdateController` (a
   `ChangeNotifier` sidecar) checks on boot + every 6 h, compares versionCodes,
-  drives the `UpdateBanner` and the Settings → Updates page, and triggers
+  drives the `UpdateBanner` and the Settings → Device → Updates tab, and triggers
   download/install.
 - **Build flavors** `selfUpdate` (ships it) / `fdroid` (ships without it) keep the
   same signing key + `applicationId`; the key must never change (a self-update needs
@@ -751,6 +898,9 @@ design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
 | Auto-reconnect + status | Robust to Mac downtime; slideshow stays up |
 | Idle photo slideshow (Google) | Ambient value when idle; user picks the folder |
 | Proactive notifications via a persistent **device-dialed** channel (Approach A) | Mac reaches the display unprompted while keeping the device the dialer — reuses the existing mDNS + `instance_id` pin and the blessed auto-reconnect model; avoids a reverse connection / device listener / new trust direction. A doorbell (device advertises, Mac nudges) was considered but only wins idle-socket cost, which is free on a mains-powered display, at the price of lossy triggers. Shipped visual-only first (see §4) |
+| One shared Wyoming protocol crate (`anamanti-protocol/`) | Core and Display previously each kept a copy of the framing + ~58 frame constants; one crate makes a wire change a single edit, golden-bytes tests pin the encoding, and the framing reader caps header (64 KiB), `data` (4 MiB) and `payload` (8 MiB) sizes so a LAN peer can't force a huge allocation. Both sides re-export it as `crate::wyoming::protocol`; cargokit builds the device crate in place, so the path dependency works on device builds |
+| LLM tools are a name-keyed `VoiceTool` registry built from `ToolDeps` (`llm/rig/tools/`) | One place per tool (definition + guidance + invoke); settings rebuild the whole tool set from one function (`LlmFactory::for_settings`) so saving one setting can never drop another tool. Every rig round streams (tool calls are detected mid-stream), and every rig backend — incl. Anthropic subscription OAuth and OpenAI — gets tools + follow-up history; the `native` engine remains as an explicitly capability-limited fallback |
+| Admin console is loopback-only (Host/Origin + JSON content-type checks) | Settings, secrets and OAuth flows are reachable from it, so cross-site POSTs and DNS rebinding from a browser on the Mac are rejected (403/415) centrally before routing |
 | In-app APK auto-updater over Cloudflare R2 (Rust download/verify + native `PackageInstaller`), with `selfUpdate`/`fdroid` flavors | First-party, hands-off updates for a headless kiosk without depending on the third-party Obtainium app; networking stays in Rust (ureq+rustls, the one HTTPS client) and only the unavoidable install is a native channel; SHA-256 pins integrity; flavors let F-Droid ship without the self-updater. Keep Obtainium in parallel until hardware-proven. See §4 + [`UpdaterPlan.md`](./UpdaterPlan.md) |
 
 ---
@@ -796,7 +946,34 @@ There are **two flavors** of tool:
   the config page (Household tab) and the Anamanti Core redeems it
   (`/voice/links/redeem`) for a durable voice-link token stored in the 0600 settings
   file. It never touches Supabase directly — Cadora owns list creation, member
-  attribution, and dedupe.
+  attribution, and dedupe. The **`send_phone_message`** tool has the same external
+  shape: it holds an injected `Arc<dyn PhoneMessenger>` (`anamanti-core/src/appsaid/`)
+  and pushes a message — often a Google Maps link — to a named family member's phone
+  via **AppSaid** (a self-hosted HTML-push worker), one `POST {worker_url}/v1/messages`
+  per recipient. It resolves the spoken name to the recipient's AppSaid `user_key`
+  (from `appsaid.recipients` in the config), builds a Maps link from a `place` when no
+  explicit `url` is given, and speaks back a short confirmation. The sender app token is
+  a secret (`APPSAID_APP_TOKEN` / config page, 0600), never in the JSON config; the tool
+  is advertised only when the worker URL + app token + at least one recipient are all
+  present, and relinks/withdraws live like `spotify_control`.
+  **Recipients are unified on the household.** Each person lives in the household roster
+  (`HouseholdMember`) with an **`appsaid` address** (their `user_key`) alongside their
+  emails/phones; the recipient roster is **derived** from members that have one (the
+  household is the single source of truth). Set it two ways: paste it per-person on the
+  config page → Household tab, or link it from the device.
+  **Recipient pairing (TV-style, device).** The family member opens the AppSaid app →
+  "Link another device" to show a 4-character code, and on the Echo Show, **Settings →
+  Link a phone** (`PairPhoneScreen`) takes that code plus a name. The device sends both to
+  the Core over a control round-trip (**`anamanti-pair-phone` → `anamanti-pair-result`**, a
+  clone of `anamanti-get-drive-token` handled in the async `control::handle_control`); the
+  Core redeems the code (`appsaid::claim_pairing_code` → `POST {worker_url}/v1/pair/claim`),
+  learns the phone's `user_key`, and stores it on the matching household member via
+  `SharedSettings::add_appsaid_recipient` — **auto-adding the person to the household** if
+  no member matches, so a paired contact is always in the roster. A household edit
+  re-derives the roster and rebuilds the tool (so `apply_household` now rebuilds the LLM,
+  like `apply_appsaid`). The claimed `user_key` never rides back to the device; only an
+  `ok`/`message` result does. A legacy `appsaid.recipients` config seed is folded into the
+  household at boot.
 - **Action tool** — additionally causes an effect on the Echo Show (e.g.
   `set_timer`). The tool cannot reach the device directly (it runs inside the LLM
   loop, which has no socket), so it emits a **`DeviceAction`** onto a per-turn
@@ -830,11 +1007,11 @@ FRB event → Flutter UI. To add a new action, mirror these steps:
    `Option<&ActionSink>` and `send`s a new `DeviceAction` variant
    (`anamanti-core/src/llm/mod.rs`) instead of doing the work locally. Action tools are
    registered unconditionally (they need no config).
-2. **Relay** (`anamanti-core/src/orchestrator.rs`): the reply loop already drains the per-turn
+2. **Relay** (`anamanti-core/src/orchestrator/speech_out.rs`): the reply loop already drains the per-turn
    action channel (`drain_device_actions`) and writes the frame; add a match arm
    mapping the new `DeviceAction` to its `WyomingEvent` constructor.
-3. **Wire frame** (`anamanti-core/src/wyoming/protocol.rs` **and** `anamanti-display/rust/src/wyoming/protocol.rs`,
-   kept **byte-identical** with round-trip tests in both crates): add an `anamanti-*`
+3. **Wire frame** (the shared `anamanti-protocol` crate, re-exported by both `anamanti-core/src/wyoming/protocol.rs` and `anamanti-display/rust/src/wyoming/protocol.rs`,
+   one definition with golden-bytes round-trip tests): add an `anamanti-*`
    `type` const, constructor(s), and — on the device side — a decoder
    (e.g. `timer_command()`).
 4. **Device intake** (`anamanti-display/rust/src/wyoming/client.rs`): add a `TurnUpdate` variant and a
@@ -862,6 +1039,47 @@ FRB event → Flutter UI. To add a new action, mirror these steps:
 
 Build/verify each layer independently: `cargo test` for `anamanti-core/` and `anamanti-display/rust/`,
 `flutter test` + `flutter analyze` for the UI.
+
+### 8.4 Output personalities (Core-side, pure output tuning)
+
+**Personalities** change only how the assistant's replies *sound* — tone, word choice,
+delivery — never what it knows, remembers, or which tools it calls. The feature is an
+on/off switch plus a selectable style, with the catalog of styles editable from the Core
+GUI. It is deliberately a **Core-only** concern: nothing crosses the Wyoming boundary and
+there is no Display UI.
+
+- **State + catalog** live in the settings overlay (`Personality` in
+  `anamanti-core/src/settings.rs`): `enabled`, `active` (a key; empty/"normal" = off), and
+  `definitions` (the editable `{key,label,description}` catalog, seeded with the built-ins
+  — *overly enthusiastic, heavy sarcasm, depressed, 1940s gangster, Donald Trump*). It is
+  part of `PersistedSettings`/`RuntimeSettings` (persisted to `anamanti_settings.json`,
+  read from the per-turn snapshot) and has **no `anamanti.json` seed** — it's a pure
+  runtime/GUI concern. Changing it **never rebuilds the LLM backend** (like `household`).
+- **Prompt injection** (`orchestrator/prompt.rs`, `personality_prompt`): during prompt assembly
+  the snapshot's active personality is appended as a **trailing, fenced style block** —
+  "deliver your reply in this voice; this changes ONLY tone… never facts, memory, or
+  tools". A short always-present line lists the available personality names + the current
+  one so the model can switch by voice. Both read from the live snapshot, so a config-page
+  or voice change takes effect on the next turn. Nothing is written to memory/recall.
+- **Voice control, two layers** — both end at the same `SharedSettings::set_active_personality`
+  (resolving the name against the live catalog, "normal"/"off" disabling), so a change takes
+  effect on the next turn's snapshot with no LLM rebuild and no device frame:
+  1. **Deterministic fast path** (`orchestrator::detect_personality_switch`), checked
+     *before* the LLM. It fires only on a switch **trigger** phrase (`talk like`, `switch
+     to`, `become`, `personality`, `turn off`, …) **and** either a catalog name (key/label,
+     case-insensitive, longest-first) or an explicit **off** intent ("normal" / "turn off"),
+     with off winning over a name so "turn off the gangster voice" disables. On a match it
+     flips the personality in place and returns a canned spoken confirmation as a one-item
+     reply stream, **skipping the model entirely** (like the persona fast path). Conservative
+     by design: ordinary speech and a bare name without a trigger never match.
+  2. **`set_personality` rig tool** (always registered, like the timer tools) — the fallback
+     the model invokes for phrasings the fast path doesn't catch. It emits a **Core-side**
+     `DeviceAction::SetPersonality { name }` that `drain_device_actions` applies to the same
+     setter rather than writing a device frame.
+- **GUI** = the config page **Personality** tab (`/personality`, `webconfig/personality.html`
+  + `personality_status_json`/`personality_save_json`): toggle on/off, pick the active one,
+  and edit/add/remove personalities (label + style description). A full-record save through
+  `apply_personality`, mirroring the Household tab.
 
 ---
 

@@ -26,6 +26,13 @@
 #
 # Bump `version:` in pubspec.yaml first (e.g. 1.2.0+12). The `+N` build number is
 # the Android versionCode and MUST increase every release.
+#
+# Stale-UI guard: the build starts from a clean Gradle output dir (build/app), and
+# before publishing the script compares the new APK's compiled Dart UI
+# (lib/armeabi-v7a/libapp.so) with the currently published release's. Identical ⇒
+# it refuses to publish — that is how 1.0.18 shipped 1.0.17's UI (a stale Gradle
+# mergeJniLibFolders output was repackaged). For a deliberate native/Rust-only
+# release with no Dart change, set ALLOW_SAME_DART=1.
 
 set -euo pipefail
 
@@ -41,6 +48,13 @@ NOTES="${NOTES:-Bug fixes and improvements}"
 WRANGLER="${WRANGLER:-npx wrangler}"
 UPDATE_BASE_URL="${UPDATE_BASE_URL%/}" # strip any trailing slash
 
+# Derive the R2 key prefix from any path component of UPDATE_BASE_URL. The bucket
+# is shared across products (e.g. immediacy-releases), so Anamanti lives under a
+# per-product subpath like .../anamanti → objects are uploaded as `anamanti/…`.
+# A bare domain (no path) yields an empty prefix (bucket root).
+R2_PREFIX="$(printf '%s' "$UPDATE_BASE_URL" | sed -E 's#^https?://[^/]+##; s#^/##')"
+[ -n "$R2_PREFIX" ] && R2_PREFIX="${R2_PREFIX}/"
+
 # --- read version + versionCode from pubspec.yaml (version: X.Y.Z+N) ---
 VERSION_LINE="$(grep -m1 '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//')"
 VERSION_NAME="${VERSION_LINE%%+*}"
@@ -55,17 +69,51 @@ echo "Releasing versionName=$VERSION_NAME versionCode=$VERSION_CODE"
 # --- build the signed selfUpdate release APK ---
 # android-arm: the Echo Show 8 (crown) is 32-bit armeabi-v7a (see agents.md).
 echo "Building signed selfUpdate release APK…"
+# Start from a clean Gradle output dir: an incremental build has been seen to keep a
+# stale merged libapp.so (Gradle's mergeJniLibFolders reported up-to-date while
+# Flutter's fresh AOT output had changed), silently repackaging an old Dart UI. The
+# Flutter (.dart_tool) and Cargo caches are kept, so this only re-runs packaging.
+rm -rf build/app
 flutter build apk --release --flavor selfUpdate --target-platform android-arm
 APK_SRC="build/app/outputs/flutter-apk/app-selfUpdate-release.apk"
 [ -f "$APK_SRC" ] || { echo "error: APK not found at $APK_SRC" >&2; exit 1; }
 
-# --- compute SHA-256 (portable across macOS/Linux) ---
-if command -v sha256sum >/dev/null 2>&1; then
-  SHA256="$(sha256sum "$APK_SRC" | awk '{print $1}')"
-else
-  SHA256="$(shasum -a 256 "$APK_SRC" | awk '{print $1}')"
-fi
+# --- SHA-256 helper (portable across macOS/Linux): file arg, or stdin when omitted ---
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@" | awk '{print $1}'
+  else
+    shasum -a 256 "$@" | awk '{print $1}'
+  fi
+}
+SHA256="$(sha256 "$APK_SRC")"
 echo "sha256=$SHA256"
+
+# --- stale-UI guard: refuse to republish the previous release's compiled Dart UI ---
+APP_SO="lib/armeabi-v7a/libapp.so"
+NEW_DART="$(unzip -p "$APK_SRC" "$APP_SO" | sha256)"
+PREV_URL="$(curl -fsS "$UPDATE_BASE_URL/latest.json" 2>/dev/null \
+  | sed -n 's/.*"apkUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+if [ -z "$PREV_URL" ]; then
+  echo "note: no published latest.json/apkUrl found — skipping the stale-UI check"
+else
+  PREV_APK="$(mktemp)"
+  if curl -fsS -o "$PREV_APK" "$PREV_URL"; then
+    PREV_DART="$(unzip -p "$PREV_APK" "$APP_SO" | sha256)"
+    echo "libapp.so: new=${NEW_DART:0:12} published=${PREV_DART:0:12} ($PREV_URL)"
+    if [ "$NEW_DART" = "$PREV_DART" ] && [ "${ALLOW_SAME_DART:-0}" != "1" ]; then
+      rm -f "$PREV_APK"
+      echo "error: the new APK's compiled Dart UI ($APP_SO) is byte-identical to the" >&2
+      echo "  published release's. Either the build reused a stale libapp.so (try a" >&2
+      echo "  'flutter clean' and rebuild), or this release has no Dart change — then" >&2
+      echo "  re-run with ALLOW_SAME_DART=1. Nothing was uploaded." >&2
+      exit 1
+    fi
+  else
+    echo "warning: couldn't download the published APK ($PREV_URL) — skipping the stale-UI check" >&2
+  fi
+  rm -f "$PREV_APK"
+fi
 
 # --- write latest.json ---
 OUT_DIR="build/r2"
@@ -85,12 +133,15 @@ cat "$OUT_DIR/latest.json"
 
 # --- upload: APK first, then latest.json (so the manifest never points at a
 #     not-yet-uploaded APK) ---
-echo "Uploading APK → r2://$R2_BUCKET/$APK_NAME"
-$WRANGLER r2 object put "$R2_BUCKET/$APK_NAME" --file "$OUT_DIR/$APK_NAME" \
-  --content-type application/vnd.android.package-archive
-echo "Uploading manifest → r2://$R2_BUCKET/latest.json"
-$WRANGLER r2 object put "$R2_BUCKET/latest.json" --file "$OUT_DIR/latest.json" \
-  --content-type application/json
+# NOTE: --remote is REQUIRED. Without it, wrangler v3+ writes to a LOCAL simulator
+# store ("Resource location: local") and nothing is published to the real bucket —
+# the device then keeps 404ing. Always target the remote R2 instance.
+echo "Uploading APK → r2://$R2_BUCKET/${R2_PREFIX}$APK_NAME"
+$WRANGLER r2 object put "$R2_BUCKET/${R2_PREFIX}$APK_NAME" --file "$OUT_DIR/$APK_NAME" \
+  --content-type application/vnd.android.package-archive --remote
+echo "Uploading manifest → r2://$R2_BUCKET/${R2_PREFIX}latest.json"
+$WRANGLER r2 object put "$R2_BUCKET/${R2_PREFIX}latest.json" --file "$OUT_DIR/latest.json" \
+  --content-type application/json --remote
 
 echo
 echo "Done. Devices will pick up versionCode $VERSION_CODE on their next check"

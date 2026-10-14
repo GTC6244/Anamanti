@@ -137,6 +137,7 @@ void main() {
       download: ({required apkUrl, required expectedSha256, required destPath}) =>
           stream.stream,
       cacheDir: () async => '/tmp',
+      fileExists: (_) async => true,
     );
     addTearDown(c.dispose);
 
@@ -195,6 +196,7 @@ void main() {
       download: ({required apkUrl, required expectedSha256, required destPath}) =>
           stream.stream,
       cacheDir: () async => '/tmp',
+      fileExists: (_) async => true,
     );
     addTearDown(c.dispose);
 

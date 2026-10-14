@@ -9,6 +9,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/music_data.dart';
+import 'package:anamanti_display/src/ui/album_art.dart';
 
 /// Format a clock as `m:ss` (seconds zero-padded, minutes not). Negatives clamp
 /// to zero. Used for both the position and duration labels.
@@ -70,7 +71,12 @@ class NowPlayingView extends StatelessWidget {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      _artwork(),
+                      AlbumArt(
+                        uri: music.artworkUri,
+                        size: 280,
+                        radius: 16,
+                        iconSize: 96,
+                      ),
                       const SizedBox(width: 28),
                       Expanded(child: _details()),
                     ],
@@ -107,45 +113,12 @@ class NowPlayingView extends StatelessWidget {
             tooltip: 'Close',
             onPressed: onClose,
             iconSize: 32,
-            icon: Icon(Icons.close, color: Colors.white.withValues(alpha: 0.85)),
+            icon: Icon(
+              Icons.close,
+              color: Colors.white.withValues(alpha: 0.85),
+            ),
           ),
         ],
-      ),
-    );
-  }
-
-  /// The large album artwork, capped in size and with a graceful fallback to a
-  /// music-note icon so a slow/failed image never blocks the card. When there's
-  /// no artwork URL at all we show the fallback directly (no network fetch).
-  Widget _artwork() {
-    if (!music.hasArtwork) return _artworkFallback();
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: Image.network(
-        music.artworkUri,
-        width: 280,
-        height: 280,
-        fit: BoxFit.cover,
-        gaplessPlayback: true,
-        errorBuilder: (_, _, _) => _artworkFallback(),
-        loadingBuilder: (context, child, progress) =>
-            progress == null ? child : _artworkFallback(),
-      ),
-    );
-  }
-
-  Widget _artworkFallback() {
-    return Container(
-      width: 280,
-      height: 280,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Icon(
-        Icons.music_note,
-        size: 96,
-        color: Colors.white.withValues(alpha: 0.5),
       ),
     );
   }
@@ -204,8 +177,9 @@ class NowPlayingView extends StatelessWidget {
   }
 
   Widget _progress() {
-    final value =
-        music.durationSecs > 0 ? (music.positionSecs / music.durationSecs).clamp(0.0, 1.0) : 0.0;
+    final value = music.durationSecs > 0
+        ? (music.positionSecs / music.durationSecs).clamp(0.0, 1.0)
+        : 0.0;
     final label = TextStyle(
       color: Colors.white.withValues(alpha: 0.7),
       fontSize: 14,
@@ -250,7 +224,9 @@ class NowPlayingView extends StatelessWidget {
           onPressed: onPlayPause,
           iconSize: 72,
           icon: Icon(
-            music.playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
+            music.playing
+                ? Icons.pause_circle_filled
+                : Icons.play_circle_filled,
             color: _accent,
           ),
         ),

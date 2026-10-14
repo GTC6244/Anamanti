@@ -255,8 +255,8 @@ impl LocalNomicEmbedder {
             special_tokens_map_file: read("special_tokens_map.json")?,
             tokenizer_config_file: read("tokenizer_config.json")?,
         };
-        let model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files)
-            .with_pooling(Pooling::Mean);
+        let model =
+            UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files).with_pooling(Pooling::Mean);
         let options = InitOptionsUserDefined::new().with_max_length(Self::MAX_LENGTH);
         let embedder = TextEmbedding::try_new_from_user_defined(model, options)
             .map_err(|e| anyhow::anyhow!("initializing nomic embedder: {e}"))?;
@@ -268,7 +268,11 @@ impl LocalNomicEmbedder {
 
     /// Prefix every input, run fastembed (mean-pool + L2-normalize), then apply
     /// Matryoshka truncation + re-normalization if `dims < NOMIC_FULL_DIMS`.
-    async fn embed_prefixed(&self, prefix: &'static str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_prefixed(
+        &self,
+        prefix: &'static str,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -285,12 +289,7 @@ impl LocalNomicEmbedder {
             if dims < NOMIC_FULL_DIMS {
                 for v in &mut vectors {
                     v.truncate(dims);
-                    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    if norm > 0.0 {
-                        for x in v.iter_mut() {
-                            *x /= norm;
-                        }
-                    }
+                    crate::vecmath::l2_normalize_in_place(v);
                 }
             }
             Ok(vectors)
@@ -376,12 +375,7 @@ fn embed_mock(text: &str, dims: usize) -> Vec<f32> {
     }
     // L2-normalize so cosine similarity behaves; empty text → tiny nonzero vector
     // (a zero vector has undefined direction for cosine).
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in &mut v {
-            *x /= norm;
-        }
-    } else {
+    if !crate::vecmath::l2_normalize_in_place(&mut v) {
         v[0] = 1.0;
     }
     v
@@ -553,7 +547,10 @@ mod tests {
             assert_eq!(docs.len(), 2);
             assert_eq!(docs[0].len(), NOMIC_FULL_DIMS);
             let norm = docs[0].iter().map(|x| x * x).sum::<f32>().sqrt();
-            assert!((norm - 1.0).abs() < 1e-3, "expected unit length, got {norm}");
+            assert!(
+                (norm - 1.0).abs() < 1e-3,
+                "expected unit length, got {norm}"
+            );
 
             // A jazz query sits closer to the jazz document than the travel one.
             let q = e.embed_query("jazz records are my favorite").await.unwrap();
@@ -589,9 +586,16 @@ mod tests {
             let e = LocalNomicEmbedder::open(&model, &tok, 256).unwrap();
             assert_eq!(e.dimensions(), 256);
             let v = e.embed_one("jazz music").await.unwrap();
-            assert_eq!(v.len(), 256, "Matryoshka should truncate to the configured dims");
+            assert_eq!(
+                v.len(),
+                256,
+                "Matryoshka should truncate to the configured dims"
+            );
             let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            assert!((norm - 1.0).abs() < 1e-3, "truncated vector must be re-normalized");
+            assert!(
+                (norm - 1.0).abs() < 1e-3,
+                "truncated vector must be re-normalized"
+            );
         }
 
         #[test]

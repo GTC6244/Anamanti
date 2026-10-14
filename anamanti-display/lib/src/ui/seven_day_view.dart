@@ -161,29 +161,35 @@ class _DayColumn extends StatelessWidget {
             size: 44,
             color: weatherIconColor(day.weatherCode, isDay: true),
           ),
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                '${day.high}$unitSuffix',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 30,
-                  fontWeight: FontWeight.w700,
-                  height: 1.0,
+          // Scale-to-fit the high/low: with the global font scale raised, a 3-digit
+          // temperature could otherwise wrap in this narrow column. `scaleDown` only
+          // shrinks when it would overflow, so the default (1.0×) size is unchanged.
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${day.high}$unitSuffix',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 30,
+                    fontWeight: FontWeight.w700,
+                    height: 1.0,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${day.low}°',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.6),
-                  fontSize: 22,
-                  fontWeight: FontWeight.w500,
-                  height: 1.0,
+                const SizedBox(height: 4),
+                Text(
+                  '${day.low}°',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.6),
+                    fontSize: 22,
+                    fontWeight: FontWeight.w500,
+                    height: 1.0,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
           // Precip chance, or a spacer so the columns stay vertically aligned.
           if (day.precipProb > 0)

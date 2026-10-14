@@ -49,9 +49,8 @@ mod tests {
         DecisionRequest {
             transcript: t.to_string(),
             screen: None,
-            history: Vec::new(),
-            location: None,
             timers: Default::default(),
+            speaker: Default::default(),
         }
     }
 

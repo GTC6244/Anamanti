@@ -280,14 +280,25 @@ pub enum WakeWordEventKind {
     /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
     /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
     RecipeScroll,
-    /// Music mode: a voice `music_screen` command. `music_screen` is the target screen
-    /// (`"now_playing"` / `"up_next"` / `"hidden"`). Only acts when music is playing.
+    /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
+    /// command. The direction (`"increase"` / `"decrease"`) rides the generic
+    /// `recipe_action` field (the same string carrier as `RecipeScroll`). The UI bumps the
+    /// global font scale and persists it.
+    FontAdjust,
+    /// Music mode: a voice `music_screen` command. The target screen (`"now_playing"` /
+    /// `"up_next"` / `"hidden"`) rides the generic `recipe_action` string carrier (as
+    /// `FontAdjust` does). Only acts when music is playing.
     MusicScreen,
     /// Phase 5: the camera proximity sensor's present/absent state changed. `present`
     /// is `true` when someone has approached the display (brighten) and `false` when
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
     /// transitions, never per frame.
     Presence,
+    /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
+    /// guided capture (a training sample or the verify check). `enroll_json` carries the
+    /// raw `anamanti-enroll-result` data block (phase / accepted / samples / consistency /
+    /// confidence / speaker_id / name / message); the enroll screen parses it to advance.
+    EnrollResult,
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
@@ -353,9 +364,9 @@ pub struct WakeWordEvent {
     /// The recipe navigation/scroll argument: the target tab (`RecipeNavigate`) or the
     /// scroll direction (`RecipeScroll`). Empty for every other kind.
     pub recipe_action: String,
-    /// The music screen target for a `MusicScreen` voice command (`"now_playing"` /
-    /// `"up_next"` / `"hidden"`). Empty for every other kind.
-    pub music_screen: String,
+    /// The enrollment-step result as a JSON string (`EnrollResult`); empty for every
+    /// other kind. The enroll screen decodes it to show progress / the verify outcome.
+    pub enroll_json: String,
 }
 
 impl WakeWordEvent {
@@ -382,7 +393,7 @@ impl WakeWordEvent {
             weather_json: String::new(),
             place_json: String::new(),
             recipe_action: String::new(),
-            music_screen: String::new(),
+            enroll_json: String::new(),
         }
     }
 
@@ -559,6 +570,13 @@ impl WakeWordEvent {
         Self::base(WakeWordEventKind::DismissPlace)
     }
 
+    pub(crate) fn enroll_result(enroll_json: String) -> Self {
+        Self {
+            enroll_json,
+            ..Self::base(WakeWordEventKind::EnrollResult)
+        }
+    }
+
     pub(crate) fn recipe_navigate(target: String) -> Self {
         Self {
             recipe_action: target,
@@ -575,8 +593,15 @@ impl WakeWordEvent {
 
     pub(crate) fn music_screen(screen: String) -> Self {
         Self {
-            music_screen: screen,
+            recipe_action: screen,
             ..Self::base(WakeWordEventKind::MusicScreen)
+        }
+    }
+
+    pub(crate) fn font_adjust(direction: String) -> Self {
+        Self {
+            recipe_action: direction,
+            ..Self::base(WakeWordEventKind::FontAdjust)
         }
     }
 
@@ -610,16 +635,17 @@ pub fn is_wake_word_engine_running() -> bool {
     crate::engine::is_running()
 }
 
-/// Live-adjust the capture gain (dB) and idle wake-word detection threshold on the
-/// **running** engine without restarting it, so the audio-diagnostics screen's
-/// sliders take effect instantly while the user watches the meters. The engine
-/// re-reads both values each audio block. They are re-seeded from [`WakeWordConfig`]
-/// on the next engine start, so persist the chosen values to settings to keep them
-/// across restarts. A harmless no-op when no engine is running. `gain_db` is clamped
-/// to `[0, 36]`; `threshold` to `[0, 1]`.
+/// Live-adjust the capture gain (dB), the idle wake-word detection threshold and the
+/// active (in-turn, "sensitivity while speaking") threshold on the **running** engine
+/// without restarting it, so Settings and the audio-diagnostics screen take effect
+/// instantly. The engine re-reads the values each audio block. They are re-seeded from
+/// [`WakeWordConfig`] on the next engine start, so persist the chosen values to
+/// settings to keep them across restarts. A harmless no-op when no engine is running.
+/// `gain_db` is clamped to `[0, 36]`; both thresholds to `[0, 1]`. While a turn is
+/// active the effective threshold is `max(active_threshold, threshold)`.
 #[frb(sync)]
-pub fn update_diagnostics_tuning(gain_db: f32, threshold: f32) {
-    crate::engine::update_tuning(gain_db, threshold);
+pub fn update_diagnostics_tuning(gain_db: f32, threshold: f32, active_threshold: f32) {
+    crate::engine::update_tuning(gain_db, threshold, active_threshold);
 }
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
@@ -744,7 +770,7 @@ pub fn set_music_context(
     artist: String,
     screen: String,
 ) {
-    let value = if active {
+    let context = if active {
         Some(serde_json::json!({
             "kind": "music",
             "music": {
@@ -757,7 +783,78 @@ pub fn set_music_context(
     } else {
         None
     };
-    crate::engine::set_display_context(value);
+    crate::engine::set_display_context(context);
+}
+
+/// Report that the **audio-diagnostics** screen is (or is no longer) foreground as the
+/// device's display context. Unlike the recipe/weather/place screens — which enrich the
+/// LLM turn — this context makes the next voice turn **transcription-only**: the
+/// orchestrator echoes the STT transcript to the device for on-screen display and then
+/// stops, never running the LLM/TTS. It carries no state (the bare `kind` is the signal).
+///
+/// The diagnostics screen's setter for the general display-context mechanism (see
+/// [`set_recipe_context`] / [`crate::engine::set_display_context`]). Flutter calls it with
+/// `active == true` when the Audio Diagnostics screen opens and `active == false` when it
+/// closes (clearing the context back to an idle screen).
+#[frb(sync)]
+pub fn set_diagnostics_context(active: bool) {
+    let screen = if active {
+        Some(serde_json::json!({ "kind": "diagnostics" }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(screen);
+}
+
+/// Report that the **voice-enrollment** screen is foreground (SpeakerEnrollmentPlan.md
+/// Phase 2) as the device's display context, so the next voice turn's `audio-start`
+/// routes the captured speech to the orchestrator's enrollment accumulator instead of
+/// the assistant. Like diagnostics, this is a **suppressing** context — no LLM/TTS — but
+/// it carries the session grouping the captures, the name being enrolled, the sample
+/// index (progress), and the `phase` (`"sample"` to train, `"verify"` for the read-only
+/// recognition check after commit).
+///
+/// Flutter sets it (`active == true`) just before each phrase capture and clears it
+/// (`active == false`) when the enroll screen closes. The enroll screen reuses the
+/// ordinary wake-word turn for capture, so there is no second audio path.
+#[frb(sync)]
+pub fn set_enroll_context(
+    active: bool,
+    session: String,
+    name: String,
+    sample_index: u32,
+    phase: String,
+) {
+    let screen = if active {
+        Some(serde_json::json!({
+            "kind": "enroll",
+            "enroll": {
+                "session": session,
+                "name": name,
+                "sample_index": sample_index,
+                "phase": phase,
+            },
+        }))
+    } else {
+        None
+    };
+    crate::engine::set_display_context(screen);
+}
+
+/// Report the device's **font-scaling context** so the next voice turn's `audio-start`
+/// carries it to the orchestrator as the `screen.font` sibling (orthogonal to the
+/// foreground widget, like `screen.timers`). Lets "increase font" / "decrease font"
+/// resolve only when a resizable surface is on screen (`scalable`), and lets the assistant
+/// say when the text is already at the maximum/minimum. `scale` is the current global
+/// multiplier (1.0 = unscaled). Flutter calls this at startup and after each adjustment.
+#[frb(sync)]
+pub fn set_font_context(scalable: bool, scale: f32, at_min: bool, at_max: bool) {
+    crate::engine::set_font_context(Some(serde_json::json!({
+        "scalable": scalable,
+        "scale": scale,
+        "at_min": at_min,
+        "at_max": at_max,
+    })));
 }
 
 // ---------------------------------------------------------------------------
@@ -803,16 +900,93 @@ pub struct NotifyEvent {
     pub body: String,
 }
 
-struct NotifyHandle {
+/// A running persistent push channel (notify / weather / music): its stop flag and
+/// worker thread.
+struct ChannelHandle {
     running: std::sync::Arc<std::sync::atomic::AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
-static NOTIFY: std::sync::OnceLock<std::sync::Mutex<Option<NotifyHandle>>> =
-    std::sync::OnceLock::new();
+/// Where a channel's [`ChannelHandle`] lives between `start_*` and `stop_*`.
+type ChannelSlot = std::sync::OnceLock<std::sync::Mutex<Option<ChannelHandle>>>;
 
-fn notify_slot() -> &'static std::sync::Mutex<Option<NotifyHandle>> {
-    NOTIFY.get_or_init(|| std::sync::Mutex::new(None))
+static NOTIFY: ChannelSlot = std::sync::OnceLock::new();
+static WEATHER: ChannelSlot = std::sync::OnceLock::new();
+static MUSIC: ChannelSlot = std::sync::OnceLock::new();
+
+/// Start a persistent push channel on its own thread + current-thread runtime, replacing
+/// any channel already in `slot` (so it can be restarted when the pinned orchestrator
+/// changes). `run` gets the endpoint cache, the resolved discovery timeout, the pin
+/// (`None` = Auto) and the stop flag, and drives the channel until stopped.
+fn start_channel<F, Fut>(
+    slot: &'static ChannelSlot,
+    label: &'static str,
+    orchestrator_key: &str,
+    discovery_timeout_secs: u64,
+    run: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(
+            crate::wyoming::EndpointCache,
+            std::time::Duration,
+            Option<String>,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    stop_channel(slot);
+
+    let timeout = if discovery_timeout_secs == 0 {
+        crate::wyoming::DEFAULT_DISCOVERY_TIMEOUT
+    } else {
+        std::time::Duration::from_secs(discovery_timeout_secs)
+    };
+    let key = Some(orchestrator_key.trim().to_string()).filter(|k| !k.is_empty());
+    let running = Arc::new(AtomicBool::new(true));
+    let loop_running = running.clone();
+    let join = std::thread::Builder::new()
+        .name(format!("{label}-channel"))
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::error!("{label} channel: could not build runtime: {e:#}");
+                    return;
+                }
+            };
+            rt.block_on(run(
+                crate::wyoming::EndpointCache::new(),
+                timeout,
+                key,
+                loop_running,
+            ));
+        })?;
+
+    *slot.get_or_init(Default::default).lock().unwrap() = Some(ChannelHandle {
+        running,
+        join: Some(join),
+    });
+    Ok(())
+}
+
+/// Stop the channel in `slot` (if any) and join its thread. Idempotent.
+fn stop_channel(slot: &ChannelSlot) {
+    use std::sync::atomic::Ordering;
+    let handle = slot.get().and_then(|m| m.lock().unwrap().take());
+    if let Some(mut h) = handle {
+        h.running.store(false, Ordering::SeqCst);
+        if let Some(join) = h.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 /// Open the persistent proactive-notification channel and stream pushed
@@ -823,47 +997,25 @@ pub fn start_notify_channel(
     config: NotifyConfig,
     sink: StreamSink<NotifyEvent>,
 ) -> anyhow::Result<()> {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-
-    stop_notify_channel();
-
-    let running = Arc::new(AtomicBool::new(true));
-    let loop_running = running.clone();
-    let join = std::thread::Builder::new()
-        .name("notify-channel".to_string())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    log::error!("notify channel: could not build runtime: {e:#}");
-                    return;
-                }
-            };
-            let timeout = if config.discovery_timeout_secs == 0 {
-                crate::wyoming::DEFAULT_DISCOVERY_TIMEOUT
-            } else {
-                std::time::Duration::from_secs(config.discovery_timeout_secs)
-            };
-            let key = {
-                let k = config.orchestrator_key.trim();
-                if k.is_empty() {
-                    None
-                } else {
-                    Some(k.to_string())
-                }
-            };
-            let cache = crate::wyoming::EndpointCache::new();
-            rt.block_on(crate::wyoming::notify::run(
+    let NotifyConfig {
+        orchestrator_key,
+        discovery_timeout_secs,
+        device_id,
+        device_name,
+    } = config;
+    start_channel(
+        &NOTIFY,
+        "notify",
+        &orchestrator_key,
+        discovery_timeout_secs,
+        move |cache, timeout, key, running| async move {
+            crate::wyoming::notify::run(
                 &cache,
                 timeout,
                 key,
-                config.device_id,
-                config.device_name,
-                loop_running,
+                device_id,
+                device_name,
+                running,
                 move |note| {
                     sink.add(NotifyEvent {
                         id: note.id,
@@ -873,26 +1025,15 @@ pub fn start_notify_channel(
                     })
                     .is_ok()
                 },
-            ));
-        })?;
-
-    *notify_slot().lock().unwrap() = Some(NotifyHandle {
-        running,
-        join: Some(join),
-    });
-    Ok(())
+            )
+            .await
+        },
+    )
 }
 
 /// Stop the proactive-notification channel (if any) and join its thread. Idempotent.
 pub fn stop_notify_channel() {
-    use std::sync::atomic::Ordering;
-    let handle = notify_slot().lock().unwrap().take();
-    if let Some(mut h) = handle {
-        h.running.store(false, Ordering::SeqCst);
-        if let Some(join) = h.join.take() {
-            let _ = join.join();
-        }
-    }
+    stop_channel(&NOTIFY);
 }
 
 // ---------------------------------------------------------------------------
@@ -929,18 +1070,6 @@ pub struct WeatherPush {
     pub report_json: String,
 }
 
-struct WeatherHandle {
-    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-static WEATHER: std::sync::OnceLock<std::sync::Mutex<Option<WeatherHandle>>> =
-    std::sync::OnceLock::new();
-
-fn weather_slot() -> &'static std::sync::Mutex<Option<WeatherHandle>> {
-    WEATHER.get_or_init(|| std::sync::Mutex::new(None))
-}
-
 /// Open the persistent ambient-weather channel and stream pushed reports to Dart.
 /// Replaces any channel already running (so it can be restarted when the pinned
 /// orchestrator changes). Dials the pinned orchestrator and reconnects with backoff
@@ -949,68 +1078,35 @@ pub fn start_weather_channel(
     config: WeatherConfig,
     sink: StreamSink<WeatherPush>,
 ) -> anyhow::Result<()> {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-
-    stop_weather_channel();
-
-    let running = Arc::new(AtomicBool::new(true));
-    let loop_running = running.clone();
-    let join = std::thread::Builder::new()
-        .name("weather-channel".to_string())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    log::error!("weather channel: could not build runtime: {e:#}");
-                    return;
-                }
-            };
-            let timeout = if config.discovery_timeout_secs == 0 {
-                crate::wyoming::DEFAULT_DISCOVERY_TIMEOUT
-            } else {
-                std::time::Duration::from_secs(config.discovery_timeout_secs)
-            };
-            let key = {
-                let k = config.orchestrator_key.trim();
-                if k.is_empty() {
-                    None
-                } else {
-                    Some(k.to_string())
-                }
-            };
-            let cache = crate::wyoming::EndpointCache::new();
-            rt.block_on(crate::wyoming::weather::run(
+    let WeatherConfig {
+        orchestrator_key,
+        discovery_timeout_secs,
+        device_id,
+        device_name,
+    } = config;
+    start_channel(
+        &WEATHER,
+        "weather",
+        &orchestrator_key,
+        discovery_timeout_secs,
+        move |cache, timeout, key, running| async move {
+            crate::wyoming::weather::run(
                 &cache,
                 timeout,
                 key,
-                config.device_id,
-                config.device_name,
-                loop_running,
+                device_id,
+                device_name,
+                running,
                 move |report_json| sink.add(WeatherPush { report_json }).is_ok(),
-            ));
-        })?;
-
-    *weather_slot().lock().unwrap() = Some(WeatherHandle {
-        running,
-        join: Some(join),
-    });
-    Ok(())
+            )
+            .await
+        },
+    )
 }
 
 /// Stop the ambient-weather channel (if any) and join its thread. Idempotent.
 pub fn stop_weather_channel() {
-    use std::sync::atomic::Ordering;
-    let handle = weather_slot().lock().unwrap().take();
-    if let Some(mut h) = handle {
-        h.running.store(false, Ordering::SeqCst);
-        if let Some(join) = h.join.take() {
-            let _ = join.join();
-        }
-    }
+    stop_channel(&WEATHER);
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1129,9 @@ pub struct MusicConfig {
     pub discovery_timeout_secs: u64,
     /// A stable identifier for this display, sent in the `anamanti-hello` frame.
     pub device_id: String,
+    /// A human-friendly label for this display (e.g. "Kitchen"), sent alongside
+    /// `device_id` in the `anamanti-hello` frame (may be empty).
+    pub device_name: String,
 }
 
 /// One now-playing push from the orchestrator, streamed to Flutter. `now_playing_json`
@@ -1045,82 +1144,38 @@ pub struct MusicPush {
     pub now_playing_json: String,
 }
 
-struct MusicHandle {
-    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-static MUSIC: std::sync::OnceLock<std::sync::Mutex<Option<MusicHandle>>> =
-    std::sync::OnceLock::new();
-
-fn music_slot() -> &'static std::sync::Mutex<Option<MusicHandle>> {
-    MUSIC.get_or_init(|| std::sync::Mutex::new(None))
-}
-
 /// Open the persistent music now-playing channel and stream pushed snapshots to Dart.
 /// Replaces any channel already running (so it can be restarted when the pinned
 /// orchestrator changes). Dials the pinned orchestrator and reconnects with backoff for
 /// the life of the subscription.
 pub fn start_music_channel(config: MusicConfig, sink: StreamSink<MusicPush>) -> anyhow::Result<()> {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-
-    stop_music_channel();
-
-    let running = Arc::new(AtomicBool::new(true));
-    let loop_running = running.clone();
-    let join = std::thread::Builder::new()
-        .name("music-channel".to_string())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    log::error!("music channel: could not build runtime: {e:#}");
-                    return;
-                }
-            };
-            let timeout = if config.discovery_timeout_secs == 0 {
-                crate::wyoming::DEFAULT_DISCOVERY_TIMEOUT
-            } else {
-                std::time::Duration::from_secs(config.discovery_timeout_secs)
-            };
-            let key = {
-                let k = config.orchestrator_key.trim();
-                if k.is_empty() {
-                    None
-                } else {
-                    Some(k.to_string())
-                }
-            };
-            let cache = crate::wyoming::EndpointCache::new();
-            rt.block_on(crate::wyoming::music::run(
+    let MusicConfig {
+        orchestrator_key,
+        discovery_timeout_secs,
+        device_id,
+        device_name,
+    } = config;
+    start_channel(
+        &MUSIC,
+        "music",
+        &orchestrator_key,
+        discovery_timeout_secs,
+        move |cache, timeout, key, running| async move {
+            crate::wyoming::music::run(
                 &cache,
                 timeout,
                 key,
-                config.device_id,
-                loop_running,
+                device_id,
+                device_name,
+                running,
                 move |now_playing_json| sink.add(MusicPush { now_playing_json }).is_ok(),
-            ));
-        })?;
-
-    *music_slot().lock().unwrap() = Some(MusicHandle {
-        running,
-        join: Some(join),
-    });
-    Ok(())
+            )
+            .await
+        },
+    )
 }
 
 /// Stop the music now-playing channel (if any) and join its thread. Idempotent.
 pub fn stop_music_channel() {
-    use std::sync::atomic::Ordering;
-    let handle = music_slot().lock().unwrap().take();
-    if let Some(mut h) = handle {
-        h.running.store(false, Ordering::SeqCst);
-        if let Some(join) = h.join.take() {
-            let _ = join.join();
-        }
-    }
+    stop_channel(&MUSIC);
 }

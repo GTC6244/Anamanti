@@ -3,52 +3,142 @@
 //! device discovers over mDNS (Plan.MD Phase 4 bullet 5, "frames stream back to
 //! the Echo Show over the Wyoming socket").
 
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
+use crate::app::AppServices;
 use crate::control;
-use crate::llm::catalog::ModelCatalog;
 use crate::music::{MusicDucker, NowPlayingService};
 use crate::notify::NotificationService;
-use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome};
+use crate::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome, TurnStart};
 use crate::weather::WeatherService;
-use crate::wyoming::protocol::{self, types, AudioFormat};
+use crate::wyoming::protocol::{self, types};
 use crate::wyoming::DynConnection;
+
+/// Lowers and restores the house music around a spoken reply. Implemented by
+/// [`MusicDucker`] (Snapcast); abstracted so the turn wiring is testable.
+#[async_trait]
+pub trait Ducker: Send + Sync {
+    async fn duck(&self) -> Result<()>;
+    async fn restore(&self) -> Result<()>;
+}
+
+#[async_trait]
+impl Ducker for MusicDucker {
+    async fn duck(&self) -> Result<()> {
+        MusicDucker::duck(self).await
+    }
+    async fn restore(&self) -> Result<()> {
+        MusicDucker::restore(self).await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuckOp {
+    Duck,
+    Restore,
+}
+
+/// Music ducking for one device connection. Duck/restore requests go down one channel
+/// to one task that applies them **in order**, so a restore can never overtake the duck
+/// it undoes (two independently spawned tasks could race). Best-effort: a failure is
+/// logged and never touches the turn. The task ends once this handle (and every
+/// [`TurnDuck`]) is dropped and the queue has drained.
+pub struct ConnectionDucking {
+    tx: mpsc::UnboundedSender<DuckOp>,
+}
+
+impl ConnectionDucking {
+    /// Start the per-connection ducking task.
+    pub fn spawn(ducker: Arc<dyn Ducker>) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<DuckOp>();
+        tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                let res = match op {
+                    DuckOp::Duck => ducker.duck().await,
+                    DuckOp::Restore => ducker.restore().await,
+                };
+                if let Err(e) = res {
+                    log::debug!("music {op:?} failed: {e:#}");
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// A guard for one turn: [`TurnDuck::observe`] ducks on the first
+    /// [`TurnEvent::Speaking`], and dropping the guard restores — on every exit path
+    /// (a finished reply, an error, a timeout, a barge-in, a disconnect, a panic).
+    pub fn turn(&self) -> TurnDuck {
+        TurnDuck {
+            tx: self.tx.clone(),
+            ducked: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Per-turn ducking guard (see [`ConnectionDucking::turn`]).
+pub struct TurnDuck {
+    tx: mpsc::UnboundedSender<DuckOp>,
+    ducked: AtomicBool,
+}
+
+impl TurnDuck {
+    /// Feed a turn event: the first `Speaking` ducks the music.
+    pub fn observe(&self, ev: &TurnEvent) {
+        if matches!(ev, TurnEvent::Speaking) && !self.ducked.swap(true, Ordering::SeqCst) {
+            let _ = self.tx.send(DuckOp::Duck);
+        }
+    }
+}
+
+impl Drop for TurnDuck {
+    fn drop(&mut self) {
+        if *self.ducked.get_mut() {
+            let _ = self.tx.send(DuckOp::Restore);
+        }
+    }
+}
+
+/// Run one voice turn on `device` after its opening `audio-start` has been parsed into
+/// `start` — the entry point the connection handler uses (and the pipeline tests
+/// drive). Music is ducked while the reply speaks and restored when the turn ends,
+/// however it ends; `on_event` sees every [`TurnEvent`].
+pub async fn drive_turn(
+    pipeline: &Pipeline,
+    device: &mut DynConnection,
+    connector: &dyn ServiceConnector,
+    start: TurnStart,
+    ducking: Option<&ConnectionDucking>,
+    on_event: &mut (dyn FnMut(TurnEvent) + Send),
+) -> Result<TurnOutcome> {
+    let duck = ducking.map(ConnectionDucking::turn);
+    let mut observe = |ev: TurnEvent| {
+        if let Some(d) = duck.as_ref() {
+            d.observe(&ev);
+        }
+        on_event(ev);
+    };
+    pipeline
+        .run_turn_after_start(device, connector, start, &mut observe)
+        .await
+    // `duck` drops here (or on unwind), restoring the music if this turn ducked it.
+}
 
 /// Accept device connections forever, handling each on its own task. Returns only
 /// if the listener itself fails.
-#[allow(clippy::too_many_arguments)]
-pub async fn serve(
-    listener: TcpListener,
-    pipeline: Pipeline,
-    connector: Arc<dyn ServiceConnector>,
-    catalog: Arc<ModelCatalog>,
-    voices_dir: Option<PathBuf>,
-    ducker: Option<Arc<MusicDucker>>,
-    notify: Arc<NotificationService>,
-    weather: Arc<WeatherService>,
-    music: Arc<NowPlayingService>,
-) -> Result<()> {
+pub async fn serve(listener: TcpListener, services: Arc<AppServices>) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         log::info!("device connected: {peer}");
-        let pipeline = pipeline.clone();
-        let connector = connector.clone();
-        let catalog = catalog.clone();
-        let voices_dir = voices_dir.clone();
-        let ducker = ducker.clone();
-        let notify = notify.clone();
-        let weather = weather.clone();
-        let music = music.clone();
+        let services = services.clone();
         tokio::spawn(async move {
-            match handle_connection(
-                stream, pipeline, connector, catalog, voices_dir, ducker, notify, weather, music,
-            )
-            .await
-            {
+            match handle_connection(stream, &services).await {
                 Ok(()) => log::info!("device disconnected: {peer}"),
                 Err(e) => log::warn!("connection {peer} ended with error: {e:#}"),
             }
@@ -61,20 +151,14 @@ pub async fn serve(
 /// the memory store / runtime settings; an `audio-start` opens a voice turn. The
 /// Phase-3 device opens a fresh connection per turn, but looping here also supports
 /// a device that reuses one socket for several turns or control requests.
-#[allow(clippy::too_many_arguments)]
-async fn handle_connection(
-    stream: TcpStream,
-    pipeline: Pipeline,
-    connector: Arc<dyn ServiceConnector>,
-    catalog: Arc<ModelCatalog>,
-    voices_dir: Option<PathBuf>,
-    ducker: Option<Arc<MusicDucker>>,
-    notify: Arc<NotificationService>,
-    weather: Arc<WeatherService>,
-    music: Arc<NowPlayingService>,
-) -> Result<()> {
+async fn handle_connection(stream: TcpStream, services: &AppServices) -> Result<()> {
+    let pipeline = &services.pipeline;
+    let connector = services.connector.as_ref();
     let peer = stream.peer_addr().ok();
     let mut device = DynConnection::from_tcp_stream(stream);
+    // Music ducking for this connection's turns, applied in order on one task. Started
+    // on the first turn, so control-only and push-channel connections never spawn it.
+    let mut ducking: Option<ConnectionDucking> = None;
 
     loop {
         match device.read().await? {
@@ -85,69 +169,28 @@ async fn handle_connection(
                     peer_str(peer.as_ref()),
                     ev.event_type
                 );
-                control::handle_control(
-                    &mut device,
-                    &ev,
-                    pipeline.memory(),
-                    pipeline.settings(),
-                    pipeline.speaker().map(|s| s.registry()),
-                    &catalog,
-                    connector.as_ref(),
-                    voices_dir.as_deref(),
-                )
-                .await?;
+                control::handle_control(&mut device, &ev, services).await?;
             }
             Some(ev) if ev.event_type == types::AUDIO_START => {
-                let format = protocol::audio_format(&ev.data).unwrap_or(AudioFormat::PCM_16K_MONO);
-                // A follow-up turn (device auto-opened the mic) stamps its chain depth
-                // and the listen window it was given; an ordinary wake-word turn reads
-                // both back as 0.
-                let followup_depth = protocol::followup_depth(&ev.data);
-                let followup_wait_secs = protocol::followup_wait_secs(&ev.data);
-                // The turn's device context: what the display is currently showing (its
-                // "display context", e.g. an open recipe screen) plus orthogonal
-                // background state like active timers, so the LLM can drive the screen by
-                // voice and System-1 can route timer/stop commands this turn.
-                let device_ctx = protocol::device_context(&ev.data);
-                // Best-effort music ducking: lower the music group's volume while
-                // the assistant speaks and restore it when the turn ends. Fired on
-                // a spawned task so it never blocks (or fails) the turn; `duck`/
-                // `restore` are idempotent, so repeated `Speaking` events are safe.
-                let mut on_event = |ev: TurnEvent| {
-                    log_event(peer.as_ref(), &ev);
-                    if let Some(d) = ducker.as_ref() {
-                        match &ev {
-                            TurnEvent::Speaking => {
-                                let d = d.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = d.duck().await {
-                                        log::debug!("music duck failed: {e:#}");
-                                    }
-                                });
-                            }
-                            TurnEvent::Finished => {
-                                let d = d.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = d.restore().await {
-                                        log::debug!("music restore failed: {e:#}");
-                                    }
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
+                // The opening frame carries the PCM format, the follow-up chain depth +
+                // listen window, and the device context (what the display shows, plus
+                // background state like running timers).
+                let Some(start) = TurnStart::from_event(&ev) else {
+                    continue;
                 };
-                match pipeline
-                    .run_turn_after_start(
-                        &mut device,
-                        connector.as_ref(),
-                        format,
-                        followup_depth,
-                        followup_wait_secs,
-                        device_ctx,
-                        &mut on_event,
-                    )
-                    .await?
+                if ducking.is_none() {
+                    ducking = services.ducker.clone().map(ConnectionDucking::spawn);
+                }
+                let mut on_event = |ev: TurnEvent| log_event(peer.as_ref(), &ev);
+                match drive_turn(
+                    pipeline,
+                    &mut device,
+                    connector,
+                    start,
+                    ducking.as_ref(),
+                    &mut on_event,
+                )
+                .await?
                 {
                     TurnOutcome::Completed => continue,
                     TurnOutcome::Disconnected => return Ok(()),
@@ -159,9 +202,7 @@ async fn handle_connection(
                 let text = ev.speak_text().unwrap_or_default().to_string();
                 log::info!("[{}] speak request: {text:?}", peer_str(peer.as_ref()));
                 if !text.trim().is_empty() {
-                    pipeline
-                        .announce(&mut device, connector.as_ref(), &text)
-                        .await?;
+                    pipeline.announce(&mut device, connector, &text).await?;
                 }
             }
             // device → orchestrator: open the persistent proactive-notification
@@ -176,20 +217,13 @@ async fn handle_connection(
                 // the default), the ambient weather push (`role=weather`), or the music
                 // now-playing push (`role=music`); the write pump below is identical for
                 // all three — it just drains whichever service's receiver.
-                let channel = match ev.hello_role() {
-                    "weather" => "weather",
-                    "music" => "music",
-                    _ => "notify",
-                };
+                let channel = PushChannel::for_role(ev.hello_role(), services);
                 log::info!(
-                    "[{}] {channel} channel opened (device_id={device_id:?}, name={device_name:?})",
-                    peer_str(peer.as_ref())
+                    "[{}] {} channel opened (device_id={device_id:?}, name={device_name:?})",
+                    peer_str(peer.as_ref()),
+                    channel.label(),
                 );
-                let (conn_id, mut rx) = match channel {
-                    "weather" => weather.register(&device_id, &device_name),
-                    "music" => music.register(&device_id),
-                    _ => notify.register(&device_id, &device_name),
-                };
+                let (conn_id, mut rx) = channel.register(&device_id, &device_name);
                 let (reader, writer) = device.split_mut();
                 // Pump enqueued pushes out to the device while watching the read half
                 // for the device closing the socket. In this visual-only phase the
@@ -217,15 +251,67 @@ async fn handle_connection(
                         }
                     }
                 }
-                match channel {
-                    "weather" => weather.deregister(conn_id),
-                    "music" => music.deregister(conn_id),
-                    _ => notify.deregister(conn_id),
-                }
-                log::info!("[{}] {channel} channel closed", peer_str(peer.as_ref()));
+                channel.deregister(conn_id);
+                log::info!(
+                    "[{}] {} channel closed",
+                    peer_str(peer.as_ref()),
+                    channel.label()
+                );
                 return Ok(());
             }
             Some(_) => continue, // ignore stray pre-turn frames
+        }
+    }
+}
+
+/// The persistent push service an `anamanti-hello` frame opens, looked up by its
+/// `role`: `weather` → the ambient weather push, `music` → the now-playing push,
+/// anything else (the default `notify`) → proactive notifications.
+enum PushChannel<'a> {
+    Notify(&'a NotificationService),
+    Weather(&'a WeatherService),
+    Music(&'a NowPlayingService),
+}
+
+impl<'a> PushChannel<'a> {
+    fn for_role(role: &str, services: &'a AppServices) -> Self {
+        match role {
+            "weather" => PushChannel::Weather(&services.weather),
+            "music" => PushChannel::Music(&services.now_playing),
+            _ => PushChannel::Notify(&services.notify),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            PushChannel::Notify(_) => "notify",
+            PushChannel::Weather(_) => "weather",
+            PushChannel::Music(_) => "music",
+        }
+    }
+
+    /// Register the channel. Only notify channels record the device identity (for the
+    /// config page's connected-devices list).
+    fn register(
+        &self,
+        device_id: &str,
+        name: &str,
+    ) -> (
+        u64,
+        tokio::sync::mpsc::UnboundedReceiver<protocol::WyomingEvent>,
+    ) {
+        match self {
+            PushChannel::Notify(svc) => svc.register(device_id, name),
+            PushChannel::Weather(svc) => svc.register(),
+            PushChannel::Music(svc) => svc.register(),
+        }
+    }
+
+    fn deregister(&self, conn_id: u64) {
+        match self {
+            PushChannel::Notify(svc) => svc.deregister(conn_id),
+            PushChannel::Weather(svc) => svc.deregister(conn_id),
+            PushChannel::Music(svc) => svc.deregister(conn_id),
         }
     }
 }

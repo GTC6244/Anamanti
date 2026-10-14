@@ -21,6 +21,28 @@ use tokio::sync::Mutex;
 
 use super::{MpvControl, SnapcastClient};
 
+/// Kill any process whose full command line matches `pattern` (via `pkill -f`).
+/// Best-effort and fire-and-forget: a non-zero exit (pkill returns 1 when
+/// nothing matched) or a missing `pkill` is not an error. Used to clear stale,
+/// untracked siblings before spawning a fresh one. `pattern` must be specific
+/// enough (e.g. `librespot --name Ambient`) that it cannot match this Core
+/// process or an unrelated program.
+fn reap_stale(pattern: &str, key: &str) {
+    match std::process::Command::new("pkill")
+        .arg("-f")
+        .arg(pattern)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            log::info!("music: reaped stale {key} matching {pattern:?} before start");
+        }
+        // Exit 1 = nothing matched (the common, healthy case); other codes/errors
+        // (e.g. no `pkill`) are non-fatal — we still try to spawn.
+        Ok(_) => {}
+        Err(e) => log::warn!("music: could not run pkill to reap {key}: {e}"),
+    }
+}
+
 /// The externally-launched processes the orchestrator can supervise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManagedProc {
@@ -77,6 +99,14 @@ pub struct ProcSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub log_path: PathBuf,
+    /// When set, a `pkill -f <pattern>` is run *before* spawning to reap any
+    /// stale instance this supervisor no longer tracks. Production is stopped by
+    /// port (not a clean exit), so `kill_on_drop` never fires and old children
+    /// orphan and pile up (dozens of `librespot --name Ambient` were seen in the
+    /// field); reaping on start keeps exactly one live instance. `None` disables
+    /// reaping (e.g. snapserver, which is guarded by the "already reachable"
+    /// check in [`MusicHub::start_all`]).
+    pub reap_pattern: Option<String>,
 }
 
 /// One process's current state, for the status endpoint.
@@ -120,6 +150,11 @@ impl MusicSupervisor {
             } else {
                 bail!("{} is already running", proc.key());
             }
+        }
+        // Reap any stale, untracked instance (orphaned by a prior kill-by-port
+        // shutdown) before spawning, so instances cannot pile up.
+        if let Some(pattern) = &spec.reap_pattern {
+            reap_stale(pattern, proc.key());
         }
         if let Some(dir) = spec.log_path.parent() {
             std::fs::create_dir_all(dir).ok();
@@ -270,6 +305,7 @@ mod tests {
                 program: PathBuf::from("sleep"),
                 args: vec!["30".into()],
                 log_path: log.clone(),
+                reap_pattern: None,
             },
         );
 
@@ -301,6 +337,7 @@ mod tests {
                 program: PathBuf::from("sleep"),
                 args: vec!["30".into()],
                 log_path: dir.join("ambient-sa-1.log"),
+                reap_pattern: None,
             },
         );
         specs.insert(
@@ -309,6 +346,7 @@ mod tests {
                 program: PathBuf::from("sleep"),
                 args: vec!["30".into()],
                 log_path: dir.join("ambient-sa-2.log"),
+                reap_pattern: None,
             },
         );
         let sup = MusicSupervisor::new(specs);
@@ -327,6 +365,7 @@ mod tests {
                 program: PathBuf::from("/nonexistent/xyzzy-not-real-binary"),
                 args: vec![],
                 log_path: std::env::temp_dir().join("ambient-sup-none.log"),
+                reap_pattern: None,
             },
         );
         assert!(sup.start(ManagedProc::MpvWeb).await.is_err());

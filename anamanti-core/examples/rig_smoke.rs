@@ -1,16 +1,16 @@
 //! Live streaming smoke test for the rig LLM path against a **real** Ollama, with
-//! the optional `internet_search` tool (real DuckDuckGo). This is the manual
-//! soak step before flipping `rig` on by default. Requires `--features rig`.
+//! the optional `internet_search` tool (real DuckDuckGo). The manual soak step for
+//! the rig path (rig-core is always compiled in).
 //!
 //! Prereqs:
 //!   ollama serve            # in another terminal
 //!   ollama pull qwen2.5     # or set ANAMANTI_OLLAMA_MODEL to one you have
 //!
 //! Run (no helix needed, faster build):
-//!   cargo run --no-default-features --features rig --example rig_smoke -- "what is 2+2?"
+//!   cargo run --no-default-features --example rig_smoke -- "what is 2+2?"
 //!
 //! Exercise tool calling (model decides to search, tool runs, answer streams):
-//!   ANAMANTI_WEB_SEARCH=1 cargo run --no-default-features --features rig \
+//!   ANAMANTI_WEB_SEARCH=1 cargo run --no-default-features \
 //!       --example rig_smoke -- "what happened in the news today?"
 //!
 //! Env:
@@ -23,28 +23,19 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
-use anamanti_core::directions::LiveHomeLocation;
-use anamanti_core::llm::rig::{tools_from_config, RigBackend, Tools};
+use anamanti_core::llm::rig::{RigBackend, ToolDeps, Tools};
 use anamanti_core::llm::{LlmBackend, LlmTurn};
 use futures_util::StreamExt;
 
-/// Minimal tool set for the smoke test: just the (optional) keyless DuckDuckGo web
-/// search. Calendar / directions / Spotify are orchestrator features, not exercised
-/// here.
-fn smoke_tools(web_search: bool) -> Option<Arc<Tools>> {
-    tools_from_config(
+/// Minimal tool set for the smoke test: the always-on device tools plus the
+/// (optional) keyless DuckDuckGo web search. Calendar / directions / Spotify are
+/// orchestrator features, not exercised here.
+fn smoke_tools(web_search: bool) -> Arc<Tools> {
+    Arc::new(Tools::build(ToolDeps {
         web_search,
-        "duckduckgo",
-        None,
-        LiveHomeLocation::default(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-    )
+        search_provider: "duckduckgo".into(),
+        ..Default::default()
+    }))
 }
 
 const SYSTEM_PROMPT: &str =

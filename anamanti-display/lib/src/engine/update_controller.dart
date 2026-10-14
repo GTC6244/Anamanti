@@ -13,6 +13,7 @@
 // native channel and no network.
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -61,6 +62,9 @@ typedef DownloadUpdateFn =
 /// Resolve a writable cache directory for the downloaded APK.
 typedef CacheDirProvider = Future<String> Function();
 
+/// Check whether the downloaded APK is still on disk (defaults to `File.exists`).
+typedef FileExistsFn = Future<bool> Function(String path);
+
 class UpdateController extends ChangeNotifier {
   UpdateController({
     required UpdaterChannel channel,
@@ -69,6 +73,7 @@ class UpdateController extends ChangeNotifier {
     CheckForUpdateFn? check,
     DownloadUpdateFn? download,
     CacheDirProvider? cacheDir,
+    FileExistsFn? fileExists,
     Duration checkInterval = const Duration(hours: 6),
     // These public named params are assigned to private fields; an initializing
     // formal would make them unusable private named parameters (same reason as
@@ -82,16 +87,24 @@ class UpdateController extends ChangeNotifier {
        _check = check ?? ((b) => checkForUpdate(baseUrl: b)),
        _download = download ?? downloadUpdate,
        _cacheDir = cacheDir ?? _defaultCacheDir,
+       _fileExists = fileExists ?? ((p) => File(p).exists()),
        // ignore: prefer_initializing_formals
        _checkInterval = checkInterval;
 
+  // Download into the app support (files) dir, NOT getTemporaryDirectory(): the
+  // cache dir is the first thing Android evicts under storage pressure, and this
+  // device runs near-full (<1 GiB free). Eviction between download and install
+  // would make the APK vanish before PackageInstaller reads it. The support dir is
+  // still app-private, which is fine — PackageInstaller streams the bytes in-process
+  // (no FileProvider / content:// URI needed).
   static Future<String> _defaultCacheDir() async =>
-      (await getTemporaryDirectory()).path;
+      (await getApplicationSupportDirectory()).path;
 
   final UpdaterChannel _channel;
   final CheckForUpdateFn _check;
   final DownloadUpdateFn _download;
   final CacheDirProvider _cacheDir;
+  final FileExistsFn _fileExists;
   final Duration _checkInterval;
 
   String _baseUrl;
@@ -254,6 +267,14 @@ class UpdateController extends ChangeNotifier {
   Future<void> install() async {
     final path = _downloadedPath;
     if (path == null) return;
+    // The verified APK can disappear between download and install (OS storage
+    // reclaim, user clearing data). Re-verify it's on disk; if it's gone, restart
+    // the download rather than handing PackageInstaller a missing path.
+    if (!await _fileExists(path)) {
+      _downloadedPath = null;
+      await download();
+      return;
+    }
     if (!await _channel.canInstallPackages()) {
       await _channel.openInstallSettings();
       _setStatus(UpdateStatus.readyToInstall);

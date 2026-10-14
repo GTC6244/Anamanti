@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `block_on`, `preferred`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `block_on`, `decode_pcm_le`, `preferred`, `timeout`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Discover every orchestrator on the LAN for the settings "Orchestrator"
 /// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
@@ -69,6 +69,18 @@ Future<DriveToken> getDriveToken({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Fetch the read-only snapshot of the Core's configured functions (cloud/local,
+/// model, and whether each required API key is set) for the Settings screen's
+/// "Functions" section. Never returns secret values. An older Core that doesn't
+/// recognize the frame surfaces as the round-trip timeout error.
+Future<List<FunctionStatus>> getFunctions({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsGetFunctions(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// List all persistent memory entries (settings memory management view).
 Future<List<MemoryEntry>> listMemories({
   required String orchestratorKey,
@@ -115,11 +127,67 @@ Future<String> musicControl({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Browse stored conversation turns from the GraphRAG graph (Memory screen →
+/// Conversations), newest first. All filters optional: `query` (substring over the
+/// turn text), `speaker_id` (that speaker only), `entity` (turns mentioning that
+/// keyword). An older Core (or the SQLite recall backend) surfaces as an error.
+Future<List<TurnInfo>> listTurns({
+  required String orchestratorKey,
+  required String query,
+  required String speakerId,
+  required String entity,
+  required int limit,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListTurns(
+  orchestratorKey: orchestratorKey,
+  query: query,
+  speakerId: speakerId,
+  entity: entity,
+  limit: limit,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Browse stored entities / "keywords" from the GraphRAG graph (Memory screen →
+/// Keywords). `query` is an optional substring filter on the name.
+Future<List<EntityInfo>> listEntities({
+  required String orchestratorKey,
+  required String query,
+  required int limit,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListEntities(
+  orchestratorKey: orchestratorKey,
+  query: query,
+  limit: limit,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Drop one graph node (a turn or entity) by its id. Helix-index-only — the durable
+/// SQLite facts and the chat log are untouched. Returns whether the Core accepted it.
+Future<bool> deleteGraphNode({
+  required String orchestratorKey,
+  required PlatformInt64 id,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsDeleteGraphNode(
+  orchestratorKey: orchestratorKey,
+  id: id,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// List the identified speakers (settings "People" view).
 Future<List<SpeakerInfo>> listSpeakers({
   required String orchestratorKey,
   required BigInt discoveryTimeoutSecs,
 }) => RustLib.instance.api.crateApiSettingsListSpeakers(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// The household roster's member names, for the voice-enrollment "existing person"
+/// picker. Empty when the roster is empty (or the Core predates this field).
+Future<List<String>> listHouseholdMembers({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListHouseholdMembers(
   orchestratorKey: orchestratorKey,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
@@ -137,6 +205,22 @@ Future<bool> nameSpeaker({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Link a family member's phone to AppSaid by redeeming the 4-character pairing
+/// `code` shown in their AppSaid app and storing it on the Core as a phone-message
+/// recipient under `name`. Returns the Core's confirmation on success; a rejected or
+/// expired code (or an unreachable Core) is an `Err` carrying the reason to show.
+Future<String> pairPhone({
+  required String orchestratorKey,
+  required String name,
+  required String code,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsPairPhone(
+  orchestratorKey: orchestratorKey,
+  name: name,
+  code: code,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// Merge the `drop` speaker into `keep` (same person, two clusters). Returns
 /// whether the merge was applied.
 Future<bool> mergeSpeakers({
@@ -151,6 +235,21 @@ Future<bool> mergeSpeakers({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Link a voice to a household member on the Core (People → "Link to household
+/// member"): merged into the member's existing voiceprint, or named as them. Returns
+/// the Core's confirmation message; errors carry the reason.
+Future<String> linkSpeaker({
+  required String orchestratorKey,
+  required String id,
+  required String member,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsLinkSpeaker(
+  orchestratorKey: orchestratorKey,
+  id: id,
+  member: member,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// Delete a speaker profile. Returns whether a profile was removed.
 Future<bool> deleteSpeaker({
   required String orchestratorKey,
@@ -159,6 +258,70 @@ Future<bool> deleteSpeaker({
 }) => RustLib.instance.api.crateApiSettingsDeleteSpeaker(
   orchestratorKey: orchestratorKey,
   id: id,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// List a speaker's stored voice clips (newest first), for the People screen's
+/// playback. Empty when the speaker has no clips (or clip capture is disabled on the
+/// Core).
+Future<List<SpeakerClipInfo>> listSpeakerClips({
+  required String orchestratorKey,
+  required String id,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsListSpeakerClips(
+  orchestratorKey: orchestratorKey,
+  id: id,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Fetch and play back a person's stored voice clips through the running engine's
+/// speaker, so a human can listen and put a name to an anonymous cluster. Clips play
+/// back-to-back (newest first) with a short gap between them. Returns the number of
+/// clips queued (0 when the person has none).
+///
+/// Reuses the one existing audio output path (the engine's [`PlaybackSink`]); errors
+/// if the engine isn't running / has no audio output. Playback itself runs on a
+/// background thread so the call returns promptly while the clips play out.
+Future<int> playSpeakerClips({
+  required String orchestratorKey,
+  required String id,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsPlaySpeakerClips(
+  orchestratorKey: orchestratorKey,
+  id: id,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Commit the current guided voice-enrollment session into a named profile
+/// (SpeakerEnrollmentPlan.md Phase 2). The sample captures were streamed over the
+/// ordinary wake-word turns while the enroll screen was foreground; this averages
+/// them into a voiceprint. Returns the orchestrator's confirmation message, or an
+/// error carrying the reason (e.g. too few samples).
+///
+/// With `speaker_id` set (the People screen's "Add voice samples"), the samples are
+/// folded into that existing person's voiceprint instead and `name` is ignored.
+Future<String> enrollFinish({
+  required String orchestratorKey,
+  required String session,
+  required String name,
+  String? speakerId,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsEnrollFinish(
+  orchestratorKey: orchestratorKey,
+  session: session,
+  name: name,
+  speakerId: speakerId,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Discard an in-flight guided voice-enrollment session (the user backed out).
+Future<void> enrollCancel({
+  required String orchestratorKey,
+  required String session,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsEnrollCancel(
+  orchestratorKey: orchestratorKey,
+  session: session,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
@@ -223,6 +386,121 @@ class DriveToken {
           refreshToken == other.refreshToken &&
           folderIds == other.folderIds &&
           scope == other.scope;
+}
+
+/// One stored entity ("keyword") from the GraphRAG graph, for the device Memory
+/// screen's "Keywords" tab. Built by the Core's `list_entities`.
+class EntityInfo {
+  /// Graph node id (`$id`), used to delete this entity.
+  final PlatformInt64 id;
+
+  /// Canonical surface form.
+  final String name;
+
+  /// Coarse type: `person` | `place` | `thing` | `topic`.
+  final String kind;
+
+  const EntityInfo({required this.id, required this.name, required this.kind});
+
+  @override
+  int get hashCode => id.hashCode ^ name.hashCode ^ kind.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EntityInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          kind == other.kind;
+}
+
+/// One entity ("keyword") a turn mentions, decorating a [`TurnInfo`] row.
+class EntityRef {
+  /// Canonical surface form (e.g. `jazz`, `Portland`, `Sam`).
+  final String name;
+
+  /// Coarse type: `person` | `place` | `thing` | `topic` (free-form).
+  final String kind;
+
+  const EntityRef({required this.name, required this.kind});
+
+  @override
+  int get hashCode => name.hashCode ^ kind.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EntityRef &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          kind == other.kind;
+}
+
+/// One capability row in the Core's "functions" snapshot, shown read-only on the
+/// device Settings screen. Describes whether a function runs in the `cloud` or
+/// `local`ly (or is `off`), which model it uses, and whether a required API key is
+/// set — never the key itself. Built by the Core's `functions_response`.
+class FunctionStatus {
+  /// Grouping header: `Config` | `Tools` | `System1` | `Memory` | `Speech`.
+  final String category;
+
+  /// Human-friendly capability name (e.g. `LLM`, `Weather`, `Embeddings`).
+  final String name;
+
+  /// Where it runs: `cloud` | `local` | `off`.
+  final String mode;
+
+  /// Provider label (e.g. `Anthropic (Claude)`, `Mapbox`); empty when n/a.
+  final String provider;
+
+  /// Selected model / voice / dims; empty when n/a.
+  final String model;
+
+  /// Whether this function needs an API key / credential to work.
+  final bool keyRequired;
+
+  /// Whether that key/credential is currently set on the Core.
+  final bool keySet;
+
+  /// Optional nuance (e.g. a keyless fallback); empty when none.
+  final String note;
+
+  const FunctionStatus({
+    required this.category,
+    required this.name,
+    required this.mode,
+    required this.provider,
+    required this.model,
+    required this.keyRequired,
+    required this.keySet,
+    required this.note,
+  });
+
+  @override
+  int get hashCode =>
+      category.hashCode ^
+      name.hashCode ^
+      mode.hashCode ^
+      provider.hashCode ^
+      model.hashCode ^
+      keyRequired.hashCode ^
+      keySet.hashCode ^
+      note.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FunctionStatus &&
+          runtimeType == other.runtimeType &&
+          category == other.category &&
+          name == other.name &&
+          mode == other.mode &&
+          provider == other.provider &&
+          model == other.model &&
+          keyRequired == other.keyRequired &&
+          keySet == other.keySet &&
+          note == other.note;
 }
 
 /// One persistent memory entry, for the settings memory list.
@@ -481,6 +759,46 @@ class SettingsUpdate {
           sileroThreshold == other.sileroThreshold;
 }
 
+/// One stored voice clip for a speaker, for the People screen's clip playback
+/// (speaker_id_plan.md Phase C).
+class SpeakerClipInfo {
+  /// Opaque clip id (the Core's on-disk file stem); the key to fetch/play it.
+  final String name;
+
+  /// Capture time in Unix milliseconds (newest-first ordering).
+  final PlatformInt64 createdMs;
+
+  /// Number of `i16` samples in the clip.
+  final PlatformInt64 samples;
+
+  /// Sample rate of the clip's PCM in Hz (16 kHz house format).
+  final int sampleRate;
+
+  const SpeakerClipInfo({
+    required this.name,
+    required this.createdMs,
+    required this.samples,
+    required this.sampleRate,
+  });
+
+  @override
+  int get hashCode =>
+      name.hashCode ^
+      createdMs.hashCode ^
+      samples.hashCode ^
+      sampleRate.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SpeakerClipInfo &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          createdMs == other.createdMs &&
+          samples == other.samples &&
+          sampleRate == other.sampleRate;
+}
+
 /// One identified speaker, for the settings "People" list (speaker_id_plan.md
 /// Phase C).
 class SpeakerInfo {
@@ -525,6 +843,70 @@ class SpeakerInfo {
           labeled == other.labeled &&
           samples == other.samples &&
           createdAt == other.createdAt;
+}
+
+/// One stored conversation turn from the GraphRAG graph, for the device Memory
+/// screen's "Conversations" tab. Built by the Core's `list_turns`.
+class TurnInfo {
+  /// Graph node id (`$id`), used to delete this turn.
+  final PlatformInt64 id;
+
+  /// The chat-log record id this turn was ingested from.
+  final String extId;
+
+  /// The conversation session id.
+  final String session;
+
+  /// Unix seconds when the turn happened.
+  final PlatformInt64 ts;
+
+  /// What the user said (the STT transcript).
+  final String transcript;
+
+  /// What the assistant replied.
+  final String reply;
+
+  /// Speaker id (`spk-…`, or `household` for the shared/unattributed user).
+  final String speakerId;
+
+  /// Entities ("keywords") this turn mentions.
+  final List<EntityRef> entities;
+
+  const TurnInfo({
+    required this.id,
+    required this.extId,
+    required this.session,
+    required this.ts,
+    required this.transcript,
+    required this.reply,
+    required this.speakerId,
+    required this.entities,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      extId.hashCode ^
+      session.hashCode ^
+      ts.hashCode ^
+      transcript.hashCode ^
+      reply.hashCode ^
+      speakerId.hashCode ^
+      entities.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TurnInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          extId == other.extId &&
+          session == other.session &&
+          ts == other.ts &&
+          transcript == other.transcript &&
+          reply == other.reply &&
+          speakerId == other.speakerId &&
+          entities == other.entities;
 }
 
 /// One selectable Piper voice for the settings TTS voice dropdown, as reported by

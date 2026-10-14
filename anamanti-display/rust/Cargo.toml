@@ -7,6 +7,10 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+# The Wyoming wire protocol, shared with the Mac-side Anamanti Core so the two
+# ends cannot drift. Pure Rust (serde/serde_json/tokio io-util); cargokit builds
+# this crate in place via --manifest-path, so the path outside rust/ resolves.
+anamanti_protocol = { path = "../../anamanti-protocol" }
 anyhow = "1.0.104"
 cpal = "0.18.2"
 flutter_rust_bridge = "=2.11.1"
@@ -45,3 +49,13 @@ ndk-context = "0.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+# Crash fix: vendored cpal 0.18.2 with the AAudio hardware-timestamp query removed.
+# Upstream cpal calls `AAudioStream_getTimestamp` on every capture/playback callback;
+# on the Echo Show 8's legacy AudioTrack path that aborts the process inside Android's
+# libaaudio (google/oboe#1489 — observed as a SIGABRT on the "AudioTrack" thread,
+# 2026-10-03). We discard the timestamp, so the vendored copy returns the monotonic
+# callback instant instead. See vendor/cpal/src/host/aaudio/convert.rs. Same version,
+# so this only overrides the source — no dependency-graph change.
+[patch.crates-io]
+cpal = { path = "vendor/cpal" }

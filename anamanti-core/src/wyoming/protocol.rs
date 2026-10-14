@@ -1,810 +1,30 @@
 //! Wyoming Protocol wire format for the Mac orchestrator (Plan.MD §3 "Wire
 //! format"; architecture.md §4).
 //!
-//! This is the byte-for-byte counterpart of the device engine's
-//! `rust/src/wyoming/protocol.rs`: a Wyoming *event* is three concatenated parts
-//! on the socket —
+//! The codec itself — event type, framing, frame-type constants, constructors and
+//! the bounded reader — lives in the shared `anamanti_protocol` crate, which the
+//! device engine uses too, so the two sides cannot drift. It is re-exported here
+//! wholesale so `crate::wyoming::protocol::…` paths are unchanged throughout the
+//! Core.
 //!
-//! 1. one JSON **header line** terminated by `\n` (`type`, optional
-//!    `data_length` / `payload_length`),
-//! 2. a length-prefixed JSON **`data` object** (when `data_length` is present),
-//! 3. an opaque binary **payload** (when `payload_length` is present; raw PCM).
-//!
-//! The device crate cannot be shared as a library here (it is an Android
-//! `cdylib`/`staticlib` that links `cpal`/`tract`/JNI), so the codec is
-//! re-implemented independently but kept wire-identical, and the round-trip tests
-//! below are the guardrail against drift. The orchestrator uses the same codec in
-//! *both* directions: as a Wyoming **server** to the Echo Show, and as a Wyoming
-//! **client** to the downstream Whisper (STT) and Piper (TTS) services.
+//! What remains in this module is Core-only: parsing the device's display / timer /
+//! font context out of an `audio-start` data block.
 
-use std::io;
+pub use anamanti_protocol::*;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
-/// Wyoming event `type` names used by the orchestrator.
-pub mod types {
-    /// Marks the beginning of an audio stream (data: rate/width/channels).
-    pub const AUDIO_START: &str = "audio-start";
-    /// A chunk of raw PCM (data: rate/width/channels; payload: samples).
-    pub const AUDIO_CHUNK: &str = "audio-chunk";
-    /// Marks the end of an audio stream.
-    pub const AUDIO_STOP: &str = "audio-stop";
-    /// client → STT: request transcription (data may pin a model/language).
-    pub const TRANSCRIBE: &str = "transcribe";
-    /// STT → client: a (final) transcript (data: `text`). Server-side VAD makes
-    /// this the end-of-speech signal.
-    pub const TRANSCRIPT: &str = "transcript";
-    /// client → TTS: request synthesis of `text` (data: `text`, optional `voice`).
-    pub const SYNTHESIZE: &str = "synthesize";
-    /// client → downstream Wyoming service: request its capabilities (no data).
-    /// Sent to Piper to enumerate its advertised voice catalog.
-    pub const DESCRIBE: &str = "describe";
-    /// downstream Wyoming service → client: capabilities (data: `tts`/`asr` arrays;
-    /// each `tts` entry carries a `voices` array of `{name, languages, ...}`).
-    pub const INFO: &str = "info";
-    /// orchestrator → device (Phase 5): one streamed LLM reply-token fragment
-    /// (data: `text`), so the device renders the reply token-by-token as it is
-    /// generated. A project-local extension on the device↔Mac hop (no off-the-shelf
-    /// Wyoming server is on that hop).
-    pub const REPLY_TOKEN: &str = "reply-token";
-    /// device → orchestrator: **barge-in**. The user started speaking (a new wake
-    /// word, or on-device VAD) while the assistant was still replying, so the
-    /// orchestrator must abort the in-flight LLM generation + TTS synthesis for
-    /// this turn at once (no data). A project-local extension on the device↔Mac
-    /// hop; kept byte-identical to the device crate's `types::INTERRUPT`.
-    pub const INTERRUPT: &str = "anamanti-interrupt";
-
-    // ---- Phase 6: project-local settings + memory control frames ----
-    //
-    // These ride the same Wyoming framing on the device↔orchestrator hop only (no
-    // off-the-shelf Wyoming server ever sees them). They let the on-device settings
-    // screen read/change the orchestrator's runtime LLM backend + TTS voice and
-    // view/delete persistent memory entries. Kept byte-identical to the device
-    // crate's `types` (guarded by the round-trip tests in both crates).
-
-    /// device → orchestrator: request the current runtime settings (no data).
-    pub const DESCRIBE_SETTINGS: &str = "anamanti-describe-settings";
-    /// device → orchestrator: change runtime settings (data: optional
-    /// `llm_backend`, `llm_model`, and `tts_voice` — where a present `tts_voice:
-    /// null` clears the voice and an absent key leaves it unchanged).
-    pub const SET_SETTINGS: &str = "anamanti-set-settings";
-    /// orchestrator → device: the resulting settings (data: `ok`, `message`,
-    /// `llm_backend`, `llm_model`, `tts_voice`).
-    pub const SETTINGS: &str = "anamanti-settings";
-    /// device → orchestrator: list all stored memory entries (no data).
-    pub const LIST_MEMORIES: &str = "anamanti-list-memories";
-    /// orchestrator → device: the stored entries (data: `entries` array).
-    pub const MEMORIES: &str = "anamanti-memories";
-    /// device → orchestrator: delete one entry by id (data: `id`).
-    pub const DELETE_MEMORY: &str = "anamanti-delete-memory";
-    /// device → orchestrator: delete every stored entry (no data).
-    pub const CLEAR_MEMORIES: &str = "anamanti-clear-memories";
-    /// orchestrator → device: result of a delete/clear (data: `ok`, `count`).
-    pub const MEMORY_RESULT: &str = "anamanti-memory-result";
-
-    // ---- Speaker identification control frames (speaker_id_plan.md Phase C) ----
-    //
-    // Let the on-device "People" settings view enumerate identified speakers and
-    // name / merge / delete them. Same device↔orchestrator-only framing.
-
-    /// device → orchestrator: list identified speakers (no data).
-    pub const LIST_SPEAKERS: &str = "anamanti-list-speakers";
-    /// orchestrator → device: the speakers (data: `ok`, `speakers` array of
-    /// `{id, name, labeled, samples, created_at}`).
-    pub const SPEAKERS: &str = "anamanti-speakers";
-    /// device → orchestrator: name a speaker (data: `id`, `name`).
-    pub const NAME_SPEAKER: &str = "anamanti-name-speaker";
-    /// device → orchestrator: merge `drop` into `keep` (data: `keep`, `drop`).
-    pub const MERGE_SPEAKERS: &str = "anamanti-merge-speakers";
-    /// device → orchestrator: delete a speaker profile (data: `id`).
-    pub const DELETE_SPEAKER: &str = "anamanti-delete-speaker";
-    /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
-    pub const SPEAKER_RESULT: &str = "anamanti-speaker-result";
-
-    /// device → orchestrator: list the selectable LLM models for the settings model
-    /// dropdown (no data).
-    pub const LIST_MODELS: &str = "anamanti-list-models";
-    /// orchestrator → device: the selectable models (data: `ok`, `models` array of
-    /// `{provider, id, label}`), scoped to the last 12 months per provider.
-    pub const MODELS: &str = "anamanti-models";
-
-    /// device → orchestrator: list the installed Piper voices for the settings TTS
-    /// voice dropdown (no data).
-    pub const LIST_VOICES: &str = "anamanti-list-voices";
-    /// orchestrator → device: the installed voices (data: `ok`, `voices` array of
-    /// `{name, language, label}`). The orchestrator intersects Piper's advertised
-    /// catalog with the voices actually present on disk.
-    pub const VOICES: &str = "anamanti-voices";
-
-    /// device → orchestrator: fetch the Google Drive photo-slideshow credentials +
-    /// linkage the orchestrator owns (no data). The orchestrator runs the one-time
-    /// OAuth consent (config page); the device pulls the bundle and mints Drive
-    /// access tokens on-device, so the APK ships credential-free.
-    pub const GET_DRIVE_TOKEN: &str = "anamanti-get-drive-token";
-    /// orchestrator → device: the Drive bundle (data: `ok`, `linked`, `configured`,
-    /// `client_id`, `client_secret`, `refresh_token`, `folder_ids` array, `scope`).
-    /// Secrets ride the device↔orchestrator LAN hop only.
-    pub const DRIVE_TOKEN: &str = "anamanti-drive-token";
-
-    // ---- Device-action frames (Phase 2: on-device timers/alarms) ----
-    //
-    // A tool the LLM calls on the Mac emits a **device action** that the pipeline
-    // relays to the Echo Show as this project-local frame. The device owns the
-    // action's state (unlimited concurrent timers, the countdown UI, and the alarm
-    // sound), so it keeps working if the Mac disconnects. Same device↔orchestrator-
-    // only framing; byte-identical to the device crate's `types::TIMER`.
-
-    /// orchestrator → device: start or cancel a timer (data: `action` =
-    /// `"start"`/`"cancel"`; for `start`: `duration_secs` + optional `label`; for
-    /// `cancel`: optional `label`, where an absent/null label cancels all timers).
-    pub const TIMER: &str = "anamanti-timer";
-
-    /// device → orchestrator: synthesize `text` with Piper and stream the audio
-    /// back on the same socket (data: `text`). Lets an on-device timer speak its
-    /// "Time's up …" announcement in the real assistant voice when the Mac is
-    /// reachable. Byte-identical to the device crate's `types::SPEAK`.
-    pub const SPEAK: &str = "anamanti-speak";
-
-    /// orchestrator → device: **follow-up listen**. The assistant's reply was a
-    /// question, so the device should reopen the mic and start a fresh turn with no
-    /// wake word once the reply audio finishes (data: `depth` = the chain depth the
-    /// follow-up turn will carry). Sent *before* the turn's final `audio-stop` (the
-    /// device ends its turn on the first `audio-stop`). Byte-identical to the device
-    /// crate's `types::LISTEN`. See `plans/Plan.MD` (Follow-up listening).
-    pub const LISTEN: &str = "anamanti-listen";
-
-    // ---- Proactive notifications (Approach A: persistent device-dialed channel) ----
-    //
-    // A NEW long-lived connection the device dials and holds open so the
-    // orchestrator can PUSH unsolicited notifications to the display *without* the
-    // device starting a voice turn. Distinct from the per-turn voice socket, but
-    // rides the same Wyoming framing and the same discovered endpoint. Byte-identical
-    // to the device crate's `types` (guarded by the round-trip tests in both crates).
-
-    /// device → orchestrator: open + register the persistent notify channel (data:
-    /// `role` = "notify", `device_id`, optional `instance_id`). The orchestrator
-    /// keeps this connection open and pushes `anamanti-notify` frames down it.
-    pub const ANAMANTI_HELLO: &str = "anamanti-hello";
-    /// orchestrator → device: a proactive notification to display (data: `id`,
-    /// `priority` = "info" | "reminder" | "alert", `title`, `body`). Visual-only in
-    /// this phase — no spoken output.
-    pub const ANAMANTI_NOTIFY: &str = "anamanti-notify";
-    /// device → orchestrator: acknowledge a notification by `id` (data: `id`,
-    /// `result`). Reserved for delivery tracking; unused in the visual-only phase.
-    pub const ANAMANTI_NOTIFY_ACK: &str = "anamanti-notify-ack";
-
-    /// orchestrator → device: show or dismiss the recipe-mode screen (data: `action`
-    /// = `"show"`/`"dismiss"`; for `show`, `recipe` is the structured recipe object —
-    /// `title`, `summary`, `source_url`, `image_url`, `servings`, `total_time`,
-    /// `ingredients[]`, `steps[]`). A device action driven by the `recipe_lookup`
-    /// tool; the device owns the screen state until dismissed. Byte-identical to the
-    /// device crate's `types::RECIPE`.
-    pub const RECIPE: &str = "anamanti-recipe";
-
-    /// orchestrator → device: show/refresh/dismiss the weather screen (data: `action`
-    /// = `"show"` (full-screen forecast, voice-triggered) / `"current"` (ambient
-    /// indicator refresh over the persistent channel) / `"dismiss"`; for `show`/`current`,
-    /// `weather` is the structured report — `location_label`, `units`, `current{…}`,
-    /// `daily[]`). Byte-identical to the device crate's `types::WEATHER`.
-    pub const WEATHER: &str = "anamanti-weather";
-
-    /// orchestrator → device: show/dismiss the full-screen place card (data: `action`
-    /// = `"show"` / `"dismiss"`; for `show`, `place` is the structured report — `name`,
-    /// `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`, `photo_uri`, …).
-    /// Byte-identical to the device crate's `types::PLACE`.
-    pub const PLACE: &str = "anamanti-place";
-
-    /// orchestrator → device: push the music now-playing screen (data: `action` =
-    /// `"now_playing"` (the `music` object carries `playing`, `track_title`, `artist`,
-    /// `album`, `artwork_uri`, `position_secs`, `duration_secs`, `volume_percent`, and a
-    /// `next_up[]` queue) / `"dismiss"` (nothing is playing — close the screen)). Fanned
-    /// out over the persistent `role="music"` channel so it stays fresh while idle.
-    /// Byte-identical to the device crate's `types::MUSIC`.
-    pub const MUSIC: &str = "anamanti-music";
-
-    /// device → orchestrator: a music transport/volume command from the on-screen
-    /// controls (data: `action` = `"pause"`/`"resume"`/`"next"`/`"previous"`/`"volume"`,
-    /// with `value` the 0–100 percent for `"volume"`). Answered with [`MUSIC_RESULT`].
-    /// Byte-identical to the device crate's `types::MUSIC_CONTROL`.
-    pub const MUSIC_CONTROL: &str = "anamanti-music-control";
-
-    /// orchestrator → device: the result of a [`MUSIC_CONTROL`] command (data: `ok`
-    /// bool + a short `message`). Byte-identical to the device crate's `types::MUSIC_RESULT`.
-    pub const MUSIC_RESULT: &str = "anamanti-music-result";
-}
-
-/// PCM format carried by `audio-start` / `audio-chunk` frames. The device streams
-/// 16 kHz mono 16-bit and every downstream service is fed the same.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioFormat {
-    pub rate: u32,
-    pub width_bytes: u16,
-    pub channels: u16,
-}
-
-impl AudioFormat {
-    /// The pipeline default: 16 kHz, mono, 16-bit signed PCM.
-    pub const PCM_16K_MONO: AudioFormat = AudioFormat {
-        rate: 16_000,
-        width_bytes: 2,
-        channels: 1,
-    };
-}
-
-impl Default for AudioFormat {
-    fn default() -> Self {
-        AudioFormat::PCM_16K_MONO
-    }
-}
-
-/// A decoded Wyoming event: a `type` tag, an optional structured `data` object,
-/// and an optional opaque binary `payload`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WyomingEvent {
-    pub event_type: String,
-    pub data: Value,
-    pub payload: Option<Vec<u8>>,
-}
-
-/// Just the header line of an event, before the length-prefixed blocks are read.
-#[derive(Debug, Serialize, Deserialize)]
-struct Header {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    data_length: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    payload_length: Option<usize>,
-}
-
-impl WyomingEvent {
-    /// A data-less, payload-less event.
-    pub fn new(event_type: impl Into<String>) -> Self {
-        Self {
-            event_type: event_type.into(),
-            data: Value::Null,
-            payload: None,
-        }
-    }
-
-    /// An event carrying a JSON `data` object.
-    pub fn with_data(event_type: impl Into<String>, data: Value) -> Self {
-        Self {
-            event_type: event_type.into(),
-            data,
-            payload: None,
-        }
-    }
-
-    /// An `audio-start` event describing the PCM format that follows.
-    pub fn audio_start(fmt: AudioFormat, timestamp_ms: u64) -> Self {
-        Self::with_data(
-            types::AUDIO_START,
-            json!({
-                "rate": fmt.rate,
-                "width": fmt.width_bytes,
-                "channels": fmt.channels,
-                "timestamp": timestamp_ms,
-            }),
-        )
-    }
-
-    /// An `audio-chunk` carrying little-endian `i16` PCM bytes as its payload.
-    pub fn audio_chunk(fmt: AudioFormat, timestamp_ms: u64, pcm: Vec<u8>) -> Self {
-        Self {
-            event_type: types::AUDIO_CHUNK.to_string(),
-            data: json!({
-                "rate": fmt.rate,
-                "width": fmt.width_bytes,
-                "channels": fmt.channels,
-                "timestamp": timestamp_ms,
-            }),
-            payload: Some(pcm),
-        }
-    }
-
-    /// An `audio-stop` event with a timestamp.
-    pub fn audio_stop(timestamp_ms: u64) -> Self {
-        Self::with_data(types::AUDIO_STOP, json!({ "timestamp": timestamp_ms }))
-    }
-
-    /// A `transcript` event carrying recognized `text`.
-    pub fn transcript(text: impl Into<String>) -> Self {
-        Self::with_data(types::TRANSCRIPT, json!({ "text": text.into() }))
-    }
-
-    /// A `reply-token` event carrying one streamed LLM reply fragment, relayed to
-    /// the device so it can render the reply as it is generated (Phase 5).
-    pub fn reply_token(text: impl Into<String>) -> Self {
-        Self::with_data(types::REPLY_TOKEN, json!({ "text": text.into() }))
-    }
-
-    /// Extract the fragment text from a `reply-token` event's `data.text`.
-    pub fn reply_token_text(&self) -> Option<&str> {
-        if self.event_type == types::REPLY_TOKEN {
-            self.data.get("text").and_then(Value::as_str)
-        } else {
-            None
-        }
-    }
-
-    /// An `anamanti-interrupt` (barge-in) event: data-less, sent device →
-    /// orchestrator to abort the in-flight reply.
-    pub fn interrupt() -> Self {
-        Self::new(types::INTERRUPT)
-    }
-
-    /// True if this is an `anamanti-interrupt` (barge-in) event.
-    pub fn is_interrupt(&self) -> bool {
-        self.event_type == types::INTERRUPT
-    }
-
-    /// An `anamanti-timer` **start** action (orchestrator → device): begin a timer
-    /// for `duration_secs` with an optional spoken `label` ("pasta"). The device
-    /// assigns the timer's id and owns its countdown/alarm.
-    pub fn timer_start(duration_secs: u64, label: Option<&str>) -> Self {
-        Self::with_data(
-            types::TIMER,
-            json!({
-                "action": "start",
-                "duration_secs": duration_secs,
-                "label": label,
-            }),
-        )
-    }
-
-    /// An `anamanti-timer` **cancel** action (orchestrator → device): cancel timers
-    /// matching `label`, or *all* timers when `label` is `None`.
-    pub fn timer_cancel(label: Option<&str>) -> Self {
-        Self::with_data(
-            types::TIMER,
-            json!({
-                "action": "cancel",
-                "label": label,
-            }),
-        )
-    }
-
-    /// True if this is an `anamanti-timer` device-action frame.
-    pub fn is_timer(&self) -> bool {
-        self.event_type == types::TIMER
-    }
-
-    /// An `anamanti-recipe` **show** action (orchestrator → device): render `recipe`
-    /// (a serialized [`crate::recipe::Recipe`]) on the recipe-mode screen.
-    pub fn recipe(recipe: Value) -> Self {
-        Self::with_data(types::RECIPE, json!({ "action": "show", "recipe": recipe }))
-    }
-
-    /// An `anamanti-recipe` **dismiss** action (orchestrator → device): close the
-    /// recipe screen and return to the idle/ambient display.
-    pub fn recipe_dismiss() -> Self {
-        Self::with_data(types::RECIPE, json!({ "action": "dismiss" }))
-    }
-
-    /// An `anamanti-recipe` **navigate** action (orchestrator → device): switch the
-    /// recipe screen to the `target` tab (`"overview"` / `"ingredients"` / `"steps"`)
-    /// by voice, mirroring a touch of the bottom tab bar.
-    pub fn recipe_navigate(target: &str) -> Self {
-        Self::with_data(
-            types::RECIPE,
-            json!({ "action": "navigate", "target": target }),
-        )
-    }
-
-    /// An `anamanti-recipe` **scroll** action (orchestrator → device): scroll the
-    /// active recipe pane in `direction` (`"up"` / `"down"` a page, or `"top"` /
-    /// `"bottom"`) by voice.
-    pub fn recipe_scroll(direction: &str) -> Self {
-        Self::with_data(
-            types::RECIPE,
-            json!({ "action": "scroll", "direction": direction }),
-        )
-    }
-
-    /// True if this is an `anamanti-recipe` device-action frame.
-    pub fn is_recipe(&self) -> bool {
-        self.event_type == types::RECIPE
-    }
-
-    /// An `anamanti-weather` **show** action (orchestrator → device): render `weather`
-    /// (a serialized [`crate::weather::WeatherReport`]) full-screen on the weather
-    /// screen. Voice-triggered by the `weather_lookup` tool.
-    pub fn weather_show(weather: Value) -> Self {
-        Self::with_data(
-            types::WEATHER,
-            json!({ "action": "show", "weather": weather }),
-        )
-    }
-
-    /// An `anamanti-weather` **current** refresh (orchestrator → device): update the
-    /// ambient indicator (icon + temperature beside the clock) without opening the
-    /// full screen. Pushed periodically over the persistent channel.
-    pub fn weather_current(weather: Value) -> Self {
-        Self::with_data(
-            types::WEATHER,
-            json!({ "action": "current", "weather": weather }),
-        )
-    }
-
-    /// An `anamanti-weather` **dismiss** action (orchestrator → device): close the
-    /// full-screen weather view and return to the idle/ambient display.
-    pub fn weather_dismiss() -> Self {
-        Self::with_data(types::WEATHER, json!({ "action": "dismiss" }))
-    }
-
-    /// True if this is an `anamanti-weather` frame.
-    pub fn is_weather(&self) -> bool {
-        self.event_type == types::WEATHER
-    }
-
-    /// An `anamanti-place` **show** action (orchestrator → device): render `place`
-    /// (a serialized [`crate::places::PlaceReport`]) full-screen on the place card.
-    /// Voice-triggered by the `places_lookup` tool.
-    pub fn place_show(place: Value) -> Self {
-        Self::with_data(types::PLACE, json!({ "action": "show", "place": place }))
-    }
-
-    /// An `anamanti-place` **dismiss** action (orchestrator → device): close the
-    /// full-screen place card and return to the idle/ambient display.
-    pub fn place_dismiss() -> Self {
-        Self::with_data(types::PLACE, json!({ "action": "dismiss" }))
-    }
-
-    /// True if this is an `anamanti-place` frame.
-    pub fn is_place(&self) -> bool {
-        self.event_type == types::PLACE
-    }
-
-    /// An `anamanti-music` **now_playing** push (orchestrator → device): render the
-    /// music screen from `music` (a serialized [`crate::music::NowPlaying`]). Fanned out
-    /// over the persistent `role="music"` channel so it stays fresh while idle.
-    pub fn music_now_playing(music: Value) -> Self {
-        Self::with_data(
-            types::MUSIC,
-            json!({ "action": "now_playing", "music": music }),
-        )
-    }
-
-    /// An `anamanti-music` **dismiss** push (orchestrator → device): nothing is playing,
-    /// so close the music screen and return to the idle/ambient display.
-    pub fn music_dismiss() -> Self {
-        Self::with_data(types::MUSIC, json!({ "action": "dismiss" }))
-    }
-
-    /// An `anamanti-music` **screen** action (orchestrator → device): drive which music
-    /// screen is shown by voice — `screen` ∈ `"now_playing"` / `"up_next"` / `"hidden"`.
-    /// Relayed on the per-turn socket by the `music_screen` tool (distinct from the
-    /// `now_playing`/`dismiss` pushes on the persistent channel).
-    pub fn music_screen(screen: &str) -> Self {
-        Self::with_data(
-            types::MUSIC,
-            json!({ "action": "screen", "screen": screen }),
-        )
-    }
-
-    /// An `anamanti-music-control` command (device → orchestrator): a transport/volume
-    /// action from the on-screen controls. `value` is the 0–100 percent for `"volume"`.
-    /// Mirror of the device crate's `music_control` constructor.
-    pub fn music_control(action: impl Into<String>, value: Option<i64>) -> Self {
-        Self::with_data(
-            types::MUSIC_CONTROL,
-            json!({ "action": action.into(), "value": value }),
-        )
-    }
-
-    /// Decode an `anamanti-music-control` frame into `(action, value)`; `None` for a
-    /// frame of another type or with no `action`.
-    pub fn music_control_command(&self) -> Option<(String, Option<i64>)> {
-        if self.event_type != types::MUSIC_CONTROL {
-            return None;
-        }
-        let action = self.data.get("action").and_then(Value::as_str)?.to_string();
-        let value = self.data.get("value").and_then(Value::as_i64);
-        Some((action, value))
-    }
-
-    /// An `anamanti-music-result` response (orchestrator → device): the outcome of a
-    /// [`music_control`](Self::music_control) command.
-    pub fn music_result(ok: bool, message: impl Into<String>) -> Self {
-        Self::with_data(
-            types::MUSIC_RESULT,
-            json!({ "ok": ok, "message": message.into() }),
-        )
-    }
-
-    /// An `anamanti-speak` request (device → orchestrator): please synthesize `text`
-    /// and stream its audio back. Mirror of the device crate's `speak` constructor.
-    pub fn speak(text: impl Into<String>) -> Self {
-        Self::with_data(types::SPEAK, json!({ "text": text.into() }))
-    }
-
-    /// Extract the text from an `anamanti-speak` request's `data.text`.
-    pub fn speak_text(&self) -> Option<&str> {
-        if self.event_type == types::SPEAK {
-            self.data.get("text").and_then(Value::as_str)
-        } else {
-            None
-        }
-    }
-
-    /// An `anamanti-listen` follow-up-listen frame (orchestrator → device): after a
-    /// reply, ask the device to reopen the mic (no wake word) for a fresh turn once the
-    /// reply audio drains. `depth` is the chain depth the follow-up turn will carry
-    /// (bounded by `follow_up.max_chain`). `wait_secs` is how long the mic should stay
-    /// open for input before the assistant sleeps — longer after a question — which the
-    /// device echoes back on the follow-up `audio-start` so this orchestrator sizes that
-    /// turn's no-speech window to match.
-    pub fn listen(depth: u32, wait_secs: u32) -> Self {
-        Self::with_data(
-            types::LISTEN,
-            json!({ "depth": depth, "wait_secs": wait_secs }),
-        )
-    }
-
-    /// A `synthesize` request for the Piper TTS server. `voice` pins a named voice
-    /// when the config asks for one; otherwise the server default is used.
-    pub fn synthesize(text: impl Into<String>, voice: Option<&str>) -> Self {
-        let mut data = Map::new();
-        data.insert("text".into(), Value::String(text.into()));
-        if let Some(v) = voice {
-            data.insert("voice".into(), json!({ "name": v }));
-        }
-        Self::with_data(types::SYNTHESIZE, Value::Object(data))
-    }
-
-    /// True if this is a `transcript` event.
-    pub fn is_transcript(&self) -> bool {
-        self.event_type == types::TRANSCRIPT
-    }
-
-    /// Extract the recognized text from a `transcript` event's `data.text`.
-    pub fn transcript_text(&self) -> Option<&str> {
-        if self.is_transcript() {
-            self.data.get("text").and_then(Value::as_str)
-        } else {
-            None
-        }
-    }
-
-    /// An `anamanti-hello` channel-open frame (device → orchestrator): register the
-    /// persistent notify channel. `name` is a human-friendly label for the display
-    /// (may be empty). Mirror of the device crate's `hello` constructor.
-    pub fn hello(
-        device_id: impl Into<String>,
-        instance_id: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
-        Self::with_data(
-            types::ANAMANTI_HELLO,
-            json!({
-                "role": "notify",
-                "device_id": device_id.into(),
-                "instance_id": instance_id.into(),
-                "name": name.into(),
-            }),
-        )
-    }
-
-    /// An `anamanti-hello` frame opening the persistent **weather** channel (device →
-    /// orchestrator): same frame as [`hello`](Self::hello) but with `role = "weather"`
-    /// so the server registers it with the weather push service rather than the notify
-    /// service. Byte-identical to the device crate's `hello_weather`.
-    pub fn hello_weather(
-        device_id: impl Into<String>,
-        instance_id: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
-        Self::with_data(
-            types::ANAMANTI_HELLO,
-            json!({
-                "role": "weather",
-                "device_id": device_id.into(),
-                "instance_id": instance_id.into(),
-                "name": name.into(),
-            }),
-        )
-    }
-
-    /// The `device_id` from an `anamanti-hello` frame's `data.device_id`.
-    pub fn hello_device_id(&self) -> Option<&str> {
-        if self.event_type == types::ANAMANTI_HELLO {
-            self.data.get("device_id").and_then(Value::as_str)
-        } else {
-            None
-        }
-    }
-
-    /// The human-friendly `name` from an `anamanti-hello` frame's `data.name`
-    /// (`None` when the frame is a different type or carries no name — older devices
-    /// that predate the field).
-    pub fn hello_name(&self) -> Option<&str> {
-        if self.event_type == types::ANAMANTI_HELLO {
-            self.data.get("name").and_then(Value::as_str)
-        } else {
-            None
-        }
-    }
-
-    /// The `role` from an `anamanti-hello` frame's `data.role` (`"notify"` /
-    /// `"weather"`); defaults to `"notify"` when absent, for back-compatibility.
-    pub fn hello_role(&self) -> &str {
-        if self.event_type == types::ANAMANTI_HELLO {
-            self.data
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or("notify")
-        } else {
-            "notify"
-        }
-    }
-
-    /// An `anamanti-notify` push (orchestrator → device): a proactive notification to
-    /// display. Byte-identical to the device crate's `notify` constructor.
-    pub fn notify(
-        id: impl Into<String>,
-        priority: impl Into<String>,
-        title: impl Into<String>,
-        body: impl Into<String>,
-    ) -> Self {
-        Self::with_data(
-            types::ANAMANTI_NOTIFY,
-            json!({
-                "id": id.into(),
-                "priority": priority.into(),
-                "title": title.into(),
-                "body": body.into(),
-            }),
-        )
-    }
-
-    /// An `anamanti-notify-ack` frame (device → orchestrator). Reserved for a later
-    /// delivery-tracking phase; provided now so both crates share the constructor.
-    pub fn notify_ack(id: impl Into<String>, result: impl Into<String>) -> Self {
-        Self::with_data(
-            types::ANAMANTI_NOTIFY_ACK,
-            json!({ "id": id.into(), "result": result.into() }),
-        )
-    }
-
-    /// Serialize to on-the-wire bytes: header line, then the length-prefixed
-    /// `data` block, then the binary payload.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let data_bytes: Option<Vec<u8>> = match &self.data {
-            Value::Null => None,
-            other => Some(serde_json::to_vec(other).expect("JSON value is always serializable")),
-        };
-
-        let header = Header {
-            event_type: self.event_type.clone(),
-            data_length: data_bytes.as_ref().map(Vec::len),
-            payload_length: self.payload.as_ref().map(Vec::len),
-        };
-
-        let mut out = serde_json::to_vec(&header).expect("header is always serializable");
-        out.push(b'\n');
-        if let Some(d) = data_bytes {
-            out.extend_from_slice(&d);
-        }
-        if let Some(p) = &self.payload {
-            out.extend_from_slice(p);
-        }
-        out
-    }
-}
-
-/// Normalize a decoded `data` block: an absent block reads back as
-/// [`Value::Null`]; a present block must be a JSON object.
-fn coerce_data(data: Option<Value>) -> io::Result<Value> {
-    match data {
-        None => Ok(Value::Null),
-        Some(v @ Value::Object(_)) => Ok(v),
-        Some(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Wyoming data block was not a JSON object",
-        )),
-    }
-}
-
-/// Write a single event to an async sink and flush it.
-pub async fn write_event<W>(writer: &mut W, event: &WyomingEvent) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    writer.write_all(&event.to_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-/// Read one event from an async buffered source. Returns `Ok(None)` on a clean
-/// EOF at a frame boundary (peer closed the socket).
-pub async fn read_event<R>(reader: &mut R) -> io::Result<Option<WyomingEvent>>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).await?;
-    if n == 0 {
-        return Ok(None);
-    }
-
-    let header: Header = serde_json::from_str(line.trim_end_matches(['\r', '\n']))
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    let data = match header.data_length {
-        Some(len) if len > 0 => {
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf).await?;
-            Some(
-                serde_json::from_slice(&buf)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-            )
-        }
-        _ => None,
-    };
-
-    let payload = match header.payload_length {
-        Some(len) if len > 0 => {
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf).await?;
-            Some(buf)
-        }
-        _ => None,
-    };
-
-    Ok(Some(WyomingEvent {
-        event_type: header.event_type,
-        data: coerce_data(data)?,
-        payload,
-    }))
-}
-
-/// Decode a full event from an in-memory byte slice (used by tests).
-pub async fn decode(bytes: &[u8]) -> io::Result<Option<WyomingEvent>> {
-    read_event(&mut &bytes[..]).await
-}
-
-/// Pull the follow-up chain depth out of an `audio-start` data block. The device
-/// stamps `followup: true` + `followup_depth: <n>` on a turn it opened in response
-/// to an `anamanti-listen` frame (no wake word); an ordinary wake-word turn omits
-/// both and reads back as `0`. See `plans/Plan.MD` (Follow-up listening).
-pub fn followup_depth(data: &Value) -> u32 {
-    let obj = match data.as_object() {
-        Some(o) => o,
-        None => return 0,
-    };
-    if !obj
-        .get("followup")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return 0;
-    }
-    obj.get("followup_depth")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32
-}
-
-/// Pull the follow-up listen window (seconds) the device echoed on an `audio-start`
-/// (the `wait_secs` it received in the triggering `anamanti-listen`). `0` when absent —
-/// an ordinary wake-word turn, or a device that didn't stamp it — so the caller falls
-/// back to its default no-speech window. See `plans/Plan.MD` (Follow-up listening).
-pub fn followup_wait_secs(data: &Value) -> u32 {
-    data.as_object()
-        .and_then(|o| o.get("wait_secs"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32
-}
+use serde_json::{Map, Value};
 
 /// What the display is currently showing, as the device stamps it in the `screen`
 /// block of each `audio-start`. It lets the model know what is on screen so it can
 /// **drive it by voice** with the matching tool. This is a **general, extensible**
 /// concept: each device screen that wants voice control reports its own context here,
-/// discriminated by the `screen.kind` string on the wire. Today only the recipe screen
-/// is implemented; music / weather / photo screens would add their own variants (and a
-/// device-side setter + a Core-side prompt line) without touching the transport.
+/// discriminated by the `screen.kind` string on the wire. Recipe / weather / place each
+/// add their own variant (and a device-side setter + a Core-side prompt line) without
+/// touching the transport.
+///
+/// Most contexts enrich the LLM turn, but a context can also **suppress** it: the
+/// [`Diagnostics`](DisplayContext::Diagnostics) screen makes the turn transcription-only
+/// (the orchestrator echoes the transcript and stops, never reaching the LLM/TTS).
 ///
 /// See `plans/architecture.md` §4 ("Display context") and `plans/RecipePlan.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -817,6 +37,32 @@ pub enum DisplayContext {
     Place(PlaceScreen),
     /// The music player is up (`kind: "music"`).
     Music(MusicScreen),
+    /// The audio-diagnostics screen is up (`kind: "diagnostics"`). This is a
+    /// **transcription-only** context: the turn pipeline echoes the STT transcript to
+    /// the device for on-screen display and then stops — no speaker ID, no System-1, no
+    /// LLM, no TTS, no memory/chat-log. The screen is a diagnostic surface only, so a
+    /// voice tone it hears must never be processed by the assistant. Carries no state.
+    Diagnostics,
+    /// The guided voice-enrollment screen is up (`kind: "enroll"`;
+    /// SpeakerEnrollmentPlan.md Phase 2). Like [`Diagnostics`](Self::Diagnostics) this
+    /// **suppresses** the normal turn: the orchestrator routes the captured voiced PCM
+    /// to the enrollment accumulator (or the read-only verify check) instead of the
+    /// LLM, and never recalls/writes memory or speaks a generated reply.
+    Enroll(EnrollScreen),
+}
+
+/// The enrollment screen's per-capture state, carried in a [`DisplayContext::Enroll`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnrollScreen {
+    /// Device-chosen id grouping this enrollment's captures (one per "Add person" flow).
+    pub session: String,
+    /// The name the person is being enrolled under (for the spoken/shown confirmation).
+    pub name: String,
+    /// 0-based index of the phrase being captured (progress display only).
+    pub sample_index: u32,
+    /// `"sample"` (accumulate a training sample) or `"verify"` (read-only recognition
+    /// check after the profile is committed). Unknown values are treated as `"sample"`.
+    pub phase: String,
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
@@ -890,8 +136,36 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         }
         "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
         "music" => parse_music_screen(screen.get("music")?.as_object()?).map(DisplayContext::Music),
+        // The audio-diagnostics screen carries no state — its presence alone switches the
+        // turn to transcription-only (the orchestrator short-circuits before any LLM work).
+        "diagnostics" => Some(DisplayContext::Diagnostics),
+        "enroll" => {
+            parse_enroll_screen(screen.get("enroll")?.as_object()?).map(DisplayContext::Enroll)
+        }
         _ => None,
     }
+}
+
+/// Parse the `screen.enroll` object into an [`EnrollScreen`]. A missing `session`
+/// is the one hard requirement (it keys the accumulator); the rest default.
+fn parse_enroll_screen(obj: &serde_json::Map<String, Value>) -> Option<EnrollScreen> {
+    let session = obj.get("session").and_then(Value::as_str)?.to_string();
+    if session.is_empty() {
+        return None;
+    }
+    Some(EnrollScreen {
+        session,
+        name: obj
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        sample_index: obj.get("sample_index").and_then(Value::as_u64).unwrap_or(0) as u32,
+        phase: match obj.get("phase").and_then(Value::as_str) {
+            Some("verify") => "verify".to_string(),
+            _ => "sample".to_string(),
+        },
+    })
 }
 
 /// Active-timer state the device reports on **every** turn, **orthogonal to the
@@ -921,6 +195,36 @@ impl TimerContext {
     }
 }
 
+/// Font-scaling state the device reports on **every** turn, **orthogonal to the foreground
+/// widget** (`DisplayContext`): it describes whether a resizable text surface is on screen
+/// and the current global font scale, so it rides as a `font` sibling of `kind` inside the
+/// `screen` block (like `timers`). Lets the Core resolve "increase font" / "decrease font"
+/// only when there is something to resize (`scalable`), and report when the text is already
+/// at the maximum/minimum. `scale` is stored as **permille** (e.g. 1100 = 1.1×) so this
+/// derives `Eq` alongside [`DeviceContext`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FontContext {
+    /// Whether a resizable text surface is currently on screen (the resolve gate).
+    pub scalable: bool,
+    /// The current global font scale, in permille (1000 = 1.0×). 0 when never reported.
+    pub scale_permille: u16,
+    /// Whether the font is already at the minimum scale (a "decrease" would be a no-op).
+    pub at_min: bool,
+    /// Whether the font is already at the maximum scale (an "increase" would be a no-op).
+    pub at_max: bool,
+}
+
+impl FontContext {
+    /// The current global font scale as a multiplier (1.0 = unscaled); 1.0 when unset.
+    pub fn scale(&self) -> f32 {
+        if self.scale_permille == 0 {
+            1.0
+        } else {
+            self.scale_permille as f32 / 1000.0
+        }
+    }
+}
+
 /// The full device context for a turn: the foreground widget (if any) **plus** the
 /// orthogonal background state (active timers now; media later). Parsed once from the
 /// `audio-start` data via [`device_context`]. Keeping [`display_context`] separate lets
@@ -931,6 +235,8 @@ pub struct DeviceContext {
     pub widget: Option<DisplayContext>,
     /// Background timer state, reported regardless of `widget`.
     pub timers: TimerContext,
+    /// Font-scaling state, reported regardless of `widget`.
+    pub font: FontContext,
 }
 
 impl DeviceContext {
@@ -942,6 +248,11 @@ impl DeviceContext {
             Some(DisplayContext::Weather(_)) => Some("weather"),
             Some(DisplayContext::Place(_)) => Some("place"),
             Some(DisplayContext::Music(_)) => Some("music"),
+            // Diagnostics never reaches System-1/System-2 (the turn short-circuits before
+            // them), so it reports no widget label — nothing can leak into a decision or
+            // prompt even if that ordering changes later. Enrollment is the same: the turn
+            // is consumed by the voiceprint accumulator, never the LLM.
+            Some(DisplayContext::Diagnostics) | Some(DisplayContext::Enroll(_)) => None,
             None => None,
         }
     }
@@ -981,13 +292,47 @@ pub fn timer_context(data: &Value) -> TimerContext {
     }
 }
 
-/// Parse the full [`DeviceContext`] (foreground widget + background timers) from an
-/// `audio-start` data block. The turn pipeline uses this so System-1 sees background
-/// timers; [`display_context`] remains for the System-2 prompt line.
+/// Parse the font-scaling state from an `audio-start` data block's `screen.font` object.
+/// Missing/absent → a default [`FontContext`] (`scalable == false`), **independently of
+/// `screen.kind`** — the font state is reported even on an idle screen. `scale` arrives as
+/// a float multiplier on the wire and is stored as permille.
+pub fn font_context(data: &Value) -> FontContext {
+    let Some(font) = data
+        .as_object()
+        .and_then(|o| o.get("screen"))
+        .and_then(Value::as_object)
+        .and_then(|s| s.get("font"))
+        .and_then(Value::as_object)
+    else {
+        return FontContext::default();
+    };
+    let scalable = font
+        .get("scalable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let scale_permille = font
+        .get("scale")
+        .and_then(Value::as_f64)
+        .map(|s| (s * 1000.0).round().clamp(0.0, u16::MAX as f64) as u16)
+        .unwrap_or(0);
+    let at_min = font.get("at_min").and_then(Value::as_bool).unwrap_or(false);
+    let at_max = font.get("at_max").and_then(Value::as_bool).unwrap_or(false);
+    FontContext {
+        scalable,
+        scale_permille,
+        at_min,
+        at_max,
+    }
+}
+
+/// Parse the full [`DeviceContext`] (foreground widget + background timers + font state)
+/// from an `audio-start` data block. The turn pipeline uses this so System-1 sees the
+/// background state; [`display_context`] remains for the System-2 prompt line.
 pub fn device_context(data: &Value) -> DeviceContext {
     DeviceContext {
         widget: display_context(data),
         timers: timer_context(data),
+        font: font_context(data),
     }
 }
 
@@ -1080,153 +425,87 @@ fn parse_recipe_screen(recipe: &Map<String, Value>) -> Option<RecipeScreen> {
     })
 }
 
-/// Pull the `(rate, width, channels)` PCM format out of an `audio-*` data block.
-pub fn audio_format(data: &Value) -> Option<AudioFormat> {
-    let obj: &Map<String, Value> = data.as_object()?;
-    Some(AudioFormat {
-        rate: obj.get("rate")?.as_u64()? as u32,
-        width_bytes: obj.get("width")?.as_u64()? as u16,
-        channels: obj.get("channels")?.as_u64()? as u16,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    async fn roundtrip(event: &WyomingEvent) -> WyomingEvent {
-        decode(&event.to_bytes())
-            .await
-            .expect("decode ok")
-            .expect("event present")
-    }
+    #[test]
+    fn font_context_parses_orthogonally_to_widget_kind() {
+        // No screen block → default (not scalable), independent of any widget.
+        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        assert_eq!(font_context(&plain.data), FontContext::default());
 
-    #[tokio::test]
-    async fn header_only_event_roundtrips() {
-        let ev = WyomingEvent::new(types::AUDIO_STOP);
-        let back = roundtrip(&ev).await;
-        assert_eq!(back, ev);
-        assert_eq!(back.data, Value::Null);
-        assert!(back.payload.is_none());
-    }
-
-    #[tokio::test]
-    async fn audio_start_roundtrips_and_reports_format() {
-        let ev = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 42);
-        let back = roundtrip(&ev).await;
-        assert_eq!(back, ev);
-        assert_eq!(audio_format(&back.data), Some(AudioFormat::PCM_16K_MONO));
-    }
-
-    #[tokio::test]
-    async fn payload_event_roundtrips() {
-        let pcm: Vec<u8> = (0..320u16).flat_map(|s| s.to_le_bytes()).collect();
-        let ev = WyomingEvent::audio_chunk(AudioFormat::PCM_16K_MONO, 100, pcm.clone());
-        let back = roundtrip(&ev).await;
-        assert_eq!(back, ev);
-        assert_eq!(back.payload.as_deref(), Some(pcm.as_slice()));
-    }
-
-    #[tokio::test]
-    async fn interrupt_event_roundtrips() {
-        let ev = WyomingEvent::interrupt();
-        let back = roundtrip(&ev).await;
-        assert_eq!(back, ev);
-        assert_eq!(back.event_type, types::INTERRUPT);
-        assert!(back.is_interrupt());
-        assert_eq!(back.data, Value::Null);
-        assert!(back.payload.is_none());
-    }
-
-    #[tokio::test]
-    async fn timer_start_and_cancel_roundtrip() {
-        let start = WyomingEvent::timer_start(300, Some("pasta"));
-        let back = roundtrip(&start).await;
-        assert_eq!(back, start);
-        assert!(back.is_timer());
-        assert_eq!(back.data["action"], json!("start"));
-        assert_eq!(back.data["duration_secs"], json!(300));
-        assert_eq!(back.data["label"], json!("pasta"));
-
-        // Cancel-all carries a null label.
-        let cancel_all = WyomingEvent::timer_cancel(None);
-        let back = roundtrip(&cancel_all).await;
-        assert_eq!(back.data["action"], json!("cancel"));
-        assert_eq!(back.data["label"], Value::Null);
-    }
-
-    #[tokio::test]
-    async fn recipe_show_and_dismiss_roundtrip() {
-        let recipe = json!({
-            "title": "Carbonara",
-            "ingredients": ["spaghetti", "eggs"],
-            "steps": ["boil", "toss"],
+        // Font reported WITHOUT any `kind` (idle screen) is still seen.
+        let idle_with_font = json!({
+            "screen": { "font": { "scalable": true, "scale": 1.1, "at_min": false, "at_max": false } }
         });
-        let show = WyomingEvent::recipe(recipe.clone());
-        let back = roundtrip(&show).await;
-        assert_eq!(back, show);
-        assert!(back.is_recipe());
-        assert_eq!(back.data["action"], json!("show"));
-        assert_eq!(back.data["recipe"], recipe);
+        let font = font_context(&idle_with_font);
+        assert_eq!(
+            font,
+            FontContext {
+                scalable: true,
+                scale_permille: 1100,
+                at_min: false,
+                at_max: false,
+            }
+        );
+        assert!((font.scale() - 1.1).abs() < 1e-6);
+        // display_context sees nothing here (no `kind`), proving orthogonality.
+        assert_eq!(display_context(&idle_with_font), None);
 
-        let dismiss = WyomingEvent::recipe_dismiss();
-        let back = roundtrip(&dismiss).await;
-        assert_eq!(back, dismiss);
-        assert_eq!(back.data["action"], json!("dismiss"));
-    }
-
-    #[tokio::test]
-    async fn weather_show_current_and_dismiss_roundtrip() {
-        let weather = json!({
-            "location_label": "Austin, Texas",
-            "units": "imperial",
-            "current": { "temp": 72, "weather_code": 2, "is_day": true },
-            "daily": [{ "date": "2026-09-25", "high": 80, "low": 60 }],
+        // Font reported alongside a widget + timers: device_context carries all three.
+        let combined = json!({
+            "screen": {
+                "kind": "recipe",
+                "recipe": { "title": "Carbonara", "tab": "steps", "at_top": false, "at_bottom": true, "ingredient_count": 5, "step_count": 7 },
+                "timers": { "running": 1, "next_remaining_secs": 30 },
+                "font": { "scalable": true, "scale": 1.6, "at_min": false, "at_max": true }
+            }
         });
-        let show = WyomingEvent::weather_show(weather.clone());
-        let back = roundtrip(&show).await;
-        assert_eq!(back, show);
-        assert!(back.is_weather());
-        assert_eq!(back.data["action"], json!("show"));
-        assert_eq!(back.data["weather"], weather);
-
-        let current = WyomingEvent::weather_current(weather.clone());
-        let back = roundtrip(&current).await;
-        assert_eq!(back, current);
-        assert_eq!(back.data["action"], json!("current"));
-
-        let dismiss = WyomingEvent::weather_dismiss();
-        let back = roundtrip(&dismiss).await;
-        assert_eq!(back, dismiss);
-        assert_eq!(back.data["action"], json!("dismiss"));
+        let dev = device_context(&combined);
+        assert_eq!(dev.widget_label(), Some("recipe"));
+        assert_eq!(dev.timers.running, 1);
+        assert!(dev.font.scalable);
+        assert!(dev.font.at_max);
+        assert_eq!(dev.font.scale_permille, 1600);
     }
 
-    #[tokio::test]
-    async fn weather_hello_carries_role() {
-        let hello = WyomingEvent::hello_weather("dev-1", "core-1", "Bedroom");
-        let back = roundtrip(&hello).await;
-        assert_eq!(back, hello);
-        assert_eq!(back.hello_role(), "weather");
-        assert_eq!(back.hello_device_id(), Some("dev-1"));
-        assert_eq!(back.hello_name(), Some("Bedroom"));
-        // The default notify hello reports the notify role.
-        assert_eq!(WyomingEvent::hello("d", "c", "").hello_role(), "notify");
-    }
+    #[test]
+    fn enroll_screen_parses_and_suppresses_the_widget_label() {
+        let data = json!({
+            "rate": 16_000, "width": 2, "channels": 1, "timestamp": 0,
+            "screen": {
+                "kind": "enroll",
+                "enroll": { "session": "sess-1", "name": "Dana", "sample_index": 2, "phase": "verify" },
+            },
+        });
+        assert_eq!(
+            display_context(&data),
+            Some(DisplayContext::Enroll(EnrollScreen {
+                session: "sess-1".to_string(),
+                name: "Dana".to_string(),
+                sample_index: 2,
+                phase: "verify".to_string(),
+            }))
+        );
+        // Like diagnostics, enrollment never surfaces a widget label (can't leak to the LLM).
+        assert_eq!(device_context(&data).widget_label(), None);
 
-    #[tokio::test]
-    async fn recipe_navigate_and_scroll_roundtrip() {
-        let nav = WyomingEvent::recipe_navigate("ingredients");
-        let back = roundtrip(&nav).await;
-        assert_eq!(back, nav);
-        assert!(back.is_recipe());
-        assert_eq!(back.data["action"], json!("navigate"));
-        assert_eq!(back.data["target"], json!("ingredients"));
-
-        let scroll = WyomingEvent::recipe_scroll("down");
-        let back = roundtrip(&scroll).await;
-        assert_eq!(back, scroll);
-        assert_eq!(back.data["action"], json!("scroll"));
-        assert_eq!(back.data["direction"], json!("down"));
+        // An unknown phase defaults to "sample"; a missing session → no context.
+        let defaulted =
+            json!({ "screen": { "kind": "enroll", "enroll": { "session": "s", "name": "" } } });
+        assert_eq!(
+            display_context(&defaulted),
+            Some(DisplayContext::Enroll(EnrollScreen {
+                session: "s".to_string(),
+                name: String::new(),
+                sample_index: 0,
+                phase: "sample".to_string(),
+            }))
+        );
+        let no_session = json!({ "screen": { "kind": "enroll", "enroll": { "name": "x" } } });
+        assert_eq!(display_context(&no_session), None);
     }
 
     #[test]
@@ -1305,6 +584,11 @@ mod tests {
                 screen: "now_playing".to_string(),
             }))
         );
+        // The audio-diagnostics screen carries no state — its bare `kind` is enough, and
+        // `widget_label()` reports nothing (it must never route a decision or prompt).
+        let diag = json!({ "screen": { "kind": "diagnostics" } });
+        assert_eq!(display_context(&diag), Some(DisplayContext::Diagnostics));
+        assert_eq!(device_context(&diag).widget_label(), None);
 
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
         let other = json!({ "screen": { "kind": "photos" } });
@@ -1373,131 +657,5 @@ mod tests {
         assert_eq!(dev, DeviceContext::default());
         assert_eq!(dev.widget_label(), None);
         assert!(!dev.timers.any_running());
-    }
-
-    #[tokio::test]
-    async fn speak_frame_roundtrips_and_extracts_text() {
-        let ev = WyomingEvent::speak("Time's up for pasta");
-        let back = roundtrip(&ev).await;
-        assert_eq!(back, ev);
-        assert_eq!(back.event_type, types::SPEAK);
-        assert_eq!(back.speak_text(), Some("Time's up for pasta"));
-        // A non-speak frame yields no text.
-        assert_eq!(WyomingEvent::audio_stop(0).speak_text(), None);
-    }
-
-    #[tokio::test]
-    async fn listen_frame_roundtrips_and_carries_depth_and_wait() {
-        let ev = WyomingEvent::listen(2, 10);
-        let back = roundtrip(&ev).await;
-        assert_eq!(back, ev);
-        assert_eq!(back.event_type, types::LISTEN);
-        assert_eq!(back.data["depth"], json!(2));
-        assert_eq!(back.data["wait_secs"], json!(10));
-    }
-
-    #[test]
-    fn followup_depth_reads_marked_audio_start_only() {
-        // A plain wake-word audio-start has no follow-up marker → depth 0.
-        let plain = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
-        assert_eq!(followup_depth(&plain.data), 0);
-
-        // A device follow-up turn stamps `followup: true` + `followup_depth` + `wait_secs`.
-        let marked = json!({
-            "rate": 16_000, "width": 2, "channels": 1, "timestamp": 0,
-            "followup": true, "followup_depth": 3, "wait_secs": 5,
-        });
-        assert_eq!(followup_depth(&marked), 3);
-        assert_eq!(followup_wait_secs(&marked), 5);
-
-        // `followup: false` (or absent) ignores any stray depth.
-        let disabled = json!({ "followup": false, "followup_depth": 3 });
-        assert_eq!(followup_depth(&disabled), 0);
-        // No `wait_secs` on a plain turn → 0 (caller uses its default window).
-        assert_eq!(followup_wait_secs(&plain.data), 0);
-    }
-
-    #[tokio::test]
-    async fn notify_frames_roundtrip() {
-        // hello (device → orchestrator)
-        let hello = WyomingEvent::hello("echo-show-8", "Paul Family", "Kitchen");
-        let back = roundtrip(&hello).await;
-        assert_eq!(back, hello);
-        assert_eq!(back.event_type, types::ANAMANTI_HELLO);
-        assert_eq!(back.hello_device_id(), Some("echo-show-8"));
-        assert_eq!(back.hello_name(), Some("Kitchen"));
-        assert_eq!(back.data["role"], json!("notify"));
-        // A non-hello frame yields no device id or name.
-        assert_eq!(WyomingEvent::audio_stop(0).hello_device_id(), None);
-        assert_eq!(WyomingEvent::audio_stop(0).hello_name(), None);
-
-        // notify (orchestrator → device)
-        let note = WyomingEvent::notify("42-0", "info", "Reminder", "Meeting in 5 minutes");
-        let back = roundtrip(&note).await;
-        assert_eq!(back, note);
-        assert_eq!(back.event_type, types::ANAMANTI_NOTIFY);
-        assert_eq!(back.data["id"], json!("42-0"));
-        assert_eq!(back.data["priority"], json!("info"));
-        assert_eq!(back.data["title"], json!("Reminder"));
-        assert_eq!(back.data["body"], json!("Meeting in 5 minutes"));
-
-        // ack (device → orchestrator), reserved for a later phase
-        let ack = WyomingEvent::notify_ack("42-0", "shown");
-        let back = roundtrip(&ack).await;
-        assert_eq!(back, ack);
-        assert_eq!(back.event_type, types::ANAMANTI_NOTIFY_ACK);
-    }
-
-    #[tokio::test]
-    async fn synthesize_carries_text_and_optional_voice() {
-        let with_voice = WyomingEvent::synthesize("hello there", Some("en_US-amy-medium"));
-        let back = roundtrip(&with_voice).await;
-        assert_eq!(back.event_type, types::SYNTHESIZE);
-        assert_eq!(back.data["text"], json!("hello there"));
-        assert_eq!(back.data["voice"]["name"], json!("en_US-amy-medium"));
-
-        let no_voice = WyomingEvent::synthesize("hi", None);
-        assert!(no_voice.data.get("voice").is_none());
-    }
-
-    #[test]
-    fn header_line_is_single_newline_terminated_json() {
-        let bytes = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0).to_bytes();
-        let newline = bytes.iter().position(|&b| b == b'\n').expect("has newline");
-        assert_eq!(bytes.iter().filter(|&&b| b == b'\n').count(), 1);
-        let header: Header = serde_json::from_slice(&bytes[..newline]).expect("header parses");
-        assert_eq!(header.event_type, types::AUDIO_START);
-        assert_eq!(header.data_length, Some(bytes.len() - newline - 1));
-        assert_eq!(header.payload_length, None);
-    }
-
-    #[test]
-    fn transcript_text_is_extracted() {
-        let ev = WyomingEvent::transcript("turn on the lights");
-        assert!(ev.is_transcript());
-        assert_eq!(ev.transcript_text(), Some("turn on the lights"));
-    }
-
-    #[tokio::test]
-    async fn empty_input_decodes_to_none() {
-        assert_eq!(decode(&[]).await.expect("ok"), None);
-    }
-
-    #[tokio::test]
-    async fn two_events_stream_back_to_back() {
-        let mut wire = Vec::new();
-        wire.extend_from_slice(&WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0).to_bytes());
-        let pcm: Vec<u8> = vec![0x11, 0x22, 0x0a, 0x33]; // includes a 0x0a ('\n')
-        wire.extend_from_slice(
-            &WyomingEvent::audio_chunk(AudioFormat::PCM_16K_MONO, 1, pcm.clone()).to_bytes(),
-        );
-
-        let mut reader = &wire[..];
-        let first = read_event(&mut reader).await.unwrap().unwrap();
-        assert_eq!(first.event_type, types::AUDIO_START);
-        let second = read_event(&mut reader).await.unwrap().unwrap();
-        assert_eq!(second.event_type, types::AUDIO_CHUNK);
-        assert_eq!(second.payload.as_deref(), Some(pcm.as_slice()));
-        assert_eq!(read_event(&mut reader).await.unwrap(), None);
     }
 }

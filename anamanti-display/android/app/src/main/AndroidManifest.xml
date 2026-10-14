@@ -46,9 +46,19 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- HOME + DEFAULT make this app selectable as the device launcher. On the
+                 kiosk Echo Show it is set as the default Home app (one-time, out-of-band
+                 like the mic/camera grants: `adb shell cmd package set-home-activity
+                 com.anamanti.anamanti_display/.MainActivity`, or Settings → Home app), so
+                 after a crash the OS relaunches it immediately — the crash-recovery
+                 watchdog. Escape hatch back to the stock launcher: in-app Settings →
+                 System (SettingsScreen._systemPage) opens the Home-app picker. LAUNCHER is
+                 kept so the app still appears in app lists. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+                <category android:name="android.intent.category.HOME"/>
+                <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

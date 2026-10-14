@@ -27,6 +27,8 @@ import 'package:anamanti_display/src/engine/place_data.dart';
 import 'package:anamanti_display/src/engine/music_data.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
+import 'package:anamanti_display/src/settings/app_settings.dart'
+    show kFontScaleMin, kFontScaleMax;
 
 /// Opens the native engine event stream for a given config. Production passes
 /// `startWakeWordEngine`; tests pass a fake.
@@ -72,6 +74,20 @@ typedef PlaceContextSink =
       required String address,
     });
 
+/// Pushes the current font-scaling context down to the native engine, so the next voice
+/// turn's `audio-start` tells the orchestrator whether a resizable text surface is on
+/// screen and what the current global scale is. Lets "increase font" / "decrease font"
+/// resolve only when there is something to resize (and lets the assistant say when it is
+/// already at the maximum/minimum). Production wires the native [setFontContext]; null
+/// (the default, for tests) disables it.
+typedef FontContextSink =
+    void Function({
+      required bool scalable,
+      required double scale,
+      required bool atMin,
+      required bool atMax,
+    });
+
 /// Probes whether the Mac orchestrator is currently reachable. Returns `true` if a
 /// connection/handshake succeeded. Production wires this to a control-protocol
 /// round-trip (mDNS discover + connect); tests inject a fake. When left null the
@@ -90,13 +106,14 @@ typedef MusicControlSink = void Function({required String action, int? value});
 /// "what's this song?". Production wires the native [setMusicContext]; null (the default,
 /// for tests) disables it. Only a full music screen counts as context — the compact overlay
 /// does not, so it never steals the context from a recipe/weather/place screen.
-typedef MusicContextSink = void Function({
-  required bool active,
-  required bool playing,
-  required String title,
-  required String artist,
-  required String screen,
-});
+typedef MusicContextSink =
+    void Function({
+      required bool active,
+      required bool playing,
+      required String title,
+      required String artist,
+      required String screen,
+    });
 
 /// Which music surface is currently shown, independent of whether music is playing
 /// (`music != null`). While playing, the compact [MusicControlOverlay] rides the ambient
@@ -215,6 +232,8 @@ class AssistantState {
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
+    this.enrollSeq = 0,
+    this.enrollResultJson = '',
   });
 
   final TurnPhase phase;
@@ -323,6 +342,16 @@ class AssistantState {
   /// or `'top'` / `'bottom'`. Read together with [recipeScrollSeq].
   final String recipeScrollDir;
 
+  /// Monotonic counter bumped each time a voice-enrollment capture result arrives
+  /// (SpeakerEnrollmentPlan.md Phase 2). The enroll screen watches it (a counter, so a
+  /// repeated/rejected sample still registers) and reads [enrollResultJson]. 0 = none.
+  final int enrollSeq;
+
+  /// The latest `anamanti-enroll-result` data block as a raw JSON string (paired with
+  /// [enrollSeq]): the orchestrator's reply to the most recent enrollment sample/verify
+  /// capture. Empty until the first result.
+  final String enrollResultJson;
+
   /// Whether recipe mode is currently on screen.
   bool get recipeActive => recipe != null;
 
@@ -362,7 +391,8 @@ class AssistantState {
   bool get musicActive => music != null;
 
   /// Whether a full-screen music view (now-playing or up-next) is currently on screen.
-  bool get musicScreenActive => musicActive && musicScreen != MusicScreen.hidden;
+  bool get musicScreenActive =>
+      musicActive && musicScreen != MusicScreen.hidden;
 
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
@@ -391,11 +421,7 @@ class AssistantState {
   /// camera-presence flip. (Historically the backlight tracked only [userPresent],
   /// so a turn/mode that woke the display left the backlight stuck dim.)
   bool get screenAwake =>
-      userPresent ||
-      displayActive ||
-      recipeActive ||
-      weatherActive ||
-      placeActive ||
+      userPresent || displayActive || recipeActive || weatherActive || placeActive ||
       musicScreenActive;
 
   AssistantState copyWith({
@@ -433,6 +459,8 @@ class AssistantState {
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
+    int? enrollSeq,
+    String? enrollResultJson,
   }) {
     return AssistantState(
       phase: phase ?? this.phase,
@@ -465,6 +493,8 @@ class AssistantState {
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
+      enrollSeq: enrollSeq ?? this.enrollSeq,
+      enrollResultJson: enrollResultJson ?? this.enrollResultJson,
     );
   }
 }
@@ -490,6 +520,9 @@ class AssistantController extends ChangeNotifier {
     PlaceContextSink? setPlaceContext,
     MusicControlSink? musicControl,
     MusicContextSink? setMusicContext,
+    FontContextSink? setFontContext,
+    void Function(String direction)? onFontAdjust,
+    double fontScale = 1.0,
   })  : _config = config,
         _onUserActivity = onUserActivity,
         _weatherAutoClose = weatherAutoClose,
@@ -499,6 +532,9 @@ class AssistantController extends ChangeNotifier {
         _setPlaceContext = setPlaceContext,
         _musicControl = musicControl,
         _setMusicContext = setMusicContext,
+        _setFontContext = setFontContext,
+        _onFontAdjust = onFontAdjust,
+        _fontScale = fontScale,
         // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
         // [EngineStreamFactory] shape (tests inject their own factory).
         _startEngine = startEngine ?? _defaultEngineStream,
@@ -514,8 +550,49 @@ class AssistantController extends ChangeNotifier {
   static Stream<WakeWordEvent> _defaultEngineStream(WakeWordConfig config) =>
       startWakeWordEngine(config: config);
 
-  final WakeWordConfig _config;
+  /// The engine config, reused on every reconnect ([_listen]). Not final: live
+  /// tuning ([updateLiveTuning]) folds new values in so a reconnect doesn't revert
+  /// them to what the controller was created with.
+  WakeWordConfig _config;
   final EngineStreamFactory _startEngine;
+
+  /// The engine config currently in use (reflects live tuning).
+  WakeWordConfig get config => _config;
+
+  /// Record live-tuned capture gain + wake-word thresholds (already pushed to the
+  /// running engine via `update_diagnostics_tuning`) in the config, so an engine
+  /// reconnect re-seeds these values instead of the ones this controller started
+  /// with.
+  void updateLiveTuning({
+    required double gainDb,
+    required double threshold,
+    required double activeThreshold,
+  }) {
+    final c = _config;
+    _config = WakeWordConfig(
+      melspecModelPath: c.melspecModelPath,
+      embeddingModelPath: c.embeddingModelPath,
+      wakewordModelPath: c.wakewordModelPath,
+      modelName: c.modelName,
+      threshold: threshold,
+      activeThreshold: activeThreshold,
+      discoveryTimeoutSecs: c.discoveryTimeoutSecs,
+      orchestratorKey: c.orchestratorKey,
+      turnTimeoutSecs: c.turnTimeoutSecs,
+      smoothingWindow: c.smoothingWindow,
+      fireOnPeak: c.fireOnPeak,
+      playbackBufferSecs: c.playbackBufferSecs,
+      captureGainDb: gainDb,
+      useAudiorecord: c.useAudiorecord,
+      micSource: c.micSource,
+      platformAec: c.platformAec,
+      platformAgc: c.platformAgc,
+      platformNs: c.platformNs,
+      cameraProximity: c.cameraProximity,
+      proximityMotionThreshold: c.proximityMotionThreshold,
+      proximityReleaseSecs: c.proximityReleaseSecs,
+    );
+  }
 
   /// Reachability probe used to auto-recover the online status while idle, instead
   /// of waiting for the next wake word. Null disables the poll (e.g. in tests).
@@ -572,6 +649,20 @@ class AssistantController extends ChangeNotifier {
   /// [MusicContextSink]); null disables it (tests with no native library).
   final MusicContextSink? _setMusicContext;
 
+  /// Sink for pushing font-scaling context to the native engine (see [FontContextSink]);
+  /// null disables it (tests with no native library).
+  final FontContextSink? _setFontContext;
+
+  /// Called when a voice "increase font" / "decrease font" command arrives, with the
+  /// direction `'increase'` / `'decrease'`. The app shell applies + persists the new
+  /// global [AppSettings.fontScale] and calls [updateFontScale] back. Null disables it.
+  final void Function(String direction)? _onFontAdjust;
+
+  /// The current global font scale, mirrored from [AppSettings.fontScale] so the pushed
+  /// font context reports the live value and whether it is at the min/max bound. Updated
+  /// by the app shell via [updateFontScale] after each voice adjustment.
+  double _fontScale;
+
   /// The active recipe pane's latest scroll position, tracked so recipe context
   /// pushes carry it. `_recipeAtTop` starts true (a freshly opened tab is at the top);
   /// the [RecipeView] corrects both once it measures the pane.
@@ -601,6 +692,10 @@ class AssistantController extends ChangeNotifier {
     _sub?.cancel();
     _backoff = _minBackoff;
     _listen();
+    // Seed the native font context before the first turn so its `audio-start` already
+    // carries the current global scale (and `scalable`). Pushed here — well ahead of any
+    // turn — so the value is read, not raced, when the turn stamps `screen.font`.
+    _pushFontContext();
     // Start probing immediately if we're offline (don't wait for the first event).
     _syncOfflinePoll();
   }
@@ -821,12 +916,15 @@ class AssistantController extends ChangeNotifier {
           _placeAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
-          _emit(_state.copyWith(
+          _emit(
+            _state.copyWith(
               recipe: recipe,
               recipeTab: 0,
               clearWeather: true,
               clearPlace: true,
-              musicScreen: MusicScreen.hidden));
+              musicScreen: MusicScreen.hidden,
+            ),
+          );
           _pushRecipeContext();
           _pushPlaceContext();
         }
@@ -877,12 +975,15 @@ class AssistantController extends ChangeNotifier {
           _weatherAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
-          _emit(_state.copyWith(
+          _emit(
+            _state.copyWith(
               place: place,
               clearRecipe: true,
               clearWeather: true,
               recipeTab: 0,
-              musicScreen: MusicScreen.hidden));
+              musicScreen: MusicScreen.hidden,
+            ),
+          );
           _schedulePlaceAutoClose();
           _pushRecipeContext();
           _pushWeatherContext();
@@ -911,8 +1012,25 @@ class AssistantController extends ChangeNotifier {
         }
       case WakeWordEventKind.musicScreen:
         // Voice `music_screen` command ("show me what's playing" / "what's up next" /
-        // "hide the music"). Routed through the same methods a touch uses.
-        _applyMusicScreen(e.musicScreen);
+        // "hide the music"). The target screen rides the generic
+        // [WakeWordEvent.recipeAction] string (same carrier as font adjust). Routed
+        // through the same methods a touch uses.
+        _applyMusicScreen(e.recipeAction);
+      case WakeWordEventKind.fontAdjust:
+        // Voice "increase font" / "decrease font". The direction rides the generic
+        // [WakeWordEvent.recipeAction] string (same carrier as recipe scroll). The app
+        // shell applies + persists the new global scale and calls [updateFontScale] back.
+        _onFontAdjust?.call(e.recipeAction);
+      case WakeWordEventKind.enrollResult:
+        // A guided voice-enrollment capture's result (sample accepted/rejected, or the
+        // verify outcome). The enroll screen owns the flow; bump the counter + stash the
+        // raw JSON for it to parse. Does not touch the turn state machine.
+        _emit(
+          _state.copyWith(
+            enrollSeq: _state.enrollSeq + 1,
+            enrollResultJson: e.enrollJson,
+          ),
+        );
     }
   }
 
@@ -1027,7 +1145,9 @@ class AssistantController extends ChangeNotifier {
   void applyMusicPush(String nowPlayingJson) {
     if (nowPlayingJson.trim().isEmpty) {
       if (_state.music != null) {
-        _emit(_state.copyWith(clearMusic: true, musicScreen: MusicScreen.hidden));
+        _emit(
+          _state.copyWith(clearMusic: true, musicScreen: MusicScreen.hidden),
+        );
         _pushMusicContext();
       }
       return;
@@ -1092,7 +1212,13 @@ class AssistantController extends ChangeNotifier {
     if (sink == null) return;
     final m = _state.music;
     if (m == null || _state.musicScreen == MusicScreen.hidden) {
-      sink(active: false, playing: false, title: '', artist: '', screen: 'hidden');
+      sink(
+        active: false,
+        playing: false,
+        title: '',
+        artist: '',
+        screen: 'hidden',
+      );
       return;
     }
     sink(
@@ -1100,7 +1226,9 @@ class AssistantController extends ChangeNotifier {
       playing: m.playing,
       title: m.trackTitle,
       artist: m.artist,
-      screen: _state.musicScreen == MusicScreen.nextUp ? 'up_next' : 'now_playing',
+      screen: _state.musicScreen == MusicScreen.nextUp
+          ? 'up_next'
+          : 'now_playing',
     );
   }
 
@@ -1120,6 +1248,32 @@ class AssistantController extends ChangeNotifier {
   /// Set the music volume (0–100 percent).
   void setMusicVolume(int percent) =>
       _musicControl?.call(action: 'volume', value: percent.clamp(0, 100));
+
+  /// Mirror the latest global font scale (from [AppSettings.fontScale]) after the app
+  /// shell applies a voice adjustment, and re-push the font context so the next turn
+  /// reports the new value (and whether it is now at the min/max bound).
+  void updateFontScale(double scale) {
+    _fontScale = scale;
+    _pushFontContext();
+  }
+
+  /// Push the current font-scaling context down to the native engine so the next voice
+  /// turn's `audio-start` carries it to the orchestrator. `scalable` is true whenever a
+  /// text surface is on screen — which on this always-on display is always the case (the
+  /// conversation panel and cards during a turn, the idle clock otherwise, the large away
+  /// clock in off mode), per the product decision to allow resizing whenever text is
+  /// visible. A no-op when no sink is wired (tests).
+  void _pushFontContext() {
+    final sink = _setFontContext;
+    if (sink == null) return;
+    const eps = 1e-6;
+    sink(
+      scalable: true,
+      scale: _fontScale,
+      atMin: _fontScale <= kFontScaleMin + eps,
+      atMax: _fontScale >= kFontScaleMax - eps,
+    );
+  }
 
   /// Fold an ambient weather push (from the weather channel) into the indicator state.
   /// Called by the app shell's weather-channel subscription. Never opens the full

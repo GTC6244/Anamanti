@@ -22,7 +22,7 @@ prepares an `fdroid` flavor that ships without the updater.
 - **Keep the GitHub Releases + Obtainium path too** (`.github/workflows/release.yml`)
   for now; retire Obtainium once the in-app path is hardware-proven.
 - **Base URL is a device-local setting** (`AppSettings.updateBaseUrl`, default
-  placeholder `https://dl.example.com`), editable in Settings → Updates.
+  placeholder `https://dl.example.com`), editable in Settings → Device → Updates (Advanced mode).
 - **Client = `ureq` (blocking) + rustls/`ring` + `webpki-roots` + `sha2`**, NOT
   reqwest: reqwest's default aws-lc-rs / native-tls don't reliably cross-compile for
   32-bit armv7 Android; ring does, and ureq fits the codebase's dedicated-`std::thread`
@@ -34,7 +34,7 @@ prepares an `fdroid` flavor that ships without the updater.
 | --- | --- | --- |
 | **Rust engine** | Fetch `latest.json`, stream-download the APK, incremental SHA-256 verify, progress stream | `rust/src/update/mod.rs` (impl), `rust/src/api/updater.rs` (FRB: `check_for_update`, `download_update`, `cancel_download`) |
 | **Kotlin channel** | `PackageInstaller` session, unknown-sources redirect, running `versionCode`, flavor flag | `MainActivity.kt` (`anamanti_display/updater`), `InstallReceiver.kt` |
-| **Flutter** | Periodic check, version compare, banner + Settings page, orchestration | `lib/src/engine/update_controller.dart`, `lib/src/update/updater_channel.dart`, `lib/src/ui/update_banner.dart`, Settings → Updates in `settings_screen.dart`; wired in `main.dart` |
+| **Flutter** | Periodic check, version compare, banner + Settings page, orchestration | `lib/src/engine/update_controller.dart`, `lib/src/update/updater_channel.dart`, `lib/src/ui/update_banner.dart`, Settings → Device → Updates (`lib/src/ui/settings/device_section.dart`); wired in `main.dart` |
 
 ### Flow
 1. On boot + every 6 h (a Dart `Timer`, only on the `selfUpdate` flavor and when
@@ -59,6 +59,13 @@ prepares an `fdroid` flavor that ships without the updater.
 name a flavor**, e.g. `flutter build apk --release --flavor selfUpdate`.
 
 ## Releasing
+
+> **Canonical runbook:** `agents.md` → "Deploying / updating Anamanti Display (device
+> OTA) — publish from the Mac" has the full, current step-by-step (both OTA paths, the
+> concrete `immediacy-releases` bucket + default URL, the signing-key trap, the Flutter
+> 3.44.1 pin, and why **CI `release.yml` currently cannot sign** — no `ANDROID_*`
+> secrets, so publish from the Mac for now). The steps below are the design-level
+> summary; follow `agents.md` when actually shipping.
 
 1. Bump `version:` in `pubspec.yaml` (e.g. `1.2.0+12`). The `+N` build number is the
    Android `versionCode` and **must increase every release**.
@@ -92,7 +99,33 @@ name a flavor**, e.g. `flutter build apk --release --flavor selfUpdate`.
 - [x] Rust fetch/download/verify + FRB; Kotlin install channel + receiver; flavors;
   Flutter controller + banner + Settings page; release script + manifest template;
   docs. Suites green (Rust tests, `dart analyze`, `flutter test`).
-- [ ] **Verify on hardware** (the full flow above) — not yet device-tested.
+- [x] **Verified on hardware** (2026-10-02, Echo Show 8 / LineageOS `crown`): full
+  flow banner → download (live progress) → SHA-256 verify → `PackageInstaller` →
+  relaunch at the new versionCode, confirmed by an in-app OTA v3 → v4. Three real
+  bugs were found and fixed during this bring-up:
+  - **Inverted download cancel flag** (`rust/src/api/updater.rs`): the thread flag was
+    created as a `running` bool initialized `true` and passed straight into
+    `update/mod.rs`, which reads it as a *cancel* flag (`true` == stop). Every real
+    download therefore bailed instantly with "download cancelled" (unit tests missed
+    it — they call the lower layer with `false` directly). Fixed to proper cancel
+    semantics; locked by `update::tests::cancel_flag_polarity_true_means_abort`.
+  - **Placeholder base URL shipped as the default** (`kDefaultUpdateBaseUrl` was
+    `https://dl.example.com`, which does not resolve → every check failed with a DNS
+    error). Now defaults to `https://releases.immediacy.app/anamanti` (the Anamanti
+    subpath of the shared `immediacy-releases` R2 bucket; on-device override unchanged).
+  - **`release-r2.sh` uploaded to wrangler's LOCAL store** (missing `--remote`), so
+    nothing reached the real bucket. Added `--remote`; the script also now derives an
+    `anamanti/` key prefix from the URL path (shared bucket → per-product subpath).
+  Download location also hardened: APK now lands in the non-evictable app support dir
+  (not the cache dir) and `install()` re-verifies the file exists before committing.
+  Signing note: LineageOS enforces signature *consistency* on in-place updates, not a
+  "release" key — the kiosk is debug-signed by the build host's `~/.android/debug.keystore`,
+  and release builds fall back to that same key, so OTAs install cleanly. Keep publishing
+  from one machine (or a pinned keystore); a different debug key breaks updates.
+- [ ] Hands-off install: the system `CONFIRM_INSTALL` dialog appeared and the update
+  completed without a manual tap in this test, but relying on that for a headless kiosk
+  should be deliberately confirmed — the guaranteed-silent path is device-owner
+  provisioning + a silent `PackageInstaller` install.
 - [ ] Device-local secrets / integrity hardening is unchanged by this work; the
   manifest + APK ride plain HTTPS from a host you control, pinned by SHA-256.
 - [ ] Later: retire Obtainium + the GitHub Releases workflow once the in-app path is

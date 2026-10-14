@@ -7,9 +7,11 @@
 //! the words come from a remote `wyoming-faster-whisper` process or an in-process
 //! `whisper-rs` engine.
 //!
-//! **Stage 1** (this file) ships exactly one implementation, [`WyomingTranscriber`],
-//! which wraps the existing [`SttSession`] with byte-for-byte the old behavior. The
-//! in-process whisper-rs engine lands behind this same trait in Stage 2.
+//! Three engines sit behind the seam: [`WyomingTranscriber`] (wraps the existing
+//! [`SttSession`] with byte-for-byte the pre-seam behavior; the default), the
+//! in-process whisper.cpp engine (feature `stt-whisper-local`), and
+//! [`ElevenLabsEngine`] (Scribe v2 Realtime over WebSocket). The live selection is read
+//! per turn from the settings snapshot (`stt.engine`).
 //!
 //! The method set deliberately mirrors `SttSession` (`forward_pcm` / `read_event` /
 //! `finish`) so the pump loop's two-arm `select!` — and its cancellation-safety
@@ -25,10 +27,20 @@ use crate::wyoming::protocol::AudioFormat;
 use crate::wyoming::stt::SttSession;
 use crate::wyoming::{DynConnection, DynRead, DynWrite};
 
+/// Deterministic transcript normalization (pronunciation rewrite table). Not
+/// feature-gated: it runs on the transcript regardless of which engine produced it.
+pub mod normalize;
+pub use normalize::{normalize, sanitize_rules, PronunciationRule};
+
 #[cfg(feature = "stt-whisper-local")]
 mod whisper_local;
 #[cfg(feature = "stt-whisper-local")]
 pub use whisper_local::{WhisperEngine, WhisperLocal, WhisperSttEngine};
+
+/// ElevenLabs Scribe v2 Realtime STT engine (always compiled; see
+/// `plans/ElevenLabsSttPlan.md`). Activated by `stt.engine = "elevenlabs"`.
+pub mod elevenlabs;
+pub use elevenlabs::ElevenLabsEngine;
 
 /// An event surfaced by a [`Transcriber`] while a turn is streaming. The pump loop
 /// only cares about the final transcript; every other engine signal
@@ -46,14 +58,16 @@ pub enum SttEvent {
 /// and reused across turns: a downstream Wyoming engine dials a fresh socket each
 /// turn, while an in-process engine hands out a session over its already-loaded
 /// model. The pipeline falls back to the historical Wyoming-via-`ServiceConnector`
-/// path when no engine is attached (`Pipeline::with_stt_engine` is not called).
+/// path when the selected engine is unavailable (no whisper model loaded via
+/// [`Pipeline::with_whisper_engine`](crate::orchestrator::Pipeline::with_whisper_engine),
+/// or no ElevenLabs key).
 #[async_trait]
 pub trait SttEngine: Send + Sync {
     /// Start a transcription session for one turn's PCM format.
     async fn begin(&self, format: AudioFormat) -> Result<Box<dyn Transcriber>>;
 }
 
-/// A single in-flight transcription request, created per turn. The energy VAD in
+/// A single in-flight transcription request, created per turn. The VAD loop in
 /// `orchestrator::stream_to_transcript` feeds it PCM via [`forward_pcm`] and, at
 /// end-of-speech, calls [`finish`] and drains [`read_event`] until the
 /// [`SttEvent::Transcript`] arrives.

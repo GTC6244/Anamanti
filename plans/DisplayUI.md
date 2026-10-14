@@ -35,8 +35,10 @@ events; nothing here touches audio buffers or sockets directly.
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
 | **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView`, `NowPlayingView`, `NextUpView` |
-| **Settings (route)** | `SettingsScreen` (Assistant / Device Config / Audio Diagnostics / Speech Processing / Speech Detection / Background / Updates), `AudioDiagnosticsView` |
-| **Settings sub-screens** (built, currently **unwired**) | `MemoryScreen`, `PeopleScreen` |
+| **Settings (route)** | `SettingsScreen`: a side rail of six sections — Assistant (Brain · Capabilities) / Listening (Wake word · Microphone · End of speech) / Audio Diagnostics / Display (Screen · Photos) / Household / Device (Connection · Updates · Maintenance) — plus `AudioDiagnosticsView` |
+| **People / enrollment** (pushed from Settings → Household → People) | `PeopleScreen`, `SpeakerEnrollScreen` |
+| **Memory** (pushed from Settings → Household → Memory) | `MemoryScreen` (tabs: Facts / Conversations / Keywords) |
+| **Link a phone** (pushed from Settings → Household → Link a phone) | `PairPhoneScreen` (name + 4-char AppSaid pairing code) |
 | **Shared visual helpers** | `weatherIcon` / `weatherIconColor` |
 
 ---
@@ -61,6 +63,13 @@ events; nothing here touches audio buffers or sockets directly.
   `Stack(fit: expand)` driven by an `AnimatedBuilder` on `AssistantController`.
   Composes the background, away face, full-screen modes, conversation panel, and
   all always-on overlays, cross-fading them by state.
+- **Global font scale.** `main.dart` wraps `AmbientScreen` in a single
+  `MediaQuery` whose `textScaler` is `TextScaler.linear(AppSettings.fontScale)`, so
+  the voice commands *"increase font"* / *"decrease font"* scale **all** ambient text
+  at once (every `Text` reads the ambient `textScaler`; no per-widget sizes change).
+  The scale is device-local + persisted, clamped `[0.85, 1.6]`, stepped `0.1`. The
+  pushed `SettingsScreen` route is **outside** this subtree, so it stays at the
+  default size. See [`FontScalePlan.md`](./FontScalePlan.md).
 - Derived flags: `active = state.displayActive` (turn in flight **or** reply audio
   still playing); `recipeActive` / `weatherActive` / `placeActive`;
   `modeActive = any full-screen mode`; `offMode = !userPresent && !active &&
@@ -193,12 +202,13 @@ Core-owned path).
   `AmbientScreen` wraps it in an `AnimatedOpacity` (key `listening-cue`, 250 ms) and
   mounts the widget only while shown, so the pulse controller isn't spinning during
   the idle day.
-- **User-configurable** in Settings → Speech Processing: a master on/off
+- **User-configurable** in Settings → Display → Screen: a master on/off
   (`AppSettings.listeningRingEnabled` — when off the overlay never appears) plus the
   reactivity / attack / release / auto-range-decay dials (`ringReactivity`,
-  `ringAttack`, `ringRelease`, `ringDecay`). `AmbientScreen` receives these from
-  `main.dart` and passes them to `ListeningOverlay`; changes apply instantly on Save
-  (a `setState` in `_onSettingsApplied`), with no engine restart or Mac round-trip.
+  `ringAttack`, `ringRelease`, `ringDecay`; attack / release / auto-range are
+  Advanced-mode only). `AmbientScreen` receives these from `main.dart` and passes
+  them to `ListeningOverlay`; changes apply as soon as they're made (a `setState` in
+  `_onSettingsApplied`), with no engine restart or Mac round-trip.
 
 ## 4. Overlays — timers
 
@@ -391,89 +401,279 @@ payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart
 
 ## 9. Settings (navigation route)
 
-**`SettingsScreen` / `_SettingsScreenState`** — `lib/src/ui/settings_screen.dart`
-- The only `Navigator.push` in the app (tap the gear on `AmbientScreen`). A
-  two-level master/detail: `_menu()` lists the category tiles; selecting one opens
-  `_categoryPage`. `enum _SettingsCategory`:
-  - **Assistant** — **Device name** (device-local text field, key
-    `settings-device-name`; the subtitle shows this display's stable MAC-derived
-    `deviceId`, e.g. `anamanti-140ac5942aca`; the name is sent to the Core in the
-    `anamanti-hello` frame and appears in the Core config page's "Connected devices"
-    list), orchestrator (which Mac) + LLM backend, Anthropic auth (API key vs
-    subscription/OAuth), model, voice. The device-name + orchestrator tiles are
-    device-local (usable offline); the rest are orchestrator-managed and show
-    "Contacting…" / "Assistant offline" guard tiles when the Mac is unreachable.
-  - **Device Config** — Wake word (word, threshold slider, smoothing window,
-    capture gain, "Fire on peak", "AudioRecord capture (far-field)", noise
-    suppression / AGC / echo cancellation switches) + Display ("Dim screen after"
-    preset slider, 30 s…1 h).
-  - **Audio Diagnostics** — a full custom page (`AudioDiagnosticsView`, not a tile
-    list) for visually tuning the mic. See its own section below.
-  - **Speech Processing** — playback buffer, "Instant processing cue", endpoint
-    silence ms, endpoint RMS threshold, and the **Listening ring** controls (on/off
-    switch + reactivity / attack / release / auto-range dials — presentational,
-    applied instantly on Save, no engine restart).
-  - **Speech Detection** — VAD engine (Energy vs Silero), Silero threshold,
-    end-silence ms, voice RMS threshold (applied on the Mac; see
-    [`VadSileroPlan.md`](./VadSileroPlan.md)).
-  - **Background** — photo source; Google Photos (Ambient) link via QR; Google
-    Drive link via the orchestrator config page + Sync; folder-id field.
-  - **Updates** — in-app app updates (only shown on the `selfUpdate` flavor, i.e.
-    when `SettingsScreen.updates` is non-null). A full custom page
-    (`_updatesPage()`): an "Automatic update checks" switch (`autoUpdateEnabled`), an
-    **Update URL** field (`updateBaseUrl`, the Cloudflare R2 base), the installed
-    versionCode, a live status line, **Check now**, and a **Download & install** /
-    **Install** / **Retry** action — driven by `UpdateController`. The URL + toggle
-    persist with the device-local settings on Save. See
-    [`UpdaterPlan.md`](./UpdaterPlan.md).
-- On Save → `onApplied(next)` in `main.dart` restarts the engine (wake/threshold
-  changes) and/or refreshes the slideshow (photo-source changes); assistant / VAD
-  settings apply on the Mac.
+**`SettingsScreen`** — `lib/src/ui/settings_screen.dart` (shell) +
+`lib/src/ui/settings/` (one file per section, the shared `settings_widgets.dart` rows,
+and `settings_controller.dart`). Layout and rationale:
+[`SettingsReorgPlan.md`](./SettingsReorgPlan.md).
+
+- **Navigation.** Pushed from the gear on `AmbientScreen` (the only `Navigator.push` of
+  Settings). Opens directly on **Assistant → Brain** — there is no menu page. A left
+  **side rail** (key `settings-rail-<section>`) switches between six sections; a
+  section with more than one tab shows a **tab strip** (key `settings-tab-<id>`).
+  Every setting is at most two touches away. Each tab body is keyed
+  `settings-page-<section>-<tab>`.
+- **Fits one screen.** Every tab is laid out in **two columns** sized for the Echo
+  Show 8's **960×600 dp** (1280×800 px at 213 dpi) and does not scroll; the outer
+  scroll view is only a safety net. A widget test (with the real Material fonts)
+  asserts no tab scrolls, with Advanced mode on and off. Long help text lives behind
+  ⓘ buttons; small choices are segmented buttons / chips.
+- **Changes apply immediately — no Save button.** `SettingsController`:
+  - device-local settings are persisted (`SettingsStore`) and handed to `main.dart`'s
+    `_onSettingsApplied` after a ~600 ms debounce; applies are **serialized**, and a
+    burst of changes costs one apply (one engine restart at most). Sliders commit on
+    release; text fields (device name, Ollama model, free-text voice, Update URL, Drive
+    folder IDs) commit on submit / focus loss.
+  - **capture gain and both wake-word thresholds** are pushed to the running engine
+    **live while the slider moves** (FRB `updateDiagnosticsTuning(gainDb, threshold,
+    activeThreshold)`), with no engine restart.
+  - Core-managed settings (LLM, model, voice, VAD) go to the Mac via `applySettings`
+    after a ~500 ms debounce; a rejected or failed apply **reverts** the control to the
+    Core's last confirmed value and shows why in the AppBar.
+  - anything still pending (a debounce, a slider mid-drag, a text field mid-edit) is
+    **flushed when Settings closes**. Text-field drafts are held apart from the other
+    settings, so an unrelated change never applies a half-typed value; a failed apply
+    isn't marked applied, so it's retried; an edit made while an apply is still in
+    flight (including an undo) is always sent.
+  - **Re-pinning the Core** (Device → Connection) switches Settings itself to the new
+    Mac once the change applies (`SettingsScreen.clientForCore`), reloading the Core
+    settings and capabilities; People / Memory / Link a phone open against it too.
+  - Live-tuned gain + thresholds are also folded into the engine controller's config
+    (`AssistantController.updateLiveTuning`), so an engine reconnect re-seeds them
+    instead of reverting.
+  - The AppBar shows the apply status (key `settings-apply-status`: "Saving…" /
+    "Saved" / the last error) and, in Advanced mode, an **Advanced** chip
+    (`settings-advanced-chip`, jumps to Device → Maintenance).
+- **Advanced mode** (`AppSettings.advancedMode`, default **on**, switch on Device →
+  Maintenance, key `settings-advanced-mode`). Off hides the expert controls (marked
+  *Adv* below) and the Listening → Microphone tab. Presentational only.
+- **Core-dependent controls** (Brain, and the Core column of End of speech) show a
+  "Contacting the assistant…" / "Assistant offline · Retry" banner and are disabled
+  (not hidden) until the Core is reachable.
+
+**Sections and tabs**
+
+- **Assistant**
+  - **Brain** — LLM backend (segmented: Local · Claude · OpenAI, + Mock *Adv*; key
+    `settings-backend`), Anthropic auth (segmented API key / Subscription,
+    `settings-anthropic-auth`, Claude only), Model (dropdown of the Core's recent models
+    for cloud backends, free text for Ollama; `settings-model`), TTS voice (dropdown of
+    installed Piper voices or free text; `settings-voice`), and a one-line
+    **Capabilities summary** ("11 on · 1 key missing", `settings-capabilities-summary`)
+    that taps through to the next tab.
+  - **Capabilities** — a **read-only** grid (3 across) of what the Core is configured to
+    use per capability, mirroring the Core config page's Config, Tools, System1, Speech
+    and Memory→Embedding tabs: name, provider · model, and a **Cloud / Local / Off** chip
+    — or a red **"API key missing"** warning (`Icons.key_off`) when a required key isn't
+    set on the Core (card key `settings-function-<cat>-<name>`). Fetched via
+    `anamanti-get-functions` → `anamanti-functions` (FRB `get_functions`) when Settings
+    opens, with its own offline guard + Retry and a Refresh button. Never carries secret
+    values — only each key's set/unset bit.
+- **Listening**
+  - **Wake word** — wake word (`settings-wakeword`), Sensitivity (idle)
+    (`settings-threshold`), Sensitivity while speaking (`settings-active-threshold`),
+    Capture gain (`settings-capture-gain`) — all three sliders live-tuned; *Adv*:
+    Smoothing window (`settings-smoothing`), Fire on peak (`settings-fire-on-peak`); a
+    "Test it live in Audio Diagnostics" button.
+  - **Microphone** (*Adv* tab) — AudioRecord capture (far-field)
+    (`settings-use-audiorecord`), Playback buffer (`settings-playback-buffer`); platform
+    Noise suppression / Automatic gain control / Echo cancellation
+    (`settings-platform-ns|agc|aec`, disabled unless AudioRecord is on). These restart
+    the engine (debounced).
+  - **End of speech** — two labelled columns so the two "end of speech" settings aren't
+    confused. **Assistant (Core)**, which decides when you've finished talking:
+    End-of-speech wait (`settings-vad-silence`); *Adv*: VAD engine (segmented Silero /
+    Energy, Silero is the default; `settings-vad-engine`), Silero threshold
+    (`settings-vad-silero-threshold`, Silero only), Voice level (`settings-vad-level`)
+    — see [`VadSileroPlan.md`](./VadSileroPlan.md). **On-screen cue**, which only
+    changes when the "thinking" indicator appears: Instant processing cue
+    (`settings-endpoint-cue`); *Adv*: cue silence (`settings-endpoint-silence`) and cue
+    silence level (`settings-endpoint-level`).
+- **Audio Diagnostics** — the full `AudioDiagnosticsView` (below), kept as a top-level
+  section because it's used often. Follows the engine controller across restarts.
+- **Display**
+  - **Screen** — Dim screen after (chips 30s…1h, `settings-dim-delay`, each
+    `settings-dim-delay-<secs>`; an off-preset stored value shows the nearest), Font
+    size (`settings-font-scale`, 85 %…160 %, the manual override of the voice font
+    scale) with a live preview line; Listening ring on/off (`settings-listening-ring`)
+    + Reactivity (`settings-ring-reactivity`); *Adv*: Attack / Release / Auto-range
+    (`settings-ring-attack|release|decay`). Ring dials are disabled while the ring is off.
+  - **Photos** — idle photo source (segmented Gradients · Google Photos · Drive,
+    `settings-photo-source`); Google Photos (Ambient API) link via QR
+    (`settings-ambient-link`); Google Drive: Sync from Core (`settings-drive-sync`) +
+    Choose folders (`settings-drive-pick`); *Adv*: raw folder-ID field
+    (`settings-drive-folders`). Links apply as soon as they complete.
+- **Household** — three large buttons that push the existing full screens: **People**
+  (`settings-menu-people`), **Link a phone** (`settings-menu-pair-phone`), **Memory**
+  (`settings-menu-memory`). See §10.
+- **Device**
+  - **Connection** — Device name (`settings-device-name`; the helper shows this
+    display's stable MAC-derived `deviceId`, e.g. `anamanti-140ac5942aca`; the name is
+    sent to the Core in `anamanti-hello` and appears in the Core config page's
+    "Connected devices" list), the **Anamanti Core** picker (`settings-orchestrator`:
+    Auto or a discovered Core — a strict pin), and a connection status line with Retry.
+    Both controls are device-local and usable offline.
+  - **Updates** (only on the `selfUpdate` flavor, i.e. when `SettingsScreen.updates`
+    is non-null) — "Check for updates automatically" (`settings-auto-update`), the
+    installed versionCode + live status, **Check now** (`settings-check-update`) and
+    **Download & install / Install / Retry** (`settings-update-action`), driven by
+    `UpdateController`; *Adv*: Update URL (`settings-update-url`, the Cloudflare R2
+    base). See [`UpdaterPlan.md`](./UpdaterPlan.md).
+  - **Maintenance** — **Permissions**: every Android permission the app declares (read
+    live from the platform on open / on app resume), each row keyed
+    `settings-permission-<name>` with a status chip; the two **runtime** permissions —
+    **Camera** (presence detection + auto-brightness) and **Microphone** (wake word +
+    voice) — show a **Grant** button (`settings-permission-grant-<name>`) when missing;
+    a Refresh button (`settings-permissions-refresh`). A newly granted **Camera**
+    triggers `SettingsScreen.onRequestEngineRestart` (wired to `main.dart`'s
+    `_startEngine`). It exists because the app is the device Home/launcher, so there's
+    no onboarding moment to prompt. Then the **Advanced mode** switch, and **Android**:
+    Open app settings (`settings-permissions-app-settings`, for a permanently denied
+    grant), **Switch Home app** (`settings-switch-home` →
+    `Settings.ACTION_HOME_SETTINGS`) and **Open Android settings**
+    (`settings-open-android-settings` → `Settings.ACTION_SETTINGS`) — the **kiosk escape
+    hatch**, since the app is the device **Home/launcher** (manifest `category.HOME` +
+    `DEFAULT`) and the OS relaunches it after a native crash. Channels:
+    `anamanti_display/permissions` and `anamanti_display/maintenance` → `MainActivity`.
+    adb fallback: `adb shell cmd package set-home-activity`.
 
 **`AudioDiagnosticsView`** — `lib/src/ui/audio_diagnostics_view.dart`
-- The **Audio Diagnostics** settings category — a live, visual mic-tuning surface.
-  Rendered full-page by `SettingsScreen._audioDiagnosticsPage()` (passed the live
-  `AssistantController` via the new `SettingsScreen.assistant` field, wired from
-  `main.dart`'s `_openSettings`). Driven entirely by the always-on wake-word
+- The **Audio Diagnostics** section — a live, visual mic-tuning surface. Rendered by
+  `SettingsScreen` with the live `AssistantController` from
+  `SettingsScreen.assistant` (a `ValueListenable`, wired from `main.dart`). After an
+  engine restart the same view swaps to the new controller (`didUpdateWidget`) without
+  re-announcing the transcription-only context, so it stays set while the page is up.
+  People is likewise rebuilt with the live controller. Driven entirely by the always-on wake-word
   engine's event stream folded into `AssistantState` — no second audio path.
-- Shows: a **Microphone monitor** toggle (pauses/resumes the visualization only —
-  the wake-word mic is always on); a **mic input-level (RMS) meter** on a dBFS
-  scale (so quiet far-field audio is visible); a **wake-word score meter** with the
-  firing **threshold** drawn as a bright line and the smoothed score as a faint
-  tick, flashing a **DETECTED** chip when the wake word fires; a **numeric
-  readouts** grid (RMS, dBFS, score, smoothed, threshold, gain, device / rate /
-  channels); a **recent-detections** history (time + score); and two **live-tuning**
-  sliders (**Capture gain**, **Sensitivity (idle)**).
-- The tuning sliders apply to the **running engine instantly** via the new FRB
-  `updateDiagnosticsTuning(gainDb, threshold)` (no restart), and mirror into the
-  parent's editable `AppSettings` via `onChanged` so the shared **Save** button
-  persists them across restarts.
+- Shows: a **mic input-level (RMS) meter** on a dBFS scale whose header line carries
+  the **Microphone monitor** switch (`Key('diag-monitor-toggle')`, pauses/resumes the
+  visualization only — the wake-word mic is always on); a **wake-word score meter**
+  with the firing **threshold** drawn as a bright line and the smoothed score as a
+  faint tick, flashing a **DETECTED** chip when the wake word fires; **live tuning**
+  sliders (**Capture gain**, **Sensitivity (idle)**); a compact **recent detections**
+  list (time + score, the last 4, two per row); a **numeric readouts** grid (three
+  across: RMS, dBFS, score, smoothed, threshold, gain, device / rate / channels) whose
+  header carries a **copy-config** button (`Key('diag-copy-config')`); and a **Heard
+  words** card.
+- Layout: **two columns** (meters, tuning, detections on the left; readouts and heard
+  words on the right) that fit the 864 dp-wide pane beside the rail without scrolling,
+  even with a full detection list and a two-line transcript (covered by a widget test).
+- **Heard words** (`Key('diag-transcript')`, up to two lines) shows what the server
+  transcribed from the last thing said *while this screen is up*. Entering the section
+  calls FRB `setDiagnosticsContext(active: true)` (and `false` on leave; injectable as
+  `SettingsScreen.onDiagnosticsActive` for tests), which stamps a
+  **transcription-only** display context (`screen.kind == "diagnostics"`) on each
+  voice turn's `audio-start`; the Core then transcribes and relays the words here but
+  **never sends them to the LLM** (no reply, no TTS, no memory). Reuses the normal
+  wake-word turn (no second audio path).
+- The tuning sliders write the same settings as Listening → Wake word, apply to the
+  **running engine instantly** (no restart), and are saved automatically.
 - Data path: the Rust `run_loop` enriches its periodic `WakeWordEventKind.level`
   event with the live `score` / `avgScore` / `threshold` / `gainDb` (see
   `rust/src/engine/mod.rs`, `WakeWordEvent::level_diag`); the controller stores them
   on `AssistantState` (`wakeScore`, `wakeAvgScore`, `wakeThreshold`, `captureGainDb`,
   `captureDevice` / `captureSampleRate` / `captureChannels`, `detectionSeq`,
-  `lastDetectionScore`).
+  `lastDetectionScore`). Live tuning: `update_diagnostics_tuning` stores the gain, idle
+  threshold and active threshold in atomics the loop re-reads every block (re-seeded
+  from `WakeWordConfig` on each engine start); the in-turn threshold is
+  `max(active, idle)`.
 
 ---
 
-## 10. Settings sub-screens — built but currently UNWIRED
+## 10. People, voice enrollment & other sub-screens
 
-These widgets exist and are tested but are **not reachable** from the running app
-in this version (referenced only from `test/`). Listed so they are not
-re-implemented by mistake; wire them into `SettingsScreen` navigation when needed.
+`PeopleScreen` + `SpeakerEnrollScreen`, `MemoryScreen` and `PairPhoneScreen` are all
+**reachable** from the large buttons on **Settings → Household** (→ People, → Link a
+phone, → Memory).
 
 **`MemoryScreen`** — `lib/src/ui/memory_screen.dart`
-- `Scaffold` + `AppBar("Memory")`. Lists Core memory entries (`MemoryView`: facts
-  vs preferences, explicit vs inferred) as `ListTile`s with per-entry delete;
-  app-bar refresh + "Forget all" (confirm dialog). Constructed with an
-  `OrchestratorClient`.
+- Reached from **Settings → Household → Memory** (`settings-menu-memory`, pushed as its own route
+  like People). `Scaffold` + `AppBar("Memory")` with a 3-tab `TabBar`, each tab its own
+  list + delete, all constructed with an `OrchestratorClient`:
+  - **Facts** — the durable SQLite facts/preferences (`MemoryView`: facts vs
+    preferences, explicit vs inferred) as `ListTile`s with per-entry delete + a
+    "Forget all" action (confirm dialog). Uses `listMemories`/`deleteMemory`/
+    `clearMemories` (unchanged frames).
+  - **Conversations** — stored GraphRAG `Turn` nodes (`TurnView`): transcript + reply,
+    speaker + relative time, and entity ("keyword") chips. A search field + a person
+    dropdown (`listSpeakers`) + an optional entity filter chip (set by tapping a
+    keyword) drive `listTurns(query, speakerId, entity)`. Per-turn delete (confirm) →
+    `deleteGraphNode(turn.id)`.
+  - **Keywords** — stored GraphRAG `Entity` nodes (`EntityView`: name + kind) via
+    `listEntities(query)`; tapping one jumps to Conversations filtered to it; per-entity
+    delete (confirm) → `deleteGraphNode(entity.id)`.
+- Conversations/Keywords deletes are **Helix-index-only** (prune recall; the chat-log
+  source of truth is untouched, so a rebuild can restore them) — surfaced as a caption
+  at the bottom of those lists. Needs the Core on the HelixDB backend; the SQLite recall
+  backend answers these frames `ok:false` and the tab shows an "unavailable" state.
 
 **`PeopleScreen`** — `lib/src/ui/people_screen.dart`
-- `Scaffold` + `AppBar("People")`. Lists voice-identified speakers (`SpeakerView`;
-  named people vs anonymous "Speaker N", voice-clip counts). Per-row menu:
-  Name/rename, Merge with…, Forget. Constructed with an `OrchestratorClient`.
-  See [`speaker_id_plan.md`](./speaker_id_plan.md).
+- Reached from **Settings → Household → People** (`settings-menu-people`). `Scaffold` +
+  `AppBar("People")`. Lists voice-identified speakers (`SpeakerView`; named people vs
+  anonymous "Speaker N", voice-clip counts). Each row has a **play button**
+  (`speaker-play-<id>`, ▶) that replays that person's recorded voice clips through the
+  assistant's speaker so a human can listen and recognize who it is before naming them
+  (`OrchestratorClient.playSpeakerClips` → the Core streams the clips back; a snackbar
+  reports how many played, or that none are saved yet). Rows are badged against the Mac's
+  household roster (`OrchestratorClient.listHouseholdMembers`): a home avatar + "Household
+  member" when the voice's name matches a member, "Not linked to household" for a named
+  voice outside the roster. Per-row menu: **Link to household member…**
+  (`speaker-link-<id>` → a member picker `link-member-<name>`: "This voice becomes X", or
+  "Merge into X's voiceprint" (→ confirm `link-merge-confirm`) when X already has one;
+  "Already linked" disabled; empty roster → a snackbar pointing to the Mac's Household
+  page; calls `OrchestratorClient.linkSpeaker`), Name/rename,
+  **Add voice samples** (`speaker-add-samples-<id>`, only when the live engine controller is
+  wired — opens `SpeakerEnrollScreen` in add-samples mode for that person), Merge with…, Forget. An **"Add voice"** FAB (`people-add`, shown when the live engine
+  controller is wired) opens the guided enrollment flow below. Constructed with an
+  `OrchestratorClient` (+ the `AssistantController` and native `setEnrollContext` for
+  enrollment). See [`speaker_id_plan.md`](./speaker_id_plan.md).
+
+**`SpeakerEnrollScreen`** — `lib/src/ui/speaker_enroll_screen.dart`
+- `Scaffold` + `AppBar("Add a voice")`. The guided "train a voice" flow
+  (SpeakerEnrollmentPlan.md Phase 2): a "Whose voice is this?" step — **household members**
+  as `ChoiceChip`s (`enroll-member-<name>`; a voice icon marks members who already have a
+  voiceprint) fetched via `OrchestratorClient.listHouseholdMembers`, **or** a new name in the
+  `enroll-name` field (a typed name matching a member resolves to that member's spelling); an
+  `enroll-name-hint` line says whether the voice will be linked to an existing member, added to
+  their existing voiceprint, or added to the household as a new person — → a capture step
+  with a **phrase guide** (`enroll-guide-<i>`: the session's phrases, captured ones ticked off,
+  the current one highlighted; beside the controls on landscape ≥700 px, stacked below on
+  narrow screens). Cancel / Save are **pinned** under the scrolling content so they stay
+  on the ~960×600 screen. Both the capture and verify steps show a live **capture-status
+  panel** (`EnrollCaptureStatus`, `lib/src/ui/enroll_capture_status.dart`, key
+  `enroll-capture-status`) mapped by `enrollCueFor` from `AssistantState.phase` /
+  `captureReady` / `online` + the last sample result: *Starting microphone…* → *Waiting for
+  "<wake word>"* → **Listening — read the phrase now** (red, recording dot, "Heard
+  "<wake word>"", an auto-ranged `MicLevelMeter` fed `micLevel`) → *Checking that sample…*
+  (spinner, from the on-device end-of-speech cue) → *Sample captured* / *Sample not used* +
+  the Core's reason (flashed for `kEnrollResultFlash` = 3 s, cleared early by the next wake
+  word); plus *Can't reach the assistant* and *Microphone restarting…*. Presentation only —
+  no new engine events; implicit animations only.
+  **Add-samples mode** (`speakerId` + `personLabel`, from the People ⋮ menu): `AppBar("Add
+  voice samples")`, skips the name step, starts the guide later in `kEnrollPhrases` so a
+  re-train reads fresh sentences, and commits via `enrollFinish(…, speakerId:)` into that exact
+  voiceprint. Then the shared flow: a capture step that prompts the user to
+  say the wake word and read short phrases (progress dots, per-sample accept/retry feedback)
+  → commit → a verify step that confirms recognition ("Recognized Dana!", with confidence).
+  Captures reuse the ordinary wake-word turn via an `enroll` display context (stamped by the
+  native `setEnrollContext`), so there is **no second audio path**; each capture's result
+  arrives as a `WakeWordEvent.enrollResult` folded into `AssistantState`. Commit/cancel are
+  `OrchestratorClient.enrollFinish`/`enrollCancel`. See
+  [`SpeakerEnrollmentPlan.md`](./SpeakerEnrollmentPlan.md).
+
+**`PairPhoneScreen`** — `lib/src/ui/pair_phone_screen.dart`
+- Reached from **Settings → Household → Link a phone** (`settings-menu-pair-phone`, pushed as its own
+  route like People/Memory). `Scaffold` + `AppBar("Link a phone")`. Matches a 4-character
+  **AppSaid pairing code** — shown on a family member's phone in the AppSaid app ("Link
+  another device") — to a **person**: a name field (`pair-name`) + a 4-char code field
+  (`pair-code`, upper-cased, alphanumeric), then a **Link phone** button (`pair-submit`,
+  disabled until both are valid). Submitting calls
+  `OrchestratorClient.pairPhone(name, code)`, which round-trips **`anamanti-pair-phone` →
+  `anamanti-pair-result`** to the Core; the Core redeems the code (`POST /v1/pair/claim`),
+  learns the phone's `user_key`, and stores it on the matching **household member's**
+  AppSaid address — **auto-adding the person to the household** if new — so recipients stay
+  unified on the household (the key never returns to the device). On success a done step shows the Core's
+  confirmation + **Done** (`pair-done`); a bad/expired code or unreachable Mac shows the
+  reason inline (`pair-error`). See [`architecture.md`](./architecture.md) §8.4.
 
 ---
 

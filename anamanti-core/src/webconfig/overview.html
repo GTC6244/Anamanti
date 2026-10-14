@@ -1,0 +1,210 @@
+<p class="sub" data-head="sub">The whole assistant at a glance: where each stage runs, whether it's healthy, what reaches the internet, and how fast recent turns were.</p>
+<div class="btn-row" data-head="actions">
+  <span id="headChips" class="legend"></span>
+  <button type="button" id="refresh" class="sm"><i data-icon="refresh"></i>Refresh</button>
+</div>
+
+<div class="grid-12">
+  <!-- Pipeline -->
+  <section class="card span-12" id="pipeline">
+    <div class="card-head">
+      <h2><i data-icon="layers"></i>Voice pipeline</h2>
+      <div class="tools legend" id="legend"></div>
+    </div>
+    <p class="desc">Each turn flows left to right. Click a stage to change it. The colour bar shows where it runs: <span style="color:var(--loc-local-fg);font-weight:650">this Mac</span>, <span style="color:var(--loc-lan-fg);font-weight:650">your network</span> or <span style="color:var(--loc-cloud-fg);font-weight:650">the cloud</span>.</p>
+    <div class="pipeline" id="pipe">
+      <div class="skeleton" style="height:116px;flex:1"></div>
+    </div>
+  </section>
+
+  <!-- Displays -->
+  <section class="card span-3" id="displays">
+    <div class="card-head">
+      <h2><i data-icon="display"></i>Displays</h2>
+      <div class="tools" id="devCount"></div>
+    </div>
+    <div id="devList" class="list"></div>
+    <div class="card-foot" style="justify-content:space-between">
+      <span class="hint">Over your network</span>
+      <a class="btn sm" href="/devices#displays"><i data-icon="send"></i>Send test</a>
+    </div>
+  </section>
+
+  <!-- Latency -->
+  <section class="card span-6" id="latency">
+    <div class="card-head">
+      <h2><i data-icon="clock"></i>Recent latency</h2>
+      <div class="tools" id="latStats"></div>
+    </div>
+    <p class="desc">End of speech → reply ready for the last 20 turns (oldest left), split by stage.</p>
+    <div id="spark" class="spark" style="height:92px"></div>
+    <div class="legend" id="stageLegend" style="margin-top:.6rem;font-size:.74rem;color:var(--muted)"></div>
+  </section>
+
+  <!-- Egress -->
+  <section class="card span-3" id="egress">
+    <div class="card-head">
+      <h2><i data-icon="globe"></i>What leaves the house</h2>
+    </div>
+    <p class="desc">Everything currently sent to an internet service.</p>
+    <div id="egressList" class="list scroll-y" style="max-height:146px"></div>
+  </section>
+
+  <!-- Integrations -->
+  <section class="card span-6" id="integrations">
+    <div class="card-head">
+      <h2><i data-icon="link"></i>Integrations</h2>
+      <a class="btn sm ghost" href="/integrations">Manage<i data-icon="arrow"></i></a>
+    </div>
+    <p class="desc">Voice tools backed by third-party services.</p>
+    <div id="intGrid" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.5rem"></div>
+  </section>
+
+  <!-- Last turns -->
+  <section class="card span-6" id="turns">
+    <div class="card-head">
+      <h2><i data-icon="chat"></i>Last turns</h2>
+      <div class="tools">
+        <a class="btn sm" href="/memory#unknown" id="unkLink" hidden title="Facts said by a voice that could not be identified"><i data-icon="users"></i><span id="unkText"></span></a>
+        <a class="btn sm ghost" href="/conversations">All conversations<i data-icon="arrow"></i></a>
+      </div>
+    </div>
+    <div id="turnList" class="list"></div>
+  </section>
+</div>
+
+<script>
+ui.hydrate();
+
+const INT_ICON = { weather: 'sun', places: 'pin', directions: 'route', calendar: 'calendar', cadora: 'cart', appsaid: 'phone', spotify: 'music', drive: 'photo' };
+const STAGE_ICON = { vad: 'wave', stt: 'mic', system1: 'bolt', llm: 'brain', search: 'search', embed: 'db', extract: 'graph', tts: 'speaker' };
+
+// Which LOCALITY entry describes a live cloud stage (for "What leaves the house").
+function egressKey(s){
+  const e = (s.engine || '').toLowerCase();
+  switch (s.key) {
+    case 'stt': return e.includes('eleven') ? 'stt.elevenlabs' : null;
+    case 'system1': return e.startsWith('jev') ? 'system1.jev' : null;
+    case 'llm': return e.startsWith('claude') ? 'llm.anthropic' : e.startsWith('openai') ? 'llm.openai' : null;
+    case 'search': return e.includes('duck') ? 'search.duckduckgo' : 'search.tavily';
+    case 'embed': return e.includes('openai') ? 'embed.openai' : null;
+    case 'extract': return 'extract.anthropic';
+    default: return null;
+  }
+}
+const INT_EGRESS = { weather: 'weather.visualcrossing', places: 'places.google', directions: 'directions.mapbox', calendar: 'calendar.ics', cadora: 'cadora', appsaid: 'appsaid', spotify: 'spotify', drive: 'drive' };
+
+function statusDot(st){ return st === 'ok' ? 'ok' : st === 'error' ? 'err' : (st === 'fallback' || st === 'needs_key') ? 'warn' : 'off'; }
+function statusText(st){ return ({ ok: 'healthy', error: 'unreachable', fallback: 'fallback', needs_key: 'needs key', off: 'off', unknown: 'not probed' })[st] || st; }
+
+function renderPipeline(o){
+  const stages = o.stages || [];
+  const arrow = '<div class="pipe-arrow">' + ui.icon('arrow') + '</div>';
+  let h = '<div class="pipe-end">' + ui.icon('mic') + 'You</div>' + arrow;
+  h += stages.map((s, i) => {
+    const tierText = s.keyless ? 'Cloud · keyless' : null;
+    const foot = ui.loc(s.tier, tierText) + (s.status !== 'off' ? ' <span class="chip neutral" title="' + escAttr(s.detail || '') + '"><span class="dot ' + statusDot(s.status) + '"></span>' + esc(statusText(s.status)) + '</span>' : '');
+    return '<a class="pipe-node tier-' + escAttr(s.tier) + '" href="' + escAttr(s.href) + '" title="' + escAttr(s.label + ' — ' + s.engine + (s.detail ? ' (' + s.detail + ')' : '')) + '">'
+      + '<span class="pn-label">' + esc(s.label) + ui.icon(STAGE_ICON[s.key] || 'layers') + '</span>'
+      + '<span class="pn-engine">' + esc(s.engine) + '</span>'
+      + '<span class="pn-detail">' + esc(s.status === 'fallback' && s.detail ? s.detail : (s.detail || ' ')) + '</span>'
+      + '<span class="pn-foot">' + foot + '</span></a>' + (i < stages.length - 1 ? arrow : '');
+  }).join('');
+  h += arrow + '<div class="pipe-end">' + ui.icon('display') + 'Display</div>';
+  $('pipe').innerHTML = h;
+
+  const counts = { local: 0, lan: 0, cloud: 0, off: 0 };
+  stages.forEach(s => { counts[s.tier] = (counts[s.tier] || 0) + 1; });
+  const words = { local: 'on this Mac', lan: 'on your network', cloud: 'in the cloud', off: 'off' };
+  $('legend').innerHTML = ['local', 'lan', 'cloud', 'off'].filter(t => counts[t]).map(t => ui.loc(t, counts[t] + ' ' + words[t])).join('');
+
+  const bad = stages.filter(s => s.status === 'error');
+  const warn = stages.filter(s => s.status === 'fallback' || s.status === 'needs_key');
+  $('headChips').innerHTML = (bad.length ? ui.status('err', bad.length + ' stage' + (bad.length > 1 ? 's' : '') + ' unreachable')
+      : warn.length ? ui.status('warn', warn.length + ' need' + (warn.length > 1 ? '' : 's') + ' attention') : ui.status('ok', 'All stages healthy'))
+    + ' <span class="chip neutral">v' + esc(o.version || '') + '</span>'
+    + (o.uptime_secs != null ? ' <span class="chip neutral" title="Uptime">' + ui.icon('clock') + esc(ui.fmtDuration(o.uptime_secs)) + '</span>' : '');
+}
+
+function renderDevices(o){
+  const devs = o.devices || [];
+  $('devCount').innerHTML = ui.status(devs.length ? 'ok' : 'off', devs.length + ' connected');
+  $('devList').innerHTML = devs.length ? devs.slice(0, 5).map(d =>
+    '<div class="list-row"><span class="dot ok"></span><div class="grow"><div class="title ellipsis">' + esc(d.name || '(unnamed)') + '</div><div class="meta mono ellipsis">' + esc(d.device_id) + '</div></div></div>').join('')
+    + (devs.length > 5 ? '<div class="hint" style="padding-top:.4rem">+' + (devs.length - 5) + ' more</div>' : '')
+    : '<div class="empty">' + ui.icon('display') + '<div>No displays connected.</div></div>';
+}
+
+function renderLatency(o){
+  const turns = (o.turns || []).slice().reverse(); // oldest → newest
+  const lat = o.latency || {};
+  $('latStats').innerHTML = lat.count
+    ? '<span class="chip neutral">p50 <b style="margin-left:.25rem">' + esc(ui.fmtMs(lat.p50_ms)) + '</b></span><span class="chip neutral">p95 <b style="margin-left:.25rem">' + esc(ui.fmtMs(lat.p95_ms)) + '</b></span>'
+    : '';
+  if (!turns.length) { $('spark').innerHTML = '<div class="empty" style="flex:1">' + ui.icon('clock') + '<div>No turns yet. Say the wake word to get started.</div></div>'; $('stageLegend').innerHTML = ''; return; }
+  const max = Math.max(1, ...turns.map(t => t.total_ms || ui.STAGES.reduce((a, s) => a + (t[s.key] || 0), 0)));
+  $('spark').innerHTML = turns.map(t => {
+    const total = t.total_ms || 0;
+    const parts = ui.STAGES.filter(s => t[s.key]).map(s =>
+      '<div class="seg-part" style="height:' + (100 * t[s.key] / max).toFixed(2) + '%;background:' + s.color + '" title="' + escAttr(s.label + ': ' + ui.fmtMs(t[s.key])) + '"></div>').join('');
+    return '<a class="col" href="/conversations' + (t.turn_id ? '#' + encodeURIComponent(t.turn_id) : '') + '" style="height:100%" title="' + escAttr((t.transcript || '') + ' — ' + ui.fmtMs(total)) + '">' + parts + '</a>';
+  }).join('');
+  $('stageLegend').innerHTML = ui.STAGES.map(s => '<span style="display:inline-flex;align-items:center;gap:.3rem"><span class="swatch" style="background:' + s.color + '"></span>' + esc(s.label) + '</span>').join('');
+}
+
+function renderEgress(o){
+  const items = [];
+  (o.stages || []).filter(s => s.tier === 'cloud' && s.status !== 'fallback').forEach(s => {
+    const k = egressKey(s); if (!k) return;
+    items.push({ name: s.label + ' · ' + s.engine, text: ui.LOCALITY[k].sends, href: s.href });
+  });
+  // Weather in "attention" (Visual Crossing chosen, no key) still sends the city —
+  // to the keyless Open-Meteo fallback.
+  (o.integrations || []).filter(i => i.status === 'active' || (i.key === 'weather' && i.status === 'attention')).forEach(i => {
+    const k = i.key === 'weather' && (i.keyless || i.status === 'attention') ? 'weather.openmeteo' : INT_EGRESS[i.key];
+    const m = ui.LOCALITY[k]; if (!m) return;
+    items.push({ name: i.name, text: m.sends, href: '/integrations#' + i.key });
+  });
+  $('egressList').innerHTML = items.length ? items.map(it =>
+    '<a class="list-row" href="' + escAttr(it.href) + '" style="color:inherit;text-decoration:none;align-items:flex-start">'
+    + '<span class="chip loc-cloud" style="padding:0 .35rem">' + ui.icon('cloud') + '</span>'
+    + '<div class="grow"><div class="title" style="font-size:.84rem">' + esc(it.name) + '</div><div class="meta">' + it.text.replace(/^Sends:\s*/, '') + '</div></div></a>').join('')
+    : '<div class="empty">' + ui.icon('shield') + '<div>Nothing. Every stage runs on this Mac or your network.</div></div>';
+}
+
+function renderIntegrations(o){
+  const kind = { active: 'ok', attention: 'warn', inactive: 'off', disabled: 'off' };
+  $('intGrid').innerHTML = (o.integrations || []).map(i =>
+    '<a href="/integrations#' + escAttr(i.key) + '" class="stat" style="color:inherit;text-decoration:none;display:flex;flex-direction:column;gap:.3rem" title="' + escAttr(i.detail || '') + '">'
+    + '<span style="display:flex;align-items:center;gap:.45rem;font-weight:650;font-size:.84rem"><span style="color:var(--accent);display:inline-flex">' + ui.icon(INT_ICON[i.key] || 'link') + '</span><span class="ellipsis">' + esc(i.name) + '</span></span>'
+    + '<span style="display:flex;align-items:center;gap:.35rem;font-size:.74rem;color:var(--muted)"><span class="dot ' + (kind[i.status] === 'ok' ? 'ok' : kind[i.status] === 'warn' ? 'warn' : 'off') + '"></span><span class="ellipsis">' + esc(i.detail || i.status) + '</span></span></a>').join('');
+}
+
+function renderTurns(o){
+  const turns = (o.turns || []).slice(0, 3);
+  $('turnList').innerHTML = turns.length ? turns.map(t => {
+    const tot = t.total_ms;
+    const k = tot == null ? 'off' : tot < 1500 ? 'ok' : tot < 3000 ? 'warn' : 'err';
+    return '<a class="list-row" href="/conversations' + (t.turn_id ? '#' + encodeURIComponent(t.turn_id) : '') + '" style="color:inherit;text-decoration:none">'
+      + '<div class="grow"><div class="title ellipsis">' + esc(t.transcript || '(no transcript)') + '</div>'
+      + '<div class="meta ellipsis">' + esc(t.reply || '') + '</div></div>'
+      + '<div style="text-align:right;flex:0 0 auto"><div>' + (t.speaker_tag ? ui.speakerTag(t.speaker_tag, { hints: false }) + ' ' : '') + ui.status(k, ui.fmtMs(tot)) + '</div><div class="meta" title="' + escAttr(fmtTime(t.ts)) + '">' + esc(ui.fmtAgo(t.ts)) + (!t.speaker_tag && t.speaker && t.speaker !== 'household' && !/^spk-/.test(t.speaker) ? ' · ' + esc(t.speaker) : '') + '</div></div></a>';
+  }).join('') : '<div class="empty">' + ui.icon('chat') + '<div>No conversations yet.</div></div>';
+  // "N unknown-speaker memories to review" → the Memory page review queue.
+  const n = o.unknown_memories || 0;
+  $('unkLink').hidden = !n;
+  $('unkText').textContent = n + ' unknown-speaker memor' + (n === 1 ? 'y' : 'ies') + ' to review';
+}
+
+async function load(probe){
+  try {
+    const o = await getJSON('/overview.json' + (probe ? '' : '?probe=0'));
+    if (!o.ok) throw new Error(o.message || 'failed');
+    renderPipeline(o); renderDevices(o); renderLatency(o); renderEgress(o); renderIntegrations(o); renderTurns(o);
+  } catch (e) { ui.toast(false, 'Could not load the overview: ' + (e.message || e)); }
+}
+$('refresh').addEventListener('click', () => load(true));
+// Paint fast without probes, then probe the downstream services for health.
+load(false).then(() => load(true));
+setInterval(() => { if (!document.hidden) load(true); }, 30000);
+</script>

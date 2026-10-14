@@ -83,10 +83,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DriveToken dco_decode_drive_token(dynamic raw);
 
   @protected
+  EntityInfo dco_decode_entity_info(dynamic raw);
+
+  @protected
+  EntityRef dco_decode_entity_ref(dynamic raw);
+
+  @protected
   double dco_decode_f_32(dynamic raw);
 
   @protected
   double dco_decode_f_64(dynamic raw);
+
+  @protected
+  FunctionStatus dco_decode_function_status(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -96,6 +105,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<EntityInfo> dco_decode_list_entity_info(dynamic raw);
+
+  @protected
+  List<EntityRef> dco_decode_list_entity_ref(dynamic raw);
+
+  @protected
+  List<FunctionStatus> dco_decode_list_function_status(dynamic raw);
 
   @protected
   List<MemoryEntry> dco_decode_list_memory_entry(dynamic raw);
@@ -110,7 +128,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<SpeakerClipInfo> dco_decode_list_speaker_clip_info(dynamic raw);
+
+  @protected
   List<SpeakerInfo> dco_decode_list_speaker_info(dynamic raw);
+
+  @protected
+  List<TurnInfo> dco_decode_list_turn_info(dynamic raw);
 
   @protected
   List<VoiceInfo> dco_decode_list_voice_info(dynamic raw);
@@ -155,7 +179,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SettingsUpdate dco_decode_settings_update(dynamic raw);
 
   @protected
+  SpeakerClipInfo dco_decode_speaker_clip_info(dynamic raw);
+
+  @protected
   SpeakerInfo dco_decode_speaker_info(dynamic raw);
+
+  @protected
+  TurnInfo dco_decode_turn_info(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -266,10 +296,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DriveToken sse_decode_drive_token(SseDeserializer deserializer);
 
   @protected
+  EntityInfo sse_decode_entity_info(SseDeserializer deserializer);
+
+  @protected
+  EntityRef sse_decode_entity_ref(SseDeserializer deserializer);
+
+  @protected
   double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
   double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
+  FunctionStatus sse_decode_function_status(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -279,6 +318,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<EntityInfo> sse_decode_list_entity_info(SseDeserializer deserializer);
+
+  @protected
+  List<EntityRef> sse_decode_list_entity_ref(SseDeserializer deserializer);
+
+  @protected
+  List<FunctionStatus> sse_decode_list_function_status(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<MemoryEntry> sse_decode_list_memory_entry(SseDeserializer deserializer);
@@ -295,7 +345,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<SpeakerClipInfo> sse_decode_list_speaker_clip_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<SpeakerInfo> sse_decode_list_speaker_info(SseDeserializer deserializer);
+
+  @protected
+  List<TurnInfo> sse_decode_list_turn_info(SseDeserializer deserializer);
 
   @protected
   List<VoiceInfo> sse_decode_list_voice_info(SseDeserializer deserializer);
@@ -342,7 +400,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SettingsUpdate sse_decode_settings_update(SseDeserializer deserializer);
 
   @protected
+  SpeakerClipInfo sse_decode_speaker_clip_info(SseDeserializer deserializer);
+
+  @protected
   SpeakerInfo sse_decode_speaker_info(SseDeserializer deserializer);
+
+  @protected
+  TurnInfo sse_decode_turn_info(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -476,10 +540,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_drive_token(DriveToken self, SseSerializer serializer);
 
   @protected
+  void sse_encode_entity_info(EntityInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_entity_ref(EntityRef self, SseSerializer serializer);
+
+  @protected
   void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_function_status(
+    FunctionStatus self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
@@ -489,6 +565,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_entity_info(
+    List<EntityInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_entity_ref(
+    List<EntityRef> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_function_status(
+    List<FunctionStatus> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_memory_entry(
@@ -515,10 +609,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_speaker_clip_info(
+    List<SpeakerClipInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_speaker_info(
     List<SpeakerInfo> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_turn_info(List<TurnInfo> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_voice_info(
@@ -578,7 +681,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_speaker_clip_info(
+    SpeakerClipInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_speaker_info(SpeakerInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_turn_info(TurnInfo self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_16(int self, SseSerializer serializer);

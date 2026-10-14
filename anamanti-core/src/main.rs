@@ -20,6 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 
+use anamanti_core::app::AppServices;
 use anamanti_core::config::{Config, MemoryBackendChoice, SttEngineKind, VadEngineKind};
 use anamanti_core::discovery::MdnsAdvertiser;
 use anamanti_core::memory::{ChatLog, GraphView, MemoryStore, PromptLog};
@@ -28,7 +29,7 @@ use anamanti_core::notify::NotificationService;
 use anamanti_core::orchestrator::{self, Pipeline, TcpConnector};
 use anamanti_core::server;
 use anamanti_core::weather::WeatherService;
-use anamanti_core::webconfig::{self, DebugSources};
+use anamanti_core::webconfig::{self, BootInfo, DebugSources};
 
 /// Worker-thread stack size. The embedded HelixDB engine builds deep async state
 /// machines whose stack usage exceeds tokio's 2 MiB default, especially in debug
@@ -57,8 +58,32 @@ async fn run() -> Result<()> {
         .format_timestamp_millis()
         .init();
 
+    // Install a process-default rustls CryptoProvider before any TLS client is used.
+    // rustls 0.23 is compiled with BOTH the aws-lc-rs and ring providers (pulled in
+    // transitively by reqwest and tokio-tungstenite), so it refuses to auto-select a
+    // default and `CryptoProvider::get_default()` returns None. tokio-tungstenite's
+    // rustls connector — exercised the moment `stt.engine = elevenlabs` dials the
+    // Scribe v2 `wss://` endpoint — reads that process default and PANICS when it is
+    // unset/ambiguous, aborting the turn (no transcript, no reply, nothing logged).
+    // reqwest picks its provider internally, which is why this only surfaced once the
+    // ElevenLabs STT engine was selected. Install aws-lc-rs (reqwest's own default) so
+    // every TLS client in the process shares one provider. `install_default` errors
+    // only if a provider was already installed — harmless, so ignore it.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        log::debug!("rustls default CryptoProvider was already installed");
+    }
+
     let cli = parse_cli().context("parsing command-line arguments")?;
     let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
+    // Which file the config came from, for the console's System page: the explicit
+    // `--config` path, else the convention `anamanti.json` when present.
+    let boot_config_file = cli.config.clone().or_else(|| {
+        let p = PathBuf::from("anamanti.json");
+        p.exists().then_some(p)
+    });
     log::info!(
         "starting orchestrator: name={:?} instance_id={} bind={} stt={} tts={} llm={} db={}",
         config.service_name,
@@ -92,8 +117,9 @@ async fn run() -> Result<()> {
 
     // Selectable-model catalog for the settings dropdown (device + config page).
     // Live-fetched from the provider APIs (filtered to the last 12 months) with a
-    // curated static fallback; shared by both front doors.
-    let catalog = Arc::new(config.model_catalog());
+    // curated static fallback; shared by both front doors. Credentials are read live
+    // from the settings, so keys entered on the config page are used.
+    let catalog = Arc::new(config.model_catalog(&settings));
 
     // Chat log (always on): every completed turn is recorded here, both as the
     // durable source of truth and as the ingestion queue for GraphRAG memory.
@@ -203,44 +229,28 @@ async fn run() -> Result<()> {
         }
     }
 
-    // STT engine selection (plans/python-to-rust-whisper.md). Default: the downstream
-    // Wyoming Whisper server dialed via the connector below. `whisper-rs` loads
-    // whisper.cpp in-process and needs the `stt-whisper-local` build feature.
-    match config.stt.engine {
-        SttEngineKind::Wyoming => {
-            log::info!(
-                "STT engine: wyoming (downstream Whisper at {})",
-                config.stt_addr
-            );
+    // STT engine (plans/python-to-rust-whisper.md, plans/ElevenLabsSttPlan.md). The live
+    // engine is chosen PER TURN from the settings snapshot (`stt.engine`, config-page
+    // swappable with no restart), so — like the Silero VAD model — we load the in-process
+    // whisper engine at boot whenever it's available (feature compiled + model present),
+    // regardless of the seeded engine, so a later swap to whisper-rs works live. Wyoming
+    // and ElevenLabs need no boot resource (dialed/connected per turn). The live selection
+    // is logged by `build_stt_transcriber` on each turn.
+    match config.build_whisper_engine() {
+        Ok(Some(engine)) => {
+            pipeline = pipeline.with_whisper_engine(engine);
         }
-        SttEngineKind::WhisperLocal => {
-            #[cfg(feature = "stt-whisper-local")]
-            {
-                let model = config.stt.resolved_model_path();
-                let model_str = model.to_string_lossy().into_owned();
-                let engine = anamanti_core::stt::WhisperEngine::open(
-                    &model_str,
-                    config.stt.language.clone(),
-                    config.stt.num_threads as i32,
-                )
-                .with_context(|| format!("loading in-process Whisper model {model_str}"))?;
-                log::info!(
-                    "STT engine: whisper-rs (in-process; model {model_str}, {} threads)",
-                    config.stt.num_threads
-                );
-                pipeline = pipeline
-                    .with_stt_engine(Arc::new(anamanti_core::stt::WhisperSttEngine::new(engine)));
+        Ok(None) => {}
+        Err(e) => {
+            // A present-but-unloadable model is fatal only if whisper-rs is the seeded
+            // engine; otherwise warn and continue (wyoming/elevenlabs still work).
+            if config.stt.engine == SttEngineKind::WhisperLocal {
+                return Err(e).context("loading the seeded in-process whisper STT engine");
             }
-            #[cfg(not(feature = "stt-whisper-local"))]
-            {
-                anyhow::bail!(
-                    "config selects stt.engine = whisper-rs, but this binary was built \
-                     without the `stt-whisper-local` feature; rebuild with \
-                     `--features stt-whisper-local`"
-                );
-            }
+            log::warn!("in-process whisper engine failed to load (non-fatal; not the seeded engine): {e:#}");
         }
     }
+    log::info!("STT engine (seed): {}", config.stt.engine.as_label());
 
     // End-of-speech VAD engine (plans/VadSileroPlan.md). The engine is runtime-swappable
     // from the config page / device (energy ⇄ silero), so on a `vad-silero` build we load
@@ -309,19 +319,16 @@ async fn run() -> Result<()> {
     // Dormant (no task) when weather is disabled in the config.
     let weather_svc = Arc::new(WeatherService::new());
     if config.weather.enabled {
-        let imperial =
-            anamanti_core::directions::units_are_imperial(config.weather_units.as_deref());
-        // The push builds its provider from the live settings each tick, so a config-page
-        // provider/key switch retargets it without a restart.
+        // Each tick reads the live household location + units and builds the provider
+        // from the live settings, so a config-page edit of any of them retargets the
+        // push without a restart.
         anamanti_core::weather::service::spawn_periodic(
             weather_svc.clone(),
             pipeline.settings().clone(),
-            pipeline.settings().home_location(),
-            imperial,
             config.weather.refresh_interval(),
         );
         log::info!(
-            "weather push: every {}s (imperial={imperial}, provider={})",
+            "weather push: every {}s (provider={})",
             config.weather.refresh_interval().as_secs(),
             config.weather.provider,
         );
@@ -345,28 +352,40 @@ async fn run() -> Result<()> {
             config.music.nowplaying_refresh().as_secs(),
         );
     }
+    // House-wide music routing (Snapcast) control plane. Dormant unless music is
+    // enabled in the config file; when on, the ducker lowers the music group's volume
+    // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
+    let ducker = config
+        .build_ducker()
+        .map(|d| d as Arc<dyn anamanti_core::server::Ducker>);
+
+    // Every shared service handle, built once: the device server, its control protocol
+    // and the config page all share this one `Arc`.
+    let services = Arc::new(
+        AppServices::new(pipeline, connector, catalog)
+            .with_voices_dir(config.tts_voices_dir.clone())
+            .with_notify(notify)
+            .with_weather(weather_svc)
+            .with_now_playing(music_svc)
+            .with_graphrag(graphrag)
+            .with_ducker(ducker)
+            .with_music(music_hub.clone())
+            .with_debug(DebugSources {
+                chatlog_path: config.chatlog_path.clone(),
+                promptlog_path: config.promptlog_path.clone(),
+                db_path: config.db_path.clone(),
+                helix_path: config.helix_path.clone(),
+                memory_backend: match config.memory_backend {
+                    MemoryBackendChoice::Helix => "helix",
+                    MemoryBackendChoice::Sqlite => "sqlite",
+                }
+                .to_string(),
+                graph: graph_view,
+                boot: BootInfo::from_config(&config, boot_config_file.as_deref()),
+            }),
+    );
 
     if let Some(config_addr) = config.config_addr {
-        let settings = pipeline.settings().clone();
-        let catalog = catalog.clone();
-        let connector = connector.clone();
-        let voices_dir = config.tts_voices_dir.clone();
-        let music = music_hub.clone();
-        let notify = notify.clone();
-        let graphrag = graphrag.clone();
-        let debug = DebugSources {
-            memory: pipeline.memory().clone(),
-            chatlog_path: config.chatlog_path.clone(),
-            promptlog_path: config.promptlog_path.clone(),
-            db_path: config.db_path.clone(),
-            helix_path: config.helix_path.clone(),
-            memory_backend: match config.memory_backend {
-                MemoryBackendChoice::Helix => "helix",
-                MemoryBackendChoice::Sqlite => "sqlite",
-            }
-            .to_string(),
-            graph: graph_view.clone(),
-        };
         match TcpListener::bind(config_addr).await {
             Ok(listener) => {
                 let local = listener.local_addr().unwrap_or(config_addr);
@@ -374,13 +393,9 @@ async fn run() -> Result<()> {
                     "config + debug pages on http://{local}/ \
                      (chat log, prompts, SQLite, HelixDB — no auth, keep it on a trusted network)"
                 );
+                let services = services.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = webconfig::serve(
-                        listener, settings, catalog, connector, voices_dir, debug, music, notify,
-                        graphrag,
-                    )
-                    .await
-                    {
+                    if let Err(e) = webconfig::serve(listener, services).await {
                         log::error!("config page stopped: {e:#}");
                     }
                 });
@@ -399,10 +414,6 @@ async fn run() -> Result<()> {
     let _mdns = MdnsAdvertiser::advertise(&config.service_name, &config.instance_id, local.port())
         .context("advertising Wyoming service over mDNS")?;
 
-    // House-wide music routing (Snapcast) control plane. Dormant unless music is
-    // enabled in the config file; when on, the ducker lowers the music group's volume
-    // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
-    let ducker = config.build_ducker();
     if config.music.enabled {
         log::info!(
             "music routing on: snapserver={} duck_on_speech={} duck_to={}% group={:?}",
@@ -428,7 +439,7 @@ async fn run() -> Result<()> {
     log::info!("orchestrator ready on {local}; waiting for the device");
 
     let outcome = tokio::select! {
-        res = server::serve(listener, pipeline, connector, catalog, config.tts_voices_dir.clone(), ducker, notify, weather_svc, music_svc) => {
+        res = server::serve(listener, services) => {
             res.context("device-facing server stopped")
         }
         _ = tokio::signal::ctrl_c() => {
@@ -515,4 +526,3 @@ async fn ensure_ollama_model(config: &mut Config) {
         ),
     }
 }
-

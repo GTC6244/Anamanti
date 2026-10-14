@@ -24,6 +24,53 @@ pub enum MemoryCommand {
     /// "my name is …" / "call me …" — name the current speaker (speaker_id_plan.md
     /// Phase C). Carries the given name.
     NameSpeaker(String),
+    /// "who am I?" / "what's my name?" — answered from the voiceprint resolution, never
+    /// from memory text (SpeakerScopedMemoryPlan.md §5).
+    WhoAmI,
+}
+
+/// Whole-utterance questions asking the assistant to identify the speaker. Matched
+/// against the cleaned, lowercased utterance (filler words like "hey" / "jarvis" /
+/// "tell me" are stripped first), so only a question that *is* the identity question
+/// fires — "what's my name on the booking" does not.
+const WHO_AM_I: &[&str] = &[
+    "who am i",
+    "what's my name",
+    "whats my name",
+    "what is my name",
+    "do you know who i am",
+    "do you know my name",
+    "do you know who this is",
+    "who is this",
+    "who's this",
+    "who's talking",
+    "who is talking",
+    "who is speaking",
+    "who's speaking",
+    "who do you think i am",
+    "who do you think this is",
+    "can you tell who i am",
+    "do you recognize me",
+    "do you recognise me",
+    "do you recognize my voice",
+    "do you recognise my voice",
+];
+
+/// Whether `lead_clean` (normalized, punctuation-trimmed) is a who-am-I question.
+fn is_who_am_i(lead_clean: &str) -> bool {
+    let mut q = lead_clean.replace('\u{2019}', "'").replace(',', "");
+    for filler in [
+        "hey ", "ok ", "okay ", "so ", "um ", "uh ", "jarvis ", "tell me ", "please ",
+    ] {
+        while let Some(rest) = q.strip_prefix(filler) {
+            q = rest.trim_start().to_string();
+        }
+    }
+    let q = q
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .trim_end_matches(" jarvis")
+        .trim();
+    WHO_AM_I.contains(&q)
 }
 
 /// Trim surrounding whitespace and trailing sentence punctuation.
@@ -43,6 +90,10 @@ fn normalize_lead(text: &str) -> String {
 pub fn parse_command(text: &str) -> Option<MemoryCommand> {
     let lead = normalize_lead(text);
     let lead_clean = clean(&lead);
+
+    if is_who_am_i(lead_clean) {
+        return Some(MemoryCommand::WhoAmI);
+    }
 
     // "forget that" / "forget it" (bare) → drop the last entry.
     if lead_clean == "forget that"
@@ -195,6 +246,28 @@ mod tests {
                 content: "I like my coffee black".to_string()
             })
         );
+    }
+
+    #[test]
+    fn recognizes_who_am_i_questions_only_when_whole() {
+        for q in [
+            "Who am I?",
+            "What's my name?",
+            "what is my name",
+            "Hey Jarvis, who am I?",
+            "Do you know who I am?",
+            "Do you recognise my voice?",
+            "who\u{2019}s talking",
+        ] {
+            assert_eq!(parse_command(q), Some(MemoryCommand::WhoAmI), "{q:?}");
+        }
+        for q in [
+            "What's my name on the booking?",
+            "who am I meeting tomorrow",
+            "my name is Sam",
+        ] {
+            assert_ne!(parse_command(q), Some(MemoryCommand::WhoAmI), "{q:?}");
+        }
     }
 
     #[test]

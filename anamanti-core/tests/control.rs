@@ -13,8 +13,9 @@ use anamanti_core::llm::anthropic_auth::AnthropicAuth;
 use anamanti_core::memory::{MemoryKind, MemorySource, MemoryStore};
 use anamanti_core::orchestrator::{Pipeline, ServiceConnector, TcpConnector};
 use anamanti_core::settings::{
-    CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings, SharedSettings,
-    SpotifyConfig, DEFAULT_END_SILENCE_MS, DEFAULT_SILERO_THRESHOLD, DEFAULT_VOICE_RMS_THRESHOLD,
+    AppSaidConfig, CadoraConfig, DriveConfig, Household, LlmEngine, LlmFactory, RuntimeSettings,
+    SharedSettings, SpotifyConfig, DEFAULT_END_SILENCE_MS, DEFAULT_SILERO_THRESHOLD,
+    DEFAULT_VOICE_RMS_THRESHOLD,
 };
 use anamanti_core::wyoming::protocol::{read_event, types, write_event, WyomingEvent};
 use serde_json::json;
@@ -34,9 +35,10 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         openai_api_key: None,
         openai_max_tokens: 128,
         anthropic_token: None,
-        home_location: anamanti_core::directions::LiveHomeLocation::default(),
+        home_location: anamanti_core::household::LiveHomeLocation::default(),
         spotify: None,
         cadora: None,
+        appsaid: None,
         calendar: None,
         directions: None,
         directions_provider: String::new(),
@@ -45,6 +47,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         weather_imperial: false,
         weather_enabled: false,
         places: None,
+        places_enabled: true,
+        places_provider: "google".to_string(),
     };
     let (llm, backend, model) = factory
         .build(
@@ -77,14 +81,18 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             voice_rms_threshold: DEFAULT_VOICE_RMS_THRESHOLD,
             silero_threshold: DEFAULT_SILERO_THRESHOLD,
             vad_engine: anamanti_core::config::VadEngineKind::Energy,
+            stt: anamanti_core::settings::SttRuntime::default(),
             drive: DriveConfig::default(),
             household: Household::default(),
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
+            appsaid: AppSaidConfig::default(),
             weather_provider: "visualcrossing".to_string(),
             visualcrossing_key: None,
             google_places_key: None,
             system1: anamanti_core::settings::System1Runtime::default(),
+            personality: anamanti_core::settings::Personality::default(),
+            pronunciations: Vec::new(),
         },
     );
     let pipeline = Pipeline::with_settings(
@@ -108,12 +116,10 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let notify = Arc::new(anamanti_core::notify::NotificationService::new());
-    let weather = Arc::new(anamanti_core::weather::WeatherService::new());
-    let music = Arc::new(anamanti_core::music::NowPlayingService::new());
-    tokio::spawn(anamanti_core::server::serve(
-        listener, pipeline, connector, catalog, None, None, notify, weather, music,
+    let services = Arc::new(anamanti_core::app::AppServices::new(
+        pipeline, connector, catalog,
     ));
+    tokio::spawn(anamanti_core::server::serve(listener, services));
     (addr, memory, settings)
 }
 

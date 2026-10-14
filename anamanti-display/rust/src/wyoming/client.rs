@@ -47,6 +47,16 @@ impl Default for AudioFormat {
     }
 }
 
+impl From<AudioFormat> for protocol::AudioFormat {
+    fn from(f: AudioFormat) -> Self {
+        Self {
+            rate: f.rate,
+            width_bytes: f.width_bytes,
+            channels: f.channels,
+        }
+    }
+}
+
 /// A live Wyoming connection: buffered reader + writer halves plus the PCM format
 /// for outgoing audio frames. Generic over the IO so it works with a real
 /// `TcpStream` in production and a duplex pipe in tests.
@@ -75,6 +85,12 @@ pub struct WyomingConnection<R, W> {
     /// Core answer "how much time is left?" and route bare "stop"/"cancel" to the timer.
     /// See `plans/system1-fast-decisions.md` §17/§19. `None` when no timer is running.
     timer_context: Option<serde_json::Value>,
+    /// Font-scaling state (`scalable` + current global `scale`), stamped as `screen.font`
+    /// — **orthogonal** to `display_context`, like `timer_context`: it describes whether a
+    /// resizable text surface is on screen regardless of which widget is foreground, so it
+    /// is emitted even on an idle screen. Lets the Core resolve "increase/decrease font"
+    /// only when there is something to resize. `None` when never set.
+    font_context: Option<serde_json::Value>,
 }
 
 impl WyomingConnection<BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf> {
@@ -111,6 +127,7 @@ where
             followup_wait_secs: 0,
             display_context: None,
             timer_context: None,
+            font_context: None,
         }
     }
 
@@ -129,6 +146,14 @@ where
         self.timer_context = timers;
     }
 
+    /// Set the font-scaling context stamped as `screen.font` on this turn's `audio-start`
+    /// (`scalable` + current global `scale` + at-min/at-max). `None` leaves it off.
+    /// Orthogonal to [`Self::set_display_context`] / [`Self::set_timer_context`] — all may
+    /// be set. Call before [`Self::send_audio_start`].
+    pub fn set_font_context(&mut self, font: Option<serde_json::Value>) {
+        self.font_context = font;
+    }
+
     /// Mark this turn as a **follow-up** (the device auto-opened the mic after a reply,
     /// no wake word) so its `audio-start` carries `followup_depth` + the `wait_secs`
     /// listen window to echo back. `depth == 0` leaves it an ordinary turn. Call before
@@ -143,9 +168,7 @@ where
     /// includes recent history, bounds the chain, and sizes its no-speech window.
     pub async fn send_audio_start(&mut self) -> Result<()> {
         let mut ev = WyomingEvent::audio_start_followup(
-            self.format.rate,
-            self.format.width_bytes,
-            self.format.channels,
+            self.format.into(),
             self.timestamp_ms,
             self.followup_depth,
             self.followup_wait_secs,
@@ -162,6 +185,11 @@ where
             .unwrap_or_default();
         if let Some(timers) = &self.timer_context {
             screen.insert("timers".into(), timers.clone());
+        }
+        // The orthogonal font-scaling state (resizable? current scale?) — also reported
+        // regardless of the foreground widget, so "increase/decrease font" can resolve.
+        if let Some(font) = &self.font_context {
+            screen.insert("font".into(), font.clone());
         }
         if !screen.is_empty() {
             if let serde_json::Value::Object(map) = &mut ev.data {
@@ -181,13 +209,7 @@ where
         for &s in samples {
             pcm.extend_from_slice(&s.to_le_bytes());
         }
-        let ev = WyomingEvent::audio_chunk(
-            self.format.rate,
-            self.format.width_bytes,
-            self.format.channels,
-            self.timestamp_ms,
-            pcm,
-        );
+        let ev = WyomingEvent::audio_chunk(self.format.into(), self.timestamp_ms, pcm);
         // Advance the running timestamp by this chunk's wall-clock duration (ms).
         let frames = samples.len() as u64 / self.format.channels.max(1) as u64;
         self.timestamp_ms += frames * 1000 / self.format.rate.max(1) as u64;
@@ -258,12 +280,22 @@ pub enum TurnUpdate {
     /// `"hidden"`). Handled by the UI (the music player outlives the turn's socket), so it
     /// does not change the turn's state machine.
     Music(String),
+    /// A device-action **font** command relayed from the orchestrator: step the global
+    /// on-screen font scale up or down. Handled by the UI (device-local, persisted), so it
+    /// does not change the turn's state machine.
+    Font(protocol::FontCommand),
     /// The orchestrator asked the device to **listen for a follow-up** after its reply.
     /// The payload is `(depth, wait_secs)`: the chain depth the follow-up turn should
     /// carry, and how long to keep the mic open for input before sleeping (longer after
     /// a question). Does not change this turn's state machine — the engine reopens the
     /// mic (no wake word) once the reply audio finishes draining. See `plans/Plan.MD`.
     ListenFollowup(u32, u32),
+    /// The orchestrator's reply to a guided voice-enrollment capture (sample or verify;
+    /// SpeakerEnrollmentPlan.md Phase 2), relayed on the voice-turn socket. The payload
+    /// is the raw `anamanti-enroll-result` data block as a JSON string; the enrollment
+    /// screen (which outlives the turn) parses it to show progress / the verify result.
+    /// Does not change the turn's state machine.
+    EnrollResult(String),
     /// The turn ended cleanly and the client is back to idle.
     Finished,
 }
@@ -427,8 +459,8 @@ where
 
     match event.event_type.as_str() {
         types::AUDIO_START => {
-            if let Some((rate, _width, _channels)) = protocol::audio_format(&event.data) {
-                *playback_rate = rate;
+            if let Some(fmt) = protocol::audio_format(&event.data) {
+                *playback_rate = fmt.rate;
             }
             on_update(TurnUpdate::Speaking);
         }
@@ -484,6 +516,18 @@ where
                 on_update(TurnUpdate::Music(screen));
             }
         }
+        // A device action (font increase/decrease) relayed on the voice-turn socket. The
+        // global font scale is owned by the UI (device-local, persisted), so just surface it.
+        types::FONT => {
+            if let Some(cmd) = event.font_command() {
+                on_update(TurnUpdate::Font(cmd));
+            }
+        }
+        // The orchestrator's reply to an enrollment capture (sample/verify). The enroll
+        // screen owns the flow and outlives the turn, so just surface the raw result.
+        types::ENROLL_RESULT => {
+            on_update(TurnUpdate::EnrollResult(event.data.to_string()));
+        }
         // Follow-up-listen request (the reply was a question). Surface it without
         // touching the turn state — it arrives mid-SPEAKING, and the engine reopens
         // the mic only once the reply audio has drained (see engine/net.rs).
@@ -536,6 +580,13 @@ mod tests {
     use crate::wyoming::protocol::{read_event, types};
     use serde_json::json;
     use tokio::io::BufReader as TokioBufReader;
+
+    /// The PCM format a mock Piper TTS reply arrives in (22.05 kHz mono 16-bit).
+    const TTS_22K: protocol::AudioFormat = protocol::AudioFormat {
+        rate: 22_050,
+        width_bytes: 2,
+        channels: 1,
+    };
 
     /// Send an `audio-start` through a duplex pipe and return its parsed frame.
     async fn audio_start_frame(
@@ -596,6 +647,20 @@ mod tests {
         assert_eq!(start.data["screen"]["kind"], json!("recipe"));
         assert_eq!(start.data["screen"]["recipe"]["tab"], json!("steps"));
         assert_eq!(start.data["screen"]["timers"]["running"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn audio_start_stamps_font_context_even_on_idle_screen() {
+        // Font state is orthogonal to the foreground widget: the `screen` block carries
+        // `font` even with no `kind`.
+        let (mut conn, server_io) = duplex_conn();
+        conn.set_font_context(Some(json!({
+            "scalable": true, "scale": 1.1, "at_min": false, "at_max": false
+        })));
+        let start = audio_start_frame(conn, server_io).await;
+        assert_eq!(start.data["screen"]["font"]["scalable"], json!(true));
+        assert_eq!(start.data["screen"]["font"]["scale"], json!(1.1));
+        assert!(start.data["screen"].get("kind").is_none());
     }
 
     #[tokio::test]
@@ -684,8 +749,8 @@ mod tests {
                 .flat_map(|s| s.to_le_bytes())
                 .collect();
             for ev in [
-                WyomingEvent::audio_start(22_050, 2, 1, 0),
-                WyomingEvent::audio_chunk(22_050, 2, 1, 0, tts_pcm),
+                WyomingEvent::audio_start(TTS_22K, 0),
+                WyomingEvent::audio_chunk(TTS_22K, 0, tts_pcm),
                 WyomingEvent::audio_stop(0),
             ] {
                 protocol::write_event(&mut writer, &ev).await.unwrap();
@@ -756,7 +821,7 @@ mod tests {
             )
             .await
             .unwrap();
-            protocol::write_event(&mut writer, &WyomingEvent::audio_start(22_050, 2, 1, 0))
+            protocol::write_event(&mut writer, &WyomingEvent::audio_start(TTS_22K, 0))
                 .await
                 .unwrap();
             // The follow-up signal (depth 2, 10 s window), then the terminating audio-stop.

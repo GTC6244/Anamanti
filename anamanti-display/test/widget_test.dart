@@ -76,8 +76,7 @@ WakeWordEvent _event(
     weatherJson: '',
     placeJson: '',
     recipeAction: '',
-    musicScreen: '',
-  );
+    enrollJson: '',  );
 }
 
 /// A harness that wires an [AmbientScreen] to a synthetic engine stream, and

@@ -8,6 +8,8 @@ import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'support/wake_word_events.dart';
+
 // A now-playing snapshot with no artwork, so nothing a widget renders fetches over the
 // network. Mirrors the Core's `NowPlaying` serialization (snake_case).
 const _musicJson = '''
@@ -49,57 +51,39 @@ WakeWordConfig _cfg() => WakeWordConfig(
 /// A controller wired with a capturing music-control sink. The engine stream is never
 /// started (the music path is driven directly via [applyMusicPush] + the UI methods), so
 /// no native library is needed.
-AssistantController _controller(List<Map<String, Object?>> sink) => AssistantController(
-  config: _cfg(),
-  musicControl: ({required String action, int? value}) =>
-      sink.add({'action': action, 'value': value}),
-);
+AssistantController _controller(List<Map<String, Object?>> sink) =>
+    AssistantController(
+      config: _cfg(),
+      musicControl: ({required String action, int? value}) =>
+          sink.add({'action': action, 'value': value}),
+    );
 
 /// A `musicScreen` voice event carrying the target `screen` token.
-WakeWordEvent _musicScreenEvent(String screen) => WakeWordEvent(
-  kind: WakeWordEventKind.musicScreen,
-  message: '',
-  device: '',
-  deviceSampleRate: 0,
-  channels: 0,
-  rms: 0,
-  score: 0,
-  avgScore: 0,
-  threshold: 0,
-  gainDb: 0,
-  model: '',
-  transcript: '',
-  reply: '',
-  timerId: 0,
-  timerLabel: '',
-  timerRemainingSecs: 0,
-  present: false,
-  recipeJson: '',
-  weatherJson: '',
-  placeJson: '',
-  recipeAction: '',
-  musicScreen: screen,
-);
+WakeWordEvent _musicScreenEvent(String screen) =>
+    wakeEvent(WakeWordEventKind.musicScreen, recipeAction: screen);
 
 void main() {
   group('AssistantController music pushes', () {
-    test('a now-playing push populates music state (overlay only, screen hidden)', () {
-      final controller = _controller([]);
-      addTearDown(controller.dispose);
+    test(
+      'a now-playing push populates music state (overlay only, screen hidden)',
+      () {
+        final controller = _controller([]);
+        addTearDown(controller.dispose);
 
-      expect(controller.state.musicActive, isFalse);
-      controller.applyMusicPush(_musicJson);
+        expect(controller.state.musicActive, isFalse);
+        controller.applyMusicPush(_musicJson);
 
-      final s = controller.state;
-      expect(s.musicActive, isTrue);
-      expect(s.music!.trackTitle, 'Paranoid Android');
-      expect(s.music!.artist, 'Radiohead');
-      expect(s.music!.volumePercent, 65);
-      expect(s.music!.nextUp, hasLength(1));
-      // A push alone never opens a full screen — only the compact overlay rides.
-      expect(s.musicScreen, MusicScreen.hidden);
-      expect(s.musicScreenActive, isFalse);
-    });
+        final s = controller.state;
+        expect(s.musicActive, isTrue);
+        expect(s.music!.trackTitle, 'Paranoid Android');
+        expect(s.music!.artist, 'Radiohead');
+        expect(s.music!.volumePercent, 65);
+        expect(s.music!.nextUp, hasLength(1));
+        // A push alone never opens a full screen — only the compact overlay rides.
+        expect(s.musicScreen, MusicScreen.hidden);
+        expect(s.musicScreenActive, isFalse);
+      },
+    );
 
     test('an empty push dismisses music and hides any full screen', () {
       final controller = _controller([]);
@@ -115,14 +99,17 @@ void main() {
       expect(controller.state.musicScreen, MusicScreen.hidden);
     });
 
-    test('a malformed non-empty push is ignored, keeping the last snapshot', () {
-      final controller = _controller([]);
-      addTearDown(controller.dispose);
+    test(
+      'a malformed non-empty push is ignored, keeping the last snapshot',
+      () {
+        final controller = _controller([]);
+        addTearDown(controller.dispose);
 
-      controller.applyMusicPush(_musicJson);
-      controller.applyMusicPush('not json at all');
-      expect(controller.state.music!.trackTitle, 'Paranoid Android');
-    });
+        controller.applyMusicPush(_musicJson);
+        controller.applyMusicPush('not json at all');
+        expect(controller.state.music!.trackTitle, 'Paranoid Android');
+      },
+    );
   });
 
   group('AssistantController music screen navigation', () {
@@ -213,27 +200,30 @@ void main() {
   });
 
   group('AssistantController music voice control', () {
-    test('a musicScreen voice event drives the screen via the engine stream', () async {
-      final engine = StreamController<WakeWordEvent>.broadcast();
-      final controller = AssistantController(
-        config: _cfg(),
-        startEngine: (_) => engine.stream,
-      )..start();
-      addTearDown(controller.dispose);
-      controller.applyMusicPush(_musicJson);
+    test(
+      'a musicScreen voice event drives the screen via the engine stream',
+      () async {
+        final engine = StreamController<WakeWordEvent>.broadcast();
+        final controller = AssistantController(
+          config: _cfg(),
+          startEngine: (_) => engine.stream,
+        )..start();
+        addTearDown(controller.dispose);
+        controller.applyMusicPush(_musicJson);
 
-      engine.add(_musicScreenEvent('now_playing'));
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.state.musicScreen, MusicScreen.nowPlaying);
+        engine.add(_musicScreenEvent('now_playing'));
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.musicScreen, MusicScreen.nowPlaying);
 
-      engine.add(_musicScreenEvent('up_next'));
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.state.musicScreen, MusicScreen.nextUp);
+        engine.add(_musicScreenEvent('up_next'));
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.musicScreen, MusicScreen.nextUp);
 
-      engine.add(_musicScreenEvent('hidden'));
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.state.musicScreen, MusicScreen.hidden);
-    });
+        engine.add(_musicScreenEvent('hidden'));
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.musicScreen, MusicScreen.hidden);
+      },
+    );
 
     test('voice show is a no-op when nothing is playing', () async {
       final engine = StreamController<WakeWordEvent>.broadcast();
@@ -248,41 +238,47 @@ void main() {
       expect(controller.state.musicScreen, MusicScreen.hidden);
     });
 
-    test('opening a full screen pushes music display context; closing clears it', () {
-      final ctx = <Map<String, Object?>>[];
-      final controller = AssistantController(
-        config: _cfg(),
-        setMusicContext: ({
-          required bool active,
-          required bool playing,
-          required String title,
-          required String artist,
-          required String screen,
-        }) => ctx.add({
-          'active': active,
-          'playing': playing,
-          'title': title,
-          'screen': screen,
-        }),
-      );
-      addTearDown(controller.dispose);
-      controller.applyMusicPush(_musicJson); // playing, screen hidden → no context yet
-      expect(ctx, isEmpty);
+    test(
+      'opening a full screen pushes music display context; closing clears it',
+      () {
+        final ctx = <Map<String, Object?>>[];
+        final controller = AssistantController(
+          config: _cfg(),
+          setMusicContext:
+              ({
+                required bool active,
+                required bool playing,
+                required String title,
+                required String artist,
+                required String screen,
+              }) => ctx.add({
+                'active': active,
+                'playing': playing,
+                'title': title,
+                'screen': screen,
+              }),
+        );
+        addTearDown(controller.dispose);
+        controller.applyMusicPush(
+          _musicJson,
+        ); // playing, screen hidden → no context yet
+        expect(ctx, isEmpty);
 
-      controller.openNowPlaying();
-      expect(ctx.last, {
-        'active': true,
-        'playing': true,
-        'title': 'Paranoid Android',
-        'screen': 'now_playing',
-      });
+        controller.openNowPlaying();
+        expect(ctx.last, {
+          'active': true,
+          'playing': true,
+          'title': 'Paranoid Android',
+          'screen': 'now_playing',
+        });
 
-      controller.showMusicQueue();
-      expect(ctx.last['screen'], 'up_next');
+        controller.showMusicQueue();
+        expect(ctx.last['screen'], 'up_next');
 
-      controller.closeMusicScreen();
-      expect(ctx.last['active'], isFalse);
-    });
+        controller.closeMusicScreen();
+        expect(ctx.last['active'], isFalse);
+      },
+    );
 
     test('a Core screen (place) hides the music full screen', () async {
       final engine = StreamController<WakeWordEvent>.broadcast();
@@ -296,29 +292,9 @@ void main() {
       expect(controller.state.musicScreen, MusicScreen.nowPlaying);
 
       engine.add(
-        WakeWordEvent(
-          kind: WakeWordEventKind.showPlace,
-          message: '',
-          device: '',
-          deviceSampleRate: 0,
-          channels: 0,
-          rms: 0,
-          score: 0,
-          avgScore: 0,
-          threshold: 0,
-          gainDb: 0,
-          model: '',
-          transcript: '',
-          reply: '',
-          timerId: 0,
-          timerLabel: '',
-          timerRemainingSecs: 0,
-          present: false,
-          recipeJson: '',
-          weatherJson: '',
+        wakeEvent(
+          WakeWordEventKind.showPlace,
           placeJson: '{"name":"Blue Bottle","address":"1 Main St"}',
-          recipeAction: '',
-          musicScreen: '',
         ),
       );
       await Future<void>.delayed(Duration.zero);

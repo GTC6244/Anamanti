@@ -31,12 +31,29 @@ speaks the reply back through the Echo Show's speakers.
   stops instantly and a fresh turn begins (the Anamanti Core also aborts the in-flight
   LLM + TTS via an `anamanti-interrupt` frame). The assistant remembers
   facts/preferences across sessions (stored on the Mac).
+- 🗣️ **Knows who's talking** — with speaker ID on, each person's voiceprint scopes
+  what the assistant remembers and recalls: "I like jazz" is remembered for the person
+  who said it, "the wifi is FastNet" for the whole household, and something said by a
+  voice it doesn't recognise is kept for review on the Mac but never treated as true for
+  anyone. "Who am I?" is answered from the voice, not from memory. Enroll on the
+  display under Settings → People → Add a voice.
 - 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder.
 - 🔔 **Proactive notifications** — the Mac can push a visual notification to the
   display *without* you asking (a reminder, an alert), over a persistent connection
   the device holds open to its pinned Anamanti Core. Visual-only today (no spoken
-  output); send a test one from the config page's **Notify** tab.
+  output); send a test one from the config page's **Music & Devices** page.
+- 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
+  heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
+  tuning* — it changes only how replies sound, never what the assistant knows or does.
+  Switch it on/off and pick one **by voice** ("talk like a 1940s gangster", "go back
+  to normal"); edit the catalog of personalities on the config page's **Personality** page.
+- 🖥️ **Admin console** — a loopback web console on the Mac (`http://127.0.0.1:8730/`)
+  laid out for a 1920×1080 desktop: an **Overview** of the whole voice pipeline that
+  marks every stage **On this Mac / Your network / Cloud** and lists exactly what leaves
+  the house, plus pages for Voice, Intelligence, Personality, Household, Integrations,
+  Music & Devices, Memory (including a switch for cloud entity extraction),
+  Conversations (per-turn latency + the exact prompt), Keys & Accounts and System.
 
 ## Architecture at a glance
 
@@ -76,6 +93,7 @@ See [`architecture.md`](./plans/architecture.md) for the full design and
 anamanti-display/   Anamanti Display — the Echo Show app: Flutter UI (`lib/`) +
                     Rust device engine (`rust/`: audio, wake word, Wyoming client)
 anamanti-core/      Anamanti Core — the Mac Mini brain (STT ↔ LLM + memory ↔ TTS)
+anamanti-protocol/  Shared Wyoming protocol crate used by both Core and Display
 plans/              Design + planning docs (architecture.md, Plan.MD, TODO.md, …)
 agents.md           Build guidance for AI agents & contributors
 README.md           You are here
@@ -147,7 +165,8 @@ NOTES="Bug fixes" \
 anamanti-display/scripts/release-r2.sh
 ```
 
-Point each device at your domain in **Settings → Updates** (the default is a
+Point each device at your domain in **Settings → Device → Updates** (the Update URL
+field shows in Advanced mode; the default is a
 placeholder). On the LineageOS kiosk, grant the app "install unknown apps" once.
 
 ### Run the Mac Mini Anamanti Core (the brain)

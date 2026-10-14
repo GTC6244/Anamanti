@@ -51,6 +51,12 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          # Pin to the known-good local/hardware-verified toolchain. `channel: stable`
+          # floats and had moved to 3.47.6, which demands Gradle >= 9.1 / AGP 9 and
+          # breaks the bundled cargokit plugin (see agents.md locked decision). 3.44.1
+          # bundles Dart 3.12.1 (matches pubspec `sdk: ^3.12.1`) and builds on the
+          # pinned AGP 8.7.3. Bump this deliberately alongside the Android toolchain.
+          flutter-version: 3.44.1
           channel: stable
           cache: true
 
@@ -59,9 +65,14 @@ jobs:
 
       - name: Install Android NDK
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "ndk;${NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          # sdkmanager is not on PATH in a plain run shell on ubuntu-latest; it lives
+          # under the SDK's cmdline-tools. Resolve it by full path (ANDROID_SDK_ROOT or
+          # ANDROID_HOME, whichever the runner exports).
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Decode release keystore
         env:
