@@ -34,6 +34,9 @@ use super::MemoryStore;
 pub struct RecallResult {
     /// Context snippets, most relevant first, de-duplicated, capped to `limit`.
     pub hits: Vec<String>,
+    /// The subset of `hits` that are **household** facts (true for everyone) rather
+    /// than the reader's own — the prompt presents the two separately.
+    pub household: Vec<String>,
     /// Query-embedding round-trip latency in ms (GraphRAG only; the OpenAI call).
     pub embed_ms: Option<u64>,
     /// Local vector KNN + graph-expansion latency in ms (GraphRAG only).
@@ -52,10 +55,10 @@ pub struct RecallResult {
 #[async_trait]
 pub trait Recall: Send + Sync {
     /// Return up to `limit` context snippets relevant to `transcript` for the given
-    /// speaker (`None` = shared/household scope), most relevant first, already
-    /// de-duplicated, wrapped in a [`RecallResult`] whose optional per-stage timings
-    /// the caller records for the timing logs. A speaker's own memories plus shared
-    /// ones are in scope.
+    /// reader (`Some(spk-…)` = that person's own memories plus household ones; `None` =
+    /// household only; the unknown speaker's are never returned), most relevant first,
+    /// already de-duplicated, wrapped in a [`RecallResult`] whose optional per-stage
+    /// timings the caller records for the timing logs.
     async fn recall(
         &self,
         transcript: &str,
@@ -83,8 +86,8 @@ pub trait Recall: Send + Sync {
     }
 
     /// Detach everything this backend stores for speaker `id` from that person (their
-    /// voiceprint was forgotten): it becomes shared/household, matching the SQLite
-    /// side. Returns how many stored items changed.
+    /// voiceprint was forgotten): it moves to the unknown speaker (never recalled),
+    /// matching the SQLite side. Returns how many stored items changed.
     async fn delete_speaker(&self, id: &str) -> Result<u64> {
         let _ = id;
         Ok(0)
@@ -121,6 +124,11 @@ impl Recall for SqliteRecall {
         .await
         .context("joining the SQLite recall task")??;
         Ok(RecallResult {
+            household: hits
+                .iter()
+                .filter(|m| m.scope == super::ScopeKind::Household)
+                .map(|m| m.content.clone())
+                .collect(),
             hits: hits.into_iter().map(|m| m.content).collect(),
             // FTS is purely local: no embedding, no separate graph stage to split out.
             ..Default::default()
@@ -166,10 +174,14 @@ impl Recall for HelixRecall {
         let qvec = self.embedder.embed_query(transcript).await?;
         let embed_ms = t0.elapsed().as_millis() as u64;
         let t1 = Instant::now();
-        let hits = self.helix.recall(qvec, speaker_id, self.k, limit).await?;
+        let (hits, household) = self
+            .helix
+            .recall_scoped(qvec, speaker_id, self.k, limit)
+            .await?;
         let search_ms = t1.elapsed().as_millis() as u64;
         Ok(RecallResult {
             hits,
+            household,
             embed_ms: Some(embed_ms),
             search_ms: Some(search_ms),
         })

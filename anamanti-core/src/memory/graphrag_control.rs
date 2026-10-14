@@ -34,7 +34,7 @@ use super::graphview::{
 };
 use super::helix::HelixMemory;
 use super::ingester::MemoryIngester;
-use crate::speaker::{AliasMap, SpeakerAliases, HOUSEHOLD_SPEAKER};
+use crate::speaker::{AliasMap, SpeakerAliases, UNKNOWN_SPEAKER};
 
 /// A [`Recall`] that forwards to an inner backend which can be swapped at runtime.
 /// Reads clone the current `Arc` under a short read lock and release it before the
@@ -580,7 +580,7 @@ async fn apply_speaker_aliases(helix: &HelixMemory, aliases: &AliasMap) -> Resul
             continue;
         }
         moved += match aliases.resolve(from) {
-            HOUSEHOLD_SPEAKER => helix.delete_speaker(from).await?,
+            UNKNOWN_SPEAKER => helix.delete_speaker(from).await?,
             to => helix.reassign_speaker(from, to).await?,
         };
     }
@@ -771,6 +771,7 @@ mod tests {
             speaker_id: speaker.to_string(),
             speaker_name: Some(name.to_string()),
             timing: None,
+            ..Default::default()
         }
     }
 
@@ -871,7 +872,7 @@ mod tests {
             kept.sort();
             assert_eq!(kept, vec!["t1", "t2"]);
 
-            // A forget re-points the merged id too: both now land on the household.
+            // A forget re-points the merged id too: both now land on the unknown speaker.
             h.service
                 .delete(&h.keep, &h.memory, Some(&graph))
                 .await
@@ -880,7 +881,7 @@ mod tests {
             let after_forget = ingested_store(&h, "other-8").await;
             assert!(turns_of(&after_forget, &h.keep).await.is_empty());
             assert!(turns_of(&after_forget, &h.drop).await.is_empty());
-            assert_eq!(turns_of(&after_forget, "household").await.len(), 2);
+            assert_eq!(turns_of(&after_forget, "unknown").await.len(), 2);
             std::fs::remove_dir_all(&h.dir).ok();
         });
     }

@@ -407,7 +407,15 @@ impl SpeakerRegistry {
         tx.execute(
             "UPDATE speakers SET centroid = ?1, samples = ?2, name = ?3, labeled = ?4, \
              name_source = ?5, updated_at = ?6 WHERE id = ?7",
-            params![encode_vec(&merged), ks + ds, name, labeled, source, now(), keep_id],
+            params![
+                encode_vec(&merged),
+                ks + ds,
+                name,
+                labeled,
+                source,
+                now(),
+                keep_id
+            ],
         )?;
         tx.execute("DELETE FROM speakers WHERE id = ?1", params![drop_id])?;
         super::aliases::record(&tx, drop_id, Some(keep_id))?;
@@ -507,7 +515,12 @@ fn name_of(conn: &Connection, id: &str) -> Result<(Option<String>, Option<NameSo
         .query_row(
             "SELECT name, name_source FROM speakers WHERE id = ?1",
             params![id],
-            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .optional()?
         .map(|(n, s)| (n, s.as_deref().and_then(NameSource::parse)))

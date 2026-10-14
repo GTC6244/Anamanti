@@ -234,8 +234,15 @@ pub struct SpeakerConfig {
     pub match_threshold: f32,
     /// Cosine below this ⇒ mint a new anonymous cluster.
     pub new_threshold: f32,
-    /// Minimum voiced audio (ms) before attempting identification.
+    /// Minimum voiced audio (ms) before a turn may **create or update** a voiceprint.
     pub min_speech_ms: u32,
+    /// Minimum voiced audio (ms) for a **read-only** short-clip match ("who am I?" is
+    /// well under `min_speech_ms`). Below it the speaker is unknown. `0` disables the
+    /// short-clip path. See SpeakerScopedMemoryPlan.md §4.
+    pub min_identify_ms: u32,
+    /// Extra cosine a short-clip match needs above `match_threshold` to count as
+    /// identified (short clips embed less reliably); otherwise it is at most tentative.
+    pub short_clip_margin: f32,
     /// Embedding dimensionality the ONNX model produces (ECAPA-TDNN → 192).
     pub embed_dims: usize,
 }
@@ -248,6 +255,8 @@ impl Default for SpeakerConfig {
             match_threshold: 0.55,
             new_threshold: 0.40,
             min_speech_ms: 1200,
+            min_identify_ms: 600,
+            short_clip_margin: 0.10,
             embed_dims: 192,
         }
     }
@@ -947,6 +956,8 @@ pub struct FileSpeaker {
     pub match_threshold: Option<f32>,
     pub new_threshold: Option<f32>,
     pub min_speech_ms: Option<u32>,
+    pub min_identify_ms: Option<u32>,
+    pub short_clip_margin: Option<f32>,
     pub embed_dims: Option<usize>,
 }
 
@@ -1302,6 +1313,8 @@ impl Config {
             match_threshold: fc.speaker.match_threshold.unwrap_or(sd.match_threshold),
             new_threshold: fc.speaker.new_threshold.unwrap_or(sd.new_threshold),
             min_speech_ms: fc.speaker.min_speech_ms.unwrap_or(sd.min_speech_ms),
+            min_identify_ms: fc.speaker.min_identify_ms.unwrap_or(sd.min_identify_ms),
+            short_clip_margin: fc.speaker.short_clip_margin.unwrap_or(sd.short_clip_margin),
             embed_dims: fc.speaker.embed_dims.unwrap_or(sd.embed_dims),
         };
 
@@ -2151,7 +2164,8 @@ impl Config {
             self.speaker.match_threshold,
             self.speaker.new_threshold,
             self.speaker.min_speech_ms,
-        );
+        )
+        .with_short_clip(self.speaker.min_identify_ms, self.speaker.short_clip_margin);
         let embedder: Arc<dyn SpeakerEmbedder> = match &self.speaker.model_path {
             Some(path) => {
                 use crate::speaker::embed::OnnxSpeakerEmbedder;

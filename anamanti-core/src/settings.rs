@@ -275,7 +275,8 @@ impl Household {
         if needle.is_empty() {
             return None;
         }
-        let first = |m: &HouseholdMember| m.name.split_whitespace().next().unwrap_or("").to_string();
+        let first =
+            |m: &HouseholdMember| m.name.split_whitespace().next().unwrap_or("").to_string();
         let by_first: Vec<&HouseholdMember> = self
             .members
             .iter()
@@ -299,7 +300,9 @@ impl Household {
             }
         }
         match best {
-            Some((d, m)) if !tied && d <= crate::household::spoken_name_tolerance(needle) => Some(m),
+            Some((d, m)) if !tied && d <= crate::household::spoken_name_tolerance(needle) => {
+                Some(m)
+            }
             _ => None,
         }
     }
