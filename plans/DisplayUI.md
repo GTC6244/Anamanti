@@ -559,7 +559,14 @@ phone, → Memory).
   (`speaker-play-<id>`, ▶) that replays that person's recorded voice clips through the
   assistant's speaker so a human can listen and recognize who it is before naming them
   (`OrchestratorClient.playSpeakerClips` → the Core streams the clips back; a snackbar
-  reports how many played, or that none are saved yet). Per-row menu: Name/rename,
+  reports how many played, or that none are saved yet). Rows are badged against the Mac's
+  household roster (`OrchestratorClient.listHouseholdMembers`): a home avatar + "Household
+  member" when the voice's name matches a member, "Not linked to household" for a named
+  voice outside the roster. Per-row menu: **Link to household member…**
+  (`speaker-link-<id>` → a member picker `link-member-<name>`: "This voice becomes X", or
+  "Merge into X's voiceprint" (→ confirm `link-merge-confirm`) when X already has one;
+  "Already linked" disabled; empty roster → a snackbar pointing to the Mac's Household
+  page; calls `OrchestratorClient.linkSpeaker`), Name/rename,
   **Add voice samples** (`speaker-add-samples-<id>`, only when the live engine controller is
   wired — opens `SpeakerEnrollScreen` in add-samples mode for that person), Merge with…, Forget. An **"Add voice"** FAB (`people-add`, shown when the live engine
   controller is wired) opens the guided enrollment flow below. Constructed with an

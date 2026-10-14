@@ -140,6 +140,12 @@ pub mod types {
     pub const MERGE_SPEAKERS: &str = "anamanti-merge-speakers";
     /// device → orchestrator: delete a speaker profile (data: `id`).
     pub const DELETE_SPEAKER: &str = "anamanti-delete-speaker";
+    /// device → orchestrator: link a voice to a **household member** (data: `id`,
+    /// `member`). The Core resolves `member` against its household roster; if another
+    /// voiceprint already belongs to that member, `id` is merged into it (voiceprint,
+    /// memories, clips, graph history), otherwise `id` is named as the member. Answered
+    /// with `SPEAKER_RESULT` (+ `speaker_id` of the resulting profile, `name`, `merged`).
+    pub const LINK_SPEAKER: &str = "anamanti-link-speaker";
     /// orchestrator → device: result of a name/merge/delete (data: `ok`, `message`).
     pub const SPEAKER_RESULT: &str = "anamanti-speaker-result";
 

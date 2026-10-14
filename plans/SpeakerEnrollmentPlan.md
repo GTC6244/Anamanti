@@ -178,6 +178,12 @@ a deferred polish.
   offline, and restarting states. Save/Cancel pinned so they stay on the 960×600 screen.
   Display-only (no Core / wire change). Flutter 186 green, analyze clean.
 
+- 2026-10-14: **Link to household member.** People ⋮ → "Link to household member…" picks a
+  member from the Mac's roster; the Core merges the voice into that member's existing
+  voiceprint (voice + memories + clips + graph) or names it as them. New frame
+  `anamanti-link-speaker`; rows badged by household link status. Core 561, device Rust 94,
+  Flutter 191 green; clippy/analyze clean.
+
 ## Owed / not done (hardware-gated — needs the Echo Show + real voices)
 
 1. **Threshold calibration.** `match_threshold`/`new_threshold`/`min_speech_ms` and the
