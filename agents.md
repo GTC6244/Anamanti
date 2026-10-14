@@ -655,6 +655,17 @@ WRANGLER="npx -y wrangler" \
 ./scripts/release-r2.sh
 ```
 
+**Stale-UI guard (2026-10-14).** The script deletes `build/app` before building and,
+before uploading, compares the new APK's compiled Dart UI (`lib/armeabi-v7a/libapp.so`)
+with the currently published APK's — **identical ⇒ it refuses to publish** (nothing is
+uploaded). This exists because an incremental build shipped 1.0.18 with 1.0.17's UI:
+Gradle's `mergeSelfUpdateReleaseJniLibFolders` kept a stale `libapp.so` while Flutter's
+fresh AOT output had changed, and only the Rust `.so` updated. If it trips, `flutter
+clean` and rebuild; for a deliberate Rust/native-only release with no Dart change, re-run
+with `ALLOW_SAME_DART=1`. When verifying an APK by hand, note that Dart stores strings
+containing non-Latin-1 characters (e.g. `…`, `—`) as UTF-16, so a plain `grep -a` won't
+find those — check an ASCII-only string, or compare `libapp.so` hashes.
+
 Verify it went live (devices pick it up on their next check, within the `latest.json`
 edge-cache TTL — purge/short-TTL it if a device lags):
 
