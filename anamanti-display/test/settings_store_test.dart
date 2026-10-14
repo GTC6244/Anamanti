@@ -132,6 +132,20 @@ void main() {
     expect(rt.ringReactivity, 1.5);
   });
 
+  test('advancedMode defaults on, round-trips, and tolerates bad values', () {
+    // Default on (SettingsReorgPlan decision #8), including legacy files without it.
+    expect(const AppSettings().advancedMode, true);
+    expect(AppSettings.fromJson({'wakeWord': 'hey_jarvis'}).advancedMode, true);
+    expect(AppSettings.fromJson({'advancedMode': 'no'}).advancedMode, true);
+
+    final rt = AppSettings.fromJson(
+      const AppSettings(advancedMode: false).toJson(),
+    );
+    expect(rt.advancedMode, false);
+    expect(rt, const AppSettings(advancedMode: false));
+    expect(rt == const AppSettings(), isFalse);
+  });
+
   test('copyWith changes only the given fields', () {
     const base = AppSettings();
     final next = base.copyWith(wakeWord: 'ok_nabu', threshold: 0.6);
