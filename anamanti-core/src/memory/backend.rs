@@ -92,6 +92,28 @@ pub trait Recall: Send + Sync {
         let _ = id;
         Ok(0)
     }
+
+    /// Re-attribute one logged turn (chat-log record `ext_id`) and the person/unknown
+    /// facts it wrote to speaker `to` — the admin console's turn correction
+    /// (SpeakerScopedMemoryPlan.md §8.4). Returns how many stored items changed.
+    async fn reattribute_turn(&self, ext_id: &str, to: &str) -> Result<u64> {
+        let _ = (ext_id, to);
+        Ok(0)
+    }
+
+    /// Move stored facts with exactly `content` from owner `from` to owner `to`
+    /// (`spk-…` / `household` / `unknown`) — the admin review queue's attribute action.
+    async fn retag_memory(&self, content: &str, from: &str, to: &str) -> Result<u64> {
+        let _ = (content, from, to);
+        Ok(0)
+    }
+
+    /// Drop stored facts with exactly `content` owned by `owner` — the admin console's
+    /// delete, so a removed fact stops being recalled from the graph too.
+    async fn forget_memory(&self, content: &str, owner: &str) -> Result<u64> {
+        let _ = (content, owner);
+        Ok(0)
+    }
 }
 
 /// SQLite FTS recall — the always-available keyword backend.
@@ -201,6 +223,18 @@ impl Recall for HelixRecall {
 
     async fn delete_speaker(&self, id: &str) -> Result<u64> {
         self.helix.delete_speaker(id).await
+    }
+
+    async fn reattribute_turn(&self, ext_id: &str, to: &str) -> Result<u64> {
+        self.helix.reattribute_turn(ext_id, to).await
+    }
+
+    async fn retag_memory(&self, content: &str, from: &str, to: &str) -> Result<u64> {
+        self.helix.retag_memory(content, from, to).await
+    }
+
+    async fn forget_memory(&self, content: &str, owner: &str) -> Result<u64> {
+        self.helix.forget_memory(content, owner).await
     }
 }
 

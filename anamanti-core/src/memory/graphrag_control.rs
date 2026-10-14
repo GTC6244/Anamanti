@@ -79,6 +79,15 @@ impl Recall for SwappableRecall {
     async fn delete_speaker(&self, id: &str) -> Result<u64> {
         self.current().delete_speaker(id).await
     }
+    async fn reattribute_turn(&self, ext_id: &str, to: &str) -> Result<u64> {
+        self.current().reattribute_turn(ext_id, to).await
+    }
+    async fn retag_memory(&self, content: &str, from: &str, to: &str) -> Result<u64> {
+        self.current().retag_memory(content, from, to).await
+    }
+    async fn forget_memory(&self, content: &str, owner: &str) -> Result<u64> {
+        self.current().forget_memory(content, owner).await
+    }
 }
 
 /// A [`GraphView`] that forwards to a swappable inner store (debug GUI `/helix`).

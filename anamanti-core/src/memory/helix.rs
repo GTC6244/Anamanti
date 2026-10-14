@@ -602,6 +602,44 @@ impl HelixMemory {
         self.set_speaker_of(&ids, &to).await
     }
 
+    /// Drop `Memory` nodes with exactly this `content` owned by `owner` (`spk-…`,
+    /// `household` or `unknown`) — the admin console's delete. Returns how many.
+    pub async fn forget_memory(&self, content: &str, owner: &str) -> Result<u64> {
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "m",
+                        g().n_with_label(L_MEMORY)
+                            .where_(Predicate::eq("content", content))
+                            .value_map(Some(vec![P_ID, "speaker_id"])),
+                    )
+                    .returning(["m"]),
+            )
+            .await?;
+        let ids: Vec<u64> = items_of(&found, "m")
+            .iter()
+            .filter(|m| {
+                m.get("speaker_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(UNKNOWN)
+                    == owner
+            })
+            .filter_map(|m| m.get(P_ID).and_then(Value::as_u64))
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.write(
+            batch::write_batch()
+                .var_as("_d", g().n(NodeRef::ids(ids.clone())).drop())
+                .returning(["_d"]),
+        )
+        .await?;
+        self.flush().await?;
+        Ok(ids.len() as u64)
+    }
+
     /// Set `speaker_id = to` on the nodes `ids`; returns how many.
     async fn set_speaker_of(&self, ids: &[u64], to: &str) -> Result<u64> {
         if ids.is_empty() {
@@ -2105,6 +2143,83 @@ mod tests {
     /// recall finds the dropped speaker's history), re-points SAID, and leaves a
     /// tombstone so a late ingest under the old id lands on the kept speaker. A forget
     /// moves the person's nodes to the household.
+    /// The admin console's corrections reach the graph: a turn (and its personal
+    /// facts) re-attributed, an unknown fact attributed, a fact deleted — and recall
+    /// follows.
+    #[test]
+    fn admin_corrections_rewrite_graph_recall() {
+        on_big_stack(corrections_body());
+    }
+
+    async fn corrections_body() {
+        let mem = HelixMemory::open_in_memory("corrections", 3).await.unwrap();
+        let emb = vec![0.0f32, 1.0, 0.0];
+        mem.ingest_turn(turn(
+            "r1",
+            1,
+            "my name is Brendan",
+            "Hi.",
+            emb.clone(),
+            &[],
+            "unknown",
+            None,
+        ))
+        .await
+        .unwrap();
+        for (ext, content, owner) in [
+            ("r1-mem-0", "The user's name is Brendan", "unknown"),
+            ("r1-mem-1", "the wifi is FastNet", "household"),
+            ("x-mem-0", "The user likes jazz", "unknown"),
+        ] {
+            mem.ingest_memory(ext, "memory", content, emb.clone(), &[], owner)
+                .await
+                .unwrap();
+        }
+        mem.flush().await.unwrap();
+        let recalled = |who: Option<&'static str>| {
+            let mem = &mem;
+            let emb = emb.clone();
+            async move { mem.recall(emb, who, 10, 20).await.unwrap() }
+        };
+        assert!(!recalled(Some("spk-b"))
+            .await
+            .iter()
+            .any(|h| h.contains("Brendan")));
+
+        // Turn correction: the turn + its personal fact move; the household fact stays.
+        assert_eq!(mem.reattribute_turn("r1", "spk-b").await.unwrap(), 2);
+        let b = recalled(Some("spk-b")).await;
+        assert!(b.iter().any(|h| h.contains("my name is Brendan")));
+        assert!(b.iter().any(|h| h == "The user's name is Brendan"));
+        assert!(
+            b.iter().any(|h| h.contains("FastNet")),
+            "household still shared"
+        );
+
+        // Review queue: attribute an unknown fact, then delete it.
+        assert_eq!(
+            mem.retag_memory("The user likes jazz", "unknown", "spk-b")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(recalled(Some("spk-b"))
+            .await
+            .iter()
+            .any(|h| h.contains("jazz")));
+        assert_eq!(
+            mem.forget_memory("The user likes jazz", "spk-b")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!recalled(Some("spk-b"))
+            .await
+            .iter()
+            .any(|h| h.contains("jazz")));
+        assert_eq!(mem.forget_memory("nope", "spk-b").await.unwrap(), 0);
+    }
+
     #[test]
     fn reassign_and_delete_speaker_rewrite_graph_attribution() {
         on_big_stack(reassign_body());

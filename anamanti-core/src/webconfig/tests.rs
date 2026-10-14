@@ -977,7 +977,15 @@ fn sqlite_json_reports_memory_rows() {
             MemorySource::Explicit,
         )
         .unwrap();
-    let v: Value = serde_json::from_str(&sqlite_json(&memory, &d)).unwrap();
+    let dir = super::speakers::SpeakerDirectory::from_parts(
+        &[],
+        Default::default(),
+        &Default::default(),
+        Default::default(),
+        false,
+        |_| false,
+    );
+    let v: Value = serde_json::from_str(&sqlite_json(&memory, &d, &dir)).unwrap();
     assert_eq!(v["ok"], true);
     assert_eq!(v["count"], 1);
     assert_eq!(v["memory_backend"], "sqlite");
@@ -987,7 +995,7 @@ fn sqlite_json_reports_memory_rows() {
 
 #[tokio::test]
 async fn helix_json_reports_disabled_without_a_graph() {
-    let v: Value = serde_json::from_str(&helix_json(&debug()).await).unwrap();
+    let v: Value = serde_json::from_str(&helix_json(&debug(), None).await).unwrap();
     assert_eq!(v["ok"], true);
     assert_eq!(v["enabled"], false);
     assert!(v["message"].is_string());
@@ -1005,7 +1013,7 @@ async fn helix_json_explains_the_fallback_when_configured_for_helix() {
     // it should point at the likely cause (OPENAI_API_KEY) and the log line.
     let mut d = debug();
     d.memory_backend = "helix".to_string();
-    let v: Value = serde_json::from_str(&helix_json(&d).await).unwrap();
+    let v: Value = serde_json::from_str(&helix_json(&d, None).await).unwrap();
     assert_eq!(v["enabled"], false);
     let msg = v["message"].as_str().unwrap();
     assert!(msg.contains("fell back to SQLite FTS"), "got: {msg}");
@@ -1430,6 +1438,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/spotify/status.json", "", "200 OK", JSON),
     ("GET", "/cadora/status.json", "", "200 OK", JSON),
     ("GET", "/appsaid/status.json", "", "200 OK", JSON),
+    ("GET", "/speakers.json", "", "200 OK", JSON),
     // Mutations, each with a well-formed body …
     ("POST", "/config", r#"{"tts_voice":"amy"}"#, "200 OK", JSON),
     ("POST", "/household/save", "{}", "200 OK", JSON),
@@ -1487,6 +1496,21 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/cadora/link", "{}", "200 OK", JSON),
     ("POST", "/appsaid/save", "{}", "200 OK", JSON),
     ("POST", "/appsaid/token", "{}", "200 OK", JSON),
+    (
+        "POST",
+        "/memory/attribute",
+        r#"{"id":1,"to":"household"}"#,
+        "200 OK",
+        JSON,
+    ),
+    ("POST", "/memory/delete", r#"{"id":1}"#, "200 OK", JSON),
+    (
+        "POST",
+        "/conversations/attribute",
+        r#"{"turn_id":"t-1","to":"unknown"}"#,
+        "200 OK",
+        JSON,
+    ),
     // … and with a malformed one (only /config answers 400; the page handlers
     // report the parse error in-band with a 200).
     ("POST", "/config", "not json", "400 Bad Request", JSON),
@@ -1510,6 +1534,15 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/cadora/link", "not json", "200 OK", JSON),
     ("POST", "/appsaid/save", "not json", "200 OK", JSON),
     ("POST", "/appsaid/token", "not json", "200 OK", JSON),
+    ("POST", "/memory/attribute", "not json", "200 OK", JSON),
+    ("POST", "/memory/delete", "not json", "200 OK", JSON),
+    (
+        "POST",
+        "/conversations/attribute",
+        "not json",
+        "200 OK",
+        JSON,
+    ),
     // Not routes.
     ("GET", "/nope", "", "404 Not Found", TEXT),
     ("GET", "/household/save", "", "404 Not Found", TEXT),
@@ -1632,4 +1665,644 @@ fn tri_state_string_helpers() {
     assert_eq!(secret_update(&data, "set"), Some(Some("v".to_string())));
     let clear = json!({ "set": "v", "clear": true });
     assert_eq!(secret_update(&clear, "set"), Some(None));
+}
+
+// ---------------------------------------------------------------- Speaker tagging
+// SpeakerScopedMemoryPlan.md §8 / §10 (webconfig).
+
+mod speaker_tagging {
+    use super::*;
+    use crate::memory::{ChatLogRecord, MemoryKind, MemoryScope, MemorySource, Provenance};
+    use crate::settings::{Household, HouseholdMember};
+    use crate::speaker::{MockSpeakerEmbedder, SpeakerRegistry, SpeakerService, SpeakerThresholds};
+    use crate::webconfig::speakers::SpeakerDirectory;
+
+    fn roster() -> Household {
+        Household {
+            members: vec![
+                HouseholdMember {
+                    name: "Kristina".into(),
+                    relationship: Some("wife".into()),
+                    ..Default::default()
+                },
+                HouseholdMember {
+                    name: "Brendon".into(),
+                    relationship: Some("husband".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// Services with speaker ID on: an in-memory registry holding the given people.
+    fn speaker_services(settings: Arc<SharedSettings>, debug: DebugSources) -> AppServices {
+        let svc = SpeakerService::new(
+            Arc::new(MockSpeakerEmbedder::default()),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default(),
+        );
+        let pipeline = crate::orchestrator::Pipeline::with_settings(
+            settings,
+            Arc::new(MemoryStore::open_in_memory().unwrap()),
+            "persona",
+            std::time::Duration::from_secs(5),
+        )
+        .with_speaker(Arc::new(svc));
+        AppServices::new(pipeline, connector(), catalog())
+            .with_notify(notify())
+            .with_debug(debug)
+    }
+
+    fn reg(s: &AppServices) -> &SpeakerRegistry {
+        s.speaker().unwrap().registry()
+    }
+
+    fn record(turn_id: &str, speaker_id: &str, name: Option<&str>) -> ChatLogRecord {
+        ChatLogRecord {
+            id: format!("rec-{turn_id}"),
+            turn_id: Some(turn_id.into()),
+            ts: 1,
+            transcript: format!("transcript of {turn_id}"),
+            reply: "ok".into(),
+            llm_backend: "mock".into(),
+            speaker_id: speaker_id.into(),
+            speaker_name: name.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn temp_log(name: &str, records: &[ChatLogRecord]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "wc_spk_{name}_{}_{}.jsonl",
+            std::process::id(),
+            crate::clock::now_secs()
+        ));
+        let body: String = records
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap() + "\n")
+            .collect();
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn directory_resolves_aliases_to_the_survivor_and_forgotten_ids_to_unknown() {
+        let s = speaker_services(settings(), debug());
+        let keep = reg(&s).create_labeled("Brendon", &[1.0, 0.0], 3).unwrap();
+        let drop = reg(&s).create_cluster(&[0.9, 0.1]).unwrap();
+        let gone = reg(&s).create_cluster(&[0.0, 1.0]).unwrap();
+        assert!(reg(&s).merge(&keep, &drop).unwrap());
+        assert!(reg(&s).delete(&gone).unwrap());
+
+        let dir = SpeakerDirectory::build(&s);
+        let merged = dir.tag(&drop);
+        assert_eq!(merged.kind, "person");
+        assert_eq!(merged.id.as_deref(), Some(keep.as_str()));
+        assert_eq!(merged.label, "Brendon");
+        assert!(merged.color.is_some());
+        assert_eq!(merged.color, dir.tag(&keep).color, "one colour per person");
+
+        let forgotten = dir.tag(&gone);
+        assert_eq!(forgotten.kind, "unknown");
+        assert_eq!(forgotten.id, None);
+        assert_eq!(forgotten.label, "Unknown speaker");
+    }
+
+    #[test]
+    fn unnamed_voices_get_a_stable_ordinal_label() {
+        let s = speaker_services(settings(), debug());
+        let a = reg(&s).create_labeled("Brendon", &[1.0, 0.0], 3).unwrap();
+        let b = reg(&s).create_cluster(&[0.0, 1.0]).unwrap();
+        let dir = SpeakerDirectory::build(&s);
+        assert_eq!(dir.tag(&a).label, "Brendon");
+        let t = dir.tag(&b);
+        assert_eq!((t.kind, t.name.as_deref()), ("person", None));
+        assert_eq!(t.label, "Speaker 2 (unnamed)");
+    }
+
+    #[test]
+    fn a_later_rename_shows_on_earlier_turns() {
+        let s = speaker_services(settings(), debug());
+        let id = reg(&s).create_cluster(&[1.0, 0.0]).unwrap();
+        // Logged while anonymous (speaker_name: null) …
+        let r = record("t-1", &id, None);
+        assert_eq!(
+            SpeakerDirectory::build(&s).turn_tag(&r).label,
+            "Speaker 1 (unnamed)"
+        );
+        // … then named: the same old record now reads the live name.
+        assert!(reg(&s).rename(&id, "Brendon").unwrap());
+        let t = SpeakerDirectory::build(&s).turn_tag(&r);
+        assert_eq!(t.label, "Brendon");
+        assert_eq!(t.name_source, Some("admin"));
+    }
+
+    #[test]
+    fn legacy_household_and_blank_turns_tag_as_unknown() {
+        let dir = SpeakerDirectory::from_parts(
+            &[],
+            Default::default(),
+            &roster(),
+            Default::default(),
+            true,
+            |_| false,
+        );
+        for raw in ["household", "", "unknown"] {
+            let t = dir.turn_tag(&record("t-x", raw, None));
+            assert_eq!(t.kind, "unknown", "{raw:?}");
+            assert_eq!(t.label, "Unknown speaker");
+        }
+    }
+
+    #[test]
+    fn spoken_names_reconcile_to_the_roster_spelling() {
+        let s = speaker_services(settings(), debug());
+        s.settings().apply_household(&roster());
+        let id = reg(&s).create_cluster(&[1.0, 0.0]).unwrap();
+        assert!(reg(&s).name_from_voice(&id, "Christina").unwrap());
+        let t = SpeakerDirectory::build(&s).tag(&id);
+        assert_eq!(t.name.as_deref(), Some("Kristina"));
+        assert_eq!(t.label, "Kristina");
+        assert_eq!(t.relationship.as_deref(), Some("wife"));
+        assert_eq!(t.name_source, Some("spoken"));
+    }
+
+    #[test]
+    fn unknown_memories_carry_their_candidate_and_provenance() {
+        let s = speaker_services(settings(), debug());
+        let brendon = reg(&s).create_labeled("Brendon", &[1.0, 0.0], 3).unwrap();
+        let mem = s.memory();
+        let unk = mem
+            .add_in(
+                MemoryKind::Fact,
+                "The user's name is Brendon",
+                MemorySource::Inferred,
+                &MemoryScope::Unknown {
+                    candidate: Some(brendon.clone()),
+                },
+                &Provenance {
+                    said_by: Some(brendon.clone()),
+                    resolution: Some("tentative".into()),
+                    confidence: Some(0.47),
+                    turn_id: Some("t-9".into()),
+                },
+            )
+            .unwrap();
+        mem.add(
+            MemoryKind::Fact,
+            "The wifi is FastNet",
+            MemorySource::Explicit,
+        )
+        .unwrap();
+
+        let dir = SpeakerDirectory::build(&s);
+        let v: Value = serde_json::from_str(&sqlite_json(mem, &s.debug, &dir)).unwrap();
+        assert_eq!(v["unknown_count"], 1);
+        let row = v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == unk)
+            .unwrap();
+        // Raw fields kept …
+        assert_eq!(row["speaker_id"], Value::Null);
+        assert_eq!(row["candidate_speaker_id"], brendon.as_str());
+        // … plus the resolved tags.
+        assert_eq!(row["scope"], "unknown");
+        assert_eq!(row["speaker"]["kind"], "unknown");
+        assert_eq!(row["speaker"]["label"], "Unknown · maybe Brendon?");
+        assert_eq!(row["speaker"]["candidate"]["label"], "Brendon");
+        assert_eq!(row["candidate"]["id"], brendon.as_str());
+        assert_eq!(row["said_by"]["label"], "Brendon");
+        assert_eq!(row["said_by"]["resolution"], "tentative");
+        assert!((row["said_by"]["confidence"].as_f64().unwrap() - 0.47).abs() < 1e-6);
+        assert_eq!(row["turn_id"], "t-9");
+
+        let house = v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["content"] == "The wifi is FastNet")
+            .unwrap();
+        assert_eq!(house["speaker"]["kind"], "household");
+        assert_eq!(
+            house["said_by"],
+            Value::Null,
+            "legacy provenance: not recorded"
+        );
+    }
+
+    #[test]
+    fn speaker_tag_json_shape_is_stable() {
+        let s = speaker_services(settings(), debug());
+        let id = reg(&s).create_labeled("Brendon", &[1.0, 0.0], 3).unwrap();
+        let v: Value = serde_json::from_str(&super::super::speakers::speakers_json(&s)).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["enabled"], true);
+        let p = &v["speakers"][0];
+        for key in [
+            "id",
+            "kind",
+            "name",
+            "label",
+            "relationship",
+            "resolution",
+            "confidence",
+            "candidate",
+            "has_clips",
+            "name_source",
+            "color",
+            "inherited",
+            "short_clip",
+            "ordinal",
+            "samples",
+            "unknown_candidate_count",
+        ] {
+            assert!(p.get(key).is_some(), "missing {key}");
+        }
+        assert_eq!(p["id"], id.as_str());
+        assert_eq!(p["kind"], "person");
+        assert_eq!(v["household"]["kind"], "household");
+        assert_eq!(v["unknown"]["label"], "Unknown speaker");
+    }
+
+    #[test]
+    fn chatlog_json_tags_turns_memories_and_honours_overrides() {
+        let mut d = debug();
+        let s0 = speaker_services(settings(), debug());
+        let brendon = reg(&s0).create_labeled("Brendon", &[1.0, 0.0], 3).unwrap();
+        let mut scoped = record("t-1", "unknown", None);
+        scoped.speaker_resolution = Some("unknown".into());
+        scoped.memories = vec![
+            crate::memory::WrittenMemory {
+                content: "The user likes jazz".into(),
+                scope: "unknown".into(),
+                speaker_id: None,
+            },
+            crate::memory::WrittenMemory {
+                content: "The wifi is FastNet".into(),
+                scope: "household".into(),
+                speaker_id: None,
+            },
+        ];
+        let mut legacy = record("t-2", "household", None);
+        legacy.memories_written = vec!["The user likes tea".into()];
+        let mut ident = record("t-3", &brendon, Some("Brendon"));
+        ident.speaker_resolution = Some("identified".into());
+        ident.speaker_confidence = Some(0.71);
+        ident.speaker_inherited = true;
+        d.chatlog_path = temp_log("chat", &[scoped, legacy, ident]);
+        let s = AppServices {
+            debug: d.clone(),
+            ..s0
+        };
+        s.memory().set_turn_override("t-1", &brendon).unwrap();
+
+        let dir = SpeakerDirectory::build(&s);
+        let v: Value = serde_json::from_str(&chatlog_json(&s.debug, &dir, 10)).unwrap();
+        let recs = v["records"].as_array().unwrap();
+        let by = |t: &str| recs.iter().find(|r| r["turn_id"] == t).unwrap().clone();
+
+        let corrected = by("t-1");
+        assert_eq!(corrected["speaker_id"], "unknown", "raw field kept");
+        assert_eq!(corrected["speaker"]["label"], "Brendon");
+        assert_eq!(corrected["speaker"]["resolution"], "corrected");
+        assert_eq!(corrected["speaker_override"], brendon.as_str());
+        assert_eq!(corrected["memories_tagged"][0]["for"]["label"], "Brendon");
+        assert_eq!(corrected["memories_tagged"][1]["for"]["kind"], "household");
+
+        let old = by("t-2");
+        assert_eq!(old["speaker"]["kind"], "unknown");
+        assert_eq!(old["memories_tagged"][0]["content"], "The user likes tea");
+        assert_eq!(old["memories_tagged"][0]["for"], Value::Null);
+
+        let id3 = by("t-3");
+        assert_eq!(id3["speaker"]["resolution"], "identified");
+        assert_eq!(id3["speaker"]["inherited"], true);
+        let _ = std::fs::remove_file(&s.debug.chatlog_path);
+    }
+
+    #[test]
+    fn memory_attribute_moves_rows_and_validates_the_target() {
+        let s = speaker_services(settings(), debug());
+        let kristina = reg(&s).create_labeled("Kristina", &[1.0, 0.0], 3).unwrap();
+        let mem = s.memory();
+        let a = mem
+            .add_in(
+                MemoryKind::Fact,
+                "The user likes jazz",
+                MemorySource::Inferred,
+                &MemoryScope::Unknown {
+                    candidate: Some(kristina.clone()),
+                },
+                &Provenance::default(),
+            )
+            .unwrap();
+        let b = mem
+            .add_in(
+                MemoryKind::Fact,
+                "The user is a nurse",
+                MemorySource::Inferred,
+                &MemoryScope::Unknown { candidate: None },
+                &Provenance::default(),
+            )
+            .unwrap();
+        let c = mem
+            .add_in(
+                MemoryKind::Fact,
+                "Our dog is Rex",
+                MemorySource::Inferred,
+                &MemoryScope::Unknown { candidate: None },
+                &Provenance::default(),
+            )
+            .unwrap();
+
+        let post = |body: Value| -> Value {
+            serde_json::from_str(&super::super::speakers::memory_attribute_json(&s, &body)).unwrap()
+        };
+        // Bulk confirm for the candidate.
+        let r = post(json!({ "ids": [a, b], "to": kristina }));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["moved"], 2);
+        assert_eq!(r["graph_updated"], false);
+        for id in [a, b] {
+            let m = mem.get(id).unwrap().unwrap();
+            assert_eq!(m.scope, crate::memory::ScopeKind::Person);
+            assert_eq!(m.speaker_id.as_deref(), Some(kristina.as_str()));
+        }
+        // Make household.
+        assert_eq!(post(json!({ "id": c, "to": "household" }))["ok"], true);
+        assert_eq!(
+            mem.get(c).unwrap().unwrap().scope,
+            crate::memory::ScopeKind::Household
+        );
+        // Unknown people / missing rows / missing target are refused.
+        assert_eq!(post(json!({ "id": a, "to": "spk-nope" }))["ok"], false);
+        assert_eq!(post(json!({ "id": 9999, "to": "household" }))["ok"], false);
+        assert_eq!(post(json!({ "id": a }))["ok"], false);
+        assert_eq!(mem.list_unknown().unwrap().len(), 0);
+
+        let del: Value = serde_json::from_str(&super::super::speakers::memory_delete_json(
+            &s,
+            &json!({ "id": c }),
+        ))
+        .unwrap();
+        assert_eq!(del["deleted"], 1);
+        assert!(mem.get(c).unwrap().is_none());
+    }
+
+    #[test]
+    fn conversations_attribute_records_an_override_and_rescopes_the_turn() {
+        let s = speaker_services(settings(), debug());
+        let brendon = reg(&s).create_labeled("Brendon", &[1.0, 0.0], 3).unwrap();
+        let mem = s.memory();
+        let prov = Provenance {
+            said_by: None,
+            resolution: Some("unknown".into()),
+            confidence: Some(0.0),
+            turn_id: Some("t-5".into()),
+        };
+        let personal = mem
+            .add_in(
+                MemoryKind::Fact,
+                "The user's name is Brendon",
+                MemorySource::Inferred,
+                &MemoryScope::Unknown { candidate: None },
+                &prov,
+            )
+            .unwrap();
+        let shared = mem
+            .add_in(
+                MemoryKind::Fact,
+                "Our wifi is FastNet",
+                MemorySource::Inferred,
+                &MemoryScope::Household,
+                &prov,
+            )
+            .unwrap();
+        let post = |body: Value| -> Value {
+            serde_json::from_str(&super::super::speakers::conversations_attribute_json(
+                &s, &body,
+            ))
+            .unwrap()
+        };
+        let r = post(json!({ "turn_id": "t-5", "to": brendon }));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["memories"], 1);
+        assert_eq!(r["speaker"]["label"], "Brendon");
+        assert_eq!(
+            mem.turn_overrides().unwrap().get("t-5").map(String::as_str),
+            Some(brendon.as_str())
+        );
+        let m = mem.get(personal).unwrap().unwrap();
+        assert_eq!(m.speaker_id.as_deref(), Some(brendon.as_str()));
+        assert_eq!(
+            mem.get(shared).unwrap().unwrap().scope,
+            crate::memory::ScopeKind::Household,
+            "household facts stay household"
+        );
+        // A turn is never "said by the household"; blank ids are refused.
+        assert_eq!(
+            post(json!({ "turn_id": "t-5", "to": "household" }))["ok"],
+            false
+        );
+        assert_eq!(post(json!({ "to": brendon }))["ok"], false);
+        // Back to unknown.
+        assert_eq!(
+            post(json!({ "turn_id": "t-5", "to": "unknown" }))["ok"],
+            true
+        );
+        assert_eq!(
+            mem.get(personal).unwrap().unwrap().scope,
+            crate::memory::ScopeKind::Unknown
+        );
+    }
+
+    #[test]
+    fn overview_reports_unknown_memories_to_review() {
+        let s = speaker_services(settings(), debug());
+        s.memory()
+            .add_in(
+                MemoryKind::Fact,
+                "The user likes jazz",
+                MemorySource::Inferred,
+                &MemoryScope::Unknown { candidate: None },
+                &Provenance::default(),
+            )
+            .unwrap();
+        let v: Value =
+            serde_json::from_str(&block_on(super::super::system::overview_json(&s, false)))
+                .unwrap();
+        assert_eq!(v["unknown_memories"], 1);
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    /// Serve one raw request with speaker-enabled services whose memory store is
+    /// `memory` (shared), returning the raw response.
+    async fn serve_with(
+        memory_rows: impl FnOnce(&AppServices),
+        req: impl FnOnce(u16) -> String,
+    ) -> (String, Arc<MemoryStore>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let s = speaker_services(settings(), debug());
+        memory_rows(&s);
+        let memory = s.memory().clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = handle(stream, &s).await;
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(req(addr.port()).as_bytes()).await.unwrap();
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        (resp, memory)
+    }
+
+    fn add_unknown(s: &AppServices) {
+        s.memory()
+            .add_in(
+                MemoryKind::Fact,
+                "The user likes jazz",
+                MemorySource::Inferred,
+                &MemoryScope::Unknown { candidate: None },
+                &Provenance {
+                    turn_id: Some("t-1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn raw_post(path: &str, host: &str, extra: &str, body: &str) -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn attribute_endpoints_reject_non_json_and_non_loopback() {
+        let body = r#"{"id":1,"to":"household"}"#;
+        let turn = r#"{"turn_id":"t-1","to":"unknown"}"#;
+        for (path, body) in [
+            ("/memory/attribute", body),
+            ("/conversations/attribute", turn),
+        ] {
+            // Form content type → 415, nothing moved.
+            let (resp, mem) = serve_with(add_unknown, |p| {
+                raw_post(
+                    path,
+                    &format!("127.0.0.1:{p}"),
+                    "Content-Type: application/x-www-form-urlencoded\r\n",
+                    body,
+                )
+            })
+            .await;
+            assert!(resp.starts_with("HTTP/1.1 415"), "{path}: {resp}");
+            assert_eq!(mem.list_unknown().unwrap().len(), 1, "{path}");
+            assert!(mem.turn_overrides().unwrap().is_empty());
+
+            // Rebinding host → 403.
+            let (resp, mem) = serve_with(add_unknown, |p| {
+                raw_post(
+                    path,
+                    &format!("evil.example:{p}"),
+                    "Content-Type: application/json\r\n",
+                    body,
+                )
+            })
+            .await;
+            assert!(resp.starts_with("HTTP/1.1 403"), "{path}: {resp}");
+            assert_eq!(mem.list_unknown().unwrap().len(), 1, "{path}");
+
+            // Cross-origin → 403.
+            let (resp, _) = serve_with(add_unknown, |p| {
+                raw_post(
+                    path,
+                    &format!("127.0.0.1:{p}"),
+                    "Origin: https://evil.example\r\nContent-Type: application/json\r\n",
+                    body,
+                )
+            })
+            .await;
+            assert!(resp.starts_with("HTTP/1.1 403"), "{path}: {resp}");
+        }
+
+        // A proper same-origin JSON POST moves the SQLite rows.
+        let (resp, mem) = serve_with(add_unknown, |p| {
+            raw_post(
+                "/memory/attribute",
+                &format!("127.0.0.1:{p}"),
+                &format!("Origin: http://127.0.0.1:{p}\r\nContent-Type: application/json\r\n"),
+                body,
+            )
+        })
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(resp.contains("\"graph_updated\":false"), "{resp}");
+        assert_eq!(mem.list_unknown().unwrap().len(), 0);
+        assert_eq!(
+            mem.get(1).unwrap().unwrap().scope,
+            crate::memory::ScopeKind::Household
+        );
+
+        let (resp, mem) = serve_with(add_unknown, |p| {
+            raw_post(
+                "/conversations/attribute",
+                &format!("127.0.0.1:{p}"),
+                "Content-Type: application/json\r\n",
+                turn,
+            )
+        })
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert_eq!(
+            mem.turn_overrides().unwrap().get("t-1").map(String::as_str),
+            Some("unknown")
+        );
+    }
+
+    #[test]
+    fn graph_nodes_gain_resolved_speaker_tags() {
+        let dir = SpeakerDirectory::from_parts(
+            &[crate::speaker::SpeakerProfile {
+                id: "spk-1".into(),
+                name: Some("Christina".into()),
+                name_source: Some(crate::speaker::NameSource::Spoken),
+                labeled: true,
+                samples: 1,
+                created_at: 1,
+                updated_at: 1,
+            }],
+            Default::default(),
+            &roster(),
+            Default::default(),
+            true,
+            |_| true,
+        );
+        let mut nodes = json!({
+            "User": [
+                { "$id": 1, "speaker_id": "spk-1" },
+                { "$id": 2, "speaker_id": "household" },
+                { "$id": 3, "speaker_id": "unknown" },
+            ],
+            "Entity": [ { "$id": 4, "name": "Rex" } ],
+        });
+        super::super::speakers::tag_graph_nodes(&dir, &mut nodes);
+        assert_eq!(nodes["User"][0]["$speaker"]["label"], "Kristina");
+        assert_eq!(nodes["User"][0]["$speaker"]["has_clips"], true);
+        assert_eq!(nodes["User"][1]["$speaker"]["kind"], "household");
+        assert_eq!(nodes["User"][2]["$speaker"]["kind"], "unknown");
+        assert!(nodes["Entity"][0].get("$speaker").is_none());
+    }
 }

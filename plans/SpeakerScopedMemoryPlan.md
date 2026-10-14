@@ -20,7 +20,7 @@
 | 3. Short-utterance identification | **Done**: `speaker.min_identify_ms` (600) + `short_clip_margin` (0.10), follow-up inheritance |
 | 4. Helix graph | **Done**: `unknown` user, `in_scope` excludes it, ingester attributes only identified turns + honours corrections, marker-guarded `household → unknown` migration, `reattribute_turn` / `retag_memory` |
 | 5. System-1 + tools | **Done**: `DecisionRequest.speaker`; "me" handled via the identity line + `send_phone_message` guidance; `pending_unknown` on the enroll result |
-| 6a/6b. Core UI tagging + review | See the commit history (implemented after this table was written) |
+| 6a/6b. Core UI tagging + review | **Done**: `webconfig/speakers.rs` (`SpeakerDirectory`, `/speakers.json`), `speaker`/`said_by`/scope on `/sqlite.json`, `/chatlog.json`, `/prompts.json`, `/helix.json`, `/overview.json`; For/Said-by columns, the Unknown-speaker review tab with bulk confirm, turn correction, the Speaker block. `POST /memory/attribute`, `/memory/delete`, `/conversations/attribute` update SQLite **and** the live GraphRAG store (`Recall::{retag_memory, forget_memory, reattribute_turn}`). Voice-clip playback stays on the device People screen (there is no web clip endpoint). |
 
 **Where the implementation differs from the text below (deliberately):**
 - **No tentative cap for spoken names** (§4a.2, last bullet). Personal writes are keyed by
