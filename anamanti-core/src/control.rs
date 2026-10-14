@@ -46,6 +46,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::NAME_SPEAKER
             | types::MERGE_SPEAKERS
             | types::DELETE_SPEAKER
+            | types::LINK_SPEAKER
             | types::LIST_SPEAKER_CLIPS
             | types::GET_SPEAKER_CLIP
             | types::ENROLL_FINISH
@@ -106,6 +107,11 @@ pub async fn handle_control(
         speaker_clips_response(speaker, request)
     } else if request.event_type == types::GET_SPEAKER_CLIP {
         speaker_clip_response(speaker, request)
+    } else if request.event_type == types::LINK_SPEAKER {
+        // Linking to a household member reads the roster (settings) and may run a full
+        // merge (registry + memory + clips + graph), so it is coordinated here.
+        let graph = graphrag.map(|g| g.recall());
+        link_speaker_response(request, memory, speaker, graph.as_deref(), settings).await
     } else if request.event_type == types::MERGE_SPEAKERS
         || request.event_type == types::DELETE_SPEAKER
     {
@@ -984,6 +990,98 @@ async fn speaker_change_response(
     }
 }
 
+/// Link voice `id` to the household member `member` (the People screen's "Link to
+/// household member"). The Core's roster is the authority: `member` must match a
+/// household member (case-insensitive). If another voiceprint already carries that
+/// member's name, `id` is **merged into it** (voiceprint, memories, clips, graph
+/// history — the same coordinated merge as "Merge with…"), so a person ends up with one
+/// voiceprint; otherwise `id` is simply named as the member. The resulting profile is
+/// labeled with the member's canonical spelling.
+async fn link_speaker_response(
+    request: &WyomingEvent,
+    memory: &MemoryStore,
+    speaker: Option<&SpeakerService>,
+    graph: Option<&dyn crate::memory::Recall>,
+    settings: &SharedSettings,
+) -> WyomingEvent {
+    let Some(svc) = speaker else {
+        return speaker_result(false, SPEAKER_DISABLED);
+    };
+    let arg = |key: &str| {
+        request
+            .data
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let (Some(id), Some(member)) = (arg("id"), arg("member")) else {
+        return speaker_result(false, "link-speaker requires `id` and `member`");
+    };
+    let Some(canonical) = settings
+        .household()
+        .member_matching(member)
+        .map(|m| m.name.clone())
+    else {
+        return speaker_result(false, &format!("{member} isn't in the household"));
+    };
+    let reg = svc.registry();
+    let profiles = match reg.list() {
+        Ok(p) => p,
+        Err(e) => return speaker_result(false, &format!("{e:#}")),
+    };
+    if !profiles.iter().any(|p| p.id == id) {
+        return speaker_result(false, "no such speaker");
+    }
+    // The member's existing voiceprint (oldest first), other than this one.
+    let target = profiles
+        .iter()
+        .find(|p| {
+            p.id != id
+                && p.name
+                    .as_deref()
+                    .is_some_and(|n| n.trim().eq_ignore_ascii_case(&canonical))
+        })
+        .map(|p| p.id.clone());
+
+    let link_result = |ok: bool, message: String, speaker_id: &str, merged: bool| {
+        WyomingEvent::with_data(
+            types::SPEAKER_RESULT,
+            json!({
+                "ok": ok, "message": message, "speaker_id": speaker_id,
+                "name": canonical, "merged": merged,
+            }),
+        )
+    };
+    match target {
+        Some(keep) => match svc.merge(&keep, id, memory, graph).await {
+            Ok(Some(change)) => {
+                // Normalize the kept profile to the roster's spelling.
+                if let Err(e) = reg.rename(&keep, &canonical) {
+                    log::warn!("link-speaker: renaming {keep} to {canonical}: {e:#}");
+                }
+                link_result(
+                    true,
+                    format!(
+                        "merged into {canonical} ({} memories moved){}",
+                        change.memories,
+                        warnings_suffix(&change.warnings)
+                    ),
+                    &keep,
+                    true,
+                )
+            }
+            Ok(None) => speaker_result(false, "merge failed (unknown id)"),
+            Err(e) => speaker_result(false, &format!("{e:#}")),
+        },
+        None => match reg.rename(id, &canonical) {
+            Ok(true) => link_result(true, format!("linked to {canonical}"), id, false),
+            Ok(false) => speaker_result(false, "no such speaker"),
+            Err(e) => speaker_result(false, &format!("{e:#}")),
+        },
+    }
+}
+
 /// `"; warnings: a; b"` for a speaker change whose follow-up steps partly failed.
 fn warnings_suffix(warnings: &[String]) -> String {
     if warnings.is_empty() {
@@ -1757,6 +1855,87 @@ mod tests {
         assert_eq!(svc.registry().count().unwrap(), 1);
         assert_eq!(svc.registry().get(&id).unwrap().unwrap().samples, 9);
         assert_eq!(s.household().members.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn link_speaker_names_or_merges_into_a_household_member() {
+        use crate::memory::{MemoryKind, MemorySource};
+        use crate::settings::{Household, HouseholdMember};
+        use crate::speaker::{MockSpeakerEmbedder, SpeakerEmbedder};
+        assert!(is_control_request(types::LINK_SPEAKER));
+        let mem = MemoryStore::open_in_memory().unwrap();
+        let s = settings();
+        s.apply_household(&Household {
+            members: vec![HouseholdMember {
+                name: "Christina".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let svc = speaker_service();
+        let reg = svc.registry();
+        let e = MockSpeakerEmbedder::default();
+        let a = reg
+            .create_cluster(&e.embed(&vec![1000i16; 20_000]).unwrap())
+            .unwrap();
+        let b = reg
+            .create_cluster(&e.embed(&vec![500i16; 20_000]).unwrap())
+            .unwrap();
+        mem.add_scoped(
+            MemoryKind::Fact,
+            "likes tea",
+            MemorySource::Explicit,
+            Some(&b),
+        )
+        .unwrap();
+        let link = |id: &str, member: &str| {
+            let r = req(types::LINK_SPEAKER, json!({ "id": id, "member": member }));
+            let (mem, svc, s) = (&mem, &svc, &s);
+            async move { link_speaker_response(&r, mem, Some(svc), None, s).await }
+        };
+
+        // Not a household member → refused, nothing changes.
+        let bad = link(&a, "Zed").await;
+        assert_eq!(bad.data["ok"], json!(false));
+        assert!(bad.data["message"]
+            .as_str()
+            .unwrap()
+            .contains("isn't in the household"));
+
+        // Christina has no voiceprint yet → this voice is simply named as her
+        // (canonical spelling from the roster).
+        let first = link(&a, "christina").await;
+        assert_eq!(first.data["ok"], json!(true));
+        assert_eq!(first.data["merged"], json!(false));
+        assert_eq!(first.data["name"], json!("Christina"));
+        assert_eq!(
+            reg.get(&a).unwrap().unwrap().name.as_deref(),
+            Some("Christina")
+        );
+
+        // A second voice linked to Christina is merged into her voiceprint, carrying
+        // its memories along.
+        let second = link(&b, "Christina").await;
+        assert_eq!(second.data["ok"], json!(true));
+        assert_eq!(second.data["merged"], json!(true));
+        assert_eq!(second.data["speaker_id"], json!(a));
+        assert_eq!(reg.count().unwrap(), 1, "one voiceprint per person");
+        let hits = mem.search_scoped("tea", Some(&a), 10).unwrap();
+        assert!(hits.iter().any(|m| m.content == "likes tea"));
+
+        // Disabled speaker ID → in-band failure.
+        let off = link_speaker_response(
+            &req(
+                types::LINK_SPEAKER,
+                json!({ "id": a, "member": "Christina" }),
+            ),
+            &mem,
+            None,
+            None,
+            &s,
+        )
+        .await;
+        assert_eq!(off.data["ok"], json!(false));
     }
 
     #[tokio::test]

@@ -218,6 +218,21 @@ Future<bool> mergeSpeakers({
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
 
+/// Link a voice to a household member on the Core (People → "Link to household
+/// member"): merged into the member's existing voiceprint, or named as them. Returns
+/// the Core's confirmation message; errors carry the reason.
+Future<String> linkSpeaker({
+  required String orchestratorKey,
+  required String id,
+  required String member,
+  required BigInt discoveryTimeoutSecs,
+}) => RustLib.instance.api.crateApiSettingsLinkSpeaker(
+  orchestratorKey: orchestratorKey,
+  id: id,
+  member: member,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
 /// Delete a speaker profile. Returns whether a profile was removed.
 Future<bool> deleteSpeaker({
   required String orchestratorKey,

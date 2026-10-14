@@ -388,6 +388,12 @@ abstract class OrchestratorClient {
   /// Merge the `drop` speaker into `keep` (same person, two clusters).
   Future<bool> mergeSpeakers({required String keep, required String drop});
 
+  /// Link voice [id] to the household member [member] on the Mac: merged into that
+  /// member's existing voiceprint (voice, memories, clips) if they have one, otherwise
+  /// named as them. Returns the Core's confirmation; throws with the reason (e.g. not
+  /// a household member).
+  Future<String> linkSpeaker(String id, String member);
+
   /// Delete a speaker profile; returns whether one was removed.
   Future<bool> deleteSpeaker(String id);
 
@@ -686,6 +692,14 @@ class FrbOrchestratorClient implements OrchestratorClient {
         drop: drop,
         discoveryTimeoutSecs: _timeout,
       );
+
+  @override
+  Future<String> linkSpeaker(String id, String member) => frb.linkSpeaker(
+    orchestratorKey: orchestratorKey,
+    id: id,
+    member: member,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<bool> deleteSpeaker(String id) => frb.deleteSpeaker(

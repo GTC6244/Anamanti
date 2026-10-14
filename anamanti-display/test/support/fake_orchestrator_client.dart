@@ -107,6 +107,7 @@ class FakeOrchestratorClient implements OrchestratorClient {
   int clearCount = 0;
   final List<Map<String, String>> namedCalls = <Map<String, String>>[];
   final List<Map<String, String>> mergeCalls = <Map<String, String>>[];
+  final List<Map<String, String>> linkCalls = <Map<String, String>>[];
   final List<String> deletedSpeakers = <String>[];
   final List<Map<String, String>> enrollFinishCalls = <Map<String, String>>[];
   final List<String> enrollCancelCalls = <String>[];
@@ -331,6 +332,45 @@ class FakeOrchestratorClient implements OrchestratorClient {
     mergeCalls.add({'keep': keep, 'drop': drop});
     _speakers.removeWhere((s) => s.id == drop);
     return true;
+  }
+
+  /// Mirrors the Core: the member must be in the roster; merge into another profile
+  /// already carrying that name, else rename this one to the canonical spelling.
+  @override
+  Future<String> linkSpeaker(String id, String member) async {
+    linkCalls.add({'id': id, 'member': member});
+    if (throwOnFetch) throw Exception('offline');
+    final canonical = _householdMembers.firstWhere(
+      (m) => m.toLowerCase() == member.trim().toLowerCase(),
+      orElse: () => throw Exception("$member isn't in the household"),
+    );
+    final i = _speakers.indexWhere((s) => s.id == id);
+    if (i < 0) throw Exception('no such speaker');
+    final target = _speakers.indexWhere(
+      (s) => s.id != id && s.name?.toLowerCase() == canonical.toLowerCase(),
+    );
+    if (target >= 0) {
+      final keep = _speakers[target];
+      final drop = _speakers[i];
+      _speakers[target] = SpeakerView(
+        id: keep.id,
+        name: canonical,
+        labeled: true,
+        samples: keep.samples + drop.samples,
+        createdAt: keep.createdAt,
+      );
+      _speakers.removeAt(i);
+      return 'merged into $canonical (0 memories moved)';
+    }
+    final s = _speakers[i];
+    _speakers[i] = SpeakerView(
+      id: s.id,
+      name: canonical,
+      labeled: true,
+      samples: s.samples,
+      createdAt: s.createdAt,
+    );
+    return 'linked to $canonical';
   }
 
   @override

@@ -611,6 +611,28 @@ pub fn merge_speakers(
     })
 }
 
+/// Link a voice to a household member on the Core (People → "Link to household
+/// member"): merged into the member's existing voiceprint, or named as them. Returns
+/// the Core's confirmation message; errors carry the reason.
+pub fn link_speaker(
+    orchestrator_key: String,
+    id: String,
+    member: String,
+    discovery_timeout_secs: u64,
+) -> Result<String> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::link_speaker(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &id,
+            &member,
+        )
+        .await
+    })
+}
+
 /// Delete a speaker profile. Returns whether a profile was removed.
 pub fn delete_speaker(
     orchestrator_key: String,
