@@ -125,6 +125,7 @@ async fn run() -> anyhow::Result<()> {
     let log = ChatLog::open(&log_path)?;
     let mk = |id: &str, t: &str, r: &str, mem: &[&str]| ChatLogRecord {
         id: id.to_string(),
+        turn_id: None,
         ts: 1,
         session_id: "live".to_string(),
         transcript: t.to_string(),

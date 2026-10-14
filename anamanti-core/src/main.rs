@@ -28,7 +28,7 @@ use anamanti_core::notify::NotificationService;
 use anamanti_core::orchestrator::{self, Pipeline, TcpConnector};
 use anamanti_core::server;
 use anamanti_core::weather::WeatherService;
-use anamanti_core::webconfig::{self, DebugSources};
+use anamanti_core::webconfig::{self, BootInfo, DebugSources};
 
 /// Worker-thread stack size. The embedded HelixDB engine builds deep async state
 /// machines whose stack usage exceeds tokio's 2 MiB default, especially in debug
@@ -77,6 +77,12 @@ async fn run() -> Result<()> {
 
     let cli = parse_cli().context("parsing command-line arguments")?;
     let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
+    // Which file the config came from, for the console's System page: the explicit
+    // `--config` path, else the convention `anamanti.json` when present.
+    let boot_config_file = cli.config.clone().or_else(|| {
+        let p = PathBuf::from("anamanti.json");
+        p.exists().then_some(p)
+    });
     log::info!(
         "starting orchestrator: name={:?} instance_id={} bind={} stt={} tts={} llm={} db={}",
         config.service_name,
@@ -355,6 +361,7 @@ async fn run() -> Result<()> {
                 }
                 .to_string(),
                 graph: graph_view,
+                boot: BootInfo::from_config(&config, boot_config_file.as_deref()),
             }),
     );
 

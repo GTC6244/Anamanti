@@ -122,7 +122,7 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   `embed-local`, ON by default); it needs no network and no API key, only the ONNX +
   tokenizer on disk (`scripts/fetch-embed-model.sh`). `graphrag.embed_backend="openai"`
   is the opt-in cloud path and then needs `OPENAI_API_KEY`. The backend is **hot-swappable
-  live** from the config page (Memory → Embeddings) with no restart; each backend keeps its
+  live** from the config page (Memory → Recall settings, `/memory#settings`) with no restart; each backend keeps its
   **own per-signature store** (`helix_path/<label>-<dims>/`) so switching is lossless (the
   durable SQLite facts + chat log are never touched — only the derived vector index differs).
   If the chosen embedder init
@@ -136,7 +136,7 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
 - **Idle screen:** photo slideshow from a Google Photos/Drive folder; keeps running
   when disconnected. Google Photos (Ambient) links via **on-device OAuth**
   (device-code/QR); **Google Drive links on the Anamanti Core** (consent on the Mac,
-  config page → Photos tab) and the device pulls the token over Wyoming.
+  config page → Integrations → Google Drive, `/integrations#drive`) and the device pulls the token over Wyoming.
 - **Resilience:** **auto-reconnect** with backoff via mDNS + a subtle
   disconnected indicator; wake words queue until reconnected.
 - **AEC interim:** raise the wake-word confidence **threshold during playback** to
@@ -162,7 +162,7 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   `set_active_personality` (no device frame); the orchestrator appends a fenced style block
   to each turn's prompt from the snapshot. State + the **editable catalog** live in the settings overlay (`Personality`
   in `settings.rs`, persisted to `anamanti_settings.json`, no `anamanti.json` seed) and
-  are edited on the Core GUI **Personality tab** (`/personality`). Core-only; no Display
+  are edited on the Core GUI **Personality page** (`/personality`). Core-only; no Display
   UI. See architecture.md §8.4 and the Plan.MD decision row.
 - **Proactive notifications (Approach A):** the Anamanti Core can push **visual**
   notifications to the display *unprompted* (no voice turn) over a **persistent,
@@ -253,7 +253,7 @@ adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk   # or: flu
   server; see `plans/python-to-rust-whisper.md`), **or** ElevenLabs Scribe v2 Realtime
   over WebSocket (`stt.engine=elevenlabs`, needs the `ELEVENLABS_API_KEY` secret and
   network; always compiled, no feature flag; see `plans/ElevenLabsSttPlan.md`). The
-  engine is **runtime-swappable** from the config-page **Speech** tab (`/stt`) with no
+  engine is **runtime-swappable** from the config-page **Voice** page (`/voice#stt`) with no
   restart (like the LLM/VAD/weather controls); `stt.engine` is just the boot seed. The
   Core's VAD stays the end-of-speech authority for all three.
 
@@ -281,6 +281,24 @@ anamanti-core/scripts/build-webui-css.sh
 # Content-Type: application/json (else 415) — page scripts use shell.js apiJSON/postJSON.
 # Routes live in ONE table (anamanti-core/src/webconfig/routes.rs); the checks run once,
 # before routing. Binding config_addr to a LAN address therefore does NOT expose it.
+#
+# Information architecture (plans/CoreWebUIPlan.md, 2026-10-14): ten pages tuned to fit
+# one 1920x1080 screen each — Overview `/` (live pipeline with a Local/LAN/Cloud chip
+# per stage, displays, latency, "what leaves the house"), Voice `/voice` (STT, VAD,
+# Piper voice, transcript fixes), Intelligence `/intelligence` (LLM + keys, System-1,
+# web search, read-only system prompt), Personality, Household (address + people),
+# Integrations `/integrations` (tiles + per-service drawers: weather, places,
+# directions, calendar, Cadora, AppSaid, Spotify, Drive), Music & Devices `/devices`,
+# Memory `/memory` (embeddings, the cloud ENTITY-EXTRACTION toggle, facts, graph),
+# Conversations `/conversations` (turns + latency waterfall + the matched prompt, joined
+# by `turn_id`), Keys & Accounts `/keys`, System `/system` (build, runtime, redacted
+# effective boot config). The pre-2026-10-14 page routes (/stt, /tools, /drive,
+# /system1, /music, /notifications, /embeddings, /sqlite, /helix, /chatlog, /prompts,
+# /about, /pronunciations) 302 to their new homes; every JSON/POST endpoint is
+# unchanged. Shared front-end: shell.js (helpers + shell) and ui.js (component kit +
+# the LOCALITY map that holds every option's tier and "Sends:" copy — keep it in step
+# with the plan's locality matrix). Aggregators: /overview.json, /keys.json,
+# /system.json (webconfig/system.rs, which also holds the address→tier classifier).
 
 # End-to-end check of a running Core (real STT → LLM → TTS) with a fake device:
 #   say -o /tmp/q.wav --data-format=LEI16@16000 "what is two plus two"
@@ -300,22 +318,22 @@ anamanti-core/scripts/build-webui-css.sh
 # shell env at all.
 #   ANTHROPIC_API_KEY / OPENAI_API_KEY  (anthropic/openai backends; OPENAI_API_KEY is
 #     needed for the helix GraphRAG embeddings ONLY when graphrag.embed_backend="openai"
-#     — the default "local" nomic embedder is offline and needs no key; UI: Config tab)
+#     — the default "local" nomic embedder is offline and needs no key; UI: Intelligence → `/intelligence#llm`, also Keys & Accounts → `/keys`)
 #   TAVILY_API_KEY                       (real web search when llm.search_provider=tavily;
-#     UI: Config tab)
+#     UI: Intelligence → `/intelligence#search`)
 #   MAPBOX_TOKEN (or MAPBOX_ACCESS_TOKEN) (the directions_lookup provider token;
-#     UI: Tools tab → /tools)
+#     UI: Integrations → `/integrations#directions`)
 #   APPSAID_APP_TOKEN                    (the send_phone_message sender app token for
-#     AppSaid HTML-push; UI: Household tab → /household)
+#     AppSaid HTML-push; UI: Integrations → `/integrations#appsaid`)
 #   VISUALCROSSING_API_KEY               (the weather provider key when weather.provider=
-#     visualcrossing, the default; UI: Tools tab → /tools. Absent ⇒ weather falls back to
+#     visualcrossing, the default; UI: Integrations → `/integrations#weather`. Absent ⇒ weather falls back to
 #     keyless Open-Meteo)
 #   GOOGLE_PLACES_API_KEY                (the places_lookup provider key — Google Places API
-#     New; UI: Tools tab → /tools. Absent ⇒ the tool is not advertised, no keyless fallback)
+#     New; UI: Integrations → `/integrations#places`. Absent ⇒ the tool is not advertised, no keyless fallback)
 #   ANTHROPIC_OAUTH_TOKEN                (Claude subscription token from `claude setup-token`;
-#     UI: Config tab when Anthropic auth = subscription)
+#     UI: Intelligence → `/intelligence#llm` when Anthropic auth = subscription)
 #   OPENROUTER_API_KEY                   (the System-1 `jev` decision backend on OpenRouter;
-#     UI: System-1 tab → /system1. Only needed when system1.backend=jev)
+#     UI: Intelligence → `/intelligence#system1`. Only needed when system1.backend=jev)
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
 #     process start, so it has no config-page control)
 #
@@ -347,7 +365,7 @@ anamanti-core/scripts/build-webui-css.sh
 #     embed_tokenizer_dir, embed_model, embed_dims, extract_model, …}. The default
 #     local nomic-embed-text-v1.5 embedder needs its ONNX+tokenizer on disk — provision
 #     with anamanti-core/scripts/fetch-embed-model.sh (never committed; see /models/).
-#     The backend is hot-swappable live from the config page (Memory → Embeddings); the
+#     The backend is hot-swappable live from the config page (Memory → Recall settings); the
 #     choice persists in helix_path/active_backend. Each backend keeps its OWN store +
 #     ingest offset under helix_path/<label>-<dims>/ (e.g. nomic-768, openai-1536), so
 #     switching is lossless and never re-embeds an already-built backend — durable SQLite
@@ -360,7 +378,7 @@ anamanti-core/scripts/build-webui-css.sh
 #     pluggable System-1 fast-decision engine (plans/system1-fast-decisions.md). backend
 #     default "none" (disabled); "laya-serve" (local Laya-Decision sidecar on base_url,
 #     `/v1/systemone`) or "jev" (OpenRouter, needs OPENROUTER_API_KEY). Runtime-swappable
-#     + persisted; UI: System-1 tab → /system1. Resolves weather/timer before the LLM.
+#     + persisted; UI: Intelligence → `/intelligence#system1`. Resolves weather/timer before the LLM.
 #     (system1.device / system1.model are deprecated: still accepted, ignored + warned.)
 #   calendar.subscriptions=[{name,url}], calendar.cache_ttl_secs (read-only web .ics;
 #     `webcal://` accepted; enables calendar_lookup; empty → tool not advertised). The
@@ -371,23 +389,23 @@ anamanti-core/scripts/build-webui-css.sh
 #     tab) → the directions_lookup tool
 #   weather{enabled,provider,refresh_interval_secs} → the weather_lookup tool + ambient
 #     push. provider="visualcrossing" (default; + the VISUALCROSSING_API_KEY secret, set
-#     via env or the Tools tab) or "openmeteo" (keyless). Provider + key are runtime-
-#     settable on the Tools tab (persisted, rebuilds the tool + retargets the push live);
+#     via env or Integrations → Weather) or "openmeteo" (keyless). Provider + key are runtime-
+#     settable on Integrations → Weather (persisted, rebuilds the tool + retargets the push live);
 #     visualcrossing with no key falls back to keyless Open-Meteo
 #   places{enabled,provider} → the places_lookup tool (Google Places API New) + the
 #     anamanti-place frame + the display's place card. provider="google" (default/only) +
-#     the GOOGLE_PLACES_API_KEY secret, set via env or the Tools tab (runtime-settable,
+#     the GOOGLE_PLACES_API_KEY secret, set via env or Integrations → Places (runtime-settable,
 #     rebuilds the tool live). No keyless fallback — no key ⇒ the tool is not advertised
 #   drive{client_id,client_secret,folder_ids,scope} (Google Drive photo slideshow OAuth
 #     CLIENT creds; the refresh token is minted by config-page consent, never seeded)
 #   spotify{client_id,client_secret,refresh_token,device_name,redirect_url} (spotify_control
-#     tool; Premium; easiest setup is config page → Music tab → "Connect Spotify". redirect_url
+#     tool; Premium; easiest setup is config page → Integrations → Spotify → "Connect Spotify". redirect_url
 #     is the OAuth callback the consent flow binds + registers, default
 #     http://127.0.0.1:8888/callback)
 #   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
 #     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
 #     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
-#     Voice & Integrations, enter it on the config page → Household tab → "Shopping list
+#     Voice & Integrations, enter it on the config page → Integrations → "Shopping list
 #     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)
 #   appsaid{worker_url,recipients{name:user_key},default_recipient} (send_phone_message
@@ -770,7 +788,7 @@ Photos Partner Program** (`createDevice` → 403 until accepted); and (2) **Goog
 Drive** (`drive_photos.dart`; `drive.readonly`) as the interim. **Drive is
 Anamanti Core-owned:** the Mac runs the one-time OAuth consent itself
 (`anamanti-core/src/drive_consent.rs`, a "Desktop app" client, loopback + PKCE),
-driven from the config page **Photos tab** (`/drive` on `ANAMANTI_CONFIG_ADDR`).
+driven from the config page **Integrations → Google Drive** drawer (`/integrations#drive` on `ANAMANTI_CONFIG_ADDR`; the legacy `/drive` redirects there).
 The Anamanti Core holds the Drive client id/secret + refresh token + folder ids (in
 its `0600` `anamanti_settings.json`), and the device **pulls the whole bundle over
 Wyoming** (`anamanti-get-drive-token`) and mints Drive access tokens on-device — so

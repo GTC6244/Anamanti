@@ -1,0 +1,341 @@
+<p class="sub" data-head="sub">Every completed turn, newest first: what was heard, what the assistant said, where the time went, and the exact prompt sent to the model.</p>
+<div class="btn-row" data-head="actions">
+  <span class="legend" id="cvLegend"></span>
+</div>
+
+<style>
+  /* Conversations page — scoped helpers (cv-*). */
+  .cv-tb { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding-bottom: 0.7rem; border-bottom: 1px solid var(--border); }
+  .cv-tb input, .cv-tb select { width: auto; }
+  .cv-tb input[type="search"] { flex: 1; min-width: 10rem; }
+  .cv-card { padding: 0.85rem 0 0 0; overflow: hidden; }
+  .cv-card > .cv-tb { padding-left: 1rem; padding-right: 1rem; }
+  .cv-list { flex: 1; overflow-y: auto; min-height: 0; outline: none; }
+  .cv-list:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+  .cv-foot { padding: 0.4rem 1rem; border-top: 1px solid var(--border); font-size: 0.74rem; color: var(--muted); display: flex; justify-content: space-between; }
+  .cv-who { font-weight: 600; color: var(--text); }
+  .cv-locdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+  .cv-locdot.local { background: var(--loc-local-fg); } .cv-locdot.lan { background: var(--loc-lan-fg); }
+  .cv-locdot.cloud { background: var(--loc-cloud-fg); } .cv-locdot.off { background: var(--loc-off-bd); }
+  .cv-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
+  .cv-head .grow { flex: 1; }
+  .cv-title { font-weight: 650; font-size: 0.98rem; }
+  .cv-section { margin-top: 1rem; }
+  .cv-mems { margin: 0; padding-left: 1.1rem; font-size: 0.84rem; }
+  .cv-mems li { margin: 0.15rem 0; }
+  .cv-wf .lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cv-wf .total-sep { grid-column: 1 / -1; border-top: 1px solid var(--border); margin: 0.15rem 0; }
+  .cv-pre { max-height: 260px; overflow: auto; }
+  .cv-fold-tools { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+  .cv-lg { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.74rem; color: var(--muted); }
+</style>
+
+<div class="page-fill">
+  <div class="md">
+    <!-- Master: turn list -->
+    <section class="card fill cv-card">
+      <div class="cv-tb">
+        <input type="search" id="cvSearch" placeholder="Search transcript or reply…" aria-label="Search turns">
+        <select id="cvSpeaker" aria-label="Filter by speaker"><option value="">All speakers</option></select>
+        <select id="cvLimit" aria-label="Number of turns to load">
+          <option value="50">50</option><option value="100" selected>100</option><option value="250">250</option><option value="1000">1000</option>
+        </select>
+        <button type="button" class="sm" id="cvRefresh" aria-label="Refresh"><i data-icon="refresh"></i>Refresh</button>
+      </div>
+      <div class="cv-list" id="cvList" tabindex="0" role="listbox" aria-label="Turns">
+        <div style="padding:1rem"><div class="skeleton" style="margin-bottom:.6rem"></div><div class="skeleton" style="margin-bottom:.6rem;width:80%"></div><div class="skeleton" style="width:60%"></div></div>
+      </div>
+      <div class="cv-foot"><span id="cvCount"></span><button type="button" class="sm ghost" id="cvOrphans" hidden></button><span>↑ / ↓ to move</span></div>
+    </section>
+
+    <!-- Detail: selected turn -->
+    <section class="card fill">
+      <div class="card-body scroll-y" id="cvDetail">
+        <div class="empty"><i data-icon="chat"></i><div>Select a turn.</div></div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<aside class="drawer" id="orphanDrawer" aria-hidden="true" aria-label="Prompts without a turn">
+  <div class="drawer-head"><h2>Prompts without a turn</h2><button type="button" class="icon-btn" id="orphanClose" aria-label="Close"><i data-icon="x"></i></button></div>
+  <div class="drawer-body" id="orphanBody"></div>
+</aside>
+
+<script>
+ui.hydrate();
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#cvOrphans')) ui.drawer.open('orphanDrawer');
+  if (e.target.closest('#orphanClose')) ui.drawer.close();
+});
+let TURNS = [], PROMPTS = [], BOOT = {}, cvSel = null, cvFirst = true;
+
+// Prompts no loaded turn claims (e.g. a turn that errored or timed out before it was
+// logged) — the old /prompts page listed every prompt, so keep them reachable.
+function orphanPrompts(){
+  const used = new Set();
+  TURNS.forEach(t => { const m = matchPrompt(t); if (m) used.add(m.p); });
+  return PROMPTS.filter(p => !used.has(p));
+}
+function renderOrphans(){
+  const list = orphanPrompts();
+  const b = $('cvOrphans');
+  b.hidden = !list.length;
+  b.textContent = list.length + ' prompt' + (list.length === 1 ? '' : 's') + ' without a turn';
+  $('orphanBody').innerHTML = list.map(p =>
+    '<details class="fold" style="margin-bottom:.5rem"><summary>' + esc(fmtTime(p.ts)) + ' · ' + esc([p.llm_backend, p.model].filter(Boolean).join(' / ')) + '</summary>'
+    + '<div class="fold-body"><div class="bubble-label">User message</div><pre>' + esc(p.user_message) + '</pre>'
+    + '<div class="bubble-label">System prompt</div><pre style="max-height:320px;overflow:auto">' + esc(p.system_prompt) + '</pre></div></details>').join('')
+    || '<div class="empty">' + ui.icon('file') + '<div>Every prompt belongs to a logged turn.</div></div>';
+}
+
+function errMsg(e){ return String((e && e.message) || e); }
+function firstLine(s){ return String(s || '').split('\n').find(l => l.trim()) || ''; }
+function who(r){ return r.speaker_name || r.speaker_id || ''; }
+function keyOf(r){ return String(r.turn_id || r.id); }
+const STAGE = {}; (ui.STAGES || []).forEach(s => { STAGE[s.key] = s; });
+function color(k){ return (STAGE[k] && STAGE[k].color) || 'var(--accent)'; }
+
+// Where the model call ran for this turn.
+function turnTier(r){
+  const path = r.timing && r.timing.path;
+  if (path === 'system1' || path === 'command') return null; // no LLM call
+  const b = String(r.llm_backend || '').toLowerCase();
+  if (b === 'anthropic' || b === 'openai') return 'cloud';
+  if (b === 'ollama') return ui.classify((BOOT.services || {}).ollama_url || 'http://127.0.0.1:11434');
+  if (b === 'mock') return 'local';
+  return null;
+}
+function latClass(ms){ return ms == null ? 'neutral' : ms < 1500 ? 'ok' : ms < 3000 ? 'warn' : 'err'; }
+
+// ---------------------------------------------------------------- Legend
+$('cvLegend').innerHTML = (ui.STAGES || []).map(s => '<span class="cv-lg"><span class="swatch" style="background:' + s.color + '"></span>' + esc(s.label) + '</span>').join('');
+
+// ---------------------------------------------------------------- List
+function filtered(){
+  const q = $('cvSearch').value.trim().toLowerCase(), sp = $('cvSpeaker').value;
+  return TURNS.filter(r => (!q || String(r.transcript || '').toLowerCase().includes(q) || String(r.reply || '').toLowerCase().includes(q))
+    && (!sp || (who(r) || '__none') === sp));
+}
+function buildSpeakers(){
+  const sel = $('cvSpeaker'), cur = sel.value;
+  const vals = [...new Set(TURNS.map(r => who(r) || '__none'))].sort();
+  sel.innerHTML = '<option value="">All speakers</option>' + vals.map(v => '<option value="' + escAttr(v) + '">' + esc(v === '__none' ? 'unknown' : v) + '</option>').join('');
+  if (vals.includes(cur)) sel.value = cur;
+}
+function renderList(){
+  const list = $('cvList'), rows = filtered();
+  $('cvCount').textContent = rows.length === TURNS.length ? TURNS.length + ' turn' + (TURNS.length === 1 ? '' : 's') : rows.length + ' of ' + TURNS.length;
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">' + ui.icon('chat') + '<div>' + (TURNS.length ? 'No turns match.' : 'No turns logged yet. Talk to a display and they appear here.') + '</div></div>';
+    return;
+  }
+  list.innerHTML = rows.map(r => {
+    const t = r.timing || {}, tier = turnTier(r);
+    const model = [r.llm_backend, r.model].filter(Boolean).join(' / ');
+    return '<div class="turn-row' + (keyOf(r) === cvSel ? ' selected' : '') + '" role="option" data-key="' + escAttr(keyOf(r)) + '" aria-selected="' + (keyOf(r) === cvSel) + '">'
+      + '<div class="t-meta">'
+      + (tier ? '<span class="cv-locdot ' + tier + '" title="' + escAttr(ui.TIER[tier].long) + '"></span>' : '')
+      + '<span title="' + escAttr(fmtTime(r.ts)) + '">' + esc(ui.fmtAgo(r.ts)) + '</span>'
+      + (who(r) ? '<span class="cv-who">' + esc(who(r)) + '</span>' : '')
+      + (model ? '<span class="chip neutral ellipsis" style="max-width:14rem" title="' + escAttr(model) + '">' + esc(r.model || r.llm_backend) + '</span>' : '')
+      + (t.path ? '<span class="chip">' + esc(t.path) + '</span>' : '')
+      + '</div>'
+      + '<div>' + (t.total_ms != null ? '<span class="chip tnum ' + latClass(t.total_ms) + '">' + esc(ui.fmtMs(t.total_ms)) + '</span>' : '') + '</div>'
+      + '<div class="t-text">' + esc(firstLine(r.transcript) || '—') + '</div>'
+      + '<div class="t-reply">' + esc(firstLine(r.reply) || '—') + '</div>'
+      + '</div>';
+  }).join('');
+}
+function select(key, scroll){
+  cvSel = key;
+  $('cvList').querySelectorAll('.turn-row').forEach(el => {
+    const on = el.dataset.key === key;
+    el.classList.toggle('selected', on); el.setAttribute('aria-selected', on);
+    if (on && scroll) el.scrollIntoView({ block: 'nearest' });
+  });
+  if (key) history.replaceState(null, '', '#' + encodeURIComponent(key));
+  renderDetail();
+}
+
+// ---------------------------------------------------------------- Waterfall
+function timingRows(t){
+  const rows = [];
+  if (t.stt_ms != null) rows.push({ k: 'stt_ms', label: 'STT — end-of-speech → transcript', ms: t.stt_ms });
+  if (t.system1_ms != null) {
+    const x = [];
+    if (t.system1_intent) x.push('intent ' + t.system1_intent);
+    if (t.system1_confidence != null) x.push('conf ' + Number(t.system1_confidence).toFixed(2));
+    if (t.system1_outcome) x.push(t.system1_outcome);
+    rows.push({ k: 'system1_ms', label: 'System-1 decision' + (x.length ? ' (' + x.join(', ') + ')' : ''), ms: t.system1_ms });
+  }
+  if (t.fetch_ms != null) rows.push({ k: 'fetch_ms', label: 'Fast-path fetch (e.g. weather forecast)', ms: t.fetch_ms });
+  if (t.recall_ms != null) {
+    const embLabel = t.recall_embedder ? ' (' + t.recall_embedder + ')' : '';
+    if (t.recall_backend === 'helix' && (t.recall_embed_ms != null || t.recall_search_ms != null)) {
+      if (t.recall_embed_ms != null) rows.push({ k: 'recall_ms', label: 'Memory recall — query embedding' + embLabel, ms: t.recall_embed_ms });
+      if (t.recall_search_ms != null) rows.push({ k: 'recall_ms', label: 'Memory recall — graph search (HelixDB GraphRAG)', ms: t.recall_search_ms, light: true });
+    } else {
+      let src = '';
+      if (t.recall_backend === 'helix') src = 'HelixDB GraphRAG';
+      else if (t.recall_backend === 'sqlite-fts') src = 'SQLite FTS';
+      else if (t.recall_backend) src = t.recall_backend;
+      let emb = '';
+      if (t.recall_embedded === true) emb = ', ' + (t.recall_embedder || '') + ' embedding';
+      else if (t.recall_embedded === false) emb = ', no embedding';
+      rows.push({ k: 'recall_ms', label: 'Memory recall' + (src ? ' (' + src + emb + ')' : ''), ms: t.recall_ms });
+    }
+  }
+  if (t.prompt_ms != null) rows.push({ k: 'prompt_ms', label: 'Prompt build', ms: t.prompt_ms });
+  if (t.llm_ms != null) rows.push({ k: 'llm_ms', label: 'LLM — time to first reply token', ms: t.llm_ms });
+  if (t.tts_ms != null) rows.push({ k: 'tts_ms', label: 'TTS — first chunk synthesis', ms: t.tts_ms });
+  return rows;
+}
+function waterfall(t){
+  if (!t) return '<p class="hint">No timing recorded for this turn (logged before latency capture, or a turn with no measured stages).</p>';
+  const rows = timingRows(t);
+  if (!rows.length && t.total_ms == null) return '<p class="hint">No stages were measured for this turn.</p>';
+  const sum = rows.reduce((a, r) => a + (r.ms || 0), 0);
+  const scale = Math.max(t.total_ms || 0, sum, 1);
+  const pct = (v) => (100 * v / scale).toFixed(2) + '%';
+  let at = 0, h = '<div class="wf cv-wf">';
+  rows.forEach(r => {
+    const bar = '<span class="bar" style="left:' + pct(at) + ';width:max(2px,' + pct(r.ms || 0) + ');background:' + color(r.k) + (r.light ? ';opacity:.55' : '') + '"></span>';
+    h += '<div class="lbl" title="' + escAttr(r.label) + '">' + esc(r.label) + '</div><div class="bar-track">' + bar + '</div><div class="v">' + esc(ui.fmtMs(r.ms)) + '</div>';
+    at += r.ms || 0;
+  });
+  if (t.total_ms != null) {
+    let seg = '', x = 0;
+    rows.forEach(r => { seg += '<span class="bar" style="border-radius:0;left:' + pct(x) + ';width:' + pct(r.ms || 0) + ';background:' + color(r.k) + (r.light ? ';opacity:.55' : '') + '"></span>'; x += r.ms || 0; });
+    h += '<div class="total-sep"></div><div class="lbl total">End-of-speech → reply (total)</div><div class="bar-track">' + seg + '</div><div class="v total">' + esc(ui.fmtMs(t.total_ms)) + '</div>';
+  }
+  h += '</div>';
+  if (sum > (t.total_ms || 0) && t.total_ms != null) h += '<p class="hint" style="margin-top:.4rem">Stages overlap (e.g. TTS starts while the reply streams), so they add up to more than the total.</p>';
+  return h;
+}
+
+// ---------------------------------------------------------------- Prompt match
+function matchPrompt(r){
+  if (r.turn_id) {
+    const exact = PROMPTS.find(p => p.turn_id && p.turn_id === r.turn_id);
+    if (exact) return { p: exact, exact: true };
+  }
+  let best = null, bestD = Infinity;
+  PROMPTS.forEach(p => {
+    if (p.turn_id) return; // a linked prompt belongs to the turn that carries its id
+    const d = r.ts - p.ts;
+    if (Math.abs(d) <= 5 && Math.abs(d) < bestD) { best = p; bestD = Math.abs(d); }
+  });
+  return best ? { p: best, exact: false } : null;
+}
+
+// ---------------------------------------------------------------- Detail
+function renderDetail(){
+  const d = $('cvDetail');
+  const r = TURNS.find(x => keyOf(x) === cvSel);
+  if (!r) { d.innerHTML = '<div class="empty">' + ui.icon('chat') + '<div>' + (TURNS.length ? 'Select a turn.' : 'No turns logged yet.') + '</div></div>'; return; }
+  const t = r.timing, path = t && t.path, tier = turnTier(r);
+  const model = [r.llm_backend, r.model].filter(Boolean).join(' / ');
+  let loc = '';
+  if (path === 'system1' || path === 'command') loc = '<span class="chip neutral" title="Answered without calling the language model">' + ui.icon('bolt') + (path === 'command' ? 'Command' : 'System-1') + ' · no LLM call</span>';
+  else if (tier) loc = ui.loc(tier, tier === 'cloud' ? 'Cloud' : tier === 'lan' ? 'LAN' : 'Local');
+  let h = '<div class="cv-head">'
+    + '<span class="cv-title" title="' + escAttr(fmtTime(r.ts)) + '">' + esc(fmtTime(r.ts)) + '</span>'
+    + '<span class="hint">' + esc(ui.fmtAgo(r.ts)) + '</span>'
+    + (who(r) ? '<span class="chip accent">' + ui.icon('users') + esc(who(r)) + '</span>' : '')
+    + '<span class="grow"></span>'
+    + (model ? '<span class="chip neutral mono">' + esc(model) + '</span>' : '')
+    + loc
+    + (path ? '<span class="chip">' + esc(path) + ' path</span>' : '')
+    + (t && t.total_ms != null ? '<span class="chip tnum ' + latClass(t.total_ms) + '">' + ui.icon('clock') + esc(ui.fmtMs(t.total_ms)) + '</span>' : '')
+    + '</div>';
+  h += '<div class="bubble-label">Heard</div><div class="bubble user">' + esc(r.transcript || '—') + '</div>';
+  h += '<div class="bubble-label">Replied</div><div class="bubble bot">' + esc(r.reply || '—') + '</div>';
+  const mems = r.memories_written || [];
+  h += '<div class="cv-section"><div class="section-label">Memories written</div>'
+    + (mems.length ? '<ul class="cv-mems">' + mems.map(m => '<li>' + esc(m) + '</li>').join('') + '</ul>' : '<p class="hint">None this turn.</p>') + '</div>';
+  h += '<div class="cv-section"><div class="section-label">Latency</div>' + waterfall(t) + '</div>';
+
+  const m = matchPrompt(r);
+  h += '<div class="cv-section"><details class="fold" id="cvPrompt"><summary>' + ui.icon('file') + 'Prompt sent to the model'
+    + (m ? (m.exact ? ' <span class="chip ok">matched</span>' : ' <span class="chip warn" title="No turn_id link; nearest prompt within 5 s">approximate match</span>') : ' <span class="chip neutral">none</span>')
+    + (m ? '<span class="cv-fold-tools"><button type="button" class="sm ghost" id="cvCopy">' + ui.icon('copy') + 'Copy</button></span>' : '')
+    + '</summary><div class="fold-body">';
+  if (m) {
+    const pm = [m.p.llm_backend, m.p.model].filter(Boolean).join(' / ');
+    h += '<p class="hint" style="margin-bottom:.4rem">' + esc(fmtTime(m.p.ts)) + (pm ? ' · ' + esc(pm) : '') + '</p>'
+      + '<div class="bubble-label">User message</div><pre class="cv-pre">' + esc(m.p.user_message || '') + '</pre>'
+      + '<div class="bubble-label">System prompt</div><pre class="cv-pre">' + esc(m.p.system_prompt || '') + '</pre>';
+  } else {
+    h += '<p class="hint">No prompt recorded (fast-path or command turn).</p>';
+  }
+  h += '</div></details></div>';
+  d.innerHTML = h;
+  d.scrollTop = 0;
+  const copy = $('cvCopy');
+  if (copy) copy.addEventListener('click', async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const text = 'User message:\n' + (m.p.user_message || '') + '\n\nSystem prompt:\n' + (m.p.system_prompt || '');
+    try { await navigator.clipboard.writeText(text); ui.toast(true, 'Prompt copied.'); }
+    catch (err) { ui.toast(false, 'Could not copy: ' + errMsg(err)); }
+  });
+}
+
+// ---------------------------------------------------------------- Load
+async function load(){
+  const n = $('cvLimit').value;
+  const btn = $('cvRefresh'); btn.disabled = true;
+  try {
+    const [cl, pr, sys] = await Promise.all([
+      getJSON('/chatlog.json?limit=' + n),
+      getJSON('/prompts.json?limit=' + n).catch(() => ({ ok: false })),
+      cvFirst ? getJSON('/system.json').catch(() => null) : Promise.resolve(null),
+    ]);
+    if (sys && sys.config) BOOT = sys.config;
+    if (!cl.ok) throw new Error(cl.message || 'chat log unavailable');
+    TURNS = cl.records || [];
+    PROMPTS = (pr && pr.ok && pr.records) || [];
+    if (pr && pr.ok === false && pr.message) ui.toast(false, 'Prompt log: ' + pr.message);
+    buildSpeakers();
+    renderOrphans();
+    let want = cvSel;
+    if (cvFirst && location.hash.length > 1) {
+      let h = location.hash.slice(1);
+      try { h = decodeURIComponent(h); } catch (e) { /* keep raw */ }
+      const hit = TURNS.find(r => r.turn_id === h) || TURNS.find(r => String(r.id) === h);
+      if (hit) want = keyOf(hit);
+      else ui.toast(false, 'That turn is not in the last ' + n + ' turns.');
+    }
+    if (!want || !TURNS.some(r => keyOf(r) === want)) want = TURNS.length ? keyOf(TURNS[0]) : null;
+    cvSel = want;
+    renderList();
+    select(want, true);
+    cvFirst = false;
+  } catch (e) {
+    $('cvList').innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load the chat log: ' + esc(errMsg(e)) + '</div></div>';
+    ui.toast(false, 'Could not load turns: ' + errMsg(e));
+  } finally { btn.disabled = false; }
+}
+
+$('cvRefresh').addEventListener('click', load);
+$('cvLimit').addEventListener('change', load);
+$('cvSearch').addEventListener('input', renderList);
+$('cvSpeaker').addEventListener('change', renderList);
+$('cvList').addEventListener('click', (e) => {
+  const row = e.target.closest('.turn-row'); if (row) select(row.dataset.key, false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'select' || tag === 'textarea' || e.target.isContentEditable) return;
+  const rows = [...$('cvList').querySelectorAll('.turn-row')];
+  if (!rows.length) return;
+  e.preventDefault();
+  let i = rows.findIndex(el => el.dataset.key === cvSel);
+  i = i < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)));
+  select(rows[i].dataset.key, true);
+});
+
+load();
+</script>

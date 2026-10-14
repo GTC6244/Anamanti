@@ -50,7 +50,10 @@ mod household;
 mod memory;
 mod music;
 mod routes;
+mod system;
 mod tools;
+
+pub use system::BootInfo;
 
 #[cfg(test)]
 mod tests;
@@ -74,89 +77,65 @@ pub struct DebugSources {
     /// Read-only view of the graph store when GraphRAG is live; `None` otherwise
     /// (feature off, SQLite backend, or init failed → `/helix` reports disabled).
     pub graph: Option<Arc<dyn GraphView>>,
+    /// The boot-config snapshot (downstream addresses for the locality chips + the
+    /// redacted effective config for the System page).
+    pub boot: BootInfo,
 }
 
-/// The Config page body. Authored as a real HTML file (with proper tooling) and
-/// compiled into the binary via `include_str!` — no runtime asset files, so the
-/// single copied release binary still serves the whole admin UI with nothing beside
-/// it. Same rationale for every asset below.
-const CONFIG_BODY: &str = include_str!("config.html");
-
-/// The shared admin-console design system (Material 3: top app bar, navigation
-/// drawer, surface cards, filled fields, stadium buttons, tables, danger zone).
-/// GENERATED from `webconfig/tailwind/input.css` by `scripts/build-webui-css.sh`
-/// (the Tailwind CLI) and committed; served verbatim at `GET /panel.css`. Do not
-/// hand-edit — edit the Tailwind source + the page HTML, then re-run the script.
+/// The shared admin-console design system (Material 3 tokens + the console's layout
+/// grid, locality chips, choice cards, drawers, tables). GENERATED from
+/// `webconfig/tailwind/input.css` by `scripts/build-webui-css.sh` (the Tailwind CLI)
+/// and committed; served verbatim at `GET /panel.css`. Do not hand-edit — edit the
+/// Tailwind source + the page HTML, then re-run the script.
 const PANEL_CSS: &str = include_str!("panel.css");
 
 /// Client-side helpers shared by every page (`esc`/`fmtTime`/`getJSON`/`apiJSON`/
 /// `postJSON` — every POST goes through `postJSON`, which sends the JSON content type
-/// the server requires) plus the
-/// shell behavior (active-nav highlight, mobile drawer toggle). Served at
-/// `GET /shell.js`.
+/// the server requires) plus the shell behavior (active-nav highlight, collapsible
+/// rail, mobile drawer, app-bar status pills). Served at `GET /shell.js`.
 const SHELL_SCRIPT: &str = include_str!("shell.js");
 
-/// The static HTML shell wrapped around every page body: the `<head>` + the Material
-/// top app bar + the navigation drawer (`shell_head.html`, with a `{{TITLE}}` token),
-/// and the closing tags (`shell_foot.html`). Authored as plain HTML so no page markup
-/// is generated in Rust; compiled in so the single binary still serves the whole UI.
+/// The console's UI component kit (toasts, dirty-tracking save bar, secret fields,
+/// choice cards, locality chips + the locality map, drawers, tabs, inline confirm).
+/// Served at `GET /ui.js`, loaded right after `/shell.js`.
+const UI_SCRIPT: &str = include_str!("ui.js");
+
+/// The static HTML shell wrapped around every page body: the `<head>` + the top app
+/// bar + the navigation rail (`shell_head.html`, with a `{{TITLE}}` token), and the
+/// closing tags (`shell_foot.html`). Authored as plain HTML so no page markup is
+/// generated in Rust; compiled in so the single binary still serves the whole UI.
 const SHELL_HEAD: &str = include_str!("shell_head.html");
 const SHELL_FOOT: &str = include_str!("shell_foot.html");
 
-/// `/about` body — static HTML; the dynamic build metadata is fetched from
-/// `/about.json` and rendered client-side (like the other data-backed pages).
-const ABOUT_BODY: &str = include_str!("about.html");
+// Page bodies. Each is a real HTML file beside this one, compiled in with
+// `include_str!` — no runtime asset files, so the single copied release binary still
+// serves the whole admin UI with nothing beside it. Information architecture:
+// plans/CoreWebUIPlan.md §4.
 
-/// `/chatlog` body — every completed turn, newest first.
-const CHATLOG_BODY: &str = include_str!("chatlog.html");
-
-/// `/prompts` body — the exact assembled LLM prompt per turn, newest first.
-const PROMPTS_BODY: &str = include_str!("prompts.html");
-
-/// `/sqlite` body — the persistent memory store rows.
-const SQLITE_BODY: &str = include_str!("sqlite.html");
-
-/// `/helix` body — GraphRAG node counts + a sample of nodes per label.
-const HELIX_BODY: &str = include_str!("helix.html");
-
-/// `/music` body — start/stop the music sibling processes and see snapserver status.
-const MUSIC_BODY: &str = include_str!("music.html");
-
-/// `/drive` body — link a Google Drive folder for the idle photo slideshow. The
-/// orchestrator runs the one-time OAuth consent here (a browser opens on the Mac);
-/// the tablet then pulls the token over Wyoming.
-const DRIVE_BODY: &str = include_str!("drive.html");
-
-/// `/tools` body — credentials for the LLM tools that need a secret. v1 hosts the
-/// **Mapbox token** for the `directions_lookup` tool; a saved token rebuilds the tool
-/// set live (no restart).
-const TOOLS_BODY: &str = include_str!("tools.html");
-
-/// `/stt` body — pick the speech-to-text engine (wyoming / whisper-rs / elevenlabs),
-/// applied live (no restart), plus the ElevenLabs API key + connection settings. See
-/// `plans/ElevenLabsSttPlan.md`.
-const STT_BODY: &str = include_str!("stt.html");
-
-/// `/notifications` body — push a proactive (visual-only) notification to the
-/// display for testing, and see how many device notify channels are connected.
-const NOTIFY_BODY: &str = include_str!("notifications.html");
-
-/// `/household` body — edit the canonical household + home information: the home
-/// location + units (grounds "here" for weather/nearby questions) and the roster of
-/// people who live here with their emails + phone numbers. A full-record save.
-const HOUSEHOLD_BODY: &str = include_str!("household.html");
-const SYSTEM1_BODY: &str = include_str!("system1.html");
-const EMBEDDINGS_BODY: &str = include_str!("embeddings.html");
-
-/// `/personality` body — toggle the output personality on/off, pick the active one, and
-/// edit the catalog of personalities (label + style description). Pure output tuning: it
-/// only changes how replies sound. A full-record save.
+/// `/` — the Overview dashboard (pipeline + locality, displays, latency, egress).
+const OVERVIEW_BODY: &str = include_str!("overview.html");
+/// `/voice` — STT engine, VAD, Piper voice, transcript fixes, listening (read-only).
+const VOICE_BODY: &str = include_str!("voice.html");
+/// `/intelligence` — LLM model/engine + credentials, System-1 fast path, web search,
+/// the system prompt (read-only).
+const INTELLIGENCE_BODY: &str = include_str!("intelligence.html");
+/// `/personality` — the output-personality switch + catalog editor.
 const PERSONALITY_BODY: &str = include_str!("personality.html");
-
-/// `/pronunciations` body — edit the STT pronunciation rewrite table as JSON. Each rule
-/// maps mis-heard forms of a word to its canonical spelling; applied to the transcript
-/// before it reaches the LLM (plans/stt-vocabulary-biasing.md). A full-record save.
-const PRONUNCIATIONS_BODY: &str = include_str!("pronunciations.html");
+/// `/household` — home address + units and the people roster.
+const HOUSEHOLD_BODY: &str = include_str!("household.html");
+/// `/integrations` — the third-party service tiles (weather, places, directions,
+/// calendar, Cadora, AppSaid, Spotify, Google Drive) with per-tile drawers.
+const INTEGRATIONS_BODY: &str = include_str!("integrations.html");
+/// `/devices` — connected displays + test notification, and the music processes.
+const DEVICES_BODY: &str = include_str!("devices.html");
+/// `/memory` — recall settings (embeddings + entity extraction), facts, graph.
+const MEMORY_BODY: &str = include_str!("memory.html");
+/// `/conversations` — the turn log with per-turn latency and the matched prompt.
+const CONVERSATIONS_BODY: &str = include_str!("conversations.html");
+/// `/keys` — every secret / OAuth link in one table.
+const KEYS_BODY: &str = include_str!("keys.html");
+/// `/system` — build, runtime and the redacted effective boot config.
+const SYSTEM_BODY: &str = include_str!("system.html");
 
 /// Cap on request bytes we buffer before the body — a config request is tiny; this
 /// just bounds a misbehaving/hostile client on the (unauthenticated) socket.
@@ -184,11 +163,13 @@ struct Request<'a> {
     body: &'a [u8],
 }
 
-/// One response: status line, content type and body.
+/// One response: status line, content type and body (plus a `Location` for a
+/// redirect).
 struct Reply {
     status: &'static str,
     content_type: &'static str,
     body: Vec<u8>,
+    location: Option<&'static str>,
 }
 
 impl Reply {
@@ -198,6 +179,7 @@ impl Reply {
             status: "200 OK",
             content_type: "application/json",
             body: payload.into_bytes(),
+            location: None,
         }
     }
 
@@ -207,6 +189,7 @@ impl Reply {
             status: "200 OK",
             content_type: "text/html; charset=utf-8",
             body: page(title, body).into_bytes(),
+            location: None,
         }
     }
 
@@ -216,6 +199,7 @@ impl Reply {
             status: "200 OK",
             content_type,
             body: body.as_bytes().to_vec(),
+            location: None,
         }
     }
 
@@ -225,6 +209,18 @@ impl Reply {
             status,
             content_type: "text/plain",
             body: message.as_bytes().to_vec(),
+            location: None,
+        }
+    }
+
+    /// `302 Found` to `location` — the legacy page routes (`/stt`, `/tools`, …) point
+    /// at their new homes so bookmarks keep working.
+    fn redirect(location: &'static str) -> Self {
+        Self {
+            status: "302 Found",
+            content_type: "text/plain",
+            body: format!("moved to {location}").into_bytes(),
+            location: Some(location),
         }
     }
 
@@ -307,6 +303,7 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
 /// Accept config-page connections forever, one task per connection. Returns only if
 /// the listener itself fails.
 pub async fn serve(listener: TcpListener, services: Arc<AppServices>) -> Result<()> {
+    system::mark_started();
     loop {
         let (stream, peer) = listener.accept().await?;
         let services = services.clone();
@@ -449,10 +446,15 @@ fn check_request(
 
 /// Write a minimal HTTP/1.1 response and close the connection.
 async fn write_reply(stream: &mut TcpStream, reply: &Reply) -> Result<()> {
+    let location = reply
+        .location
+        .map(|l| format!("Location: {l}\r\n"))
+        .unwrap_or_default();
     let header = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {len}\r\n\
+         {location}\
          Cache-Control: no-store\r\n\
          Connection: close\r\n\
          \r\n",

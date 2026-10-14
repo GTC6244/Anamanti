@@ -25,16 +25,18 @@ use super::music::{
     music_play_json, music_proc_json, music_startall_json, music_status_json, music_stopall_json,
     music_stopweb_json, spotify_link_json, spotify_save_json, spotify_status_json,
 };
+use super::system::{
+    extraction_save_json, extraction_status_json, keys_json, overview_json, system_json,
+};
 use super::tools::{
     directions_save_json, directions_status_json, places_save_json, places_status_json,
     stt_save_json, stt_status_json, system1_save_json, system1_status_json, weather_save_json,
     weather_status_json,
 };
 use super::{
-    view_json, with_json, Reply, Request, ABOUT_BODY, CHATLOG_BODY, CONFIG_BODY, DRIVE_BODY,
-    EMBEDDINGS_BODY, HELIX_BODY, HOUSEHOLD_BODY, MUSIC_BODY, NOTIFY_BODY, PANEL_CSS,
-    PERSONALITY_BODY, PROMPTS_BODY, PRONUNCIATIONS_BODY, SHELL_SCRIPT, SQLITE_BODY, STT_BODY,
-    SYSTEM1_BODY, TOOLS_BODY,
+    view_json, with_json, Reply, Request, CONVERSATIONS_BODY, DEVICES_BODY, HOUSEHOLD_BODY,
+    INTEGRATIONS_BODY, INTELLIGENCE_BODY, KEYS_BODY, MEMORY_BODY, OVERVIEW_BODY, PANEL_CSS,
+    PERSONALITY_BODY, SHELL_SCRIPT, SYSTEM_BODY, UI_SCRIPT, VOICE_BODY,
 };
 use crate::app::AppServices;
 
@@ -84,51 +86,99 @@ pub(super) static ROUTES: &[Route] = &[
         "/shell.js",
         Sync(|_, _| Reply::asset("application/javascript; charset=utf-8", SHELL_SCRIPT)),
     ),
-    // Pages.
-    get("/", Sync(|_, _| Reply::page("Anamanti Core", CONFIG_BODY))),
+    get(
+        "/ui.js",
+        Sync(|_, _| Reply::asset("application/javascript; charset=utf-8", UI_SCRIPT)),
+    ),
+    // Pages (information architecture: plans/CoreWebUIPlan.md §4).
+    get("/", Sync(|_, _| Reply::page("Overview", OVERVIEW_BODY))),
     get(
         "/index.html",
-        Sync(|_, _| Reply::page("Anamanti Core", CONFIG_BODY)),
+        Sync(|_, _| Reply::page("Overview", OVERVIEW_BODY)),
     ),
+    get("/voice", Sync(|_, _| Reply::page("Voice", VOICE_BODY))),
     get(
-        "/household",
-        Sync(|_, _| Reply::page("Household", HOUSEHOLD_BODY)),
+        "/intelligence",
+        Sync(|_, _| Reply::page("Intelligence", INTELLIGENCE_BODY)),
     ),
     get(
         "/personality",
         Sync(|_, _| Reply::page("Personality", PERSONALITY_BODY)),
     ),
     get(
-        "/pronunciations",
-        Sync(|_, _| Reply::page("Pronunciation", PRONUNCIATIONS_BODY)),
+        "/household",
+        Sync(|_, _| Reply::page("Household", HOUSEHOLD_BODY)),
     ),
-    get("/drive", Sync(|_, _| Reply::page("Photos", DRIVE_BODY))),
-    get("/tools", Sync(|_, _| Reply::page("Tools", TOOLS_BODY))),
-    get("/stt", Sync(|_, _| Reply::page("Speech to Text", STT_BODY))),
+    get(
+        "/integrations",
+        Sync(|_, _| Reply::page("Integrations", INTEGRATIONS_BODY)),
+    ),
+    get(
+        "/devices",
+        Sync(|_, _| Reply::page("Music &amp; Devices", DEVICES_BODY)),
+    ),
+    get("/memory", Sync(|_, _| Reply::page("Memory", MEMORY_BODY))),
+    get(
+        "/conversations",
+        Sync(|_, _| Reply::page("Conversations", CONVERSATIONS_BODY)),
+    ),
+    get(
+        "/keys",
+        Sync(|_, _| Reply::page("Keys &amp; Accounts", KEYS_BODY)),
+    ),
+    get("/system", Sync(|_, _| Reply::page("System", SYSTEM_BODY))),
+    // Legacy page routes → their new homes (bookmarks + older docs keep working).
+    get("/stt", Sync(|_, _| Reply::redirect("/voice#stt"))),
+    get(
+        "/pronunciations",
+        Sync(|_, _| Reply::redirect("/voice#fixes")),
+    ),
     get(
         "/system1",
-        Sync(|_, _| Reply::page("System-1", SYSTEM1_BODY)),
+        Sync(|_, _| Reply::redirect("/intelligence#system1")),
+    ),
+    get("/tools", Sync(|_, _| Reply::redirect("/integrations"))),
+    get(
+        "/drive",
+        Sync(|_, _| Reply::redirect("/integrations#drive")),
+    ),
+    get("/music", Sync(|_, _| Reply::redirect("/devices#music"))),
+    get(
+        "/notifications",
+        Sync(|_, _| Reply::redirect("/devices#displays")),
     ),
     get(
         "/embeddings",
-        Sync(|_, _| Reply::page("Embeddings", EMBEDDINGS_BODY)),
+        Sync(|_, _| Reply::redirect("/memory#settings")),
+    ),
+    get("/sqlite", Sync(|_, _| Reply::redirect("/memory#facts"))),
+    get("/helix", Sync(|_, _| Reply::redirect("/memory#graph"))),
+    get("/chatlog", Sync(|_, _| Reply::redirect("/conversations"))),
+    get("/prompts", Sync(|_, _| Reply::redirect("/conversations"))),
+    get("/about", Sync(|_, _| Reply::redirect("/system"))),
+    // Console-wide aggregators (read-only) + the entity-extraction toggle.
+    get(
+        "/overview.json",
+        Async(|s, r| {
+            Box::pin(async move {
+                let probe = !r.target.contains("probe=0");
+                Reply::json(overview_json(s, probe).await)
+            })
+        }),
+    ),
+    get("/keys.json", Sync(|s, _| Reply::json(keys_json(s)))),
+    get(
+        "/system.json",
+        Sync(|s, _| Reply::json(system_json(&s.debug))),
     ),
     get(
-        "/notifications",
-        Sync(|_, _| Reply::page("Notify", NOTIFY_BODY)),
+        "/extraction/status.json",
+        Sync(|s, _| Reply::json(extraction_status_json(s))),
     ),
-    get(
-        "/chatlog",
-        Sync(|_, _| Reply::page("Chat log", CHATLOG_BODY)),
+    post(
+        "/extraction/save",
+        Sync(|s, r| with_json(r, |d| extraction_save_json(s, d))),
     ),
-    get(
-        "/prompts",
-        Sync(|_, _| Reply::page("Prompts", PROMPTS_BODY)),
-    ),
-    get("/sqlite", Sync(|_, _| Reply::page("SQLite", SQLITE_BODY))),
-    get("/helix", Sync(|_, _| Reply::page("HelixDB", HELIX_BODY))),
-    get("/music", Sync(|_, _| Reply::page("Music", MUSIC_BODY))),
-    get("/about", Sync(|_, _| Reply::page("About", ABOUT_BODY))),
     get("/about.json", Sync(|_, _| Reply::json(about_json()))),
     // Config tab: the live settings, the model + voice dropdowns.
     get(

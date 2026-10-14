@@ -1,0 +1,265 @@
+<p class="sub" data-head="sub">The displays connected to this Core and the local music processes it supervises. Every action here applies immediately.</p>
+
+<style>
+  .dv-log { display: flex; align-items: center; gap: .25rem; min-width: 0; }
+  .dv-log .p { display: inline-block; max-width: 17rem; font-size: .76rem; color: var(--muted); }
+  .dv-group { display: grid; grid-template-columns: minmax(0, 9rem) auto auto minmax(0, 1fr); align-items: center; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid var(--border); font-size: .82rem; }
+  .dv-group:last-child { border-bottom: 0; }
+  .dv-clients { color: var(--muted); min-width: 0; }
+  .dv-snap-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .82rem; }
+</style>
+
+<div class="grid-12">
+  <!-- Displays + test push -->
+  <div class="stack span-5">
+    <section class="card" id="displays">
+      <div class="card-head">
+        <h2><i data-icon="display"></i>Displays</h2>
+        <div class="tools">
+          <span id="devCount"><span class="skeleton" style="display:inline-block;width:4rem"></span></span>
+          <i data-loc="lan" data-text="Your network"></i>
+        </div>
+      </div>
+      <p class="desc">Displays holding a live notify channel open to this Core, with the name each one announced. Names and ids are set on the device's Settings screen (the id comes from its Wi-Fi MAC). Refreshes every 10 s.</p>
+      <div id="devList" class="list scroll-y" style="max-height:260px">
+        <div class="skeleton" style="height:38px;margin-bottom:.4rem"></div>
+        <div class="skeleton" style="height:38px"></div>
+      </div>
+    </section>
+
+    <section class="card" id="notify">
+      <div class="card-head">
+        <h2><i data-icon="send"></i>Send a test notification</h2>
+        <div class="tools"><i data-loc="lan" data-text="Your network"></i></div>
+      </div>
+      <p class="desc">Appears on the idle screen of every connected display without anyone speaking. Visual only: nothing is spoken.</p>
+      <div class="field-grid">
+        <div class="field">
+          <label for="nTitle">Title</label>
+          <input id="nTitle" type="text" placeholder="Test notification" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>Priority</label>
+          <div class="seg" role="radiogroup" aria-label="Priority">
+            <label><input type="radio" name="nPrio" value="info" checked><span>info</span></label>
+            <label><input type="radio" name="nPrio" value="reminder"><span>reminder</span></label>
+            <label><input type="radio" name="nPrio" value="alert"><span>alert</span></label>
+          </div>
+        </div>
+        <div class="field full">
+          <label for="nBody">Body</label>
+          <input id="nBody" type="text" placeholder="Hello from the Core." autocomplete="off">
+        </div>
+      </div>
+      <div class="card-foot" style="justify-content:space-between">
+        <span class="hint" id="nHint">Dropped if no display is connected.</span>
+        <button type="button" class="primary" id="nSend"><i data-icon="send"></i>Send</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Music -->
+  <section class="card span-7" id="music">
+    <div class="card-head">
+      <h2><i data-icon="music"></i>Music</h2>
+      <div class="tools">
+        <span id="runChip"></span>
+        <i data-loc="local" data-text="On this Mac"></i>
+        <span id="musicActions" class="btn-row" hidden>
+          <button type="button" class="sm primary" id="startAll"><i data-icon="play"></i>Start all</button>
+          <button type="button" class="sm" id="stopAll"><i data-icon="stop"></i>Stop all</button>
+          <button type="button" class="sm ghost" id="musicRefresh" aria-label="Refresh music status"><i data-icon="refresh"></i>Refresh</button>
+        </span>
+      </div>
+    </div>
+    <p class="desc">Local multiroom audio: the Core starts and stops snapserver, librespot and mpv, but never handles the audio itself. Spotify voice control is set up under <a href="/integrations#spotify">Integrations → Spotify</a>.</p>
+
+    <div id="musicLoading">
+      <div class="skeleton" style="height:28px;margin-bottom:.45rem"></div>
+      <div class="skeleton" style="height:28px;margin-bottom:.45rem"></div>
+      <div class="skeleton" style="height:28px"></div>
+    </div>
+
+    <div id="musicOff" hidden>
+      <div class="empty">
+        <i data-icon="music"></i>
+        <div><b>Music routing is disabled.</b></div>
+        <div>Set <code>"music": {"enabled": true}</code> in <code>anamanti.json</code> and restart the Core to manage the music processes here.</div>
+      </div>
+    </div>
+
+    <div id="musicOn" hidden>
+      <div class="section-label">Processes</div>
+      <div class="table-wrap" style="max-height:220px">
+        <table>
+          <thead><tr><th>Process</th><th>Status</th><th class="num">PID</th><th></th><th>Log</th></tr></thead>
+          <tbody id="procRows"></tbody>
+        </table>
+        <div id="procEmpty" class="empty" hidden><i data-icon="server"></i><div>No processes configured.</div></div>
+      </div>
+
+      <div class="section-label">Snapserver</div>
+      <div id="snapHead" class="dv-snap-head"></div>
+      <div id="snapGroups" class="scroll-y" style="max-height:170px;margin-top:.35rem"></div>
+
+      <div class="section-label">Web-URL player</div>
+      <div class="inline">
+        <input id="playUrl" type="text" placeholder="https://stream-url or a file path on this Mac" autocomplete="off">
+        <button type="button" class="primary" id="playBtn"><i data-icon="play"></i>Play</button>
+        <button type="button" id="stopWebBtn"><i data-icon="stop"></i>Stop</button>
+      </div>
+      <p class="hint" style="margin-top:.35rem">Plays a stream URL or local file through the music pipeline (mpv → snapserver).</p>
+    </div>
+  </section>
+</div>
+
+<script>
+ui.hydrate();
+
+(function(){
+  // ---------------------------------------------------------------- helpers
+  async function copyText(text){
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+    } catch (e) { /* fall through */ }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+  function shortPath(p){
+    const parts = String(p || '').split('/').filter(Boolean);
+    return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : String(p || '');
+  }
+  async function busy(btn, fn){
+    btn.disabled = true;
+    try { return await fn(); } finally { btn.disabled = false; }
+  }
+
+  // ---------------------------------------------------------------- Displays
+  async function loadDisplays(){
+    let j;
+    try { j = await getJSON('/notifications/status.json'); }
+    catch (e) {
+      $('devCount').innerHTML = ui.status('err', 'unavailable');
+      $('devList').innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load connected displays.</div></div>';
+      return;
+    }
+    const devs = Array.isArray(j.devices) ? j.devices : [];
+    const n = devs.length || j.connected || 0;
+    $('devCount').innerHTML = ui.status(n ? 'ok' : 'off', n + ' connected');
+    $('nHint').textContent = n ? 'Goes to ' + n + ' display' + (n === 1 ? '' : 's') + '.' : 'No display connected: a test is dropped.';
+    if (!devs.length) {
+      $('devList').innerHTML = '<div class="empty">' + ui.icon('display') + '<div>No displays connected — a test notification is dropped until one connects.</div></div>';
+      return;
+    }
+    $('devList').innerHTML = devs.map(d => {
+      const name = d.name && String(d.name).trim() ? esc(d.name) : '<span class="muted">(unnamed)</span>';
+      return '<div class="list-row"><span class="dot ok"></span><div class="grow"><div class="title ellipsis">' + name + '</div>'
+        + '<div class="meta mono ellipsis" title="' + escAttr(d.device_id || '') + '">' + esc(d.device_id || '—') + '</div></div></div>';
+    }).join('');
+  }
+
+  $('nSend').addEventListener('click', () => busy($('nSend'), async () => {
+    const prio = (document.querySelector('input[name="nPrio"]:checked') || {}).value || 'info';
+    const body = { title: $('nTitle').value.trim() || undefined, body: $('nBody').value.trim() || undefined, priority: prio };
+    try {
+      const r = await ui.req(postJSON('/notifications/test', body));
+      const n = r.delivered || 0;
+      if (n) ui.toast(true, 'Sent to ' + n + ' display(s).');
+      else ui.toast(false, 'Sent to 0 displays: no display is connected, so it was dropped.');
+    } catch (e) { ui.toast(false, 'Send failed: ' + (e.message || e)); }
+    loadDisplays();
+  }));
+
+  // ---------------------------------------------------------------- Music
+  function renderProcs(procs){
+    $('procEmpty').hidden = procs.length > 0;
+    $('procRows').innerHTML = procs.map(p => {
+      const st = p.running ? ui.status('ok', 'running') : ui.status('off', 'stopped');
+      const act = p.running
+        ? '<button type="button" class="sm" data-proc="' + escAttr(p.key) + '" data-action="stop">' + ui.icon('stop') + 'Stop</button>'
+        : '<button type="button" class="sm" data-proc="' + escAttr(p.key) + '" data-action="start">' + ui.icon('play') + 'Start</button>';
+      const log = p.log_path
+        ? '<div class="dv-log"><span class="p mono ellipsis" title="' + escAttr(p.log_path) + '">' + esc(shortPath(p.log_path)) + '</span>'
+          + '<button type="button" class="sm ghost" data-copy="' + escAttr(p.log_path) + '" aria-label="Copy log path" title="Copy full path">' + ui.icon('copy') + '</button></div>'
+        : '<span class="faint">—</span>';
+      return '<tr><td class="nowrap"><b>' + esc(p.label || p.key) + '</b></td><td>' + st + '</td>'
+        + '<td class="num mono">' + (p.pid ? esc(p.pid) : '<span class="faint">—</span>') + '</td>'
+        + '<td>' + act + '</td><td>' + log + '</td></tr>';
+    }).join('');
+  }
+  function renderSnap(j){
+    const ss = j.snapserver || {};
+    const addr = j.snapserver_addr || '';
+    if (!ss.reachable) {
+      $('snapHead').innerHTML = ui.status('err', 'not reachable') + '<code>' + esc(addr || '?') + '</code><span class="hint">Start snapserver above.</span>';
+      $('snapGroups').innerHTML = '';
+      return;
+    }
+    const groups = ss.groups || [];
+    $('snapHead').innerHTML = ui.status('ok', 'reachable') + '<code>' + esc(addr) + '</code><span class="hint">' + groups.length + ' group' + (groups.length === 1 ? '' : 's') + '</span>';
+    if (!groups.length) { $('snapGroups').innerHTML = '<div class="hint" style="padding:.4rem 0">Connected. No groups yet.</div>'; return; }
+    $('snapGroups').innerHTML = groups.map(g => {
+      const clients = (g.clients || []).map(c => esc(c.name || c.id) + ' (' + esc(c.volume) + '%' + (c.muted ? ', muted' : '') + ')').join(', ');
+      return '<div class="dv-group"><span class="mono ellipsis" title="' + escAttr(g.id) + '">' + esc(g.id) + '</span>'
+        + '<span class="chip neutral">' + ui.icon('music') + esc(g.stream || '—') + '</span>'
+        + (g.muted ? ui.status('warn', 'muted') : '<span class="chip neutral">unmuted</span>')
+        + '<span class="dv-clients ellipsis" title="' + escAttr((g.clients || []).map(c => c.name || c.id).join(', ')) + '">' + (clients || '<span class="faint">no clients</span>') + '</span></div>';
+    }).join('');
+  }
+  async function loadMusic(){
+    let j;
+    try { j = await getJSON('/music/status.json'); }
+    catch (e) {
+      ui.toast(false, 'Could not load music status: ' + e);
+      $('musicLoading').innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load music status.</div></div>';
+      return;
+    }
+    $('musicLoading').hidden = true;
+    if (!j.enabled) {
+      $('musicOff').hidden = false; $('musicOn').hidden = true; $('musicActions').hidden = true;
+      $('runChip').innerHTML = ui.status('off', 'disabled');
+      return;
+    }
+    $('musicOff').hidden = true; $('musicOn').hidden = false; $('musicActions').hidden = false;
+    const procs = j.procs || [];
+    const up = procs.filter(p => p.running).length;
+    $('runChip').innerHTML = ui.status(up === procs.length && up ? 'ok' : up ? 'warn' : 'off', up + ' of ' + procs.length + ' running');
+    renderProcs(procs);
+    renderSnap(j);
+  }
+  async function act(url, body, okMsg, delay){
+    try {
+      const r = await ui.req(postJSON(url, body));
+      ui.toast(true, r.message || okMsg);
+    } catch (e) { ui.toast(false, String(e.message || e)); }
+    setTimeout(loadMusic, delay || 600);
+  }
+
+  $('procRows').addEventListener('click', async (e) => {
+    const cp = e.target.closest('button[data-copy]');
+    if (cp) { const ok = await copyText(cp.dataset.copy); ui.toast(ok, ok ? 'Log path copied.' : 'Could not copy: ' + cp.dataset.copy); return; }
+    const b = e.target.closest('button[data-proc]');
+    if (!b) return;
+    const action = b.dataset.action;
+    b.disabled = true;
+    await act('/music/proc', { proc: b.dataset.proc, action }, (action === 'start' ? 'Started ' : 'Stopped ') + b.dataset.proc + '.', 500);
+  });
+  $('startAll').addEventListener('click', () => busy($('startAll'), () => act('/music/startall', undefined, 'Starting all music processes.', 800)));
+  ui.confirm($('stopAll'), () => act('/music/stopall', undefined, 'Stopped all music processes.', 800), 'Stop all?');
+  $('musicRefresh').addEventListener('click', () => busy($('musicRefresh'), loadMusic));
+  $('playBtn').addEventListener('click', () => {
+    const url = $('playUrl').value.trim();
+    if (!url) { ui.toast(false, 'Enter a stream URL or file path.'); $('playUrl').focus(); return; }
+    return busy($('playBtn'), () => act('/music/play', { url }, 'Playing.', 500));
+  });
+  $('playUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('playBtn').click(); });
+  $('stopWebBtn').addEventListener('click', () => busy($('stopWebBtn'), () => act('/music/stopweb', undefined, 'Stopped the URL player.', 500)));
+
+  Promise.all([loadDisplays(), loadMusic()]).then(() => ui.reveal());
+  setInterval(() => { if (!document.hidden) loadDisplays(); }, 10000);
+})();
+</script>

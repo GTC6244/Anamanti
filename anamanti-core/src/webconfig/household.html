@@ -1,233 +1,222 @@
-<p class="sub">Canonical context the assistant uses to ground answers: where "here" is (for weather and nearby questions) and who lives in the home, with their emails and phone numbers. Changes apply live, no restart.</p>
-
-<div class="card-grid">
-<div class="card">
-  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>Home</h2>
-  <p class="desc">The home address, grounding "here" for weather and nearby questions. Driving directions use the full address; weather and the assistant's general "here" use only City + State/Prov. Leave fields blank if unknown.</p>
-  <label>Address 1 <span class="hint">street address, e.g. "123 Main St"</span>
-    <input id="address1" type="text" placeholder="(unset)" autocomplete="off">
-  </label>
-  <label>Address 2 <span class="hint">optional, e.g. "Apt 4"</span>
-    <input id="address2" type="text" placeholder="(unset)" autocomplete="off">
-  </label>
-  <label>City
-    <input id="city" type="text" placeholder="(unset)" autocomplete="off">
-  </label>
-  <label>State / Province
-    <input id="state" type="text" placeholder="(unset)" autocomplete="off">
-  </label>
-  <label>Zip / Postal code
-    <input id="postal" type="text" placeholder="(unset)" autocomplete="off">
-  </label>
-  <label>Country
-    <input id="country" type="text" placeholder="(unset)" autocomplete="off">
-  </label>
-  <label>Measurement units
-    <select id="weather_units">
-      <option value="">(let the assistant choose)</option>
-      <option value="imperial">imperial (°F, miles)</option>
-      <option value="metric">metric (°C, km)</option>
-    </select>
-  </label>
+<p class="sub" data-head="sub">Where "here" is and who lives in the home. The assistant uses this to ground weather, directions and "who" questions, and to decide who can get phone messages. Changes apply live, no restart.</p>
+<div class="btn-row" data-head="actions">
+  <a class="btn sm ghost" href="/integrations#cadora"><i data-icon="cart"></i>Shopping list &amp; phone messages moved to Integrations<i data-icon="arrow"></i></a>
 </div>
 
-<div class="card">
-  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>People</h2>
-  <p class="desc">Who lives in the home. Fix spellings, emails, numbers, and AppSaid addresses here — the assistant uses this roster to recognize people, answer "who" questions, and to decide who <code>send_phone_message</code> can text. A person needs an <b>AppSaid address</b> to receive phone messages (paste it, or link it from the device: Settings → Link a phone).</p>
-  <div id="members"></div>
-  <div class="toolbar"><button id="add">+ Add person</button></div>
-</div>
+<style>
+  /* Household page (hh- prefix). */
+  .hh-people td { vertical-align: top; }
+  .hh-people td input { min-height: 34px; }
+  .hh-as { display: flex; flex-direction: column; gap: 0.25rem; }
+  .hh-uses { display: flex; flex-direction: column; gap: 0.45rem; }
+  .hh-uses .hh-use { display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.8rem; }
+  .hh-uses .hh-use > svg { width: 15px; height: 15px; stroke: currentColor; fill: none; flex: 0 0 auto; margin-top: 2px; color: var(--accent); }
+  .hh-uses .hh-use .chip { margin-left: auto; }
+</style>
 
-<div class="card">
-  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/></svg>Shopping list (Cadora)</h2>
-  <p class="desc">Enables the <code>shopping_list_add</code> voice tool, so "add milk to the shopping list" writes to the household's shared Cadora list (used by NextHaul and the family apps).</p>
-  <div id="cad" class="muted">Loading…</div>
-  <div class="toolbar" style="margin-top:0.6rem;">
-    <input id="cad_code" type="text" inputmode="numeric" placeholder="6-digit code" style="min-width:12rem">
-    <button class="primary" onclick="cadoraLink()">Link</button>
-    <span id="cadmsg" class="muted"></span>
-  </div>
-  <details style="margin-top:0.5rem">
-    <summary class="hint">Advanced: paste a full token &amp; app-server URL</summary>
-    <div class="toolbar" style="margin-top:0.4rem">
-      <input id="cad_token" type="text" placeholder="Paste a vl_… token instead" style="min-width:22rem">
+<div class="grid-12" id="householdForm">
+  <!-- Home -->
+  <section class="card span-4" id="home">
+    <div class="card-head">
+      <h2><i data-icon="home"></i>Home</h2>
     </div>
-    <div class="toolbar" style="margin-top:0.4rem">
-      <input id="cad_base" type="text" placeholder="https://cadora-server.fly.dev" style="min-width:20rem">
-      <button onclick="cadoraSave()">Save URL</button>
+    <p class="desc">Grounds "here" for weather and nearby questions. Leave fields blank if unknown.</p>
+    <div class="field-grid">
+      <div class="field full">
+        <label for="address1">Address 1 <span class="hint">street, e.g. 123 Main St</span></label>
+        <input id="address1" type="text" placeholder="(unset)" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="address2">Address 2 <span class="hint">optional</span></label>
+        <input id="address2" type="text" placeholder="Apt 4" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="city">City</label>
+        <input id="city" type="text" placeholder="(unset)" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="state">State / Prov</label>
+        <input id="state" type="text" placeholder="(unset)" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="postal">Zip / Postal</label>
+        <input id="postal" type="text" placeholder="(unset)" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="country">Country</label>
+        <input id="country" type="text" placeholder="(unset)" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="weather_units">Measurement units</label>
+        <select id="weather_units">
+          <option value="">Let the assistant choose</option>
+          <option value="imperial">Imperial (°F, miles)</option>
+          <option value="metric">Metric (°C, km)</option>
+        </select>
+      </div>
     </div>
-  </details>
-  <p class="hint" style="margin:0.5rem 0 0">In the <b>NextHaul</b> app, open <b>Settings → Voice &amp; Integrations</b>, add a voice assistant to get a <b>6-digit code</b>, and enter it here. It's single-use and expires in a few minutes; the tool activates the moment the code is redeemed.</p>
-</div>
-
-<div class="card">
-  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.6a2 2 0 0 1-.5 2.1L8 11a16 16 0 0 0 6 6l1.6-1.2a2 2 0 0 1 2.1-.5c.8.3 1.7.5 2.6.6a2 2 0 0 1 1.7 2z"/></svg>Phone messages (AppSaid)</h2>
-  <p class="desc">Enables the <code>send_phone_message</code> voice tool, so "text Mom the address" pushes a message (often a Google Maps link) to a family member's phone via AppSaid. <b>Recipients are the people above who have an AppSaid address</b> — set each person's address in the People card (or link it from the device). The worker URL + app token below are the shared sender credentials.</p>
-  <div id="appsaid" class="muted">Loading…</div>
-  <div class="toolbar" style="margin-top:0.6rem;">
-    <input id="as_token" type="password" placeholder="AppSaid app token (leave blank to keep current)" autocomplete="off" style="min-width:22rem">
-    <button class="primary" onclick="appsaidToken()">Save token</button>
-    <span id="asmsg" class="muted"></span>
-  </div>
-  <details style="margin-top:0.5rem">
-    <summary class="hint">Advanced: worker URL &amp; default recipient</summary>
-    <div class="toolbar" style="margin-top:0.4rem">
-      <input id="as_worker" type="text" placeholder="https://appsaid.you.workers.dev" style="min-width:22rem">
+    <div class="section-label" style="margin-top:1rem">What uses this</div>
+    <div class="hh-uses">
+      <div class="hh-use"><i data-icon="route"></i><div><b>Directions &amp; Places</b> get the <b>full address</b> <span class="hint">(Mapbox / Google)</span></div><i data-loc="cloud" data-text="Cloud"></i></div>
+      <div class="hh-use"><i data-icon="sun"></i><div><b>Weather</b> and the assistant's "here" get <b>City + State only</b></div><span id="hereLoc"></span></div>
     </div>
-    <div class="toolbar" style="margin-top:0.4rem">
-      <input id="as_default" type="text" placeholder="default recipient (for &quot;text me…&quot;)" style="min-width:16rem">
-      <button onclick="appsaidSave()">Save</button>
+  </section>
+
+  <!-- People -->
+  <section class="card span-8" id="people">
+    <div class="card-head">
+      <h2><i data-icon="users"></i>People <span class="hint" id="peopleCount"></span></h2>
+      <div class="tools" id="llmChip"></div>
     </div>
-  </details>
-</div>
-
-</div>
-
-<div class="card danger-zone">
-  <h2><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Danger zone</h2>
-  <div class="callout">
-    <span class="ico">⚠</span>
-    <div>Removing a person and clicking <b>Save</b> permanently deletes their record — name, relationship, emails and phone numbers. This can't be undone from here.</div>
-  </div>
-</div>
-
-<div class="sticky-actions">
-  <div id="status" class="status"></div>
-  <button id="save" class="primary">Save</button>
+    <p class="desc">Who lives in the home. The assistant uses this roster to recognize people and answer "who" questions. People with an <b>AppSaid address</b> are the recipients for phone messages (<a href="/integrations#appsaid">Phone messages settings</a>). Paste the address here, or link it from the device: <b>Settings → Link a phone</b>. Press Enter after each email or phone.</p>
+    <div class="table-wrap" style="max-height:min(470px, calc(100vh - 420px))">
+      <table class="edit hh-people">
+        <thead><tr>
+          <th style="width:15%">Name</th>
+          <th style="width:13%">Relationship</th>
+          <th style="width:23%">Emails</th>
+          <th style="width:19%">Phones</th>
+          <th style="width:24%">AppSaid address</th>
+          <th style="width:44px"></th>
+        </tr></thead>
+        <tbody id="memberRows">
+          <tr><td colspan="6"><div class="skeleton" style="width:90%"></div></td></tr>
+          <tr><td colspan="6"><div class="skeleton" style="width:70%"></div></td></tr>
+        </tbody>
+      </table>
+      <div id="peopleEmpty" class="empty" hidden><i data-icon="users"></i><div>No one yet. Add the people who live here so the assistant knows who's who.</div></div>
+    </div>
+    <div id="llmNote"></div>
+    <div class="card-foot" style="justify-content:space-between">
+      <span class="hint">Removing a person deletes their name, emails and phone numbers when you save.</span>
+      <button type="button" class="sm" id="addPerson"><i data-icon="plus"></i>Add person</button>
+    </div>
+  </section>
 </div>
 
 <script>
-  const $ = (id) => document.getElementById(id);
-  const statusEl = $('status');
-  function show(ok, msg){ statusEl.textContent = msg; statusEl.className = 'status ' + (ok?'ok':'err'); }
-  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-  function memberRow(m){
-    m = m || {};
-    const div = document.createElement('div');
-    div.className = 'member';
-    div.innerHTML =
-      '<div class="row"><label>Name</label><button type="button" class="rm danger">Remove</button></div>' +
-      '<input class="m-name" type="text" placeholder="Name" value="'+esc(m.name)+'">' +
-      '<label>Relationship <span class="hint">optional, e.g. parent, kid, roommate</span></label>' +
-      '<input class="m-rel" type="text" value="'+esc(m.relationship)+'">' +
-      '<label>Emails <span class="hint">comma-separated</span></label>' +
-      '<input class="m-emails" type="text" value="'+esc((m.emails||[]).join(', '))+'">' +
-      '<label>Phone numbers <span class="hint">comma-separated</span></label>' +
-      '<input class="m-phones" type="text" value="'+esc((m.phones||[]).join(', '))+'">' +
-      '<label>AppSaid address <span class="hint">their AppSaid user key — paste it here, or link it from the device (Settings → Link a phone)</span></label>' +
-      '<input class="m-appsaid" type="text" value="'+esc(m.appsaid)+'" autocomplete="off" placeholder="(not linked)">';
-    div.querySelector('.rm').addEventListener('click', () => div.remove());
-    return div;
-  }
-  function splitList(v){ return v.split(',').map(s=>s.trim()).filter(Boolean); }
-  async function load(){
-    try{
-      const j = await apiJSON('/household/status.json');
-      const a = j.address || {};
-      $('address1').value = a.address1 || '';
-      $('address2').value = a.address2 || '';
-      $('city').value = a.city || '';
-      $('state').value = a.state || '';
-      $('postal').value = a.postal || '';
-      $('country').value = a.country || '';
-      $('weather_units').value = j.weather_units || '';
-      const box = $('members'); box.innerHTML = '';
-      (j.members||[]).forEach(m => box.appendChild(memberRow(m)));
-    }catch(e){ show(false, 'Could not load: ' + e); }
-  }
-  async function save(){
-    const members = [...document.querySelectorAll('#members .member')].map(d => ({
-      name: d.querySelector('.m-name').value.trim(),
-      relationship: d.querySelector('.m-rel').value.trim() || null,
-      emails: splitList(d.querySelector('.m-emails').value),
-      phones: splitList(d.querySelector('.m-phones').value),
-      appsaid: d.querySelector('.m-appsaid').value.trim() || null,
-    })).filter(m => m.name);
-    const body = {
-      address: {
-        address1: $('address1').value.trim() || null,
-        address2: $('address2').value.trim() || null,
-        city: $('city').value.trim() || null,
-        state: $('state').value.trim() || null,
-        postal: $('postal').value.trim() || null,
-        country: $('country').value.trim() || null,
-      },
-      weather_units: $('weather_units').value || null,
-      members,
-    };
-    try{
-      const j = await postJSON('/household/save', body);
-      if(j.ok === false){ show(false, j.message || 'Rejected.'); } else { show(true, 'Saved.'); load(); }
-    }catch(e){ show(false, 'Request failed: ' + e); }
-  }
-  $('add').addEventListener('click', () => $('members').appendChild(memberRow({})));
-  $('save').addEventListener('click', save);
-  load();
+ui.hydrate();
 
-  // --- Shopping list (Cadora) linkage -------------------------------------
-  async function cadoraLoad(){
-    try{
-      const j = await apiJSON('/cadora/status.json');
-      const el = $('cad');
-      const state = j.linked
-        ? '<span class="badge good">linked — tool active</span>'
-        : '<span class="badge">not linked</span>';
-      el.innerHTML = 'Status: ' + state + ' &nbsp; server: <code>' + esc(j.base_url||'') + '</code>';
-      if(j.base_url) $('cad_base').placeholder = esc(j.base_url);
-    }catch(e){ $('cad').textContent = 'Request failed: ' + e; }
-  }
-  window.cadoraSave = async function(){
-    const msg = $('cadmsg'); msg.textContent = 'Saving…';
-    try{
-      const j = await postJSON('/cadora/save', {base_url: $('cad_base').value.trim()}); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
-      cadoraLoad();
-    }catch(e){ msg.textContent = 'Request failed: ' + e; }
-  };
-  window.cadoraLink = async function(){
-    const msg = $('cadmsg'); msg.textContent = 'Linking…';
-    const body = {
-      token: $('cad_token').value.trim(),
-      code: $('cad_code').value.trim(),
-      base_url: $('cad_base').value.trim(),
-    };
-    try{
-      const j = await postJSON('/cadora/link', body); msg.textContent = j.ok ? (j.message||'Linked.') : (j.message||'Error');
-      $('cad_token').value = ''; $('cad_code').value = '';
-      cadoraLoad();
-    }catch(e){ msg.textContent = 'Request failed: ' + e; }
-  };
-  cadoraLoad();
+function hhMarkDirty(){ $('householdForm').dispatchEvent(new Event('change', {bubbles: true})); }
 
-  // --- Phone messages (AppSaid) -------------------------------------------
-  async function appsaidLoad(){
-    try{
-      const j = await apiJSON('/appsaid/status.json');
-      const el = $('appsaid');
-      const state = j.tool_active
-        ? '<span class="badge good">configured — tool active</span>'
-        : '<span class="badge">not configured</span>';
-      const names = (j.recipients||[]).map(esc).join(', ') || '(none — give a person an AppSaid address in the People card above)';
-      el.innerHTML = 'Status: ' + state
-        + ' &nbsp; token: ' + (j.token_set ? 'set' : 'not set')
-        + '<br>recipients: <code>' + names + '</code>'
-        + (j.default_recipient ? ' &nbsp; default: <code>' + esc(j.default_recipient) + '</code>' : '');
-      if(j.worker_url) $('as_worker').placeholder = esc(j.worker_url);
-    }catch(e){ $('appsaid').textContent = 'Request failed: ' + e; }
+function hhSyncEmpty(){
+  const n = $('memberRows').children.length;
+  $('peopleEmpty').hidden = n > 0;
+  $('peopleCount').textContent = n ? '· ' + n : '';
+}
+
+function hhLinkedChip(v){
+  return v ? '<span class="chip ok">' + ui.icon('check') + 'linked</span>' : '';
+}
+
+function hhRow(m){
+  m = m || {};
+  const tr = document.createElement('tr');
+  tr.innerHTML =
+    '<td><input type="text" class="m-name" placeholder="Name" autocomplete="off"></td>'
+    + '<td><input type="text" class="m-rel" placeholder="e.g. parent" autocomplete="off"></td>'
+    + '<td><div class="m-emails"></div></td>'
+    + '<td><div class="m-phones"></div></td>'
+    + '<td><div class="hh-as"><input type="text" class="m-appsaid mono" placeholder="(not linked)" autocomplete="off"><span class="m-linked"></span></div></td>'
+    + '<td><button type="button" class="sm ghost danger-text m-del" aria-label="Remove person">' + ui.icon('trash') + '</button></td>';
+  tr.querySelector('.m-name').value = m.name || '';
+  tr.querySelector('.m-rel').value = m.relationship || '';
+  const as = tr.querySelector('.m-appsaid');
+  as.value = m.appsaid || '';
+  const paintLinked = () => { tr.querySelector('.m-linked').innerHTML = hhLinkedChip(as.value.trim()); };
+  as.addEventListener('input', paintLinked);
+  paintLinked();
+  tr._emails = ui.tags(tr.querySelector('.m-emails'), m.emails || [], { placeholder: 'name@example.com' });
+  tr._phones = ui.tags(tr.querySelector('.m-phones'), m.phones || [], { placeholder: '+1 555…' });
+  const del = tr.querySelector('.m-del');
+  del.setAttribute('aria-label', 'Remove ' + (m.name || 'person'));
+  ui.confirm(del, () => { tr.remove(); hhSyncEmpty(); hhMarkDirty(); }, 'Remove?');
+  return tr;
+}
+
+function hhMembers(){
+  return [...$('memberRows').children].map(tr => ({
+    name: tr.querySelector('.m-name').value.trim(),
+    relationship: tr.querySelector('.m-rel').value.trim() || null,
+    emails: tr._emails.get(),
+    phones: tr._phones.get(),
+    appsaid: tr.querySelector('.m-appsaid').value.trim() || null,
+  })).filter(m => m.name);
+}
+
+// The roster goes into every LLM prompt; show where that prompt runs.
+function hhRenderLlm(view, sys){
+  const backend = (view && view.llm_backend) || '';
+  const services = ((sys && sys.config) || {}).services || {};
+  let tier = 'cloud', addr = '';
+  if (backend === 'ollama') { addr = services.ollama_url || ''; tier = ui.classify(addr); }
+  else if (backend === 'mock' || !backend) tier = 'local';
+  const names = { anthropic: 'Anthropic', openai: 'OpenAI', ollama: 'Ollama', mock: 'Mock' };
+  const label = 'LLM: ' + (names[backend] || backend || 'unknown');
+  $('llmChip').innerHTML = ui.loc(tier, label + ' · ' + ui.TIER[tier].short, 'Where the language model runs');
+  const lead = 'The roster (<b>names, relationships, emails, phones</b>) and the home <b>city/state</b> are included in every LLM prompt. ';
+  let note;
+  if (backend && ui.LOCALITY['llm.' + backend]) {
+    const m = ui.LOCALITY['llm.' + backend];
+    const sendsText = (m.sends || '').replace('{addr}', '<code>' + esc(addr || '?') + '</code>');
+    note = ui.sends(lead + sendsText, tier === 'off' ? 'local' : tier);
+  } else {
+    note = ui.sends(lead, tier);
   }
-  window.appsaidToken = async function(){
-    const msg = $('asmsg'); msg.textContent = 'Saving…';
-    try{
-      const j = await postJSON('/appsaid/token', {app_token: $('as_token').value.trim()}); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
-      $('as_token').value = '';
-      appsaidLoad();
-    }catch(e){ msg.textContent = 'Request failed: ' + e; }
-  };
-  window.appsaidSave = async function(){
-    const msg = $('asmsg'); msg.textContent = 'Saving…';
-    try{
-      const j = await postJSON('/appsaid/save', {worker_url: $('as_worker').value.trim(), default_recipient: $('as_default').value.trim()}); msg.textContent = j.ok===false ? (j.message||'Error') : 'Saved.';
-      appsaidLoad();
-    }catch(e){ msg.textContent = 'Request failed: ' + e; }
-  };
-  appsaidLoad();
+  $('llmNote').innerHTML = note + '<p class="hint" style="margin:.35rem 0 0">Change the model on <a href="/intelligence#llm">Intelligence</a>.</p>';
+  // Weather + "here": the weather provider is a cloud service either way.
+  $('hereLoc').innerHTML = ui.loc('cloud', 'Cloud');
+}
+
+async function hhLoad(){
+  const j = await getJSON('/household/status.json');
+  const a = j.address || {};
+  ['address1', 'address2', 'city', 'state', 'postal', 'country'].forEach(k => { $(k).value = a[k] || ''; });
+  $('weather_units').value = j.weather_units || '';
+  const body = $('memberRows'); body.innerHTML = '';
+  (j.members || []).forEach(m => body.appendChild(hhRow(m)));
+  hhSyncEmpty();
+}
+
+async function hhLoadLlm(){
+  try {
+    const [view, sys] = await Promise.all([getJSON('/config'), getJSON('/system.json').catch(() => ({}))]);
+    hhRenderLlm(view, sys);
+  } catch (e) {
+    $('llmNote').innerHTML = ui.sends('The roster (<b>names, relationships, emails, phones</b>) is included in every LLM prompt.', 'cloud');
+  }
+}
+
+$('addPerson').addEventListener('click', () => {
+  const tr = hhRow({});
+  $('memberRows').appendChild(tr);
+  hhSyncEmpty();
+  hhMarkDirty();
+  tr.querySelector('.m-name').focus();
+});
+
+const hhBar = ui.savebar([
+  { name: 'Household', el: $('householdForm'), save: async () => {
+      const v = (id) => $(id).value.trim() || null;
+      const body = {
+        address: { address1: v('address1'), address2: v('address2'), city: v('city'), state: v('state'), postal: v('postal'), country: v('country') },
+        weather_units: $('weather_units').value || null,
+        members: hhMembers(),
+      };
+      const r = await postJSON('/household/save', body);
+      if (r && r.ok === false) return r;
+      return { ok: true, message: body.members.length + ' ' + (body.members.length === 1 ? 'person' : 'people') + ' saved' };
+  } },
+], { afterSave: () => hhBar.quiet(hhLoad), onDiscard: () => hhLoad(), canSave: () => HH_LOADED });
+let HH_LOADED = false;
+
+hhBar.quiet(hhLoad)
+  .then(() => { HH_LOADED = true; ui.reveal(); })
+  .catch(e => {
+    $('memberRows').innerHTML = '';
+    $('peopleEmpty').hidden = false;
+    $('peopleEmpty').querySelector('div').textContent = 'Could not load the household.';
+    ui.toast(false, 'Could not load: ' + e);
+  });
+hhLoadLlm();
 </script>

@@ -77,7 +77,13 @@ pub(crate) struct TurnCtx<'a> {
     pub on_event: &'a mut (dyn FnMut(TurnEvent) + Send),
     pub dump: Option<TurnAudioDump>,
     pub timing: TurnTiming,
+    /// This turn's id (`t-{unix_millis}-{n}`), written to both the chat-log and the
+    /// prompt-log record so the config page can join a turn to its exact prompt.
+    pub turn_id: String,
 }
+
+/// Mints turn ids (see [`TurnCtx::turn_id`]).
+pub(crate) static TURN_IDS: crate::ids::IdMinter = crate::ids::IdMinter::new();
 
 #[cfg(test)]
 mod tests {
