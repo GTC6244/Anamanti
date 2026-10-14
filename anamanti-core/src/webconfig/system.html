@@ -1,0 +1,261 @@
+<p class="sub" data-head="sub">The running Core build, where it listens and keeps its data, and the effective boot configuration (read-only, secrets redacted).</p>
+
+<style>
+  .sy-col { display: flex; flex-direction: column; gap: 1rem; }
+  .sy-col > .card.fill { height: auto; flex: 1; min-height: 0; }
+  .sy-kv th, .sy-kv td { padding: .32rem .5rem; vertical-align: middle; }
+  .sy-kv th { width: 38%; }
+  .sy-kv td { word-break: break-all; }
+  .sy-kv .chip { margin-left: .35rem; }
+  .sy-cols { columns: 3 24rem; column-gap: 1.6rem; }
+  .sy-sec { break-inside: avoid; margin: 0 0 1.1rem; }
+  .sy-sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; border-bottom: 1px solid var(--border-strong); padding-bottom: .25rem; margin-bottom: .1rem; }
+  .sy-sec-head .section-label { margin: 0; }
+  .sy-sec-head a { font-size: .74rem; }
+  .sy-row { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; padding: .28rem 0; border-bottom: 1px solid var(--border); font-size: .82rem; min-width: 0; }
+  .sy-row:last-child { border-bottom: 0; }
+  .sy-row.block { display: block; }
+  .sy-k { font-family: var(--font-mono); font-size: .75rem; color: var(--muted); flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .sy-v { text-align: right; min-width: 0; overflow-wrap: anywhere; flex: 0 1 auto; }
+  .sy-v.mono { font-size: .78rem; }
+  .sy-long { margin-top: .3rem; font-size: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card-2); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: .4rem .55rem; }
+  .sy-long.clamped { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .sy-list { margin: .3rem 0 0; padding: 0; list-style: none; font-size: .78rem; }
+  .sy-list li { padding: .15rem 0; overflow-wrap: anywhere; }
+  .sy-more { margin-top: .25rem; }
+  mark.sy-hit { background: var(--accent-container); color: var(--on-accent-container); border-radius: 3px; padding: 0 1px; }
+</style>
+
+<div class="page-fill sy-col">
+  <div class="grid-12 stretch">
+    <!-- Build -->
+    <section class="card span-4" id="build">
+      <div class="card-head">
+        <h2><i data-icon="layers"></i>Build</h2>
+      </div>
+      <p class="desc">The binary currently serving this page. Use it to confirm what's deployed.</p>
+      <table class="kv sy-kv"><tbody id="buildRows">
+        <tr><td><div class="skeleton" style="width:80%"></div></td></tr>
+        <tr><td><div class="skeleton" style="width:60%"></div></td></tr>
+      </tbody></table>
+    </section>
+
+    <!-- Runtime -->
+    <section class="card span-4" id="runtime">
+      <div class="card-head">
+        <h2><i data-icon="server"></i>Runtime</h2>
+      </div>
+      <p class="desc">Who this Core is, where it listens, and the services it talks to.</p>
+      <table class="kv sy-kv"><tbody id="runtimeRows">
+        <tr><td><div class="skeleton" style="width:80%"></div></td></tr>
+        <tr><td><div class="skeleton" style="width:60%"></div></td></tr>
+      </tbody></table>
+    </section>
+
+    <!-- Data files -->
+    <section class="card span-4" id="paths">
+      <div class="card-head">
+        <h2><i data-icon="db"></i>Data files</h2>
+        <i data-loc="local" data-text="On this Mac"></i>
+      </div>
+      <p class="desc">Where the Core keeps memories, logs and console settings.</p>
+      <table class="kv sy-kv"><tbody id="pathRows">
+        <tr><td><div class="skeleton" style="width:80%"></div></td></tr>
+        <tr><td><div class="skeleton" style="width:60%"></div></td></tr>
+      </tbody></table>
+    </section>
+  </div>
+
+  <!-- Effective configuration -->
+  <section class="card fill" id="config">
+    <div class="card-head">
+      <h2><i data-icon="file"></i>Effective configuration</h2>
+      <div class="tools">
+        <span class="chip neutral" title="Edit anamanti.json and restart to change"><i data-icon="lock"></i>Read-only</span>
+        <input id="cfgFilter" type="search" placeholder="Filter keys or values…" aria-label="Filter configuration" style="width:16rem;padding:.3rem .55rem;font-size:.82rem">
+        <button type="button" class="sm" id="copyJson"><i data-icon="copy"></i>Copy as JSON</button>
+      </div>
+    </div>
+    <p class="desc">Boot values from <code>anamanti.json</code> + defaults. Settings changed in the console (model, voice, keys, …) live on their own pages and win at runtime.</p>
+    <div class="card-body scroll-y" id="cfgBody">
+      <div class="skeleton" style="height:18px;margin-bottom:.5rem"></div>
+      <div class="skeleton" style="height:18px;margin-bottom:.5rem;width:80%"></div>
+      <div class="skeleton" style="height:18px;width:60%"></div>
+    </div>
+  </section>
+</div>
+
+<script>
+ui.hydrate();
+
+(function(){
+  let SYS = null;
+  const SECTIONS = [
+    ['identity', 'Identity', null],
+    ['services', 'Services', null],
+    ['llm', 'Language model', '/intelligence#llm'],
+    ['prompt', 'Prompt', '/intelligence'],
+    ['speech', 'Speech', '/voice'],
+    ['follow_up', 'Follow-up', '/voice#listening'],
+    ['speaker', 'Speaker ID', '/voice#listening'],
+    ['memory', 'Memory', '/memory#settings'],
+    ['integrations', 'Integrations', '/integrations'],
+    ['music', 'Music', '/devices#music'],
+    ['paths', 'Paths', null],
+  ];
+  const LONG = 90;
+
+  // ---------------------------------------------------------------- helpers
+  async function copyText(text){
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+    } catch (e) { /* fall through */ }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+  const dash = '<span class="faint">—</span>';
+  const cell = (v) => (v == null || v === '') ? dash : esc(v);
+  const mono = (v) => (v == null || v === '') ? dash : '<code>' + esc(v) + '</code>';
+  const row = (k, v) => '<tr><th>' + esc(k) + '</th><td>' + v + '</td></tr>';
+  function addrRow(label, addr){
+    if (!addr) return row(label, dash);
+    return row(label, '<code>' + esc(addr) + '</code>' + ui.loc(ui.classify(addr)));
+  }
+
+  // ---------------------------------------------------------------- top cards
+  function renderTop(){
+    const b = SYS.build || {}, c = SYS.config || {}, id = c.identity || {}, sv = c.services || {}, p = c.paths || {};
+    $('buildRows').innerHTML =
+      row('Version', '<b>' + cell(b.version) + '</b>')
+      + row('Git branch', mono(b.git_branch))
+      + row('Commit', b.git_sha ? '<code>' + esc(b.git_sha) + '</code> <button type="button" class="sm ghost" id="copySha" aria-label="Copy commit" title="Copy commit">' + ui.icon('copy') + '</button>' : dash)
+      + row('Built (UTC)', cell(b.build_time))
+      + row('Uptime', esc(ui.fmtDuration(SYS.uptime_secs)));
+    const sha = $('copySha');
+    if (sha) sha.addEventListener('click', async () => { const ok = await copyText(b.git_sha); ui.toast(ok, ok ? 'Commit copied.' : 'Could not copy.'); });
+
+    $('runtimeRows').innerHTML =
+      row('Service name', cell(id.service_name))
+      + row('Instance id', mono(id.instance_id))
+      + row('Device port', mono(id.bind_addr))
+      + row('Console', mono(id.config_addr))
+      + row('Config file', SYS.config_file ? '<code>' + esc(SYS.config_file) + '</code>' : '<span class="muted">built-in defaults</span>')
+      + row('Memory backend', cell(SYS.memory_backend))
+      + addrRow('Speech-to-text', sv.stt_addr)
+      + addrRow('Text-to-speech', sv.tts_addr)
+      + addrRow('Ollama', sv.ollama_url);
+
+    const P = [['db_path', 'Memory DB'], ['helix_path', 'HelixDB'], ['chatlog_path', 'Chat log'], ['promptlog_path', 'Prompt log'],
+      ['settings_path', 'Console settings'], ['audio_dump_dir', 'Audio dumps']];
+    $('pathRows').innerHTML = P.map(([k, label]) => row(label, p[k] ? '<code>' + esc(p[k]) + '</code>'
+      : (k === 'audio_dump_dir' ? '<span class="muted">off</span>' : dash))).join('');
+  }
+
+  // ---------------------------------------------------------------- config
+  // Flatten nested objects into dotted keys; arrays and scalars stay leaves.
+  function flatten(obj, prefix, out){
+    Object.keys(obj || {}).forEach(k => {
+      const v = obj[k], key = prefix ? prefix + '.' + k : k;
+      if (v && typeof v === 'object' && !Array.isArray(v)) flatten(v, key, out);
+      else out.push([key, v]);
+    });
+    return out;
+  }
+  function hl(text, q){
+    const s = esc(text);
+    if (!q) return s;
+    const i = String(text).toLowerCase().indexOf(q);
+    if (i < 0) return s;
+    const t = String(text);
+    return esc(t.slice(0, i)) + '<mark class="sy-hit">' + esc(t.slice(i, i + q.length)) + '</mark>' + esc(t.slice(i + q.length));
+  }
+  function itemText(v){
+    if (Array.isArray(v)) return v.map(x => typeof x === 'object' ? JSON.stringify(x) : String(x)).join(' ');
+    return v == null ? '' : String(v);
+  }
+  function valueHtml(key, v, q){
+    if (v === true) return { html: ui.status('ok', 'on') };
+    if (v === false) return { html: ui.status('off', 'off') };
+    if (v == null || v === '') return { html: dash };
+    if (typeof v === 'number') return { html: '<span class="tnum">' + hl(String(v), q) + '</span>' };
+    if (Array.isArray(v)) {
+      if (!v.length) return { html: '<span class="faint">none</span>' };
+      const items = v.map(x => {
+        if (x && typeof x === 'object') {
+          if ('name' in x || 'url' in x) return '<li><b>' + hl(x.name || '(unnamed)', q) + '</b> <span class="mono muted">' + hl(x.url || '', q) + '</span></li>';
+          return '<li class="mono">' + hl(JSON.stringify(x), q) + '</li>';
+        }
+        return '<li class="mono">' + hl(String(x), q) + '</li>';
+      }).join('');
+      return { block: true, html: '<ul class="sy-list">' + items + '</ul>', count: v.length };
+    }
+    const s = String(v);
+    if (s.length > LONG || s.includes('\n')) return { block: true, long: true, html: '<div class="sy-long clamped">' + hl(s, q) + '</div>' };
+    return { html: '<span class="' + (/\s/.test(s) ? '' : 'mono') + '">' + hl(s, q) + '</span>', mono: !/\s/.test(s) };
+  }
+  function renderConfig(){
+    const cfg = (SYS && SYS.config) || {};
+    const q = $('cfgFilter').value.trim().toLowerCase();
+    const known = SECTIONS.map(s => s[0]);
+    const all = SECTIONS.concat(Object.keys(cfg).filter(k => !known.includes(k)).map(k => [k, k, null]));
+    let shown = 0;
+    const html = all.filter(([k]) => cfg[k] != null).map(([k, title, href]) => {
+      const val = cfg[k];
+      let rows = (val && typeof val === 'object' && !Array.isArray(val)) ? flatten(val, '', []) : [[k, val]];
+      const secHit = q && (k.toLowerCase().includes(q) || title.toLowerCase().includes(q));
+      if (q && !secHit) rows = rows.filter(([rk, rv]) => rk.toLowerCase().includes(q) || itemText(rv).toLowerCase().includes(q));
+      if (!rows.length) return '';
+      shown += rows.length;
+      const body = rows.map(([rk, rv]) => {
+        const v = valueHtml(rk, rv, q);
+        if (v.block) {
+          return '<div class="sy-row block"><div style="display:flex;justify-content:space-between;gap:.5rem"><span class="sy-k">' + hl(rk, q) + '</span>'
+            + (v.count != null ? '<span class="hint">' + v.count + '</span>' : '') + '</div>' + v.html
+            + (v.long ? '<button type="button" class="sm ghost sy-more" data-more>Show more</button>' : '') + '</div>';
+        }
+        return '<div class="sy-row"><span class="sy-k">' + hl(rk, q) + '</span><span class="sy-v' + (v.mono ? ' mono' : '') + '">' + v.html + '</span></div>';
+      }).join('');
+      return '<div class="sy-sec" id="cfg-' + escAttr(k) + '"><div class="sy-sec-head"><div class="section-label">' + esc(title) + '</div>'
+        + (href ? '<a href="' + escAttr(href) + '">Open page →</a>' : '')
+        + '</div>' + body + '</div>';
+    }).join('');
+    $('cfgBody').innerHTML = shown
+      ? '<div class="sy-cols">' + html + '</div>'
+      : '<div class="empty">' + ui.icon(q ? 'search' : 'file') + '<div>' + (q ? 'No keys or values match “' + esc(q) + '”.' : 'No configuration reported.') + '</div></div>';
+  }
+
+  $('cfgBody').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-more]');
+    if (!b) return;
+    const box = b.previousElementSibling;
+    const clamped = box.classList.toggle('clamped');
+    b.textContent = clamped ? 'Show more' : 'Show less';
+  });
+  $('cfgFilter').addEventListener('input', () => { if (SYS) renderConfig(); });
+  $('copyJson').addEventListener('click', async () => {
+    if (!SYS) { ui.toast(false, 'Configuration not loaded yet.'); return; }
+    const ok = await copyText(JSON.stringify(SYS.config || {}, null, 2));
+    ui.toast(ok, ok ? 'Effective configuration copied as JSON (secrets redacted).' : 'Could not copy to the clipboard.');
+  });
+
+  async function load(){
+    try {
+      const j = await getJSON('/system.json');
+      if (!j || j.ok === false) throw new Error((j && j.message) || 'rejected');
+      SYS = j;
+      renderTop();
+      renderConfig();
+    } catch (e) {
+      ui.toast(false, 'Could not load system info: ' + (e.message || e));
+      const err = '<tr><td><span class="muted">Could not load.</span></td></tr>';
+      $('buildRows').innerHTML = err; $('runtimeRows').innerHTML = err; $('pathRows').innerHTML = err;
+      $('cfgBody').innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load the effective configuration.</div></div>';
+    }
+  }
+  load().then(() => ui.reveal());
+})();
+</script>

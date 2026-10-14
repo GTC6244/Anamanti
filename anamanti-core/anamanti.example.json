@@ -44,6 +44,7 @@
     "embed_dims": 1536,
     "anthropic_base_url": "https://api.anthropic.com",
     "extract_model": "claude-haiku-4-5",
+    "extract": "auto",
     "ingest_interval_secs": 30,
     "recall_k": 6
   },

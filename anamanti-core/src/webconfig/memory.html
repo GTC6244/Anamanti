@@ -1,0 +1,457 @@
+<p class="sub" data-head="sub">What the assistant remembers and how it recalls it: the embedding backend, cloud entity extraction, stored facts and the memory graph.</p>
+<div class="btn-row" data-head="actions">
+  <div class="tabs" id="memTabs">
+    <button type="button" data-tab="settings"><i data-icon="layers"></i>Recall settings</button>
+    <button type="button" data-tab="facts"><i data-icon="db"></i>Facts <span class="count" id="cntFacts"></span></button>
+    <button type="button" data-tab="graph"><i data-icon="graph"></i>Graph <span class="count" id="cntGraph"></span></button>
+  </div>
+</div>
+
+<style>
+  /* Memory page — scoped helpers (mem-*). */
+  .mem-strip { margin-bottom: 1rem; }
+  .mem-strip .stat .foot { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; white-space: nowrap; overflow: hidden; }
+  .mem-panel { height: 100%; min-height: 0; }
+  .mem-scroll { height: 100%; overflow-y: auto; min-height: 0; }
+  .mem-split { display: grid; grid-template-columns: minmax(0, 8fr) minmax(0, 4fr); gap: 1rem; height: 100%; min-height: 0; }
+  .mem-split > * { min-height: 0; }
+  .mem-tb { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+  .mem-tb input, .mem-tb select { width: auto; }
+  .mem-tb input[type="search"] { min-width: 16rem; flex: 1; max-width: 26rem; }
+  .mem-tb .grow { flex: 1; }
+  .mem-facts tbody tr { cursor: pointer; }
+  .mem-detail { display: grid; grid-template-columns: 7rem 1fr; gap: 0.35rem 0.8rem; font-size: 0.84rem; }
+  .mem-detail dt { color: var(--muted); }
+  .mem-detail dd { margin: 0; word-break: break-word; }
+  .mem-content { white-space: pre-wrap; word-break: break-word; font-size: 0.88rem; line-height: 1.5; margin-top: 0.8rem; padding: 0.7rem 0.8rem; border-radius: var(--radius-sm); background: var(--card-2); border: 1px solid var(--border); }
+  .mem-rename { display: flex; gap: 0.35rem; align-items: center; }
+  .mem-rename input { padding: 0.3rem 0.5rem; font-size: 0.84rem; min-width: 10rem; }
+  .mem-state { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.2rem 0 0.6rem; }
+  @media (max-width: 1180px) { .mem-split { grid-template-columns: 1fr; height: auto; } }
+</style>
+
+<!-- Stats strip (always visible) -->
+<div class="stats mem-strip" id="memStats">
+  <div class="stat"><div class="label">Facts</div><div class="value" id="stFacts"><div class="skeleton" style="width:40%"></div></div><div class="foot" id="stFactsFoot">SQLite store</div></div>
+  <div class="stat"><div class="label">Graph nodes</div><div class="value" id="stGraph"><div class="skeleton" style="width:40%"></div></div><div class="foot" id="stGraphFoot"></div></div>
+  <div class="stat"><div class="label">Recall</div><div class="value" id="stRecall"><div class="skeleton" style="width:50%"></div></div><div class="foot" id="stRecallFoot"></div></div>
+  <div class="stat"><div class="label">Entity extraction</div><div class="value" id="stExtract"><div class="skeleton" style="width:40%"></div></div><div class="foot" id="stExtractFoot"></div></div>
+</div>
+
+<div class="page-fill">
+  <!-- ============================== Recall settings -->
+  <section id="tab-settings" class="mem-panel">
+    <div class="mem-scroll">
+      <div class="grid-12">
+        <!-- Embeddings -->
+        <section class="card span-6" id="embeddings">
+          <div class="card-head">
+            <h2><i data-icon="layers"></i>Embeddings</h2>
+            <div class="tools" id="embStatus"></div>
+          </div>
+          <p class="desc">The model that turns memory text into vectors for recall. Switching applies <b>immediately</b> and is <b>lossless</b>: each backend keeps its own vector store, and the SQLite facts and chat log are never touched. The first switch to a backend rebuilds its index from the chat log in the background; switching back reuses it.</p>
+          <div id="embBody"><div class="skeleton" style="height:96px"></div></div>
+          <div class="card-foot" id="embFoot" hidden>
+            <span class="hint grow">OpenAI embeddings read <code>OPENAI_API_KEY</code> from the environment at boot. A key entered on Intelligence is used by the LLM only.</span>
+            <button type="button" class="primary sm" id="embSwitch"><i data-icon="refresh"></i>Switch</button>
+          </div>
+        </section>
+
+        <!-- Entity extraction -->
+        <section class="card span-6" id="extraction">
+          <div class="card-head">
+            <h2><i data-icon="graph"></i>Entity extraction</h2>
+            <div class="tools"><i data-loc="cloud" data-text="Cloud"></i></div>
+          </div>
+          <p class="desc">Builds people, place and topic nodes from each turn so recall can follow relationships (“what did Sam say about the cabin?”). It is the <b>one memory step that calls a cloud model even when everything else is local</b>.</p>
+          <div id="extBody"><div class="skeleton" style="height:96px"></div></div>
+        </section>
+
+        <!-- Store -->
+        <section class="card span-12" id="store">
+          <div class="card-head">
+            <h2><i data-icon="db"></i>Store</h2>
+            <span class="chip neutral" title="Set in anamanti.json; restart to change"><i data-icon="lock"></i>Read-only</span>
+          </div>
+          <p class="desc">Where memory lives. Set by <code>memory_backend</code> in <code>anamanti.json</code> at boot. Everything here is stored on this Mac.</p>
+          <table class="kv"><tbody id="storeRows"><tr><td><div class="skeleton" style="width:60%"></div></td></tr></tbody></table>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== Facts -->
+  <section id="tab-facts" class="mem-panel" hidden>
+    <div class="mem-split">
+      <section class="card fill">
+        <div class="mem-tb">
+          <input type="search" id="fSearch" placeholder="Search content…" aria-label="Search facts">
+          <select id="fKind" aria-label="Filter by kind"><option value="">All kinds</option></select>
+          <select id="fSpeaker" aria-label="Filter by speaker"><option value="">All speakers</option></select>
+          <span class="grow"></span>
+          <span class="hint" id="fCount"></span>
+          <button type="button" class="sm" id="fRefresh"><i data-icon="refresh"></i>Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table class="mem-facts">
+            <thead><tr><th class="num" style="width:4.5rem">ID</th><th style="width:7rem">Kind</th><th style="width:8rem">Source</th><th style="width:8rem">Speaker</th><th style="width:11rem">Created</th><th>Content</th></tr></thead>
+            <tbody id="fRows"><tr><td colspan="6"><div class="skeleton"></div></td></tr></tbody>
+          </table>
+          <div id="fEmpty" class="empty" hidden></div>
+        </div>
+      </section>
+      <section class="card fill">
+        <div class="card-head"><h2><i data-icon="file"></i>Fact</h2></div>
+        <div class="card-body scroll-y" id="fDetail">
+          <div class="empty"><i data-icon="db"></i><div>Select a fact to see its full text.</div></div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ============================== Graph -->
+  <section id="tab-graph" class="mem-panel" hidden>
+    <section class="card fill">
+      <div class="mem-tb">
+        <div class="seg" id="gLabels" role="radiogroup" aria-label="Node label"></div>
+        <span class="grow"></span>
+        <span class="hint" id="gNote">(50 shown per label)</span>
+        <button type="button" class="sm" id="gRefresh"><i data-icon="refresh"></i>Refresh</button>
+      </div>
+      <div class="table-wrap" id="gWrap">
+        <div class="skeleton" style="height:120px"></div>
+      </div>
+    </section>
+  </section>
+</div>
+
+<script>
+ui.hydrate();
+
+let EMB = null, EXT = null, SQL = null, HELIX = null;
+let embCards = null, factSel = null, graphLabel = null, editingId = null;
+
+function errMsg(e){ return String((e && e.message) || e); }
+
+// ---------------------------------------------------------------- Stats strip
+function renderStats(){
+  if (SQL) {
+    $('stFacts').textContent = SQL.ok ? String(SQL.count ?? (SQL.memories || []).length) : '—';
+    const kinds = SQL.ok ? new Set((SQL.memories || []).map(m => m.kind)).size : 0;
+    $('stFactsFoot').textContent = SQL.ok ? 'SQLite · ' + kinds + ' kind' + (kinds === 1 ? '' : 's') : (SQL.message || 'unavailable');
+    $('cntFacts').textContent = SQL.ok ? String(SQL.count ?? '') : '';
+  }
+  if (HELIX) {
+    if (HELIX.ok && HELIX.enabled) {
+      const s = HELIX.stats || {}, by = s.by_label || {};
+      $('stGraph').textContent = String(s.total || 0);
+      $('stGraphFoot').innerHTML = Object.keys(by).map(k => '<span>' + esc(k) + ' <b>' + esc(by[k]) + '</b></span>').join('<span class="faint">·</span>') || 'empty';
+      $('cntGraph').textContent = String(s.total || 0);
+    } else {
+      $('stGraph').innerHTML = '<small>off</small>';
+      $('stGraphFoot').textContent = 'GraphRAG not active';
+      $('cntGraph').textContent = '';
+    }
+  }
+  const backend = (SQL && SQL.memory_backend) || (HELIX && HELIX.enabled ? 'helix' : '');
+  if (SQL || EMB) {
+    $('stRecall').innerHTML = backend ? esc(backend === 'helix' ? 'HelixDB' : backend === 'sqlite' ? 'SQLite FTS' : backend) : '—';
+    if (EMB && EMB.available) {
+      const t = EMB.active === 'openai' ? 'cloud' : 'local';
+      $('stRecallFoot').innerHTML = ui.loc(t) + '<span>' + esc(EMB.active === 'openai' ? 'OpenAI' : 'nomic') + ' · ' + esc(EMB.dims) + '-dim</span>';
+    } else {
+      $('stRecallFoot').textContent = 'keyword search (no embedder)';
+    }
+  }
+  if (EXT) {
+    if (!EXT.available) { $('stExtract').innerHTML = '<small>unavailable</small>'; $('stExtractFoot').textContent = 'GraphRAG not active'; }
+    else if (EXT.active) { $('stExtract').textContent = 'On'; $('stExtractFoot').innerHTML = ui.loc('cloud', 'Cloud') + '<span>' + esc(EXT.model || '') + '</span>'; }
+    else if (EXT.mode === 'auto') { $('stExtract').innerHTML = 'Idle'; $('stExtractFoot').textContent = 'no ANTHROPIC_API_KEY at boot'; }
+    else { $('stExtract').textContent = 'Off'; $('stExtractFoot').innerHTML = ui.loc('local', 'nothing sent'); }
+  }
+}
+
+// ---------------------------------------------------------------- Embeddings
+function embOptions(){
+  const L = ui.LOCALITY;
+  return [
+    { value: 'local', title: 'Local nomic', tier: 'local', tierText: 'On this Mac',
+      desc: esc(L['embed.local'].desc), disabled: !EMB.local.available, why: 'Unavailable: ' + (EMB.local.detail || 'model files missing'),
+      meta: EMB.active === 'local' ? [ui.status('ok', 'active · ' + EMB.dims + '-dim')] : [] },
+    { value: 'openai', title: 'OpenAI text-embedding-3-small', tier: 'cloud', tierText: 'Cloud',
+      desc: esc(L['embed.openai'].desc) + ' Needs <code>OPENAI_API_KEY</code> in the environment.',
+      disabled: !EMB.openai.available, why: 'Unavailable: ' + (EMB.openai.detail || 'OPENAI_API_KEY not set at boot'),
+      meta: EMB.active === 'openai' ? [ui.status('ok', 'active · ' + EMB.dims + '-dim')] : [] },
+  ];
+}
+function paintEmbSends(v){
+  const s = $('embSends'); if (!s) return;
+  s.innerHTML = v === 'openai' ? ui.sendsFor('embed.openai') : ui.sendsFor('embed.local');
+  $('embSwitch').disabled = !v || v === EMB.active;
+}
+function renderEmb(){
+  const body = $('embBody');
+  if (!EMB) { body.innerHTML = '<div class="empty"><i data-icon="alert"></i><div>Could not load the embedding status.</div></div>'; ui.hydrate(body); return; }
+  if (EMB.available === false) {
+    embCards = null;
+    $('embFoot').hidden = true;
+    $('embStatus').innerHTML = ui.status('off', 'unavailable');
+    body.innerHTML = '<div class="callout">' + ui.icon('info') + '<div>' + esc(EMB.reason || 'GraphRAG memory is not active.') + ' Recall uses SQLite keyword search.</div></div>';
+    return;
+  }
+  $('embFoot').hidden = false;
+  $('embStatus').innerHTML = ui.status('ok', 'active: ' + EMB.active);
+  if (!embCards || !$('embChoices')) {
+    body.innerHTML = '<div id="embChoices"></div><div id="embSends"></div>';
+    embCards = ui.choices($('embChoices'), { name: 'emb', cols: 2, options: [], onChange: paintEmbSends });
+  }
+  embCards.refresh(embOptions(), EMB.active);
+  paintEmbSends(EMB.active);
+}
+async function switchEmb(){
+  const v = embCards && embCards.get();
+  if (!v || v === EMB.active) return;
+  const btn = $('embSwitch');
+  btn.disabled = true; btn.textContent = 'Switching…';
+  try {
+    const j = await postJSON('/embeddings/switch', { backend: v });
+    if (j.ok === false) throw new Error(j.error || j.message || 'switch rejected');
+    EMB = j;
+    ui.toast(true, 'Embeddings switched to ' + (j.active === 'openai' ? 'OpenAI' : 'local nomic') + '. A first switch rebuilds that index in the background.');
+  } catch (e) { ui.toast(false, 'Switch failed: ' + errMsg(e)); }
+  btn.innerHTML = ui.icon('refresh') + 'Switch';
+  renderEmb(); renderStats(); renderStore();
+}
+
+// ---------------------------------------------------------------- Entity extraction
+function renderExt(){
+  const body = $('extBody');
+  if (!EXT) { body.innerHTML = '<div class="empty"><i data-icon="alert"></i><div>Could not load the extraction status.</div></div>'; ui.hydrate(body); return; }
+  if (!EXT.available) {
+    body.innerHTML = '<div class="callout">' + ui.icon('info') + '<div>' + esc(EXT.reason || 'GraphRAG memory is not active.') + ' No entity extraction runs, so no turn text is sent for it.</div></div>';
+    return;
+  }
+  const on = EXT.mode !== 'off';
+  let state;
+  if (EXT.active) state = ui.status('ok', 'active') + ui.loc('cloud', 'Sending to Anthropic');
+  else if (on) state = ui.status('warn', 'auto, but no ANTHROPIC_API_KEY at boot') + ui.loc('local', 'nothing is sent');
+  else state = ui.status('off', 'off') + ui.loc('local', 'nothing is sent');
+  body.innerHTML =
+    '<table class="kv"><tbody>'
+    + '<tr><th>Provider</th><td>' + esc(EXT.provider === 'anthropic' ? 'Anthropic' : (EXT.provider || 'Anthropic')) + ' ' + ui.loc('cloud') + '</td></tr>'
+    + '<tr><th>Model</th><td><code>' + esc(EXT.model || 'claude-haiku-4-5') + '</code></td></tr>'
+    + '<tr><th>State</th><td><span class="mem-state">' + state + '</span></td></tr>'
+    + '</tbody></table>'
+    + '<label class="switch" style="margin-top:.4rem"><span class="switch-text">Extract entities with Anthropic'
+    + '<span class="hint">Applies immediately and persists across restarts.</span></span>'
+    + '<input type="checkbox" id="extToggle"' + (on ? ' checked' : '') + '></label>'
+    + (on ? ui.sendsFor('extract.anthropic')
+          : ui.sends('Recall is pure vector search; <b>no turn text leaves the Mac</b> for extraction.', 'local'))
+    + (on && !EXT.key_present ? '<p class="hint" style="margin-top:.5rem">Extraction reads <code>ANTHROPIC_API_KEY</code> from the environment at boot. It was missing, so nothing is sent until you restart with it set.</p>' : ''
+    + '<p class="hint" style="margin-top:.5rem">Turns ingested while extraction is off are indexed without entities and are not back-filled later. Setting <code>"graphrag": {"extract": "off"}</code> in <code>anamanti.json</code> keeps it off at every boot regardless of this switch.</p>';
+  $('extToggle').addEventListener('change', saveExt);
+}
+async function saveExt(e){
+  const want = e.target.checked;
+  e.target.disabled = true;
+  try {
+    const j = await postJSON('/extraction/save', { enabled: want });
+    if (j.ok === false) throw new Error(j.message || 'rejected');
+    EXT = j;
+    ui.toast(true, want ? (j.active ? 'Entity extraction on: turns are sent to Anthropic.' : 'Entity extraction on (auto), but no ANTHROPIC_API_KEY at boot, so nothing is sent.')
+                        : 'Entity extraction off: no turn text leaves the Mac for extraction.');
+  } catch (err) { ui.toast(false, 'Could not change extraction: ' + errMsg(err)); }
+  renderExt(); renderStats();
+}
+
+// ---------------------------------------------------------------- Store
+function renderStore(){
+  const b = (SQL && SQL.memory_backend) || '';
+  const helix = HELIX && HELIX.enabled;
+  const row = (k, v) => '<tr><th>' + k + '</th><td>' + v + '</td></tr>';
+  $('storeRows').innerHTML =
+    row('Memory backend', b ? '<code>' + esc(b) + '</code> ' + ui.loc('local') : '<span class="muted">unknown</span>')
+    + row('SQLite database', SQL && SQL.db_path ? '<code>' + esc(SQL.db_path) + '</code>' : '<span class="muted">—</span>')
+    + row('HelixDB graph', HELIX && HELIX.helix_path ? '<code>' + esc(HELIX.helix_path) + '</code>' + (helix ? '' : ' ' + ui.status('off', 'not active')) : '<span class="muted">not active</span>')
+    + row('Recall', helix
+        ? 'Vector search + graph expansion in HelixDB. If the embedder fails on a turn, recall falls back to <b>SQLite full-text search</b> so the turn still gets memories.'
+        : 'SQLite full-text (keyword) search. No embedder runs.');
+}
+
+// ---------------------------------------------------------------- Facts
+function factsFiltered(){
+  const q = $('fSearch').value.trim().toLowerCase(), k = $('fKind').value, sp = $('fSpeaker').value;
+  return ((SQL && SQL.memories) || []).filter(m =>
+    (!q || String(m.content || '').toLowerCase().includes(q))
+    && (!k || m.kind === k)
+    && (!sp || (m.speaker_id || '') === (sp === '__household' ? '' : sp)));
+}
+function fillSelect(sel, values, allText, labelFn){
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">' + esc(allText) + '</option>' + values.map(v => '<option value="' + escAttr(v) + '">' + esc(labelFn ? labelFn(v) : v) + '</option>').join('');
+  if (values.includes(cur)) sel.value = cur;
+}
+function buildFactFilters(){
+  const mems = (SQL && SQL.memories) || [];
+  fillSelect($('fKind'), [...new Set(mems.map(m => m.kind).filter(Boolean))].sort(), 'All kinds');
+  const sp = [...new Set(mems.map(m => m.speaker_id ? m.speaker_id : '__household'))].sort();
+  fillSelect($('fSpeaker'), sp, 'All speakers', v => v === '__household' ? 'household' : v);
+}
+function renderFacts(){
+  const body = $('fRows'), empty = $('fEmpty');
+  if (!SQL) return;
+  if (!SQL.ok) {
+    body.innerHTML = ''; empty.hidden = false;
+    empty.innerHTML = ui.icon('alert') + '<div>' + esc(SQL.message || 'Could not read the memory store.') + '</div>';
+    $('fCount').textContent = '';
+    return;
+  }
+  const all = SQL.memories || [], rows = factsFiltered();
+  $('fCount').textContent = rows.length === all.length ? all.length + ' fact' + (all.length === 1 ? '' : 's') : rows.length + ' of ' + all.length;
+  if (!rows.length) {
+    body.innerHTML = ''; empty.hidden = false;
+    empty.innerHTML = ui.icon('db') + '<div>' + (all.length ? 'No facts match these filters.' : 'No facts stored yet. The assistant saves facts and preferences as you talk to it.') + '</div>';
+    return;
+  }
+  empty.hidden = true;
+  body.innerHTML = rows.map(m =>
+    '<tr data-id="' + escAttr(m.id) + '"' + (String(m.id) === String(factSel) ? ' class="selected"' : '') + '>'
+    + '<td class="num faint">' + esc(m.id) + '</td>'
+    + '<td><span class="chip neutral">' + esc(m.kind || '—') + '</span></td>'
+    + '<td class="nowrap">' + esc(m.source || '') + '</td>'
+    + '<td class="nowrap">' + (m.speaker_id ? esc(m.speaker_id) : '<span class="muted">household</span>') + '</td>'
+    + '<td class="nowrap muted">' + esc(fmtTime(m.created_at)) + '</td>'
+    + '<td><div class="clamp-2">' + esc(m.content) + '</div></td></tr>').join('');
+}
+function renderFactDetail(){
+  const m = ((SQL && SQL.memories) || []).find(x => String(x.id) === String(factSel));
+  const d = $('fDetail');
+  if (!m) { d.innerHTML = '<div class="empty">' + ui.icon('db') + '<div>Select a fact to see its full text.</div></div>'; return; }
+  d.innerHTML = '<dl class="mem-detail">'
+    + '<dt>ID</dt><dd class="mono">' + esc(m.id) + '</dd>'
+    + '<dt>Kind</dt><dd><span class="chip neutral">' + esc(m.kind || '—') + '</span></dd>'
+    + '<dt>Source</dt><dd>' + esc(m.source || '—') + '</dd>'
+    + '<dt>Speaker</dt><dd>' + (m.speaker_id ? esc(m.speaker_id) : '<span class="muted">household</span>') + '</dd>'
+    + '<dt>Created</dt><dd>' + esc(fmtTime(m.created_at)) + ' <span class="hint">' + esc(ui.fmtAgo(m.created_at)) + '</span></dd>'
+    + '</dl><div class="mem-content">' + esc(m.content) + '</div>';
+}
+
+// ---------------------------------------------------------------- Graph
+function renderGraph(){
+  const wrap = $('gWrap'), seg = $('gLabels');
+  if (!HELIX) { wrap.innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load the graph.</div></div>'; seg.innerHTML = ''; return; }
+  if (!HELIX.ok || !HELIX.enabled) {
+    seg.innerHTML = ''; $('gNote').hidden = true;
+    wrap.innerHTML = '<div class="empty">' + ui.icon('graph') + '<div>' + esc(HELIX.message || 'GraphRAG (HelixDB) is not active.') + '</div></div>';
+    return;
+  }
+  $('gNote').hidden = false;
+  const nodes = HELIX.nodes || {}, by = (HELIX.stats || {}).by_label || {};
+  const labels = [...new Set(Object.keys(nodes).concat(Object.keys(by)))];
+  if (!labels.length) { seg.innerHTML = ''; wrap.innerHTML = '<div class="empty">' + ui.icon('graph') + '<div>The memory graph is empty. Nodes appear as turns are ingested.</div></div>'; return; }
+  if (!labels.includes(graphLabel)) graphLabel = labels.includes('Entity') ? 'Entity' : labels[0];
+  seg.innerHTML = labels.map(l => '<label><input type="radio" name="glabel" value="' + escAttr(l) + '"' + (l === graphLabel ? ' checked' : '') + '><span>' + esc(l) + ' <span class="faint">' + esc(by[l] ?? (nodes[l] || []).length) + '</span></span></label>').join('');
+  renderGraphTable();
+}
+function renderGraphTable(){
+  const wrap = $('gWrap');
+  const rows = (HELIX.nodes || {})[graphLabel] || [];
+  if (!rows.length) { wrap.innerHTML = '<div class="empty">' + ui.icon('graph') + '<div>No ' + esc(graphLabel) + ' nodes sampled.</div></div>'; return; }
+  const cols = [];
+  rows.forEach(r => Object.keys(r).forEach(k => { if (k !== '$id' && !cols.includes(k)) cols.push(k); }));
+  const editable = graphLabel === 'Entity' && cols.includes('name');
+  let h = '<table><thead><tr><th>$id</th>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + (editable ? '<th style="width:7rem"></th>' : '') + '</tr></thead><tbody>';
+  rows.forEach((r, i) => {
+    const rid = String(r['$id'] ?? i);
+    h += '<tr data-row="' + i + '"><td class="mono faint nowrap">' + esc(r['$id']) + '</td>';
+    cols.forEach(c => {
+      let v = r[c];
+      if (v != null && typeof v === 'object') v = JSON.stringify(v);
+      if (editable && c === 'name' && editingId === rid) {
+        h += '<td><div class="mem-rename"><input type="text" id="gRenameInput" value="' + escAttr(v ?? '') + '" aria-label="New entity name">'
+          + '<button type="button" class="sm primary" data-act="save">Save</button><button type="button" class="sm ghost" data-act="cancel">Cancel</button></div></td>';
+      } else {
+        h += '<td><div class="clamp-2">' + esc(v ?? '') + '</div></td>';
+      }
+    });
+    if (editable) h += '<td>' + (editingId === rid ? '' : '<button type="button" class="sm ghost" data-act="edit">' + ui.icon('edit') + 'Rename</button>') + '</td>';
+    h += '</tr>';
+  });
+  wrap.innerHTML = h + '</tbody></table>';
+  const inp = $('gRenameInput');
+  if (inp) { inp.focus(); inp.select(); }
+}
+function graphRow(el){
+  const tr = el.closest('tr[data-row]');
+  return tr ? ((HELIX.nodes || {})[graphLabel] || [])[+tr.dataset.row] : null;
+}
+async function saveRename(row){
+  const oldName = row.name == null ? '' : String(row.name);
+  const inp = $('gRenameInput');
+  const newName = inp ? inp.value.trim() : '';
+  if (!newName || newName === oldName) { editingId = null; renderGraphTable(); return; }
+  inp.disabled = true;
+  try {
+    const j = await postJSON('/helix/rename-entity', { old_name: oldName, new_name: newName });
+    if (!j.ok) throw new Error(j.message || 'rename failed');
+    ui.toast(true, 'Fixed “' + oldName + '” → “' + newName + '”: ' + (j.entities || 0) + ' entity, ' + (j.turns || 0) + ' turn, ' + (j.memories || 0) + ' memory node(s).');
+    editingId = null;
+    await loadHelix();
+  } catch (e) { ui.toast(false, 'Rename failed: ' + errMsg(e)); inp.disabled = false; inp.focus(); }
+}
+
+// ---------------------------------------------------------------- Loading
+async function loadSql(){
+  try { SQL = await getJSON('/sqlite.json'); } catch (e) { SQL = { ok: false, message: 'Request failed: ' + errMsg(e) }; }
+  buildFactFilters(); renderFacts(); renderFactDetail(); renderStats(); renderStore();
+}
+async function loadHelix(){
+  try { HELIX = await getJSON('/helix.json'); } catch (e) { HELIX = null; ui.toast(false, 'Could not load the graph: ' + errMsg(e)); }
+  renderGraph(); renderStats(); renderStore();
+}
+async function loadSettings(){
+  const [emb, ext] = await Promise.all([
+    getJSON('/embeddings/status.json').catch(() => null),
+    getJSON('/extraction/status.json').catch(() => null),
+  ]);
+  EMB = emb; EXT = ext;
+  if (!emb || !ext) ui.toast(false, 'Could not load some memory settings.');
+  renderEmb(); renderExt(); renderStats();
+}
+
+// ---------------------------------------------------------------- Wiring
+$('embSwitch').addEventListener('click', switchEmb);
+['input', 'change'].forEach(ev => {
+  $('fSearch').addEventListener(ev, renderFacts);
+});
+$('fKind').addEventListener('change', renderFacts);
+$('fSpeaker').addEventListener('change', renderFacts);
+$('fRefresh').addEventListener('click', loadSql);
+$('fRows').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+  factSel = tr.dataset.id;
+  $('fRows').querySelectorAll('tr.selected').forEach(x => x.classList.remove('selected'));
+  tr.classList.add('selected');
+  renderFactDetail();
+});
+$('gRefresh').addEventListener('click', () => { editingId = null; loadHelix(); });
+$('gLabels').addEventListener('change', (e) => { if (e.target.name === 'glabel') { graphLabel = e.target.value; editingId = null; renderGraphTable(); } });
+$('gWrap').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const row = graphRow(b); if (!row) return;
+  const tr = b.closest('tr[data-row]');
+  if (b.dataset.act === 'edit') { editingId = String(row['$id'] ?? tr.dataset.row); renderGraphTable(); }
+  else if (b.dataset.act === 'cancel') { editingId = null; renderGraphTable(); }
+  else if (b.dataset.act === 'save') saveRename(row);
+});
+$('gWrap').addEventListener('keydown', (e) => {
+  if (e.target.id !== 'gRenameInput') return;
+  if (e.key === 'Enter') { e.preventDefault(); const row = graphRow(e.target); if (row) saveRename(row); }
+  else if (e.key === 'Escape') { editingId = null; renderGraphTable(); }
+});
+
+ui.tabs($('memTabs'));
+Promise.all([loadSettings(), loadSql(), loadHelix()])
+  .then(() => { const h = location.hash.slice(1); if (h === 'embeddings' || h === 'extraction' || h === 'store') ui.reveal(); })
+  .catch(e => ui.toast(false, 'Could not load: ' + errMsg(e)));
+</script>

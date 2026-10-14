@@ -24,6 +24,10 @@ use super::jsonl::{self, JsonlLog};
 pub struct PromptLogRecord {
     /// Monotonic-ish unique id (`{unix_millis}-{counter}`).
     pub id: String,
+    /// The turn this prompt was assembled for — the same id as that turn's
+    /// [`super::chatlog::ChatLogRecord::turn_id`]. Absent on older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     /// Unix seconds when the prompt was assembled.
     pub ts: i64,
     /// Which LLM backend received the prompt (e.g. `"ollama"`, `"anthropic"`).
@@ -61,6 +65,7 @@ mod tests {
     fn rec(id: &str, prompt: &str) -> PromptLogRecord {
         PromptLogRecord {
             id: id.to_string(),
+            turn_id: None,
             ts: 1,
             llm_backend: "mock".to_string(),
             model: None,

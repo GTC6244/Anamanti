@@ -673,6 +673,12 @@ pub struct GraphRagConfig {
     pub anthropic_base_url: String,
     /// Entity-extraction chat model (default Claude Haiku 4.5).
     pub extract_model: String,
+    /// Boot seed for cloud entity extraction (`graphrag.extract`: `"auto"` → on when
+    /// `ANTHROPIC_API_KEY` is set, the default; `"off"` → never send turn text to
+    /// Anthropic for extraction). Runtime-switchable from the config page (Memory →
+    /// Recall settings); the live choice persists in `helix_path/extract_mode` and wins
+    /// over `auto` at the next boot — but an explicit `"off"` here always wins.
+    pub extract_enabled: bool,
     /// How often the background ingester drains the chat log.
     pub ingest_interval: Duration,
     /// KNN fan-out per vector search at recall time.
@@ -693,6 +699,7 @@ impl Default for GraphRagConfig {
             embed_dims: 768,
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             extract_model: "claude-haiku-4-5".to_string(),
+            extract_enabled: true,
             ingest_interval: Duration::from_secs(30),
             recall_k: 6,
         }
@@ -926,6 +933,8 @@ pub struct FileGraphRag {
     pub embed_dims: Option<usize>,
     pub anthropic_base_url: Option<String>,
     pub extract_model: Option<String>,
+    /// `"auto"` (default) or `"off"` — see [`GraphRagConfig::extract_enabled`].
+    pub extract: Option<String>,
     pub ingest_interval_secs: Option<u64>,
     pub recall_k: Option<usize>,
 }
@@ -1262,6 +1271,16 @@ impl Config {
         }
         if let Some(v) = nonempty(fc.graphrag.extract_model) {
             graphrag.extract_model = v;
+        }
+        if let Some(v) = nonempty(fc.graphrag.extract) {
+            graphrag.extract_enabled = match v.to_lowercase().as_str() {
+                "off" | "false" | "none" | "disabled" => false,
+                "auto" | "on" | "true" | "anthropic" => true,
+                other => {
+                    log::warn!("unknown graphrag.extract {other:?}; using the default (auto)");
+                    true
+                }
+            };
         }
         if let Some(v) = nonempty(fc.graphrag.openai_base_url) {
             graphrag.openai_base_url = v;

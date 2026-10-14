@@ -378,6 +378,7 @@ impl Pipeline {
             // turn's device mic (near-end) and Piper TTS (far-end reference).
             dump: TurnAudioDump::for_turn(self.audio_dump_dir.as_deref()),
             timing: crate::memory::TurnTiming::default(),
+            turn_id: turn::TURN_IDS.mint("t-"),
         };
 
         // 1. Open the STT stream and pump device PCM into it until the transcript. The
@@ -491,6 +492,7 @@ impl Pipeline {
         // logging failure break the turn.
         let timing = std::mem::take(&mut ctx.timing);
         self.log_turn(
+            &ctx.turn_id,
             &ctx.runtime,
             &speaker,
             &transcript,
@@ -696,7 +698,13 @@ impl Pipeline {
             &context,
         );
         // Record the exact prompt the model is about to see (debug GUI). Best-effort.
-        self.log_prompt(&ctx.runtime, speaker, &system_prompt, transcript);
+        self.log_prompt(
+            &ctx.turn_id,
+            &ctx.runtime,
+            speaker,
+            &system_prompt,
+            transcript,
+        );
 
         // A follow-up turn (the device auto-opened the mic after a reply) is fed the
         // recent conversation so the answer has context; an ordinary single-shot turn
@@ -907,8 +915,10 @@ impl Pipeline {
 
     /// Append the completed turn to the chat log, if one is attached. A failure is
     /// logged and swallowed — logging must never break a turn.
+    #[allow(clippy::too_many_arguments)]
     fn log_turn(
         &self,
+        turn_id: &str,
         runtime: &RuntimeSettings,
         speaker: &SpeakerContext,
         transcript: &str,
@@ -923,6 +933,7 @@ impl Pipeline {
         let record = ChatLogRecord {
             session_id: format!("s-{id}"),
             id,
+            turn_id: Some(turn_id.to_string()),
             ts: now_secs(),
             transcript: transcript.to_string(),
             reply: reply.to_string(),
@@ -942,6 +953,7 @@ impl Pipeline {
     /// failure is logged and swallowed — logging must never break a turn.
     fn log_prompt(
         &self,
+        turn_id: &str,
         runtime: &RuntimeSettings,
         speaker: &SpeakerContext,
         system_prompt: &str,
@@ -952,6 +964,7 @@ impl Pipeline {
         };
         let record = PromptLogRecord {
             id: log.next_id(),
+            turn_id: Some(turn_id.to_string()),
             ts: now_secs(),
             llm_backend: runtime.llm_backend.clone(),
             model: runtime.llm_model.clone(),

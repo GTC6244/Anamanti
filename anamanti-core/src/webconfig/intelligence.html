@@ -1,0 +1,393 @@
+<p class="sub" data-head="sub">How the assistant thinks: the language model that answers each turn, the fast path that catches common requests first, and web search. Changes apply live from the next turn.</p>
+<div class="btn-row" data-head="actions">
+  <span id="pipeStrip" class="legend"></span>
+</div>
+
+<div class="grid-12">
+  <!-- Language model -->
+  <section class="card span-8" id="llm">
+    <div class="card-head">
+      <h2><i data-icon="brain"></i>Language model</h2>
+      <div class="tools" id="llmStatus"></div>
+    </div>
+    <p class="desc">The model that writes every reply the fast path doesn't handle. Pick where it runs, then the model and engine.</p>
+    <div id="llmChoices"><div class="skeleton" style="height:96px"></div></div>
+    <div class="field-grid cols-3" style="margin-top:.85rem">
+      <div class="field">
+        <label for="llm_model_select">Model <span class="hint" id="modelHint"></span></label>
+        <select id="llm_model_select"></select>
+        <input id="llm_model_text" type="text" placeholder="(backend default)" hidden>
+      </div>
+      <div class="field">
+        <label>Engine <span class="hint" id="engineHint"></span></label>
+        <div class="seg" role="radiogroup" aria-label="Engine">
+          <label><input type="radio" name="engine" value="rig"><span>rig · agent + tools</span></label>
+          <label><input type="radio" name="engine" value="native"><span>native · plain HTTP</span></label>
+        </div>
+        <div id="engineCaps" class="legend" style="margin-top:.4rem"></div>
+      </div>
+      <div class="field" id="authField" hidden>
+        <label>Anthropic auth</label>
+        <div class="seg" role="radiogroup" aria-label="Anthropic auth">
+          <label><input type="radio" name="anthropic_auth" value="apikey"><span>API key</span></label>
+          <label><input type="radio" name="anthropic_auth" value="subscription"><span>Subscription</span></label>
+        </div>
+      </div>
+    </div>
+    <div id="secretRow" class="field" style="margin-top:.7rem">
+      <label id="secretLabel">Key <span class="hint">stored 0600, never shown back; can be replaced, not cleared here</span></label>
+      <div id="sec_anthropic_api_key"></div>
+      <div id="sec_anthropic_oauth_token" hidden></div>
+      <div id="sec_openai_api_key" hidden></div>
+      <p class="hint" id="secretNote" style="margin-top:.35rem"></p>
+    </div>
+    <div id="llmSends"></div>
+  </section>
+
+  <!-- Fast path -->
+  <section class="card span-4" id="system1">
+    <div class="card-head">
+      <h2><i data-icon="bolt"></i>Fast path (System-1)</h2>
+      <div class="tools" id="s1Status"></div>
+    </div>
+    <p class="desc">Resolves common intents (weather, timers) before the LLM, skipping recall and the model call. Low confidence defers to the LLM.</p>
+    <div id="s1Choices"><div class="skeleton" style="height:96px"></div></div>
+    <div id="s1Fields" style="margin-top:.85rem">
+      <div class="field" id="s1BaseField">
+        <label for="s1_base_url">Base URL <span class="hint" id="s1BaseHint"></span></label>
+        <input id="s1_base_url" type="text" autocomplete="off">
+      </div>
+      <div class="field" id="s1ModelField">
+        <label for="s1_model">Model <span class="hint">OpenRouter model id</span></label>
+        <input id="s1_model" type="text" placeholder="typesafe/jev-1.13" autocomplete="off">
+      </div>
+      <div class="field" id="s1ConfField">
+        <label for="s1_min_confidence">Min confidence <span class="hint">below this, the LLM answers</span></label>
+        <div class="range-row">
+          <input type="range" id="s1_conf_range" min="0" max="1" step="0.01" aria-label="Min confidence slider">
+          <input type="number" id="s1_min_confidence" min="0" max="1" step="0.01">
+        </div>
+      </div>
+      <div class="field" id="s1KeyField">
+        <label>OpenRouter API key <span class="hint">never shown back</span></label>
+        <div id="s1Key"></div>
+      </div>
+    </div>
+    <div id="s1Sends"></div>
+    <p class="hint" id="s1Intents" style="margin-top:.45rem"></p>
+  </section>
+
+  <!-- Web search -->
+  <section class="card span-4" id="search">
+    <div class="card-head">
+      <h2><i data-icon="globe"></i>Web search</h2>
+      <div class="tools" id="searchStatus"></div>
+    </div>
+    <label class="switch" style="margin-bottom:.75rem">
+      <span class="switch-text">Let the assistant search the web<span class="hint">A tool the model can call mid-turn. rig engine only.</span></span>
+      <input id="web_search" type="checkbox">
+    </label>
+    <div id="searchChoices"><div class="skeleton" style="height:80px"></div></div>
+    <div class="field" id="searchKeyField" style="margin-top:.7rem">
+      <label>Tavily API key <span class="hint">never shown back</span></label>
+      <div id="searchKey"></div>
+    </div>
+    <div id="searchSends"></div>
+    <div id="searchEngineWarn"></div>
+  </section>
+
+  <!-- System prompt (read-only) -->
+  <section class="card span-4" id="prompt">
+    <div class="card-head">
+      <h2><i data-icon="file"></i>System prompt</h2>
+      <span class="chip neutral" title="Set in anamanti.json; restart to change"><i data-icon="lock"></i>Read-only</span>
+    </div>
+    <p class="desc">The base instructions, set in <code>anamanti.json</code> at boot. Each turn adds the context listed alongside.</p>
+    <pre id="promptText" style="max-height:200px;overflow:auto"><div class="skeleton" style="width:80%"></div></pre>
+    <table class="kv" style="margin-top:.4rem"><tbody>
+      <tr><th>Turn timeout</th><td id="turnTimeout">—</td></tr>
+    </tbody></table>
+    <div class="card-foot" style="justify-content:flex-start;margin-top:.5rem;padding-top:.6rem">
+      <a href="/conversations">See the last prompt sent <i data-icon="arrow"></i></a>
+    </div>
+  </section>
+
+  <!-- What the model sees -->
+  <section class="card span-4" id="context">
+    <div class="card-head">
+      <h2><i data-icon="layers"></i>What the model sees</h2>
+      <div class="tools" id="ctxLoc"></div>
+    </div>
+    <p class="desc">Every prompt is built from these, and all of it goes wherever the language model runs.</p>
+    <div class="list" id="ctxList"></div>
+    <div id="ctxSends"></div>
+  </section>
+</div>
+
+<script>
+ui.hydrate();
+
+const CLOUD_LLM = ['anthropic', 'openai'];
+let VIEW = {}, MODELS = [], S1 = {}, BOOT = {}, OVERVIEW = null;
+let llmCards, s1Cards, searchCards, secAnthKey, secAnthTok, secOpenai, s1Key, searchKey;
+
+const tierWord = (t) => t === 'local' ? 'On this Mac' : (t === 'lan' ? 'Your network' : 'Cloud');
+const stageOf = (key) => OVERVIEW && (OVERVIEW.stages || []).find(s => s.key === key);
+const stageChip = (st) => st ? ui.status(st.status === 'ok' ? 'ok' : st.status === 'error' ? 'err' : st.status === 'needs_key' ? 'warn' : 'off', st.status === 'ok' ? 'reachable' : st.status === 'error' ? 'unreachable' : st.status === 'needs_key' ? 'needs key' : 'not probed') : '';
+// ui.secret on a container that was already a secret field: drop the stale editing state first.
+function mkSecret(el, cfg){ el.classList.remove('editing'); return ui.secret(el, cfg); }
+function radioVal(name){ const c = document.querySelector('input[name="' + name + '"]:checked'); return c ? c.value : null; }
+function setRadio(name, v){ document.querySelectorAll('input[name="' + name + '"]').forEach(i => { i.checked = i.value === v; }); }
+
+// ---------------------------------------------------------------- Language model
+function ollamaUrl(){ return (BOOT.services || {}).ollama_url || ''; }
+function llmOptions(){
+  const url = ollamaUrl(), tier = ui.classify(url);
+  const st = VIEW.llm_backend === 'ollama' ? stageOf('llm') : null;
+  const keyChip = (set, what) => set ? ui.status('ok', what + ' set') : ui.status('warn', 'needs ' + what);
+  const sub = (radioVal('anthropic_auth') || VIEW.anthropic_auth) === 'subscription';
+  const anthSet = sub ? VIEW.anthropic_oauth_token_set : VIEW.anthropic_key_set;
+  return [
+    { value: 'ollama', title: 'Ollama', tier, tierText: tierWord(tier),
+      desc: 'Open-weights models at <code>' + esc(url || '?') + '</code>.', meta: st ? [stageChip(st)] : [] },
+    { value: 'anthropic', title: 'Anthropic Claude', tier: 'cloud', desc: ui.LOCALITY['llm.anthropic'].desc,
+      meta: [keyChip(anthSet, sub ? 'token' : 'key')] },
+    { value: 'openai', title: 'OpenAI', tier: 'cloud', desc: ui.LOCALITY['llm.openai'].desc, meta: [keyChip(VIEW.openai_key_set, 'key')] },
+    { value: 'mock', title: 'Mock', tier: 'local', tierText: 'On this Mac', desc: ui.LOCALITY['llm.mock'].desc },
+  ];
+}
+function llmTier(backend){ return backend === 'ollama' ? ui.classify(ollamaUrl()) : (backend === 'mock' ? 'local' : 'cloud'); }
+
+// Cloud backends: a dropdown of the provider's recent models, keeping an off-list pinned
+// value visible. Ollama / mock: a free-text model tag.
+function renderModel(backend, selected){
+  const sel = $('llm_model_select'), txt = $('llm_model_text');
+  if (CLOUD_LLM.includes(backend)) {
+    sel.hidden = false; txt.hidden = true;
+    const list = MODELS.filter(m => m.provider === backend);
+    $('modelHint').textContent = list.length ? 'last 12 months' : 'model list unavailable';
+    sel.innerHTML = '<option value="">(backend default)</option>' + list.map(m =>
+      '<option value="' + escAttr(m.id) + '">' + esc(m.label || m.id) + '</option>').join('');
+    if (selected && !list.some(m => m.id === selected)) sel.insertAdjacentHTML('beforeend', '<option value="' + escAttr(selected) + '">' + esc(selected) + ' (pinned)</option>');
+    sel.value = selected || '';
+  } else {
+    sel.hidden = true; txt.hidden = false; txt.value = selected || '';
+    const boot = ((BOOT.llm || {}).boot_choice) || {};
+    txt.placeholder = backend === 'ollama' && boot.backend === 'ollama' && boot.model ? '(backend default: ' + boot.model + ')' : '(backend default)';
+    $('modelHint').textContent = backend === 'ollama' ? 'Ollama tag, e.g. qwen2.5' : '';
+  }
+}
+function currentModel(){
+  const raw = CLOUD_LLM.includes(llmCards.get()) ? $('llm_model_select').value : $('llm_model_text').value;
+  return raw.trim() || null;
+}
+
+function renderEngine(){
+  const eng = radioVal('engine') || 'rig';
+  // The live capabilities describe the saved engine; for an unsaved switch, use what the engine implies.
+  const caps = eng === VIEW.engine && VIEW.llm_capabilities ? VIEW.llm_capabilities
+    : (eng === 'native' ? { tools: false, history: false } : { tools: true, history: true });
+  $('engineHint').textContent = eng === 'rig' ? 'recommended' : '';
+  const out = [];
+  if (!caps.tools) out.push(ui.status('warn', 'no tools'));
+  if (!caps.history) out.push(ui.status('warn', 'no follow-up history'));
+  if (caps.tools && caps.history) out.push(ui.status('ok', 'tools + follow-up history'));
+  if (caps.streaming === false) out.push(ui.status('off', 'no streaming'));
+  $('engineCaps').innerHTML = out.join('');
+  renderSearchWarn();
+}
+
+function renderLlmDetail(){
+  const b = llmCards.get(), auth = radioVal('anthropic_auth') || 'apikey';
+  $('authField').hidden = b !== 'anthropic';
+  const which = b === 'anthropic' ? (auth === 'subscription' ? 'anthropic_oauth_token' : 'anthropic_api_key') : (b === 'openai' ? 'openai_api_key' : null);
+  $('secretRow').hidden = !which;
+  ['anthropic_api_key', 'anthropic_oauth_token', 'openai_api_key'].forEach(k => { $('sec_' + k).hidden = k !== which; });
+  const labels = { anthropic_api_key: 'Anthropic API key', anthropic_oauth_token: 'Claude subscription token', openai_api_key: 'OpenAI API key' };
+  if (which) $('secretLabel').firstChild.textContent = labels[which] + ' ';
+  $('secretNote').innerHTML = which === 'anthropic_oauth_token'
+    ? 'Create one with <code>claude setup-token</code>.'
+    : which ? 'Used by the language model at once. OpenAI embeddings and entity extraction read <code>' + (b === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY') + '</code> from the environment at boot, so they only see a key after a restart with it set.' : '';
+  const tier = llmTier(b);
+  $('llmSends').innerHTML = ui.sendsFor('llm.' + b, ollamaUrl(), tier);
+  $('llmStatus').innerHTML = ui.loc(tier, tierWord(tier));
+  renderContext(b);
+}
+
+// ---------------------------------------------------------------- Fast path
+function s1Options(){
+  const url = $('s1_base_url').value.trim() || S1.base_url || '';
+  const tier = ui.classify(url);
+  const st = stageOf('system1');
+  return [
+    { value: 'none', title: 'Off', tier: 'off', desc: 'Every turn goes to the LLM.' },
+    { value: 'laya-serve', title: 'laya-serve', tier, tierText: tier === 'lan' ? 'LAN' : (tier === 'local' ? 'Local' : 'Cloud'),
+      desc: 'Laya-Decision sidecar.', meta: st && S1.backend === 'laya-serve' ? [stageChip(st)] : [] },
+    { value: 'jev', title: 'jev (OpenRouter)', tier: 'cloud', desc: 'Hosted intent classifier.',
+      meta: [S1.openrouter_key_set ? ui.status('ok', 'key set') : ui.status('warn', 'needs key')] },
+  ];
+}
+function renderS1(backend){
+  const off = backend === 'none', jev = backend === 'jev';
+  $('s1BaseField').hidden = off; $('s1ConfField').hidden = off;
+  $('s1ModelField').hidden = !jev; $('s1KeyField').hidden = !jev;
+  $('s1_base_url').placeholder = jev ? 'https://openrouter.ai/api/v1' : 'http://127.0.0.1:8000';
+  $('s1BaseHint').textContent = jev ? 'OpenRouter API root' : 'sidecar host';
+  const url = $('s1_base_url').value.trim();
+  $('s1Sends').innerHTML = off ? '' : ui.sendsFor('system1.' + backend, url, jev ? 'cloud' : ui.classify(url));
+  const active = S1.active && backend === S1.backend;
+  $('s1Status').innerHTML = backend === 'none' ? ui.loc('off') : (active ? ui.status('ok', 'active') : ui.status('off', 'not applied'));
+}
+
+// ---------------------------------------------------------------- Web search
+function searchOptions(){
+  return [
+    { value: 'duckduckgo', title: 'DuckDuckGo', tier: 'cloud', tierText: 'Cloud · keyless', desc: ui.LOCALITY['search.duckduckgo'].desc },
+    { value: 'tavily', title: 'Tavily', tier: 'cloud', desc: ui.LOCALITY['search.tavily'].desc,
+      meta: [VIEW.search_key_set ? ui.status('ok', 'key set') : ui.status('warn', 'needs key')] },
+  ];
+}
+function renderSearch(){
+  const p = searchCards.get(), on = $('web_search').checked;
+  $('searchKeyField').hidden = p !== 'tavily';
+  $('searchSends').innerHTML = on ? ui.sendsFor('search.' + p) : '';
+  $('searchStatus').innerHTML = on ? ui.loc('cloud', p === 'duckduckgo' ? 'Cloud · keyless' : 'Cloud') : ui.loc('off');
+  renderSearchWarn();
+}
+function renderSearchWarn(){
+  const el = $('searchEngineWarn'); if (!el) return;
+  const on = $('web_search').checked, eng = radioVal('engine');
+  const needKey = on && searchCards && searchCards.get() === 'tavily' && !VIEW.search_key_set && !(searchKey && searchKey.value());
+  el.innerHTML = (on && eng === 'native' ? '<div class="callout warn" style="margin-top:.6rem">' + ui.icon('alert') + '<div>The <b>native</b> engine has no tools, so search won’t run until the engine is <b>rig</b>.</div></div>' : '')
+    + (needKey ? '<div class="callout warn" style="margin-top:.6rem">' + ui.icon('alert') + '<div>Tavily needs an API key before searches work.</div></div>' : '');
+}
+
+// ---------------------------------------------------------------- Prompt + context
+function renderPrompt(){
+  const p = BOOT.prompt || {};
+  const txt = p.system_prompt;
+  $('promptText').textContent = txt ? txt : '(none set: the built-in default prompt is used)';
+  $('turnTimeout').textContent = p.turn_timeout_secs != null ? p.turn_timeout_secs + ' s' : '—';
+}
+function renderContext(backend){
+  const items = [
+    ['mic', 'Your transcript', 'what you just said'],
+    ['brain', 'Recalled memories', 'facts and past turns relevant to it'],
+    ['users', 'Household roster', 'names, relationships, emails, phones'],
+    ['home', 'Home city and state', 'from Household'],
+    ['clock', 'Date and time', 'local to this Mac'],
+    ['speaker', 'Speaker', 'who is talking, when speaker ID knows'],
+  ];
+  $('ctxList').innerHTML = items.map(i => '<div class="list-row" style="padding:.35rem 0">' + ui.icon(i[0])
+    + '<div class="grow"><span class="title">' + esc(i[1]) + '</span> <span class="meta">· ' + esc(i[2]) + '</span></div></div>').join('');
+  const tier = llmTier(backend);
+  $('ctxLoc').innerHTML = ui.loc(tier, tierWord(tier));
+  $('ctxSends').innerHTML = ui.sendsFor('llm.' + backend, ollamaUrl(), tier);
+}
+
+function renderPipeStrip(){
+  if (!OVERVIEW) return;
+  const pick = ['system1', 'llm', 'search'];
+  $('pipeStrip').innerHTML = (OVERVIEW.stages || []).filter(s => pick.includes(s.key))
+    .map(s => '<span class="chip lg loc-' + escAttr(s.tier) + '" title="' + escAttr(s.label) + '">' + ui.icon(s.tier) + esc(s.label) + '</span>').join('');
+}
+
+// ---------------------------------------------------------------- Load + save
+async function load(){
+  const [view, models, s1, sys] = await Promise.all([
+    getJSON('/config'), getJSON('/models').catch(() => ({})),
+    getJSON('/system1/status.json').catch(() => null), getJSON('/system.json').catch(() => ({})),
+  ]);
+  VIEW = view || {}; MODELS = (models && models.models) || []; BOOT = (sys && sys.config) || {};
+
+  // Language model
+  const backend = VIEW.llm_backend || 'ollama';
+  llmCards = llmCards || ui.choices($('llmChoices'), { name: 'llm_backend', cols: 4, options: [], onChange: (b) => { renderModel(b, ''); renderLlmDetail(); } });
+  setRadio("engine", VIEW.engine || "rig");
+  setRadio("anthropic_auth", VIEW.anthropic_auth || "apikey");
+  llmCards.refresh(llmOptions(), backend);
+  renderModel(backend, VIEW.llm_model || '');
+  secAnthKey = mkSecret($('sec_anthropic_api_key'), { set: VIEW.anthropic_key_set, placeholder: 'sk-ant-…' });
+  secAnthTok = mkSecret($('sec_anthropic_oauth_token'), { set: VIEW.anthropic_oauth_token_set, placeholder: 'sk-ant-oat…' });
+  secOpenai = mkSecret($('sec_openai_api_key'), { set: VIEW.openai_key_set, placeholder: 'sk-…' });
+  renderLlmDetail();
+  renderEngine();
+
+  // Fast path
+  if (s1 && s1.ok !== false) {
+    S1 = s1;
+    $('s1_base_url').value = S1.base_url || '';
+    $('s1_model').value = S1.model || '';
+    $('s1_min_confidence').value = S1.min_confidence ?? 0.85;
+    $('s1_conf_range').value = S1.min_confidence ?? 0.85;
+    s1Key = mkSecret($('s1Key'), { set: S1.openrouter_key_set, placeholder: 'sk-or-…' });
+    s1Cards = s1Cards || ui.choices($('s1Choices'), { name: 's1_backend', cols: 3, options: [], onChange: renderS1 });
+    s1Cards.refresh(s1Options(), S1.backend || 'none');
+    renderS1(S1.backend || 'none');
+    const intents = Array.isArray(S1.intents) ? S1.intents : [];
+    $('s1Intents').innerHTML = intents.length && S1.backend !== 'none' ? 'Routes: ' + intents.map(i => '<code>' + esc(i) + '</code>').join(' ') : '';
+  } else {
+    $('s1Choices').innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load the fast-path status.</div></div>';
+    $('s1Fields').hidden = true;
+  }
+
+  // Web search
+  $('web_search').checked = !!VIEW.web_search;
+  searchKey = mkSecret($('searchKey'), { set: VIEW.search_key_set, placeholder: 'tvly-…' });
+  searchCards = searchCards || ui.choices($('searchChoices'), { name: 'search_provider', cols: 2, options: [], onChange: renderSearch });
+  searchCards.refresh(searchOptions(), VIEW.search_provider || 'tavily');
+  renderSearch();
+
+  renderPrompt();
+}
+// Probe the downstream services once (slower), then repaint the reachability chips.
+async function loadHealth(){
+  try { OVERVIEW = await getJSON('/overview.json'); } catch (e) { OVERVIEW = null; }
+  bar.quiet(() => {
+    if (llmCards) llmCards.refresh(llmOptions());
+    if (s1Cards) s1Cards.refresh(s1Options());
+  });
+  renderPipeStrip();
+}
+
+document.querySelectorAll('input[name="engine"]').forEach(i => i.addEventListener('change', renderEngine));
+document.querySelectorAll('input[name="anthropic_auth"]').forEach(i => i.addEventListener("change", () => { llmCards.refresh(llmOptions()); renderLlmDetail(); }));
+$('s1_conf_range').addEventListener('input', () => { $('s1_min_confidence').value = $('s1_conf_range').value; });
+$('s1_min_confidence').addEventListener('input', () => { $('s1_conf_range').value = $('s1_min_confidence').value; });
+$('s1_base_url').addEventListener('input', () => { if (s1Cards) { s1Cards.refresh(s1Options()); renderS1(s1Cards.get()); } });
+$('web_search').addEventListener('change', renderSearch);
+$('searchKey').addEventListener('input', renderSearchWarn);
+
+const bar = ui.savebar([
+  { name: 'Language model', el: $('llm'), save: async () => {
+      const body = { engine: radioVal('engine') || 'rig', llm_backend: llmCards.get(), llm_model: currentModel(), anthropic_auth: radioVal('anthropic_auth') || 'apikey' };
+      const a = secAnthKey.value(), t = secAnthTok.value(), o = secOpenai.value();
+      if (a) body.anthropic_api_key = a;
+      if (t) body.anthropic_oauth_token = t;
+      if (o) body.openai_api_key = o;
+      const r = await postJSON('/config', body);
+      return r.ok ? { ok: true, message: r.message || 'applied' } : { ok: false, message: r.message };
+  } },
+  { name: 'Fast path', el: $('system1'), save: async () => {
+      const body = {
+        backend: s1Cards.get() || 'none',
+        base_url: $('s1_base_url').value.trim() || undefined,
+        model: $('s1_model').value.trim() || undefined,
+        min_confidence: parseFloat($('s1_min_confidence').value),
+        openrouter_api_key: s1Key && s1Key.value(),
+      };
+      if (Number.isNaN(body.min_confidence)) delete body.min_confidence;
+      const r = await postJSON('/system1/save', body);
+      return r.ok === false ? r : { ok: true, message: body.backend === 'none' ? 'off' : body.backend + ' applied' };
+  } },
+  { name: 'Web search', el: $('search'), save: async () => {
+      const body = { web_search: $('web_search').checked, search_provider: searchCards.get() || 'tavily' };
+      const k = searchKey.value(); if (k) body.search_api_key = k;
+      const r = await postJSON('/config', body);
+      return r.ok ? { ok: true, message: body.web_search ? 'on · ' + body.search_provider : 'off' } : { ok: false, message: r.message };
+  } },
+], { afterSave: () => bar.quiet(load), onDiscard: () => load(), canSave: () => I_LOADED });
+let I_LOADED = false;
+
+bar.quiet(load).then(() => { I_LOADED = true; ui.reveal(); loadHealth(); }).catch(e => ui.toast(false, 'Could not load: ' + e));
+</script>

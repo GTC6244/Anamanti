@@ -15,6 +15,7 @@
 //! derived vector index differs per backend.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -27,7 +28,7 @@ use crate::config::{Config, EmbedBackend, GraphRagConfig};
 use super::backend::{HelixRecall, Recall, RecallResult};
 use super::chatlog::ChatLog;
 use super::embed::{Embedder, OpenAiEmbedder};
-use super::entity::{AnthropicEntityExtractor, EntityExtractor, NoopEntityExtractor};
+use super::entity::{AnthropicEntityExtractor, Entity, EntityExtractor, NoopEntityExtractor};
 use super::graphview::{
     EntityList, GraphSample, GraphStats, GraphView, NodeId, RenameOutcome, TurnList,
 };
@@ -130,6 +131,59 @@ impl GraphView for SwappableGraphView {
     }
 }
 
+/// An [`EntityExtractor`] behind a live on/off switch. Entity extraction is the one
+/// GraphRAG step that calls a **cloud** model (Anthropic) even when the LLM and the
+/// embedder are local, so the config page can turn it off without a restart: while
+/// off, every ingested turn gets no entities (recall degrades to pure vector KNN) and
+/// no turn text leaves the Mac for extraction.
+pub struct GatedExtractor {
+    inner: Arc<dyn EntityExtractor>,
+    enabled: AtomicBool,
+}
+
+impl GatedExtractor {
+    fn new(inner: Arc<dyn EntityExtractor>, enabled: bool) -> Self {
+        Self {
+            inner,
+            enabled: AtomicBool::new(enabled),
+        }
+    }
+    fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+    }
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl EntityExtractor for GatedExtractor {
+    async fn extract(&self, text: &str) -> Result<Vec<Entity>> {
+        if !self.is_enabled() {
+            return Ok(Vec::new());
+        }
+        self.inner.extract(text).await
+    }
+}
+
+/// Status of cloud entity extraction, for the config page.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExtractStatus {
+    /// The chosen mode: `"auto"` (extract when a key is present) or `"off"`.
+    pub mode: &'static str,
+    /// Whether turn text is actually being sent for extraction right now
+    /// (`mode == "auto"` and an Anthropic key was present at boot).
+    pub active: bool,
+    /// Whether `ANTHROPIC_API_KEY` was present when the extractor was built.
+    pub key_present: bool,
+    /// The extraction provider (always `"anthropic"` today).
+    pub provider: &'static str,
+    /// The extraction model (`graphrag.extract_model`).
+    pub model: String,
+    /// The provider API base (`graphrag.anthropic_base_url`).
+    pub base_url: String,
+}
+
 /// Status of the embedding backend, for the config page.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EmbedStatus {
@@ -154,6 +208,10 @@ pub struct GraphRagController {
     helix_base: PathBuf,
     cfg: GraphRagConfig,
     extractor: Arc<dyn EntityExtractor>,
+    /// The live on/off switch over `extractor` (the same object).
+    gate: Arc<GatedExtractor>,
+    /// Whether a real (cloud) extractor was built — i.e. `ANTHROPIC_API_KEY` was set.
+    extract_key_present: bool,
     /// Speaker merges/forgets (`crate::speaker::aliases`), replayed onto a store each
     /// time it becomes active and applied by its ingester. `None` when the alias table
     /// could not be opened.
@@ -187,7 +245,23 @@ impl GraphRagController {
         let cfg = config.graphrag.clone();
         let helix_base = config.helix_path.clone();
         let chatlog_path = chatlog.path().to_path_buf();
-        let extractor = build_extractor(&cfg);
+        let (inner, extract_key_present) = build_extractor(&cfg);
+        // An explicit `graphrag.extract: "off"` in anamanti.json always wins (a privacy
+        // opt-out must not be undone by an older console choice); otherwise the
+        // persisted console choice wins over the `auto` default.
+        let extract_on = cfg.extract_enabled
+            && read_extract_marker(&extract_marker_path(&helix_base)).unwrap_or(true);
+        let gate = Arc::new(GatedExtractor::new(inner, extract_on));
+        let extractor: Arc<dyn EntityExtractor> = gate.clone();
+        log::info!(
+            "memory entity extraction: {} ({})",
+            if extract_on { "auto" } else { "off" },
+            if extract_on && extract_key_present {
+                "active — turn text is sent to Anthropic"
+            } else {
+                "inactive — no turn text leaves the Mac for extraction"
+            }
+        );
         // The alias table lives in the SQLite store of record; it exists (empty) even
         // when speaker identification is off.
         let aliases = match SpeakerAliases::open(&config.db_path) {
@@ -237,6 +311,8 @@ impl GraphRagController {
             helix_base,
             cfg,
             extractor,
+            gate,
+            extract_key_present,
             aliases,
             recall: Arc::new(SwappableRecall::new(built.recall)),
             graph: Arc::new(SwappableGraphView::new(built.graph)),
@@ -293,6 +369,34 @@ impl GraphRagController {
             built.dims
         );
         Ok(self.status_for(backend, built.dims))
+    }
+
+    /// Current entity-extraction status.
+    pub fn extract_status(&self) -> ExtractStatus {
+        let on = self.gate.is_enabled();
+        ExtractStatus {
+            mode: if on { "auto" } else { "off" },
+            active: on && self.extract_key_present,
+            key_present: self.extract_key_present,
+            provider: "anthropic",
+            model: self.cfg.extract_model.clone(),
+            base_url: self.cfg.anthropic_base_url.clone(),
+        }
+    }
+
+    /// Turn cloud entity extraction on (`auto`) or off, live (the next ingested turn
+    /// sees it) and persisted to `helix_path/extract_mode`, so it wins over the
+    /// `graphrag.extract` seed at the next boot.
+    pub fn set_extraction(&self, on: bool) -> ExtractStatus {
+        self.gate.set_enabled(on);
+        if let Err(e) = write_extract_marker(&extract_marker_path(&self.helix_base), on) {
+            log::warn!("could not persist the entity-extraction mode: {e:#}");
+        }
+        log::info!(
+            "memory entity extraction switched {}",
+            if on { "on (auto)" } else { "off" }
+        );
+        self.extract_status()
     }
 
     /// Current status (active backend + which options are selectable).
@@ -362,20 +466,45 @@ fn offset_path(chatlog_path: &Path, sig: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn build_extractor(cfg: &GraphRagConfig) -> Arc<dyn EntityExtractor> {
+/// The extractor to gate, plus whether it is the real (cloud) one.
+fn build_extractor(cfg: &GraphRagConfig) -> (Arc<dyn EntityExtractor>, bool) {
     match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => Arc::new(AnthropicEntityExtractor::new(
-            cfg.anthropic_base_url.clone(),
-            key,
-            cfg.extract_model.clone(),
-        )),
+        Ok(key) if !key.is_empty() => (
+            Arc::new(AnthropicEntityExtractor::new(
+                cfg.anthropic_base_url.clone(),
+                key,
+                cfg.extract_model.clone(),
+            )),
+            true,
+        ),
         _ => {
             log::warn!(
                 "ANTHROPIC_API_KEY absent; entity extraction disabled (recall is pure vector KNN)"
             );
-            Arc::new(NoopEntityExtractor)
+            (Arc::new(NoopEntityExtractor), false)
         }
     }
+}
+
+fn extract_marker_path(helix_base: &Path) -> PathBuf {
+    helix_base.join("extract_mode")
+}
+
+/// The persisted extraction mode: `Some(true)` for `auto`, `Some(false)` for `off`.
+fn read_extract_marker(path: &Path) -> Option<bool> {
+    match std::fs::read_to_string(path).ok()?.trim() {
+        "auto" | "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn write_extract_marker(path: &Path, on: bool) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    std::fs::write(path, if on { "auto" } else { "off" })
+        .with_context(|| format!("writing extract-mode marker {}", path.display()))
 }
 
 /// Build a backend about to become active (boot or a switch): open its store, bring
@@ -631,6 +760,7 @@ mod tests {
     fn logged(id: &str, speaker: &str, name: &str, transcript: &str) -> ChatLogRecord {
         ChatLogRecord {
             id: id.to_string(),
+            turn_id: None,
             ts: 1,
             session_id: "s".to_string(),
             transcript: transcript.to_string(),
@@ -876,5 +1006,29 @@ mod tests {
         let _ = ctrl.graph_view().stats().await.unwrap();
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn gated_extractor_emits_nothing_while_off() {
+        let gate = GatedExtractor::new(Arc::new(super::super::entity::MockEntityExtractor), true);
+        let text = "I love jazz in Portland";
+        let on = gate.extract(text).await.unwrap();
+        gate.set_enabled(false);
+        assert!(gate.extract(text).await.unwrap().is_empty());
+        gate.set_enabled(true);
+        assert_eq!(gate.extract(text).await.unwrap(), on);
+    }
+
+    #[test]
+    fn extract_marker_round_trips() {
+        let dir = std::env::temp_dir().join(format!("extract_marker_{}", std::process::id()));
+        let path = extract_marker_path(&dir);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read_extract_marker(&path), None);
+        write_extract_marker(&path, false).unwrap();
+        assert_eq!(read_extract_marker(&path), Some(false));
+        write_extract_marker(&path, true).unwrap();
+        assert_eq!(read_extract_marker(&path), Some(true));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

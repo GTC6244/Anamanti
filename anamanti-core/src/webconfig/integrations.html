@@ -1,0 +1,684 @@
+<p class="sub" data-head="sub">Third-party services that give the assistant voice tools. Each one is a cloud service; Configure shows exactly what it sends. Changes apply live, no restart.</p>
+<div class="btn-row" data-head="actions">
+  <div class="seg" role="radiogroup" aria-label="Filter integrations" id="intFilter">
+    <label><input type="radio" name="intFilter" value="all" checked><span>All <span class="hint" data-count="all"></span></span></label>
+    <label><input type="radio" name="intFilter" value="active"><span>Active <span class="hint" data-count="active"></span></span></label>
+    <label><input type="radio" name="intFilter" value="attention"><span>Needs attention <span class="hint" data-count="attention"></span></span></label>
+    <label><input type="radio" name="intFilter" value="unset"><span>Not set up <span class="hint" data-count="unset"></span></span></label>
+  </div>
+</div>
+
+<style>
+  /* Integrations page (int- / fp- prefixes). */
+  .int-foot[hidden], .int-hide { display: none !important; }
+  .int-line { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: 0.15rem 0 0.6rem; font-size: 0.82rem; }
+  .int-line .hint { min-width: 6.5rem; }
+  .int-desc { font-size: 0.78rem; color: var(--muted); line-height: 1.35; }
+  .int-steps { margin: 0.4rem 0 0; padding-left: 1.1rem; font-size: 0.8rem; color: var(--muted); }
+  .int-steps li { margin: 0.15rem 0; }
+  .int-pending { margin-top: 0.7rem; }
+  .int-verify { margin-top: 0.6rem; }
+  .tile .tile-status { min-height: 1.2em; }
+  /* Drive folder picker (ported from the old Photos page). */
+  .fp-panel { margin-top: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); overflow: hidden; }
+  .fp-panel[hidden] { display: none; }
+  .fp-head { display: flex; gap: 0.5rem; align-items: center; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .fp-head input { flex: 1; }
+  .fp-count { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
+  .fp-list { max-height: 260px; overflow-y: auto; padding: 0.25rem; }
+  .fp-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.38rem 0.5rem; border-radius: 8px; cursor: pointer; margin: 0; font-weight: 500; }
+  .fp-row:hover { background: var(--accent-soft); }
+  .fp-row input { width: auto; margin: 0; }
+  .fp-row .fp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fp-empty { color: var(--muted); padding: 0.8rem 0.6rem; font-size: 0.82rem; }
+  .fp-foot { display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0.5rem 0.6rem; border-top: 1px solid var(--border); }
+  .fp-names { display: block; margin-top: 0.35rem; color: var(--muted); font-size: 0.78rem; }
+</style>
+
+<div class="tiles" id="tiles">
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+  <div class="tile"><div class="skeleton" style="width:60%;height:20px"></div><div class="skeleton" style="width:80%"></div></div>
+</div>
+<div id="tilesEmpty" class="empty" hidden><i data-icon="filter"></i><div>No integrations match this filter.</div></div>
+<p class="hint" style="margin-top:1rem">Keys and tokens are stored 0600 on this Mac and never shown back. All of them are also listed on <a href="/keys">Keys &amp; Accounts</a>.</p>
+
+<!-- One drawer; one panel per integration. -->
+<aside class="drawer" id="intDrawer" aria-hidden="true" aria-labelledby="dTitle" role="dialog">
+  <div class="drawer-head">
+    <span class="tile-icon" id="dIcon"></span>
+    <div style="flex:1;min-width:0">
+      <h2 id="dTitle">Integration</h2>
+      <div class="tile-tool" id="dTool"></div>
+    </div>
+    <span id="dChips" class="legend"></span>
+    <button type="button" class="icon-btn" id="dClose" aria-label="Close"><i data-icon="x"></i></button>
+  </div>
+  <div class="drawer-body">
+
+    <!-- Weather -->
+    <div class="drawer-panel" data-panel="weather" hidden>
+      <p class="desc">Backs the <code>weather_lookup</code> tool and the icon + temperature beside the display clock.</p>
+      <div id="wDisabled"></div>
+      <div id="wEffective"></div>
+      <div class="section-label">Provider</div>
+      <div id="wChoices"></div>
+      <div class="field" style="margin-top:.85rem">
+        <label>Visual Crossing API key <span class="hint">from visualcrossing.com</span></label>
+        <div id="wKey"></div>
+      </div>
+      <div id="wSends"></div>
+    </div>
+
+    <!-- Places -->
+    <div class="drawer-panel" data-panel="places" hidden>
+      <p class="desc">Enables the <code>places_lookup</code> tool: a place's address, hours, rating, phone and a photo, shown on the display.</p>
+      <div id="pStatus"></div>
+      <div class="field">
+        <label>Google Places API key <span class="hint">console.cloud.google.com → enable Places API (New)</span></label>
+        <div id="pKey"></div>
+      </div>
+      <div class="callout" style="margin-top:.6rem"><i data-icon="info"></i><div>There's no keyless fallback: with no key the <code>places_lookup</code> tool isn't offered to the assistant.</div></div>
+      <div id="pSends"></div>
+    </div>
+
+    <!-- Directions -->
+    <div class="drawer-panel" data-panel="directions" hidden>
+      <p class="desc">Enables the <code>directions_lookup</code> tool: distance, travel time and live traffic from home.</p>
+      <div id="dirStatus"></div>
+      <div class="field">
+        <label>Mapbox token <span class="hint">from account.mapbox.com</span></label>
+        <div id="dirKey"></div>
+      </div>
+      <div id="dirProvider"></div>
+      <div id="dirSends"></div>
+    </div>
+
+    <!-- Calendar (read-only) -->
+    <div class="drawer-panel" data-panel="calendar" hidden>
+      <p class="desc">The <code>calendar_lookup</code> tool reads your subscribed .ics / webcal feeds. Feeds are set at boot.</p>
+      <div id="calStatus"></div>
+      <div class="section-label">Feeds</div>
+      <div id="calFeeds" class="list"></div>
+      <div class="callout" style="margin-top:.75rem"><i data-icon="lock"></i><div>Read-only here. Edit <code>calendar.subscriptions</code> in <code>anamanti.json</code> and restart the Core to change feeds.</div></div>
+      <div id="calSends"></div>
+    </div>
+
+    <!-- Cadora -->
+    <div class="drawer-panel" data-panel="cadora" hidden>
+      <p class="desc">Enables the <code>shopping_list_add</code> tool, so "add milk to the shopping list" writes to the household's shared Cadora list (used by NextHaul and the family apps).</p>
+      <div id="cadStatus"></div>
+      <div class="field">
+        <label for="cad_code">Pairing code</label>
+        <div class="inline">
+          <input id="cad_code" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="off" class="mono">
+          <button type="button" class="primary" data-action="link-cadora"><i data-icon="link"></i>Link</button>
+        </div>
+      </div>
+      <ol class="int-steps">
+        <li>In the <b>NextHaul</b> app, open <b>Settings → Voice &amp; Integrations</b>.</li>
+        <li>Add a voice assistant to get a <b>6-digit code</b> and enter it above.</li>
+        <li>The code is single-use and expires in a few minutes; the tool turns on the moment it's redeemed.</li>
+      </ol>
+      <details class="fold" style="margin-top:.85rem">
+        <summary>Advanced: paste a token or change the server</summary>
+        <div class="fold-body">
+          <div class="field">
+            <label for="cad_token">Token <span class="hint">used by Link when no code is entered</span></label>
+            <input id="cad_token" type="password" class="mono" placeholder="vl_…" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="cad_base">App-server URL <span class="hint">blank = default</span></label>
+            <div class="inline">
+              <input id="cad_base" type="text" class="mono" placeholder="https://cadora-server.fly.dev" autocomplete="off">
+              <button type="button" class="sm" data-action="save-cadora-url">Save URL</button>
+            </div>
+          </div>
+        </div>
+      </details>
+      <div id="cadSends"></div>
+    </div>
+
+    <!-- AppSaid -->
+    <div class="drawer-panel" data-panel="appsaid" hidden>
+      <p class="desc">Enables the <code>send_phone_message</code> tool, so "text Mom the address" pushes a message (often a map link) to a family member's phone.</p>
+      <div id="asStatus"></div>
+      <div class="callout" style="margin:.2rem 0 .8rem"><i data-icon="users"></i><div>Recipients are the people on <a href="/household#people">Household → People</a> who have an AppSaid address. They can also link from the device: Settings → Link a phone.</div></div>
+      <div class="field">
+        <label>App token <span class="hint">the shared sender credential</span></label>
+        <div class="inline"><div id="asKey" style="flex:1"></div><button type="button" class="sm primary" data-action="save-appsaid-token">Save token</button></div>
+      </div>
+      <details class="fold" style="margin-top:.85rem">
+        <summary>Advanced: worker URL &amp; default recipient</summary>
+        <div class="fold-body">
+          <div class="field">
+            <label for="as_worker">Worker URL <span class="hint">blank clears</span></label>
+            <input id="as_worker" type="text" class="mono" placeholder="https://appsaid.you.workers.dev" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="as_default">Default recipient <span class="hint">for "text me…"; blank clears</span></label>
+            <input id="as_default" type="text" list="asRecipients" placeholder="(none)" autocomplete="off">
+            <datalist id="asRecipients"></datalist>
+          </div>
+          <div class="btn-row" style="justify-content:flex-end"><button type="button" class="sm" data-action="save-appsaid">Save</button></div>
+        </div>
+      </details>
+      <div id="asSends"></div>
+    </div>
+
+    <!-- Spotify -->
+    <div class="drawer-panel" data-panel="spotify" hidden>
+      <p class="desc">Enables the <code>spotify_control</code> tool for Spotify Connect playback. Requires Spotify <b>Premium</b> and an app at developer.spotify.com.</p>
+      <div id="spStatus"></div>
+      <div class="field-grid">
+        <div class="field full">
+          <label for="sp_cid">Client ID <span class="hint" id="sp_cid_state"></span></label>
+          <input id="sp_cid" type="text" class="mono" autocomplete="off">
+        </div>
+        <div class="field full">
+          <label>Client secret</label>
+          <div id="spSecret"></div>
+        </div>
+        <div class="field">
+          <label for="sp_dev">Device name</label>
+          <input id="sp_dev" type="text" placeholder="(default)" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="sp_redirect">Redirect URL</label>
+          <input id="sp_redirect" type="text" class="mono" placeholder="http://127.0.0.1:8888/callback" autocomplete="off">
+        </div>
+      </div>
+      <div class="callout" style="margin-top:.8rem"><i data-icon="info"></i><div>
+        First register <code id="sp_redirect_code">http://127.0.0.1:8888/callback</code> as a Redirect URI in your Spotify app, then <b>Save</b> and <b>Connect Spotify</b>. Connect opens a browser on the Mac; approve access there. The tool turns on as soon as consent completes.
+      </div></div>
+      <div id="spPending" class="callout warn int-pending" hidden><i data-icon="clock"></i><div>Opening a browser on the Mac… approve access there, then come back. This waits up to 3 minutes.</div></div>
+      <div id="spSends"></div>
+    </div>
+
+    <!-- Google Drive -->
+    <div class="drawer-panel" data-panel="drive" hidden>
+      <p class="desc">Photo slideshow on the display's idle screen. Consent runs once here on the Mac; the display then pulls the token itself (no adb, no rebuild). Needs a Google Cloud OAuth client of type <b>Desktop app</b>.</p>
+      <div id="drStatus"></div>
+      <div class="field">
+        <label>OAuth client ID</label>
+        <div id="drCid"></div>
+      </div>
+      <div class="field">
+        <label>OAuth client secret</label>
+        <div id="drSecret"></div>
+      </div>
+      <div class="field">
+        <label for="dr_folders">Folder IDs <span class="hint">pick, or paste comma-separated IDs</span></label>
+        <div class="inline">
+          <input id="dr_folders" type="text" class="mono" placeholder="1AbC…, 1XyZ…" autocomplete="off">
+          <button type="button" class="sm" data-action="browse-drive" id="drBrowse"><i data-icon="search"></i>Browse folders…</button>
+        </div>
+        <span class="fp-names" id="dr_names"></span>
+      </div>
+      <div class="fp-panel" id="fpPanel" hidden>
+        <div class="fp-head">
+          <input id="fpFilter" type="text" placeholder="Filter folders…" autocomplete="off">
+          <span class="fp-count" id="fpCount"></span>
+        </div>
+        <div class="fp-list" id="fpList"></div>
+        <div class="fp-foot">
+          <button type="button" class="sm ghost" data-action="fp-cancel">Cancel</button>
+          <button type="button" class="sm primary" data-action="fp-apply">Use selected</button>
+        </div>
+      </div>
+      <div id="drPending" class="callout warn int-pending" hidden><i data-icon="clock"></i><div>Opening a browser on the Mac… approve access there, then come back.</div></div>
+      <div id="drVerify" class="int-verify"></div>
+      <div id="drSends"></div>
+    </div>
+
+  </div>
+  <div class="drawer-foot">
+    <button type="button" class="ghost" data-action="close">Close</button>
+    <span class="grow"></span>
+    <div class="btn-row int-foot" data-foot="weather" hidden><button type="button" class="primary" data-action="save-weather">Save weather</button></div>
+    <div class="btn-row int-foot" data-foot="places" hidden><button type="button" class="primary" data-action="save-places">Save key</button></div>
+    <div class="btn-row int-foot" data-foot="directions" hidden><button type="button" class="primary" data-action="save-directions">Save token</button></div>
+    <div class="btn-row int-foot" data-foot="spotify" hidden>
+      <button type="button" data-action="link-spotify"><i data-icon="link"></i>Connect Spotify</button>
+      <button type="button" class="primary" data-action="save-spotify">Save</button>
+    </div>
+    <div class="btn-row int-foot" data-foot="drive" hidden>
+      <button type="button" data-action="link-drive"><i data-icon="link"></i>Link Google Drive</button>
+      <button type="button" class="primary" data-action="save-drive">Save</button>
+    </div>
+  </div>
+</aside>
+
+<script>
+ui.hydrate();
+
+(function(){
+  const META = {
+    weather:    { icon: 'sun',      name: 'Weather',             tool: 'weather_lookup' },
+    places:     { icon: 'pin',      name: 'Places',              tool: 'places_lookup',      loc: 'places.google' },
+    directions: { icon: 'route',    name: 'Directions',          tool: 'directions_lookup',  loc: 'directions.mapbox' },
+    calendar:   { icon: 'calendar', name: 'Calendar',            tool: 'calendar_lookup',    loc: 'calendar.ics' },
+    cadora:     { icon: 'cart',     name: 'Shopping list',       tool: 'shopping_list_add',  loc: 'cadora' },
+    appsaid:    { icon: 'phone',    name: 'Phone messages',      tool: 'send_phone_message', loc: 'appsaid' },
+    spotify:    { icon: 'music',    name: 'Spotify',             tool: 'spotify_control',    loc: 'spotify' },
+    drive:      { icon: 'photo',    name: 'Google Drive photos', tool: 'slideshow',          loc: 'drive' },
+  };
+  const ORDER = Object.keys(META);
+  const PROVIDER = { weather: 'Visual Crossing / Open-Meteo', places: 'Google Places', directions: 'Mapbox', calendar: '.ics feeds', cadora: 'Cadora · NextHaul', appsaid: 'AppSaid', spotify: 'Spotify Connect', drive: 'Google Drive' };
+  const STATUS_TEXT = { active: 'Active', attention: 'Needs attention', inactive: 'Not set up', disabled: 'Disabled' };
+  const EP = {
+    weather: '/tools/weather/status.json', places: '/tools/places/status.json', directions: '/tools/status.json',
+    cadora: '/cadora/status.json', appsaid: '/appsaid/status.json', spotify: '/spotify/status.json', drive: '/drive/status.json',
+  };
+  let ROWS = {}, ST = {}, BOOT = {}, current = null, filter = 'all';
+
+  // ------------------------------------------------------------ helpers
+  function locKey(key){
+    if (key === 'weather') return (ST.weather && ST.weather.effective === 'visualcrossing') ? 'weather.visualcrossing' : 'weather.openmeteo';
+    return META[key].loc;
+  }
+  function locChip(key){
+    const r = ROWS[key] || {};
+    const keyless = r.keyless || (key === 'weather' && ST.weather && ST.weather.effective !== 'visualcrossing');
+    return ui.loc(r.tier || 'cloud', keyless ? 'Cloud · keyless' : 'Cloud');
+  }
+  function statusChip(key){
+    const r = ROWS[key];
+    if (!r) return '';
+    return ui.status(r.status, STATUS_TEXT[r.status] || r.status);
+  }
+  function line(label, html){ return '<div class="int-line"><span class="hint">' + esc(label) + '</span>' + html + '</div>'; }
+  function errBlock(what){ return '<div class="callout danger">' + ui.icon('alert') + '<div>Could not load ' + esc(what) + ' status.</div></div>'; }
+  async function act(btn, fn, okMsg){
+    const label = btn ? btn.innerHTML : '';
+    if (btn) btn.disabled = true;
+    try {
+      const r = await ui.req(fn());
+      ui.toast(true, typeof okMsg === 'function' ? okMsg(r) : okMsg);
+      await load(current);
+      return r;
+    } catch (e) {
+      ui.toast(false, String(e.message || e));
+      return null;
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = label; }
+    }
+  }
+
+  // ------------------------------------------------------------ tiles
+  function bucket(s){ return s === 'active' ? 'active' : s === 'attention' ? 'attention' : 'unset'; }
+  function tileHTML(key){
+    const m = META[key], r = ROWS[key] || {};
+    const lk = locKey(key), desc = (ui.LOCALITY[lk] || {}).desc || '';
+    const ro = r.readonly || key === 'calendar';
+    return '<article class="tile' + (current === key ? ' target' : '') + '" id="' + key + '" data-bucket="' + bucket(r.status) + '">'
+      + '<div class="tile-top"><span class="tile-icon">' + ui.icon(m.icon) + '</span>'
+      + '<div style="min-width:0"><div class="tile-name">' + esc(r.name || m.name) + '</div><div class="tile-tool">' + esc(r.tool || m.tool) + '</div></div></div>'
+      + '<div class="tile-meta">' + locChip(key) + statusChip(key) + (ro ? '<span class="chip neutral">' + ui.icon('lock') + 'Read-only</span>' : '') + '</div>'
+      + '<div class="tile-status">' + esc(r.detail || '—') + '</div>'
+      + '<div class="int-desc">' + esc(desc) + '</div>'
+      + '<div class="tile-foot"><span class="hint">' + esc(PROVIDER[key]) + '</span>'
+      + '<button type="button" class="sm" data-configure="' + key + '">' + ui.icon(ro ? 'info' : 'edit') + (ro ? 'View' : 'Configure') + '</button></div>'
+      + '</article>';
+  }
+  function renderTiles(){
+    $('tiles').innerHTML = ORDER.map(tileHTML).join('');
+    const counts = { all: ORDER.length, active: 0, attention: 0, unset: 0 };
+    ORDER.forEach(k => { counts[bucket((ROWS[k] || {}).status)]++; });
+    document.querySelectorAll('#intFilter [data-count]').forEach(el => { el.textContent = counts[el.dataset.count]; });
+    applyFilter();
+  }
+  function applyFilter(){
+    let shown = 0;
+    $('tiles').querySelectorAll('.tile[data-bucket]').forEach(t => {
+      const on = filter === 'all' || t.dataset.bucket === filter;
+      t.classList.toggle('int-hide', !on);
+      if (on) shown++;
+    });
+    $('tilesEmpty').hidden = shown > 0;
+  }
+
+  // ------------------------------------------------------------ panels
+  let wCards = null;
+  const wKey = ui.secret($('wKey'), { clearable: true, placeholder: 'Visual Crossing key',
+    onClear: () => act(null, () => postJSON('/tools/weather/save', { clear: true }), 'Visual Crossing key cleared.') });
+  const pKey = ui.secret($('pKey'), { clearable: true, placeholder: 'AIza…',
+    onClear: () => act(null, () => postJSON('/tools/places/save', { clear: true }), 'Google Places key cleared.') });
+  const dirKey = ui.secret($('dirKey'), { placeholder: 'pk.…' });
+  const asKey = ui.secret($('asKey'), { placeholder: 'AppSaid app token' });
+  const spSecret = ui.secret($('spSecret'), { placeholder: 'Spotify client secret' });
+  const drCid = ui.secret($('drCid'), { placeholder: '….apps.googleusercontent.com' });
+  const drSecret = ui.secret($('drSecret'), { placeholder: 'GOCSPX-…' });
+  // The client ID isn't secret; let it be read while typing.
+  $('drCid').querySelector('input').type = 'text';
+
+  function renderWeather(){
+    const w = ST.weather;
+    if (!w) { $('wEffective').innerHTML = errBlock('weather'); return; }
+    const opts = [
+      { value: 'visualcrossing', title: 'Visual Crossing', tier: 'cloud', desc: esc(ui.LOCALITY['weather.visualcrossing'].desc),
+        meta: [w.key_set ? ui.status('ok', 'key set') : ui.status('warn', 'needs key')] },
+      { value: 'openmeteo', title: 'Open-Meteo', tier: 'cloud', tierText: 'Cloud · keyless', desc: esc(ui.LOCALITY['weather.openmeteo'].desc) },
+    ];
+    wCards = wCards || ui.choices($('wChoices'), { name: 'wprov', cols: 2, options: opts, onChange: weatherNotes });
+    wCards.refresh(opts, w.provider === 'openmeteo' ? 'openmeteo' : 'visualcrossing');
+    wKey.setState(w.key_set); wKey.reset();
+    $('wDisabled').innerHTML = w.enabled ? '' : '<div class="callout warn" style="margin-bottom:.6rem">' + ui.icon('alert')
+      + '<div>Weather is <b>disabled in <code>anamanti.json</code></b> (<code>weather.enabled = false</code>). Settings here are stored, but the tool stays off until it’s enabled and the Core restarts.</div></div>';
+    let eff;
+    if (!w.enabled) eff = ui.status('off', 'disabled in anamanti.json');
+    else if (w.effective === 'visualcrossing') eff = ui.status('ok', 'Active · Visual Crossing');
+    else if (w.provider === 'visualcrossing' && !w.key_set) eff = ui.status('warn', 'Visual Crossing selected but no key → using Open-Meteo');
+    else eff = ui.status('ok', 'Active · Open-Meteo');
+    $('wEffective').innerHTML = line('In use now', eff);
+    weatherNotes();
+  }
+  function weatherNotes(){
+    const sel = wCards ? wCards.get() : 'visualcrossing';
+    $('wSends').innerHTML = ui.sendsFor(sel === 'openmeteo' ? 'weather.openmeteo' : 'weather.visualcrossing');
+  }
+
+  function renderPlaces(){
+    const p = ST.places;
+    if (!p) { $('pStatus').innerHTML = errBlock('Places'); return; }
+    pKey.setState(p.key_set); pKey.reset();
+    $('pStatus').innerHTML = line('Tool', p.tool_active ? ui.status('ok', 'places_lookup active') : ui.status('off', 'inactive — add a key'));
+    $('pSends').innerHTML = ui.sendsFor('places.google');
+  }
+
+  function renderDirections(){
+    const d = ST.directions;
+    if (!d) { $('dirStatus').innerHTML = errBlock('Directions'); return; }
+    dirKey.setState(d.token_set); dirKey.reset();
+    $('dirStatus').innerHTML = line('Tool', d.tool_active ? ui.status('ok', 'directions_lookup active') : ui.status('off', 'inactive — add a token'));
+    const prov = ((BOOT.integrations || {}).directions_provider) || 'mapbox';
+    $('dirProvider').innerHTML = prov === 'mapbox'
+      ? '<p class="hint" style="margin:.5rem 0 0">Uses <code>directions.provider = "mapbox"</code> from <code>anamanti.json</code> (the default). The token can be replaced, not cleared.</p>'
+      : '<div class="callout warn" style="margin-top:.6rem">' + ui.icon('alert') + '<div><code>directions.provider</code> is <code>' + esc(prov) + '</code> in <code>anamanti.json</code>; the Mapbox token is only used when it is <code>mapbox</code>.</div></div>';
+    $('dirSends').innerHTML = ui.sendsFor('directions.mapbox');
+  }
+
+  function renderCalendar(){
+    const integ = BOOT.integrations || {};
+    const feeds = integ.calendar_feeds || [];
+    const ttl = integ.calendar_cache_ttl_secs;
+    const r = ROWS.calendar || {};
+    $('calStatus').innerHTML = line('Tool', r.status === 'active' ? ui.status('ok', 'calendar_lookup active') : ui.status('off', 'inactive'))
+      + line('Cache TTL', ttl != null ? esc(ttl < 60 ? ttl + ' s' : ui.fmtDuration(ttl).trim()) : '<span class="muted">default</span>');
+    $('calFeeds').innerHTML = feeds.length
+      ? feeds.map(f => {
+          const t = ui.classify(f.url || '');
+          return '<div class="list-row"><span class="grow"><div class="title">' + esc(f.name || '(unnamed)') + '</div>'
+            + '<div class="meta mono ellipsis" title="' + escAttr(f.url || '') + '">' + esc(f.url || '') + '</div></span>' + ui.loc(t) + '</div>';
+        }).join('')
+      : '<div class="empty">' + ui.icon('calendar') + '<div>No feeds configured.</div></div>';
+    $('calSends').innerHTML = ui.sendsFor('calendar.ics');
+  }
+
+  function renderCadora(){
+    const c = ST.cadora;
+    if (!c) { $('cadStatus').innerHTML = errBlock('Cadora'); return; }
+    $('cadStatus').innerHTML = line('Status', c.linked ? ui.status('ok', 'linked — tool active') : ui.status('off', 'not linked'))
+      + line('Server', '<code>' + esc(c.base_url || 'default') + '</code>');
+    $('cad_base').value = c.base_url || '';
+    $('cadSends').innerHTML = ui.sendsFor('cadora');
+  }
+
+  function renderAppsaid(){
+    const a = ST.appsaid;
+    if (!a) { $('asStatus').innerHTML = errBlock('AppSaid'); return; }
+    asKey.setState(a.token_set); asKey.reset();
+    const rec = a.recipients || [];
+    $('asStatus').innerHTML = line('Tool', a.tool_active ? ui.status('ok', 'send_phone_message active') : (a.token_set ? ui.status('warn', 'needs recipients') : ui.status('off', 'not configured')))
+      + line('Token', a.token_set ? ui.status('ok', 'set') : ui.status('off', 'not set'))
+      + line('Recipients', rec.length ? rec.map(n => '<span class="chip neutral">' + esc(n) + '</span>').join('') : '<span class="muted">none — <a href="/household#people">add an AppSaid address to a person</a></span>')
+      + (a.default_recipient ? line('Default', '<span class="chip accent">' + esc(a.default_recipient) + '</span>') : '');
+    $('as_worker').value = a.worker_url || '';
+    $('as_default').value = a.default_recipient || '';
+    $('asRecipients').innerHTML = rec.map(n => '<option value="' + escAttr(n) + '"></option>').join('');
+    $('asSends').innerHTML = ui.sendsFor('appsaid');
+  }
+
+  function renderSpotify(){
+    const s = ST.spotify;
+    if (!s) { $('spStatus').innerHTML = errBlock('Spotify'); return; }
+    $('spStatus').innerHTML = line('Status', s.linked ? ui.status('ok', 'linked — tool active') : (s.configured ? ui.status('warn', 'credentials set, not linked') : ui.status('off', 'no credentials')))
+      + line('Device', '<code>' + esc(s.device_name || 'default') + '</code>');
+    $('sp_cid').value = '';
+    $('sp_cid').placeholder = s.client_id_set ? '(set — leave blank to keep)' : 'Client ID';
+    $('sp_cid_state').innerHTML = s.client_id_set ? '<span class="dot ok"></span> set' : 'not set';
+    spSecret.setState(s.client_secret_set); spSecret.reset();
+    $('sp_dev').value = s.device_name || '';
+    $('sp_redirect').value = s.redirect_url || '';
+    $('sp_redirect_code').textContent = s.redirect_url || 'http://127.0.0.1:8888/callback';
+    $('spSends').innerHTML = ui.sendsFor('spotify');
+  }
+
+  // Drive folder picker state: the full listing from the last Browse, id → name.
+  let ALL_FOLDERS = [];
+  const FOLDER_NAMES = new Map();
+  function selectedIds(){ return $('dr_folders').value.split(',').map(s => s.trim()).filter(Boolean); }
+  function updateNames(){
+    const ids = selectedIds();
+    $('dr_names').textContent = ids.length ? 'Selected: ' + ids.map(id => FOLDER_NAMES.get(id) || id).join(', ') : '';
+  }
+  function renderFolderList(f){
+    const sel = new Set(selectedIds());
+    const q = (f || '').trim().toLowerCase();
+    const shown = ALL_FOLDERS.filter(x => !q || String(x.name || '').toLowerCase().includes(q));
+    $('fpCount').textContent = shown.length + ' of ' + ALL_FOLDERS.length;
+    $('fpList').innerHTML = shown.length
+      ? shown.map(x => '<label class="fp-row"><input type="checkbox" value="' + escAttr(x.id) + '"' + (sel.has(x.id) ? ' checked' : '') + '>'
+          + '<span class="fp-name" title="' + escAttr(x.name) + '">' + esc(x.name) + '</span>'
+          + (x.shared ? '<span class="chip neutral">shared</span>' : '') + '</label>').join('')
+      : '<div class="fp-empty">No folders match.</div>';
+  }
+  async function browseDrive(btn){
+    btn.disabled = true;
+    try {
+      const j = await getJSON('/drive/folders.json');
+      if (!j || !j.ok) { ui.toast(false, (j && j.message) || 'Could not list folders.'); return; }
+      ALL_FOLDERS = j.folders || [];
+      ALL_FOLDERS.forEach(f => FOLDER_NAMES.set(f.id, f.name));
+      $('fpFilter').value = '';
+      renderFolderList('');
+      $('fpPanel').hidden = false;
+      $('fpFilter').focus();
+      updateNames();
+      ui.toast(true, ALL_FOLDERS.length + ' folder(s) found. Tick the ones to show.');
+    } catch (e) { ui.toast(false, 'Request failed: ' + e); }
+    finally { btn.disabled = !(ST.drive && ST.drive.linked); }
+  }
+  function applyPick(){
+    const picked = [...$('fpList').querySelectorAll('input:checked')].map(c => c.value);
+    // Keep hand-typed ids that weren't in the listing (e.g. an id pasted from a link).
+    const known = new Set(ALL_FOLDERS.map(f => f.id));
+    const manual = selectedIds().filter(id => !known.has(id));
+    $('dr_folders').value = [...new Set([...picked, ...manual])].join(', ');
+    $('fpPanel').hidden = true;
+    updateNames();
+    ui.toast(true, picked.length + ' folder(s) selected. Save to apply.');
+  }
+  function renderDrive(){
+    const d = ST.drive;
+    if (!d) { $('drStatus').innerHTML = errBlock('Google Drive'); return; }
+    $('drStatus').innerHTML = line('Status', d.linked ? ui.status('ok', 'linked') : (d.configured ? ui.status('warn', 'configured — not linked yet') : ui.status('off', 'not configured — set the client ID + secret')))
+      + line('Scope', '<code>' + esc(d.scope || '—') + '</code>');
+    drCid.setState(d.client_id_set); drCid.reset();
+    drSecret.setState(d.client_secret_set); drSecret.reset();
+    $('dr_folders').value = (d.folder_ids || []).join(', ');
+    updateNames();
+    $('drBrowse').disabled = !d.linked;
+    $('drBrowse').title = d.linked ? '' : 'Link Google Drive first';
+    $('drSends').innerHTML = ui.sendsFor('drive');
+  }
+
+  const RENDER = { weather: () => renderWeather(), places: () => renderPlaces(), directions: () => renderDirections(), calendar: () => renderCalendar(),
+    cadora: () => renderCadora(), appsaid: () => renderAppsaid(), spotify: () => renderSpotify(), drive: () => renderDrive() };
+  // Re-render every panel, or only `only` (after a save in one panel, so unsaved
+  // edits in the other panels are not overwritten by the refresh).
+  function renderPanels(only){
+    if (only && RENDER[only]) RENDER[only]();
+    else Object.values(RENDER).forEach(f => f());
+    if (current) paintHead(current);
+  }
+
+  // ------------------------------------------------------------ drawer
+  function paintHead(key){
+    const m = META[key], r = ROWS[key] || {};
+    $('dIcon').innerHTML = ui.icon(m.icon);
+    $('dTitle').textContent = r.name || m.name;
+    $('dTool').textContent = r.tool || m.tool;
+    $('dChips').innerHTML = locChip(key) + statusChip(key);
+  }
+  function openDrawer(key){
+    if (!META[key]) return;
+    current = key;
+    document.querySelectorAll('#intDrawer [data-panel]').forEach(p => { p.hidden = p.dataset.panel !== key; });
+    document.querySelectorAll('#intDrawer [data-foot]').forEach(p => { p.hidden = p.dataset.foot !== key; });
+    $('fpPanel').hidden = true;
+    paintHead(key);
+    document.querySelectorAll('.tile.target').forEach(t => t.classList.remove('target'));
+    const t = $(key);
+    if (t) { t.classList.add('target'); t.scrollIntoView({ block: 'nearest' }); }
+    if (location.hash !== '#' + key) history.replaceState(null, '', '#' + key);
+    ui.drawer.open('intDrawer');
+    // ui.drawer focuses the first control in DOM order, which may sit in a hidden
+    // panel; move focus into the visible one.
+    setTimeout(() => {
+      const p = document.querySelector('#intDrawer [data-panel="' + key + '"]');
+      const f = p && [...p.querySelectorAll('input:not([type=hidden]), select, textarea, button')].find(el => el.offsetParent !== null && !el.disabled);
+      if (f) f.focus();
+    }, 260);
+  }
+  ui.drawer.onClose = () => {
+    current = null;
+    document.querySelectorAll('.tile.target').forEach(t => t.classList.remove('target'));
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  };
+  $('dClose').addEventListener('click', () => ui.drawer.close());
+  window.addEventListener('hashchange', () => { const k = location.hash.slice(1); if (META[k]) openDrawer(k); });
+
+  // ------------------------------------------------------------ actions
+  async function linkFlow(btn, pendingEl, url, onOk){
+    const label = btn.innerHTML;
+    btn.disabled = true; btn.textContent = 'Waiting for consent…';
+    $(pendingEl).hidden = false;
+    try {
+      const r = await postJSON(url);
+      if (r && r.ok) { onOk(r); await load(current); }
+      else ui.toast(false, (r && r.message) || 'Link failed.');
+    } catch (e) { ui.toast(false, 'Request failed: ' + e); }
+    finally { btn.disabled = false; btn.innerHTML = label; $(pendingEl).hidden = true; }
+  }
+  const ACTIONS = {
+    'close': () => ui.drawer.close(),
+    'save-weather': (b) => {
+      if (!ST.weather || !wCards) { ui.toast(false, 'Weather status did not load — reload before saving.'); return; }
+      const body = { provider: wCards ? wCards.get() : 'visualcrossing' };
+      const k = wKey.value(); if (k) body.visualcrossing_key = k;
+      return act(b, () => postJSON('/tools/weather/save', body), 'Weather saved.');
+    },
+    'save-places': (b) => {
+      const k = pKey.value();
+      if (!k) { ui.toast(false, 'Paste a key first (Add / Replace).'); return; }
+      return act(b, () => postJSON('/tools/places/save', { google_places_key: k }), 'Google Places key saved.');
+    },
+    'save-directions': (b) => {
+      const k = dirKey.value();
+      if (!k) { ui.toast(false, 'Paste a token first (Add / Replace).'); return; }
+      return act(b, () => postJSON('/tools/save', { mapbox_token: k }), 'Mapbox token saved.');
+    },
+    'link-cadora': (b) => {
+      const code = $('cad_code').value.trim(), token = $('cad_token').value.trim(), base = $('cad_base').value.trim();
+      if (!code && !token) { ui.toast(false, 'Enter the 6-digit code from NextHaul (or paste a token under Advanced).'); $('cad_code').focus(); return; }
+      const body = {}; if (code) body.code = code; if (token) body.token = token; if (base) body.base_url = base;
+      return act(b, () => postJSON('/cadora/link', body), (r) => r.message || 'Shopping list linked.').then(r => { if (r) { $('cad_code').value = ''; $('cad_token').value = ''; } });
+    },
+    'save-cadora-url': (b) => !ST.cadora ? ui.toast(false, 'Cadora status did not load — reload before saving.') : act(b, () => postJSON('/cadora/save', { base_url: $('cad_base').value.trim() }), 'Cadora server saved.'),
+    'save-appsaid-token': (b) => {
+      const k = asKey.value();
+      if (!k) { ui.toast(false, 'Paste a token first (Add / Replace).'); return; }
+      return act(b, () => postJSON('/appsaid/token', { app_token: k }), 'AppSaid token saved.');
+    },
+    'save-appsaid': (b) => !ST.appsaid ? ui.toast(false, 'AppSaid status did not load — reload before saving.') : act(b, () => postJSON('/appsaid/save', { worker_url: $('as_worker').value.trim(), default_recipient: $('as_default').value.trim() }), 'AppSaid settings saved.'),
+    'save-spotify': (b) => {
+      const body = {};
+      const cid = $('sp_cid').value.trim(); if (cid) body.client_id = cid;
+      const sec = spSecret.value(); if (sec) body.client_secret = sec;
+      const dev = $('sp_dev').value.trim(); if (dev) body.device_name = dev;
+      const red = $('sp_redirect').value.trim(); if (red) body.redirect_url = red;
+      return act(b, () => postJSON('/spotify/save', body), 'Spotify settings saved.');
+    },
+    'link-spotify': (b) => linkFlow(b, 'spPending', '/spotify/link', (r) => ui.toast(true, r.message || 'Spotify linked.')),
+    'save-drive': (b) => {
+      // folder_ids always REPLACES the stored list — never send it from an unloaded form.
+      if (!ST.drive) { ui.toast(false, 'Google Drive status did not load — reload before saving.'); return; }
+      const body = { folder_ids: selectedIds() };
+      const cid = drCid.value(); if (cid) body.client_id = cid;
+      const sec = drSecret.value(); if (sec) body.client_secret = sec;
+      return act(b, () => postJSON('/drive/save', body), 'Saved. The display picks this up on its next refresh (or reboot).');
+    },
+    'link-drive': (b) => {
+      $('drVerify').innerHTML = '';
+      return linkFlow(b, 'drPending', '/drive/link', (r) => {
+        ui.toast(true, r.message || 'Google Drive linked.');
+        const v = r.verify || [];
+        if (v.length) {
+          $('drVerify').innerHTML = '<div class="section-label">Folder check</div><div class="list">' + v.map(x =>
+            '<div class="list-row"><span class="grow mono ellipsis" title="' + escAttr(x.folder_id) + '">' + esc(FOLDER_NAMES.get(x.folder_id) || x.folder_id) + '</span>'
+            + (x.error ? ui.status('err', x.error) : ui.status(x.images ? 'ok' : 'warn', x.images + ' image(s)')) + '</div>').join('') + '</div>';
+        }
+      });
+    },
+    'browse-drive': (b) => browseDrive(b),
+    'fp-apply': () => applyPick(),
+    'fp-cancel': () => { $('fpPanel').hidden = true; },
+  };
+  $('intDrawer').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-action]');
+    if (b && ACTIONS[b.dataset.action] && !b.disabled) ACTIONS[b.dataset.action](b);
+  });
+  $('cad_code').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); ACTIONS['link-cadora']($('intDrawer').querySelector('[data-action="link-cadora"]')); }
+  });
+  $('fpFilter').addEventListener('input', (e) => renderFolderList(e.target.value));
+  $('dr_folders').addEventListener('input', updateNames);
+  $('tiles').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-configure]');
+    if (b) openDrawer(b.dataset.configure);
+  });
+  $('intFilter').addEventListener('change', (e) => { if (e.target.name === 'intFilter') { filter = e.target.value; applyFilter(); } });
+
+  // ------------------------------------------------------------ load
+  async function load(only){
+    const keys = Object.keys(EP);
+    const res = await Promise.allSettled([getJSON('/overview.json?probe=0'), getJSON('/system.json')].concat(keys.map(k => getJSON(EP[k]))));
+    const ov = res[0].status === 'fulfilled' ? res[0].value : null;
+    BOOT = (res[1].status === 'fulfilled' && res[1].value && res[1].value.config) || BOOT;
+    keys.forEach((k, i) => { const r = res[i + 2]; ST[k] = r.status === 'fulfilled' ? r.value : null; });
+    if (!ov || !Array.isArray(ov.integrations)) throw new Error('integration status unavailable');
+    ROWS = {};
+    ov.integrations.forEach(r => { ROWS[r.key] = r; });
+    renderTiles();
+    renderPanels(only);
+  }
+
+  load()
+    .then(() => {
+      const k = location.hash.slice(1);
+      if (META[k]) openDrawer(k);
+    })
+    .catch(e => {
+      $('tiles').innerHTML = '';
+      $('tilesEmpty').hidden = false;
+      $('tilesEmpty').querySelector('div').textContent = 'Could not load integrations.';
+      ui.toast(false, 'Could not load: ' + (e.message || e));
+    });
+})();
+</script>

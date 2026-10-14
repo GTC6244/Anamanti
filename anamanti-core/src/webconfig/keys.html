@@ -1,0 +1,176 @@
+<p class="sub" data-head="sub">Every API key, token and linked account the Core holds, in one place: whether it's set, what uses it and where it's configured.</p>
+<div class="btn-row" data-head="actions">
+  <button type="button" class="sm" id="keysRefresh"><i data-icon="refresh"></i>Refresh</button>
+</div>
+
+<style>
+  .ky-edit { display: flex; align-items: center; gap: .35rem; justify-content: flex-end; }
+  .ky-edit input { width: 15rem; padding: .3rem .5rem; font-size: .82rem; }
+  .ky-actions { display: flex; align-items: center; gap: .35rem; justify-content: flex-end; }
+  .ky-svc { display: flex; align-items: center; gap: .3rem .5rem; flex-wrap: wrap; }
+  .ky-svc .chips { display: flex; gap: .3rem; }
+  #keyTable td { vertical-align: middle; padding-top: .4rem; padding-bottom: .4rem; }
+</style>
+
+<div class="grid-12 stretch">
+  <div class="callout span-7" id="keysBanner" style="align-items:center">
+    <i data-icon="lock"></i>
+    <div>Secrets are stored <b>0600</b> in <code id="settingsPath">the console settings file</code> and never shown back. Environment variables seed them at boot; a value set here wins and persists. Keys saved through the language-model and web-search settings can be replaced here but not cleared.</div>
+  </div>
+  <div class="stats span-5" id="keyStats">
+    <div class="stat"><div class="label">Secrets set</div><div class="value"><span class="skeleton" style="display:inline-block;width:3rem"></span></div></div>
+    <div class="stat"><div class="label">Linked accounts</div><div class="value"><span class="skeleton" style="display:inline-block;width:3rem"></span></div></div>
+    <div class="stat"><div class="label">Not set</div><div class="value"><span class="skeleton" style="display:inline-block;width:3rem"></span></div></div>
+  </div>
+
+  <section class="card span-12 flush" id="keys">
+    <div class="card-head">
+      <h2><i data-icon="key"></i>Keys &amp; accounts</h2>
+      <div class="tools"><span class="hint">Every service here is an internet service</span><i data-loc="cloud" data-text="Cloud"></i></div>
+    </div>
+    <div class="table-wrap">
+      <table id="keyTable">
+        <thead><tr>
+          <th style="width:27%">Service</th><th>Status</th><th>Seed env var</th><th>Used by</th><th>Where</th><th style="text-align:right">Actions</th>
+        </tr></thead>
+        <tbody id="keyRows">
+          <tr><td colspan="6"><div class="skeleton" style="height:22px;margin:.3rem 0"></div><div class="skeleton" style="height:22px;margin:.3rem 0"></div><div class="skeleton" style="height:22px;margin:.3rem 0"></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+ui.hydrate();
+
+(function(){
+  let KEYS = [];
+  const KIND = { secret: 'secret', oauth: 'OAuth', link: 'link' };
+  const PAGE = { intelligence: 'Intelligence', voice: 'Voice', integrations: 'Integrations', memory: 'Memory', household: 'Household', devices: 'Music & Devices' };
+  const SECTION = { llm: 'Model', search: 'Web search', system1: 'Fast path', stt: 'Speech-to-text', directions: 'Directions', weather: 'Weather',
+    places: 'Places', appsaid: 'Phone messages', spotify: 'Spotify', drive: 'Google Drive', cadora: 'Shopping list', calendar: 'Calendar' };
+
+  function whereLabel(href){
+    const m = String(href || '').match(/^\/([^#?]*)(?:#(.*))?$/);
+    if (!m) return href || '—';
+    const page = PAGE[m[1]] || m[1] || 'Overview';
+    return m[2] ? page + ' › ' + (SECTION[m[2]] || m[2]) : page;
+  }
+
+  function statusCell(k){
+    if (k.kind === 'secret') return k.set ? ui.status('ok', 'Set') : ui.status('off', 'Not set');
+    return k.set ? ui.status('ok', 'Linked') : ui.status('off', 'Not linked');
+  }
+
+  function actionsCell(k){
+    if (k.kind !== 'secret' || !k.field) {
+      return '<div class="ky-actions"><a class="btn sm" href="' + escAttr(k.edit || '#') + '">' + ui.icon('ext') + 'Open</a></div>';
+    }
+    return '<div class="ky-actions">'
+      + '<button type="button" class="sm" data-act="edit" data-id="' + escAttr(k.id) + '">' + (k.set ? 'Replace' : 'Add') + '</button>'
+      + (k.field.clear && k.set ? '<button type="button" class="sm ghost danger-text" data-act="clear" data-id="' + escAttr(k.id) + '">Clear</button>' : '')
+      + '</div>'
+      + '<div class="ky-edit" hidden>'
+      + '<input type="password" autocomplete="off" placeholder="Paste a new value" aria-label="New value for ' + escAttr(k.service) + '">'
+      + '<button type="button" class="sm primary" data-act="save" data-id="' + escAttr(k.id) + '">Save</button>'
+      + '<button type="button" class="sm ghost" data-act="cancel">Cancel</button>'
+      + '</div>';
+  }
+
+  function render(){
+    if (!KEYS.length) {
+      $('keyRows').innerHTML = '<tr><td colspan="6"><div class="empty">' + ui.icon('key') + '<div>No keys reported by the Core.</div></div></td></tr>';
+      return;
+    }
+    $('keyRows').innerHTML = KEYS.map(k => '<tr data-id="' + escAttr(k.id) + '">'
+      + '<td><div class="ky-svc"><b>' + esc(k.service) + '</b><span class="chips">' + ui.loc('cloud', 'Cloud') + '<span class="chip neutral">' + esc(KIND[k.kind] || k.kind) + '</span></span></div></td>'
+      + '<td>' + statusCell(k) + '</td>'
+      + '<td>' + (k.env ? '<code>' + esc(k.env) + '</code>' : '<span class="faint">—</span>') + '</td>'
+      + '<td class="muted">' + esc(k.used_by || '—') + '</td>'
+      + '<td class="nowrap">' + (k.edit ? '<a href="' + escAttr(k.edit) + '">' + esc(whereLabel(k.edit)) + '</a>' : '<span class="faint">—</span>') + '</td>'
+      + '<td>' + actionsCell(k) + '</td>'
+      + '</tr>').join('');
+    // Inline two-step confirm on each Clear button (no window.confirm).
+    $('keyRows').querySelectorAll('button[data-act="clear"]').forEach(b => {
+      const k = KEYS.find(x => x.id === b.dataset.id);
+      ui.confirm(b, () => clearKey(k), 'Clear?');
+    });
+  }
+
+  function renderStats(){
+    const secrets = KEYS.filter(k => k.kind === 'secret');
+    const accounts = KEYS.filter(k => k.kind !== 'secret');
+    const s = secrets.filter(k => k.set).length, a = accounts.filter(k => k.set).length;
+    const missing = KEYS.length - s - a;
+    $('keyStats').innerHTML =
+      '<div class="stat"><div class="label">Secrets set</div><div class="value">' + s + ' <small>of ' + secrets.length + '</small></div></div>'
+      + '<div class="stat"><div class="label">Linked accounts</div><div class="value">' + a + ' <small>of ' + accounts.length + '</small></div></div>'
+      + '<div class="stat"><div class="label">Not set / not linked</div><div class="value">' + missing + '</div></div>';
+  }
+
+  async function load(){
+    try {
+      const j = await getJSON('/keys.json');
+      if (!j || j.ok === false) throw new Error((j && j.message) || 'rejected');
+      KEYS = Array.isArray(j.keys) ? j.keys : [];
+      if (j.settings_path) $('settingsPath').textContent = j.settings_path;
+      render(); renderStats();
+    } catch (e) {
+      ui.toast(false, 'Could not load keys: ' + (e.message || e));
+      $('keyRows').innerHTML = '<tr><td colspan="6"><div class="empty">' + ui.icon('alert') + '<div>Could not load keys.</div></div></td></tr>';
+    }
+  }
+
+  async function saveKey(k, value, btn){
+    btn.disabled = true;
+    try {
+      await ui.req(postJSON(k.field.endpoint, { [k.field.name]: value }));
+      ui.toast(true, k.service + ' saved.');
+      await load();
+    } catch (e) {
+      btn.disabled = false;
+      ui.toast(false, k.service + ': ' + (e.message || e));
+    }
+  }
+  async function clearKey(k){
+    try {
+      await ui.req(postJSON(k.field.endpoint, { clear: true }));
+      ui.toast(true, k.service + ' cleared.');
+    } catch (e) { ui.toast(false, k.service + ': ' + (e.message || e)); }
+    await load();
+  }
+
+  function setEditing(row, on){
+    row.querySelector('.ky-actions').hidden = on;
+    const ed = row.querySelector('.ky-edit');
+    ed.hidden = !on;
+    const inp = ed.querySelector('input');
+    if (on) inp.focus(); else inp.value = '';
+  }
+
+  $('keyRows').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    const row = b.closest('tr');
+    const k = KEYS.find(x => x.id === row.dataset.id);
+    if (!k) return;
+    if (b.dataset.act === 'edit') setEditing(row, true);
+    else if (b.dataset.act === 'cancel') setEditing(row, false);
+    else if (b.dataset.act === 'save') {
+      const v = row.querySelector('.ky-edit input').value.trim();
+      if (!v) { ui.toast(false, 'Paste a value first.'); row.querySelector('.ky-edit input').focus(); return; }
+      saveKey(k, v, b);
+    }
+  });
+  $('keyRows').addEventListener('keydown', (e) => {
+    if (!e.target.matches('.ky-edit input')) return;
+    const row = e.target.closest('tr');
+    if (e.key === 'Enter') { e.preventDefault(); row.querySelector('button[data-act="save"]').click(); }
+    else if (e.key === 'Escape') setEditing(row, false);
+  });
+  $('keysRefresh').addEventListener('click', load);
+
+  load().then(() => ui.reveal());
+})();
+</script>

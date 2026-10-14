@@ -26,6 +26,12 @@ pub struct ChatLogRecord {
     /// only in ordering, not value. Used as the HelixDB `Turn.ext_id` for
     /// idempotent upserts.
     pub id: String,
+    /// The turn this record belongs to (`t-{unix_millis}-{n}`, minted when the turn
+    /// starts). Shared with the turn's [`super::promptlog::PromptLogRecord`] so the
+    /// config page's Conversations view can show the exact prompt for a turn. Absent
+    /// on records logged before the link shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
     /// Unix seconds when the turn completed.
     pub ts: i64,
     /// Session this turn belongs to (one per device connection).
@@ -157,6 +163,7 @@ mod tests {
     fn rec(id: &str, transcript: &str) -> ChatLogRecord {
         ChatLogRecord {
             id: id.to_string(),
+            turn_id: None,
             ts: 1,
             session_id: "s1".to_string(),
             transcript: transcript.to_string(),
