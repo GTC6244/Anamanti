@@ -576,7 +576,17 @@ phone, → Memory).
   their existing voiceprint, or added to the household as a new person — → a capture step
   with a **phrase guide** (`enroll-guide-<i>`: the session's phrases, captured ones ticked off,
   the current one highlighted; beside the controls on landscape ≥700 px, stacked below on
-  narrow screens).
+  narrow screens). Cancel / Save are **pinned** under the scrolling content so they stay
+  on the ~960×600 screen. Both the capture and verify steps show a live **capture-status
+  panel** (`EnrollCaptureStatus`, `lib/src/ui/enroll_capture_status.dart`, key
+  `enroll-capture-status`) mapped by `enrollCueFor` from `AssistantState.phase` /
+  `captureReady` / `online` + the last sample result: *Starting microphone…* → *Waiting for
+  "<wake word>"* → **Listening — read the phrase now** (red, recording dot, "Heard
+  "<wake word>"", an auto-ranged `MicLevelMeter` fed `micLevel`) → *Checking that sample…*
+  (spinner, from the on-device end-of-speech cue) → *Sample captured* / *Sample not used* +
+  the Core's reason (flashed for `kEnrollResultFlash` = 3 s, cleared early by the next wake
+  word); plus *Can't reach the assistant* and *Microphone restarting…*. Presentation only —
+  no new engine events; implicit animations only.
   **Add-samples mode** (`speakerId` + `personLabel`, from the People ⋮ menu): `AppBar("Add
   voice samples")`, skips the name step, starts the guide later in `kEnrollPhrases` so a
   re-train reads fresh sentences, and commits via `enrollFinish(…, speakerId:)` into that exact
