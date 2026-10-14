@@ -169,18 +169,22 @@ pub(crate) fn speaker_identity_line(speaker: &SpeakerContext, household: &Househ
                 .and_then(|m| m.relationship.as_deref())
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            match (member, rel) {
+            let who = match (member, rel) {
                 (Some(_), Some(rel)) => {
                     format!("You are speaking with {name} ({rel}), who lives here.")
                 }
                 (Some(_), None) => format!("You are speaking with {name}, who lives here."),
                 (None, _) => format!("You are speaking with {name}."),
-            }
+            };
+            format!(
+                "{who} When they say \"me\" or \"my phone\", as in \"text me\", that means {name}."
+            )
         }
         (SpeakerResolution::Tentative, Some((name, _))) => format!(
             "You are probably speaking with {name}, but the voice match is not certain. Don't \
              state their identity as fact; if they ask who they are, say you think it's {name} \
-             but aren't sure."
+             but aren't sure. If they ask to send something to \"me\", confirm it's for {name} \
+             first."
         ),
         (SpeakerResolution::Identified | SpeakerResolution::Tentative, None) => {
             "You are speaking with a household member whose voice you recognise but whose name \
@@ -188,7 +192,10 @@ pub(crate) fn speaker_identity_line(speaker: &SpeakerContext, household: &Househ
                 .to_string()
         }
         (SpeakerResolution::New | SpeakerResolution::Unknown, _) => {
-            format!("You do not know who is speaking: their voice was not recognised. {DONT_GUESS}")
+            format!(
+                "You do not know who is speaking: their voice was not recognised. {DONT_GUESS} If \
+                 they ask to send something to \"me\", ask who they are first."
+            )
         }
     }
 }
@@ -578,7 +585,11 @@ mod household_tests {
     #[test]
     fn identity_line_stays_plain_for_a_non_member() {
         let line = speaker_identity_line(&named_speaker("Zoe"), &Household::default());
-        assert_eq!(line, "You are speaking with Zoe.");
+        assert!(line.starts_with("You are speaking with Zoe."), "{line}");
+        assert!(
+            line.contains("that means Zoe"),
+            "\"me\" resolves to the speaker: {line}"
+        );
     }
 
     #[test]
@@ -588,9 +599,9 @@ mod household_tests {
             ..Default::default()
         };
         let line = speaker_identity_line(&named_speaker("Christina"), &hh);
-        assert_eq!(
-            line,
-            "You are speaking with Kristina (Mother), who lives here."
+        assert!(
+            line.starts_with("You are speaking with Kristina (Mother), who lives here."),
+            "{line}"
         );
     }
 

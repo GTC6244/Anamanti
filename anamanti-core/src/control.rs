@@ -97,7 +97,7 @@ pub async fn handle_control(
     } else if request.event_type == types::ENROLL_FINISH {
         // Enrollment commit/cancel touch the SpeakerService's in-flight session map
         // (not just the registry), so they are handled here rather than in `respond`.
-        enroll_finish(request, speaker, settings)
+        with_pending_unknown(enroll_finish(request, speaker, settings), memory)
     } else if request.event_type == types::ENROLL_CANCEL {
         enroll_cancel(request, speaker)
     } else if request.event_type == types::LIST_SPEAKER_CLIPS {
@@ -881,6 +881,26 @@ async fn graph_response(
 
 // ---- speaker identification control (speaker_id_plan.md Phase C) ----
 
+/// After a successful enrollment, add `pending_unknown`: how many unattributed
+/// memories name the enrolled voiceprint as their best guess, so the device can say
+/// "I also have N things someone told me that might be yours — review them on the Mac"
+/// (SpeakerScopedMemoryPlan.md §4a). Additive: an older device ignores it.
+fn with_pending_unknown(mut result: WyomingEvent, memory: &MemoryStore) -> WyomingEvent {
+    let ok = result.data.get("ok").and_then(Value::as_bool) == Some(true);
+    let id = result
+        .data
+        .get("speaker_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let (true, Some(id)) = (ok, id) {
+        let n = memory.unknown_count_for_candidate(&id).unwrap_or(0);
+        if let Value::Object(map) = &mut result.data {
+            map.insert("pending_unknown".to_string(), json!(n));
+        }
+    }
+    result
+}
+
 /// The `ambient-speakers` response listing identified speakers, plus `members`: the
 /// household roster's **names only** (no contact PII leaves the Mac), so the device's
 /// enrollment flow can attach a voiceprint to an existing home member.
@@ -1599,6 +1619,32 @@ mod tests {
         )
         .await;
         assert_eq!(disabled.data["ok"], json!(false));
+    }
+
+    #[test]
+    fn successful_enrollment_reports_unattributed_memories_that_may_be_theirs() {
+        use crate::memory::{MemoryKind, MemoryScope, MemorySource, Provenance};
+        let mem = MemoryStore::open_in_memory().unwrap();
+        mem.add_in(
+            MemoryKind::Fact,
+            "The user's name is Brendan",
+            MemorySource::Explicit,
+            &MemoryScope::Unknown {
+                candidate: Some("spk-b".into()),
+            },
+            &Provenance::default(),
+        )
+        .unwrap();
+        let ok = enroll_result(json!({ "ok": true, "phase": "finish", "speaker_id": "spk-b" }));
+        assert_eq!(
+            with_pending_unknown(ok, &mem).data["pending_unknown"],
+            json!(1)
+        );
+        let failed = enroll_result(json!({ "ok": false, "phase": "finish" }));
+        assert!(with_pending_unknown(failed, &mem)
+            .data
+            .get("pending_unknown")
+            .is_none());
     }
 
     #[test]
