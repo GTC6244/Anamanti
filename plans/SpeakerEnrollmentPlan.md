@@ -171,6 +171,13 @@ a deferred polish.
   → `SpeakerService::enroll_into` folds into that profile by id. Tests: Core 560, device Rust
   93, Flutter 182 — green; clippy/analyze clean.
 
+- 2026-10-14: **Live capture cues.** On-device feedback was missing (no sign the wake word
+  was heard). The capture + verify steps now show a status panel driven by the existing turn
+  signals: waiting for the wake word → listening/recording with a live mic meter → checking
+  → sample captured / not used (with the reason) → back to waiting; plus mic-starting,
+  offline, and restarting states. Save/Cancel pinned so they stay on the 960×600 screen.
+  Display-only (no Core / wire change). Flutter 186 green, analyze clean.
+
 ## Owed / not done (hardware-gated — needs the Echo Show + real voices)
 
 1. **Threshold calibration.** `match_threshold`/`new_threshold`/`min_speech_ms` and the

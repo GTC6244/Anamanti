@@ -19,12 +19,14 @@
 // v1 is wake-word-gated per sample: the user says the wake word, then reads a
 // phrase. Commit + cancel are control round-trips through the [OrchestratorClient].
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
+import 'package:anamanti_display/src/ui/enroll_capture_status.dart';
 
 /// Pushes the enrollment display context down to the native engine so the next
 /// voice turn's `audio-start` carries it (`screen.kind = "enroll"`). Production
@@ -55,6 +57,10 @@ const List<String> kEnrollPhrases = [
   'Turn the volume down a little and play something relaxing.',
   'Remind me to call my brother on Saturday afternoon.',
 ];
+
+/// How long a per-sample result ("Sample captured" / "Sample not used") stays on the
+/// capture-status panel before it returns to "Waiting for the wake word".
+const Duration kEnrollResultFlash = Duration(seconds: 3);
 
 enum _Stage { name, capturing, committing, verifying, done }
 
@@ -108,6 +114,11 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
   bool _verifyRecognized = false;
 
   int _lastSeq = 0;
+
+  /// The last sample result, flashed on the capture-status panel for
+  /// [kEnrollResultFlash] (null = no flash). Cleared early when a new capture starts.
+  bool? _flashAccepted;
+  Timer? _flashTimer;
 
   /// Household roster names from the Core (empty while loading / when unreachable /
   /// when the roster is empty — the new-person field always works).
@@ -183,6 +194,7 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
   @override
   void dispose() {
     widget.controller.removeListener(_onControllerTick);
+    _flashTimer?.cancel();
     // Leaving the screen: clear the enroll context so normal turns resume, and discard
     // an uncommitted session on the Core so its buffered samples don't linger.
     widget.setEnrollContext?.call(
@@ -214,6 +226,13 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
 
   void _onControllerTick() {
     final s = widget.controller.state;
+    // A new capture (wake word heard) supersedes the previous sample's result flash.
+    if (_flashAccepted != null &&
+        (s.phase == TurnPhase.listening || s.phase == TurnPhase.connecting) &&
+        mounted) {
+      _flashTimer?.cancel();
+      setState(() => _flashAccepted = null);
+    }
     if (s.enrollSeq == _lastSeq) return;
     _lastSeq = s.enrollSeq;
     if (!mounted) return;
@@ -249,7 +268,12 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
     // A training-sample result.
     final accepted = (data['accepted'] as bool?) ?? false;
     final samples = (data['samples'] as num?)?.toInt() ?? _accepted;
+    _flashTimer?.cancel();
+    _flashTimer = Timer(kEnrollResultFlash, () {
+      if (mounted) setState(() => _flashAccepted = null);
+    });
     setState(() {
+      _flashAccepted = accepted;
       _accepted = samples;
       _message = message.isEmpty
           ? (accepted ? 'Captured a sample.' : 'Sample rejected — try again.')
@@ -475,7 +499,10 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
         ),
       ),
       const SizedBox(height: 12),
-      if (_message.isNotEmpty)
+      _captureStatus(),
+      const SizedBox(height: 12),
+      // While the panel is flashing a sample result it already shows this message.
+      if (_message.isNotEmpty && _flashAccepted == null)
         Text(
           _message,
           key: const Key('enroll-message'),
@@ -483,47 +510,84 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
             color: Theme.of(context).colorScheme.primary,
           ),
         ),
-      const SizedBox(height: 20),
-      FilledButton.icon(
-        key: const Key('enroll-finish'),
-        onPressed: ready && !_busy ? _finish : null,
-        icon: const Icon(Icons.check),
-        label: Text(
-          ready
-              ? 'Save & check voice'
-              : 'Save (need ${kMinEnrollSamples - _accepted} more)',
-        ),
-      ),
-      const SizedBox(height: 8),
-      TextButton(
-        onPressed: () => Navigator.of(context).maybePop(),
-        child: const Text('Cancel'),
-      ),
     ];
+    // Cancel / Save are pinned below the scrolling content so they stay on screen on
+    // the ~960×600 Echo Show even as the status panel and phrase guide grow.
+    final actions = Row(
+      children: [
+        TextButton(
+          onPressed: () => Navigator.of(context).maybePop(),
+          child: const Text('Cancel'),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: FilledButton.icon(
+            key: const Key('enroll-finish'),
+            onPressed: ready && !_busy ? _finish : null,
+            icon: const Icon(Icons.check),
+            label: Text(
+              ready
+                  ? 'Save & check voice'
+                  : 'Save (need ${kMinEnrollSamples - _accepted} more)',
+            ),
+          ),
+        ),
+      ],
+    );
     final guide = _PhraseGuide(
       phrases: [for (var i = 0; i < guideCount; i++) _phraseAt(i)],
       done: _accepted,
     );
-    // Landscape-first: the phrase guide sits beside the capture controls so the
-    // Save button stays above the fold on the 8" screen; narrow screens stack it.
+    // Landscape-first: the phrase guide sits beside the capture controls; narrow
+    // screens stack it under the status panel.
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < 700) {
-          return ListView(
-            children: [
-              ...main.take(main.length - 5),
-              guide,
-              ...main.skip(main.length - 5),
-            ],
-          );
-        }
+        final narrow = constraints.maxWidth < 700;
+        final content = Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: ListView(
+                children: [
+                  ...main,
+                  if (narrow) ...[const SizedBox(height: 12), guide],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            actions,
+          ],
+        );
+        if (narrow) return content;
         return Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(flex: 3, child: ListView(children: main)),
+            Expanded(flex: 3, child: content),
             const SizedBox(width: 24),
             Expanded(flex: 2, child: ListView(children: [guide])),
           ],
+        );
+      },
+    );
+  }
+
+  /// The live capture-status panel (wake word heard / recording / checking / result).
+  /// Scoped to its own [ListenableBuilder] so the frequent mic-level updates rebuild
+  /// only the panel, not the whole step.
+  Widget _captureStatus({bool verifying = false}) {
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final state = widget.controller.state;
+        return EnrollCaptureStatus(
+          cue: enrollCueFor(
+            state,
+            lastResultAccepted: verifying ? null : _flashAccepted,
+          ),
+          micLevel: state.micLevel,
+          wakeWord: widget.wakeWord,
+          verifying: verifying,
+          resultDetail: _flashAccepted == null ? '' : _message,
         );
       },
     );
@@ -546,7 +610,7 @@ class _SpeakerEnrollScreenState extends State<SpeakerEnrollScreen> {
           style: Theme.of(context).textTheme.bodyMedium,
         ),
         const SizedBox(height: 20),
-        const Center(child: Icon(Icons.hearing, size: 64)),
+        _captureStatus(verifying: true),
         const SizedBox(height: 20),
         if (_message.isNotEmpty)
           Text(_message, style: Theme.of(context).textTheme.bodyMedium),

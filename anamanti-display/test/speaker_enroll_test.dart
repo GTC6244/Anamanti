@@ -193,7 +193,7 @@ void main() {
     );
     await tester.pump();
     expect(
-      find.text('too short — please speak a little longer'),
+      find.textContaining('too short — please speak a little longer'),
       findsOneWidget,
     );
     // Still on the capture step (finish disabled).
