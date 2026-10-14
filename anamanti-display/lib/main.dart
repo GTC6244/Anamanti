@@ -96,6 +96,12 @@ class _AmbientHomeState extends State<AmbientHome> {
   AppSettings _settings = const AppSettings();
   AssistantController? _assistant;
 
+  /// [_assistant], as a listenable for Settings: applying a setting there can
+  /// restart the engine (replacing the controller) while Settings stays open, and
+  /// Audio Diagnostics must follow the new one.
+  final ValueNotifier<AssistantController?> _assistantListenable =
+      ValueNotifier<AssistantController?>(null);
+
   /// Proactive-notification channel (Approach A). Rebuilt alongside the assistant so
   /// it re-pins to the selected orchestrator when that changes.
   NotificationController? _notifications;
@@ -398,6 +404,7 @@ class _AmbientHomeState extends State<AmbientHome> {
       _notifications = notifications;
       _weather = weather;
     });
+    _assistantListenable.value = assistant;
   }
 
   /// Apply settings changed on the [SettingsScreen] (already persisted there):
@@ -512,8 +519,17 @@ class _AmbientHomeState extends State<AmbientHome> {
           store: _store,
           client: _client,
           onApplied: _onSettingsApplied,
-          // The live engine controller powers the Audio Diagnostics page's meters.
-          assistant: _assistant,
+          // The live engine controller powers Audio Diagnostics' meters + voice
+          // enrollment; a listenable so it follows engine restarts.
+          assistant: _assistantListenable,
+          // Capture gain + wake-word thresholds apply to the running engine as the
+          // sliders move (no restart).
+          onLiveTune: (gainDb, threshold, activeThreshold) =>
+              updateDiagnosticsTuning(
+                gainDb: gainDb,
+                threshold: threshold,
+                activeThreshold: activeThreshold,
+              ),
           // The updater controller powers the Updates page (null on fdroid).
           updates: _updates,
           // Restart the engine after a Camera grant so the proximity sensor +
@@ -528,6 +544,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   void dispose() {
     _photoRefreshTimer?.cancel();
     _assistant?.dispose();
+    _assistantListenable.dispose();
     _notifications?.dispose();
     _weather?.dispose();
     _updates?.dispose();
