@@ -313,6 +313,19 @@ no longer a `speaker` build feature — so with no `speaker.model_path` set it j
 falls back to the dev-only mock embedder.) To take it from dormant code to a real
 feature:
 
+### 5.0 Speaker-scoped memory — hardware follow-up (SpeakerScopedMemoryPlan.md Phase 0)
+
+The code is in (scopes, resolutions, short-clip match, prompt, admin tags/review). Owed on
+hardware:
+- [ ] Rename the "Christina" voiceprint to **Kristina** (People screen) before/as she enrolls;
+      delete the six single-sample anonymous clusters.
+- [ ] Brendon + Kristina: Settings → People → **Add a voice** → pick their roster chip.
+- [ ] Calibrate `speaker.match_threshold` / `new_threshold` / `min_identify_ms` /
+      `short_clip_margin` from real far-field turns (the Conversations page shows each turn's
+      resolution + confidence).
+- [ ] Review the unknown-speaker queue on the Memory page after deploying (the legacy
+      "The user's name is Brendan" row migrates there).
+
 ### 6a. Real embedding model (Phase E — the blocker for accuracy)
 
 - [ ] Obtain/export an **ECAPA-TDNN** (or WeSpeaker) speaker-embedding model to

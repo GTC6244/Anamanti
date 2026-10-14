@@ -537,7 +537,9 @@ impl VoiceTool for SendPhoneMessage {
                     "recipient": {
                         "type": "string",
                         "description": "The family member to send to, e.g. \"Mom\" (case-insensitive). \
-                            Omit to use the default recipient (for \"text me …\")."
+                            For \"text me …\" pass the name of the person speaking when you \
+                            know who they are; if you don't, ask them instead of guessing. \
+                            Omit only when the household has a single recipient."
                     },
                     "message": {
                         "type": "string",

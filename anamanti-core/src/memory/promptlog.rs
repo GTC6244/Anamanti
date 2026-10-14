@@ -35,12 +35,17 @@ pub struct PromptLogRecord {
     /// The model name, if the backend has one.
     #[serde(default)]
     pub model: Option<String>,
-    /// The identified speaker id for this turn (`spk-…`), or `"household"`.
+    /// The resolved speaker id for this turn (`spk-…`), or `"unknown"` (older records:
+    /// `"household"`, also meaning unattributed).
     #[serde(default)]
     pub speaker_id: String,
     /// The speaker's name, if their cluster has been named.
     #[serde(default)]
     pub speaker_name: Option<String>,
+    /// How confidently the speaker was resolved (`identified | tentative | new |
+    /// unknown`) — which identity line + memory blocks the prompt carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_resolution: Option<String>,
     /// The full assembled system prompt (persona + datetime + identity + memory).
     pub system_prompt: String,
     /// The user message (the turn's final transcript) sent alongside it.
@@ -69,8 +74,9 @@ mod tests {
             ts: 1,
             llm_backend: "mock".to_string(),
             model: None,
-            speaker_id: "household".to_string(),
+            speaker_id: "unknown".to_string(),
             speaker_name: None,
+            speaker_resolution: None,
             system_prompt: prompt.to_string(),
             user_message: "hi".to_string(),
         }

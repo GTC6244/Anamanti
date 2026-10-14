@@ -20,7 +20,7 @@ pub use super::jsonl::{cursor_at_line, LogCursor};
 
 /// One completed conversation turn, as persisted to the JSONL log.
 // `PartialEq` (not `Eq`) because the embedded `TurnTiming` carries an `f64` confidence.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatLogRecord {
     /// Monotonic-ish unique id (`{unix_millis}-{counter}`), stable across restarts
     /// only in ordering, not value. Used as the HelixDB `Turn.ext_id` for
@@ -48,19 +48,51 @@ pub struct ChatLogRecord {
     /// The model name, if the backend has one.
     #[serde(default)]
     pub model: Option<String>,
-    /// The identified speaker id for this turn (`spk-…`), or `"household"` when
-    /// unattributed. Defaulted so pre-speaker-ID logs still parse (speaker_id_plan.md
-    /// §3.4).
+    /// The turn's resolved speaker id (`spk-…`), or `"unknown"` when unattributed.
+    /// Records logged before SpeakerScopedMemoryPlan.md say `"household"` (or `""`
+    /// before speaker ID) for an unattributed turn; readers treat both as unknown.
     #[serde(default)]
     pub speaker_id: String,
-    /// The speaker's name, if their cluster has been named.
+    /// The speaker's name at the time, if their cluster had been named. The admin
+    /// console shows the **live** registry name instead (renames apply retroactively).
     #[serde(default)]
     pub speaker_name: Option<String>,
+    /// How confidently the speaker was resolved: `identified | tentative | new |
+    /// unknown`. Absent on records logged before the field shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_resolution: Option<String>,
+    /// The voice-match cosine for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_confidence: Option<f32>,
+    /// The speaker was carried over from the previous follow-up turn (this turn was
+    /// too short to identify on its own).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub speaker_inherited: bool,
+    /// The speaker was matched by the read-only short-clip path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub speaker_short_clip: bool,
+    /// The memories written this turn **with their scope** (who each is true for).
+    /// Supersedes `memories_written` for the GraphRAG ingester; `memories_written` is
+    /// still written for older readers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memories: Vec<WrittenMemory>,
     /// Per-stage latency breakdown for this turn (STT, System-1 decision, fast-path
     /// fetch, System-2 recall/prompt/LLM, TTS, total). Absent for turns logged before
     /// timing capture shipped (the `/chatlog` UI shows "no timing recorded" for those).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<TurnTiming>,
+}
+
+/// One memory written during a turn, with the scope it was stored in.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WrittenMemory {
+    /// The stored text.
+    pub content: String,
+    /// `person | household | unknown`.
+    pub scope: String,
+    /// The owning person for `person` scope; the best guess for `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
 }
 
 /// Per-stage server-side latency for one turn, in milliseconds. Every field is
@@ -174,6 +206,7 @@ mod tests {
             speaker_id: "household".to_string(),
             speaker_name: None,
             timing: None,
+            ..Default::default()
         }
     }
 

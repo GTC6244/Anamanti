@@ -271,6 +271,36 @@ pub struct DecisionRequest {
     /// widget. Ground truth for the `timer_query` / `timer_cancel` / `stop_dismiss`
     /// decisions (plans/system1-fast-decisions.md §17, §19). Empty when nothing runs.
     pub timers: crate::wyoming::protocol::TimerContext,
+    /// Who is asking (SpeakerScopedMemoryPlan.md §6, decision D4): how confidently the
+    /// voiceprint resolved and the person's household name. Never the internal
+    /// `spk-…` id, the match score or any embedding. A personal fast intent with an
+    /// unknown speaker must defer to System-2.
+    pub speaker: SpeakerSummary,
+}
+
+/// The speaker as System-1 sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeakerSummary {
+    /// `identified | tentative | new | unknown`.
+    pub resolution: String,
+    /// The canonical household name, when the speaker is recognized and named.
+    pub name: Option<String>,
+}
+
+impl Default for SpeakerSummary {
+    fn default() -> Self {
+        Self {
+            resolution: "unknown".to_string(),
+            name: None,
+        }
+    }
+}
+
+impl SpeakerSummary {
+    /// Whether the speaker is recognized (identified or probable).
+    pub fn known(&self) -> bool {
+        matches!(self.resolution.as_str(), "identified" | "tentative")
+    }
 }
 
 /// A resolved fast intent: the routed label plus its calibrated confidence. The
@@ -384,6 +414,7 @@ mod tests {
             transcript: t.to_string(),
             screen: None,
             timers: Default::default(),
+            speaker: Default::default(),
         }
     }
 

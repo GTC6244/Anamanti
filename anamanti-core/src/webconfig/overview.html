@@ -64,7 +64,10 @@
   <section class="card span-6" id="turns">
     <div class="card-head">
       <h2><i data-icon="chat"></i>Last turns</h2>
-      <a class="btn sm ghost" href="/conversations">All conversations<i data-icon="arrow"></i></a>
+      <div class="tools">
+        <a class="btn sm" href="/memory#unknown" id="unkLink" hidden title="Facts said by a voice that could not be identified"><i data-icon="users"></i><span id="unkText"></span></a>
+        <a class="btn sm ghost" href="/conversations">All conversations<i data-icon="arrow"></i></a>
+      </div>
     </div>
     <div id="turnList" class="list"></div>
   </section>
@@ -185,8 +188,12 @@ function renderTurns(o){
     return '<a class="list-row" href="/conversations' + (t.turn_id ? '#' + encodeURIComponent(t.turn_id) : '') + '" style="color:inherit;text-decoration:none">'
       + '<div class="grow"><div class="title ellipsis">' + esc(t.transcript || '(no transcript)') + '</div>'
       + '<div class="meta ellipsis">' + esc(t.reply || '') + '</div></div>'
-      + '<div style="text-align:right;flex:0 0 auto"><div>' + ui.status(k, ui.fmtMs(tot)) + '</div><div class="meta" title="' + escAttr(fmtTime(t.ts)) + '">' + esc(ui.fmtAgo(t.ts)) + (t.speaker && t.speaker !== 'household' && !/^spk-/.test(t.speaker) ? ' · ' + esc(t.speaker) : '') + '</div></div></a>';
+      + '<div style="text-align:right;flex:0 0 auto"><div>' + (t.speaker_tag ? ui.speakerTag(t.speaker_tag, { hints: false }) + ' ' : '') + ui.status(k, ui.fmtMs(tot)) + '</div><div class="meta" title="' + escAttr(fmtTime(t.ts)) + '">' + esc(ui.fmtAgo(t.ts)) + (!t.speaker_tag && t.speaker && t.speaker !== 'household' && !/^spk-/.test(t.speaker) ? ' · ' + esc(t.speaker) : '') + '</div></div></a>';
   }).join('') : '<div class="empty">' + ui.icon('chat') + '<div>No conversations yet.</div></div>';
+  // "N unknown-speaker memories to review" → the Memory page review queue.
+  const n = o.unknown_memories || 0;
+  $('unkLink').hidden = !n;
+  $('unkText').textContent = n + ' unknown-speaker memor' + (n === 1 ? 'y' : 'ies') + ' to review';
 }
 
 async function load(probe){

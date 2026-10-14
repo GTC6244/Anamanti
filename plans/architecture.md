@@ -167,8 +167,29 @@ predictable memory use and no GC pauses under the 1 GB limit.
   recall **falls back to SQLite FTS** (writes are unaffected); `ANAMANTI_MEMORY_BACKEND=sqlite`
   forces FTS. **Per-person:** an opt-in local voiceprint embedder
   (`anamanti-core/src/speaker/`) identifies who is speaking from the utterance PCM and scopes
-  memory writes/recall and the prompt to that person (a shared "household" scope is
-  the floor); see `speaker_id_plan.md`. The embedder is a real ECAPA-TDNN ONNX
+  memory writes/recall and the prompt to that person; see `speaker_id_plan.md`.
+  **Speaker-scoped memory** (`SpeakerScopedMemoryPlan.md`): every memory has a **scope**
+  — `person` (true for one identified person, recalled only for them), `household`
+  (deliberately true for everyone, recalled for every speaker), or `unknown` (said about
+  themselves by a voice that could not be confirmed — **kept but never recalled**, shown
+  in the admin console's review queue for attribution). An unattributed turn is the
+  `unknown` speaker, never the household. Each turn's speaker has a **resolution** —
+  `identified` (match ≥ `match_threshold`), `tentative` (between the thresholds, or a
+  short follow-up turn inheriting the previous identified speaker), `new` (a fresh
+  anonymous cluster) or `unknown`: identified/tentative speakers *read* their own +
+  household memories; only an identified speaker *writes* personal facts to themselves
+  (others' personal facts go to `unknown` with the best guess as `candidate_speaker_id`).
+  Facts are classified personal vs household by `memory::classify_scope` ("I/my/the
+  user" → personal; "we/our/the house/the wifi/everyone" → household). Every memory
+  records provenance (`said_by_speaker_id`, resolution, confidence, `turn_id`). A
+  **read-only short-clip match** (`speaker.min_identify_ms`, default 600 ms, plus
+  `short_clip_margin`) identifies short questions like "who am I?" without creating or
+  updating voiceprints. The prompt's identity line comes from the **voiceprint name**
+  (reconciled to the household roster's spelling — "Christina" → *Kristina*), never from
+  memory text; "who am I?" is a deterministic fast path; "my name is X" only names an
+  identified, still-anonymous voiceprint with the roster spelling (`speakers.name_source`
+  = `enrolled | admin | spoken`; enrollment-by-name never folds into a spoken-named
+  profile). Forgetting a voiceprint moves its memories to `unknown`. The embedder is a real ECAPA-TDNN ONNX
   (WeSpeaker `voxceleb_ECAPA512`, 192-dim, pure-Rust `tract-onnx`) selected at runtime
   by `speaker.model_path`. Beyond passive auto-clustering, the device **People** screen
   has a guided **"Add a voice"** enrollment flow: it stamps an `enroll` display context

@@ -3,6 +3,7 @@
 
 use serde_json::{json, Value};
 
+use super::speakers::{tag_graph_nodes, SpeakerDirectory};
 use super::{fail, parse_json_body, DebugSources};
 use crate::memory::{chatlog, promptlog, MemoryStore};
 
@@ -24,42 +25,69 @@ pub(super) fn limit_param(target: &str) -> usize {
         .unwrap_or(DEFAULT_LOG_LIMIT)
 }
 
-/// `{ ok, records: [ChatLogRecord…] }` for the newest `limit` turns.
-pub(super) fn chatlog_json(debug: &DebugSources, limit: usize) -> String {
+/// `{ ok, records: [ChatLogRecord…] }` for the newest `limit` turns. Each record
+/// keeps every raw field and adds the resolved `speaker` tag, `speaker_override` and
+/// `memories_tagged` ([`SpeakerDirectory::chatlog_record_json`]).
+pub(super) fn chatlog_json(debug: &DebugSources, dir: &SpeakerDirectory, limit: usize) -> String {
     match chatlog::read_tail(&debug.chatlog_path, limit) {
-        Ok(records) => json!({ "ok": true, "records": records }).to_string(),
+        Ok(records) => {
+            let records: Vec<Value> = records.iter().map(|r| dir.chatlog_record_json(r)).collect();
+            json!({ "ok": true, "records": records }).to_string()
+        }
         Err(e) => fail(format!("{e:#}")),
     }
 }
 
-/// `{ ok, records: [PromptLogRecord…] }` for the newest `limit` prompts.
-pub(super) fn prompts_json(debug: &DebugSources, limit: usize) -> String {
+/// `{ ok, records: [PromptLogRecord…] }` for the newest `limit` prompts, each with
+/// its resolved `speaker` tag.
+pub(super) fn prompts_json(debug: &DebugSources, dir: &SpeakerDirectory, limit: usize) -> String {
     match promptlog::read_tail(&debug.promptlog_path, limit) {
-        Ok(records) => json!({ "ok": true, "records": records }).to_string(),
+        Ok(records) => {
+            let records: Vec<Value> = records.iter().map(|r| dir.prompt_record_json(r)).collect();
+            json!({ "ok": true, "records": records }).to_string()
+        }
         Err(e) => fail(format!("{e:#}")),
     }
 }
 
-/// `{ ok, count, db_path, memory_backend, memories: [...] }` — the whole memory store.
-pub(super) fn sqlite_json(memory: &MemoryStore, debug: &DebugSources) -> String {
+/// `{ ok, count, unknown_count, db_path, memory_backend, memories: [...] }` — the whole
+/// memory store. Each row keeps its raw fields and adds the resolved `speaker` (who it
+/// is for), `said_by` (provenance), `candidate`, `scope`, `turn_id` and the write-time
+/// resolution/confidence ([`SpeakerDirectory::memory_fields`]).
+pub(super) fn sqlite_json(
+    memory: &MemoryStore,
+    debug: &DebugSources,
+    dir: &SpeakerDirectory,
+) -> String {
     match memory.list() {
         Ok(items) => {
             let memories: Vec<Value> = items
                 .iter()
                 .map(|m| {
-                    json!({
+                    let mut v = json!({
                         "id": m.id,
                         "kind": m.kind.as_str(),
                         "content": m.content,
                         "source": m.source.as_str(),
                         "created_at": m.created_at,
                         "speaker_id": m.speaker_id,
-                    })
+                    });
+                    if let (Some(obj), Value::Object(extra)) =
+                        (v.as_object_mut(), dir.memory_fields(m))
+                    {
+                        obj.extend(extra);
+                    }
+                    v
                 })
                 .collect();
+            let unknown = items
+                .iter()
+                .filter(|m| m.scope == crate::memory::ScopeKind::Unknown)
+                .count();
             json!({
                 "ok": true,
                 "count": memories.len(),
+                "unknown_count": unknown,
                 "db_path": debug.db_path.display().to_string(),
                 "memory_backend": debug.memory_backend,
                 "memories": memories,
@@ -75,7 +103,10 @@ pub(super) fn sqlite_json(memory: &MemoryStore, debug: &DebugSources) -> String 
 /// message distinguishes "not configured for HelixDB" from "configured for HelixDB
 /// but init failed, so recall fell back to SQLite FTS" (commonly a missing
 /// `OPENAI_API_KEY`), so the page doesn't tell you to set a value that is already set.
-pub(super) async fn helix_json(debug: &DebugSources) -> String {
+///
+/// Sampled nodes that carry a `speaker_id` (User / Turn / Memory) gain a resolved
+/// `$speaker` tag when a directory is given, so the graph view shows names.
+pub(super) async fn helix_json(debug: &DebugSources, dir: Option<&SpeakerDirectory>) -> String {
     let Some(graph) = &debug.graph else {
         let message = if debug.memory_backend.eq_ignore_ascii_case("helix") {
             "GraphRAG (HelixDB) is configured (memory_backend=\"helix\") but failed to \
@@ -98,10 +129,13 @@ pub(super) async fn helix_json(debug: &DebugSources) -> String {
         Ok(v) => v,
         Err(e) => return fail(format!("{e:#}")),
     };
-    let nodes = match graph.sample(50).await {
-        Ok(v) => v,
+    let mut nodes = match graph.sample(50).await {
+        Ok(v) => serde_json::to_value(v).unwrap_or(Value::Null),
         Err(e) => return fail(format!("{e:#}")),
     };
+    if let Some(dir) = dir {
+        tag_graph_nodes(dir, &mut nodes);
+    }
     json!({
         "ok": true,
         "enabled": true,

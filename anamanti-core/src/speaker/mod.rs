@@ -23,13 +23,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
-use crate::memory::{MemoryStore, Recall};
+use crate::memory::{FactScope, Forgetter, MemoryScope, MemoryStore, Provenance, Recall};
 use crate::vecmath::{cosine, l2_normalize};
 
 pub use aliases::{AliasMap, SpeakerAliases};
 pub use clips::{ClipInfo, ClipStore};
 pub use embed::{MockSpeakerEmbedder, SpeakerEmbedder};
-pub use registry::{Attribution, Identified, SpeakerProfile, SpeakerRegistry};
+pub use registry::{Attribution, Identified, NameSource, SpeakerProfile, SpeakerRegistry};
 
 /// Minimum accepted samples before a guided enrollment can be committed to a
 /// profile (SpeakerEnrollmentPlan.md Phase 2). A few phrases give the centroid
@@ -43,38 +43,170 @@ pub const MIN_ENROLL_SAMPLES: usize = 3;
 /// calibrate alongside the identification thresholds on real hardware.
 pub const ENROLL_CONSISTENCY_MIN: f32 = 0.30;
 
-/// Reserved `speaker_id` for turns we don't attribute to a specific person
-/// (too little voiced audio, or speaker ID disabled). Preserves the pre-feature
-/// "one shared household" behavior as the floor; memory scoped to it is shared.
+/// The shared-household sentinel. Since SpeakerScopedMemoryPlan.md this is a memory /
+/// graph **scope** (facts deliberately true for everyone), never a speaker: an
+/// unattributed turn is [`UNKNOWN_SPEAKER`]. Legacy chat-log records and graph nodes
+/// that carry it were unattributed turns and are read as unknown.
 pub const HOUSEHOLD_SPEAKER: &str = "household";
+
+/// Reserved `speaker_id` for a turn whose speaker could not be determined (too little
+/// voiced audio, no confident match, identification disabled or failed). Anything such
+/// a turn says about its speaker is kept but never recalled for anyone.
+pub const UNKNOWN_SPEAKER: &str = "unknown";
+
+/// How confidently a turn's speaker was resolved (SpeakerScopedMemoryPlan.md §2.2).
+/// Reads (recall) are allowed from `Identified` and `Tentative`; personal writes go to
+/// the person only when `Identified` — otherwise to the unknown scope with the best
+/// guess as a candidate (decision D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeakerResolution {
+    /// A confident voiceprint match (cosine ≥ the match threshold).
+    Identified,
+    /// A probable match (between the new and match thresholds), or a short follow-up
+    /// turn inheriting the previous turn's identified speaker.
+    Tentative,
+    /// No match: this utterance started a brand-new anonymous cluster.
+    New,
+    /// Could not be determined.
+    Unknown,
+}
+
+impl SpeakerResolution {
+    /// Stable wire/storage label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SpeakerResolution::Identified => "identified",
+            SpeakerResolution::Tentative => "tentative",
+            SpeakerResolution::New => "new",
+            SpeakerResolution::Unknown => "unknown",
+        }
+    }
+
+    /// Parse a stored label (`None` for anything unrecognized).
+    pub fn parse(s: &str) -> Option<SpeakerResolution> {
+        match s {
+            "identified" => Some(SpeakerResolution::Identified),
+            "tentative" => Some(SpeakerResolution::Tentative),
+            "new" => Some(SpeakerResolution::New),
+            "unknown" => Some(SpeakerResolution::Unknown),
+            _ => None,
+        }
+    }
+}
 
 /// The outcome of identifying a turn's speaker: who they are and how sure we are.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpeakerContext {
-    /// Stable speaker id (`spk-…`), or [`HOUSEHOLD_SPEAKER`] when unattributed.
+    /// Stable speaker id (`spk-…`), or [`UNKNOWN_SPEAKER`] when unattributed.
     pub speaker_id: String,
     /// The person's name, if their cluster has been named; `None` while anonymous.
     pub name: Option<String>,
+    /// Where that name came from (enrollment / admin / spoken).
+    pub name_source: Option<NameSource>,
     /// True when this utterance created a brand-new anonymous cluster.
     pub is_new: bool,
-    /// Cosine similarity to the matched profile (0.0 for a new cluster/household).
+    /// Cosine similarity to the matched profile (0.0 for a new cluster/unknown).
     pub confidence: f32,
+    /// How confidently the speaker was resolved.
+    pub resolution: SpeakerResolution,
+    /// True when the identity was carried over from the previous turn of a follow-up
+    /// conversation (this turn was too short to identify on its own).
+    pub inherited: bool,
+    /// True when the turn was identified by the read-only short-clip path (too short
+    /// to create or update a voiceprint).
+    pub short_clip: bool,
 }
 
 impl SpeakerContext {
-    /// The unattributed/shared-household context (identification off or too short).
-    pub fn household() -> Self {
+    /// The unattributed context (identification off, failed, or too little audio).
+    pub fn unknown() -> Self {
         Self {
-            speaker_id: HOUSEHOLD_SPEAKER.to_string(),
+            speaker_id: UNKNOWN_SPEAKER.to_string(),
             name: None,
+            name_source: None,
             is_new: false,
             confidence: 0.0,
+            resolution: SpeakerResolution::Unknown,
+            inherited: false,
+            short_clip: false,
         }
     }
 
-    /// Whether this is the shared/unattributed household context.
-    pub fn is_household(&self) -> bool {
-        self.speaker_id == HOUSEHOLD_SPEAKER
+    /// A context for a known profile at the given resolution (tests and the
+    /// follow-up inheritance path).
+    pub fn known(
+        speaker_id: impl Into<String>,
+        name: Option<String>,
+        resolution: SpeakerResolution,
+        confidence: f32,
+    ) -> Self {
+        Self {
+            speaker_id: speaker_id.into(),
+            name,
+            name_source: None,
+            is_new: resolution == SpeakerResolution::New,
+            confidence,
+            resolution,
+            inherited: false,
+            short_clip: false,
+        }
+    }
+
+    /// Whether the speaker could not be determined at all.
+    pub fn is_unknown(&self) -> bool {
+        self.resolution == SpeakerResolution::Unknown
+    }
+
+    /// The person whose memories this turn may **read**: the speaker for an identified
+    /// or probable match; `None` (household facts only) for a new or unknown voice.
+    pub fn reader(&self) -> Option<&str> {
+        match self.resolution {
+            SpeakerResolution::Identified | SpeakerResolution::Tentative => {
+                Some(self.speaker_id.as_str())
+            }
+            SpeakerResolution::New | SpeakerResolution::Unknown => None,
+        }
+    }
+
+    /// The best-guess person behind this turn, whatever the confidence (`None` when
+    /// unknown) — recorded as provenance / an unknown fact's candidate.
+    pub fn best_guess(&self) -> Option<&str> {
+        (self.resolution != SpeakerResolution::Unknown && self.speaker_id != UNKNOWN_SPEAKER)
+            .then_some(self.speaker_id.as_str())
+    }
+
+    /// Where a fact of the given [`FactScope`] said in this turn is written: household
+    /// facts to the household; personal ones to the speaker only when confidently
+    /// identified, else to the unknown scope with the best guess as candidate (D1).
+    pub fn write_scope(&self, fact: FactScope) -> MemoryScope {
+        match (fact, self.resolution) {
+            (FactScope::Household, _) => MemoryScope::Household,
+            (FactScope::Personal, SpeakerResolution::Identified) => {
+                MemoryScope::Person(self.speaker_id.clone())
+            }
+            (FactScope::Personal, _) => MemoryScope::Unknown {
+                candidate: self.best_guess().map(str::to_string),
+            },
+        }
+    }
+
+    /// Who is asking when this turn says "forget …".
+    pub fn forgetter(&self) -> Forgetter<'_> {
+        match self.resolution {
+            SpeakerResolution::Identified => Forgetter::Identified(&self.speaker_id),
+            SpeakerResolution::Tentative => Forgetter::Tentative(&self.speaker_id),
+            SpeakerResolution::New | SpeakerResolution::Unknown => Forgetter::Unknown,
+        }
+    }
+
+    /// This turn's provenance record for a memory it writes.
+    pub fn provenance(&self, turn_id: &str) -> Provenance {
+        Provenance {
+            said_by: self.best_guess().map(str::to_string),
+            resolution: Some(self.resolution.as_str().to_string()),
+            confidence: Some(self.confidence),
+            turn_id: Some(turn_id.to_string()),
+        }
     }
 }
 
@@ -87,10 +219,17 @@ pub struct SpeakerThresholds {
     /// Cosine in `[new_threshold, match_threshold)` ⇒ attribute to the best match
     /// for this turn but **don't** mutate its centroid; below ⇒ new cluster.
     pub new_threshold: f32,
-    /// Minimum utterance length (samples at 16 kHz) to attempt identification.
-    /// Shorter utterances fall back to [`HOUSEHOLD_SPEAKER`] so barge-in / TTS
+    /// Minimum utterance length (samples at 16 kHz) to **create or update** a
+    /// voiceprint. Shorter utterances never touch the registry, so barge-in / TTS
     /// self-triggers don't pollute clusters.
     pub min_speech_samples: usize,
+    /// Minimum utterance length (samples) for a **read-only** short-clip match —
+    /// between this and `min_speech_samples` the speaker is matched against existing
+    /// voiceprints without creating or updating anything. `0` disables the path.
+    pub min_identify_samples: usize,
+    /// Extra cosine a short-clip match needs above `match_threshold` to count as
+    /// [`SpeakerResolution::Identified`]; otherwise it is at most tentative.
+    pub short_clip_margin: f32,
 }
 
 impl Default for SpeakerThresholds {
@@ -100,23 +239,40 @@ impl Default for SpeakerThresholds {
             new_threshold: 0.40,
             // 1200 ms × 16 samples/ms at 16 kHz.
             min_speech_samples: 1200 * 16,
+            // 600 ms.
+            min_identify_samples: 600 * 16,
+            short_clip_margin: 0.10,
         }
     }
 }
 
 impl SpeakerThresholds {
-    /// Build thresholds, treating a non-positive `min_speech_ms` as the default.
+    /// Build thresholds, treating a non-positive `min_speech_ms` as the default. The
+    /// short-clip path keeps its defaults (see [`with_short_clip`](Self::with_short_clip)).
     pub fn from_ms(match_threshold: f32, new_threshold: f32, min_speech_ms: u32) -> Self {
         let d = Self::default();
+        let min_speech_samples = if min_speech_ms == 0 {
+            d.min_speech_samples
+        } else {
+            min_speech_ms as usize * (embed::SAMPLE_RATE as usize / 1000)
+        };
         Self {
             match_threshold,
             new_threshold,
-            min_speech_samples: if min_speech_ms == 0 {
-                d.min_speech_samples
-            } else {
-                min_speech_ms as usize * (embed::SAMPLE_RATE as usize / 1000)
-            },
+            min_speech_samples,
+            min_identify_samples: d.min_identify_samples.min(min_speech_samples),
+            short_clip_margin: d.short_clip_margin,
         }
+    }
+
+    /// Set the read-only short-clip floor (`min_identify_ms`; `0` disables the path)
+    /// and the extra margin a short clip needs to count as identified.
+    pub fn with_short_clip(mut self, min_identify_ms: u32, margin: f32) -> Self {
+        self.min_identify_samples = (min_identify_ms as usize
+            * (embed::SAMPLE_RATE as usize / 1000))
+            .min(self.min_speech_samples);
+        self.short_clip_margin = margin.max(0.0);
+        self
     }
 }
 
@@ -479,10 +635,14 @@ impl SpeakerService {
 
     /// Identify (and, on a confident match, reinforce) the speaker of `pcm`.
     ///
-    /// - too little audio ⇒ [`SpeakerContext::household`];
-    /// - cosine ≥ `match_threshold` ⇒ known speaker, centroid updated;
-    /// - `new_threshold ≤ cosine < match_threshold` ⇒ tentative match, no update;
-    /// - otherwise ⇒ a new anonymous cluster is created.
+    /// - less than `min_identify_samples` of audio ⇒ [`SpeakerResolution::Unknown`];
+    /// - a **short clip** (`min_identify_samples ≤ len < min_speech_samples`) ⇒ a
+    ///   read-only match that never creates or updates a voiceprint and saves no clip:
+    ///   cosine ≥ `match_threshold + short_clip_margin` ⇒ identified, ≥ `new_threshold`
+    ///   ⇒ tentative, else unknown (SpeakerScopedMemoryPlan.md §4.1);
+    /// - otherwise cosine ≥ `match_threshold` ⇒ identified, centroid updated;
+    ///   `new_threshold ≤ cosine < match_threshold` ⇒ tentative, no update; else a new
+    ///   anonymous cluster is created ([`SpeakerResolution::New`]).
     ///
     /// The match-or-create decision is one registry transaction
     /// ([`SpeakerRegistry::identify_or_create`]), so concurrent turns from the same
@@ -490,25 +650,67 @@ impl SpeakerService {
     /// inference + SQLite + a clip write): async callers use
     /// [`identify_and_attribute_blocking`](Self::identify_and_attribute_blocking).
     pub fn identify_and_attribute(&self, pcm: &[i16]) -> Result<SpeakerContext> {
-        if pcm.len() < self.thresholds.min_speech_samples {
-            return Ok(SpeakerContext::household());
+        let t = &self.thresholds;
+        if pcm.len() < t.min_speech_samples {
+            if t.min_identify_samples == 0 || pcm.len() < t.min_identify_samples {
+                return Ok(SpeakerContext::unknown());
+            }
+            return self.identify_short_clip(pcm);
         }
 
         let embedding = self.embedder.embed(pcm)?;
-        let found = self.registry.identify_or_create(
-            &embedding,
-            self.thresholds.match_threshold,
-            self.thresholds.new_threshold,
-        )?;
+        let found =
+            self.registry
+                .identify_or_create(&embedding, t.match_threshold, t.new_threshold)?;
         // Keep this utterance in the rolling clip window so a human can play the
         // voice back: for a brand-new cluster it is exactly what's needed to put a
         // name to the anonymous "Speaker N"; a known person accumulates fresh ones.
         self.save_clip(&found.id, pcm);
+        let resolution = match found.attribution {
+            Attribution::Matched => SpeakerResolution::Identified,
+            Attribution::Tentative => SpeakerResolution::Tentative,
+            Attribution::Created => SpeakerResolution::New,
+        };
         Ok(SpeakerContext {
             speaker_id: found.id,
             name: found.name,
-            is_new: found.attribution == Attribution::Created,
+            name_source: found.name_source,
+            is_new: resolution == SpeakerResolution::New,
             confidence: found.score,
+            resolution,
+            inherited: false,
+            short_clip: false,
+        })
+    }
+
+    /// The read-only short-clip match behind [`identify_and_attribute`]: nearest
+    /// voiceprint, no registry writes, no clip.
+    fn identify_short_clip(&self, pcm: &[i16]) -> Result<SpeakerContext> {
+        let t = &self.thresholds;
+        let embedding = self.embedder.embed(pcm)?;
+        let Some((id, score)) = self.registry.identify(&embedding)? else {
+            return Ok(SpeakerContext::unknown());
+        };
+        let resolution = if score >= t.match_threshold + t.short_clip_margin {
+            SpeakerResolution::Identified
+        } else if score >= t.new_threshold {
+            SpeakerResolution::Tentative
+        } else {
+            let mut ctx = SpeakerContext::unknown();
+            ctx.short_clip = true;
+            ctx.confidence = score;
+            return Ok(ctx);
+        };
+        let profile = self.registry.get(&id)?;
+        Ok(SpeakerContext {
+            name: profile.as_ref().and_then(|p| p.name.clone()),
+            name_source: profile.and_then(|p| p.name_source),
+            speaker_id: id,
+            is_new: false,
+            confidence: score,
+            resolution,
+            inherited: false,
+            short_clip: true,
         })
     }
 
@@ -558,11 +760,13 @@ mod tests {
     }
 
     #[test]
-    fn short_utterance_is_household() {
+    fn very_short_utterance_is_unknown() {
         let svc = service();
-        // 300 ms < the 1200 ms floor.
+        // 300 ms < the 600 ms identify floor.
         let ctx = svc.identify_and_attribute(&tone(180.0, 300)).unwrap();
-        assert!(ctx.is_household());
+        assert!(ctx.is_unknown());
+        assert_eq!(ctx.speaker_id, UNKNOWN_SPEAKER);
+        assert_eq!(ctx.reader(), None);
         assert_eq!(
             svc.registry().count().unwrap(),
             0,
@@ -571,11 +775,94 @@ mod tests {
     }
 
     #[test]
+    fn short_clip_matches_read_only() {
+        let svc = service();
+        let first = svc.identify_and_attribute(&tone(180.0, 1500)).unwrap();
+        assert_eq!(first.resolution, SpeakerResolution::New);
+        let samples = svc
+            .registry()
+            .get(&first.speaker_id)
+            .unwrap()
+            .unwrap()
+            .samples;
+
+        // An 800 ms "who am I?" from the same voice: matched, but nothing is written.
+        let short = svc.identify_and_attribute(&tone(180.0, 800)).unwrap();
+        assert!(short.short_clip);
+        assert_eq!(short.speaker_id, first.speaker_id);
+        assert!(matches!(
+            short.resolution,
+            SpeakerResolution::Identified | SpeakerResolution::Tentative
+        ));
+        assert_eq!(svc.registry().count().unwrap(), 1, "no new cluster");
+        assert_eq!(
+            svc.registry()
+                .get(&first.speaker_id)
+                .unwrap()
+                .unwrap()
+                .samples,
+            samples,
+            "centroid untouched"
+        );
+
+        // A short clip from a different voice never creates a cluster.
+        let other = svc.identify_and_attribute(&tone(600.0, 800)).unwrap();
+        assert!(other.is_unknown() || other.resolution == SpeakerResolution::Tentative);
+        assert_eq!(svc.registry().count().unwrap(), 1);
+
+        // Disabled short-clip path → unknown.
+        let off = SpeakerService::new(
+            Arc::new(MockSpeakerEmbedder::default()),
+            SpeakerRegistry::open_in_memory().unwrap(),
+            SpeakerThresholds::default().with_short_clip(0, 0.1),
+        );
+        off.identify_and_attribute(&tone(180.0, 1500)).unwrap();
+        assert!(off
+            .identify_and_attribute(&tone(180.0, 800))
+            .unwrap()
+            .is_unknown());
+    }
+
+    #[test]
+    fn writes_go_to_the_person_only_when_identified() {
+        use crate::memory::{FactScope, MemoryScope};
+        let mut ctx = SpeakerContext::known("spk-b", None, SpeakerResolution::Identified, 0.8);
+        assert_eq!(
+            ctx.write_scope(FactScope::Personal),
+            MemoryScope::Person("spk-b".into())
+        );
+        assert_eq!(
+            ctx.write_scope(FactScope::Household),
+            MemoryScope::Household
+        );
+        assert_eq!(ctx.reader(), Some("spk-b"));
+        for r in [SpeakerResolution::Tentative, SpeakerResolution::New] {
+            ctx.resolution = r;
+            assert_eq!(
+                ctx.write_scope(FactScope::Personal),
+                MemoryScope::Unknown {
+                    candidate: Some("spk-b".into())
+                },
+                "{r:?} writes are unattributed with a candidate"
+            );
+        }
+        ctx.resolution = SpeakerResolution::Tentative;
+        assert_eq!(ctx.reader(), Some("spk-b"), "a probable match may read");
+        ctx.resolution = SpeakerResolution::New;
+        assert_eq!(ctx.reader(), None);
+        assert_eq!(
+            SpeakerContext::unknown().write_scope(FactScope::Personal),
+            MemoryScope::Unknown { candidate: None }
+        );
+    }
+
+    #[test]
     fn first_voice_creates_cluster_then_re_identifies_stably() {
         let svc = service();
         let first = svc.identify_and_attribute(&tone(180.0, 1500)).unwrap();
         assert!(first.is_new);
-        assert!(!first.is_household());
+        assert!(!first.is_unknown());
+        assert_eq!(first.resolution, SpeakerResolution::New);
         assert!(first.name.is_none());
 
         // Same voice returns → matched to the same cluster, not a new one.
@@ -875,9 +1162,11 @@ mod tests {
         assert_eq!(gone.memories, 1);
         assert_eq!(svc.registry().count().unwrap(), 0);
         assert!(svc.list_clips(&keep.speaker_id).unwrap().is_empty());
-        // The memory survives, now shared (visible in household scope).
+        // The memory survives but is unattributed now: kept for review, recalled for
+        // no one (a forgotten person's facts must not become the household's).
+        assert!(memory.search_scoped("tea", None, 5).unwrap().is_empty());
         assert!(memory
-            .search_scoped("tea", None, 5)
+            .list_unknown()
             .unwrap()
             .iter()
             .any(|m| m.content == "likes tea"));

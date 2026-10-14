@@ -55,7 +55,11 @@ seam alongside `wyoming` and `whisper-rs`; boot-time `stt.engine=elevenlabs`, th
 identifies who is speaking on **every** turn's voiced PCM — not the wake word — and
 scopes memory/prompt per person; opt-in via `speaker.enabled`+`speaker.model_path`, with
 a device **People** screen whose guided "Add a voice" flow (existing household member or new person) actively enrolls + verifies a
-voice via an `enroll` display context on the ordinary turn — no second audio path).
+voice via an `enroll` display context on the ordinary turn — no second audio path), and
+[`SpeakerScopedMemoryPlan.md`](./plans/SpeakerScopedMemoryPlan.md) (memory scopes
+`person` / `household` / `unknown`: a fact said by an unrecognized voice is kept but never
+recalled for anyone; per-turn speaker resolution `identified|tentative|new|unknown`;
+"who am I?" answered from the voiceprint; admin-console speaker tags + unknown-fact review).
 
 ---
 

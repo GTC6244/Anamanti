@@ -37,6 +37,7 @@ impl Pipeline {
         &self,
         ctx: &mut TurnCtx<'_>,
         transcript: &str,
+        speaker: &crate::speaker::SpeakerContext,
     ) -> Option<(String, Delivery)> {
         let engine_handle = ctx.runtime.system1.engine.clone();
         let engine = engine_handle.name().to_string();
@@ -51,6 +52,16 @@ impl Pipeline {
             // Background timer state (running/remaining/labels), ground truth for the
             // timer_query / timer_cancel / stop_dismiss decisions (§17, §19).
             timers: ctx.device_ctx.timers.clone(),
+            // Who is asking (decision D4) — resolution + household name only.
+            speaker: crate::system1::SpeakerSummary {
+                resolution: speaker.resolution.as_str().to_string(),
+                name: speaker.reader().and(speaker.name.as_deref()).map(|n| {
+                    ctx.runtime
+                        .household
+                        .member_matching_spoken(n)
+                        .map_or_else(|| n.trim().to_string(), |m| m.name.trim().to_string())
+                }),
+            },
         };
         log::info!("system1 ({engine}) call: deciding on {transcript:?}");
         let t0 = Instant::now();

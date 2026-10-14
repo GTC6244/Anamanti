@@ -10,7 +10,8 @@
 //!
 //! - `merge(keep, drop)` records `drop → keep` and re-points any alias that pointed at
 //!   `drop` (so chains stay one hop);
-//! - `delete(id)` records `id → NULL` (= the shared household) and re-points aliases
+//! - `delete(id)` records `id → NULL` (= the unknown speaker: a forgotten person's
+//!   history is kept but attributed to no one) and re-points aliases
 //!   that pointed at `id` likewise.
 //!
 //! The alias is written in the same transaction as the registry change. Consumers:
@@ -27,7 +28,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 
-use super::HOUSEHOLD_SPEAKER;
+use super::UNKNOWN_SPEAKER;
 
 /// Create the alias table if it does not exist (idempotent).
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<()> {
@@ -43,7 +44,7 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<()> {
     .context("initializing speaker alias schema")
 }
 
-/// Record `from → to` (`None` = the household) and re-point every alias that pointed
+/// Record `from → to` (`None` = the unknown speaker) and re-point every alias that pointed
 /// at `from`. Call inside the registry transaction that merges/deletes `from`.
 pub(crate) fn record(conn: &Connection, from: &str, to: Option<&str>) -> Result<()> {
     conn.execute(
@@ -69,27 +70,27 @@ pub(crate) fn load(conn: &Connection) -> Result<AliasMap> {
 }
 
 /// A snapshot of the alias table: `from_id → Some(to_id)` for a merge,
-/// `from_id → None` for a forgotten speaker (now the household).
+/// `from_id → None` for a forgotten speaker (now the unknown speaker).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AliasMap(HashMap<String, Option<String>>);
 
 impl AliasMap {
     /// The surviving id for `id`: itself when it has no alias, the merge target, or
-    /// [`HOUSEHOLD_SPEAKER`] for a forgotten speaker. Follows (bounded) chains, though
+    /// [`UNKNOWN_SPEAKER`] for a forgotten speaker. Follows (bounded) chains, though
     /// [`record`] keeps them one hop.
     pub fn resolve<'a>(&'a self, id: &'a str) -> &'a str {
         let mut cur = id;
         for _ in 0..8 {
             match self.0.get(cur) {
                 Some(Some(next)) if next != cur => cur = next,
-                Some(None) => return HOUSEHOLD_SPEAKER,
+                Some(None) => return UNKNOWN_SPEAKER,
                 _ => break,
             }
         }
         cur
     }
 
-    /// Every alias as `(from, Some(to))` / `(from, None)` (household), in no
+    /// Every alias as `(from, Some(to))` / `(from, None)` (unknown), in no
     /// particular order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v.as_deref()))
@@ -122,6 +123,28 @@ impl SpeakerAliases {
     pub fn load(&self) -> Result<AliasMap> {
         load(&self.conn.lock().unwrap())
     }
+
+    /// The admin console's per-turn speaker corrections (`turn_id → speaker_id`, the
+    /// memory store's `turn_attribution_overrides` table in the same database). Empty
+    /// when the table does not exist yet.
+    pub fn load_turn_overrides(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'turn_attribution_overrides'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)?;
+        if !exists {
+            return Ok(HashMap::new());
+        }
+        let mut stmt =
+            conn.prepare("SELECT turn_id, speaker_id FROM turn_attribution_overrides")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
 }
 
 #[cfg(test)]
@@ -141,10 +164,10 @@ mod tests {
     fn resolve_follows_merges_and_forgets() {
         let m = map(&[("a", Some("b")), ("c", None), ("d", Some("a"))]);
         assert_eq!(m.resolve("a"), "b");
-        assert_eq!(m.resolve("c"), HOUSEHOLD_SPEAKER);
+        assert_eq!(m.resolve("c"), UNKNOWN_SPEAKER);
         assert_eq!(m.resolve("d"), "b", "a chain is followed");
         assert_eq!(m.resolve("z"), "z", "unknown ids are themselves");
-        assert_eq!(m.resolve(HOUSEHOLD_SPEAKER), HOUSEHOLD_SPEAKER);
+        assert_eq!(m.resolve(UNKNOWN_SPEAKER), UNKNOWN_SPEAKER);
         // A malformed cycle can't spin.
         let cyc = map(&[("x", Some("y")), ("y", Some("x"))]);
         let _ = cyc.resolve("x");
@@ -160,10 +183,10 @@ mod tests {
         record(&conn, "b", Some("c")).unwrap();
         let m = load(&conn).unwrap();
         assert_eq!(m, map(&[("a", Some("c")), ("b", Some("c"))]));
-        // c is forgotten: everything that was c is now the household.
+        // c is forgotten: everything that was c is now the unknown speaker.
         record(&conn, "c", None).unwrap();
         let m = load(&conn).unwrap();
         assert_eq!(m, map(&[("a", None), ("b", None), ("c", None)]));
-        assert_eq!(m.resolve("a"), HOUSEHOLD_SPEAKER);
+        assert_eq!(m.resolve("a"), UNKNOWN_SPEAKER);
     }
 }

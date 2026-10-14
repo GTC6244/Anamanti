@@ -125,6 +125,8 @@ impl BootInfo {
                 "match_threshold": c.speaker.match_threshold,
                 "new_threshold": c.speaker.new_threshold,
                 "min_speech_ms": c.speaker.min_speech_ms,
+                "min_identify_ms": c.speaker.min_identify_ms,
+                "short_clip_margin": c.speaker.short_clip_margin,
             },
             "memory": {
                 "memory_backend": match c.memory_backend {
@@ -570,16 +572,19 @@ pub(super) async fn overview_json(s: &AppServices, probe_services: bool) -> Stri
     let devices = s.notify.connected_devices();
 
     // ---- Recent turns -----------------------------------------------------------
+    let speakers = super::speakers::SpeakerDirectory::build(s);
     let turns: Vec<Value> = chatlog::read_tail(&s.debug.chatlog_path, 20)
         .unwrap_or_default()
         .into_iter()
         .map(|r| {
+            let speaker_tag = speakers.turn_tag(&r);
             let t = r.timing.unwrap_or_default();
             json!({
                 "id": r.id,
                 "turn_id": r.turn_id,
                 "ts": r.ts,
                 "speaker": r.speaker_name.clone().unwrap_or_else(|| r.speaker_id.clone()),
+                "speaker_tag": speaker_tag,
                 "transcript": clip(&r.transcript, 140),
                 "reply": clip(&r.reply, 160),
                 "llm_backend": r.llm_backend,
@@ -612,6 +617,8 @@ pub(super) async fn overview_json(s: &AppServices, probe_services: bool) -> Stri
         "integrations": integrations,
         "devices": devices,
         "turns": turns,
+        // Unknown-speaker memories awaiting review on /memory#unknown.
+        "unknown_memories": s.memory().list_unknown().map(|v| v.len()).unwrap_or(0),
         "latency": {
             "count": totals.len(),
             "p50_ms": percentile(&totals, 50),

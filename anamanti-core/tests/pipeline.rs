@@ -17,11 +17,13 @@ use anamanti_core::config::FollowUpConfig;
 use anamanti_core::llm::mock::MockLlm;
 use anamanti_core::llm::{LlmBackend, LlmTurn, ReplyStream};
 use anamanti_core::memory::chatlog::now_secs;
-use anamanti_core::memory::{ChatLog, ChatLogRecord, MemoryKind, MemoryStore};
+use anamanti_core::memory::{ChatLog, ChatLogRecord, MemoryKind, MemoryScope, MemoryStore};
 use anamanti_core::orchestrator::{Pipeline, ServiceConnector, TurnEvent, TurnOutcome, TurnStart};
 use anamanti_core::server;
+use anamanti_core::settings::{Household, HouseholdMember};
 use anamanti_core::speaker::{
-    MockSpeakerEmbedder, SpeakerContext, SpeakerRegistry, SpeakerService, SpeakerThresholds,
+    MockSpeakerEmbedder, SpeakerContext, SpeakerRegistry, SpeakerResolution, SpeakerService,
+    SpeakerThresholds,
 };
 use anamanti_core::wyoming::protocol::{read_event, types, write_event, AudioFormat, WyomingEvent};
 use anamanti_core::wyoming::DynConnection;
@@ -853,28 +855,47 @@ async fn per_person_identification_scopes_memory_and_context() {
     )
     .with_speaker(speaker.clone());
 
-    // Turn 1 — Sam introduces himself (low pitch). A new cluster is minted and the
-    // inferred name fact is attributed to it.
-    let (_, ev1) = run_voiced_turn(&pipeline, "my name is Sam", 180.0).await;
+    // Turn 1 — a brand-new voice says its name. A cluster is minted, but a new voice
+    // is not a confident identity: the name fact is kept *unattributed* (best guess =
+    // the new cluster) and the voiceprint is not named by speech.
+    let (reply1, ev1) = run_voiced_turn(&pipeline, "my name is Sam", 180.0).await;
     let sam = speaker_of(&ev1);
     assert!(sam.is_new, "first voice creates a cluster");
-    assert!(!sam.is_household());
+    assert_eq!(sam.resolution, SpeakerResolution::New);
+    assert!(reply1.contains("I don't know your voice yet"), "{reply1:?}");
+    assert_eq!(
+        speaker
+            .registry()
+            .get(&sam.speaker_id)
+            .unwrap()
+            .unwrap()
+            .name,
+        None
+    );
+    let pending = memory.list_unknown().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].content, "The user's name is Sam");
+    assert_eq!(
+        pending[0].candidate_speaker_id.as_deref(),
+        Some(sam.speaker_id.as_str())
+    );
 
-    // Name the cluster (Phase C ships the voice/settings UX; here we set it directly).
+    // Name the cluster on the People screen (an admin rename).
     speaker.registry().rename(&sam.speaker_id, "Sam").unwrap();
 
-    // Turn 2 — same voice, a preference. Matches Sam (not a new cluster) and the
-    // reply's system prompt now greets him by name.
+    // Turn 2 — same voice, confidently identified: the preference is Sam's, and the
+    // system prompt greets him by name.
     let (reply2, ev2) = run_voiced_turn(&pipeline, "I like jazz", 180.0).await;
     let sam2 = speaker_of(&ev2);
     assert_eq!(sam2.speaker_id, sam.speaker_id, "same voice re-identifies");
-    assert!(!sam2.is_new);
+    assert_eq!(sam2.resolution, SpeakerResolution::Identified);
     assert!(
         reply2.contains("You are speaking with Sam."),
         "identity line reached the LLM: {reply2:?}"
     );
 
-    // Turn 3 — a different voice (high pitch): a distinct cluster.
+    // Turn 3 — a different voice (high pitch): a distinct, new cluster whose personal
+    // fact is unattributed; turn 4 — the same voice again, now identified.
     let (_, ev3) = run_voiced_turn(&pipeline, "I like tea", 600.0).await;
     let dana = speaker_of(&ev3);
     assert_ne!(
@@ -882,28 +903,133 @@ async fn per_person_identification_scopes_memory_and_context() {
         "different voice, new cluster"
     );
     assert!(dana.is_new);
+    let (_, ev4) = run_voiced_turn(&pipeline, "I like tea", 600.0).await;
+    assert_eq!(speaker_of(&ev4).resolution, SpeakerResolution::Identified);
 
-    // Memory is per-person: Sam's scope has his name + jazz, never Dana's tea.
-    let sam_hits: Vec<String> = memory
-        .search_scoped("jazz tea Sam", Some(&sam.speaker_id), 10)
-        .unwrap()
-        .into_iter()
-        .map(|m| m.content)
-        .collect();
+    // Memory is per-person: Sam's scope has jazz, never Dana's tea, and never the
+    // unattributed name fact.
+    let hits = |reader: Option<&str>, q: &str| -> Vec<String> {
+        memory
+            .search_scoped(q, reader, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .collect()
+    };
+    let sam_hits = hits(Some(&sam.speaker_id), "jazz tea Sam name");
     assert!(sam_hits.iter().any(|c| c.contains("jazz")));
-    assert!(sam_hits.iter().any(|c| c.contains("name is Sam")));
     assert!(!sam_hits.iter().any(|c| c.contains("tea")));
-
-    let dana_hits: Vec<String> = memory
-        .search_scoped("jazz tea", Some(&dana.speaker_id), 10)
-        .unwrap()
-        .into_iter()
-        .map(|m| m.content)
-        .collect();
+    assert!(!sam_hits.iter().any(|c| c.contains("name is Sam")));
+    let dana_hits = hits(Some(&dana.speaker_id), "jazz tea");
     assert!(dana_hits.iter().any(|c| c.contains("tea")));
     assert!(!dana_hits.iter().any(|c| c.contains("jazz")));
+    assert!(
+        hits(None, "jazz tea Sam name").is_empty(),
+        "an unknown voice sees nothing personal"
+    );
 
     assert_eq!(speaker.registry().count().unwrap(), 2, "exactly two people");
+}
+
+/// The reported bug (SpeakerScopedMemoryPlan.md §0): "I am Brendan" said by one voice
+/// must not make "who am I?" answer "Brendan" for another voice — and an unrecognized
+/// voice must be told so instead of being guessed.
+#[tokio::test]
+async fn who_am_i_depends_on_the_voice_not_on_remembered_text() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let speaker = Arc::new(SpeakerService::new(
+        Arc::new(MockSpeakerEmbedder::default()),
+        SpeakerRegistry::open_in_memory().unwrap(),
+        SpeakerThresholds::default(),
+    ));
+    let pipeline = Pipeline::new(
+        Arc::new(MockLlm::new("[{sys}]")),
+        memory.clone(),
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_speaker(speaker.clone());
+    pipeline.settings().apply_household(&Household {
+        members: vec![
+            HouseholdMember {
+                name: "Brendon".into(),
+                relationship: Some("Father".into()),
+                ..Default::default()
+            },
+            HouseholdMember {
+                name: "Kristina".into(),
+                relationship: Some("Mother".into()),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+
+    // An unattributed "my name is Brendan" from before (the production row).
+    memory
+        .add_in(
+            MemoryKind::Fact,
+            "The user's name is Brendan",
+            anamanti_core::memory::MemorySource::Explicit,
+            &MemoryScope::Unknown { candidate: None },
+            &Default::default(),
+        )
+        .unwrap();
+
+    // Both people have voiceprints: Brendon's was named by speech with the STT
+    // spelling, Kristina's ("Christina") renamed on the People screen.
+    let (_, ev) = run_voiced_turn(&pipeline, "hello there", 180.0).await;
+    let brendon = speaker_of(&ev).speaker_id;
+    let (_, ev) = run_voiced_turn(&pipeline, "hello there", 600.0).await;
+    let kristina = speaker_of(&ev).speaker_id;
+    speaker.registry().rename(&kristina, "Christina").unwrap();
+
+    // Brendon, now confidently identified and still anonymous, says his name: the
+    // voiceprint is labelled with the roster spelling.
+    let (reply, _) = run_voiced_turn(&pipeline, "My name is Brendan.", 180.0).await;
+    assert!(reply.contains("Nice to meet you, Brendon!"), "{reply:?}");
+    assert_eq!(
+        speaker
+            .registry()
+            .get(&brendon)
+            .unwrap()
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("Brendon")
+    );
+
+    // Each voice gets its own answer, in the roster's spelling.
+    let (reply, _) = run_voiced_turn(&pipeline, "Who am I?", 600.0).await;
+    assert_eq!(reply, "You're Kristina.");
+    let (reply, _) = run_voiced_turn(&pipeline, "What's my name?", 180.0).await;
+    assert_eq!(reply, "You're Brendon.");
+
+    // Kristina's System-2 prompt never carries Brendon's name fact, and names her.
+    let (prompt, _) = run_voiced_turn(&pipeline, "tell me something about my name", 600.0).await;
+    assert!(
+        prompt.contains("You are speaking with Kristina (Mother), who lives here."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("name is Brendan"), "{prompt}");
+
+    // Kristina saying "my name is Brendan" can't relabel either voiceprint.
+    let (reply, _) = run_voiced_turn(&pipeline, "my name is Brendan", 600.0).await;
+    assert!(
+        reply.contains("I know your voice as Christina"),
+        "{reply:?}"
+    );
+    assert_eq!(
+        speaker
+            .registry()
+            .get(&brendon)
+            .unwrap()
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("Brendon")
+    );
 }
 
 // ---- Follow-up listening (question → reopen mic + history) ------------------
@@ -1119,6 +1245,7 @@ async fn follow_up_turn_includes_recent_history_in_the_prompt() {
         speaker_id: "household".to_string(),
         speaker_name: None,
         timing: None,
+        ..Default::default()
     })
     .unwrap();
 
@@ -1152,8 +1279,10 @@ async fn follow_up_turn_includes_recent_history_in_the_prompt() {
     let turn = seen.lock().unwrap().take().expect("LLM was called");
     assert_eq!(
         turn.history,
+        // Each replayed user message is labelled with who said it (decision D3); with
+        // speaker ID off, every speaker is unknown.
         vec![(
-            "what's the weather".to_string(),
+            "[unknown speaker]: what's the weather".to_string(),
             "Where are you?".to_string()
         )],
         "the follow-up turn replays the recent turn as history"
@@ -1184,6 +1313,7 @@ async fn ordinary_turn_carries_no_history() {
         speaker_id: "household".to_string(),
         speaker_name: None,
         timing: None,
+        ..Default::default()
     })
     .unwrap();
 

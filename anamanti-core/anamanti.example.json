@@ -55,6 +55,8 @@
     "match_threshold": 0.55,
     "new_threshold": 0.40,
     "min_speech_ms": 1200,
+    "min_identify_ms": 600,
+    "short_clip_margin": 0.10,
     "embed_dims": 192
   },
 

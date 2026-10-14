@@ -415,6 +415,23 @@
   .chip.accent { color: var(--on-accent-container); background: var(--accent-container); border-color: transparent; }
   .chip.mono { font-family: var(--font-mono); font-weight: 500; }
 
+  /* Speaker chips (ui.speakerChip — SpeakerScopedMemoryPlan.md §8.2). A person's
+     colour comes from /speakers.json as `--spk` so it matches on every page. */
+  .chip.spk { color: var(--text); background: var(--card); border-color: var(--border-strong); max-width: 16rem; }
+  .chip.spk > .spk-name { overflow: hidden; text-overflow: ellipsis; }
+  .chip.spk .spk-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--spk, var(--faint)); }
+  .chip.spk.person { border-color: var(--spk, var(--border-strong)); }
+  .chip.spk.unnamed { color: var(--muted); font-style: italic; }
+  .chip.spk.household { color: var(--muted); background: var(--surface-variant); border-color: transparent; }
+  .chip.spk.unknown { color: var(--muted); border-style: dashed; }
+  .chip.res { height: 18px; padding: 0 0.35rem; font-size: 0.68rem; font-weight: 700; border-color: transparent; }
+  .chip.res.identified { color: var(--ok-fg); background: var(--ok-bg); }
+  .chip.res.tentative { color: var(--warn-fg); background: var(--warn-bg); }
+  .chip.res.new { color: var(--on-accent-container); background: var(--accent-container); }
+  .chip.res.unknown, .chip.res.corrected { color: var(--muted); background: var(--surface-variant); }
+  .spk-tag { display: inline-flex; align-items: center; gap: 0.25rem; flex-wrap: wrap; vertical-align: middle; }
+  .spk-hint { font-size: 0.68rem; color: var(--faint); font-weight: 600; }
+
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: 0 0 auto; background: var(--faint); }
   .dot.ok { background: #22a35a; box-shadow: 0 0 0 3px rgba(34, 163, 90, 0.18); }
   .dot.warn { background: #e8822f; box-shadow: 0 0 0 3px rgba(232, 130, 47, 0.18); }

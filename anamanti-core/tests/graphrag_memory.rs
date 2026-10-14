@@ -52,7 +52,8 @@ fn unique_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-/// A household turn with an empty reply (so its stored text is just `transcript`).
+/// A turn by one identified person (`spk-test`) with an empty reply (so its stored
+/// text is just `transcript`).
 fn turn<'a>(
     ext_id: &'a str,
     ts: i64,
@@ -68,7 +69,7 @@ fn turn<'a>(
         reply: "",
         embedding,
         entities,
-        speaker_id: "household",
+        speaker_id: "spk-test",
         speaker_name: None,
     }
 }
@@ -84,9 +85,10 @@ fn record(id: &str, transcript: &str, reply: &str, memories: &[&str]) -> ChatLog
         memories_written: memories.iter().map(|s| s.to_string()).collect(),
         llm_backend: "mock".to_string(),
         model: None,
-        speaker_id: "household".to_string(),
+        speaker_id: "spk-test".to_string(),
         speaker_name: None,
         timing: None,
+        ..Default::default()
     }
 }
 
@@ -132,7 +134,7 @@ async fn full_pipeline_body() {
     let n = ingester.run_once().await.unwrap();
     assert_eq!(n, 3, "all three turns should ingest");
 
-    // Nodes: 1 household user + 3 turns + 1 memory + entities (jazz, music, weather,
+    // Nodes: the household/unknown/person users + 3 turns + 1 memory + entities (jazz, music, weather,
     // coffee) → well over the turn count.
     let nodes = helix.node_count().await.unwrap();
     assert!(
@@ -148,7 +150,7 @@ async fn full_pipeline_body() {
     //    jazz memory (graph expansion turn→MENTIONS→Entity→ABOUT→Memory).
     let recall = HelixRecall::new(helix.clone(), embedder.clone(), 6);
     let res = recall
-        .recall("what music do I like", None, 8)
+        .recall("what music do I like", Some("spk-test"), 8)
         .await
         .unwrap();
     let hits = res.hits;
@@ -310,7 +312,8 @@ async fn graph_view_body() {
     let stats = serde_json::to_value(helix.stats().await.unwrap()).unwrap();
     assert!(stats["total"].as_u64().unwrap() >= 2, "user + turn nodes");
     assert_eq!(stats["by_label"]["Turn"].as_u64().unwrap(), 1);
-    assert_eq!(stats["by_label"]["User"].as_u64().unwrap(), 1);
+    // The shared household + unknown users, plus the speaker.
+    assert_eq!(stats["by_label"]["User"].as_u64().unwrap(), 3);
 
     // Sample: the Turn node carries its text (a projected property) and no
     // `embedding` (deliberately excluded — it must never be dumped to the page).
