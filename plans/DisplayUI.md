@@ -256,6 +256,9 @@ Presentation (`AssistantState.musicScreen` ∈ `hidden` / `nowPlaying` / `nextUp
 - **`NextUpView`** — `lib/src/ui/next_up_view.dart`. Full-screen up-next queue list
   (`music.nextUp`), reached from the now-playing view's "Up next" control. Keys:
   `next-up-close`, `next-up-back`. Empty queue shows "Nothing queued".
+- **`AlbumArt`** — `lib/src/ui/album_art.dart`. The shared artwork tile all three surfaces
+  use (overlay 40 px, up-next rows 56 px, now-playing 280 px): a rounded network image
+  with a music-note fallback while loading, on error, or when there's no artwork URL.
 
 Controls route back to the Core device→Core: `AssistantController` holds a
 `MusicControlSink` (`main.dart` wires it to the FRB `musicControl`), which issues a
@@ -267,9 +270,10 @@ to the `spotify_control` controller. See `agents.md` + `MusicPlan.md`.
 voice. Whenever the music full screen is open, `AssistantController` pushes a
 `DisplayContext::Music` block on the turn's `audio-start` via the FRB `setMusicContext`
 (playing / title / artist / which view), so the LLM knows what's on screen. The Core's
-**`music_screen`** rig tool (advertised alongside `spotify_control`) emits
+**`music_screen`** `VoiceTool` (advertised alongside `spotify_control`) emits
 `DeviceAction::MusicScreen` → an `anamanti-music` `screen` frame on the per-turn socket →
-`WakeWordEventKind.musicScreen` → `AssistantController._applyMusicScreen`, which routes
+`WakeWordEventKind.musicScreen` (target screen in the event's `recipeAction` string, the
+same carrier `fontAdjust` uses) → `AssistantController._applyMusicScreen`, which routes
 "show me what's playing" → `openNowPlaying`, "what's up next" → `showMusicQueue`, and "hide
 the music" → `closeMusicScreen` (the same methods touch uses). A Core-pushed mode
 (recipe/weather/place) sets `musicScreen: hidden` so the music full screen yields to it.

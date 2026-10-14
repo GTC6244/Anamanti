@@ -43,6 +43,11 @@ speaks the reply back through the Echo Show's speakers.
   display *without* you asking (a reminder, an alert), over a persistent connection
   the device holds open to its pinned Anamanti Core. Visual-only today (no spoken
   output); send a test one from the config page's **Music & Devices** page.
+- 🎵 **House music, by voice or touch** — "play some Radiohead" drives Spotify on the
+  house speakers (Snapcast + librespot on the Mac; no music audio passes through the
+  Echo Show). While a track plays, a compact control bar rides the idle screen; tap it
+  for a full now-playing screen (artwork, progress, transport, volume) and the up-next
+  queue — or just say "show me what's playing" / "what's up next" / "hide the music".
 - 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
   heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
   tuning* — it changes only how replies sound, never what the assistant knows or does.

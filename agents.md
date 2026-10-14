@@ -178,6 +178,10 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   (`NotificationController`); the Anamanti Core keeps a `NotificationService` registry
   (config-page **Notify** tab pushes a test). Visual-only for now — no spoken output,
   no state-machine interaction. Design: architecture.md §4; follow-ups: TODO.md §6a.
+  The ambient **weather** (`role=weather`) and **music now-playing** (`role=music`)
+  pushes reuse this exact design, and all three share one implementation per side: the
+  device's `wyoming/push_channel.rs` driver + `start_channel`/`stop_channel` in
+  `api/engine.rs`, and the Core's `notify::ChannelRegistry` + `server.rs` `PushChannel`.
 
 If a task seems to require changing one of these, stop and confirm first.
 
@@ -376,7 +380,10 @@ anamanti-core/scripts/build-webui-css.sh
 #     facts + the chat log (source of truth) are untouched.
 #   graphrag{…}, speaker{…}, music{…} (music.enabled defaults to true, so the
 #     Anamanti Core ducks the music group while it speaks and — with music.autostart,
-#     also default on — supervises snapserver/librespot/mpv at boot; see
+#     also default on — supervises snapserver/librespot/mpv at boot. With Spotify
+#     linked it also polls now-playing every music.nowplaying_refresh_secs (default 5,
+#     floor 1) and pushes it to the display's music screen over the persistent
+#     role="music" channel — skipped while no display has that channel open; see
 #     anamanti.example.json for the full shape)
 #   system1{backend,base_url,openrouter_model,min_confidence,intents} — the
 #     pluggable System-1 fast-decision engine (plans/system1-fast-decisions.md). backend
@@ -709,7 +716,15 @@ Android toolchain again.
   bindings.
 - **Wyoming:** newline-delimited (`\n`) JSON control frames; raw PCM immediately
   after the metadata frame; one socket carries outbound audio and inbound
-  transcript + TTS audio.
+  transcript + TTS audio. Frame types/constructors/decoders are defined **once**, in
+  the shared `anamanti-protocol` crate — never copied into either side's `protocol.rs`.
+- **Reuse the shared seams (DRY):** a new LLM tool is a `VoiceTool` registered in
+  `Tools::build` (architecture.md §8); a new persistent push channel wraps
+  `ChannelRegistry` (Core) and `push_channel::run` + `start_channel` (device); a new
+  `{ok, message}` control response is read with `ok_message`; a short string argument
+  on a `WakeWordEvent` rides the existing `recipe_action` carrier rather than a new FRB
+  field; Dart tests build events with `test/support/wake_word_events.dart`; outbound
+  HTTP goes through `crate::http` (shared pool, mandatory timeout).
 
 ## Working agreements for agents
 

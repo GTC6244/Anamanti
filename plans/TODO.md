@@ -402,9 +402,9 @@ Remaining (next phases, in rough order):
 
 ## 7. Tools & actions (agent capabilities)
 
-Tool calling runs on the **rig** engine, now the default (`anamanti-core/src/llm/rig.rs`).
-Adding a capability = registering one tool in `Tools`. See Plan §3 "Tool calling &
-actions".
+Tool calling runs on the **rig** engine, now the default (`anamanti-core/src/llm/rig/`).
+Adding a capability = one `VoiceTool` registered in `Tools::build`
+(`llm/rig/tools/mod.rs`). See Plan §3 "Tool calling & actions" and architecture.md §8.
 
 - [x] **Weather context**: inject a configured home location + units
       (`ANAMANTI_HOME_LOCATION` / `ANAMANTI_WEATHER_UNITS`) into the system prompt so
@@ -531,6 +531,26 @@ actions".
       recipe" and confirm the screen reacts and the model reliably calls
       `recipe_control` / `close_recipe` (needs the Mac Anamanti Core + a spoken turn;
       not drivable headlessly).
+- [x] **Music now-playing UI + on-screen & voice control (MusicPlan P6, PR #91)** — a
+      persistent `role="music"` push (`NowPlayingService`, polled every
+      `music.nowplaying_refresh_secs`), the compact `MusicControlOverlay` +
+      `NowPlayingView` / `NextUpView`, on-screen transport over `anamanti-music-control`,
+      and voice via the `music_screen` tool + `DisplayContext::Music`. Brought up to date
+      with main 2026-10-14 (shared protocol crate, `VoiceTool` registry, shared push-channel
+      driver on both sides).
+- [ ] **Verify music on hardware**: with Spotify linked and a track playing, confirm the
+      overlay appears within one poll, tap → now-playing → up-next and back, the transport
+      buttons + volume act on the speakers, and say "show me what's playing" / "what's up
+      next" / "hide the music" / "what's this song?". Also confirm a recipe/weather/place
+      push hides the music full screen, and that the Core logs no Spotify reads while no
+      display is connected.
+- [ ] **Test-fixture cleanup**: migrate the remaining ~11 Dart test files' private
+      `WakeWordEvent` factories (`_ev`/`_event`/…) onto
+      `test/support/wake_word_events.dart`'s `wakeEvent(kind, …)`, so adding an FRB event
+      field is one edit.
+- [ ] **Small music model cleanup**: `MusicData` repeats `QueueTrack`'s four track fields
+      (title/artist/album/artwork); consider composing a `QueueTrack`. Low value — only if
+      the shape changes again.
 
 ## 8. In-app APK auto-updater (shipped 2026-10-01 — verify on hardware)
 

@@ -699,8 +699,8 @@ mDNS + `instance_id` pin the voice path uses):
 
 - The device opens a **second, long-lived Wyoming connection** to the pinned
   Anamanti Core and holds it open, reconnecting with capped exponential backoff
-  (`rust/src/wyoming/notify.rs`; started by `start_notify_channel` on its own thread,
-  independent of the voice engine). This is a *sidecar* — the per-turn voice socket and
+  (`rust/src/wyoming/notify.rs` over the shared `push_channel.rs` driver; started by
+  `start_notify_channel` on its own thread, independent of the voice engine). This is a *sidecar* — the per-turn voice socket and
   its state machine are untouched.
 - **`anamanti-hello`** (device → Anamanti Core): sent right after the notify socket
   opens (`data.role="notify"`, `data.device_id`, `data.name`). It registers the connection
@@ -720,7 +720,7 @@ mDNS + `instance_id` pin the voice path uses):
   state-machine interaction.
 - **`anamanti-notify-ack`** (device → Anamanti Core): reserved for a later
   delivery-tracking phase (store-and-forward across reconnects); the constructor exists
-  in both crates but nothing sends it yet.
+  in the shared `anamanti-protocol` crate but nothing sends it yet.
 - The **ambient weather push** reuses this same persistent-channel design: the device
   opens a *third* long-lived connection (`rust/src/wyoming/weather.rs`, started by
   `start_weather_channel`) with an `anamanti-hello` carrying `data.role="weather"`, which
@@ -913,7 +913,7 @@ adding a new capability.
 
 ### 8.1 How tool calling works
 
-Tool calling lives in the **rig engine** (`anamanti-core/src/llm/rig.rs`), the default LLM
+Tool calling lives in the **rig engine** (`anamanti-core/src/llm/rig/`), the default LLM
 engine (`ANAMANTI_LLM_ENGINE=rig`; `native` opts out to the tool-less HTTP backends).
 Each turn the Anamanti Core advertises a set of **tool definitions** (name +
 description + JSON-schema for the arguments) to the model. If the model asks to call
@@ -926,9 +926,18 @@ TTS path, so there is no user-visible regression.
 
 There are **two flavors** of tool:
 
+Every tool implements the crate-local **`VoiceTool`** trait (`llm/rig/tools/mod.rs`): a
+`name`, the advertised `definition()`, optional preamble `guidance()`, and an async
+`invoke(args, ctx)`. **`Tools`** is a name-keyed, insertion-ordered registry of them —
+the advertised definitions, the guidance text and the dispatcher all derive from that
+one list. Tools are grouped by module: `device.rs` (timers, personality, font),
+`display.rs` (recipe / weather / places screens + their `close_*` tools, and the music
+player's `music_screen`), `services.rs` (calendar, directions, Spotify, shopping list,
+phone) and `search.rs` (`internet_search`).
+
 - **Info tool** — runs entirely on the Mac and returns text the model speaks
   (e.g. `internet_search`, `calendar_lookup`). Adding one is self-contained in
-  `rig.rs`, though it may lean on a supporting module: `calendar_lookup` (read-only
+  `llm/rig/tools/`, though it may lean on a supporting module: `calendar_lookup` (read-only
   web iCalendar) lives in `anamanti-core/src/calendar/`, holds an injected
   `Arc<dyn CalendarSource>` (mirroring how `internet_search` holds a
   `SearchProvider`), and is advertised only when `ANAMANTI_CALENDARS` lists one or
@@ -983,16 +992,19 @@ There are **two flavors** of tool:
 
 ### 8.2 Adding an **info** tool (Mac-only)
 
-1. In `anamanti-core/src/llm/rig.rs`, add a tool `NAME`, a `Deserialize` args struct, a
-   `…_definition() -> ToolDefinition` (JSON-schema for the args), and an
-   `…_invoke(args) -> Result<String>` that does the work and returns a short,
-   speakable result.
-2. Register it: add its definition in `Tools::new` and a match arm in
-   `Tools::dispatch`.
-3. Nudge the model: extend `tool_guidance` so the preamble tells the model when to
-   call it (only when the tool is actually advertised).
-4. Test it in `rig.rs` (a unit test for `…_invoke`, and an end-to-end
-   `serve_sequence` test that has a fake model call the tool then answer).
+1. In the matching `anamanti-core/src/llm/rig/tools/<group>.rs`, add a `NAME` const, a
+   `Deserialize` args struct (parse with `parse_args`), and a struct implementing
+   `VoiceTool`: `definition()` (built with `definition(NAME, description, schema)`),
+   optional `guidance()` telling the model when to call it, and `invoke()` returning a
+   short, speakable result. Inject any provider (`Arc<dyn …>`) as a field.
+2. Register it in `Tools::build` (`tools/mod.rs`), gated on its provider being present
+   in `ToolDeps`. That single registration advertises it, adds its guidance, and routes
+   calls to it — there is no separate dispatcher. If its guidance should sit at a
+   particular place in the preamble, add `NAME` to `GUIDANCE_ORDER`.
+3. Test it next to the tool (a unit test calling `invoke` with a `ToolCtx`), and
+   regenerate the advertised-tools snapshot deliberately:
+   `ANAMANTI_UPDATE_SNAPSHOTS=1 cargo test … advertised_tools`, then review the diff of
+   `src/llm/testdata/advertised_tools.json` (it is exactly what the model sees).
 
 No protocol, device, or Flutter changes are needed — build + test with
 `cargo test --manifest-path anamanti-core/Cargo.toml`.
@@ -1003,10 +1015,12 @@ Worked example: **timers** (`set_timer` / `cancel_timer`). The flow is
 model → Mac tool → `DeviceAction` → `anamanti-timer` frame → device timer manager →
 FRB event → Flutter UI. To add a new action, mirror these steps:
 
-1. **Mac tool** (`anamanti-core/src/llm/rig.rs`): as in §8.2, but `…_invoke` takes the per-turn
-   `Option<&ActionSink>` and `send`s a new `DeviceAction` variant
-   (`anamanti-core/src/llm/mod.rs`) instead of doing the work locally. Action tools are
-   registered unconditionally (they need no config).
+1. **Mac tool** (`anamanti-core/src/llm/rig/tools/`): as in §8.2, but `invoke` emits a new
+   `DeviceAction` variant (`anamanti-core/src/llm/mod.rs`) on the per-turn sink with
+   `emit(ctx.actions, action, …)` instead of doing the work locally (`ctx.require_sink`
+   first if the tool would otherwise fetch for a display that isn't there). Register it
+   unconditionally if it needs no config, or alongside the integration it drives (e.g.
+   `music_screen` is registered wherever `spotify_control` is).
 2. **Relay** (`anamanti-core/src/orchestrator/speech_out.rs`): the reply loop already drains the per-turn
    action channel (`drain_device_actions`) and writes the frame; add a match arm
    mapping the new `DeviceAction` to its `WyomingEvent` constructor.
@@ -1023,9 +1037,13 @@ FRB event → Flutter UI. To add a new action, mirror these steps:
    the long-lived `Network`/`Shared` (so it outlives the turn socket), applied from
    the `on_update` closure in `net.rs`. Reuse the shared `PlaybackSink` for any sound
    (no second audio path). See `anamanti-display/rust/src/engine/timer.rs`.
-6. **FRB event** (`anamanti-display/rust/src/api/engine.rs`): add `WakeWordEventKind` variant(s) +
-   neutral-default payload fields to the flat `WakeWordEvent`, plus `pub(crate)`
-   builders; the manager emits them via the `StreamSink`. Then **regenerate**:
+6. **FRB event** (`anamanti-display/rust/src/api/engine.rs`): add `WakeWordEventKind` variant(s)
+   plus `pub(crate)` builders. **Prefer an existing payload field** before adding one: a
+   short string argument rides the generic `recipe_action` carrier (as `RecipeScroll`,
+   `FontAdjust` and `MusicScreen` do) — every new field on the flat `WakeWordEvent`
+   ripples into every Dart test that builds one (build those with
+   `test/support/wake_word_events.dart`'s `wakeEvent(kind, …)` so a new field is one
+   edit). Add a neutral-default field only for a genuinely new payload (e.g. a JSON blob); the manager emits them via the `StreamSink`. Then **regenerate**:
    `flutter_rust_bridge_codegen generate` (never hand-edit `frb_generated.rs` or
    `anamanti-display/lib/src/rust/`).
 7. **Flutter** (`lib/`): fold the new event kind into `AssistantState` in
