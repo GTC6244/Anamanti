@@ -415,6 +415,7 @@ mod tests {
     fn rec(id: &str, transcript: &str) -> ChatLogRecord {
         ChatLogRecord {
             id: id.to_string(),
+            turn_id: None,
             ts: 1,
             session_id: "s".to_string(),
             transcript: transcript.to_string(),

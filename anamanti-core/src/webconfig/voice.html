@@ -1,0 +1,310 @@
+<p class="sub" data-head="sub">How the assistant hears and speaks: speech detection, transcription, transcript fixes and the reply voice. Changes apply live from the next turn.</p>
+<div class="btn-row" data-head="actions">
+  <span id="pipeStrip" class="legend"></span>
+</div>
+
+<div class="grid-12">
+  <!-- Speech-to-text -->
+  <section class="card span-8" id="stt">
+    <div class="card-head">
+      <h2><i data-icon="mic"></i>Speech-to-text</h2>
+      <div class="tools" id="sttStatus"></div>
+    </div>
+    <p class="desc">The engine that turns each turn's audio into text. The Core's speech detector still decides when you've stopped talking, whichever engine you pick.</p>
+    <div id="sttChoices"></div>
+    <div id="sttDetail" style="margin-top:.85rem"></div>
+  </section>
+
+  <!-- VAD -->
+  <section class="card span-4" id="vad">
+    <div class="card-head">
+      <h2><i data-icon="wave"></i>End-of-speech</h2>
+      <div class="tools"><i data-loc="local" data-text="On this Mac"></i></div>
+    </div>
+    <p class="desc">Detects when you've finished speaking. Runs on this Mac either way.</p>
+    <div id="vadChoices"></div>
+    <div id="vadSilero" style="margin-top:.85rem">
+      <div class="field">
+        <label for="silero_threshold">Speech threshold <span class="hint">higher = stricter</span></label>
+        <div class="range-row">
+          <input type="range" id="silero_range" min="0.05" max="0.95" step="0.05" aria-label="Silero threshold slider">
+          <input type="number" id="silero_threshold" min="0" max="1" step="0.05">
+        </div>
+      </div>
+    </div>
+    <div id="vadEnergy" style="margin-top:.85rem" hidden>
+      <div class="field-grid">
+        <div class="field">
+          <label for="end_silence_ms">Trailing silence <span class="hint">ms</span></label>
+          <input type="number" id="end_silence_ms" min="100" max="5000" step="50">
+        </div>
+        <div class="field">
+          <label for="voice_rms_threshold">Speech loudness <span class="hint">RMS</span></label>
+          <input type="number" id="voice_rms_threshold" min="0" step="10">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Transcript fixes -->
+  <section class="card span-8" id="fixes">
+    <div class="card-head">
+      <h2><i data-icon="text"></i>Transcript fixes</h2>
+      <div class="tools">
+        <i data-loc="local" data-text="On this Mac"></i>
+        <button type="button" class="sm ghost" id="fixJsonToggle">Edit as JSON</button>
+      </div>
+    </div>
+    <p class="desc">Whisper has no pronunciation dictionary, so coined or local names come back misspelled. Each rule rewrites the ways a word gets misheard into one correct spelling before the assistant sees the transcript. Matches whole words, case-insensitive.</p>
+    <div id="fixTableWrap" class="table-wrap" style="max-height:300px">
+      <table class="edit">
+        <thead><tr><th style="width:26%">Correct spelling</th><th>Heard as <span class="hint" style="text-transform:none;letter-spacing:0">press Enter after each</span></th><th style="width:44px"></th></tr></thead>
+        <tbody id="fixRows"></tbody>
+      </table>
+      <div id="fixEmpty" class="empty" hidden><i data-icon="text"></i><div>No rules yet. Add one when a name keeps coming back wrong.</div></div>
+    </div>
+    <textarea id="fixJson" class="mono" rows="12" spellcheck="false" hidden></textarea>
+    <div class="card-foot" style="justify-content:space-between">
+      <span class="hint">Put the real spelling in <b>Correct spelling</b>, not a phonetic one; it's inserted verbatim.</span>
+      <button type="button" class="sm" id="fixAdd"><i data-icon="plus"></i>Add rule</button>
+    </div>
+  </section>
+
+  <div class="stack span-4">
+    <!-- TTS -->
+    <section class="card" id="tts">
+      <div class="card-head">
+        <h2><i data-icon="speaker"></i>Text-to-speech</h2>
+        <div class="tools" id="ttsChips"></div>
+      </div>
+      <p class="desc">Replies are spoken by Piper over the Wyoming protocol.</p>
+      <div class="field">
+        <label for="tts_voice">Voice <span class="hint" id="voiceHint"></span></label>
+        <select id="tts_voice"></select>
+        <input id="tts_voice_text" type="text" placeholder="(server default)" hidden>
+      </div>
+      <div id="ttsSends"></div>
+    </section>
+
+    <!-- Listening (read-only) -->
+    <section class="card" id="listening">
+      <div class="card-head">
+        <h2><i data-icon="users"></i>Listening &amp; speakers</h2>
+        <span class="chip neutral" title="Set in anamanti.json; restart to change"><i data-icon="lock"></i>Read-only</span>
+      </div>
+      <table class="kv"><tbody id="listenRows"><tr><td><div class="skeleton" style="width:70%"></div></td></tr></tbody></table>
+    </section>
+  </div>
+</div>
+
+<script>
+ui.hydrate();
+
+let STT = {}, VIEW = {}, BOOT = {}, VOICES = [], OVERVIEW = null;
+let sttCards, vadCards, elKey, fixRowsTags = [];
+
+// ---------------------------------------------------------------- STT
+function sttOptions(){
+  const addr = (BOOT.services || {}).stt_addr || '';
+  const tier = ui.classify(addr);
+  const stage = OVERVIEW && (OVERVIEW.stages || []).find(s => s.key === 'stt');
+  const up = stage && STT.engine === 'wyoming' ? stage.status : null;
+  return [
+    { value: 'wyoming', title: 'Wyoming Whisper', tier, tierText: tier === 'local' ? 'On this Mac' : (tier === 'lan' ? 'Your network' : 'Cloud'),
+      desc: 'External <code>faster-whisper</code> server at <code>' + esc(addr || '?') + '</code>.',
+      meta: up ? [ui.status(up === 'ok' ? 'ok' : up === 'error' ? 'err' : 'off', up === 'ok' ? 'reachable' : up === 'error' ? 'unreachable' : 'not probed')] : [] },
+    { value: 'whisper-rs', title: 'whisper-rs', tier: 'local', tierText: 'On this Mac',
+      desc: 'whisper.cpp in-process. No Python server, no network.',
+      disabled: !STT.whisper_available, why: 'Not in this build: needs the stt-whisper-local feature and a model on disk.' },
+    { value: 'elevenlabs', title: 'ElevenLabs Scribe', tier: 'cloud',
+      desc: 'Scribe v2 Realtime over WebSocket. High accuracy, needs internet.',
+      meta: [STT.elevenlabs_key_set ? ui.status('ok', 'key set') : ui.status('warn', 'needs key')] },
+  ];
+}
+function renderSttDetail(engine){
+  const d = $('sttDetail');
+  const addr = (BOOT.services || {}).stt_addr || '';
+  if (engine === 'elevenlabs') {
+    d.innerHTML = '<div class="field-grid cols-3">'
+      + '<div class="field full"><label>ElevenLabs API key <span class="hint">stored 0600, never shown back</span></label><div id="elKey"></div></div>'
+      + '<div class="field"><label for="el_model">Model id</label><input id="el_model" type="text" placeholder="scribe_v2_realtime"></div>'
+      + '<div class="field" style="grid-column:span 2"><label for="el_base">WebSocket base URL</label><input id="el_base" type="text" placeholder="wss://api.elevenlabs.io"></div>'
+      + '</div>' + ui.sendsFor('stt.elevenlabs')
+      + (!STT.elevenlabs_key_set ? '<div class="callout warn" style="margin-top:.6rem">' + ui.icon('alert') + '<div>No key yet. Until you add one, turns <b>fall back to Wyoming Whisper</b>.</div></div>' : '');
+    elKey = ui.secret($('elKey'), { set: STT.elevenlabs_key_set, clearable: true, placeholder: 'xi-…',
+      onClear: async () => { try { await ui.req(postJSON('/stt/save', {clear: true})); ui.toast(true, 'ElevenLabs key cleared.'); load(); } catch (e) { ui.toast(false, String(e.message || e)); } } });
+    $('el_model').value = STT.elevenlabs_model_id || '';
+    $('el_base').value = STT.elevenlabs_base_url || '';
+  } else if (engine === 'whisper-rs') {
+    const sp = BOOT.speech || {};
+    d.innerHTML = '<table class="kv"><tbody>'
+      + '<tr><th>Model</th><td><code>' + esc(sp.whisper_model || '—') + '</code></td></tr>'
+      + '<tr><th>Model directory</th><td><code>' + esc(sp.whisper_model_path || sp.whisper_model_dir || '—') + '</code></td></tr>'
+      + '<tr><th>Language</th><td>' + esc(sp.language || 'auto') + '</td></tr></tbody></table>'
+      + ui.sendsFor('stt.whisper-rs');
+    elKey = null;
+  } else {
+    d.innerHTML = ui.sendsFor('stt.wyoming', addr, ui.classify(addr))
+      + '<p class="hint" style="margin-top:.5rem">The server address is <code>stt_addr</code> in <code>anamanti.json</code>.</p>';
+    elKey = null;
+  }
+}
+
+// ---------------------------------------------------------------- VAD
+function renderVad(engine){
+  $('vadSilero').hidden = engine !== 'silero';
+  $('vadEnergy').hidden = engine !== 'energy';
+}
+
+// ---------------------------------------------------------------- Fixes
+function fixRow(rule){
+  const tr = document.createElement('tr');
+  tr.innerHTML = '<td><input type="text" class="fx-canon" placeholder="e.g. Zehrs"></td><td><div class="fx-vars"></div></td>'
+    + '<td><button type="button" class="sm ghost danger-text fx-del" aria-label="Delete rule">' + ui.icon('trash') + '</button></td>';
+  tr.querySelector('.fx-canon').value = rule.canonical || '';
+  const t = ui.tags(tr.querySelector('.fx-vars'), rule.variants || [], { placeholder: 'zairs, zay rz…' });
+  tr._tags = t;
+  ui.confirm(tr.querySelector('.fx-del'), () => { tr.remove(); syncFixEmpty(); $('fixes').dispatchEvent(new Event('change', {bubbles:true})); }, 'Delete?');
+  return tr;
+}
+function syncFixEmpty(){ $('fixEmpty').hidden = $('fixRows').children.length > 0; }
+function fixRules(){
+  if (!$('fixJson').hidden) {
+    const v = JSON.parse($('fixJson').value || '[]');
+    if (!Array.isArray(v)) throw new Error('top level must be a JSON array of rules');
+    return v;
+  }
+  return [...$('fixRows').children].map(tr => ({ canonical: tr.querySelector('.fx-canon').value.trim(), variants: tr._tags.get() }))
+    .filter(r => r.canonical || r.variants.length);
+}
+function renderFixes(rules){
+  const body = $('fixRows'); body.innerHTML = '';
+  (rules || []).forEach(r => body.appendChild(fixRow(r)));
+  syncFixEmpty();
+  $('fixJson').value = JSON.stringify(rules || [], null, 2);
+}
+
+// ---------------------------------------------------------------- TTS
+function renderVoice(selected){
+  const sel = $('tts_voice'), txt = $('tts_voice_text');
+  if (VOICES.length) {
+    sel.hidden = false; txt.hidden = true;
+    $('voiceHint').textContent = VOICES.length + ' installed';
+    sel.innerHTML = '<option value="">Server default</option>' + VOICES.map(v =>
+      '<option value="' + escAttr(v.name) + '">' + esc((v.label || v.name) + (v.language ? ' · ' + v.language : '')) + '</option>').join('');
+    if (selected && !VOICES.some(v => v.name === selected)) sel.insertAdjacentHTML('beforeend', '<option value="' + escAttr(selected) + '">' + esc(selected) + ' (not installed)</option>');
+    sel.value = selected || '';
+  } else {
+    sel.hidden = true; txt.hidden = false; txt.value = selected || '';
+    $('voiceHint').textContent = 'voice list unavailable';
+  }
+  const addr = (BOOT.services || {}).tts_addr || '';
+  const tier = ui.classify(addr);
+  const stage = OVERVIEW && (OVERVIEW.stages || []).find(s => s.key === 'tts');
+  $('ttsChips').innerHTML = ui.loc(tier) + (stage ? ' ' + ui.status(stage.status === 'ok' ? 'ok' : stage.status === 'error' ? 'err' : 'off', stage.status === 'ok' ? 'reachable' : stage.status === 'error' ? 'unreachable' : 'unknown') : '');
+  $('ttsSends').innerHTML = ui.sendsFor('tts.piper', addr, tier);
+}
+
+// ---------------------------------------------------------------- Listening (read-only)
+function renderListening(){
+  const f = BOOT.follow_up || {}, sp = BOOT.speaker || {};
+  const yes = (b) => b ? ui.status('ok', 'on') : ui.status('off', 'off');
+  $('listenRows').innerHTML =
+    '<tr><th>Follow-up listening</th><td>' + yes(f.enabled) + '</td></tr>'
+    + '<tr><th>Follow-up window</th><td>' + esc(f.question_wait_secs ?? '—') + ' s after a question · ' + esc(f.reply_wait_secs ?? '—') + ' s otherwise</td></tr>'
+    + '<tr><th>Max chain</th><td>' + (f.max_chain ? esc(f.max_chain) : 'unlimited') + '</td></tr>'
+    + '<tr><th>Speaker ID</th><td>' + yes(sp.enabled) + (sp.enabled ? ' <span class="hint">match ≥ ' + esc(sp.match_threshold) + '</span>' : '') + '</td></tr>';
+}
+
+function renderPipeStrip(){
+  if (!OVERVIEW) return;
+  const pick = ['vad', 'stt', 'tts'];
+  $('pipeStrip').innerHTML = (OVERVIEW.stages || []).filter(s => pick.includes(s.key))
+    .map(s => '<span class="chip lg loc-' + s.tier + '" title="' + escAttr(s.label) + '">' + ui.icon(s.tier) + esc(s.label) + '</span>').join('');
+}
+
+// ---------------------------------------------------------------- Load + save
+async function load(){
+  const [stt, view, voices, pr, sys] = await Promise.all([
+    getJSON('/stt/status.json'), getJSON('/config'), getJSON('/voices').catch(() => ({})),
+    getJSON('/pronunciations/status.json'), getJSON('/system.json'),
+  ]);
+  STT = stt; VIEW = view; VOICES = (voices && voices.voices) || []; BOOT = (sys && sys.config) || {};
+  sttCards = sttCards || ui.choices($('sttChoices'), { name: 'stt', cols: 3, options: [], onChange: renderSttDetail });
+  sttCards.refresh(sttOptions(), STT.engine);
+  renderSttDetail(STT.engine);
+  $('sttStatus').innerHTML = STT.engine === 'elevenlabs' && !STT.elevenlabs_key_set ? ui.status('warn', 'falling back to Wyoming') : '';
+
+  const vadOpts = ['silero', 'energy'].map(k => {
+    const m = ui.LOCALITY['vad.' + k];
+    return { value: k, title: m.title, desc: m.desc, tier: 'local', tierText: 'Local' };
+  });
+  vadCards = vadCards || ui.choices($('vadChoices'), { name: 'vad', cols: 2, options: vadOpts, onChange: renderVad });
+  vadCards.refresh(vadOpts, VIEW.vad_engine || 'silero');
+  renderVad(VIEW.vad_engine || 'silero');
+  const st = Math.round((VIEW.silero_threshold ?? 0.5) * 100) / 100;
+  $('silero_threshold').value = st;
+  $('silero_range').value = st;
+  $('end_silence_ms').value = VIEW.end_silence_ms ?? '';
+  $('voice_rms_threshold').value = VIEW.voice_rms_threshold ?? '';
+
+  renderFixes(pr.rules || []);
+  renderVoice(VIEW.tts_voice || '');
+  renderListening();
+}
+// Probe the downstream services once (slower), then repaint the chips that use it.
+async function loadHealth(){
+  try { OVERVIEW = await getJSON('/overview.json'); } catch (e) { OVERVIEW = null; }
+  if (sttCards) sttCards.refresh(sttOptions());
+  renderVoice(VOICES.length ? $('tts_voice').value : $('tts_voice_text').value);
+  renderPipeStrip();
+}
+
+$('silero_range').addEventListener('input', () => { $('silero_threshold').value = $('silero_range').value; });
+$('silero_threshold').addEventListener('input', () => { $('silero_range').value = $('silero_threshold').value; });
+$('fixAdd').addEventListener('click', () => {
+  if (!$('fixJson').hidden) { ui.toast(false, 'Switch back from JSON to add rows.'); return; }
+  const tr = fixRow({}); $('fixRows').appendChild(tr); syncFixEmpty(); tr.querySelector('.fx-canon').focus();
+});
+$('fixJsonToggle').addEventListener('click', () => {
+  const toJson = $('fixJson').hidden;
+  try {
+    if (toJson) { $('fixJson').value = JSON.stringify(fixRules(), null, 2); }
+    else { renderFixes(JSON.parse($('fixJson').value || '[]')); }
+  } catch (e) { ui.toast(false, 'Not valid JSON: ' + e.message); return; }
+  $('fixJson').hidden = !toJson; $('fixTableWrap').hidden = toJson;
+  $('fixJsonToggle').textContent = toJson ? 'Edit as table' : 'Edit as JSON';
+});
+
+const bar = ui.savebar([
+  { name: 'Speech-to-text', el: $('stt'), save: async () => {
+      const body = { engine: sttCards.get() };
+      if ($('el_model')) { body.elevenlabs_model_id = $('el_model').value.trim() || undefined; body.elevenlabs_base_url = $('el_base').value.trim() || undefined; }
+      if (elKey && elKey.value()) body.elevenlabs_api_key = elKey.value();
+      const r = await postJSON('/stt/save', body);
+      return r.ok === false ? r : { ok: true, message: 'applies on the next turn' };
+  } },
+  { name: 'End-of-speech', el: $('vad'), save: async () => {
+      const body = { vad_engine: vadCards.get() };
+      const st = parseFloat($('silero_threshold').value); if (!Number.isNaN(st)) body.silero_threshold = st;
+      const es = parseInt($('end_silence_ms').value, 10); if (!Number.isNaN(es)) body.end_silence_ms = es;
+      const rms = parseFloat($('voice_rms_threshold').value); if (!Number.isNaN(rms)) body.voice_rms_threshold = rms;
+      const r = await postJSON('/config', body);
+      return r.ok ? { ok: true, message: 'applied' } : { ok: false, message: r.message };
+  } },
+  { name: 'Transcript fixes', el: $('fixes'), save: async () => {
+      let rules;
+      try { rules = fixRules(); } catch (e) { return { ok: false, message: 'Not valid JSON: ' + e.message }; }
+      const r = await postJSON('/pronunciations/save', { rules });
+      return r.ok === false ? r : { ok: true, message: (r.rules || []).length + ' rule(s) saved' };
+  } },
+  { name: 'Voice', el: $('tts'), save: async () => {
+      const v = (VOICES.length ? $('tts_voice').value : $('tts_voice_text').value).trim();
+      const r = await postJSON('/config', { tts_voice: v || null });
+      return r.ok ? { ok: true, message: v ? 'voice set to ' + v : 'server default voice' } : { ok: false, message: r.message };
+  } },
+], { afterSave: () => bar.quiet(load), onDiscard: () => load(), canSave: () => V_LOADED });
+let V_LOADED = false;
+
+bar.quiet(load).then(() => { V_LOADED = true; ui.reveal(); loadHealth(); }).catch(e => ui.toast(false, 'Could not load: ' + e));
+</script>

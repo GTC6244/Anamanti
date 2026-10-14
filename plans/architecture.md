@@ -326,17 +326,44 @@ predictable memory use and no GC pauses under the 1 GB limit.
 - **Admin-console front-end** (`webconfig.rs` + `src/webconfig/*`): the whole config
   UI is **plain static HTML in a Material Design layout styled with Tailwind CSS**,
   served by the same hand-rolled loopback HTTP server — no page markup is generated in
-  Rust. Each tab is an authored `.html` body (`config.html`, `household.html`, …)
-  wrapped by a static shell (`shell_head.html` + `shell_foot.html`: the Material top
-  app bar + navigation drawer, with a `{{TITLE}}` token `page()` fills in); the
-  active-nav highlight and the mobile drawer live in `shell.js`. Tailwind is **vendored
+  Rust. Each page is an authored `.html` body (`overview.html`, `voice.html`, …)
+  wrapped by a static shell (`shell_head.html` + `shell_foot.html`: the top app bar
+  with status pills + theme toggle, and the collapsible navigation rail, with a
+  `{{TITLE}}` token `page()` fills in); shell behavior lives in `shell.js` and the
+  component kit (save bar, choice cards, locality chips, secret fields, drawers, tabs,
+  toasts) plus the **locality map** in `ui.js`. **Information architecture
+  (2026-10-14, `plans/CoreWebUIPlan.md`):** ten task-grouped pages — Overview, Voice,
+  Intelligence, Personality, Household, Integrations, Music & Devices, Memory,
+  Conversations, Keys & Accounts, System — each laid out on a 12-column grid to fit one
+  1920×1080 screen (data pages scroll inside their panes). Every option that can run
+  on this Mac, on the LAN or in the cloud carries a **locality chip**; address-backed
+  stages (Wyoming STT/TTS, Ollama, laya-serve) are classified from their configured
+  address by `webconfig/system.rs` (loopback → local, RFC 1918/`.local` → LAN, else
+  cloud), and cloud options show a **"Sends:"** line naming what leaves the house.
+  Legacy page routes 302 to their new homes; JSON/POST endpoints are unchanged. Tailwind is **vendored
   precompiled**: `webconfig/tailwind/input.css` (theme + `@layer components`) is built
   by `scripts/build-webui-css.sh` (the `tailwindcss` CLI) into the committed
   `webconfig/panel.css`. All assets (`panel.css`, `shell.js`) are compiled into the
   binary via `include_str!` and served as their own routes (`GET /panel.css`,
   `GET /shell.js`) — so the single copied release binary still serves the entire UI
   offline, with no CDN and nothing beside it. Page data flows through the existing
-  `*.json` endpoints the bodies fetch (e.g. `/about` renders `/about.json`).
+  `*.json` endpoints the bodies fetch, plus three read-only aggregators:
+  `/overview.json` (every pipeline stage with engine + tier + health probe, the
+  integrations, connected displays, recent-turn latency), `/keys.json` (every secret /
+  OAuth link: set or not, seed env var, what uses it — never a value) and `/system.json`
+  (build, runtime, and a curated **redacted** snapshot of the boot config,
+  `webconfig::BootInfo`, built once in `main`).
+- **Cloud entity extraction toggle** (`memory/graphrag_control.rs`): GraphRAG entity
+  extraction is the one memory step that calls a cloud model (Anthropic,
+  `graphrag.extract_model`) even when the LLM and embedder are local. It sits behind a
+  `GatedExtractor` with a live on/off switch: `graphrag.extract` (`auto` default | `off`)
+  seeds it, the Memory page flips it (`POST /extraction/save`), and the choice persists
+  in `helix_path/extract_mode` (wins over the seed at boot). Off ⇒ ingested turns get no
+  entities and no turn text leaves the Mac for extraction; recall is pure vector KNN.
+- **Turn ↔ prompt join:** each turn mints a `turn_id` (`t-{unix_millis}-{n}`,
+  `orchestrator::turn::TURN_IDS`) at start and writes it to both its chat-log and
+  prompt-log record (`turn_id`, optional for older records), so the Conversations page
+  shows the exact prompt for a turn without timestamp guessing.
 - **Debug/inspection pages** (`webconfig.rs`, same loopback HTTP server as the
   config page, strictly read-only): `GET /chatlog`, `/prompts`, `/sqlite`, `/helix`
   render the recent chat log, the exact assembled LLM prompt per turn (captured to

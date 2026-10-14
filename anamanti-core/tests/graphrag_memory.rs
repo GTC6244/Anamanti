@@ -76,6 +76,7 @@ fn turn<'a>(
 fn record(id: &str, transcript: &str, reply: &str, memories: &[&str]) -> ChatLogRecord {
     ChatLogRecord {
         id: id.to_string(),
+        turn_id: None,
         ts: 1,
         session_id: "sess-1".to_string(),
         transcript: transcript.to_string(),

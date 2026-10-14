@@ -36,12 +36,18 @@ speaks the reply back through the Echo Show's speakers.
 - 🔔 **Proactive notifications** — the Mac can push a visual notification to the
   display *without* you asking (a reminder, an alert), over a persistent connection
   the device holds open to its pinned Anamanti Core. Visual-only today (no spoken
-  output); send a test one from the config page's **Notify** tab.
+  output); send a test one from the config page's **Music & Devices** page.
 - 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
   heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
   tuning* — it changes only how replies sound, never what the assistant knows or does.
   Switch it on/off and pick one **by voice** ("talk like a 1940s gangster", "go back
-  to normal"); edit the catalog of personalities on the config page's **Personality** tab.
+  to normal"); edit the catalog of personalities on the config page's **Personality** page.
+- 🖥️ **Admin console** — a loopback web console on the Mac (`http://127.0.0.1:8730/`)
+  laid out for a 1920×1080 desktop: an **Overview** of the whole voice pipeline that
+  marks every stage **On this Mac / Your network / Cloud** and lists exactly what leaves
+  the house, plus pages for Voice, Intelligence, Personality, Household, Integrations,
+  Music & Devices, Memory (including a switch for cloud entity extraction),
+  Conversations (per-turn latency + the exact prompt), Keys & Accounts and System.
 
 ## Architecture at a glance
 

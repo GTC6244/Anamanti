@@ -108,6 +108,7 @@ fn debug() -> DebugSources {
         helix_path: std::path::PathBuf::from("anamanti_helix"),
         memory_backend: "sqlite".to_string(),
         graph: None,
+        boot: super::BootInfo::default(),
     }
 }
 
@@ -152,17 +153,205 @@ fn get_root_serves_html() {
     let (status, ctype, body) = route("GET", "/", b"", &settings());
     assert_eq!(status, "200 OK");
     assert!(ctype.starts_with("text/html"));
-    assert!(String::from_utf8_lossy(&body).contains("Anamanti Core"));
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("Anamanti Core"));
+    assert!(
+        html.contains("Voice pipeline"),
+        "the root is the Overview dashboard"
+    );
+}
+
+/// Every page of the restructured console (plans/CoreWebUIPlan.md §4): served as
+/// HTML inside the shared shell, titled, and carrying the full navigation.
+const PAGES: &[(&str, &str)] = &[
+    ("/", "Overview"),
+    ("/voice", "Voice"),
+    ("/intelligence", "Intelligence"),
+    ("/personality", "Personality"),
+    ("/household", "Household"),
+    ("/integrations", "Integrations"),
+    ("/devices", "Music &amp; Devices"),
+    ("/memory", "Memory"),
+    ("/conversations", "Conversations"),
+    ("/keys", "Keys &amp; Accounts"),
+    ("/system", "System"),
+];
+
+#[test]
+fn every_page_renders_in_the_shell_with_the_full_nav() {
+    for &(path, title) in PAGES {
+        let (status, ctype, body) = route("GET", path, b"", &settings());
+        assert_eq!(status, "200 OK", "{path}");
+        assert!(ctype.starts_with("text/html"), "{path}");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains(&format!("<h1>{title}</h1>")), "{path} title");
+        assert!(html.contains("/ui.js"), "{path} loads the component kit");
+        for &(href, _) in PAGES {
+            assert!(
+                html.contains(&format!("href=\"{href}\"")),
+                "{path} nav is missing {href}"
+            );
+        }
+        // No page falls back to the browser's modal dialogs.
+        for dialog in ["alert", "prompt", "confirm"] {
+            assert!(!calls(&html, dialog), "{path} calls {dialog}()");
+        }
+    }
+}
+
+/// Whether `src` calls the bare function `name(` (not as part of a longer identifier
+/// such as `ui.confirm(` or `renderPrompt(`; `window.alert(` still counts).
+fn calls(src: &str, name: &str) -> bool {
+    let needle = format!("{name}(");
+    src.match_indices(&needle).any(|(i, _)| {
+        let before = &src[..i];
+        let prev = before.chars().next_back();
+        match prev {
+            Some(c) if c.is_alphanumeric() || c == '_' => false,
+            Some('.') => before.ends_with("window."),
+            _ => true,
+        }
+    })
+}
+
+/// Serve one synchronous route and return its `(status, Location)`.
+fn route_location(path: &str) -> (&'static str, Option<&'static str>) {
+    let svc = services_with(settings(), None, debug());
+    let req = Request {
+        target: path,
+        path,
+        body: b"",
+    };
+    match routes::lookup("GET", path) {
+        Some(Handler::Sync(handler)) => {
+            let reply = handler(&svc, &req);
+            (reply.status, reply.location)
+        }
+        _ => ("404 Not Found", None),
+    }
+}
+
+/// The pre-restructure page routes keep working as redirects to their new homes.
+#[test]
+fn legacy_page_routes_redirect_to_their_new_homes() {
+    for (old, new) in [
+        ("/stt", "/voice#stt"),
+        ("/pronunciations", "/voice#fixes"),
+        ("/system1", "/intelligence#system1"),
+        ("/tools", "/integrations"),
+        ("/drive", "/integrations#drive"),
+        ("/music", "/devices#music"),
+        ("/notifications", "/devices#displays"),
+        ("/embeddings", "/memory#settings"),
+        ("/sqlite", "/memory#facts"),
+        ("/helix", "/memory#graph"),
+        ("/chatlog", "/conversations"),
+        ("/prompts", "/conversations"),
+        ("/about", "/system"),
+    ] {
+        assert_eq!(route_location(old), ("302 Found", Some(new)), "{old}");
+    }
+}
+
+#[tokio::test]
+async fn redirects_carry_a_location_header_on_the_wire() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = handle(stream, &services_with(settings(), None, debug())).await;
+    });
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /helix HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+        addr.port()
+    );
+    client.write_all(req.as_bytes()).await.unwrap();
+    let mut resp = String::new();
+    client.read_to_string(&mut resp).await.unwrap();
+    assert!(resp.starts_with("HTTP/1.1 302 Found\r\n"), "resp: {resp}");
+    assert!(
+        resp.contains("\r\nLocation: /memory#graph\r\n"),
+        "resp: {resp}"
+    );
 }
 
 #[test]
-fn music_page_renders_with_nav() {
-    let (status, ctype, body) = route("GET", "/music", b"", &settings());
+fn keys_json_lists_every_secret_without_values() {
+    let s = settings();
+    post(
+        &s,
+        "/tools/save",
+        br#"{"mapbox_token":"pk.super-secret-token"}"#,
+    );
+    let (status, _c, body) = route("GET", "/keys.json", b"", &s);
     assert_eq!(status, "200 OK");
-    assert!(ctype.starts_with("text/html"));
-    let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("Web-URL player"), "music page body");
-    assert!(html.contains("href=\"/music\""), "nav links music");
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        !text.contains("pk.super-secret-token"),
+        "a secret leaked: {text}"
+    );
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let keys = v["keys"].as_array().unwrap();
+    let mapbox = keys.iter().find(|k| k["id"] == "mapbox_token").unwrap();
+    assert_eq!(mapbox["set"], true);
+    assert_eq!(mapbox["field"]["endpoint"], "/tools/save");
+    for id in [
+        "anthropic_api_key",
+        "openai_api_key",
+        "search_api_key",
+        "elevenlabs_api_key",
+        "openrouter_api_key",
+        "visualcrossing_key",
+        "google_places_key",
+        "app_token",
+        "spotify",
+        "drive",
+        "cadora",
+    ] {
+        assert!(keys.iter().any(|k| k["id"] == id), "missing {id}");
+    }
+}
+
+#[test]
+fn system_json_reports_build_and_boot_config() {
+    let (status, _c, body) = route("GET", "/system.json", b"", &settings());
+    assert_eq!(status, "200 OK");
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["build"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["memory_backend"], "sqlite");
+}
+
+#[test]
+fn boot_info_snapshot_is_redacted() {
+    let mut c = crate::config::Config::default();
+    c.drive.client_secret = Some("drive-secret-value".into());
+    c.spotify.client_secret = Some("spotify-secret-value".into());
+    c.cadora.link_token = Some("vl_cadora-secret".into());
+    let b = BootInfo::from_config(&c, None);
+    let text = b.config.to_string();
+    for secret in [
+        "drive-secret-value",
+        "spotify-secret-value",
+        "vl_cadora-secret",
+    ] {
+        assert!(!text.contains(secret), "boot snapshot leaked {secret}");
+    }
+    assert_eq!(b.stt_addr, c.stt_addr.to_string());
+    assert!(b.config["identity"]["instance_id"].is_string());
+}
+
+#[test]
+fn extraction_status_reports_unavailable_without_graphrag() {
+    let (status, _c, body) = route("GET", "/extraction/status.json", b"", &settings());
+    assert_eq!(status, "200 OK");
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["available"], false);
+    assert_eq!(v["active"], false);
+    let out = post(&settings(), "/extraction/save", br#"{"enabled":false}"#);
+    assert!(out.contains("\"ok\":false"), "{out}");
 }
 
 #[tokio::test]
@@ -275,20 +464,7 @@ fn post_config_sets_anthropic_key_and_selects_the_backend_without_leaking_it() {
 }
 
 #[test]
-fn about_page_and_json_report_the_build() {
-    let (status, ctype, body) = route("GET", "/about", b"", &settings());
-    assert_eq!(status, "200 OK");
-    assert!(ctype.starts_with("text/html"));
-    let html = String::from_utf8_lossy(&body);
-    // The build metadata is now fetched from /about.json and rendered client-side,
-    // so the static page references that endpoint rather than inlining the version.
-    assert!(html.contains("Build"));
-    assert!(html.contains("/about.json"));
-    assert!(
-        html.contains("href=\"/drive\""),
-        "About page missing shared nav"
-    );
-
+fn about_json_reports_the_build() {
     let (status, ctype, body) = route("GET", "/about.json", b"", &settings());
     assert_eq!(status, "200 OK");
     assert_eq!(ctype, "application/json");
@@ -300,24 +476,8 @@ fn about_page_and_json_report_the_build() {
 }
 
 #[test]
-fn get_drive_page_renders_with_nav() {
-    let (status, ctype, body) = route("GET", "/drive", b"", &settings());
-    assert_eq!(status, "200 OK");
-    assert!(ctype.starts_with("text/html"));
-    let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("Link Google Drive"));
-    assert!(html.contains("href=\"/helix\""), "missing shared nav");
-}
-
-#[test]
-fn get_system1_page_renders_with_nav_and_status_reports_default() {
+fn system1_status_reports_default() {
     let s = settings();
-    let (status, ctype, body) = route("GET", "/system1", b"", &s);
-    assert_eq!(status, "200 OK");
-    assert!(ctype.starts_with("text/html"));
-    let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("Decision engine"), "system1 page body");
-    assert!(html.contains("href=\"/system1\""), "nav links system1");
     // The status endpoint reports the default disabled engine.
     let json = system1_status_json(&s);
     assert!(json.contains("\"backend\":\"none\""), "status: {json}");
@@ -325,14 +485,8 @@ fn get_system1_page_renders_with_nav_and_status_reports_default() {
 }
 
 #[test]
-fn get_stt_page_renders_with_nav_and_status_reports_default() {
+fn stt_status_reports_default() {
     let s = settings();
-    let (status, ctype, body) = route("GET", "/stt", b"", &s);
-    assert_eq!(status, "200 OK");
-    assert!(ctype.starts_with("text/html"));
-    let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("STT engine"), "stt page body");
-    assert!(html.contains("href=\"/stt\""), "nav links stt");
     // The status endpoint reports the default Wyoming engine, no key.
     let json = stt_status_json(&s);
     assert!(json.contains("\"engine\":\"wyoming\""), "status: {json}");
@@ -803,24 +957,6 @@ fn unknown_route_is_404() {
 }
 
 #[test]
-fn debug_pages_render_with_nav() {
-    for (path, marker) in [
-        ("/chatlog", "Chat log"),
-        ("/prompts", "System prompt"),
-        ("/sqlite", "Persistent memory"),
-        ("/helix", "GraphRAG"),
-    ] {
-        let (status, ctype, body) = route("GET", path, b"", &settings());
-        assert_eq!(status, "200 OK", "{path}");
-        assert!(ctype.starts_with("text/html"), "{path}");
-        let html = String::from_utf8_lossy(&body);
-        assert!(html.contains(marker), "{path} missing {marker}");
-        // Every debug page carries the shared nav linking the others.
-        assert!(html.contains("href=\"/helix\""), "{path} missing nav");
-    }
-}
-
-#[test]
 fn limit_param_parses_and_clamps() {
     assert_eq!(limit_param("/chatlog.json"), DEFAULT_LOG_LIMIT);
     assert_eq!(limit_param("/chatlog.json?limit=25"), 25);
@@ -1135,22 +1271,18 @@ fn admin_pages_post_only_through_the_shared_json_helper() {
     assert!(SHELL_SCRIPT.contains("async function postJSON"));
     assert!(SHELL_SCRIPT.contains("'Content-Type':'application/json'"));
     for (name, body) in [
-        ("config", CONFIG_BODY),
-        ("drive", DRIVE_BODY),
-        ("tools", TOOLS_BODY),
-        ("stt", STT_BODY),
-        ("notify", NOTIFY_BODY),
-        ("household", HOUSEHOLD_BODY),
-        ("system1", SYSTEM1_BODY),
-        ("embeddings", EMBEDDINGS_BODY),
+        ("ui.js", UI_SCRIPT),
+        ("overview", OVERVIEW_BODY),
+        ("voice", VOICE_BODY),
+        ("intelligence", INTELLIGENCE_BODY),
         ("personality", PERSONALITY_BODY),
-        ("pronunciations", PRONUNCIATIONS_BODY),
-        ("music", MUSIC_BODY),
-        ("helix", HELIX_BODY),
-        ("chatlog", CHATLOG_BODY),
-        ("prompts", PROMPTS_BODY),
-        ("sqlite", SQLITE_BODY),
-        ("about", ABOUT_BODY),
+        ("household", HOUSEHOLD_BODY),
+        ("integrations", INTEGRATIONS_BODY),
+        ("devices", DEVICES_BODY),
+        ("memory", MEMORY_BODY),
+        ("conversations", CONVERSATIONS_BODY),
+        ("keys", KEYS_BODY),
+        ("system", SYSTEM_BODY),
     ] {
         assert!(
             !body.contains("function apiJSON"),
@@ -1235,22 +1367,43 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
         "200 OK",
         "application/javascript; charset=utf-8",
     ),
-    ("GET", "/household", "", "200 OK", HTML),
+    (
+        "GET",
+        "/ui.js",
+        "",
+        "200 OK",
+        "application/javascript; charset=utf-8",
+    ),
+    ("GET", "/voice", "", "200 OK", HTML),
+    ("GET", "/intelligence", "", "200 OK", HTML),
     ("GET", "/personality", "", "200 OK", HTML),
-    ("GET", "/pronunciations", "", "200 OK", HTML),
-    ("GET", "/drive", "", "200 OK", HTML),
-    ("GET", "/tools", "", "200 OK", HTML),
-    ("GET", "/stt", "", "200 OK", HTML),
-    ("GET", "/system1", "", "200 OK", HTML),
-    ("GET", "/embeddings", "", "200 OK", HTML),
-    ("GET", "/notifications", "", "200 OK", HTML),
-    ("GET", "/chatlog", "", "200 OK", HTML),
-    ("GET", "/prompts", "", "200 OK", HTML),
-    ("GET", "/sqlite", "", "200 OK", HTML),
-    ("GET", "/helix", "", "200 OK", HTML),
-    ("GET", "/music", "", "200 OK", HTML),
-    ("GET", "/about", "", "200 OK", HTML),
+    ("GET", "/household", "", "200 OK", HTML),
+    ("GET", "/integrations", "", "200 OK", HTML),
+    ("GET", "/devices", "", "200 OK", HTML),
+    ("GET", "/memory", "", "200 OK", HTML),
+    ("GET", "/conversations", "", "200 OK", HTML),
+    ("GET", "/keys", "", "200 OK", HTML),
+    ("GET", "/system", "", "200 OK", HTML),
+    // Legacy page routes → redirects.
+    ("GET", "/stt", "", "302 Found", TEXT),
+    ("GET", "/pronunciations", "", "302 Found", TEXT),
+    ("GET", "/system1", "", "302 Found", TEXT),
+    ("GET", "/tools", "", "302 Found", TEXT),
+    ("GET", "/drive", "", "302 Found", TEXT),
+    ("GET", "/music", "", "302 Found", TEXT),
+    ("GET", "/notifications", "", "302 Found", TEXT),
+    ("GET", "/embeddings", "", "302 Found", TEXT),
+    ("GET", "/sqlite", "", "302 Found", TEXT),
+    ("GET", "/helix", "", "302 Found", TEXT),
+    ("GET", "/chatlog", "", "302 Found", TEXT),
+    ("GET", "/prompts", "", "302 Found", TEXT),
+    ("GET", "/about", "", "302 Found", TEXT),
     // JSON reads.
+    ("GET", "/overview.json", "", "200 OK", JSON),
+    ("GET", "/overview.json?probe=0", "", "200 OK", JSON),
+    ("GET", "/keys.json", "", "200 OK", JSON),
+    ("GET", "/system.json", "", "200 OK", JSON),
+    ("GET", "/extraction/status.json", "", "200 OK", JSON),
     ("GET", "/about.json", "", "200 OK", JSON),
     ("GET", "/config", "", "200 OK", JSON),
     ("GET", "/config?_=1", "", "200 OK", JSON),
@@ -1297,6 +1450,13 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/notifications/test", "{}", "200 OK", JSON),
     (
         "POST",
+        "/extraction/save",
+        r#"{"enabled":true}"#,
+        "200 OK",
+        JSON,
+    ),
+    (
+        "POST",
         "/helix/rename-entity",
         r#"{"old_name":"a","new_name":"b"}"#,
         "200 OK",
@@ -1340,6 +1500,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/system1/save", "not json", "200 OK", JSON),
     ("POST", "/embeddings/switch", "not json", "200 OK", JSON),
     ("POST", "/notifications/test", "not json", "200 OK", JSON),
+    ("POST", "/extraction/save", "not json", "200 OK", JSON),
     ("POST", "/helix/rename-entity", "not json", "200 OK", JSON),
     ("POST", "/music/proc", "not json", "200 OK", JSON),
     ("POST", "/music/play", "not json", "200 OK", JSON),

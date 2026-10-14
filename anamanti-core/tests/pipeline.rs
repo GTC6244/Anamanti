@@ -1108,6 +1108,7 @@ async fn follow_up_turn_includes_recent_history_in_the_prompt() {
     let log = Arc::new(ChatLog::open(&path).unwrap());
     log.append(&ChatLogRecord {
         id: log.next_id(),
+        turn_id: None,
         ts: now_secs(),
         session_id: "s-prev".to_string(),
         transcript: "what's the weather".to_string(),
@@ -1172,6 +1173,7 @@ async fn ordinary_turn_carries_no_history() {
     let log = Arc::new(ChatLog::open(&path).unwrap());
     log.append(&ChatLogRecord {
         id: log.next_id(),
+        turn_id: None,
         ts: now_secs(),
         session_id: "s-prev".to_string(),
         transcript: "hello".to_string(),
@@ -1216,6 +1218,60 @@ async fn ordinary_turn_carries_no_history() {
         turn.history.is_empty(),
         "an ordinary turn stays single-turn (no history)"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A System-2 turn writes ONE turn id to both its chat-log record and its prompt-log
+/// record, so the console's Conversations view can show the exact prompt for a turn
+/// (plans/CoreWebUIPlan.md, decision: join prompts to turns via `turn_id`).
+#[tokio::test]
+async fn chatlog_and_promptlog_share_the_turn_id() {
+    use anamanti_core::memory::{chatlog, promptlog, PromptLog};
+    let dir = std::env::temp_dir().join(format!("anamanti_turnid_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let chat_path = dir.join("chatlog.jsonl");
+    let prompt_path = dir.join("promptlog.jsonl");
+    let _ = std::fs::remove_file(&chat_path);
+    let _ = std::fs::remove_file(&prompt_path);
+
+    let seen = Arc::new(Mutex::new(None));
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = Pipeline::new(
+        Arc::new(CapturingLlm { seen: seen.clone() }),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_chatlog(Arc::new(ChatLog::open(&chat_path).unwrap()))
+    .with_promptlog(Arc::new(PromptLog::open(&prompt_path).unwrap()));
+    let connector = MockConnector::new("what is two plus two");
+
+    let (dev_pipeline, dev_test) = tokio::io::duplex(64 * 1024);
+    let (pr, pw) = split(dev_pipeline);
+    let mut device = DynConnection::from_io(pr, pw);
+    let device_task = tokio::spawn(drive_device_collect_kinds(dev_test, 0));
+    {
+        let mut on_event = |_e: TurnEvent| {};
+        run_turn(&pipeline, &mut device, &connector, &mut on_event)
+            .await
+            .expect("turn runs");
+    }
+    drop(device);
+    device_task.await.unwrap();
+
+    let turns = chatlog::read_tail(&chat_path, 10).unwrap();
+    let prompts = promptlog::read_tail(&prompt_path, 10).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(prompts.len(), 1);
+    let id = turns[0]
+        .turn_id
+        .clone()
+        .expect("the chat record carries a turn id");
+    assert!(id.starts_with("t-"), "turn id {id}");
+    assert_eq!(prompts[0].turn_id.as_deref(), Some(id.as_str()));
+    assert_eq!(prompts[0].user_message, "what is two plus two");
 
     std::fs::remove_dir_all(&dir).ok();
 }
