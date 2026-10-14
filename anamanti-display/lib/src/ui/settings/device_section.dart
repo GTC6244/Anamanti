@@ -57,11 +57,12 @@ class DeviceConnectionTab extends StatelessWidget {
                 ? 'Shown on the Core’s “Connected devices” list'
                 : 'ID: ${s.deviceId}',
             textCapitalization: TextCapitalization.words,
-            onChanged: (v) => c.updateLocal(
-              c.settings.copyWith(deviceName: v),
-              commit: false,
+            onChanged: (v) =>
+                c.setLocalDraft('deviceName', (s) => s.copyWith(deviceName: v)),
+            onCommit: (v) => c.commitLocalText(
+              'deviceName',
+              (s) => s.copyWith(deviceName: v),
             ),
-            onCommit: c.commitLocalSoon,
           ),
         ),
         const SettingsHeader(
@@ -164,16 +165,17 @@ class DeviceUpdatesTab extends StatelessWidget {
                   'Base URL hosting latest.json + the APK (no trailing slash)',
               keyboardType: TextInputType.url,
               border: true,
-              onChanged: (v) {
-                final url = v.trim();
-                // Keep the previous URL rather than none.
-                if (url.isEmpty) return;
-                c.updateLocal(
-                  c.settings.copyWith(updateBaseUrl: url),
-                  commit: false,
-                );
-              },
-              onCommit: c.commitLocalSoon,
+              // An emptied field keeps the previous URL rather than none.
+              onChanged: (v) => c.setLocalDraft(
+                'updateBaseUrl',
+                (s) =>
+                    v.trim().isEmpty ? s : s.copyWith(updateBaseUrl: v.trim()),
+              ),
+              onCommit: (v) => c.commitLocalText(
+                'updateBaseUrl',
+                (s) =>
+                    v.trim().isEmpty ? s : s.copyWith(updateBaseUrl: v.trim()),
+              ),
             ),
           ),
       ],

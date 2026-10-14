@@ -328,11 +328,14 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
           text: s.driveFolderIds.join(', '),
           label: 'Drive folder ID(s) or link(s)',
           helper: 'Filled by “Choose folders”, or paste manually.',
-          onChanged: (v) => _c.updateLocal(
-            _c.settings.copyWith(driveFolderIds: parseDriveFolderIds(v)),
-            commit: false,
+          onChanged: (v) => _c.setLocalDraft(
+            'driveFolderIds',
+            (s) => s.copyWith(driveFolderIds: parseDriveFolderIds(v)),
           ),
-          onCommit: _c.commitLocalSoon,
+          onCommit: (v) => _c.commitLocalText(
+            'driveFolderIds',
+            (s) => s.copyWith(driveFolderIds: parseDriveFolderIds(v)),
+          ),
         ),
       ),
   ];

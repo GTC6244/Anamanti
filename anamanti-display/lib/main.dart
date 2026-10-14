@@ -488,6 +488,13 @@ class _AmbientHomeState extends State<AmbientHome> {
         threshold: next.threshold,
         activeThreshold: next.activeThreshold,
       );
+      // Also fold them into the controller's config, which an engine reconnect
+      // reuses — otherwise a reconnect would re-seed the old values.
+      _assistant!.updateLiveTuning(
+        gainDb: next.captureGainDb,
+        threshold: next.threshold,
+        activeThreshold: next.activeThreshold,
+      );
     }
     // Push the (possibly changed) update base URL / auto-update toggle to the updater.
     await _updates?.updateConfig(
@@ -522,6 +529,8 @@ class _AmbientHomeState extends State<AmbientHome> {
           // The live engine controller powers Audio Diagnostics' meters + voice
           // enrollment; a listenable so it follows engine restarts.
           assistant: _assistantListenable,
+          // Re-pinning the Core in Settings switches Settings to the new Mac.
+          clientForCore: (key) => FrbOrchestratorClient(orchestratorKey: key),
           // Capture gain + wake-word thresholds apply to the running engine as the
           // sliders move (no restart).
           onLiveTune: (gainDb, threshold, activeThreshold) =>

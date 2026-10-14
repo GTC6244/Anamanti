@@ -433,6 +433,7 @@ reworking them) would have been throwaway work.
 | Live "sensitivity while speaking" (decision #6): `update_diagnostics_tuning(gain, threshold, active_threshold)`, FRB regenerated; `main.dart` live-tunes instead of restarting and serializes applies | done | `feat(display): live-apply wake-word sensitivity while speaking` |
 | 3 — `AppSettings.advancedMode` (default on, decision #8) | done | `feat(display): AppSettings.advancedMode (default on)` |
 | 1 + 2 + 4 — rail + tabs, regroup, apply immediately, Advanced gating, two-column fit, no-scroll test | done | `feat(display): reorganize Settings — 6-section rail, …` |
+| Review fixes (independent code review): undo-while-in-flight sent; Audio Diagnostics keeps its transcription-only context across an engine restart; live tuning survives an engine reconnect; Settings follows a re-pinned Core; half-typed text never applied by unrelated changes; failed applies retried; People gets the live engine controller | done | `fix(display): settings apply-immediately review fixes` |
 | Docs — `DisplayUI.md` §9–§10, `Plan.MD` decision row, `architecture.md`, README / Updater / FontScale / TODO references | done | `docs: …` |
 
 **Deviations from §3, decided during implementation:**

@@ -376,7 +376,16 @@ and `settings_controller.dart`). Layout and rationale:
     after a ~500 ms debounce; a rejected or failed apply **reverts** the control to the
     Core's last confirmed value and shows why in the AppBar.
   - anything still pending (a debounce, a slider mid-drag, a text field mid-edit) is
-    **flushed when Settings closes**.
+    **flushed when Settings closes**. Text-field drafts are held apart from the other
+    settings, so an unrelated change never applies a half-typed value; a failed apply
+    isn't marked applied, so it's retried; an edit made while an apply is still in
+    flight (including an undo) is always sent.
+  - **Re-pinning the Core** (Device → Connection) switches Settings itself to the new
+    Mac once the change applies (`SettingsScreen.clientForCore`), reloading the Core
+    settings and capabilities; People / Memory / Link a phone open against it too.
+  - Live-tuned gain + thresholds are also folded into the engine controller's config
+    (`AssistantController.updateLiveTuning`), so an engine reconnect re-seeds them
+    instead of reverting.
   - The AppBar shows the apply status (key `settings-apply-status`: "Saving…" /
     "Saved" / the last error) and, in Advanced mode, an **Advanced** chip
     (`settings-advanced-chip`, jumps to Device → Maintenance).
@@ -476,8 +485,10 @@ and `settings_controller.dart`). Layout and rationale:
 **`AudioDiagnosticsView`** — `lib/src/ui/audio_diagnostics_view.dart`
 - The **Audio Diagnostics** section — a live, visual mic-tuning surface. Rendered by
   `SettingsScreen` with the live `AssistantController` from
-  `SettingsScreen.assistant` (a `ValueListenable`, wired from `main.dart`, so the view
-  re-subscribes after an engine restart). Driven entirely by the always-on wake-word
+  `SettingsScreen.assistant` (a `ValueListenable`, wired from `main.dart`). After an
+  engine restart the same view swaps to the new controller (`didUpdateWidget`) without
+  re-announcing the transcription-only context, so it stays set while the page is up.
+  People is likewise rebuilt with the live controller. Driven entirely by the always-on wake-word
   engine's event stream folded into `AssistantState` — no second audio path.
 - Shows: a **mic input-level (RMS) meter** on a dBFS scale whose header line carries
   the **Microphone monitor** switch (`Key('diag-monitor-toggle')`, pauses/resumes the

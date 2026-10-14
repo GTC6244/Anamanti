@@ -82,6 +82,7 @@ class SettingsScreen extends StatefulWidget {
     this.updates,
     this.onRequestEngineRestart,
     this.onLiveTune,
+    this.clientForCore,
     this.onDiagnosticsActive = _nativeDiagnosticsContext,
     this.initialSection = SettingsSection.assistant,
     this.localDebounce = const Duration(milliseconds: 600),
@@ -94,8 +95,14 @@ class SettingsScreen extends StatefulWidget {
   /// Persistence for the device-local settings.
   final SettingsStore store;
 
-  /// Client for the Core-managed settings + memory.
+  /// Client for the Core-managed settings + memory, pinned to the Core selected
+  /// when Settings opened.
   final OrchestratorClient client;
+
+  /// Build a client pinned to another Core (`''` = Auto). When the user re-pins the
+  /// Core in Device → Connection, Settings switches to it once the change applies,
+  /// so everything after that talks to the newly selected Mac. Null in tests.
+  final OrchestratorClient Function(String orchestratorKey)? clientForCore;
 
   /// Called (and awaited) with each committed device-local settings snapshot so the
   /// app can restart the engine / refresh the slideshow / live-tune as needed.
@@ -145,6 +152,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     client: widget.client,
     onApplied: widget.onApplied,
     onLiveTune: widget.onLiveTune,
+    clientForCore: widget.clientForCore,
     localDebounce: widget.localDebounce,
     remoteDebounce: widget.remoteDebounce,
   );
@@ -319,8 +327,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   /// Audio Diagnostics: live mic + wake-word meters with live-applied tuning.
-  /// Follows the engine controller across restarts (keyed by it, so the view
-  /// re-subscribes to the new one).
+  /// Follows the engine controller across restarts.
   Widget _diagnosticsPage() {
     return ValueListenableBuilder<AssistantController?>(
       valueListenable: widget.assistant ?? _noEngine,
@@ -337,8 +344,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           );
         }
+        // Not keyed by the controller: across an engine restart the same view
+        // swaps controllers (didUpdateWidget), so the transcription-only context
+        // stays set for as long as the page is up.
         return AudioDiagnosticsView(
-          key: ObjectKey(assistant),
+          key: const Key('audio-diagnostics-view'),
           controller: assistant,
           settings: _c.settings,
           // Applies + persists like any other change; the controller also pushes
@@ -400,24 +410,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _openPeople() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => PeopleScreen(
-          client: widget.client,
-          controller: widget.assistant?.value,
-          setEnrollContext:
-              ({
-                required bool active,
-                required String session,
-                required String name,
-                required int sampleIndex,
-                required String phase,
-              }) => setEnrollContext(
-                active: active,
-                session: session,
-                name: name,
-                sampleIndex: sampleIndex,
-                phase: phase,
-              ),
-          wakeWord: _c.settings.wakeWord.replaceAll('_', ' '),
+        // Rebuilt with the live engine controller, so an engine restart while People
+        // is open doesn't leave enrollment bound to a disposed one.
+        builder: (_) => ValueListenableBuilder<AssistantController?>(
+          valueListenable: widget.assistant ?? _noEngine,
+          builder: (context, assistant, _) => PeopleScreen(
+            client: _c.client,
+            controller: assistant,
+            setEnrollContext:
+                ({
+                  required bool active,
+                  required String session,
+                  required String name,
+                  required int sampleIndex,
+                  required String phase,
+                }) => setEnrollContext(
+                  active: active,
+                  session: session,
+                  name: name,
+                  sampleIndex: sampleIndex,
+                  phase: phase,
+                ),
+            wakeWord: _c.settings.wakeWord.replaceAll('_', ' '),
+          ),
         ),
       ),
     );
@@ -426,9 +441,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Memory: Facts / Conversations / Keywords, each with browse + delete.
   void _openMemory() {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => MemoryScreen(client: widget.client),
-      ),
+      MaterialPageRoute<void>(builder: (_) => MemoryScreen(client: _c.client)),
     );
   }
 
@@ -436,7 +449,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _openPairPhone() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => PairPhoneScreen(client: widget.client),
+        builder: (_) => PairPhoneScreen(client: _c.client),
       ),
     );
   }

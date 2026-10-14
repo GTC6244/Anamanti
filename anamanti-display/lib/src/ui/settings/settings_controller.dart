@@ -138,13 +138,25 @@ class SettingsController extends ChangeNotifier {
     required this.client,
     required this.onApplied,
     this.onLiveTune,
+    this.clientForCore,
     this.localDebounce = const Duration(milliseconds: 600),
     this.remoteDebounce = const Duration(milliseconds: 500),
   }) : _settings = initial,
-       _committedLocal = initial;
+       _committedLocal = initial,
+       _clientCore = initial.orchestratorKey;
 
   final SettingsStore store;
-  final OrchestratorClient client;
+
+  /// Client for the pinned Core. Replaced (via [clientForCore]) when the user pins a
+  /// different Core, so Settings keeps talking to the right Mac while it stays open.
+  OrchestratorClient client;
+
+  /// Build a client pinned to a Core key (`''` = Auto). Null keeps [client] as is
+  /// (tests).
+  final OrchestratorClient Function(String orchestratorKey)? clientForCore;
+
+  /// The Core key [client] is pinned to.
+  String _clientCore;
 
   /// Hand a committed device-local settings snapshot to the app (engine restart,
   /// slideshow refresh, live tuning). Awaited, so applies are serialized.
@@ -181,9 +193,25 @@ class SettingsController extends ChangeNotifier {
   // ---------------------------------------------------------------------------
   // Device-local settings.
 
+  /// The settings as shown — every applied control change, excluding text-field
+  /// drafts (see [setLocalDraft]).
   AppSettings _settings;
+
+  /// The last snapshot successfully persisted + applied.
   AppSettings _committedLocal;
+
+  /// The latest snapshot queued for applying, until its apply settles. Commits
+  /// compare against this (falling back to [_committedLocal]) so an edit made while
+  /// an apply is in flight — including an undo back to the applied value — is
+  /// never mistaken for "already applied".
+  AppSettings? _queuedLocal;
   Future<void> _localChain = Future<void>.value();
+
+  /// Uncommitted text-field edits, by field. Kept out of [_settings] so an unrelated
+  /// commit never applies a half-typed value; applied on the field's commit or on
+  /// [flush].
+  final Map<String, AppSettings Function(AppSettings)> _localDrafts =
+      <String, AppSettings Function(AppSettings)>{};
 
   AppSettings get settings => _settings;
 
@@ -208,6 +236,17 @@ class SettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Record an in-progress text edit for [field] without applying it.
+  void setLocalDraft(String field, AppSettings Function(AppSettings) apply) {
+    _localDrafts[field] = apply;
+  }
+
+  /// Finish a text edit: apply it (debounced like any other change).
+  void commitLocalText(String field, AppSettings Function(AppSettings) apply) {
+    _localDrafts.remove(field);
+    updateLocal(apply(_settings));
+  }
+
   /// Schedule a debounced commit of the current device-local settings.
   void commitLocalSoon() {
     if (_disposed) return;
@@ -219,26 +258,42 @@ class SettingsController extends ChangeNotifier {
   void _commitLocal() {
     _localTimer?.cancel();
     final next = _settings;
-    if (next == _committedLocal) {
+    if (next == (_queuedLocal ?? _committedLocal)) {
       notifyListeners();
       return;
     }
-    _committedLocal = next;
+    _queuedLocal = next;
     _inFlight++;
     notifyListeners();
     _localChain = _localChain.then((_) async {
       try {
         await store.save(next);
         await onApplied(next);
+        _committedLocal = next;
         lastError = null;
         lastAppliedAt = DateTime.now();
+        _repinIfNeeded(next.orchestratorKey);
       } catch (e) {
+        // Not marked applied, so the next commit (or flush) retries it.
         lastError = 'Couldn’t apply: $e';
       } finally {
+        if (identical(_queuedLocal, next)) _queuedLocal = null;
         _inFlight--;
         notifyListeners();
       }
     });
+  }
+
+  /// After a new Core pin has been applied, point Settings at that Core and reload
+  /// its settings + capabilities.
+  void _repinIfNeeded(String core) {
+    final make = clientForCore;
+    if (make == null || core == _clientCore || _disposed) return;
+    _clientCore = core;
+    client = make(core);
+    functions = null;
+    loadRemote();
+    loadFunctions();
   }
 
   // ---------------------------------------------------------------------------
@@ -310,6 +365,27 @@ class SettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Uncommitted Core-managed text edits (model, free-text voice), by field.
+  final Map<String, RemoteSettings Function(RemoteSettings)> _remoteDrafts =
+      <String, RemoteSettings Function(RemoteSettings)>{};
+
+  /// Record an in-progress text edit for [field] without applying it.
+  void setRemoteDraft(
+    String field,
+    RemoteSettings Function(RemoteSettings) apply,
+  ) {
+    _remoteDrafts[field] = apply;
+  }
+
+  /// Finish a text edit: apply it (debounced like any other change).
+  void commitRemoteText(
+    String field,
+    RemoteSettings Function(RemoteSettings) apply,
+  ) {
+    _remoteDrafts.remove(field);
+    updateRemote(apply(_remote));
+  }
+
   void commitRemoteSoon() {
     if (_disposed) return;
     _remoteTimer?.cancel();
@@ -317,15 +393,16 @@ class SettingsController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The value most recently queued for `applySettings` (null once it settles), so
-  /// [flush] doesn't resend an apply that's already in flight.
+  /// The latest value queued for `applySettings`, until it settles. Commits compare
+  /// against this (falling back to [_confirmedRemote]) so an edit made while an
+  /// apply is in flight — including an undo back to the confirmed value — is sent,
+  /// and an apply already in flight isn't resent.
   RemoteSettings? _queuedRemote;
-  bool get _remoteApplyQueued => _queuedRemote == _remote;
 
   void _commitRemote() {
     _remoteTimer?.cancel();
     final sent = _remote;
-    if (sent == _confirmedRemote || !remoteEditable) {
+    if (sent == (_queuedRemote ?? _confirmedRemote) || !remoteEditable) {
       notifyListeners();
       return;
     }
@@ -400,8 +477,18 @@ class SettingsController extends ChangeNotifier {
   /// a slider mid-drag, or a text field mid-edit (Settings is closing).
   /// Fire-and-forget: the applies complete after the screen is gone.
   void flush() {
-    if (_settings != _committedLocal) _commitLocal();
-    if (_remote != _confirmedRemote && !_remoteApplyQueued) _commitRemote();
+    for (final apply in _localDrafts.values) {
+      _settings = apply(_settings);
+    }
+    _localDrafts.clear();
+    if (remoteEditable) {
+      for (final apply in _remoteDrafts.values) {
+        _remote = apply(_remote);
+      }
+    }
+    _remoteDrafts.clear();
+    _commitLocal();
+    _commitRemote();
   }
 
   @override

@@ -256,7 +256,7 @@ class SettingsRow extends StatelessWidget {
 /// submit action or when it loses focus, never on every keystroke. Each keystroke
 /// is reported through [onChanged] as an uncommitted draft (so Settings can still
 /// apply it if it closes mid-edit — see `SettingsController.flush`); [onCommit]
-/// marks the edit finished. External changes to [text] are adopted while the field
+/// delivers the finished value. External changes to [text] are adopted while the field
 /// isn't being edited.
 class CommitTextField extends StatefulWidget {
   const CommitTextField({
@@ -276,7 +276,7 @@ class CommitTextField extends StatefulWidget {
 
   final String text;
   final ValueChanged<String> onChanged;
-  final VoidCallback onCommit;
+  final ValueChanged<String> onCommit;
   final String? label;
   final String? hint;
   final String? helper;
@@ -316,7 +316,7 @@ class _CommitTextFieldState extends State<CommitTextField> {
   void _commit() {
     if (!_dirty) return;
     _dirty = false;
-    widget.onCommit();
+    widget.onCommit(_controller.text);
   }
 
   @override

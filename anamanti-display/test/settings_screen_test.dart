@@ -34,6 +34,13 @@ class _Harness {
 
   final FakeOrchestratorClient client;
   final InMemorySettingsStore store;
+
+  /// Replaces the default "record it" apply (e.g. to make an apply fail).
+  FutureOr<void> Function(AppSettings next)? onApplied;
+
+  /// Clients for re-pinned Cores, by key (Settings → Device → Connection).
+  final Map<String, FakeOrchestratorClient> coreClients =
+      <String, FakeOrchestratorClient>{};
   final List<AppSettings> applied = <AppSettings>[];
   final List<List<double>> liveTunes = <List<double>>[];
 
@@ -51,7 +58,12 @@ class _Harness {
           initial: initial,
           store: store,
           client: client,
-          onApplied: applied.add,
+          onApplied: (next) {
+            applied.add(next);
+            return onApplied?.call(next);
+          },
+          clientForCore: (key) =>
+              coreClients.putIfAbsent(key, () => FakeOrchestratorClient()),
           onLiveTune: (g, t, a) => liveTunes.add([g, t, a]),
           localDebounce: localDebounce,
         ),
@@ -817,6 +829,24 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // An engine restart replaces the controller while the page is up: the
+      // transcription-only context must stay set (not be toggled off and on).
+      final engine2 = StreamController<WakeWordEvent>.broadcast();
+      final controller2 = AssistantController(
+        config: _cfg(),
+        startEngine: (_) => engine2.stream,
+      )..start();
+      addTearDown(() async {
+        controller2.dispose();
+        await engine2.close();
+      });
+      listenable.value = controller2;
+      await tester.pumpAndSettle();
+      expect(active, [true]);
+      engine2.add(_event(WakeWordEventKind.detected, score: 0.9));
+      await tester.pumpAndSettle();
+      expect(find.text('0.900'), findsWidgets); // follows the new engine
+
       final page = find.byKey(const Key('settings-page-diagnostics-'));
       // Height is only meaningful with real glyph widths (see real_fonts.dart).
       for (final e
@@ -833,6 +863,125 @@ void main() {
       expect(active, [true, false]);
     },
   );
+
+  group('apply-immediately edge cases', () {
+    testWidgets(
+      'undoing a Core change while its apply is in flight is applied',
+      (tester) async {
+        final h = _Harness();
+        await h.pump(tester);
+        await open(tester, 'listening', 'endOfSpeech');
+        final gate = Completer<void>();
+        h.client.applyGate = gate;
+
+        // Silero (current) → Energy: applied, and held in flight on the Mac…
+        await tester.tap(find.text('Energy'));
+        await tester.pump(const Duration(seconds: 1));
+        // …then straight back to Silero — exactly the Core's confirmed value.
+        await tester.tap(find.text('Silero'));
+        await tester.pump(const Duration(seconds: 1));
+        gate.complete();
+        await settle(tester);
+
+        // The undo must still be sent, or the Core is left on Energy.
+        expect(h.client.applyCalls.map((c) => c['vadEngine']), [
+          'energy',
+          'silero',
+        ]);
+      },
+    );
+
+    testWidgets('a half-typed field is not applied by an unrelated change', (
+      tester,
+    ) async {
+      final h = _Harness();
+      await h.pump(tester);
+
+      await open(tester, 'device', 'connection');
+      await tester.enterText(
+        find.byKey(const Key('settings-device-name')),
+        'Kit',
+      );
+      // Change something else while the name is still being typed.
+      await open(tester, 'display', 'screen');
+      await tester.tap(find.byKey(const Key('settings-dim-delay-60')));
+      await settle(tester);
+
+      expect(h.last!.dimDelaySecs, 60);
+      expect(h.last!.deviceName, isEmpty);
+    });
+
+    testWidgets('a half-typed field is applied when Settings closes', (
+      tester,
+    ) async {
+      final h = _Harness();
+      await h.pump(tester);
+
+      await open(tester, 'device', 'connection');
+      await tester.enterText(
+        find.byKey(const Key('settings-device-name')),
+        'Kitchen',
+      );
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+
+      expect(h.last!.deviceName, 'Kitchen');
+    });
+
+    testWidgets('a failed device-local apply is retried', (tester) async {
+      final h = _Harness();
+      await h.pump(tester);
+      var fail = true;
+      h.onApplied = (_) {
+        if (fail) throw Exception('engine failed to start');
+      };
+
+      await open(tester, 'listening');
+      await pickDropdown(tester, 'settings-wakeword', 'alexa');
+      await settle(tester);
+      expect(find.textContaining('engine failed to start'), findsOneWidget);
+
+      fail = false;
+      await tester.pumpWidget(const SizedBox()); // closing Settings retries
+      await tester.pumpAndSettle();
+      expect(h.applied.map((s) => s.wakeWord), ['alexa', 'alexa']);
+    });
+
+    testWidgets('re-pinning the Core switches Settings to the new Mac', (
+      tester,
+    ) async {
+      final h = _Harness(
+        client: FakeOrchestratorClient(
+          orchestrators: const [
+            OrchestratorOption(
+              key: 'test-mac',
+              name: 'Test Mac',
+              host: '192.168.1.11',
+              port: 10700,
+            ),
+          ],
+        ),
+      );
+      await h.pump(tester);
+
+      await open(tester, 'device', 'connection');
+      await pickDropdown(
+        tester,
+        'settings-orchestrator',
+        'Test Mac · 192.168.1.11',
+      );
+      await settle(tester);
+
+      final newCore = h.coreClients['test-mac']!;
+      expect(newCore.fetchCount, 1); // reloaded from the new Core
+
+      await open(tester, 'assistant', 'brain');
+      await tester.tap(find.text('OpenAI'));
+      await settle(tester);
+      expect(newCore.applyCalls.single['llmBackend'], 'openai');
+      expect(h.client.applyCalls, isEmpty);
+    });
+  });
 
   // Every tab must fit the Echo Show's 960×600 dp screen without scrolling — the
   // core goal of the reorg. Runs with Advanced mode on (the tallest layouts) and

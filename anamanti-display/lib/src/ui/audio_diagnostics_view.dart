@@ -101,6 +101,20 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
   }
 
   @override
+  void didUpdateWidget(AudioDiagnosticsView old) {
+    super.didUpdateWidget(old);
+    // An engine restart (e.g. a setting applied from Settings) replaces the
+    // controller while this screen stays up: follow the new one. The
+    // transcription-only context is deliberately NOT re-announced — it's a single
+    // global flag, and toggling it here could leave it cleared while the page is up.
+    if (!identical(old.controller, widget.controller)) {
+      old.controller.removeListener(_onTick);
+      _lastSeq = widget.controller.state.detectionSeq;
+      widget.controller.addListener(_onTick);
+    }
+  }
+
+  @override
   void dispose() {
     // Leaving the diagnostics screen: clear the transcription-only context so normal
     // (LLM-backed) turns resume elsewhere.

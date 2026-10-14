@@ -2,6 +2,8 @@
 // Records calls and returns canned data so the settings/memory screens can be
 // driven deterministically.
 
+import 'dart:async';
+
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 
 class FakeOrchestratorClient implements OrchestratorClient {
@@ -120,6 +122,10 @@ class FakeOrchestratorClient implements OrchestratorClient {
   /// orchestrator rejecting the commit, e.g. too few samples).
   String? enrollFinishError;
 
+  /// When set, [applySettings] records the call and then waits for this to complete
+  /// (simulates an apply still in flight on the Mac).
+  Completer<void>? applyGate;
+
   /// When true, [applySettings] throws (simulates the Mac dropping off mid-edit).
   bool throwOnApply = false;
 
@@ -169,6 +175,8 @@ class FakeOrchestratorClient implements OrchestratorClient {
       'vadEngine': vadEngine,
       'sileroThreshold': sileroThreshold,
     });
+    final gate = applyGate;
+    if (gate != null) await gate.future;
     if (throwOnApply) throw Exception('offline');
     final reject = rejectApply;
     if (reject != null) {

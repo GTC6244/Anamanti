@@ -125,8 +125,10 @@ class _ModelField extends StatelessWidget {
           enabled: c.remoteEditable,
           label: 'Model',
           hint: 'e.g. llama3.2 or qwen2.5',
-          onChanged: (v) => c.updateRemote(r.copyWith(model: v), commit: false),
-          onCommit: c.commitRemoteSoon,
+          onChanged: (v) =>
+              c.setRemoteDraft('model', (x) => x.copyWith(model: v)),
+          onCommit: (v) =>
+              c.commitRemoteText('model', (x) => x.copyWith(model: v)),
         ),
       );
     }
@@ -186,8 +188,10 @@ class _VoiceField extends StatelessWidget {
           enabled: c.remoteEditable,
           label: 'TTS voice',
           hint: 'Piper voice, e.g. en_US-amy-medium (blank = default)',
-          onChanged: (v) => c.updateRemote(r.copyWith(voice: v), commit: false),
-          onCommit: c.commitRemoteSoon,
+          onChanged: (v) =>
+              c.setRemoteDraft('voice', (x) => x.copyWith(voice: v)),
+          onCommit: (v) =>
+              c.commitRemoteText('voice', (x) => x.copyWith(voice: v)),
         ),
       );
     }
