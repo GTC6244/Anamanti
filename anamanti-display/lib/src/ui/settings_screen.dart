@@ -897,8 +897,11 @@ class _SettingsScreenState extends State<SettingsScreen>
       controller: assistant,
       settings: _settings,
       onChanged: (next) => setState(() => _settings = next),
-      onTune: (gain, threshold) =>
-          updateDiagnosticsTuning(gainDb: gain, threshold: threshold),
+      onTune: (gain, threshold) => updateDiagnosticsTuning(
+        gainDb: gain,
+        threshold: threshold,
+        activeThreshold: _settings.activeThreshold,
+      ),
       // Entering/leaving the page toggles the Core's transcription-only context, so
       // voice turns here show the recognized words but are never sent to the LLM.
       onActiveChanged: (active) => setDiagnosticsContext(active: active),

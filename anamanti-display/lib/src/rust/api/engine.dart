@@ -45,19 +45,22 @@ Future<void> stopWakeWordEngine() =>
 bool isWakeWordEngineRunning() =>
     RustLib.instance.api.crateApiEngineIsWakeWordEngineRunning();
 
-/// Live-adjust the capture gain (dB) and idle wake-word detection threshold on the
-/// **running** engine without restarting it, so the audio-diagnostics screen's
-/// sliders take effect instantly while the user watches the meters. The engine
-/// re-reads both values each audio block. They are re-seeded from [`WakeWordConfig`]
-/// on the next engine start, so persist the chosen values to settings to keep them
-/// across restarts. A harmless no-op when no engine is running. `gain_db` is clamped
-/// to `[0, 36]`; `threshold` to `[0, 1]`.
+/// Live-adjust the capture gain (dB), the idle wake-word detection threshold and the
+/// active (in-turn, "sensitivity while speaking") threshold on the **running** engine
+/// without restarting it, so Settings and the audio-diagnostics screen take effect
+/// instantly. The engine re-reads the values each audio block. They are re-seeded from
+/// [`WakeWordConfig`] on the next engine start, so persist the chosen values to
+/// settings to keep them across restarts. A harmless no-op when no engine is running.
+/// `gain_db` is clamped to `[0, 36]`; both thresholds to `[0, 1]`. While a turn is
+/// active the effective threshold is `max(active_threshold, threshold)`.
 void updateDiagnosticsTuning({
   required double gainDb,
   required double threshold,
+  required double activeThreshold,
 }) => RustLib.instance.api.crateApiEngineUpdateDiagnosticsTuning(
   gainDb: gainDb,
   threshold: threshold,
+  activeThreshold: activeThreshold,
 );
 
 /// Register user activity that isn't camera motion — a voice turn or a screen touch

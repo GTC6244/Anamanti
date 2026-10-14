@@ -1680,10 +1680,15 @@ fn wire__crate__api__engine__update_diagnostics_tuning_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_gain_db = <f32>::sse_decode(&mut deserializer);
             let api_threshold = <f32>::sse_decode(&mut deserializer);
+            let api_active_threshold = <f32>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok({
-                    crate::api::engine::update_diagnostics_tuning(api_gain_db, api_threshold);
+                    crate::api::engine::update_diagnostics_tuning(
+                        api_gain_db,
+                        api_threshold,
+                        api_active_threshold,
+                    );
                 })?;
                 Ok(output_ok)
             })())

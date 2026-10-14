@@ -289,6 +289,7 @@ abstract class RustLibApi extends BaseApi {
   void crateApiEngineUpdateDiagnosticsTuning({
     required double gainDb,
     required double threshold,
+    required double activeThreshold,
   });
 
   Future<OrchestratorSettings> crateApiSettingsUpdateOrchestratorSettings({
@@ -1753,6 +1754,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void crateApiEngineUpdateDiagnosticsTuning({
     required double gainDb,
     required double threshold,
+    required double activeThreshold,
   }) {
     return handler.executeSync(
       SyncTask(
@@ -1760,6 +1762,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_f_32(gainDb, serializer);
           sse_encode_f_32(threshold, serializer);
+          sse_encode_f_32(activeThreshold, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 43)!;
         },
         codec: SseCodec(
@@ -1767,7 +1770,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: null,
         ),
         constMeta: kCrateApiEngineUpdateDiagnosticsTuningConstMeta,
-        argValues: [gainDb, threshold],
+        argValues: [gainDb, threshold, activeThreshold],
         apiImpl: this,
       ),
     );
@@ -1776,7 +1779,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiEngineUpdateDiagnosticsTuningConstMeta =>
       const TaskConstMeta(
         debugName: "update_diagnostics_tuning",
-        argNames: ["gainDb", "threshold"],
+        argNames: ["gainDb", "threshold", "activeThreshold"],
       );
 
   @override

@@ -101,32 +101,40 @@ fn slot() -> &'static Mutex<Option<EngineHandle>> {
     ENGINE.get_or_init(|| Mutex::new(None))
 }
 
-/// Live-tunable capture gain (dB) and idle wake-word threshold, stored as `f32`
-/// bits so the audio-diagnostics screen can adjust them on the running engine
-/// **without a restart** (`update_tuning`, exposed to Dart as
-/// `update_diagnostics_tuning`). The run loop re-reads both each audio block and
-/// re-seeds them from the [`WakeWordConfig`] every time the engine starts, so a
-/// persisted settings value always wins on the next launch.
+/// Live-tunable capture gain (dB), idle wake-word threshold and active (in-turn)
+/// threshold, stored as `f32` bits so Settings / the audio-diagnostics screen can
+/// adjust them on the running engine **without a restart** (`update_tuning`, exposed
+/// to Dart as `update_diagnostics_tuning`). The run loop re-reads them each audio
+/// block and re-seeds them from the [`WakeWordConfig`] every time the engine starts,
+/// so a persisted settings value always wins on the next launch.
 static TUNE_GAIN_DB: AtomicU32 = AtomicU32::new(0);
 static TUNE_THRESHOLD: AtomicU32 = AtomicU32::new(0);
+static TUNE_ACTIVE_THRESHOLD: AtomicU32 = AtomicU32::new(0);
 
-fn set_tuning(gain_db: f32, threshold: f32) {
+fn set_tuning(gain_db: f32, threshold: f32, active_threshold: f32) {
     TUNE_GAIN_DB.store(gain_db.to_bits(), Ordering::Relaxed);
     TUNE_THRESHOLD.store(threshold.to_bits(), Ordering::Relaxed);
+    TUNE_ACTIVE_THRESHOLD.store(active_threshold.to_bits(), Ordering::Relaxed);
 }
 
-fn load_tuning() -> (f32, f32) {
+/// `(gain_db, idle_threshold, active_threshold)` as last set.
+fn load_tuning() -> (f32, f32, f32) {
     (
         f32::from_bits(TUNE_GAIN_DB.load(Ordering::Relaxed)),
         f32::from_bits(TUNE_THRESHOLD.load(Ordering::Relaxed)),
+        f32::from_bits(TUNE_ACTIVE_THRESHOLD.load(Ordering::Relaxed)),
     )
 }
 
-/// Live-adjust the capture gain (dB) and idle detection threshold on the running
-/// engine without restarting it (the audio-diagnostics screen). Clamped to sane
+/// Live-adjust the capture gain (dB), the idle detection threshold and the active
+/// (in-turn) threshold on the running engine without restarting it. Clamped to sane
 /// ranges. The values are re-seeded from config on the next engine start.
-pub fn update_tuning(gain_db: f32, threshold: f32) {
-    set_tuning(gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB), threshold.clamp(0.0, 1.0));
+pub fn update_tuning(gain_db: f32, threshold: f32, active_threshold: f32) {
+    set_tuning(
+        gain_db.clamp(0.0, MAX_CAPTURE_GAIN_DB),
+        threshold.clamp(0.0, 1.0),
+        active_threshold.clamp(0.0, 1.0),
+    );
 }
 
 /// The display context — what the device is currently showing (e.g. the recipe screen's
@@ -451,6 +459,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // Idle detections use `threshold`; once a turn is active, require the higher
     // `active_threshold` (never below `threshold`) to curb self-triggering while
     // the device streams/speaks (AEC-interim mitigation, Plan.MD §4).
+    // Both are seeds: the loop re-reads the live values (`load_tuning`) each block.
     let idle_threshold = config.threshold;
     let active_threshold = config.active_threshold.max(config.threshold);
 
@@ -521,7 +530,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // Seed the live-tunable knobs (capture gain + idle threshold) from config so the
     // audio-diagnostics screen can adjust them on the running engine without a restart
     // (`update_tuning`); the loop re-reads them each block below.
-    set_tuning(capture_gain_db, idle_threshold);
+    set_tuning(capture_gain_db, idle_threshold, active_threshold);
 
     while running.load(Ordering::SeqCst) {
         let n = consumer.pop_slice(&mut scratch);
@@ -542,7 +551,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
 
         // Read the live-tunable capture gain + idle threshold (adjustable from the
         // audio-diagnostics screen without restarting the engine).
-        let (gain_db, idle_thr) = load_tuning();
+        let (gain_db, idle_thr, active_thr) = load_tuning();
         let capture_gain = if gain_db > 0.0 {
             10f32.powf(gain_db / 20.0)
         } else {
@@ -579,7 +588,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                     // While a turn is active keep the raised active-threshold floor, but
                     // never below the live idle threshold the user may be tuning.
                     let threshold = if turn_active {
-                        active_threshold.max(idle_thr)
+                        active_thr.max(idle_thr)
                     } else {
                         idle_thr
                     };
