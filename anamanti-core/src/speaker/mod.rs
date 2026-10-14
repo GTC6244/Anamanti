@@ -147,6 +147,9 @@ pub struct EnrollFinishOutcome {
     pub name: String,
     /// How many samples backed the committed centroid.
     pub samples: usize,
+    /// `true` when the samples were folded into a person's **existing** voiceprint
+    /// (a profile already carried this name); `false` when a new profile was created.
+    pub updated: bool,
 }
 
 /// What a coordinated [`SpeakerService::merge`] / [`SpeakerService::delete`]
@@ -398,10 +401,13 @@ impl SpeakerService {
             .map_or(0, Vec::len)
     }
 
-    /// Commit the guided-enrollment session into a new **named, labeled** profile:
-    /// average the accepted sample embeddings into a centroid and store it. Fails
-    /// (without consuming the session) when fewer than [`MIN_ENROLL_SAMPLES`] were
-    /// gathered, so the device can keep collecting.
+    /// Commit the guided-enrollment session into a **named, labeled** profile:
+    /// average the accepted sample embeddings into a centroid and store it. When a
+    /// profile already carries `name` (case-insensitive) — e.g. enrolling an existing
+    /// household member who was named earlier — the samples are folded into that
+    /// voiceprint rather than minting a same-named duplicate. Fails (without consuming
+    /// the session) when fewer than [`MIN_ENROLL_SAMPLES`] were gathered, so the device
+    /// can keep collecting.
     pub fn enroll_finish(&self, session_id: &str, name: &str) -> Result<EnrollFinishOutcome> {
         let mut sessions = self.enrollments.lock().unwrap();
         let samples = sessions.get(session_id).cloned().unwrap_or_default();
@@ -412,14 +418,57 @@ impl SpeakerService {
             );
         }
         let centroid = mean_vector(&samples);
-        let id = self
-            .registry
-            .create_labeled(name, &centroid, samples.len() as u64)?;
+        let n = samples.len() as u64;
+        let existing = match self.registry.find_by_name(name)? {
+            Some(id) if self.registry.absorb(&id, Some(name), &centroid, n)? => Some(id),
+            _ => None,
+        };
+        let updated = existing.is_some();
+        let id = match existing {
+            Some(id) => id,
+            None => self.registry.create_labeled(name, &centroid, n)?,
+        };
         sessions.remove(session_id);
         Ok(EnrollFinishOutcome {
             speaker_id: id,
             name: name.trim().to_string(),
             samples: samples.len(),
+            updated,
+        })
+    }
+
+    /// Commit the guided-enrollment session as **extra samples for an existing
+    /// profile** `speaker_id` (the People screen's "Add voice samples"): fold the
+    /// accepted samples' mean into that voiceprint, keeping its name (an anonymous
+    /// cluster stays anonymous). Fails without consuming the session when fewer than
+    /// [`MIN_ENROLL_SAMPLES`] were gathered or the profile no longer exists.
+    pub fn enroll_into(&self, session_id: &str, speaker_id: &str) -> Result<EnrollFinishOutcome> {
+        let mut sessions = self.enrollments.lock().unwrap();
+        let samples = sessions.get(session_id).cloned().unwrap_or_default();
+        if samples.len() < MIN_ENROLL_SAMPLES {
+            anyhow::bail!(
+                "need at least {MIN_ENROLL_SAMPLES} voice samples (have {})",
+                samples.len()
+            );
+        }
+        let centroid = mean_vector(&samples);
+        if !self
+            .registry
+            .absorb(speaker_id, None, &centroid, samples.len() as u64)?
+        {
+            anyhow::bail!("that person's voiceprint no longer exists");
+        }
+        sessions.remove(session_id);
+        let name = self
+            .registry
+            .get(speaker_id)?
+            .and_then(|p| p.name)
+            .unwrap_or_default();
+        Ok(EnrollFinishOutcome {
+            speaker_id: speaker_id.to_string(),
+            name,
+            samples: samples.len(),
+            updated: true,
         })
     }
 
@@ -607,6 +656,55 @@ mod tests {
             "one sample is below the floor"
         );
         assert_eq!(svc.enroll_count("s"), 1, "failed finish keeps the session");
+    }
+
+    #[test]
+    fn enroll_finish_folds_into_an_existing_same_named_profile() {
+        let svc = service();
+        for _ in 0..MIN_ENROLL_SAMPLES {
+            svc.enroll_sample("a", &tone(180.0, 1500)).unwrap();
+        }
+        let first = svc.enroll_finish("a", "Dana").unwrap();
+        assert!(!first.updated, "first enrollment creates a profile");
+
+        for _ in 0..MIN_ENROLL_SAMPLES {
+            svc.enroll_sample("b", &tone(180.0, 1500)).unwrap();
+        }
+        let second = svc.enroll_finish("b", "  dana ").unwrap();
+        assert!(
+            second.updated,
+            "same name (any case) attaches to the existing one"
+        );
+        assert_eq!(second.speaker_id, first.speaker_id);
+
+        let all = svc.registry().list().unwrap();
+        assert_eq!(all.len(), 1, "no duplicate profile");
+        assert_eq!(all[0].samples, 2 * MIN_ENROLL_SAMPLES as u64);
+    }
+
+    #[test]
+    fn enroll_into_adds_samples_to_a_specific_profile() {
+        let svc = service();
+        // An anonymous cluster from passive identification.
+        let anon = svc.identify_and_attribute(&tone(180.0, 1500)).unwrap();
+        for _ in 0..MIN_ENROLL_SAMPLES {
+            svc.enroll_sample("s", &tone(180.0, 1500)).unwrap();
+        }
+        let out = svc.enroll_into("s", &anon.speaker_id).unwrap();
+        assert!(out.updated);
+        assert_eq!(out.speaker_id, anon.speaker_id);
+        let p = svc.registry().get(&anon.speaker_id).unwrap().unwrap();
+        assert_eq!(p.name, None, "an anonymous cluster stays anonymous");
+        assert!(!p.labeled);
+        assert_eq!(p.samples, 1 + MIN_ENROLL_SAMPLES as u64);
+        assert_eq!(svc.enroll_count("s"), 0, "session consumed");
+
+        // An unknown id fails and keeps the session for a retry.
+        for _ in 0..MIN_ENROLL_SAMPLES {
+            svc.enroll_sample("t", &tone(180.0, 1500)).unwrap();
+        }
+        assert!(svc.enroll_into("t", "spk-missing").is_err());
+        assert_eq!(svc.enroll_count("t"), MIN_ENROLL_SAMPLES);
     }
 
     #[test]

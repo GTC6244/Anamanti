@@ -66,11 +66,7 @@ class ModelOption {
 /// One selectable Piper voice for the settings TTS voice dropdown, as reported by
 /// the orchestrator (its installed-voice list).
 class VoiceOption {
-  const VoiceOption({
-    required this.name,
-    required this.label,
-    this.language,
-  });
+  const VoiceOption({required this.name, required this.label, this.language});
 
   /// The voice id sent as `ttsVoice` (e.g. `en_US-amy-medium`).
   final String name;
@@ -382,6 +378,10 @@ abstract class OrchestratorClient {
   /// List the identified speakers (the "People" view).
   Future<List<SpeakerView>> listSpeakers();
 
+  /// The household roster's member names (Core → Household), so voice enrollment
+  /// can attach a voiceprint to an existing home member. Empty when there are none.
+  Future<List<String>> listHouseholdMembers();
+
   /// Name (or rename) a speaker; returns whether it was applied.
   Future<bool> nameSpeaker(String id, String name);
 
@@ -401,9 +401,14 @@ abstract class OrchestratorClient {
   Future<int> playSpeakerClips(String id);
 
   /// Commit the current guided voice-enrollment session into a named profile
-  /// (SpeakerEnrollmentPlan.md Phase 2). Returns the orchestrator's confirmation
-  /// message; throws with the reason on failure (e.g. too few samples).
-  Future<String> enrollFinish(String session, String name);
+  /// (SpeakerEnrollmentPlan.md Phase 2). A [name] matching a household member
+  /// attaches the voiceprint to that member (folding into their existing voiceprint,
+  /// if any); a new name also adds them to the household. Returns the orchestrator's
+  /// confirmation message; throws with the reason on failure (e.g. too few samples).
+  ///
+  /// With [speakerId] (People → "Add voice samples") the samples are folded into that
+  /// existing person's voiceprint instead; [name] is then only informational.
+  Future<String> enrollFinish(String session, String name, {String? speakerId});
 
   /// Discard an in-flight guided voice-enrollment session (the user backed out).
   Future<void> enrollCancel(String session);
@@ -437,21 +442,25 @@ class FrbOrchestratorClient implements OrchestratorClient {
   Future<List<OrchestratorOption>> listOrchestrators() async {
     final list = await frb.listOrchestrators(discoveryTimeoutSecs: _timeout);
     return list
-        .map((o) => OrchestratorOption(
-              key: o.key,
-              name: o.name,
-              host: o.host,
-              port: o.port,
-            ))
+        .map(
+          (o) => OrchestratorOption(
+            key: o.key,
+            name: o.name,
+            host: o.host,
+            port: o.port,
+          ),
+        )
         .toList();
   }
 
   @override
   Future<OrchestratorSettingsView> fetchSettings() async {
-    return _view(await frb.fetchOrchestratorSettings(
-      orchestratorKey: orchestratorKey,
-      discoveryTimeoutSecs: _timeout,
-    ));
+    return _view(
+      await frb.fetchOrchestratorSettings(
+        orchestratorKey: orchestratorKey,
+        discoveryTimeoutSecs: _timeout,
+      ),
+    );
   }
 
   @override
@@ -502,7 +511,10 @@ class FrbOrchestratorClient implements OrchestratorClient {
       discoveryTimeoutSecs: _timeout,
     );
     return voices
-        .map((v) => VoiceOption(name: v.name, label: v.label, language: v.language))
+        .map(
+          (v) =>
+              VoiceOption(name: v.name, label: v.label, language: v.language),
+        )
         .toList();
   }
 
@@ -530,16 +542,18 @@ class FrbOrchestratorClient implements OrchestratorClient {
       discoveryTimeoutSecs: _timeout,
     );
     return fns
-        .map((f) => FunctionStatusView(
-              category: f.category,
-              name: f.name,
-              mode: f.mode,
-              provider: f.provider,
-              model: f.model,
-              keyRequired: f.keyRequired,
-              keySet: f.keySet,
-              note: f.note,
-            ))
+        .map(
+          (f) => FunctionStatusView(
+            category: f.category,
+            name: f.name,
+            mode: f.mode,
+            provider: f.provider,
+            model: f.model,
+            keyRequired: f.keyRequired,
+            keySet: f.keySet,
+            note: f.note,
+          ),
+        )
         .toList();
   }
 
@@ -550,28 +564,30 @@ class FrbOrchestratorClient implements OrchestratorClient {
       discoveryTimeoutSecs: _timeout,
     );
     return entries
-        .map((e) => MemoryView(
-              id: e.id.toInt(),
-              kind: e.kind,
-              content: e.content,
-              source: e.source,
-              createdAt: e.createdAt.toInt(),
-            ))
+        .map(
+          (e) => MemoryView(
+            id: e.id.toInt(),
+            kind: e.kind,
+            content: e.content,
+            source: e.source,
+            createdAt: e.createdAt.toInt(),
+          ),
+        )
         .toList();
   }
 
   @override
   Future<bool> deleteMemory(int id) => frb.deleteMemory(
-        orchestratorKey: orchestratorKey,
-        id: id,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    id: id,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<int> clearMemories() => frb.clearMemories(
-        orchestratorKey: orchestratorKey,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<List<TurnView>> listTurns({
@@ -589,23 +605,28 @@ class FrbOrchestratorClient implements OrchestratorClient {
       discoveryTimeoutSecs: _timeout,
     );
     return turns
-        .map((t) => TurnView(
-              id: t.id.toInt(),
-              extId: t.extId,
-              session: t.session,
-              ts: t.ts.toInt(),
-              transcript: t.transcript,
-              reply: t.reply,
-              speakerId: t.speakerId,
-              entities: t.entities
-                  .map((e) => EntityRefView(name: e.name, kind: e.kind))
-                  .toList(),
-            ))
+        .map(
+          (t) => TurnView(
+            id: t.id.toInt(),
+            extId: t.extId,
+            session: t.session,
+            ts: t.ts.toInt(),
+            transcript: t.transcript,
+            reply: t.reply,
+            speakerId: t.speakerId,
+            entities: t.entities
+                .map((e) => EntityRefView(name: e.name, kind: e.kind))
+                .toList(),
+          ),
+        )
         .toList();
   }
 
   @override
-  Future<List<EntityView>> listEntities({String query = '', int limit = 200}) async {
+  Future<List<EntityView>> listEntities({
+    String query = '',
+    int limit = 200,
+  }) async {
     final entities = await frb.listEntities(
       orchestratorKey: orchestratorKey,
       query: query,
@@ -619,10 +640,10 @@ class FrbOrchestratorClient implements OrchestratorClient {
 
   @override
   Future<bool> deleteGraphNode(int id) => frb.deleteGraphNode(
-        orchestratorKey: orchestratorKey,
-        id: id,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    id: id,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<List<SpeakerView>> listSpeakers() async {
@@ -631,23 +652,31 @@ class FrbOrchestratorClient implements OrchestratorClient {
       discoveryTimeoutSecs: _timeout,
     );
     return people
-        .map((s) => SpeakerView(
-              id: s.id,
-              name: s.name,
-              labeled: s.labeled,
-              samples: s.samples.toInt(),
-              createdAt: s.createdAt.toInt(),
-            ))
+        .map(
+          (s) => SpeakerView(
+            id: s.id,
+            name: s.name,
+            labeled: s.labeled,
+            samples: s.samples.toInt(),
+            createdAt: s.createdAt.toInt(),
+          ),
+        )
         .toList();
   }
 
   @override
+  Future<List<String>> listHouseholdMembers() => frb.listHouseholdMembers(
+    orchestratorKey: orchestratorKey,
+    discoveryTimeoutSecs: _timeout,
+  );
+
+  @override
   Future<bool> nameSpeaker(String id, String name) => frb.nameSpeaker(
-        orchestratorKey: orchestratorKey,
-        id: id,
-        name: name,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    id: id,
+    name: name,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<bool> mergeSpeakers({required String keep, required String drop}) =>
@@ -660,10 +689,10 @@ class FrbOrchestratorClient implements OrchestratorClient {
 
   @override
   Future<bool> deleteSpeaker(String id) => frb.deleteSpeaker(
-        orchestratorKey: orchestratorKey,
-        id: id,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    id: id,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<List<SpeakerClipView>> listSpeakerClips(String id) async {
@@ -673,46 +702,54 @@ class FrbOrchestratorClient implements OrchestratorClient {
       discoveryTimeoutSecs: _timeout,
     );
     return clips
-        .map((c) => SpeakerClipView(
-              name: c.name,
-              createdMs: c.createdMs.toInt(),
-              samples: c.samples.toInt(),
-              sampleRate: c.sampleRate,
-            ))
+        .map(
+          (c) => SpeakerClipView(
+            name: c.name,
+            createdMs: c.createdMs.toInt(),
+            samples: c.samples.toInt(),
+            sampleRate: c.sampleRate,
+          ),
+        )
         .toList();
   }
 
   @override
   Future<int> playSpeakerClips(String id) => frb.playSpeakerClips(
-        orchestratorKey: orchestratorKey,
-        id: id,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    id: id,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
-  Future<String> enrollFinish(String session, String name) => frb.enrollFinish(
-        orchestratorKey: orchestratorKey,
-        session: session,
-        name: name,
-        discoveryTimeoutSecs: _timeout,
-      );
+  Future<String> enrollFinish(
+    String session,
+    String name, {
+    String? speakerId,
+  }) => frb.enrollFinish(
+    orchestratorKey: orchestratorKey,
+    session: session,
+    name: name,
+    speakerId: speakerId,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<void> enrollCancel(String session) => frb.enrollCancel(
-        orchestratorKey: orchestratorKey,
-        session: session,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    session: session,
+    discoveryTimeoutSecs: _timeout,
+  );
 
   @override
   Future<String> pairPhone(String name, String code) => frb.pairPhone(
-        orchestratorKey: orchestratorKey,
-        name: name,
-        code: code,
-        discoveryTimeoutSecs: _timeout,
-      );
+    orchestratorKey: orchestratorKey,
+    name: name,
+    code: code,
+    discoveryTimeoutSecs: _timeout,
+  );
 
-  OrchestratorSettingsView _view(frb.OrchestratorSettings s) => OrchestratorSettingsView(
+  OrchestratorSettingsView _view(frb.OrchestratorSettings s) =>
+      OrchestratorSettingsView(
         ok: s.ok,
         message: s.message,
         llmBackend: s.llmBackend,

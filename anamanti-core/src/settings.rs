@@ -2705,6 +2705,30 @@ impl SharedSettings {
         })
     }
 
+    /// Make sure `name` is in the household roster, **auto-adding** a bare member (no
+    /// contact details) if none matches (case-insensitive). Used by guided voice
+    /// enrollment's "new person" path so a freshly enrolled voice is a household member
+    /// the prompt can reconcile. Returns the canonical stored name (an existing member
+    /// keeps their spelling). A no-op — no persist, no LLM rebuild — when already present.
+    pub fn ensure_household_member(&self, name: &str) -> String {
+        let name = name.trim();
+        if let Some(m) = self.household().member_matching(name) {
+            return m.name.clone();
+        }
+        self.mutate(Some("household"), |c| {
+            if let Some(m) = c.household.member_matching(name) {
+                return m.name.clone();
+            }
+            let mut household = c.household.clone();
+            household.members.push(HouseholdMember {
+                name: name.to_string(),
+                ..Default::default()
+            });
+            self.set_household(c, &household);
+            name.to_string()
+        })
+    }
+
     /// Unlink a person's phone: clear the matching household member's AppSaid address
     /// (case-insensitive) so they drop off the recipient roster — the member record
     /// itself is kept. No-op if no member matches. Returns the resulting config.

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1444789998;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 679131492;
 
 // Section: executor
 
@@ -476,6 +476,7 @@ fn wire__crate__api__settings__enroll_finish_impl(
             let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
             let api_session = <String>::sse_decode(&mut deserializer);
             let api_name = <String>::sse_decode(&mut deserializer);
+            let api_speaker_id = <Option<String>>::sse_decode(&mut deserializer);
             let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
@@ -485,6 +486,7 @@ fn wire__crate__api__settings__enroll_finish_impl(
                             api_orchestrator_key,
                             api_session,
                             api_name,
+                            api_speaker_id,
                             api_discovery_timeout_secs,
                         )?;
                         Ok(output_ok)
@@ -709,6 +711,45 @@ fn wire__crate__api__settings__list_entities_impl(
                             api_orchestrator_key,
                             api_query,
                             api_limit,
+                            api_discovery_timeout_secs,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__settings__list_household_members_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_household_members",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
+            let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::settings::list_household_members(
+                            api_orchestrator_key,
                             api_discovery_timeout_secs,
                         )?;
                         Ok(output_ok)
@@ -2560,40 +2601,46 @@ fn pde_ffi_dispatcher_primary_impl(
         15 => wire__crate__api__settings__get_functions_impl(port, ptr, rust_vec_len, data_len),
         16 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
         18 => wire__crate__api__settings__list_entities_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
-        21 => {
+        19 => wire__crate__api__settings__list_household_members_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        20 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
+        22 => {
             wire__crate__api__settings__list_orchestrators_impl(port, ptr, rust_vec_len, data_len)
         }
-        22 => {
+        23 => {
             wire__crate__api__settings__list_speaker_clips_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__settings__list_turns_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__settings__pair_phone_impl(port, ptr, rust_vec_len, data_len),
-        30 => {
+        24 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__settings__list_turns_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__settings__pair_phone_impl(port, ptr, rust_vec_len, data_len),
+        31 => {
             wire__crate__api__settings__play_speaker_clips_impl(port, ptr, rust_vec_len, data_len)
         }
-        37 => {
+        38 => {
             wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => {
+        39 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        39 => {
+        40 => {
             wire__crate__api__engine__start_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        40 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
-        41 => {
+        41 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        42 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        42 => {
+        43 => {
             wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        44 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        45 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -2617,14 +2664,14 @@ fn pde_ffi_dispatcher_sync_impl(
         17 => {
             wire__crate__api__engine__is_wake_word_engine_running_impl(ptr, rust_vec_len, data_len)
         }
-        28 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__engine__set_diagnostics_context_impl(ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__engine__set_enroll_context_impl(ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__engine__set_font_context_impl(ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__engine__set_diagnostics_context_impl(ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__engine__set_enroll_context_impl(ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__engine__set_font_context_impl(ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

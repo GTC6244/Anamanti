@@ -51,6 +51,17 @@ void main() {
     expect(find.text('Dana'), findsOneWidget);
   });
 
+  testWidgets('"Add voice samples" is hidden without the live engine',
+      (tester) async {
+    final client = FakeOrchestratorClient(speakers: [_spk('spk-1', name: 'Sam')]);
+    await tester.pumpWidget(MaterialApp(home: PeopleScreen(client: client)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('speaker-menu-spk-1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Name / rename'), findsOneWidget);
+    expect(find.text('Add voice samples'), findsNothing);
+  });
+
   testWidgets('deletes a speaker', (tester) async {
     final client = FakeOrchestratorClient(speakers: [
       _spk('spk-1', name: 'Sam'),

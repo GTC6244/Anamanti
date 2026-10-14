@@ -178,6 +178,64 @@ impl SpeakerRegistry {
         Ok(id)
     }
 
+    /// The oldest profile whose name matches `name` (case-insensitive, trimmed), if
+    /// any. Used by guided enrollment to attach a new voiceprint to a person who
+    /// already has one instead of minting a same-named duplicate.
+    pub fn find_by_name(&self, name: &str) -> Result<Option<String>> {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|p| {
+                p.name
+                    .as_deref()
+                    .is_some_and(|n| n.trim().eq_ignore_ascii_case(needle))
+            })
+            .map(|p| p.id))
+    }
+
+    /// Fold a guided-enrollment `centroid` (backed by `samples` utterances) into the
+    /// existing profile `id` — a sample-weighted mean, renormalized. `Some(name)`
+    /// (re)labels it; `None` keeps its current name and labeled flag (e.g. adding
+    /// samples to a still-anonymous cluster). Returns whether the profile existed.
+    pub fn absorb(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        centroid: &[f32],
+        samples: u64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let existing: Option<(Vec<u8>, i64)> = conn
+            .query_row(
+                "SELECT centroid, samples FROM speakers WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((blob, have)) = existing else {
+            return Ok(false);
+        };
+        let samples = samples.max(1) as i64;
+        let merged = fold_mean(&decode_vec(&blob), have as f32, centroid, samples as f32);
+        match name {
+            Some(name) => conn.execute(
+                "UPDATE speakers SET centroid = ?1, samples = ?2, name = ?3, labeled = 1, \
+                 updated_at = ?4 WHERE id = ?5",
+                params![encode_vec(&merged), have + samples, name.trim(), now(), id],
+            ),
+            None => conn.execute(
+                "UPDATE speakers SET centroid = ?1, samples = ?2, updated_at = ?3 WHERE id = ?4",
+                params![encode_vec(&merged), have + samples, now(), id],
+            ),
+        }
+        .context("folding enrollment into speaker")?;
+        Ok(true)
+    }
+
     /// Fold `embedding` into `id`'s centroid via an online mean over normalized
     /// vectors, then renormalize; bumps `samples`. A no-op if the id is unknown.
     pub fn update_centroid(&self, id: &str, embedding: &[f32]) -> Result<()> {
