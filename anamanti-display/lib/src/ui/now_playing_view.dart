@@ -5,6 +5,11 @@
 // transport row (previous / play-pause / next), a volume slider, and an optional
 // "up next" button. Landscape-first with large, arm's-length type. Left by voice
 // or the close control.
+//
+// For live radio (`MusicData.isRadio`) the header is the station name with a LIVE
+// badge, the logo is shown uncropped, the song from the stream is the headline, the
+// seek bar and queue are hidden, and the transport is previous station / stop / next
+// station.
 
 import 'package:flutter/material.dart';
 
@@ -76,6 +81,7 @@ class NowPlayingView extends StatelessWidget {
                         size: 280,
                         radius: 16,
                         iconSize: 96,
+                        fit: music.isRadio ? BoxFit.contain : BoxFit.cover,
                       ),
                       const SizedBox(width: 28),
                       Expanded(child: _details()),
@@ -90,14 +96,42 @@ class NowPlayingView extends StatelessWidget {
     );
   }
 
+  /// The header line: the track for Spotify, the station for radio.
+  String get _headline {
+    if (music.isRadio) {
+      return music.stationName.isEmpty ? 'Radio' : music.stationName;
+    }
+    return music.trackTitle.isEmpty ? 'Music' : music.trackTitle;
+  }
+
   Widget _header() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(28, 16, 12, 0),
       child: Row(
         children: [
+          if (music.isRadio) ...[
+            Container(
+              key: const Key('music-live-badge'),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE5484D),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: const Text(
+                'LIVE',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+          ],
           Expanded(
             child: Text(
-              music.trackTitle.isEmpty ? 'Music' : music.trackTitle,
+              _headline,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
@@ -123,7 +157,64 @@ class NowPlayingView extends StatelessWidget {
     );
   }
 
+  /// Radio: the current song (when the stream sends one) as the big line, the
+  /// artist under it. With no song, the station name is already the header.
+  List<Widget> _radioSong() {
+    final hasSong =
+        music.trackTitle.isNotEmpty && music.trackTitle != music.stationName;
+    if (!hasSong) {
+      return [
+        Text(
+          'Live radio',
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.6),
+            fontSize: 20,
+          ),
+        ),
+      ];
+    }
+    return [
+      Text(
+        music.trackTitle,
+        key: const Key('music-radio-song'),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 26,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      if (music.artist.isNotEmpty) ...[
+        const SizedBox(height: 4),
+        Text(
+          music.artist,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.75),
+            fontSize: 20,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    ];
+  }
+
   Widget _details() {
+    if (music.isRadio) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ..._radioSong(),
+          const SizedBox(height: 24),
+          _transport(),
+          const SizedBox(height: 10),
+          _volume(),
+        ],
+      );
+    }
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -207,12 +298,13 @@ class NowPlayingView extends StatelessWidget {
   }
 
   Widget _transport() {
+    final radio = music.isRadio;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         IconButton(
           key: const Key('music-previous'),
-          tooltip: 'Previous',
+          tooltip: radio ? 'Previous station' : 'Previous',
           onPressed: onPrevious,
           iconSize: 44,
           icon: const Icon(Icons.skip_previous, color: Colors.white),
@@ -220,11 +312,13 @@ class NowPlayingView extends StatelessWidget {
         const SizedBox(width: 12),
         IconButton(
           key: const Key('music-play-pause'),
-          tooltip: music.playing ? 'Pause' : 'Play',
+          tooltip: radio ? 'Stop' : (music.playing ? 'Pause' : 'Play'),
           onPressed: onPlayPause,
           iconSize: 72,
           icon: Icon(
-            music.playing
+            radio
+                ? Icons.stop_circle
+                : music.playing
                 ? Icons.pause_circle_filled
                 : Icons.play_circle_filled,
             color: _accent,
@@ -233,7 +327,7 @@ class NowPlayingView extends StatelessWidget {
         const SizedBox(width: 12),
         IconButton(
           key: const Key('music-next'),
-          tooltip: 'Next',
+          tooltip: radio ? 'Next station' : 'Next',
           onPressed: onNext,
           iconSize: 44,
           icon: const Icon(Icons.skip_next, color: Colors.white),

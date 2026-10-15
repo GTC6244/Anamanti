@@ -151,7 +151,19 @@ pub struct NowPlaying {
     pub volume_percent: u8,
     /// The up-next queue (capped), oldest-first.
     pub next_up: Vec<QueueItem>,
+    /// Which source this snapshot describes: [`SOURCE_SPOTIFY`] or
+    /// [`super::radio::SOURCE_RADIO`]. The display hides the seek bar / queue for radio.
+    pub source: String,
+    /// Radio only: the station id (call sign, e.g. `CJDV`). Omitted for Spotify.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub station_id: String,
+    /// Radio only: the station's display name. Omitted for Spotify.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub station_name: String,
 }
+
+/// [`NowPlaying::source`] for a Spotify snapshot.
+pub const SOURCE_SPOTIFY: &str = "spotify";
 
 /// The control seam the `spotify_control` rig tool depends on. Returns a short,
 /// speakable confirmation the model relays to the user.
@@ -605,6 +617,8 @@ impl SpotifyController for SpotifyWebApi {
             duration_secs,
             volume_percent,
             next_up,
+            source: SOURCE_SPOTIFY.to_string(),
+            ..Default::default()
         }))
     }
 }

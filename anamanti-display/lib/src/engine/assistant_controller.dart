@@ -421,7 +421,11 @@ class AssistantState {
   /// camera-presence flip. (Historically the backlight tracked only [userPresent],
   /// so a turn/mode that woke the display left the backlight stuck dim.)
   bool get screenAwake =>
-      userPresent || displayActive || recipeActive || weatherActive || placeActive ||
+      userPresent ||
+      displayActive ||
+      recipeActive ||
+      weatherActive ||
+      placeActive ||
       musicScreenActive;
 
   AssistantState copyWith({
@@ -523,29 +527,29 @@ class AssistantController extends ChangeNotifier {
     FontContextSink? setFontContext,
     void Function(String direction)? onFontAdjust,
     double fontScale = 1.0,
-  })  : _config = config,
-        _onUserActivity = onUserActivity,
-        _weatherAutoClose = weatherAutoClose,
-        _placeAutoClose = placeAutoClose,
-        _setRecipeContext = setRecipeContext,
-        _setWeatherContext = setWeatherContext,
-        _setPlaceContext = setPlaceContext,
-        _musicControl = musicControl,
-        _setMusicContext = setMusicContext,
-        _setFontContext = setFontContext,
-        _onFontAdjust = onFontAdjust,
-        _fontScale = fontScale,
-        // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
-        // [EngineStreamFactory] shape (tests inject their own factory).
-        _startEngine = startEngine ?? _defaultEngineStream,
-        _probe = probeOrchestrator,
-        _minBackoff = minBackoff,
-        _maxBackoff = maxBackoff,
-        _offlinePollInterval = offlinePollInterval,
-        _endpointCueEnabled = endpointCueEnabled,
-        _endpointSilence = endpointSilence,
-        _endpointRmsThreshold = endpointRmsThreshold,
-        _clock = clock ?? DateTime.now;
+  }) : _config = config,
+       _onUserActivity = onUserActivity,
+       _weatherAutoClose = weatherAutoClose,
+       _placeAutoClose = placeAutoClose,
+       _setRecipeContext = setRecipeContext,
+       _setWeatherContext = setWeatherContext,
+       _setPlaceContext = setPlaceContext,
+       _musicControl = musicControl,
+       _setMusicContext = setMusicContext,
+       _setFontContext = setFontContext,
+       _onFontAdjust = onFontAdjust,
+       _fontScale = fontScale,
+       // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
+       // [EngineStreamFactory] shape (tests inject their own factory).
+       _startEngine = startEngine ?? _defaultEngineStream,
+       _probe = probeOrchestrator,
+       _minBackoff = minBackoff,
+       _maxBackoff = maxBackoff,
+       _offlinePollInterval = offlinePollInterval,
+       _endpointCueEnabled = endpointCueEnabled,
+       _endpointSilence = endpointSilence,
+       _endpointRmsThreshold = endpointRmsThreshold,
+       _clock = clock ?? DateTime.now;
 
   static Stream<WakeWordEvent> _defaultEngineStream(WakeWordConfig config) =>
       startWakeWordEngine(config: config);
@@ -1154,7 +1158,12 @@ class AssistantController extends ChangeNotifier {
     }
     final music = MusicData.tryParse(nowPlayingJson);
     if (music != null) {
-      _emit(_state.copyWith(music: music));
+      // Radio has no queue: a station starting while the up-next list is open falls
+      // back to the now-playing view.
+      final screen = music.isRadio && _state.musicScreen == MusicScreen.nextUp
+          ? MusicScreen.nowPlaying
+          : _state.musicScreen;
+      _emit(_state.copyWith(music: music, musicScreen: screen));
       // If a full music screen is open, refresh its context (the track may have changed).
       if (_state.musicScreen != MusicScreen.hidden) _pushMusicContext();
     }
@@ -1170,8 +1179,9 @@ class AssistantController extends ChangeNotifier {
   }
 
   /// Show the full-screen up-next queue (from the now-playing view, or "what's up next").
-  /// No-op when nothing is playing.
+  /// No-op when nothing is playing. Live radio has no queue, so it opens now-playing.
   void showMusicQueue() {
+    if (_state.music?.isRadio ?? false) return openNowPlaying();
     if (_state.musicActive && _state.musicScreen != MusicScreen.nextUp) {
       _emit(_state.copyWith(musicScreen: MusicScreen.nextUp));
       _pushMusicContext();

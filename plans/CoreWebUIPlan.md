@@ -219,6 +219,7 @@ provider, embedding backend, and weather provider.
 | Phone messages | AppSaid | Cloud | app token + recipients | message text | tool hidden |
 | Music | snapserver / librespot / mpv | Local | binaries | — | — |
 | Music | Spotify control | Cloud | Premium + OAuth | playback commands | tool hidden |
+| Music | Internet radio (stations + Radio Browser look-up) | Cloud | music routing + mpv | stream URL / name typed into Look up | tool hidden (no stations) |
 | Photos | Google Drive | Cloud | OAuth client + consent | — (device pulls photos) | — |
 | Notifications | Notify channel | LAN (to displays) | display connected | notification text | dropped |
 

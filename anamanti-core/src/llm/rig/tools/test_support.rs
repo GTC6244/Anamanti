@@ -180,7 +180,7 @@ impl crate::places::PlacesProvider for StaticPlaces {
 }
 
 /// Every integration configured with offline doubles (Tavily web search + recipe,
-/// calendar, directions, Spotify, shopping list, phone, weather, places), home in
+/// calendar, directions, Spotify, radio, shopping list, phone, weather, places), home in
 /// Austin. Building it does no I/O.
 pub(crate) fn fully_configured_deps() -> ToolDeps {
     ToolDeps {
@@ -196,7 +196,49 @@ pub(crate) fn fully_configured_deps() -> ToolDeps {
         weather: Some(Arc::new(StaticWeather)),
         weather_imperial: true,
         places: Some(Arc::new(StaticPlaces)),
+        radio: Some(static_radio()),
     }
+}
+
+/// A no-op radio output (mpv + snapserver double): every call succeeds silently.
+pub(crate) struct StaticRadioOutput;
+
+#[async_trait::async_trait]
+impl crate::music::radio::RadioOutput for StaticRadioOutput {
+    async fn load(&self, _url: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn stop(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn is_idle(&self) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    async fn icy_title(&self) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    async fn volume(&self) -> anyhow::Result<u8> {
+        Ok(100)
+    }
+    async fn set_volume(&self, _percent: u8) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn route(&self, _stream_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// A radio player over [`StaticRadioOutput`] with one station (CJDV "107.5 Dave Rocks").
+pub(crate) fn static_radio() -> Arc<crate::music::RadioPlayer> {
+    let radio = Arc::new(crate::music::RadioPlayer::new(Arc::new(StaticRadioOutput)));
+    radio.set_catalog(vec![crate::music::RadioStation {
+        id: "CJDV".into(),
+        name: "107.5 Dave Rocks".into(),
+        url: "https://corus.leanstream.co/CJDVFM-MP3".into(),
+        logo_url: String::new(),
+        aliases: vec!["Dave".into()],
+    }]);
+    radio
 }
 
 /// [`Tools::build`] over [`fully_configured_deps`].

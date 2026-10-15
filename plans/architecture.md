@@ -751,6 +751,18 @@ mDNS + `instance_id` pin the voice path uses):
   `audio-start` when a music screen is open, and the Core's `music_screen` rig tool emits a
   `DeviceAction::MusicScreen` relayed as an `anamanti-music` `screen` frame on the per-turn
   socket (show now-playing / up-next / close). Playback transport stays on `spotify_control`.
+- **Internet radio** ([`RadioPlan.md`](./RadioPlan.md)) rides the same push. A curated
+  station catalog (settings overlay `radio.stations`, edited on Music & Devices) is played
+  by the existing mpv web player into the snapserver `Web` stream; the Core's
+  `music::radio::RadioPlayer` loads the URL over mpv IPC and points every snapserver group
+  at `Web` (`Group.SetStream`), and back to `Spotify` on stop — PCM still never enters the
+  Core. While a station is on, `NowPlayingService` pushes a radio snapshot (`source:"radio"`,
+  station id/name, logo as `artwork_uri`, the stream's ICY title as the song) and wakes on
+  every station change; `anamanti-music-control` transport acts on the radio
+  (pause = stop, next/previous = station, volume = mpv volume). A `RoutedSpotify`
+  decorator wraps the Spotify controller so the sources hand off: Spotify transport drives
+  the radio while it plays, and any Spotify play stops it first; a Spotify start seen by the
+  poll (e.g. from a phone) also stops it. Voice is the `radio_control` rig tool.
 
 Producers enqueue via `NotificationService::notify`, which fans a notification out to
 every connected device and prunes dead channels. The first producer is the config

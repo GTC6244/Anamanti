@@ -20,7 +20,105 @@ const _musicJson = '''
  ]}
 ''';
 
+// A live-radio snapshot (plans/RadioPlan.md) exactly as the Core serializes it: the
+// stream's song as track/artist, the station as album + station_*, no duration/queue.
+const _radioJson = '''
+{"playing":true,"track_title":"Under Pressure","artist":"Queen & David Bowie",
+ "album":"107.5 Dave Rocks","artwork_uri":"","position_secs":0,"duration_secs":0,
+ "volume_percent":80,"next_up":[],"source":"radio","station_id":"CJDV",
+ "station_name":"107.5 Dave Rocks"}
+''';
+
+// Radio with no song from the stream yet: the station name is the title.
+const _radioNoSongJson = '''
+{"playing":true,"track_title":"107.5 Dave Rocks","artist":"","album":"",
+ "artwork_uri":"","duration_secs":0,"volume_percent":80,"next_up":[],
+ "source":"radio","station_id":"CJDV","station_name":"107.5 Dave Rocks"}
+''';
+
+Widget _nowPlaying(MusicData m, {VoidCallback? onPlayPause}) => MaterialApp(
+  home: NowPlayingView(
+    music: m,
+    onClose: () {},
+    onPlayPause: onPlayPause ?? () {},
+    onNext: () {},
+    onPrevious: () {},
+    onVolume: (_) {},
+    onShowQueue: () {},
+  ),
+);
+
 void main() {
+  group('radio', () {
+    test('parses the radio fields; Spotify payloads are not radio', () {
+      final r = MusicData.tryParse(_radioJson)!;
+      expect(r.isRadio, isTrue);
+      expect(r.stationId, 'CJDV');
+      expect(r.stationName, '107.5 Dave Rocks');
+      expect(r.trackTitle, 'Under Pressure');
+      expect(MusicData.tryParse(_musicJson)!.isRadio, isFalse);
+    });
+
+    testWidgets(
+      'now-playing shows station + LIVE + song, no seek bar or queue',
+      (tester) async {
+        await tester.pumpWidget(_nowPlaying(MusicData.tryParse(_radioJson)!));
+        expect(find.byKey(const Key('music-live-badge')), findsOneWidget);
+        expect(find.text('107.5 Dave Rocks'), findsOneWidget);
+        expect(find.text('Under Pressure'), findsOneWidget);
+        expect(find.text('Queen & David Bowie'), findsOneWidget);
+        expect(find.byType(LinearProgressIndicator), findsNothing);
+        expect(find.text('0:00'), findsNothing);
+        expect(find.byKey(const Key('music-show-queue')), findsNothing);
+        expect(find.byIcon(Icons.stop_circle), findsOneWidget);
+        expect(find.byTooltip('Next station'), findsOneWidget);
+      },
+    );
+
+    testWidgets('with no song the station is the header, not repeated', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _nowPlaying(MusicData.tryParse(_radioNoSongJson)!),
+      );
+      expect(find.text('107.5 Dave Rocks'), findsOneWidget);
+      expect(find.text('Live radio'), findsOneWidget);
+      expect(find.byKey(const Key('music-radio-song')), findsNothing);
+    });
+
+    testWidgets('the stop button fires onPlayPause', (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(
+        _nowPlaying(MusicData.tryParse(_radioJson)!, onPlayPause: () => taps++),
+      );
+      await tester.tap(find.byKey(const Key('music-play-pause')));
+      expect(taps, 1);
+    });
+
+    testWidgets('overlay shows a stop control and artist · station', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MusicControlOverlay(
+              music: MusicData.tryParse(_radioJson)!,
+              onPlayPause: () {},
+              onNext: () {},
+              onPrevious: () {},
+              onVolume: (_) {},
+            ),
+          ),
+        ),
+      );
+      expect(find.byIcon(Icons.stop), findsOneWidget);
+      expect(
+        find.text('Queen & David Bowie · 107.5 Dave Rocks'),
+        findsOneWidget,
+      );
+    });
+  });
+
   group('MusicData.tryParse', () {
     test('parses a full music payload with a queue', () {
       final m = MusicData.tryParse(_musicJson)!;
@@ -150,7 +248,9 @@ void main() {
       expect(find.byIcon(Icons.pause_circle_filled), findsNothing);
     });
 
-    testWidgets('transport and close keys fire their callbacks', (tester) async {
+    testWidgets('transport and close keys fire their callbacks', (
+      tester,
+    ) async {
       final music = MusicData.tryParse(_musicJson)!;
       var closed = false, played = false, next = false, previous = false;
       await tester.pumpWidget(
@@ -192,13 +292,17 @@ void main() {
         ),
       );
 
-      await tester.drag(find.byKey(const Key('music-volume')), const Offset(120, 0));
+      await tester.drag(
+        find.byKey(const Key('music-volume')),
+        const Offset(120, 0),
+      );
       expect(volume, isNotNull);
       expect(volume, isA<int>());
     });
 
-    testWidgets('show-queue button appears only with a callback and a queue',
-        (tester) async {
+    testWidgets('show-queue button appears only with a callback and a queue', (
+      tester,
+    ) async {
       final music = MusicData.tryParse(_musicJson)!;
       var shown = false;
       await tester.pumpWidget(
@@ -253,8 +357,9 @@ void main() {
       expect(closed, isTrue);
     });
 
-    testWidgets('back button appears and fires only with a callback',
-        (tester) async {
+    testWidgets('back button appears and fires only with a callback', (
+      tester,
+    ) async {
       final music = MusicData.tryParse(_musicJson)!;
       var backed = false;
       await tester.pumpWidget(
@@ -272,17 +377,22 @@ void main() {
     });
 
     testWidgets('empty queue shows the empty state', (tester) async {
-      final music = MusicData.tryParse('{"track_title":"Solo","artwork_uri":""}')!;
+      final music = MusicData.tryParse(
+        '{"track_title":"Solo","artwork_uri":""}',
+      )!;
       await tester.pumpWidget(
-        MaterialApp(home: NextUpView(music: music, onClose: () {})),
+        MaterialApp(
+          home: NextUpView(music: music, onClose: () {}),
+        ),
       );
       expect(find.text('Nothing queued'), findsOneWidget);
     });
   });
 
   group('MusicControlOverlay', () {
-    testWidgets('renders the track title and fires transport callbacks',
-        (tester) async {
+    testWidgets('renders the track title and fires transport callbacks', (
+      tester,
+    ) async {
       final music = MusicData.tryParse(_musicJson)!;
       var played = false, next = false, previous = false, opened = false;
       int? volume;

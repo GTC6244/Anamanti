@@ -30,7 +30,7 @@ use crate::llm::{
     anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
     LlmBackend,
 };
-use crate::music::{SpotifyController, SpotifyWebApi};
+use crate::music::{RadioCatalog, RadioPlayer, RoutedSpotify, SpotifyController, SpotifyWebApi};
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
 /// clients, or the rig-core agent framework (selected at runtime with
@@ -1014,6 +1014,9 @@ pub struct PersistedSettings {
     /// (empty) for older files.
     #[serde(default)]
     pub pronunciations: Vec<crate::stt::PronunciationRule>,
+    /// Internet-radio station catalog. Defaulted (empty) for older files.
+    #[serde(default)]
+    pub radio: RadioCatalog,
 }
 
 fn default_system1_base_url() -> String {
@@ -1239,6 +1242,12 @@ pub struct LlmFactory {
     /// The places backend label (`places.provider`, default `google`), kept so `places`
     /// can be rebuilt from a new runtime key.
     pub places_provider: String,
+    /// The internet-radio player (`plans/RadioPlan.md`), or `None` when music routing or
+    /// the mpv IPC is off. Built once at boot and shared by every rebuilt backend, like
+    /// `home_location`; its catalog cell is refreshed by
+    /// [`SharedSettings::apply_radio`]. Also wraps the Spotify controller
+    /// ([`RoutedSpotify`]) so the two sources hand off cleanly.
+    pub radio: Option<Arc<RadioPlayer>>,
 }
 
 impl LlmFactory {
@@ -1252,7 +1261,10 @@ impl LlmFactory {
         let mut f = self.clone();
         f.anthropic_api_key = non_blank(&s.anthropic_api_key);
         f.openai_api_key = non_blank(&s.openai_api_key);
-        f.spotify = s.spotify.controller();
+        f.spotify = s.spotify.controller().map(|c| match &f.radio {
+            Some(radio) => RoutedSpotify::wrap(c, radio.clone()),
+            None => c,
+        });
         f.cadora = s.cadora.controller();
         f.appsaid = s.appsaid.messenger();
         f.directions = crate::directions::from_token(
@@ -1315,6 +1327,8 @@ impl LlmFactory {
             weather: self.weather.clone(),
             weather_imperial: self.weather_imperial,
             places: self.places.clone(),
+            // Advertised only with at least one station configured.
+            radio: self.radio.clone().filter(|r| r.has_stations()),
         }
     }
 
@@ -1565,6 +1579,10 @@ pub struct RuntimeSettings {
     /// stored, or sent to the LLM. Empty ⇒ no rewriting. GUI-editable; orthogonal to the
     /// LLM rebuild path (a change never rebuilds the backend).
     pub pronunciations: Vec<crate::stt::PronunciationRule>,
+    /// The curated internet-radio station list (`plans/RadioPlan.md`). GUI-editable; a
+    /// change refreshes the [`RadioPlayer`] catalog and rebuilds the LLM so the
+    /// `radio_control` tool's station list stays current.
+    pub radio: RadioCatalog,
 }
 
 /// Default System-1 HTTP base URL (local `laya-serve`).
@@ -2081,6 +2099,7 @@ impl RuntimeSettings {
         // Pure runtime/GUI state with no config-file seed: the persisted value wins.
         self.personality = p.personality;
         self.pronunciations = p.pronunciations;
+        self.radio = p.radio;
     }
 }
 
@@ -2155,6 +2174,7 @@ impl PersistedSettings {
             openrouter_api_key: sd(|p| &p.openrouter_api_key, &s.system1.openrouter_api_key),
             personality: s.personality.clone(),
             pronunciations: s.pronunciations.clone(),
+            radio: s.radio.clone(),
         }
     }
 }
@@ -2255,6 +2275,7 @@ impl SharedSettings {
             places: None,
             places_enabled: true,
             places_provider: "google".to_string(),
+            radio: None,
         };
         Self::new(
             factory,
@@ -2288,6 +2309,7 @@ impl SharedSettings {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
         )
     }
@@ -2537,6 +2559,32 @@ impl SharedSettings {
     ) -> Vec<crate::stt::PronunciationRule> {
         let cleaned = crate::stt::sanitize_rules(rules);
         self.mutate(None, |c| c.pronunciations = cleaned.clone());
+        cleaned
+    }
+
+    /// A snapshot of the live internet-radio station catalog.
+    pub fn radio(&self) -> RadioCatalog {
+        self.inner.read().unwrap().radio.clone()
+    }
+
+    /// The shared radio player, or `None` when music routing / the mpv IPC is off.
+    pub fn radio_player(&self) -> Option<Arc<RadioPlayer>> {
+        self.factory.radio.clone()
+    }
+
+    /// Replace the whole station catalog (a full-record save from the config page) and
+    /// persist it (best-effort, 0600). The value is [`RadioCatalog::sanitized`] first.
+    /// The player's live catalog cell is updated *before* the LLM rebuild so the
+    /// rebuilt `radio_control` tool advertises the new list (and appears/disappears as
+    /// the list becomes non-empty/empty). Returns the cleaned value.
+    pub fn apply_radio(&self, catalog: &RadioCatalog) -> RadioCatalog {
+        let cleaned = catalog.sanitized();
+        self.mutate(Some("radio"), |c| {
+            if let Some(player) = &self.factory.radio {
+                player.set_catalog(cleaned.stations.clone());
+            }
+            c.radio = cleaned.clone();
+        });
         cleaned
     }
 
@@ -2947,6 +2995,7 @@ mod tests {
             places: None,
             places_enabled: true,
             places_provider: "google".to_string(),
+            radio: None,
         }
     }
 
@@ -2998,6 +3047,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
         )
     }
@@ -3257,6 +3307,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
             Some(path.clone()),
         );
@@ -3534,6 +3585,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
             Some(path.clone()),
         );
@@ -3861,6 +3913,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
             Some(path.clone()),
         );
@@ -3952,6 +4005,7 @@ mod tests {
                 stt: SttRuntime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
             Some(path.clone()),
         );
@@ -4039,6 +4093,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
             Some(path.clone()),
         );
@@ -4126,6 +4181,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
             Some(path.clone()),
         );
@@ -4204,6 +4260,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
             Some(path.clone()),
         );
@@ -4675,5 +4732,39 @@ mod tests {
             blank.search_api_key, None,
             "a blank key never wipes the stored one"
         );
+    }
+    /// Saving the radio catalog sanitizes it, refreshes the shared player's live catalog,
+    /// and rebuilds so `radio_control` is advertised exactly while a station exists.
+    #[test]
+    fn apply_radio_refreshes_the_player_and_the_tool() {
+        use crate::music::{RadioPlayer, RadioStation};
+        let player = Arc::new(RadioPlayer::new(Arc::new(
+            crate::llm::rig::tools::test_support::StaticRadioOutput,
+        )));
+        let mut f = factory_with_key(None);
+        f.radio = Some(player.clone());
+        let s = shared(f);
+
+        let saved = s.apply_radio(&RadioCatalog {
+            stations: vec![RadioStation {
+                id: " cjdv ".into(),
+                name: "107.5 Dave Rocks".into(),
+                url: "https://corus.leanstream.co/CJDVFM-MP3".into(),
+                ..Default::default()
+            }],
+        });
+        assert_eq!(saved.stations[0].id, "CJDV");
+        assert_eq!(s.radio(), saved);
+        assert_eq!(player.stations(), saved.stations);
+        let deps = last_build(&s).tool_deps(false, "duckduckgo", None);
+        assert!(
+            deps.radio.is_some(),
+            "radio_control advertised with a station"
+        );
+
+        s.apply_radio(&RadioCatalog::default());
+        assert!(!player.has_stations());
+        let deps = last_build(&s).tool_deps(false, "duckduckgo", None);
+        assert!(deps.radio.is_none(), "no stations ⇒ no radio_control");
     }
 }

@@ -48,6 +48,11 @@ speaks the reply back through the Echo Show's speakers.
   Echo Show). While a track plays, a compact control bar rides the idle screen; tap it
   for a full now-playing screen (artwork, progress, transport, volume) and the up-next
   queue — or just say "show me what's playing" / "what's up next" / "hide the music".
+- 📻 **Internet radio** — curate stations on the Core's **Music & Devices** page (paste a
+  stream URL, **Look up** fills the name + logo from the Radio Browser directory), then
+  say "play Dave Rocks" / "next station" / "stop the radio". It plays on the same
+  speakers as Spotify (mpv → Snapcast; starting one stops the other), and the display's
+  now-playing screen shows the station logo, a LIVE badge and the current song.
 - 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
   heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
   tuning* — it changes only how replies sound, never what the assistant knows or does.

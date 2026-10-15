@@ -149,6 +149,17 @@ pub async fn music_control_response(
         }
         Err(e) => return WyomingEvent::music_result(false, format!("{e:#}")),
     };
+    // While a radio station is on, the controls drive the radio (pause = stop,
+    // next/previous = change station, volume = player volume) — even with Spotify
+    // unlinked.
+    if let Some(radio) = now_playing.radio() {
+        if let Some(res) = radio.transport(&cmd).await {
+            return match res {
+                Ok(msg) => WyomingEvent::music_result(true, msg),
+                Err(e) => WyomingEvent::music_result(false, format!("{e:#}")),
+            };
+        }
+    }
     let Some(controller) = now_playing.controller(settings) else {
         return WyomingEvent::music_result(false, "Spotify isn't linked on the Anamanti Core");
     };
@@ -1315,6 +1326,7 @@ mod tests {
                 places: None,
                 places_enabled: true,
                 places_provider: "google".to_string(),
+                radio: None,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -1346,6 +1358,7 @@ mod tests {
                 system1: crate::settings::System1Runtime::default(),
                 personality: crate::settings::Personality::default(),
                 pronunciations: Vec::new(),
+                radio: Default::default(),
             },
         );
         let mem = MemoryStore::open_in_memory().unwrap();

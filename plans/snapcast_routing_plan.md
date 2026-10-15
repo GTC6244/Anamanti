@@ -247,6 +247,11 @@ hardware and the Linux box:
 - **P6 — Echo Show snapclient: deferred (as directed).** armv7 dependency
   confirmed available (§7).
 
+- **Update 2026-10-14 — P3 web source + stream select + P5 tool: done for radio.**
+  [`RadioPlan.md`](./RadioPlan.md) uses the mpv `Web` source for a curated station list,
+  adds stream-select (`Group.SetStream` across all groups, `Web` ↔ `Spotify`), and a
+  `radio_control` rig tool (instead of a generic `url_play`).
+
 ## 9. Non-goals (v1)
 
 - Routing music PCM through the Wyoming/Piper pipeline or the device's cpal/oboe
