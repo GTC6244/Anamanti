@@ -15,7 +15,7 @@
 //!
 //! Layout: `search` (web search providers + `internet_search`), `device` (timers,
 //! personality, font), `display` (recipe / weather / places screens and their
-//! `close_*` tools, and the music player's `music_screen`), `services` (calendar, directions, Spotify, shopping list, phone).
+//! `close_*` tools, and the music player's `music_screen`), `services` (calendar, directions, Spotify, radio, shopping list, phone).
 
 mod device;
 mod display;
@@ -73,6 +73,8 @@ pub struct ToolDeps {
     pub weather_imperial: bool,
     /// Places provider for `places_lookup` / `close_places`.
     pub places: Option<Arc<dyn crate::places::PlacesProvider>>,
+    /// Internet-radio player for `radio_control` (present only with ≥1 station).
+    pub radio: Option<Arc<crate::music::RadioPlayer>>,
 }
 
 /// Per-call context handed to [`VoiceTool::invoke`].
@@ -212,6 +214,7 @@ const GUIDANCE_ORDER: &[&str] = &[
     services::CALENDAR_LOOKUP,
     services::DIRECTIONS_LOOKUP,
     services::SPOTIFY_CONTROL,
+    services::RADIO_CONTROL,
     display::MUSIC_SCREEN,
     display::RECIPE_LOOKUP,
     display::WEATHER_LOOKUP,
@@ -252,9 +255,19 @@ impl Tools {
                 imperial,
             ));
         }
-        if let Some(controller) = deps.spotify {
+        if let Some(controller) = deps.spotify.clone() {
             tools.push(services::spotify_control(controller));
-            // The on-screen music player is voice-driven wherever Spotify is.
+        }
+        if let Some(radio) = deps.radio {
+            tools.push(services::radio_control(radio, deps.spotify));
+        }
+        // The on-screen music player is voice-driven wherever Spotify or radio is.
+        if tools.iter().any(|t| {
+            matches!(
+                t.name(),
+                services::SPOTIFY_CONTROL | services::RADIO_CONTROL
+            )
+        }) {
             tools.push(display::music_screen());
         }
         if let Some(controller) = deps.grocery {

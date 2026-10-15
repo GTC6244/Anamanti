@@ -4,7 +4,8 @@
 // ambient content but the transport stays glanceable and tappable. A tiny
 // artwork thumb, the track title/artist, previous / play-pause / next controls,
 // and a compact volume stepper. Tapping the title area opens the now-playing
-// card via [onTap].
+// card via [onTap]. For live radio the play/pause control is a stop button,
+// previous/next change station, and the logo is shown uncropped.
 //
 // Uses keys DISTINCT from the full now-playing view so both can be mounted at
 // once without duplicate-key collisions. The parent handles visibility; this
@@ -54,7 +55,13 @@ class MusicControlOverlay extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          AlbumArt(uri: music.artworkUri, size: 40, radius: 6, iconSize: 22),
+          AlbumArt(
+            uri: music.artworkUri,
+            size: 40,
+            radius: 6,
+            iconSize: 22,
+            fit: music.isRadio ? BoxFit.contain : BoxFit.cover,
+          ),
           const SizedBox(width: 10),
           Flexible(
             child: GestureDetector(
@@ -67,24 +74,30 @@ class MusicControlOverlay extends StatelessWidget {
           const SizedBox(width: 8),
           IconButton(
             key: const Key('music-overlay-previous'),
-            tooltip: 'Previous',
+            tooltip: music.isRadio ? 'Previous station' : 'Previous',
             onPressed: onPrevious,
             iconSize: 24,
             icon: const Icon(Icons.skip_previous, color: Colors.white),
           ),
           IconButton(
             key: const Key('music-overlay-play-pause'),
-            tooltip: music.playing ? 'Pause' : 'Play',
+            tooltip: music.isRadio
+                ? 'Stop'
+                : (music.playing ? 'Pause' : 'Play'),
             onPressed: onPlayPause,
             iconSize: 30,
             icon: Icon(
-              music.playing ? Icons.pause : Icons.play_arrow,
+              music.isRadio
+                  ? Icons.stop
+                  : music.playing
+                  ? Icons.pause
+                  : Icons.play_arrow,
               color: _accent,
             ),
           ),
           IconButton(
             key: const Key('music-overlay-next'),
-            tooltip: 'Next',
+            tooltip: music.isRadio ? 'Next station' : 'Next',
             onPressed: onNext,
             iconSize: 24,
             icon: const Icon(Icons.skip_next, color: Colors.white),
@@ -116,6 +129,16 @@ class MusicControlOverlay extends StatelessWidget {
     );
   }
 
+  /// The second line: the artist, or for radio "artist · station" (just the
+  /// station when the stream sends no song, since the title is then the station).
+  String get _subtitle {
+    if (!music.isRadio) return music.artist;
+    final station = music.trackTitle == music.stationName
+        ? ''
+        : music.stationName;
+    return [music.artist, station].where((s) => s.isNotEmpty).join(' · ');
+  }
+
   Widget _titleBlock() {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -131,9 +154,9 @@ class MusicControlOverlay extends StatelessWidget {
             fontWeight: FontWeight.w600,
           ),
         ),
-        if (music.artist.isNotEmpty)
+        if (_subtitle.isNotEmpty)
           Text(
-            music.artist,
+            _subtitle,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(

@@ -17,6 +17,10 @@
 > driving the controls back over `anamanti-music-control`, and drivable by voice via
 > the `music_screen` tool. Still control-only; no audio on the device. See §5 P6 and [`DisplayUI.md`](./DisplayUI.md) §4b.
 
+> **Update (internet radio, 2026-10-14):** curated radio stations now share the music
+> pipeline, the now-playing push and the on-screen controls — see
+> [`RadioPlan.md`](./RadioPlan.md). Spotify and radio hand off (one plays at a time).
+
 This plan reads together with [`Plan.MD`](./Plan.MD) (the tool-calling / rig
 engine decisions), [`architecture.md`](./architecture.md) (the design), and the
 in-flight **Snapcast routing PR** (not yet in this tree).

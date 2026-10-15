@@ -43,6 +43,12 @@ class QueueTrack {
 /// All fields tolerate being absent (older/partial payloads). Decode with
 /// [tryParse], which never throws and returns `null` on a bad payload so the UI
 /// never crashes.
+///
+/// A snapshot is either Spotify ([source] `spotify`, or absent from an older Core) or
+/// live **radio** ([source] `radio`, see `plans/RadioPlan.md`): then [trackTitle] /
+/// [artist] are the current song from the stream (or the station name when the
+/// stream sends none), [artworkUri] is the station logo, and there is no duration
+/// or queue.
 class MusicData {
   const MusicData({
     this.playing = false,
@@ -54,6 +60,9 @@ class MusicData {
     this.durationSecs = 0,
     this.volumePercent = 0,
     this.nextUp = const [],
+    this.source = '',
+    this.stationId = '',
+    this.stationName = '',
   });
 
   final bool playing;
@@ -73,7 +82,17 @@ class MusicData {
   /// The upcoming queue (empty when nothing is queued).
   final List<QueueTrack> nextUp;
 
+  /// `spotify`, `radio`, or empty (an older Core — treated as Spotify).
+  final String source;
+
+  /// Radio only: the station's call sign (e.g. `CJDV`) and display name.
+  final String stationId;
+  final String stationName;
+
   bool get hasArtwork => artworkUri.trim().isNotEmpty;
+
+  /// Live radio: no seek bar, no queue; pause stops, next/previous change station.
+  bool get isRadio => source == 'radio';
 
   /// Decode from the Core's music JSON. Returns `null` when the string is empty,
   /// malformed, not a JSON object, or carries an empty `track_title`, so a bad
@@ -95,6 +114,9 @@ class MusicData {
         durationSecs: _int(decoded['duration_secs']),
         volumePercent: _int(decoded['volume_percent']),
         nextUp: _queue(decoded['next_up']),
+        source: _string(decoded['source']),
+        stationId: _string(decoded['station_id']),
+        stationName: _string(decoded['station_name']),
       );
     } catch (_) {
       return null;

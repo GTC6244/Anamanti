@@ -49,6 +49,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         places: None,
         places_enabled: true,
         places_provider: "google".to_string(),
+        radio: None,
     };
     let (llm, backend, model) = factory
         .build(
@@ -93,6 +94,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             system1: anamanti_core::settings::System1Runtime::default(),
             personality: anamanti_core::settings::Personality::default(),
             pronunciations: Vec::new(),
+            radio: Default::default(),
         },
     );
     let pipeline = Pipeline::with_settings(

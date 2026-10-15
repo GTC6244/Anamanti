@@ -102,10 +102,12 @@ class AmbientScreen extends StatelessWidget {
           // Music: `musicActive` means a track is playing (the compact control overlay
           // rides the ambient screen); a full music screen (now-playing / up-next) opens
           // only when the user taps the overlay, and yields to a Core-pushed mode.
-          final showNowPlaying = state.musicScreen == MusicScreen.nowPlaying &&
+          final showNowPlaying =
+              state.musicScreen == MusicScreen.nowPlaying &&
               state.musicActive &&
               !coreMode;
-          final showNextUp = state.musicScreen == MusicScreen.nextUp &&
+          final showNextUp =
+              state.musicScreen == MusicScreen.nextUp &&
               state.musicActive &&
               !coreMode;
           final musicFullScreen = showNowPlaying || showNextUp;
@@ -124,7 +126,8 @@ class AmbientScreen extends StatelessWidget {
           // The compact music control overlay rides the ambient screen when a track is
           // playing, no full music screen is up, no Core mode is up, no turn is active,
           // and someone is present.
-          final musicOverlayVisible = state.musicActive &&
+          final musicOverlayVisible =
+              state.musicActive &&
               !musicFullScreen &&
               !coreMode &&
               !active &&
@@ -261,7 +264,13 @@ class AmbientScreen extends StatelessWidget {
                   ignoring: !showNowPlaying,
                   child: showNowPlaying
                       ? NowPlayingView(
-                          key: ValueKey('now-playing:${state.music!.trackTitle}'),
+                          // Radio keys on the station so a new song from the
+                          // stream doesn't rebuild the whole view.
+                          key: ValueKey(
+                            state.music!.isRadio
+                                ? 'now-playing:radio:${state.music!.stationId}'
+                                : 'now-playing:${state.music!.trackTitle}',
+                          ),
                           music: state.music!,
                           onClose: assistant.closeMusicScreen,
                           onPlayPause: assistant.playPauseMusic,

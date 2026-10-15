@@ -13,6 +13,7 @@ class AlbumArt extends StatelessWidget {
     required this.size,
     required this.radius,
     required this.iconSize,
+    this.fit = BoxFit.cover,
   });
 
   /// The artwork URL; empty → the fallback tile.
@@ -27,6 +28,10 @@ class AlbumArt extends StatelessWidget {
   /// Size of the fallback music-note icon.
   final double iconSize;
 
+  /// How the image fills the square: `cover` for album art, `contain` for station
+  /// logos (often non-square, and cropping a logo looks broken).
+  final BoxFit fit;
+
   @override
   Widget build(BuildContext context) {
     if (uri.trim().isEmpty) return _fallback();
@@ -36,7 +41,7 @@ class AlbumArt extends StatelessWidget {
         uri,
         width: size,
         height: size,
-        fit: BoxFit.cover,
+        fit: fit,
         gaplessPlayback: true,
         errorBuilder: (_, _, _) => _fallback(),
         loadingBuilder: (context, child, progress) =>

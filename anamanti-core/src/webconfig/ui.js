@@ -129,6 +129,7 @@
     'cadora': { tier: 'cloud', title: 'Cadora', desc: 'Shared household shopping list (NextHaul).', needs: 'pairing code', sends: 'Sends: <b>items you ask to add</b> to the Cadora list.' },
     'appsaid': { tier: 'cloud', title: 'AppSaid', desc: 'Push a message or map link to a family phone.', needs: 'app token + recipients', sends: 'Sends: <b>the message text</b> to the recipient’s phone via AppSaid.' },
     'spotify': { tier: 'cloud', title: 'Spotify', desc: 'Voice control of Spotify Connect (Premium).', needs: 'client id/secret + consent', sends: 'Sends: <b>playback commands</b> to Spotify.' },
+    'radio': { tier: 'cloud', title: 'Internet radio', desc: 'Curated live stations on the house speakers.', needs: 'music routing + mpv', sends: 'Streams each station you play from its broadcaster. <b>Look up</b> sends the stream URL / name you typed to Radio Browser.' },
     'drive': { tier: 'cloud', title: 'Google Drive', desc: 'Photo slideshow on the display’s idle screen.', needs: 'OAuth client + consent', sends: 'The display downloads photos from your chosen Drive folders.' },
   };
   // Resolve an option's tier ('addr' entries need the live tier from the server).

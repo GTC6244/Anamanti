@@ -19,9 +19,12 @@
 //! (`TurnEvent::Speaking` → duck, `TurnEvent::Finished` → restore).
 
 pub mod nowplaying_service;
+pub mod radio;
+pub mod radio_browser;
 pub mod spotify;
 pub mod supervisor;
 pub use nowplaying_service::NowPlayingService;
+pub use radio::{RadioCatalog, RadioPlayer, RadioStation, RoutedSpotify};
 pub use spotify::{
     NowPlaying, QueueItem, SearchKind, SpotifyCommand, SpotifyController, SpotifyWebApi,
 };
@@ -410,6 +413,18 @@ impl MpvControl {
     /// Stop playback and clear the playlist.
     pub async fn stop(&self) -> Result<()> {
         self.command(vec![json!("stop")]).await.map(|_| ())
+    }
+
+    /// Read an mpv property (e.g. `metadata`, `volume`, `idle-active`).
+    pub async fn get_property(&self, name: &str) -> Result<Value> {
+        self.command(vec![json!("get_property"), json!(name)]).await
+    }
+
+    /// Set an mpv property (e.g. `volume`).
+    pub async fn set_property(&self, name: &str, value: Value) -> Result<()> {
+        self.command(vec![json!("set_property"), json!(name), value])
+            .await
+            .map(|_| ())
     }
 }
 

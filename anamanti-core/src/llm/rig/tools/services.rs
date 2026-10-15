@@ -1,6 +1,7 @@
 //! Service tools that answer from (or act on) an external service through an
 //! injected provider: `calendar_lookup`, `directions_lookup`, `spotify_control`,
-//! `shopping_list_add` and `send_phone_message`. None of them drives the display.
+//! `radio_control`, `shopping_list_add` and `send_phone_message`. None of them drives
+//! the display directly (radio/Spotify reach it through the now-playing push).
 //!
 //! A failure past argument parsing is prefixed with the tool's "… failed" label
 //! (e.g. "calendar lookup failed: …") before it reaches the model.
@@ -19,7 +20,7 @@ use crate::appsaid::{OutgoingMessage, PhoneMessenger};
 use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, LiveHomeLocation, TravelMode};
-use crate::music::{SearchKind, SpotifyCommand, SpotifyController};
+use crate::music::{RadioPlayer, SearchKind, SpotifyCommand, SpotifyController};
 
 /// Tool name: read the user's connected calendars.
 pub(super) const CALENDAR_LOOKUP: &str = "calendar_lookup";
@@ -27,6 +28,8 @@ pub(super) const CALENDAR_LOOKUP: &str = "calendar_lookup";
 pub(super) const DIRECTIONS_LOOKUP: &str = "directions_lookup";
 /// Tool name: house-wide Spotify playback control.
 pub(super) const SPOTIFY_CONTROL: &str = "spotify_control";
+/// Tool name: house-wide internet radio (curated stations).
+pub(super) const RADIO_CONTROL: &str = "radio_control";
 /// Tool name: add an item to the shared shopping list.
 pub(super) const SHOPPING_LIST_ADD: &str = "shopping_list_add";
 /// Tool name: push a message to a family member's phone.
@@ -396,6 +399,122 @@ impl VoiceTool for SpotifyControl {
 }
 
 // ---------------------------------------------------------------------------
+// Radio (curated internet stations on the house speakers)
+// ---------------------------------------------------------------------------
+
+/// The `radio_control` tool over the shared [`RadioPlayer`]. `spotify` (when linked) is
+/// paused as a station starts so the two sources never play at once.
+pub(super) fn radio_control(
+    radio: Arc<RadioPlayer>,
+    spotify: Option<Arc<dyn SpotifyController>>,
+) -> Arc<dyn VoiceTool> {
+    Arc::new(RadioControl { radio, spotify })
+}
+
+/// Typed arguments for `radio_control`.
+#[derive(Debug, Deserialize)]
+struct RadioArgs {
+    /// `play`, `stop`, `next`, `previous`, or `list`.
+    action: String,
+    /// For `play`: the station name, call sign, or nickname.
+    #[serde(default)]
+    station: Option<String>,
+}
+
+struct RadioControl {
+    radio: Arc<RadioPlayer>,
+    spotify: Option<Arc<dyn SpotifyController>>,
+}
+
+impl RadioControl {
+    async fn run(&self, args: RadioArgs) -> Result<String> {
+        let station = args.station.as_deref().map(str::trim).unwrap_or_default();
+        match args.action.trim().to_lowercase().as_str() {
+            "play" | "start" | "tune" => {
+                anyhow::ensure!(!station.is_empty(), "which station should I play?");
+                self.radio
+                    .play_named(station, self.spotify.as_deref())
+                    .await
+            }
+            "stop" | "pause" | "off" => self.radio.stop().await,
+            "next" | "skip" => self.radio.step(1).await,
+            "previous" | "prev" | "back" => self.radio.step(-1).await,
+            "list" => Ok(format!(
+                "The radio stations are: {}.",
+                self.radio
+                    .stations()
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            other => anyhow::bail!("unknown action `{other}`"),
+        }
+    }
+}
+
+#[async_trait]
+impl VoiceTool for RadioControl {
+    fn name(&self) -> &'static str {
+        RADIO_CONTROL
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        let stations = self
+            .radio
+            .stations()
+            .iter()
+            .map(|s| {
+                let mut also = vec![s.id.clone()];
+                also.extend(s.aliases.iter().cloned());
+                format!("{} ({})", s.name, also.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        definition(
+            RADIO_CONTROL,
+            &format!(
+                "Play live internet radio stations on the house speakers. Use this for ANY \
+                 request to play, switch, or stop a radio station, or to list the stations. \
+                 Available stations: {stations}. Returns a short spoken confirmation."
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["play", "stop", "next", "previous", "list"],
+                        "description": "play a station, stop the radio, step to the next/previous \
+                            station, or list the stations."
+                    },
+                    "station": {
+                        "type": "string",
+                        "description": "For action=play: the station's name, call sign, or \
+                            nickname as the user said it."
+                    }
+                },
+                "required": ["action"]
+            }),
+        )
+    }
+
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "You can play live radio on the house speakers with the `radio_control` tool. \
+             Whenever the user asks to play, put on, switch to, or stop a radio station (by \
+             name, call sign, frequency, or nickname), or asks what stations there are, you \
+             MUST call `radio_control` — not `spotify_control`. Pause/skip/volume requests while \
+             the radio is playing may use either tool; they act on whatever is playing.",
+        )
+    }
+
+    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: RadioArgs = parse_args(args, RADIO_CONTROL)?;
+        self.run(args).await.context("radio control failed")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shopping list (Cadora shared household via the voice API)
 // ---------------------------------------------------------------------------
 
@@ -678,6 +797,38 @@ mod tests {
             format!("{err:#}"),
             "directions lookup failed: no starting point given and no home location is configured"
         );
+    }
+
+    #[tokio::test]
+    async fn radio_control_plays_lists_and_stops() {
+        let radio = static_radio();
+        let tool = radio_control(radio.clone(), None);
+        let ctx = ToolCtx { actions: None };
+        assert!(tool
+            .definition()
+            .description
+            .contains("107.5 Dave Rocks (CJDV, Dave)"));
+        let out = tool
+            .invoke(&json!({ "action": "play", "station": "dave" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out, "Playing 107.5 Dave Rocks.");
+        assert_eq!(radio.current().unwrap().id, "CJDV");
+        let out = tool
+            .invoke(&json!({ "action": "list" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out, "The radio stations are: 107.5 Dave Rocks.");
+        let out = tool
+            .invoke(&json!({ "action": "stop" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out, "Stopped 107.5 Dave Rocks.");
+        let err = tool
+            .invoke(&json!({ "action": "play", "station": "jazz fm" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").starts_with("radio control failed: I don't have a station"));
     }
 
     #[tokio::test]

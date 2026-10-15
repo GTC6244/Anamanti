@@ -259,6 +259,18 @@ Presentation (`AssistantState.musicScreen` ∈ `hidden` / `nowPlaying` / `nextUp
 - **`AlbumArt`** — `lib/src/ui/album_art.dart`. The shared artwork tile all three surfaces
   use (overlay 40 px, up-next rows 56 px, now-playing 280 px): a rounded network image
   with a music-note fallback while loading, on error, or when there's no artwork URL.
+  `fit` is `cover` for album art and `contain` for radio station logos.
+
+**Live radio** ([`RadioPlan.md`](./RadioPlan.md)): the same surfaces render a radio
+snapshot (`MusicData.isRadio`, `source:"radio"` + `station_id`/`station_name`). The
+now-playing header is the **station name with a red LIVE badge** (`music-live-badge`), the
+logo is shown uncropped, the stream's current song is the headline (`music-radio-song`,
+artist under it; "Live radio" when the stream sends no song), there is **no progress bar
+and no Up next**, and the transport is previous station / **stop** (`Icons.stop_circle`)
+/ next station. The overlay shows a stop control and "artist · station". The controls
+send the same `pause`/`next`/`previous`/`volume` actions; the Core applies them to the
+radio. Up next (touch or voice) falls back to now-playing for radio, and the view is keyed
+on the station so a new song doesn't rebuild it.
 
 Controls route back to the Core device→Core: `AssistantController` holds a
 `MusicControlSink` (`main.dart` wires it to the FRB `musicControl`), which issues a

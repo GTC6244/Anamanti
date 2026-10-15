@@ -1,4 +1,4 @@
-<p class="sub" data-head="sub">The displays connected to this Core and the local music processes it supervises. Every action here applies immediately.</p>
+<p class="sub" data-head="sub">The displays connected to this Core, the local music processes it supervises, and your radio stations. Every action here applies immediately.</p>
 
 <style>
   .dv-log { display: flex; align-items: center; gap: .25rem; min-width: 0; }
@@ -7,6 +7,15 @@
   .dv-group:last-child { border-bottom: 0; }
   .dv-clients { color: var(--muted); min-width: 0; }
   .dv-snap-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .82rem; }
+  .rd-logo { width: 36px; height: 36px; border-radius: 6px; object-fit: contain; background: var(--border); flex: none; }
+  .rd-logo.lg { width: 64px; height: 64px; }
+  .rd-row { display: grid; grid-template-columns: 36px 5.5rem minmax(0, 1.2fr) minmax(0, 1.6fr) minmax(0, 1fr) auto; align-items: center; gap: .7rem; padding: .4rem 0; border-bottom: 1px solid var(--border); font-size: .84rem; }
+  .rd-row:last-child { border-bottom: 0; }
+  .rd-row.playing { background: color-mix(in srgb, var(--accent, #3b82f6) 8%, transparent); }
+  .rd-match { display: flex; align-items: center; gap: .6rem; padding: .35rem .4rem; border-radius: 6px; cursor: pointer; font-size: .82rem; }
+  .rd-match:hover { background: var(--border); }
+  .rd-editor { border: 1px solid var(--border); border-radius: 8px; padding: .75rem; margin-top: .6rem; }
+  .rd-editor .inline { flex-wrap: nowrap; }
 </style>
 
 <div class="grid-12">
@@ -109,6 +118,61 @@
         <button type="button" id="stopWebBtn"><i data-icon="stop"></i>Stop</button>
       </div>
       <p class="hint" style="margin-top:.35rem">Plays a stream URL or local file through the music pipeline (mpv → snapserver).</p>
+    </div>
+  </section>
+
+  <!-- Radio stations -->
+  <section class="card span-12" id="radio">
+    <div class="card-head">
+      <h2><i data-icon="speaker"></i>Radio stations</h2>
+      <div class="tools">
+        <span id="radioNow"></span>
+        <button type="button" class="sm" id="radioStop" hidden><i data-icon="stop"></i>Stop radio</button>
+        <i data-loc="cloud" data-text="Internet"></i>
+        <button type="button" class="sm primary" id="radioAdd"><i data-icon="plus"></i>Add station</button>
+      </div>
+    </div>
+    <p class="desc">Live stations played on the same speakers as Spotify (mpv → the snapserver <code>Web</code> stream). Starting one pauses Spotify; starting Spotify stops the radio. Say <i>"play Dave Rocks"</i>, <i>"next station"</i> or <i>"stop the radio"</i>. The display's now-playing screen shows the logo, station and current song. The ID is the station's call sign; aliases are extra names to say. <b>Look up</b> sends the stream URL / name you typed to the public Radio Browser directory to find the name and logo.</p>
+    <div id="radioOff" class="hint" hidden>Music routing (or the mpv web player) is off, so stations can be edited but not played. Enable <code>"music"</code> in <code>anamanti.json</code>.</div>
+
+    <div id="radioEditor" class="rd-editor" hidden>
+      <div class="field-grid">
+        <div class="field">
+          <label for="rUrl">Stream URL</label>
+          <div class="inline">
+            <input id="rUrl" type="text" placeholder="https://corus.leanstream.co/CJDVFM-MP3" autocomplete="off">
+            <button type="button" id="rLookup"><i data-icon="search"></i>Look up</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="rName">Name</label>
+          <input id="rName" type="text" placeholder="107.5 Dave Rocks" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="rId">ID (call sign)</label>
+          <input id="rId" type="text" placeholder="CJDV" autocomplete="off" style="text-transform:uppercase">
+        </div>
+        <div class="field">
+          <label for="rAliases">Aliases <span class="faint">(comma-separated)</span></label>
+          <input id="rAliases" type="text" placeholder="Dave, Dave FM" autocomplete="off">
+        </div>
+        <div class="field full">
+          <label for="rLogo">Logo URL <span class="faint">(filled by Look up; override here)</span></label>
+          <div class="inline">
+            <img id="rLogoPreview" class="rd-logo lg" alt="" referrerpolicy="no-referrer" hidden>
+            <input id="rLogo" type="text" placeholder="https://…/logo.png" autocomplete="off">
+          </div>
+        </div>
+      </div>
+      <div id="rMatches" class="scroll-y" style="max-height:220px;margin-top:.5rem"></div>
+      <div class="card-foot" style="justify-content:flex-end">
+        <button type="button" class="ghost" id="rCancel">Cancel</button>
+        <button type="button" class="primary" id="rSave"><i data-icon="check"></i>Save station</button>
+      </div>
+    </div>
+
+    <div id="radioList" style="margin-top:.4rem">
+      <div class="skeleton" style="height:38px"></div>
     </div>
   </section>
 </div>
@@ -259,7 +323,150 @@ ui.hydrate();
   $('playUrl').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('playBtn').click(); });
   $('stopWebBtn').addEventListener('click', () => busy($('stopWebBtn'), () => act('/music/stopweb', undefined, 'Stopped the URL player.', 500)));
 
-  Promise.all([loadDisplays(), loadMusic()]).then(() => ui.reveal());
+  // ---------------------------------------------------------------- Radio
+  let stations = [];
+  let current = null;
+  let radioEnabled = false;
+  let editing = -1; // index being edited, -1 = adding
+
+  function logoImg(url, cls){
+    return url
+      ? '<img class="' + (cls || 'rd-logo') + '" src="' + escAttr(url) + '" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility=\'hidden\'">'
+      : '<span class="' + (cls || 'rd-logo') + '"></span>';
+  }
+  function renderRadio(){
+    $('radioOff').hidden = radioEnabled;
+    const playing = stations.find(s => s.id === current);
+    $('radioNow').innerHTML = playing ? ui.status('ok', 'playing ' + playing.name) : '';
+    $('radioStop').hidden = !playing;
+    if (!stations.length) {
+      $('radioList').innerHTML = '<div class="empty">' + ui.icon('speaker') + '<div>No stations yet. <b>Add station</b>, paste a stream URL, and <b>Look up</b> its name and logo.</div></div>';
+      return;
+    }
+    $('radioList').innerHTML = stations.map((s, i) => {
+      const isOn = s.id === current;
+      return '<div class="rd-row' + (isOn ? ' playing' : '') + '">' + logoImg(s.logo_url)
+        + '<b class="mono">' + esc(s.id) + '</b>'
+        + '<span class="ellipsis" title="' + escAttr(s.name) + '">' + esc(s.name) + '</span>'
+        + '<span class="mono faint ellipsis" title="' + escAttr(s.url) + '">' + esc(s.url) + '</span>'
+        + '<span class="faint ellipsis">' + esc((s.aliases || []).join(', ')) + '</span>'
+        + '<span class="btn-row">'
+        + (isOn
+            ? '<button type="button" class="sm" data-r="stop">' + ui.icon('stop') + 'Stop</button>'
+            : '<button type="button" class="sm" data-r="play" data-i="' + i + '"' + (radioEnabled ? '' : ' disabled') + '>' + ui.icon('play') + 'Play</button>')
+        + '<button type="button" class="sm ghost" data-r="edit" data-i="' + i + '" aria-label="Edit ' + escAttr(s.name) + '">' + ui.icon('edit') + '</button>'
+        + '<button type="button" class="sm ghost" data-r="del" data-i="' + i + '" aria-label="Delete ' + escAttr(s.name) + '">' + ui.icon('trash') + '</button>'
+        + '</span></div>';
+    }).join('');
+  }
+  function applyRadio(j){
+    stations = Array.isArray(j.stations) ? j.stations : [];
+    current = j.current || null;
+    radioEnabled = !!j.enabled;
+    renderRadio();
+  }
+  async function loadRadio(){
+    try { applyRadio(await getJSON('/radio/stations.json')); }
+    catch (e) { $('radioList').innerHTML = '<div class="empty">' + ui.icon('alert') + '<div>Could not load radio stations.</div></div>'; }
+  }
+  async function saveStations(list, okMsg){
+    try {
+      const r = await ui.req(postJSON('/radio/save', { stations: list }));
+      applyRadio(r);
+      ui.toast(true, okMsg);
+      return true;
+    } catch (e) { ui.toast(false, 'Save failed: ' + (e.message || e)); return false; }
+  }
+  function setLogoPreview(){
+    const u = $('rLogo').value.trim();
+    $('rLogoPreview').hidden = !u;
+    if (u) $('rLogoPreview').src = u;
+  }
+  function openEditor(i){
+    editing = i;
+    const s = i >= 0 ? stations[i] : { id: '', name: '', url: '', logo_url: '', aliases: [] };
+    $('rUrl').value = s.url; $('rName').value = s.name; $('rId').value = s.id;
+    $('rAliases').value = (s.aliases || []).join(', '); $('rLogo').value = s.logo_url || '';
+    $('rMatches').innerHTML = '';
+    setLogoPreview();
+    $('radioEditor').hidden = false;
+    $('rUrl').focus();
+  }
+  function closeEditor(){ $('radioEditor').hidden = true; editing = -1; }
+
+  let matches = [];
+  $('rLookup').addEventListener('click', () => busy($('rLookup'), async () => {
+    $('rMatches').innerHTML = '<div class="hint">Searching Radio Browser…</div>';
+    try {
+      const r = await ui.req(postJSON('/radio/lookup', { url: $('rUrl').value.trim(), name: $('rName').value.trim() }));
+      matches = r.matches || [];
+      if (!matches.length) { $('rMatches').innerHTML = '<div class="hint">No matches. Enter the name and logo URL by hand.</div>'; return; }
+      $('rMatches').innerHTML = '<div class="section-label">Pick a match</div>' + matches.map((m, k) =>
+        '<div class="rd-match" data-m="' + k + '">' + logoImg(m.logo_url)
+        + '<div class="grow"><div class="title ellipsis"><b>' + esc(m.name) + '</b></div>'
+        + '<div class="meta faint ellipsis">' + esc([m.state, m.country, m.codec && (m.codec + (m.bitrate ? ' ' + m.bitrate + 'k' : ''))].filter(Boolean).join(' · '))
+        + (m.logo_url ? '' : ' · no logo') + '</div></div>'
+        + '<span class="chip neutral">' + esc(m.suggested_id) + '</span></div>').join('');
+    } catch (e) { $('rMatches').innerHTML = '<div class="hint">' + esc(String(e.message || e)) + '</div>'; }
+  }));
+  $('rMatches').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-m]');
+    if (!row) return;
+    const m = matches[+row.dataset.m];
+    if (!m) return;
+    $('rName').value = m.name;
+    if (m.logo_url) $('rLogo').value = m.logo_url;
+    if (!$('rId').value.trim()) $('rId').value = m.suggested_id || '';
+    if (!$('rUrl').value.trim()) $('rUrl').value = m.stream_url || '';
+    setLogoPreview();
+    ui.toast(true, 'Filled from ' + m.name + '. Edit anything, then Save.');
+  });
+  $('rLogo').addEventListener('input', setLogoPreview);
+  $('rCancel').addEventListener('click', closeEditor);
+  $('radioAdd').addEventListener('click', () => openEditor(-1));
+  $('rSave').addEventListener('click', () => busy($('rSave'), async () => {
+    const st = {
+      id: $('rId').value.trim().toUpperCase(),
+      name: $('rName').value.trim(),
+      url: $('rUrl').value.trim(),
+      logo_url: $('rLogo').value.trim(),
+      aliases: $('rAliases').value.split(',').map(a => a.trim()).filter(Boolean),
+    };
+    if (!st.id) { ui.toast(false, 'Give the station an ID (its call sign, e.g. CJDV).'); $('rId').focus(); return; }
+    if (!/^https?:\/\//i.test(st.url)) { ui.toast(false, 'The stream URL must start with http:// or https://.'); $('rUrl').focus(); return; }
+    const clash = stations.findIndex((s, k) => k !== editing && s.id === st.id);
+    if (clash >= 0) { ui.toast(false, 'Another station already uses the ID ' + st.id + '.'); $('rId').focus(); return; }
+    const list = stations.slice();
+    if (editing >= 0) list[editing] = st; else list.push(st);
+    if (await saveStations(list, 'Saved ' + (st.name || st.id) + '.')) closeEditor();
+  }));
+  $('radioList').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-r]');
+    if (!b) return;
+    const i = +b.dataset.i;
+    switch (b.dataset.r) {
+      case 'edit': openEditor(i); break;
+      case 'del':
+        if (b.dataset.armed) { await saveStations(stations.filter((_, k) => k !== i), 'Deleted ' + stations[i].name + '.'); }
+        else { b.dataset.armed = '1'; b.innerHTML = 'Delete?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.innerHTML = ui.icon('trash'); } }, 3000); }
+        break;
+      case 'play':
+        await busy(b, async () => {
+          try { const r = await ui.req(postJSON('/radio/play', { id: stations[i].id })); current = r.current; ui.toast(true, r.message); }
+          catch (err) { ui.toast(false, String(err.message || err)); }
+          renderRadio(); setTimeout(loadMusic, 600);
+        });
+        break;
+      case 'stop': $('radioStop').click(); break;
+    }
+  });
+  $('radioStop').addEventListener('click', () => busy($('radioStop'), async () => {
+    try { const r = await ui.req(postJSON('/radio/stop', {})); current = null; ui.toast(true, r.message); }
+    catch (err) { ui.toast(false, String(err.message || err)); }
+    renderRadio(); setTimeout(loadMusic, 600);
+  }));
+
+  Promise.all([loadDisplays(), loadMusic(), loadRadio()]).then(() => ui.reveal());
   setInterval(() => { if (!document.hidden) loadDisplays(); }, 10000);
 })();
 </script>

@@ -56,6 +56,10 @@ identifies who is speaking on **every** turn's voiced PCM — not the wake word 
 scopes memory/prompt per person; opt-in via `speaker.enabled`+`speaker.model_path`, with
 a device **People** screen whose guided "Add a voice" flow (existing household member or new person) actively enrolls + verifies a
 voice via an `enroll` display context on the ordinary turn — no second audio path), and
+[`RadioPlan.md`](./plans/RadioPlan.md) (internet radio: a curated station list on the
+Core's Music & Devices page with Radio Browser logo lookup, played by the existing mpv →
+snapserver `Web` stream on the same speakers as Spotify, the `radio_control` tool, and a
+radio variant of the display's now-playing screen over the existing `anamanti-music` push), and
 [`SpeakerScopedMemoryPlan.md`](./plans/SpeakerScopedMemoryPlan.md) (memory scopes
 `person` / `household` / `unknown`: a fact said by an unrecognized voice is kept but never
 recalled for anyone; per-turn speaker resolution `identified|tentative|new|unknown`;

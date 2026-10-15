@@ -339,8 +339,10 @@ async fn run() -> Result<()> {
     // (track + up-next queue) from the live settings and fans it out so the display's
     // music screen stays fresh without a voice turn. The poll no-ops while Spotify isn't
     // linked, so a later config-page relink activates it with no restart. Dormant (no
-    // task) when music is disabled in the config.
-    let music_svc = Arc::new(NowPlayingService::new());
+    // task) when music is disabled in the config. When the internet-radio player is on
+    // (plans/RadioPlan.md) the push reports the playing station instead.
+    let radio = pipeline.settings().radio_player();
+    let music_svc = Arc::new(NowPlayingService::with_radio(radio.clone()));
     if config.music.enabled {
         anamanti_core::music::nowplaying_service::spawn_periodic(
             music_svc.clone(),
@@ -434,6 +436,16 @@ async fn run() -> Result<()> {
             log::info!("music: auto-starting managed processes (snapserver, librespot, mpv)");
             hub.start_all().await;
         }
+    }
+    // Nothing is on the radio at boot (mpv starts idle), so make sure the speakers are
+    // on the Spotify stream — a previous run may have left them on `Web`. Best-effort,
+    // after a short delay so an autostarted snapserver is listening; a station started
+    // in the meantime is left alone.
+    if let Some(radio) = radio {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            radio.reset_routing().await;
+        });
     }
 
     log::info!("orchestrator ready on {local}; waiting for the device");

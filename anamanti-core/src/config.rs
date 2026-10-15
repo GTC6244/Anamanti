@@ -1850,7 +1850,20 @@ impl Config {
             places: self.places_provider(),
             places_enabled: self.places.enabled,
             places_provider: self.places.provider.clone(),
+            // Built once; its catalog is seeded in `shared_settings` and refreshed by
+            // `apply_radio`.
+            radio: self.radio_player(),
         }
+    }
+
+    /// Build the internet-radio player (`plans/RadioPlan.md`) over the mpv web player +
+    /// snapserver, or `None` when music routing is off or no mpv IPC is configured.
+    pub fn radio_player(&self) -> Option<Arc<crate::music::RadioPlayer>> {
+        let mpv = self.mpv_control()?;
+        Some(Arc::new(crate::music::RadioPlayer::over(
+            mpv,
+            SnapcastClient::new(self.music.snapserver_addr),
+        )))
     }
 
     /// The selectable-model catalog for the settings dropdown, wired with the same
@@ -2090,6 +2103,7 @@ impl Config {
             // with no config-file seed.
             personality: Personality::default(),
             pronunciations: Vec::new(),
+            radio: Default::default(),
         };
         let seed = PersistedSettings::from_runtime(&s, None);
 
@@ -2123,6 +2137,12 @@ impl Config {
         // Seed the location-aware tools' live home address from the resolved household.
         // Every rebuilt backend's tools share this cell; `apply_household` updates it.
         factory.home_location.set(s.household.address.clone());
+        // Seed the radio player's live catalog from the resolved (persisted) station list
+        // before the first build, so `radio_control` advertises it from boot.
+        s.radio = s.radio.sanitized();
+        if let Some(radio) = &factory.radio {
+            radio.set_catalog(s.radio.stations.clone());
+        }
         // Seed the shared token provider's override from the resolved subscription
         // token. The Arc is shared with every rebuilt backend, so a token entered on the
         // config page later takes effect in place.

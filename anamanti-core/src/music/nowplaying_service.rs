@@ -14,6 +14,11 @@
 //! Spotify credentials change), shared by the periodic push and the display's on-screen
 //! transport controls ([`crate::control::music_control_response`]) so both reuse the
 //! same access-token cache.
+//!
+//! **Radio** (`plans/RadioPlan.md`): when a [`RadioPlayer`] is attached and a station
+//! is on, the push carries the radio snapshot instead of Spotify's, and a station change
+//! wakes the loop at once (no 5 s wait). If Spotify starts playing while the radio is on
+//! (e.g. from a phone via Spotify Connect) the radio stops and Spotify takes over.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,7 +26,7 @@ use std::time::Duration;
 use serde_json::{to_value as json_to_value, Value};
 use tokio::sync::mpsc;
 
-use crate::music::{NowPlaying, SpotifyController};
+use crate::music::{NowPlaying, RadioPlayer, RoutedSpotify, SpotifyController};
 use crate::notify::ChannelRegistry;
 use crate::settings::{SharedSettings, SpotifyConfig};
 use crate::wyoming::protocol::WyomingEvent;
@@ -53,11 +58,26 @@ pub struct NowPlayingService {
     /// The live controller and the credentials it was built from; rebuilt only when
     /// [`SharedSettings::spotify`] changes, so the access-token cache survives.
     controller: Mutex<Option<(SpotifyConfig, Arc<dyn SpotifyController>)>>,
+    /// The internet-radio player, when music routing is on.
+    radio: Option<Arc<RadioPlayer>>,
 }
 
 impl NowPlayingService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A service that also reports (and hands off to/from) the radio player.
+    pub fn with_radio(radio: Option<Arc<RadioPlayer>>) -> Self {
+        Self {
+            radio,
+            ..Self::default()
+        }
+    }
+
+    /// The attached radio player, if any.
+    pub fn radio(&self) -> Option<&Arc<RadioPlayer>> {
+        self.radio.as_ref()
     }
 
     /// Register a newly-opened music channel. Returns a connection handle (used to
@@ -105,8 +125,57 @@ impl NowPlayingService {
                 return Some(ctrl.clone());
             }
         }
-        *cached = cfg.controller().map(|ctrl| (cfg, ctrl));
+        let ctrl = cfg.controller().map(|c| match &self.radio {
+            Some(radio) => RoutedSpotify::wrap(c, radio.clone()),
+            None => c,
+        });
+        *cached = ctrl.map(|ctrl| (cfg, ctrl));
         cached.as_ref().map(|(_, ctrl)| ctrl.clone())
+    }
+
+    /// One tick's snapshot: the radio when a station is on, else Spotify. `spotify_was_playing`
+    /// carries Spotify's last-seen play state between ticks so a *new* Spotify start while
+    /// the radio is on (a rising edge) hands the speakers back to Spotify. `Err` = the
+    /// Spotify read failed (skip the tick, keep the screen); `Ok(None)` from Spotify with
+    /// no controller means "not linked" and is also skipped (`None` outer).
+    async fn tick(
+        &self,
+        settings: &SharedSettings,
+        spotify_was_playing: &mut bool,
+    ) -> Option<anyhow::Result<Option<NowPlaying>>> {
+        let ctrl = self.controller(settings);
+        if let Some(radio) = self.radio.as_ref().filter(|r| r.is_playing()) {
+            if let Some(ctrl) = &ctrl {
+                if let Ok(Some(sp)) = ctrl.now_playing().await {
+                    let rising = sp.playing && !*spotify_was_playing;
+                    *spotify_was_playing = sp.playing;
+                    if rising {
+                        log::info!(
+                            "music push: Spotify started while the radio was on; handing off"
+                        );
+                        radio.release_for_spotify().await;
+                        return Some(Ok(Some(sp)));
+                    }
+                }
+            }
+            return Some(Ok(radio.now_playing().await));
+        }
+        let Some(ctrl) = ctrl else {
+            // Spotify isn't linked. If the radio just stopped, dismiss its screen;
+            // otherwise there is nothing to report.
+            let was_radio = self
+                .last
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|np| np.source == crate::music::radio::SOURCE_RADIO);
+            return was_radio.then_some(Ok(None));
+        };
+        let res = ctrl.now_playing().await;
+        if let Ok(snap) = &res {
+            *spotify_was_playing = snap.as_ref().is_some_and(|s| s.playing);
+        }
+        Some(res)
     }
 }
 
@@ -124,23 +193,26 @@ pub fn spawn_periodic(
     tokio::spawn(async move {
         // A tiny initial delay lets the device dial its channel before the first push.
         tokio::time::sleep(Duration::from_secs(2)).await;
+        // A station change (play/stop/step) wakes the loop early so the screen updates
+        // at once; with no radio this is a Notify nobody signals.
+        let wake = service.radio().map(|r| r.changed()).unwrap_or_default();
+        let mut spotify_was_playing = false;
         loop {
-            if service.connected() == 0 {
-                tokio::time::sleep(interval).await;
-                continue;
-            }
-            match service.controller(&settings) {
-                Some(ctrl) => match ctrl.now_playing().await {
-                    Ok(snapshot) => {
+            if service.connected() > 0 {
+                match service.tick(&settings, &mut spotify_was_playing).await {
+                    Some(Ok(snapshot)) => {
                         let playing = snapshot.is_some();
                         let n = service.broadcast(snapshot);
                         log::debug!("music push: playing={playing} → {n} device(s)");
                     }
-                    Err(e) => log::warn!("music push: now-playing read failed: {e:#}"),
-                },
-                None => log::debug!("music push: Spotify not linked; skipping tick"),
+                    Some(Err(e)) => log::warn!("music push: now-playing read failed: {e:#}"),
+                    None => log::debug!("music push: nothing linked/playing; skipping tick"),
+                }
             }
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = wake.notified() => {}
+            }
         }
     });
 }

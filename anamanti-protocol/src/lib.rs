@@ -306,7 +306,11 @@ pub mod types {
 
     /// orchestrator → device: the music player (data: `action` = `"now_playing"` (the
     /// `music` object carries `playing`, `track_title`, `artist`, `album`, `artwork_uri`,
-    /// `position_secs`, `duration_secs`, `volume_percent`, and a `next_up[]` queue) /
+    /// `position_secs`, `duration_secs`, `volume_percent`, a `next_up[]` queue, and
+    /// `source` = `"spotify"`/`"radio"`; a radio snapshot adds `station_id` +
+    /// `station_name`, carries the stream's current song as `track_title`/`artist`
+    /// (the station name when there is none), the logo as `artwork_uri`, and has no
+    /// duration or queue — see `plans/RadioPlan.md`) /
     /// `"dismiss"` (nothing is playing) — both pushed over the persistent `role="music"`
     /// channel — or `"screen"` (`screen` = `"now_playing"`/`"up_next"`/`"hidden"`, a
     /// device action on the per-turn socket driven by the `music_screen` tool)).
@@ -314,7 +318,9 @@ pub mod types {
 
     /// device → orchestrator: a music transport/volume command from the on-screen
     /// controls (data: `action` = `"pause"`/`"resume"`/`"next"`/`"previous"`/`"volume"`,
-    /// with `value` the 0–100 percent for `"volume"`). Answered with [`MUSIC_RESULT`].
+    /// with `value` the 0–100 percent for `"volume"`). While a radio station plays the
+    /// Core applies them to the radio: `pause` stops it, `next`/`previous` change
+    /// station, `volume` sets the player volume. Answered with [`MUSIC_RESULT`].
     pub const MUSIC_CONTROL: &str = "anamanti-music-control";
 
     /// orchestrator → device: the result of a [`MUSIC_CONTROL`] command (data: `ok`

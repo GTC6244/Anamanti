@@ -24,6 +24,12 @@ const _pausedJson = '''
  "artwork_uri":"","position_secs":10,"duration_secs":299,"volume_percent":40,"next_up":[]}
 ''';
 
+const _radioJson = '''
+{"playing":true,"track_title":"Under Pressure","artist":"Queen & David Bowie",
+ "album":"107.5 Dave Rocks","artwork_uri":"","duration_secs":0,"volume_percent":80,
+ "next_up":[],"source":"radio","station_id":"CJDV","station_name":"107.5 Dave Rocks"}
+''';
+
 WakeWordConfig _cfg() => WakeWordConfig(
   melspecModelPath: '',
   embeddingModelPath: '',
@@ -302,6 +308,36 @@ void main() {
       // Music keeps playing, but its full screen yields to the Core-pushed place card.
       expect(controller.state.musicActive, isTrue);
       expect(controller.state.musicScreen, MusicScreen.hidden);
+    });
+  });
+
+  group('radio', () {
+    test('up-next is unavailable for radio: it opens now-playing instead', () {
+      final controller = _controller([]);
+      controller.applyMusicPush(_radioJson);
+      controller.showMusicQueue();
+      expect(controller.state.musicScreen, MusicScreen.nowPlaying);
+    });
+
+    test(
+      'a station starting while up-next is open falls back to now-playing',
+      () {
+        final controller = _controller([]);
+        controller.applyMusicPush(_musicJson);
+        controller.showMusicQueue();
+        expect(controller.state.musicScreen, MusicScreen.nextUp);
+        controller.applyMusicPush(_radioJson);
+        expect(controller.state.musicScreen, MusicScreen.nowPlaying);
+        expect(controller.state.music!.isRadio, isTrue);
+      },
+    );
+
+    test('play/pause on radio sends pause (the Core stops the station)', () {
+      final sink = <Map<String, Object?>>[];
+      final controller = _controller(sink);
+      controller.applyMusicPush(_radioJson);
+      controller.playPauseMusic();
+      expect(sink.single['action'], 'pause');
     });
   });
 }

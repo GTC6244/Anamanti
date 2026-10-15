@@ -1,14 +1,17 @@
 //! The Music tab: the managed music processes, the Snapcast status, the mpv web-URL
-//! player, and the Spotify voice-control link.
+//! player, the Spotify voice-control link, and the internet-radio station list
+//! (`plans/RadioPlan.md`).
 
 use serde_json::{json, Value};
 
 use super::{fail, keep_or_set, parse_json_body};
-use crate::music::{ManagedProc, MusicHub};
+use crate::music::{ManagedProc, MusicHub, NowPlayingService, RadioCatalog};
 use crate::settings::{SharedSettings, SpotifyUpdate};
 
 const MUSIC_DISABLED: &str = "music routing is disabled";
 const NO_MPV: &str = "no mpv IPC configured (music.web_ipc)";
+const NO_RADIO: &str =
+    "radio needs music routing and the mpv web player (music.enabled + music.web_ipc)";
 
 /// `{ ok: true }`, or the error in-band.
 fn done(res: anyhow::Result<()>) -> String {
@@ -209,4 +212,88 @@ pub(super) async fn spotify_link_json(settings: &SharedSettings) -> String {
         "device_name": now.device_label(),
     })
     .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Internet radio
+// ---------------------------------------------------------------------------
+
+/// `GET /radio/stations.json` — `{ ok, enabled, stations: [...], current }`. `enabled` is
+/// whether the player exists (music routing + mpv); the list is editable either way.
+pub(super) fn radio_stations_json(settings: &SharedSettings) -> String {
+    let player = settings.radio_player();
+    json!({
+        "ok": true,
+        "enabled": player.is_some(),
+        "stations": settings.radio().stations,
+        "current": player.and_then(|p| p.current()).map(|s| s.id),
+    })
+    .to_string()
+}
+
+/// `POST /radio/save` — body `{ stations: [...] }`, a full-record save (sanitized:
+/// trimmed, ids uppercased + de-duplicated, entries without an id or http(s) URL
+/// dropped). Rebuilds the LLM so `radio_control` lists the new stations.
+pub(super) fn radio_save_json(settings: &SharedSettings, data: &Value) -> String {
+    let catalog: RadioCatalog = match serde_json::from_value(json!({
+        "stations": data.get("stations").cloned().unwrap_or_else(|| json!([])),
+    })) {
+        Ok(c) => c,
+        Err(e) => return fail(format!("invalid stations: {e}")),
+    };
+    settings.apply_radio(&catalog);
+    radio_stations_json(settings)
+}
+
+/// `POST /radio/lookup` — body `{ url, name }`: candidate stations (name, logo,
+/// suggested id…) from the public Radio Browser directory.
+pub(super) async fn radio_lookup_json(body: &[u8]) -> String {
+    let data = match parse_json_body(body) {
+        Ok(v) => v,
+        Err(invalid) => return invalid,
+    };
+    let field = |k: &str| {
+        data.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    match crate::music::radio_browser::lookup(&field("url"), &field("name")).await {
+        Ok(matches) => json!({ "ok": true, "matches": matches }).to_string(),
+        Err(e) => fail(format!("{e:#}")),
+    }
+}
+
+/// `POST /radio/play` — body `{ id }`: play that station on the house speakers
+/// (pausing Spotify first, best-effort).
+pub(super) async fn radio_play_json(
+    settings: &SharedSettings,
+    now_playing: &NowPlayingService,
+    body: &[u8],
+) -> String {
+    let Some(player) = settings.radio_player() else {
+        return fail(NO_RADIO);
+    };
+    let data = match parse_json_body(body) {
+        Ok(v) => v,
+        Err(invalid) => return invalid,
+    };
+    let id = data.get("id").and_then(Value::as_str).unwrap_or("");
+    let spotify = now_playing.controller(settings);
+    match player.play_id(id, spotify.as_deref()).await {
+        Ok(msg) => json!({ "ok": true, "message": msg, "current": player.current().map(|s| s.id) })
+            .to_string(),
+        Err(e) => fail(format!("{e:#}")),
+    }
+}
+
+/// `POST /radio/stop` — stop the radio and hand the speakers back to Spotify.
+pub(super) async fn radio_stop_json(settings: &SharedSettings) -> String {
+    let Some(player) = settings.radio_player() else {
+        return fail(NO_RADIO);
+    };
+    match player.stop().await {
+        Ok(msg) => json!({ "ok": true, "message": msg, "current": null }).to_string(),
+        Err(e) => fail(format!("{e:#}")),
+    }
 }
