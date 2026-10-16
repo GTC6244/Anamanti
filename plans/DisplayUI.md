@@ -200,7 +200,11 @@ Core-owned path).
   follow-up listen reopens the mic), stays up through the `connecting` → `streaming`
   hop and while the user speaks, and hides when end-of-speech moves the turn on
   (local cue → `processing`, or the authoritative `transcript` → `thinking`) or the
-  turn ends. Excludes the TTS `speaking` phase (that's the assistant talking).
+  turn ends. The local cue is only a guess (the Core's VAD is authoritative and keeps
+  listening through a pause the cue mistook for end-of-speech), so if sustained
+  speech-level audio (≥150 ms above the cue's level threshold) resumes while in
+  `processing` and before the transcript arrives, the phase reverts to `listening`
+  and the ring comes back. Excludes the TTS `speaking` phase (that's the assistant talking).
   `AmbientScreen` wraps it in an `AnimatedOpacity` (key `listening-cue`, 250 ms) and
   mounts the widget only while shown, so the pulse controller isn't spinning during
   the idle day.
