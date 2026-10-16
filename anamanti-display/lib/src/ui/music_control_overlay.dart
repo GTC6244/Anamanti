@@ -4,7 +4,8 @@
 // ambient content but the transport stays glanceable and tappable. A tiny
 // artwork thumb, the track title/artist, previous / play-pause / next controls,
 // and a compact volume stepper. Tapping the title area opens the now-playing
-// card via [onTap]. For live radio the play/pause control is a stop button,
+// card via [onTap]; the expand button ([onExpand]) switches the household music
+// preference to full screen (remembered, shared by Spotify and radio). For live radio the play/pause control is a stop button,
 // previous/next change station, and the logo is shown uncropped.
 //
 // Uses keys DISTINCT from the full now-playing view so both can be mounted at
@@ -25,6 +26,7 @@ class MusicControlOverlay extends StatelessWidget {
     required this.onPrevious,
     required this.onVolume,
     this.onTap,
+    this.onExpand,
   });
 
   final MusicData music;
@@ -37,6 +39,10 @@ class MusicControlOverlay extends StatelessWidget {
 
   /// Opens the now-playing card. The title area is tappable only when non-null.
   final VoidCallback? onTap;
+
+  /// Switches the music widget preference to full screen. The expand button shows
+  /// only when non-null.
+  final VoidCallback? onExpand;
 
   static const _accent = Color(0xFF8E7CFF);
 
@@ -124,6 +130,17 @@ class MusicControlOverlay extends StatelessWidget {
               color: Colors.white.withValues(alpha: 0.85),
             ),
           ),
+          if (onExpand != null)
+            IconButton(
+              key: const Key('music-overlay-fullscreen'),
+              tooltip: 'Full screen',
+              onPressed: onExpand,
+              iconSize: 22,
+              icon: Icon(
+                Icons.open_in_full,
+                color: Colors.white.withValues(alpha: 0.85),
+              ),
+            ),
         ],
       ),
     );

@@ -99,17 +99,13 @@ class AmbientScreen extends StatelessWidget {
           // Core-pushed full-screen modes (recipe/weather/place). These win over the
           // device-toggled music screen, which is suppressed while one is up.
           final coreMode = recipeActive || weatherActive || placeActive;
-          // Music: `musicActive` means a track is playing (the compact control overlay
-          // rides the ambient screen); a full music screen (now-playing / up-next) opens
-          // only when the user taps the overlay, and yields to a Core-pushed mode.
-          final showNowPlaying =
-              state.musicScreen == MusicScreen.nowPlaying &&
-              state.musicActive &&
-              !coreMode;
-          final showNextUp =
-              state.musicScreen == MusicScreen.nextUp &&
-              state.musicActive &&
-              !coreMode;
+          // Music: `musicActive` means a track is playing. Which widget shows follows the
+          // household preference (`musicDisplayStyle`: the compact bar or full screen),
+          // or a view the user explicitly opened (tap / voice); a Core-pushed mode always
+          // wins. `effectiveMusicScreen` resolves all of that in one place.
+          final musicScreen = state.effectiveMusicScreen;
+          final showNowPlaying = musicScreen == MusicScreen.nowPlaying;
+          final showNextUp = musicScreen == MusicScreen.nextUp;
           final musicFullScreen = showNowPlaying || showNextUp;
           // Any full-screen mode that overlays the idle presentation.
           final modeActive = coreMode || musicFullScreen;
@@ -253,10 +249,11 @@ class AmbientScreen extends StatelessWidget {
               ),
 
               // Music now-playing: a full-screen view (artwork + transport + volume),
+              // shown while the full-screen preference is set (and someone is there), or
               // opened by tapping the compact control overlay. Same precedence as the
               // Core-pushed modes — above the idle presentation, below the conversation
-              // panel — and suppressed while a Core mode is up. The close control returns
-              // to the overlay (music keeps playing).
+              // panel — and suppressed while a Core mode is up. The minimize control
+              // returns to the compact bar (music keeps playing).
               AnimatedOpacity(
                 opacity: showNowPlaying ? 1 : 0,
                 duration: const Duration(milliseconds: 250),
@@ -363,6 +360,7 @@ class AmbientScreen extends StatelessWidget {
                               onPrevious: assistant.previousTrack,
                               onVolume: assistant.setMusicVolume,
                               onTap: assistant.openNowPlaying,
+                              onExpand: assistant.expandMusic,
                             ),
                           )
                         : const SizedBox.shrink(),

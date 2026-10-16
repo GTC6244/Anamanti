@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use super::{close_tool, definition, emit, parse_args, ToolCtx, VoiceTool};
 use crate::directions::LiveHomeLocation;
 use crate::llm::{ActionSink, DeviceAction, MusicNav, RecipeNav};
+use crate::music::MusicDisplayStyle;
 use crate::recipe::RecipeProvider;
 
 /// Tool name: show a recipe on the display.
@@ -238,20 +239,25 @@ impl VoiceTool for MusicScreen {
     fn definition(&self) -> ToolDefinition {
         definition(
             MUSIC_SCREEN,
-            "Control what the music player shows on the display: open the full \
-             now-playing screen, open the up-next queue, or close the player back to the \
-             ambient screen. Use this for requests like \"show me what's playing\", \"show \
-             the queue / what's up next\", or \"hide the music\". This only changes the \
-             SCREEN — to play/pause/skip/change volume use spotify_control instead.",
+            "Control what the music player shows on the display (Spotify and radio share \
+             it): open the full now-playing screen, open the up-next queue, close the \
+             player back to the ambient screen, or switch which widget is shown whenever \
+             music plays — `fullscreen` (the big full-screen player, remembered) or \
+             `compact` (the small bar, remembered). Use this for requests like \"show me \
+             what's playing\", \"show the queue / what's up next\", \"hide the music\", \
+             \"make the music full screen\" or \"use the small music player\". This only \
+             changes the SCREEN — to play/pause/skip/change volume use spotify_control \
+             instead.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["show", "show_queue", "close"],
+                        "enum": ["show", "show_queue", "close", "fullscreen", "compact"],
                         "description": "The screen action: `show` opens the now-playing view, \
                                         `show_queue` opens the up-next list, `close` returns to \
-                                        the ambient display."
+                                        the ambient display, `fullscreen` / `compact` switch \
+                                        (and remember) the widget shown while music plays."
                     }
                 },
                 "required": ["action"]
@@ -266,24 +272,41 @@ impl VoiceTool for MusicScreen {
              Call `music_screen` with action=show when the user says things like \"show me \
              what's playing\" or \"pull up the music\", action=show_queue for \"what's up \
              next\" or \"show the queue\", and action=close for \"hide the music\" or \"close \
-             the player\". The turn context will tell you when the music screen is already \
-             open and what's on it. Relay its short spoken confirmation.",
+             the player\". To change which music widget is shown whenever music plays, \
+             call it with action=fullscreen (\"make the music full screen\", \"use the big \
+             player\") or action=compact (\"use the small music player\", \"shrink the \
+             music\"); that choice is remembered for Spotify and radio. The turn context will \
+             tell you when the music screen is already open and what's on it. Relay its short \
+             spoken confirmation.",
         )
     }
 
     async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
         let args: MusicScreenArgs = parse_args(args, MUSIC_SCREEN)?;
-        let (nav, confirmation) = match args.action.as_str() {
-            "show" => (MusicNav::NowPlaying, "Here's what's playing."),
-            "show_queue" => (MusicNav::Queue, "Here's what's up next."),
-            "close" => (MusicNav::Close, "Closing the music player."),
+        let (action, confirmation) = match args.action.as_str() {
+            "show" => (
+                DeviceAction::MusicScreen(MusicNav::NowPlaying),
+                "Here's what's playing.",
+            ),
+            "show_queue" => (
+                DeviceAction::MusicScreen(MusicNav::Queue),
+                "Here's what's up next.",
+            ),
+            "close" => (
+                DeviceAction::MusicScreen(MusicNav::Close),
+                "Closing the music player.",
+            ),
+            "fullscreen" => (
+                DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Fullscreen),
+                "Okay, music will play full screen.",
+            ),
+            "compact" => (
+                DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Compact),
+                "Okay, I'll use the small music player.",
+            ),
             other => anyhow::bail!("unknown music_screen action `{other}`"),
         };
-        emit(
-            ctx.actions,
-            DeviceAction::MusicScreen(nav),
-            "the music screen could update",
-        )?;
+        emit(ctx.actions, action, "the music screen could update")?;
         Ok(confirmation.to_string())
     }
 }
@@ -673,6 +696,19 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(rx.try_recv().unwrap(), DeviceAction::MusicScreen(nav));
+        }
+        for (action, style) in [
+            ("fullscreen", MusicDisplayStyle::Fullscreen),
+            ("compact", MusicDisplayStyle::Compact),
+        ] {
+            MusicScreen
+                .invoke(&json!({ "action": action }), &ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                rx.try_recv().unwrap(),
+                DeviceAction::MusicDisplayStyle(style)
+            );
         }
         let err = MusicScreen
             .invoke(&json!({ "action": "teleport" }), &ctx)

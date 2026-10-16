@@ -80,6 +80,13 @@ pub enum DeviceAction {
     /// screen state (and whether anything is playing). Transport (play/pause/skip/volume)
     /// is the separate `spotify_control` tool, not this.
     MusicScreen(MusicNav),
+    /// Switch which music widget the display shows while playing — the compact bar or
+    /// the full-screen now-playing view — and remember it. **Both** Core-side and a
+    /// device frame: the orchestrator persists it to
+    /// [`SharedSettings`](crate::settings::SharedSettings) (so every display's next
+    /// now-playing push carries it) and relays an `anamanti-music` `screen` frame
+    /// (`"fullscreen"` / `"compact"`) so the speaking display switches at once.
+    MusicDisplayStyle(crate::music::MusicDisplayStyle),
 }
 
 /// A voice command for the music screen (relayed as an `anamanti-music` `screen` frame).

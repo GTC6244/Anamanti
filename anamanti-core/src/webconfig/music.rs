@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use super::{fail, keep_or_set, parse_json_body};
-use crate::music::{ManagedProc, MusicHub, NowPlayingService, RadioCatalog};
+use crate::music::{ManagedProc, MusicDisplayStyle, MusicHub, NowPlayingService, RadioCatalog};
 use crate::settings::{SharedSettings, SpotifyUpdate};
 
 const MUSIC_DISABLED: &str = "music routing is disabled";
@@ -370,4 +370,29 @@ pub(super) async fn radio_stop_json(settings: &SharedSettings) -> String {
         Ok(msg) => json!({ "ok": true, "message": msg, "current": null }).to_string(),
         Err(e) => fail(format!("{e:#}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Display style (compact bar / full-screen now-playing)
+// ---------------------------------------------------------------------------
+
+/// `GET /music/display.json` — `{ ok, style }`: which music widget the displays show
+/// while Spotify or the radio plays (`"compact"` / `"fullscreen"`).
+pub(super) fn music_display_json(settings: &SharedSettings) -> String {
+    json!({ "ok": true, "style": settings.music_display_style().as_str() }).to_string()
+}
+
+/// `POST /music/display` — body `{ style }`: set the music-widget preference, persist it,
+/// and re-push now-playing so every connected display switches at once.
+pub(super) fn music_display_save_json(
+    settings: &SharedSettings,
+    now_playing: &NowPlayingService,
+    data: &Value,
+) -> String {
+    let raw = data.get("style").and_then(Value::as_str).unwrap_or("");
+    let Some(style) = MusicDisplayStyle::parse(raw) else {
+        return fail(format!("unknown style {raw:?} (use compact or fullscreen)"));
+    };
+    let pushed = now_playing.set_display_style(settings, style);
+    json!({ "ok": true, "style": style.as_str(), "pushed": pushed }).to_string()
 }

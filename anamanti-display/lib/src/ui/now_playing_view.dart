@@ -4,7 +4,8 @@
 // artist, and album, a progress bar with mm:ss position/duration labels, a
 // transport row (previous / play-pause / next), a volume slider, and an optional
 // "up next" button. Landscape-first with large, arm's-length type. Left by voice
-// or the close control.
+// or the minimize control (back to the compact bar; with the full-screen music
+// preference set, minimizing switches it to compact).
 //
 // For live radio (`MusicData.isRadio`) the header is the station name with a LIVE
 // badge, the logo is shown uncropped, the song from the stream is the headline, the
@@ -144,11 +145,11 @@ class NowPlayingView extends StatelessWidget {
           ),
           IconButton(
             key: const Key('music-close'),
-            tooltip: 'Close',
+            tooltip: 'Small player',
             onPressed: onClose,
             iconSize: 32,
             icon: Icon(
-              Icons.close,
+              Icons.close_fullscreen,
               color: Colors.white.withValues(alpha: 0.85),
             ),
           ),

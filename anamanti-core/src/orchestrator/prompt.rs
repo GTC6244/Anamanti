@@ -341,8 +341,8 @@ fn music_screen_line(screen: &MusicScreen) -> String {
     };
     format!(
         "The music player is on the display ({view}), {state} {track}. Use the \
-         `music_screen` tool to show the now-playing view, show the up-next queue, or close \
-         it, and `spotify_control` to play/pause/skip or change the volume."
+         `music_screen` tool to show the now-playing view, show the up-next queue, close \
+         it, or switch the remembered widget (fullscreen / compact), and `spotify_control` to play/pause/skip or change the volume."
     )
 }
 
