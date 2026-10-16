@@ -706,6 +706,18 @@ class AssistantController extends ChangeNotifier {
   /// When the mic last carried speech-level audio in the current turn.
   DateTime? _lastVoiceAt;
 
+  /// While in [TurnPhase.processing], when the current unbroken run of speech-level
+  /// audio began (null when the mic is quiet). The local cue is only a guess — the
+  /// Core's VAD is authoritative and keeps listening through a pause the cue took as
+  /// end-of-speech — so speech that resumes before the transcript arrives reverts
+  /// the phase to [TurnPhase.listening]. See [_endpointResumeMin].
+  DateTime? _resumeSince;
+
+  /// How long speech-level audio must persist in [TurnPhase.processing] before the
+  /// cue reverts to [TurnPhase.listening], so a single noise blip (a cough, a door)
+  /// while the Mac transcribes doesn't flicker the listening ring back on.
+  static const Duration _endpointResumeMin = Duration(milliseconds: 150);
+
   AssistantState _state = const AssistantState();
   AssistantState get state => _state;
 
@@ -820,6 +832,7 @@ class AssistantController extends ChangeNotifier {
         // can't wipe this new turn's text.
         _speechSeen = false;
         _lastVoiceAt = _clock();
+        _resumeSince = null;
         _emit(
           _state.copyWith(
             phase: TurnPhase.listening,
@@ -881,6 +894,7 @@ class AssistantController extends ChangeNotifier {
         // to clear the text now.
         _speechSeen = false;
         _lastVoiceAt = _clock();
+        _resumeSince = null;
         _emit(
           _state.copyWith(
             phase: TurnPhase.listening,
@@ -1501,7 +1515,23 @@ class AssistantController extends ChangeNotifier {
       } else if (_speechSeen &&
           _lastVoiceAt != null &&
           now.difference(_lastVoiceAt!) >= _endpointSilence) {
+        _resumeSince = null;
         next = next.copyWith(phase: TurnPhase.processing);
+      }
+    } else if (_endpointCueEnabled && _state.phase == TurnPhase.processing) {
+      // The local cue fired, but the Core hasn't sent its transcript yet, so it is
+      // still listening. If the user carries on talking (a pause the cue mistook for
+      // end-of-speech), revert to listening so the ring comes back. The transcript
+      // moves the phase on to thinking, which ends this window.
+      if (rms >= _endpointRmsThreshold) {
+        _resumeSince ??= now;
+        if (now.difference(_resumeSince!) >= _endpointResumeMin) {
+          _resumeSince = null;
+          _lastVoiceAt = now;
+          next = next.copyWith(phase: TurnPhase.listening);
+        }
+      } else {
+        _resumeSince = null;
       }
     }
     _emit(next);
