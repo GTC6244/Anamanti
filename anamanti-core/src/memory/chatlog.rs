@@ -64,6 +64,10 @@ pub struct ChatLogRecord {
     /// The voice-match cosine for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_confidence: Option<f32>,
+    /// How far the voice match led the closest other named person (household-relative
+    /// scoring). Absent with no rival, or on records logged before the field shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_margin: Option<f32>,
     /// The speaker was carried over from the previous follow-up turn (this turn was
     /// too short to identify on its own).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

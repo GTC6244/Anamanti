@@ -29,7 +29,9 @@ use crate::vecmath::{cosine, l2_normalize};
 pub use aliases::{AliasMap, SpeakerAliases};
 pub use clips::{ClipInfo, ClipStore};
 pub use embed::{MockSpeakerEmbedder, SpeakerEmbedder};
-pub use registry::{Attribution, Identified, NameSource, SpeakerProfile, SpeakerRegistry};
+pub use registry::{
+    Attribution, Identified, MatchPolicy, NameSource, Ranked, SpeakerProfile, SpeakerRegistry,
+};
 
 /// Minimum accepted samples before a guided enrollment can be committed to a
 /// profile (SpeakerEnrollmentPlan.md Phase 2). A few phrases give the centroid
@@ -107,6 +109,9 @@ pub struct SpeakerContext {
     pub is_new: bool,
     /// Cosine similarity to the matched profile (0.0 for a new cluster/unknown).
     pub confidence: f32,
+    /// How far `confidence` leads the closest **other named person** (household-
+    /// relative scoring); `None` when there is no such rival or nothing was compared.
+    pub margin: Option<f32>,
     /// How confidently the speaker was resolved.
     pub resolution: SpeakerResolution,
     /// True when the identity was carried over from the previous turn of a follow-up
@@ -126,6 +131,7 @@ impl SpeakerContext {
             name_source: None,
             is_new: false,
             confidence: 0.0,
+            margin: None,
             resolution: SpeakerResolution::Unknown,
             inherited: false,
             short_clip: false,
@@ -146,6 +152,7 @@ impl SpeakerContext {
             name_source: None,
             is_new: resolution == SpeakerResolution::New,
             confidence,
+            margin: None,
             resolution,
             inherited: false,
             short_clip: false,
@@ -230,6 +237,12 @@ pub struct SpeakerThresholds {
     /// Extra cosine a short-clip match needs above `match_threshold` to count as
     /// [`SpeakerResolution::Identified`]; otherwise it is at most tentative.
     pub short_clip_margin: f32,
+    /// Household-relative scoring: a match must lead the closest other named person
+    /// by at least this to be confident (else tentative). See [`MatchPolicy`].
+    pub min_margin: f32,
+    /// Household-relative scoring: a tentative-band match to a named person that leads
+    /// every other named person by at least this is identified. `0` disables.
+    pub clear_margin: f32,
 }
 
 impl Default for SpeakerThresholds {
@@ -242,6 +255,8 @@ impl Default for SpeakerThresholds {
             // 600 ms.
             min_identify_samples: 600 * 16,
             short_clip_margin: 0.10,
+            min_margin: 0.05,
+            clear_margin: 0.20,
         }
     }
 }
@@ -262,6 +277,8 @@ impl SpeakerThresholds {
             min_speech_samples,
             min_identify_samples: d.min_identify_samples.min(min_speech_samples),
             short_clip_margin: d.short_clip_margin,
+            min_margin: d.min_margin,
+            clear_margin: d.clear_margin,
         }
     }
 
@@ -273,6 +290,38 @@ impl SpeakerThresholds {
             .min(self.min_speech_samples);
         self.short_clip_margin = margin.max(0.0);
         self
+    }
+
+    /// Set the household-relative margins (`speaker.min_margin`,
+    /// `speaker.clear_margin`; `0` disables either).
+    pub fn with_household_margins(mut self, min_margin: f32, clear_margin: f32) -> Self {
+        self.min_margin = min_margin.max(0.0);
+        self.clear_margin = clear_margin.max(0.0);
+        self
+    }
+
+    /// The match policy for a full-length utterance.
+    pub fn policy(&self) -> MatchPolicy {
+        MatchPolicy {
+            match_threshold: self.match_threshold,
+            new_threshold: self.new_threshold,
+            min_margin: self.min_margin,
+            clear_margin: self.clear_margin,
+        }
+    }
+
+    /// The stricter policy for a read-only short clip: both the absolute match bar and
+    /// the clear-winner lead are raised by `short_clip_margin`.
+    pub fn short_clip_policy(&self) -> MatchPolicy {
+        MatchPolicy {
+            match_threshold: self.match_threshold + self.short_clip_margin,
+            clear_margin: if self.clear_margin > 0.0 {
+                self.clear_margin + self.short_clip_margin
+            } else {
+                0.0
+            },
+            ..self.policy()
+        }
     }
 }
 
@@ -644,6 +693,11 @@ impl SpeakerService {
     ///   `new_threshold ≤ cosine < match_threshold` ⇒ tentative, no update; else a new
     ///   anonymous cluster is created ([`SpeakerResolution::New`]).
     ///
+    /// Both paths also score against the **household** ([`MatchPolicy`]): a match that
+    /// barely leads another named person (`min_margin`) is only tentative and trains
+    /// nobody, and a tentative-band match that clearly leads every other named person
+    /// (`clear_margin`) is identified without training the voiceprint.
+    ///
     /// The match-or-create decision is one registry transaction
     /// ([`SpeakerRegistry::identify_or_create`]), so concurrent turns from the same
     /// new voice yield one cluster, not several. Blocking (mel features + ECAPA
@@ -659,15 +713,13 @@ impl SpeakerService {
         }
 
         let embedding = self.embedder.embed(pcm)?;
-        let found =
-            self.registry
-                .identify_or_create(&embedding, t.match_threshold, t.new_threshold)?;
+        let found = self.registry.identify_or_create(&embedding, &t.policy())?;
         // Keep this utterance in the rolling clip window so a human can play the
         // voice back: for a brand-new cluster it is exactly what's needed to put a
         // name to the anonymous "Speaker N"; a known person accumulates fresh ones.
         self.save_clip(&found.id, pcm);
         let resolution = match found.attribution {
-            Attribution::Matched => SpeakerResolution::Identified,
+            Attribution::Matched | Attribution::Distinct => SpeakerResolution::Identified,
             Attribution::Tentative => SpeakerResolution::Tentative,
             Attribution::Created => SpeakerResolution::New,
         };
@@ -677,6 +729,7 @@ impl SpeakerService {
             name_source: found.name_source,
             is_new: resolution == SpeakerResolution::New,
             confidence: found.score,
+            margin: found.margin,
             resolution,
             inherited: false,
             short_clip: false,
@@ -686,28 +739,30 @@ impl SpeakerService {
     /// The read-only short-clip match behind [`identify_and_attribute`]: nearest
     /// voiceprint, no registry writes, no clip.
     fn identify_short_clip(&self, pcm: &[i16]) -> Result<SpeakerContext> {
-        let t = &self.thresholds;
         let embedding = self.embedder.embed(pcm)?;
-        let Some((id, score)) = self.registry.identify(&embedding)? else {
+        let Some(ranked) = self.registry.rank(&embedding)? else {
             return Ok(SpeakerContext::unknown());
         };
-        let resolution = if score >= t.match_threshold + t.short_clip_margin {
-            SpeakerResolution::Identified
-        } else if score >= t.new_threshold {
-            SpeakerResolution::Tentative
-        } else {
-            let mut ctx = SpeakerContext::unknown();
-            ctx.short_clip = true;
-            ctx.confidence = score;
-            return Ok(ctx);
+        let margin = ranked.margin();
+        let resolution = match self.thresholds.short_clip_policy().decide(&ranked) {
+            Attribution::Matched | Attribution::Distinct => SpeakerResolution::Identified,
+            Attribution::Tentative => SpeakerResolution::Tentative,
+            Attribution::Created => {
+                let mut ctx = SpeakerContext::unknown();
+                ctx.short_clip = true;
+                ctx.confidence = ranked.score;
+                ctx.margin = margin;
+                return Ok(ctx);
+            }
         };
-        let profile = self.registry.get(&id)?;
+        let profile = self.registry.get(&ranked.id)?;
         Ok(SpeakerContext {
             name: profile.as_ref().and_then(|p| p.name.clone()),
             name_source: profile.and_then(|p| p.name_source),
-            speaker_id: id,
+            speaker_id: ranked.id,
             is_new: false,
-            confidence: score,
+            confidence: ranked.score,
+            margin,
             resolution,
             inherited: false,
             short_clip: true,

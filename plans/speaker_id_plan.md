@@ -149,11 +149,22 @@ STT+LLM. It is *not* on the streaming hot path.
 | `MATCH` | 0.55 cosine | ≥ ⇒ confident match; update the profile centroid |
 | `NEW` | 0.40 cosine | < ⇒ mint a new anonymous persona |
 | `MIN_SPEECH_MS` | 1200 ms | below this much *voiced* audio ⇒ don't identify (→ `household`) |
+| `min_margin` | 0.05 cosine | a ≥ `MATCH` score that leads the closest *other named* profile by less ⇒ tentative, no centroid update (2026-10-15) |
+| `clear_margin` | 0.20 cosine | a `[NEW, MATCH)` score for a named profile leading every other named profile by ≥ this ⇒ identified, no centroid update; `0` disables (2026-10-15) |
 
 Between `NEW` and `MATCH` we attribute to the best match for *this turn's context*
 but do **not** mutate the stored centroid (avoids poisoning a profile with a
 borderline sample). Defaults are placeholders; Phase E calibrates on real
 far-field captures.
+
+**Household-relative scoring (2026-10-15).** The household is a small closed set, so
+the lead over the runner-up is evidence on its own. `SpeakerRegistry::rank` returns the
+best profile plus its best **named** rival (anonymous clusters are excluded — they are
+often fragments of the same person), and `MatchPolicy::decide` applies `min_margin` /
+`clear_margin` on top of the absolute thresholds (the short-clip path raises both the
+match bar and `clear_margin` by `short_clip_margin`). Neither margin path ever trains a
+centroid, so a wrong promotion can't poison a voiceprint. The per-turn lead is logged
+(`speaker_margin` in the chat log) for calibration.
 
 ---
 
