@@ -139,7 +139,9 @@ impl MemoryIngester {
             // withheld from recall. Explicit/inferred facts written this turn are still
             // ingested below.
             if is_recallable_turn(r) {
-                texts.push(turn_text(&r.transcript, &r.reply));
+                // A generative reply (story, poem, …) is dropped: only the request is
+                // embedded and stored (see `recallable_reply`).
+                texts.push(turn_text(&r.transcript, recallable_reply(r)));
                 items.push(Item::Turn(ri));
             } else {
                 log::debug!(
@@ -195,7 +197,7 @@ impl MemoryIngester {
                             session: &r.session_id,
                             ts: r.ts,
                             transcript: &r.transcript,
-                            reply: &r.reply,
+                            reply: recallable_reply(r),
                             embedding: vector,
                             entities: &entities,
                             speaker_id,
@@ -429,6 +431,46 @@ fn is_recallable_turn(r: &ChatLogRecord) -> bool {
     !is_non_answer(&r.reply)
 }
 
+/// Replies longer than this (in chars) are free-form generated content — a story, a
+/// poem, a long explanation — rather than a spoken one-or-two-sentence answer.
+const GENERATIVE_REPLY_CHARS: usize = 300;
+
+/// Requests for made-up content. Matched case-insensitively against the transcript.
+const CREATIVE_REQUEST_MARKERS: &[&str] = &[
+    "a story",
+    "bedtime story",
+    "make up",
+    "a joke",
+    "another joke",
+    "a poem",
+    "a limerick",
+    "a haiku",
+    "a riddle",
+];
+
+/// Whether a turn's reply is generated content (see [`GENERATIVE_REPLY_CHARS`] and
+/// [`CREATIVE_REQUEST_MARKERS`]).
+fn is_generative_turn(r: &ChatLogRecord) -> bool {
+    if r.reply.chars().count() > GENERATIVE_REPLY_CHARS {
+        return true;
+    }
+    let t = r.transcript.to_lowercase();
+    CREATIVE_REQUEST_MARKERS.iter().any(|m| t.contains(m))
+}
+
+/// The reply to store on a recallable `Turn` node. For a generative turn this is empty,
+/// so only the request is kept. "They asked for a dolphin story" stays recallable, but
+/// the story is not: recalled in full, it would steer every later story toward the same
+/// one, and it fills the prompt. The chat log keeps the full reply, and follow-up
+/// history ("make it longer") reads the chat log, not Helix.
+fn recallable_reply(r: &ChatLogRecord) -> &str {
+    if is_generative_turn(r) {
+        ""
+    } else {
+        &r.reply
+    }
+}
+
 /// Shorten a string for a log line (char-safe, won't split a UTF-8 boundary).
 fn truncate_for_log(s: &str) -> String {
     const MAX: usize = 80;
@@ -508,6 +550,24 @@ mod tests {
         ] {
             assert!(!is_non_answer(reply), "should keep: {reply}");
         }
+    }
+
+    #[test]
+    fn generative_turns_keep_only_the_request() {
+        let mut story = rec("1", "Tell me a story about a dolphin.");
+        story.reply = "There once was a dolphin named Marina.".to_string();
+        assert!(is_generative_turn(&story), "creative request");
+        assert_eq!(recallable_reply(&story), "");
+
+        let mut long = rec("2", "How do tides work?");
+        long.reply = "x".repeat(GENERATIVE_REPLY_CHARS + 1);
+        assert!(is_generative_turn(&long), "long reply");
+        assert_eq!(recallable_reply(&long), "");
+
+        let mut short = rec("3", "What's the capital of France?");
+        short.reply = "Paris.".to_string();
+        assert!(!is_generative_turn(&short));
+        assert_eq!(recallable_reply(&short), "Paris.");
     }
 
     #[test]

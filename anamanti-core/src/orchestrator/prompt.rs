@@ -162,10 +162,25 @@ fn earlier_conversations(turns: &[String]) -> String {
         };
         s.push_str(&format!("\n- They said: \"{said}\""));
         if !replied.is_empty() {
-            s.push_str(&format!(" / You replied: \"{replied}\""));
+            s.push_str(&format!(" / You replied: \"{}\"", clip(replied)));
         }
     }
     s
+}
+
+/// Past replies are cut to this many chars in the earlier-conversations block. That is
+/// enough for the gist, but not enough to copy a whole story. It also covers long turns
+/// stored before the ingester began dropping generative replies.
+const PAST_REPLY_CHARS: usize = 120;
+
+/// `s` cut to [`PAST_REPLY_CHARS`] (char-safe) with a trailing `…`.
+fn clip(s: &str) -> String {
+    if s.chars().count() <= PAST_REPLY_CHARS {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(PAST_REPLY_CHARS).collect();
+        format!("{}…", head.trim_end())
+    }
 }
 
 fn bullets(items: &[String]) -> String {
@@ -565,7 +580,10 @@ mod location_tests {
 
 #[cfg(test)]
 mod household_tests {
-    use super::{earlier_conversations, household_line, speaker_identity_line, RecalledMemory};
+    use super::{
+        earlier_conversations, household_line, speaker_identity_line, RecalledMemory,
+        PAST_REPLY_CHARS,
+    };
     use crate::settings::{Household, HouseholdMember};
     use crate::speaker::{SpeakerContext, SpeakerResolution};
 
@@ -731,6 +749,19 @@ mod household_tests {
         // A transcript-only turn renders without a reply half.
         let solo = earlier_conversations(&["Hello there".to_string()]);
         assert!(solo.ends_with("- They said: \"Hello there\""), "{solo}");
+    }
+
+    #[test]
+    fn long_past_replies_are_clipped() {
+        let story = format!(
+            "Tell me a story\nThere once was a dolphin. {}",
+            "Waves. ".repeat(60)
+        );
+        let block = earlier_conversations(&[story]);
+        let replied = block.split("You replied: \"").nth(1).unwrap();
+        assert!(replied.ends_with("…\""), "{block}");
+        assert!(replied.chars().count() <= PAST_REPLY_CHARS + 2, "{block}");
+        assert!(replied.starts_with("There once was a dolphin."), "{block}");
     }
 }
 
