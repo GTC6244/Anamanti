@@ -129,6 +129,9 @@ pub(crate) fn device_action_event(action: &DeviceAction) -> Option<WyomingEvent>
             duration_secs,
         } => WyomingEvent::timer_start(*duration_secs, label.as_deref()),
         DeviceAction::CancelTimer { label } => WyomingEvent::timer_cancel(label.as_deref()),
+        DeviceAction::AdjustTimer { label, delta_secs } => {
+            WyomingEvent::timer_adjust(*delta_secs, label.as_deref())
+        }
         DeviceAction::ShowRecipe(recipe) => {
             WyomingEvent::recipe(serde_json::to_value(recipe).unwrap_or(serde_json::Value::Null))
         }

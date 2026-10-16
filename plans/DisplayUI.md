@@ -107,12 +107,16 @@ events; nothing here touches audio buffers or sockets directly.
     hidden during a turn, off mode, any full-screen mode, or when timers exist.
 11. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
 12. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
-13. Compact `TimersOverlay` (`compact: true`) — top-center chip row, only while a
-    turn is active.
-14. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
+13. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
     `open-settings`; fades out during a turn and in away mode.
-15. `NotificationBanner` — shows even in away mode.
-16. `UpdateBanner` — top layer; in-app updater prompt/progress (selfUpdate flavor).
+14. `NotificationBanner` — shows even in away mode.
+15. `UpdateBanner` — in-app updater prompt/progress (selfUpdate flavor).
+16. Compact `TimersOverlay` (`compact: true`) — top-center chip row, the **top-most
+    layer** so a running timer always has z-order precedence over every other overlay
+    and banner. Shown (`compactTimersVisible`) whenever timers run and the big
+    screen-filling presentation is hidden — i.e. while a turn is active **or** any
+    full-screen mode (recipe/weather/place/music) is up — so the timer stays glanceable
+    instead of hiding behind those views; suppressed in away mode.
 
 ---
 
@@ -223,11 +227,19 @@ Core-owned path).
     fill = remaining/total), and a centered `mm:ss` / `h:mm:ss` readout — or
     "Time's up" + "Tap to dismiss" when ringing.
   - **Compact (`compact: true`)** — `_CompactTimers`: a horizontal scrolling row of
-    `_TimerChip`s over a live conversation (icon + name + `m:ss`).
+    `_TimerChip`s (icon + name + `m:ss`). Mounted as the **top-most** Stack layer in
+    `ambient_screen.dart` (z-order precedence over every overlay/banner) and shown
+    (`compactTimersVisible`) whenever timers run and the big presentation is hidden (a
+    turn is active or a full-screen mode is up), so it stays glanceable over the
+    conversation, music, recipe, weather, or place views.
 - Fed by `AssistantState.timers` (Rust `timerStarted` / `timerFinished` /
   `timerCancelled`). Only **ringing** timers are tappable → `onDismiss(id)` →
   `AssistantController.dismissTimer`; running timers are not dismissible.
   `resolveTimerNames` labels unnamed timers "Timer" / "Timer N".
+- **Add/remove time:** the Core's `adjust_timer` tool sends an `anamanti-timer`
+  `adjust` frame carrying a signed `delta_secs`; the device applies it to the running
+  timer's own deadline (floored at 1s, capped at 24h) and re-emits `timerStarted` for
+  the same id, which re-anchors the countdown + ring to the new deadline.
 
 ---
 

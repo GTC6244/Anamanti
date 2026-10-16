@@ -18,6 +18,8 @@ use crate::speech::DurationStyle;
 pub(super) const SET_TIMER: &str = "set_timer";
 /// Tool name: cancel one or all countdown timers on the device.
 const CANCEL_TIMER: &str = "cancel_timer";
+/// Tool name: add or remove time on a running countdown timer on the device.
+const ADJUST_TIMER: &str = "adjust_timer";
 /// Tool name: switch the assistant's output personality (voice style), or turn it off.
 pub(super) const SET_PERSONALITY: &str = "set_personality";
 /// Tool name: adjust the global on-screen font scale ("increase/decrease font").
@@ -31,6 +33,7 @@ pub(super) fn tools() -> Vec<Arc<dyn VoiceTool>> {
     vec![
         Arc::new(SetTimer),
         Arc::new(CancelTimer),
+        Arc::new(AdjustTimer),
         Arc::new(SetPersonality),
         Arc::new(AdjustFont),
     ]
@@ -90,13 +93,16 @@ impl VoiceTool for SetTimer {
         )
     }
 
-    /// Covers both timer tools (they are always advertised together).
+    /// Covers all three timer tools (they are always advertised together).
     fn guidance(&self) -> Option<&'static str> {
         Some(
-            "You can start and cancel countdown timers on the device with the `set_timer` \
-             (convert the requested time to whole seconds) and `cancel_timer` tools. When the user \
-             asks to set, start, or cancel a timer, call the tool — never say you are unable to set \
-             timers. There can be any number of timers running at once.",
+            "You can start, cancel, and adjust countdown timers on the device with the `set_timer` \
+             (convert the requested time to whole seconds), `cancel_timer`, and `adjust_timer` \
+             tools. When the user asks to set, start, cancel, or add/remove time on a timer, call \
+             the matching tool — never say you are unable to manage timers. To add or take time \
+             off a timer that is already running (\"add five minutes\", \"give me two more \
+             minutes\", \"take a minute off\"), use `adjust_timer` rather than starting a new one. \
+             There can be any number of timers running at once.",
         )
     }
 
@@ -161,6 +167,85 @@ impl VoiceTool for CancelTimer {
         Ok(match &label {
             Some(l) => format!("Cancelled the {l} timer."),
             None => "Cancelled all timers.".to_string(),
+        })
+    }
+}
+
+/// Typed args for `adjust_timer`.
+#[derive(Debug, Deserialize)]
+struct AdjustTimerArgs {
+    /// `"add"` (more time) or `"remove"` (less time).
+    action: String,
+    /// How many whole seconds to add or remove (the model converts "5 minutes" → 300).
+    seconds: u64,
+    /// Which running timer to adjust by label; absent/empty adjusts *all* timers.
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// Add or remove time on an already-running countdown timer.
+struct AdjustTimer;
+
+#[async_trait]
+impl VoiceTool for AdjustTimer {
+    fn name(&self) -> &'static str {
+        ADJUST_TIMER
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        definition(
+            ADJUST_TIMER,
+            "Add or remove time on a countdown timer that is already running. Use for \
+             \"add five minutes to the timer\", \"give me two more minutes\", \"take a \
+             minute off the pasta timer\", etc. Do NOT use this to create a new timer — \
+             use `set_timer` for that.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "remove"],
+                        "description": "add = lengthen the timer; remove = shorten it."
+                    },
+                    "seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "How many whole seconds to add or remove (e.g. 5 minutes → 300)."
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Label of the timer to adjust; omit to adjust every running timer."
+                    }
+                },
+                "required": ["action", "seconds"]
+            }),
+        )
+    }
+
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: AdjustTimerArgs = parse_args(args, ADJUST_TIMER)?;
+        let sink = ctx.require_sink("no device is connected to manage timers on right now")?;
+        // Clamp the magnitude to the timer cap so the signed delta can't overflow, then
+        // sign it by the requested direction.
+        let magnitude = args.seconds.clamp(1, MAX_TIMER_SECS) as i64;
+        let (delta_secs, verb, preposition) = match args.action.as_str() {
+            "add" => (magnitude, "Added", "to"),
+            "remove" => (-magnitude, "Took", "off"),
+            other => anyhow::bail!("unknown adjust_timer action `{other}`"),
+        };
+        let label = args.label.filter(|s| !s.trim().is_empty());
+        emit(
+            Some(sink),
+            DeviceAction::AdjustTimer {
+                label: label.clone(),
+                delta_secs,
+            },
+            "the timer could be adjusted",
+        )?;
+        let spoken = crate::speech::duration(magnitude as f64, DurationStyle::Exact);
+        Ok(match &label {
+            Some(l) => format!("{verb} {spoken} {preposition} the {l} timer."),
+            None => format!("{verb} {spoken} {preposition} the timer."),
         })
     }
 }
@@ -400,6 +485,85 @@ mod tests {
             DeviceAction::CancelTimer {
                 label: Some("pasta".to_string())
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn adjust_timer_adds_and_removes_time() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Add time to a labeled timer.
+        let out = call(
+            &AdjustTimer,
+            json!({ "action": "add", "seconds": 300, "label": "pasta" }),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::AdjustTimer {
+                label: Some("pasta".to_string()),
+                delta_secs: 300
+            }
+        );
+        assert_eq!(out, "Added 5 minutes to the pasta timer.");
+
+        // Remove time from all timers (no label) → a negative delta.
+        let out = call(
+            &AdjustTimer,
+            json!({ "action": "remove", "seconds": 60 }),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::AdjustTimer {
+                label: None,
+                delta_secs: -60
+            }
+        );
+        assert_eq!(out, "Took 1 minute off the timer.");
+    }
+
+    #[tokio::test]
+    async fn adjust_timer_clamps_rejects_unknown_action_and_missing_device() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // The magnitude is clamped to the 24h cap so the signed delta can't overflow.
+        call(
+            &AdjustTimer,
+            json!({ "action": "add", "seconds": 999999999u64 }),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::AdjustTimer {
+                label: None,
+                delta_secs: MAX_TIMER_SECS as i64
+            }
+        );
+        // Unknown action → an error the model can relay.
+        let err = call(
+            &AdjustTimer,
+            json!({ "action": "halve", "seconds": 60 }),
+            Some(&tx),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "unknown adjust_timer action `halve`");
+        // No device attached → the tool reports an error the model can relay.
+        let err = call(
+            &AdjustTimer,
+            json!({ "action": "add", "seconds": 60 }),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no device is connected to manage timers on right now"
         );
     }
 

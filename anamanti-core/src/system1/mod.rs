@@ -43,6 +43,8 @@ pub enum Intent {
     TimerCancel,
     /// How much time is left on the running timer.
     TimerQuery,
+    /// Add time to / remove time from the running timer.
+    TimerAdjust,
     /// Close the weather screen.
     WeatherDismiss,
     /// Close the recipe screen.
@@ -61,13 +63,14 @@ pub enum Intent {
 
 impl Intent {
     /// Every intent, in the order the default router offers them.
-    pub const ALL: [Intent; 12] = [
+    pub const ALL: [Intent; 13] = [
         Intent::Weather,
         Intent::Timer,
         Intent::Time,
         Intent::Date,
         Intent::TimerCancel,
         Intent::TimerQuery,
+        Intent::TimerAdjust,
         Intent::WeatherDismiss,
         Intent::RecipeDismiss,
         Intent::PlaceDismiss,
@@ -85,6 +88,7 @@ impl Intent {
             Intent::Date => "date",
             Intent::TimerCancel => "timer_cancel",
             Intent::TimerQuery => "timer_query",
+            Intent::TimerAdjust => "timer_adjust",
             Intent::WeatherDismiss => "weather_dismiss",
             Intent::RecipeDismiss => "recipe_dismiss",
             Intent::PlaceDismiss => "place_dismiss",
@@ -103,6 +107,10 @@ impl Intent {
             Intent::Date => "today's date or the current day of the week",
             Intent::TimerCancel => "cancel or stop a running timer or alarm",
             Intent::TimerQuery => "ask how much time is left on a running timer",
+            Intent::TimerAdjust => {
+                "add time to or remove time from a running timer (\"add five minutes\", \
+                 \"give me two more minutes\", \"take a minute off the timer\")"
+            }
             Intent::WeatherDismiss => "close or dismiss the weather screen",
             Intent::RecipeDismiss => "close or dismiss the recipe screen",
             Intent::PlaceDismiss => "close or dismiss the place card",
@@ -254,6 +262,41 @@ pub fn parse_duration_secs(text: &str) -> Option<u64> {
     } else {
         Some(secs as u64)
     }
+}
+
+/// Parse a spoken "add/remove time on the timer" request into a **signed** second delta
+/// (positive = add, negative = remove), or `None` when the direction or the amount is
+/// unclear — the caller then defers to System-2, whose `adjust_timer` tool handles
+/// labeled and free-form phrasing. Deliberately conservative: it resolves only when the
+/// transcript has both an unambiguous direction keyword (exactly one of add/remove) and a
+/// clear `<number> <unit>` duration ([`parse_duration_secs`]). "Change the timer to ten
+/// minutes" (an absolute set, which the device can't do — it only takes a delta) has no
+/// direction keyword, so it defers.
+pub fn parse_timer_adjust(text: &str) -> Option<i64> {
+    let normalized = text.to_lowercase().replace('-', " ");
+    let has = |kw: &str| {
+        normalized
+            .split_whitespace()
+            .any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == kw)
+    };
+    // Direction keywords. Require exactly one side to avoid guessing on ambiguous or
+    // contradictory phrasing.
+    const ADD: [&str; 7] = [
+        "add", "more", "another", "extend", "plus", "lengthen", "increase",
+    ];
+    const REMOVE: [&str; 11] = [
+        "remove", "subtract", "less", "shorten", "cut", "reduce", "minus", "off", "take", "knock",
+        "shave",
+    ];
+    let adds = ADD.iter().any(|k| has(k));
+    let removes = REMOVE.iter().any(|k| has(k));
+    let sign = match (adds, removes) {
+        (true, false) => 1i64,
+        (false, true) => -1i64,
+        _ => return None, // neither or both → ambiguous, defer
+    };
+    let secs = parse_duration_secs(&normalized)? as i64; // unclear amount → defer
+    Some(sign * secs)
 }
 
 /// The turn state handed to a decision engine — **light context only** (no memory
@@ -475,5 +518,29 @@ mod tests {
         assert_eq!(parse_duration_secs("cancel my timer"), None);
         assert_eq!(parse_duration_secs("what's the weather"), None);
         assert_eq!(parse_duration_secs(""), None);
+    }
+
+    #[test]
+    fn parse_timer_adjust_signs_the_delta_by_direction() {
+        assert_eq!(
+            parse_timer_adjust("add five minutes to the timer"),
+            Some(300)
+        );
+        assert_eq!(parse_timer_adjust("give me two more minutes"), Some(120));
+        assert_eq!(parse_timer_adjust("add another 30 seconds"), Some(30));
+        assert_eq!(parse_timer_adjust("take a minute off the timer"), Some(-60));
+        assert_eq!(parse_timer_adjust("knock 30 seconds off"), Some(-30));
+        assert_eq!(parse_timer_adjust("subtract 5 minutes"), Some(-300));
+    }
+
+    #[test]
+    fn parse_timer_adjust_defers_when_direction_or_amount_is_unclear() {
+        // No direction keyword (an absolute "set to", which the device can't do) → defer.
+        assert_eq!(parse_timer_adjust("change the timer to ten minutes"), None);
+        // Direction but no clear amount → defer.
+        assert_eq!(parse_timer_adjust("add some time"), None);
+        // Contradictory directions → defer rather than guess.
+        assert_eq!(parse_timer_adjust("add five minutes, no less"), None);
+        assert_eq!(parse_timer_adjust(""), None);
     }
 }

@@ -555,11 +555,15 @@ predictable memory use and no GC pauses under the 1 GB limit.
   tells the Anamanti Core to abort the in-flight LLM generation + TTS at once, rather
   than only learning of the interruption when the socket drops.
 - **`anamanti-timer`** (Anamanti Core → device): a project-local **device-action** frame
-  (`data.action` = `start`/`cancel`; `duration_secs` + optional `label`). Emitted when
-  an LLM **tool** the model called on the Mac (`set_timer` / `cancel_timer`) asks to
-  act on the device. The device owns the resulting state — unlimited concurrent
-  countdowns, the on-screen UI, and the alarm — so a timer keeps running after the
-  turn's socket closes and even if the Mac disconnects. When a timer fires it rings a
+  (`data.action` = `start`/`cancel`/`adjust`; `duration_secs` or signed `delta_secs` +
+  optional `label`). Emitted when an LLM **tool** the model called on the Mac
+  (`set_timer` / `cancel_timer` / `adjust_timer`) asks to act on the device. The device
+  owns the resulting state — unlimited concurrent countdowns, the on-screen UI, and the
+  alarm — so a timer keeps running after the turn's socket closes and even if the Mac
+  disconnects. An `adjust` carries only the signed delta (the device holds the
+  authoritative deadline), which the device applies to the running timer's remaining
+  time (floored at 1s, capped at the 24h max) and re-emits `timerStarted` to re-anchor
+  the UI. When a timer fires it rings a
   two-strike **bell** locally, then (if the Mac is reachable) requests the spoken
   announcement over **`anamanti-speak`**; bell-only when offline. See §8.
 - **`anamanti-speak`** (device → Anamanti Core): a project-local frame (`data.text`)
@@ -1039,9 +1043,11 @@ No protocol, device, or Flutter changes are needed — build + test with
 
 ### 8.3 Adding a **device action** (spans all layers)
 
-Worked example: **timers** (`set_timer` / `cancel_timer`). The flow is
+Worked example: **timers** (`set_timer` / `cancel_timer` / `adjust_timer`). The flow is
 model → Mac tool → `DeviceAction` → `anamanti-timer` frame → device timer manager →
-FRB event → Flutter UI. To add a new action, mirror these steps:
+FRB event → Flutter UI. To add a new action, mirror these steps (note `adjust_timer`
+reuses the existing `timerStarted` FRB event to re-anchor the UI rather than adding a
+new one — see step 6's "prefer an existing payload" note):
 
 1. **Mac tool** (`anamanti-core/src/llm/rig/tools/`): as in §8.2, but `invoke` emits a new
    `DeviceAction` variant (`anamanti-core/src/llm/mod.rs`) on the per-turn sink with

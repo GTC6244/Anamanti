@@ -46,6 +46,14 @@ pub enum DeviceAction {
     },
     /// Cancel timers matching `label`, or *all* timers when `label` is `None`.
     CancelTimer { label: Option<String> },
+    /// Add (`delta_secs > 0`) or remove (`delta_secs < 0`) time on timers matching
+    /// `label`, or on *all* timers when `label` is `None`. The device owns the running
+    /// countdown, so the Mac relays only the signed delta and the device re-anchors the
+    /// remaining time (floored at 1s, capped at the 24h max).
+    AdjustTimer {
+        label: Option<String>,
+        delta_secs: i64,
+    },
     /// Show a parsed recipe on the display's "recipe mode" screen (Overview /
     /// Ingredients / Steps tabs). The device owns the resulting screen state until
     /// dismissed, so this is fire-and-forget like the timer actions.

@@ -612,14 +612,19 @@ more tool in `Tools`.
   code (`appsaid::claim_pairing_code` → `POST /v1/pair/claim`), learns the `user_key`, and
   stores it with `SharedSettings::add_appsaid_recipient` (persisted, tool rebuilt live). The
   `user_key` never returns to the device.
-- **Device actions (implemented, on-device):** the `set_timer` / `cancel_timer`
-  tools emit a `DeviceAction` onto a per-turn `ActionSink` (`LlmTurn.actions`); the
-  Anamanti Core's reply loop drains it (`drain_device_actions`) and relays an
-  `anamanti-timer` frame on the turn socket. The device decodes it
+- **Device actions (implemented, on-device):** the `set_timer` / `cancel_timer` /
+  `adjust_timer` tools emit a `DeviceAction` onto a per-turn `ActionSink`
+  (`LlmTurn.actions`); the Anamanti Core's reply loop drains it (`drain_device_actions`)
+  and relays an `anamanti-timer` frame on the turn socket. The device decodes it
   (`TurnUpdate::Timer`) and its long-lived `TimerManager`
   (`rust/src/engine/timer.rs`) owns each countdown (unlimited, outliving the turn
   socket + surviving a Mac disconnect), sounds a synthesized chime via the shared
   `PlaybackSink`, and emits `WakeWordEventKind.timer{Started,Finished,Cancelled}`.
+  `adjust_timer` ("add five minutes", "take a minute off") sends a signed `delta_secs`
+  the device applies to the running timer's own deadline (floored at 1s), then re-emits
+  `timerStarted` for the same id so Flutter re-anchors the countdown + ring — no new FRB
+  event. The compact timer badge is the top-most UI layer so a running timer is never
+  hidden behind a full-screen mode or banner.
   Flutter renders a countdown-chip overlay visible during idle + turns. The full
   add-a-capability process is documented in `architecture.md` §8.
 - **Calendar / reminders:** calendar shipped (read-only web `.ics`); **reminders**
