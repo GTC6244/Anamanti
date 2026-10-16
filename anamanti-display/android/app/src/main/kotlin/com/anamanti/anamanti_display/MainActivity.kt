@@ -353,6 +353,12 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Never let Android's screen-off timeout put the device to sleep while the app
+        // is up: once it sleeps, the app loses foreground and the mic is blocked
+        // (`getInputForAttr permission denied`), so the wake word silently stops working
+        // until someone touches the screen. The app does its own dimming (window
+        // brightness via `setBrightness` / the away face), which still applies.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         // Cache the MicBridge class for the Rust engine's native thread (see
         // MicBridge.nativeCacheClass). Runs here, on an app thread, so the class is
         // resolved through the app class loader before the engine ever starts.

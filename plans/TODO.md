@@ -144,9 +144,11 @@ far end — transparent to `AudioRecord`/AudioFlinger.
 1. [ ] **Quiet the shim's debug logging** in daily use: `setprop
        persist.vendor.amznaec.log 0` (drops the 5s `ref/mic in/out` lines).
 2. [ ] **Confirm doze behavior in normal daily use** — the app's mic is blocked while
-       the device "top-sleeps" (`getInputForAttr permission denied`); the ambient UI
-       normally keeps the display awake, but verify over a real idle→wake cycle without
-       the `svc power stayon true` test crutch.
+       the device "top-sleeps" (`getInputForAttr permission denied`). As of 2026-10-15
+       `MainActivity` sets `FLAG_KEEP_SCREEN_ON` so the screen-off timeout can't sleep
+       the device while the app is up (this was a cause of intermittently missed wake
+       words); verify over a real idle→wake cycle without the `svc power stayon true`
+       test crutch.
 3. [ ] 🚀 **Build the WebRTC AEC engine variant (38-50 dB)** via the LineageOS 18.1
        `crown` ROM tree (`m libamznaec_shim` against the ROM's `external/webrtc` +
        `libwebrtc_audio_preprocessing.so`). Needs a Linux host + ~150 GB tree. Much
