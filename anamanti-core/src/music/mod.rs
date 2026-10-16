@@ -19,11 +19,13 @@
 //! `crate::server` for where ducking hooks the turn lifecycle
 //! (`TurnEvent::Speaking` → duck, `TurnEvent::Finished` → restore).
 
+pub mod display_style;
 pub mod nowplaying_service;
 pub mod radio;
 pub mod radio_browser;
 pub mod spotify;
 pub mod supervisor;
+pub use display_style::MusicDisplayStyle;
 pub use nowplaying_service::NowPlayingService;
 pub use radio::{RadioCatalog, RadioPlayer, RadioStation, RoutedSpotify};
 pub use spotify::{

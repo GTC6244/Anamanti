@@ -323,7 +323,8 @@ hardware:
       delete the six single-sample anonymous clusters.
 - [ ] Brendon + Kristina: Settings → People → **Add a voice** → pick their roster chip.
 - [ ] Calibrate `speaker.match_threshold` / `new_threshold` / `min_identify_ms` /
-      `short_clip_margin` from real far-field turns (the Conversations page shows each turn's
+      `short_clip_margin` / `min_margin` / `clear_margin` from real far-field turns (the
+      chat log records each turn's `speaker_margin`; the Conversations page shows each turn's
       resolution + confidence).
 - [ ] Review the unknown-speaker queue on the Memory page after deploying (the legacy
       "The user's name is Brendan" row migrates there).

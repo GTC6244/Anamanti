@@ -142,6 +142,15 @@ pub async fn music_control_response(
     let Some((action, value)) = request.music_control_command() else {
         return WyomingEvent::music_result(false, "music-control request missing `action`");
     };
+    // The on-screen widget toggle (`display_compact` / `display_fullscreen`): a display
+    // preference, not transport — persist it and re-push so every display follows.
+    if let Some(style) = action
+        .strip_prefix("display_")
+        .and_then(crate::music::MusicDisplayStyle::parse)
+    {
+        now_playing.set_display_style(settings, style);
+        return WyomingEvent::music_result(true, format!("Music player: {}.", style.as_str()));
+    }
     // Radio while a station is on, else Spotify (shared with the config page).
     match now_playing.transport(settings, &action, value).await {
         Ok(msg) => WyomingEvent::music_result(true, msg),
@@ -1338,6 +1347,7 @@ mod tests {
                 system1: crate::settings::System1Runtime::default(),
                 personality: crate::settings::Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
         );
@@ -1639,6 +1649,44 @@ mod tests {
         assert_eq!(resp.event_type, types::MUSIC_RESULT);
         assert_eq!(resp.data["ok"], json!(false));
         assert!(resp.data["message"].as_str().unwrap().contains("linked"));
+    }
+
+    #[tokio::test]
+    async fn music_control_display_toggle_sets_the_style_without_spotify() {
+        // The on-screen widget toggle is a display preference: it succeeds even with
+        // Spotify unlinked and lands in the settings store of record.
+        let s = settings();
+        let np = NowPlayingService::new();
+        let resp = music_control_response(
+            &WyomingEvent::music_control("display_fullscreen", None),
+            &s,
+            &np,
+        )
+        .await;
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(
+            s.music_display_style(),
+            crate::music::MusicDisplayStyle::Fullscreen
+        );
+        let resp = music_control_response(
+            &WyomingEvent::music_control("display_compact", None),
+            &s,
+            &np,
+        )
+        .await;
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(
+            s.music_display_style(),
+            crate::music::MusicDisplayStyle::Compact
+        );
+        // An unknown style falls through to transport and is rejected as unknown.
+        let resp = music_control_response(
+            &WyomingEvent::music_control("display_sideways", None),
+            &s,
+            &np,
+        )
+        .await;
+        assert_eq!(resp.data["ok"], json!(false));
     }
 
     #[tokio::test]

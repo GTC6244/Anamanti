@@ -127,6 +127,8 @@ impl BootInfo {
                 "min_speech_ms": c.speaker.min_speech_ms,
                 "min_identify_ms": c.speaker.min_identify_ms,
                 "short_clip_margin": c.speaker.short_clip_margin,
+                "min_margin": c.speaker.min_margin,
+                "clear_margin": c.speaker.clear_margin,
             },
             "memory": {
                 "memory_backend": match c.memory_backend {

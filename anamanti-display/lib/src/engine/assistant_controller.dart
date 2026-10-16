@@ -229,6 +229,7 @@ class AssistantState {
     this.place,
     this.music,
     this.musicScreen = MusicScreen.hidden,
+    this.musicDisplayStyle = MusicDisplayStyle.compact,
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
@@ -382,17 +383,40 @@ class AssistantState {
   /// and the full music screens.
   final MusicData? music;
 
-  /// Which music surface is shown (see [MusicScreen]). Only meaningful while [musicActive].
+  /// Which music surface the user explicitly opened (tap / voice — see [MusicScreen]).
+  /// Only meaningful while [musicActive]. What is actually on screen also depends on
+  /// [musicDisplayStyle]; read [effectiveMusicScreen] for that.
   final MusicScreen musicScreen;
+
+  /// The household's music-widget preference (compact bar / full screen), owned by the
+  /// Core and mirrored here from the now-playing pushes, the on-screen expand/minimize
+  /// button, and the voice `music_screen` tool. Shared by Spotify and radio.
+  final MusicDisplayStyle musicDisplayStyle;
 
   /// Whether music is currently playing (there is a now-playing snapshot). The compact
   /// [MusicControlOverlay] rides the ambient screen whenever this is true and no full
   /// music screen / mode / turn is up.
   bool get musicActive => music != null;
 
+  /// The music surface actually on screen. A Core-pushed mode (recipe/weather/place)
+  /// always wins; then an explicitly opened view (tap/voice); otherwise, with the
+  /// [MusicDisplayStyle.fullscreen] preference, the now-playing view — but only while
+  /// someone is there (present or mid-turn), so an unattended display still falls to the
+  /// dim away clock rather than holding the backlight up all night.
+  MusicScreen get effectiveMusicScreen {
+    if (!musicActive || recipeActive || weatherActive || placeActive) {
+      return MusicScreen.hidden;
+    }
+    if (musicScreen != MusicScreen.hidden) return musicScreen;
+    if (musicDisplayStyle == MusicDisplayStyle.fullscreen &&
+        (userPresent || displayActive)) {
+      return MusicScreen.nowPlaying;
+    }
+    return MusicScreen.hidden;
+  }
+
   /// Whether a full-screen music view (now-playing or up-next) is currently on screen.
-  bool get musicScreenActive =>
-      musicActive && musicScreen != MusicScreen.hidden;
+  bool get musicScreenActive => effectiveMusicScreen != MusicScreen.hidden;
 
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
@@ -426,7 +450,7 @@ class AssistantState {
       recipeActive ||
       weatherActive ||
       placeActive ||
-      musicScreenActive;
+      (musicActive && musicScreen != MusicScreen.hidden);
 
   AssistantState copyWith({
     TurnPhase? phase,
@@ -460,6 +484,7 @@ class AssistantState {
     MusicData? music,
     bool clearMusic = false,
     MusicScreen? musicScreen,
+    MusicDisplayStyle? musicDisplayStyle,
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
@@ -494,6 +519,7 @@ class AssistantState {
       place: clearPlace ? null : (place ?? this.place),
       music: clearMusic ? null : (music ?? this.music),
       musicScreen: musicScreen ?? this.musicScreen,
+      musicDisplayStyle: musicDisplayStyle ?? this.musicDisplayStyle,
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
@@ -1146,13 +1172,16 @@ class AssistantController extends ChangeNotifier {
   /// full music screen; otherwise parse the snapshot and keep whatever music screen the
   /// user has open. A malformed non-empty payload is ignored (keeps the last snapshot)
   /// rather than crashing. Called by the app shell's music-channel subscription.
+  ///
+  /// The push also carries the Core's [MusicDisplayStyle] (`display_style`); a change
+  /// made elsewhere (config page, another display, voice) is adopted here — except a
+  /// stale value racing a change this display just made (see [_pendingStyle]).
   void applyMusicPush(String nowPlayingJson) {
     if (nowPlayingJson.trim().isEmpty) {
       if (_state.music != null) {
         _emit(
           _state.copyWith(clearMusic: true, musicScreen: MusicScreen.hidden),
         );
-        _pushMusicContext();
       }
       return;
     }
@@ -1160,21 +1189,79 @@ class AssistantController extends ChangeNotifier {
     if (music != null) {
       // Radio has no queue: a station starting while the up-next list is open falls
       // back to the now-playing view.
-      final screen = music.isRadio && _state.musicScreen == MusicScreen.nextUp
+      var screen = music.isRadio && _state.musicScreen == MusicScreen.nextUp
           ? MusicScreen.nowPlaying
           : _state.musicScreen;
-      _emit(_state.copyWith(music: music, musicScreen: screen));
-      // If a full music screen is open, refresh its context (the track may have changed).
-      if (_state.musicScreen != MusicScreen.hidden) _pushMusicContext();
+      var style = _state.musicDisplayStyle;
+      final pushed = _acceptPushedStyle(music.displayStyle);
+      if (pushed != null && pushed != style) {
+        style = pushed;
+        // A style switch resets any explicitly opened view, so the new preference is
+        // what shows (full screen ⇒ now-playing, compact ⇒ the bar).
+        screen = MusicScreen.hidden;
+      }
+      _emit(
+        _state.copyWith(
+          music: music,
+          musicScreen: screen,
+          musicDisplayStyle: style,
+        ),
+      );
     }
   }
+
+  /// A style this display just set locally (button / voice) and when, so a push stamped
+  /// *before* the Core applied it can't flip the screen back for a moment. Cleared once
+  /// a push agrees, or after [_pendingStyleWindow].
+  MusicDisplayStyle? _pendingStyle;
+  DateTime? _pendingStyleAt;
+  static const _pendingStyleWindow = Duration(seconds: 8);
+
+  /// The pushed style to adopt, or `null` to keep the current one (none pushed, or a
+  /// stale value racing a fresh local change).
+  MusicDisplayStyle? _acceptPushedStyle(MusicDisplayStyle? pushed) {
+    if (pushed == null) return null;
+    final pending = _pendingStyle;
+    if (pending != null) {
+      final fresh =
+          DateTime.now().difference(_pendingStyleAt!) < _pendingStyleWindow;
+      if (pushed == pending || !fresh) {
+        _pendingStyle = null;
+        _pendingStyleAt = null;
+      } else {
+        return null;
+      }
+    }
+    return pushed;
+  }
+
+  /// Switch the music widget preference on this display at once and (when [persist]) tell
+  /// the Core, which stores it and re-pushes so every display follows. `persist` is false
+  /// when the change came *from* the Core (the voice tool already stored it). Any
+  /// explicitly opened view is reset so the new preference is what shows.
+  void setMusicDisplayStyle(MusicDisplayStyle style, {bool persist = true}) {
+    final changed = style != _state.musicDisplayStyle;
+    _pendingStyle = style;
+    _pendingStyleAt = DateTime.now();
+    _emit(
+      _state.copyWith(
+        musicDisplayStyle: style,
+        musicScreen: MusicScreen.hidden,
+      ),
+    );
+    if (persist && changed) {
+      _musicControl?.call(action: 'display_${style.name}');
+    }
+  }
+
+  /// The compact bar's expand button: show music full screen from now on.
+  void expandMusic() => setMusicDisplayStyle(MusicDisplayStyle.fullscreen);
 
   /// Open the full-screen now-playing view (the user tapped the compact control overlay,
   /// or said "show me what's playing"). No-op when nothing is playing.
   void openNowPlaying() {
     if (_state.musicActive && _state.musicScreen != MusicScreen.nowPlaying) {
       _emit(_state.copyWith(musicScreen: MusicScreen.nowPlaying));
-      _pushMusicContext();
     }
   }
 
@@ -1184,7 +1271,6 @@ class AssistantController extends ChangeNotifier {
     if (_state.music?.isRadio ?? false) return openNowPlaying();
     if (_state.musicActive && _state.musicScreen != MusicScreen.nextUp) {
       _emit(_state.copyWith(musicScreen: MusicScreen.nextUp));
-      _pushMusicContext();
     }
   }
 
@@ -1192,17 +1278,27 @@ class AssistantController extends ChangeNotifier {
   void backToNowPlaying() => openNowPlaying();
 
   /// Close any full music screen and return to the compact control overlay (music keeps
-  /// playing — this never stops playback).
+  /// playing — this never stops playback). With the full-screen preference this is the
+  /// minimize control: it switches the preference to compact, since otherwise the full
+  /// screen would simply come straight back.
   void closeMusicScreen() {
-    if (_state.musicScreen != MusicScreen.hidden) {
+    if (_state.musicActive &&
+        _state.musicDisplayStyle == MusicDisplayStyle.fullscreen) {
+      setMusicDisplayStyle(MusicDisplayStyle.compact);
+    } else if (_state.musicScreen != MusicScreen.hidden) {
       _emit(_state.copyWith(musicScreen: MusicScreen.hidden));
-      _pushMusicContext();
     }
   }
 
   /// Apply a voice `music_screen` command (from the engine stream) by routing it through
-  /// the same methods a touch uses. `screen` ∈ `now_playing` / `up_next` / `hidden`.
+  /// the same methods a touch uses. `screen` ∈ `now_playing` / `up_next` / `hidden`, or a
+  /// style switch `fullscreen` / `compact` (already persisted by the Core).
   void _applyMusicScreen(String screen) {
+    final style = MusicDisplayStyle.tryParse(screen);
+    if (style != null) {
+      setMusicDisplayStyle(style, persist: false);
+      return;
+    }
     switch (screen) {
       case 'now_playing':
         openNowPlaying();
@@ -1213,15 +1309,27 @@ class AssistantController extends ChangeNotifier {
     }
   }
 
-  /// Push the current music-screen context to the native engine (see [MusicContextSink]).
-  /// Only a *full* music screen is reported as context — the compact overlay is a
-  /// background affordance, so it never claims the display context from a recipe/weather/
-  /// place screen. A no-op when no sink is wired (tests).
-  void _pushMusicContext() {
+  /// The last music context pushed to the engine (see [_syncMusicContext]), so an
+  /// unchanged screen isn't re-sent on every state change.
+  String _musicContextKey = 'hidden';
+
+  /// Push the current music-screen context to the native engine (see [MusicContextSink])
+  /// whenever what's on screen changes — called from [_emit], so every path (tap, voice,
+  /// push, style switch, presence, a Core mode opening/closing) stays in sync. Only a
+  /// *full* music screen is reported as context — the compact overlay is a background
+  /// affordance, so it never claims the display context from a recipe/weather/place
+  /// screen. A no-op when no sink is wired (tests).
+  void _syncMusicContext() {
     final sink = _setMusicContext;
     if (sink == null) return;
     final m = _state.music;
-    if (m == null || _state.musicScreen == MusicScreen.hidden) {
+    final screen = _state.effectiveMusicScreen;
+    final key = (m == null || screen == MusicScreen.hidden)
+        ? 'hidden'
+        : '${screen.name}|${m.playing}|${m.trackTitle}|${m.artist}';
+    if (key == _musicContextKey) return;
+    _musicContextKey = key;
+    if (key == 'hidden') {
       sink(
         active: false,
         playing: false,
@@ -1233,12 +1341,10 @@ class AssistantController extends ChangeNotifier {
     }
     sink(
       active: true,
-      playing: m.playing,
+      playing: m!.playing,
       title: m.trackTitle,
       artist: m.artist,
-      screen: _state.musicScreen == MusicScreen.nextUp
-          ? 'up_next'
-          : 'now_playing',
+      screen: screen == MusicScreen.nextUp ? 'up_next' : 'now_playing',
     );
   }
 
@@ -1444,6 +1550,7 @@ class AssistantController extends ChangeNotifier {
   void _emit(AssistantState next) {
     if (_disposed) return;
     _state = next;
+    _syncMusicContext();
     notifyListeners();
     // Keep the offline poll in sync with every state change: run it while we're
     // offline and idle, stop it as soon as we're online or a turn is in flight.

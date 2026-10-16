@@ -1,5 +1,24 @@
 import 'dart:convert';
 
+/// Which music widget the display shows while something is playing — the household
+/// preference owned by the Core (`plans/MusicDisplayStylePlan.md`), shared by Spotify and
+/// radio. Carried on every now-playing push as `display_style`; changed from the config
+/// page, the on-screen expand/minimize button, or by voice.
+enum MusicDisplayStyle {
+  /// The compact transport bar riding the ambient screen (the default).
+  compact,
+
+  /// The full-screen now-playing view.
+  fullscreen;
+
+  /// Parse the wire label; `null` for anything else (an older Core sends none).
+  static MusicDisplayStyle? tryParse(Object? v) => switch (v) {
+    'compact' => MusicDisplayStyle.compact,
+    'fullscreen' => MusicDisplayStyle.fullscreen,
+    _ => null,
+  };
+}
+
 /// A single queued track in the music "next up" list.
 ///
 /// Mirrors the Core's queue item: a title, artist, album, and a keyless artwork
@@ -63,6 +82,7 @@ class MusicData {
     this.source = '',
     this.stationId = '',
     this.stationName = '',
+    this.displayStyle,
   });
 
   final bool playing;
@@ -88,6 +108,10 @@ class MusicData {
   /// Radio only: the station's call sign (e.g. `CJDV`) and display name.
   final String stationId;
   final String stationName;
+
+  /// The household's music-widget preference stamped on this push by the Core, or
+  /// `null` from an older Core (then the device keeps its current style).
+  final MusicDisplayStyle? displayStyle;
 
   bool get hasArtwork => artworkUri.trim().isNotEmpty;
 
@@ -117,6 +141,7 @@ class MusicData {
         source: _string(decoded['source']),
         stationId: _string(decoded['station_id']),
         stationName: _string(decoded['station_name']),
+        displayStyle: MusicDisplayStyle.tryParse(decoded['display_style']),
       );
     } catch (_) {
       return null;

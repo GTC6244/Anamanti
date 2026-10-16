@@ -243,6 +243,14 @@ pub struct SpeakerConfig {
     /// Extra cosine a short-clip match needs above `match_threshold` to count as
     /// identified (short clips embed less reliably); otherwise it is at most tentative.
     pub short_clip_margin: f32,
+    /// Household-relative scoring: cosine lead a match needs over the closest *other
+    /// named person* to be confident; a closer race is only tentative and trains no
+    /// voiceprint. `0` disables.
+    pub min_margin: f32,
+    /// Household-relative scoring: a match to a named person between `new_threshold`
+    /// and `match_threshold` that leads every other named person by at least this is
+    /// identified (its voiceprint is not trained). Needs ≥ 2 named people. `0` disables.
+    pub clear_margin: f32,
     /// Embedding dimensionality the ONNX model produces (ECAPA-TDNN → 192).
     pub embed_dims: usize,
 }
@@ -257,6 +265,8 @@ impl Default for SpeakerConfig {
             min_speech_ms: 1200,
             min_identify_ms: 600,
             short_clip_margin: 0.10,
+            min_margin: 0.05,
+            clear_margin: 0.20,
             embed_dims: 192,
         }
     }
@@ -979,6 +989,8 @@ pub struct FileSpeaker {
     pub min_speech_ms: Option<u32>,
     pub min_identify_ms: Option<u32>,
     pub short_clip_margin: Option<f32>,
+    pub min_margin: Option<f32>,
+    pub clear_margin: Option<f32>,
     pub embed_dims: Option<usize>,
 }
 
@@ -1338,6 +1350,8 @@ impl Config {
             min_speech_ms: fc.speaker.min_speech_ms.unwrap_or(sd.min_speech_ms),
             min_identify_ms: fc.speaker.min_identify_ms.unwrap_or(sd.min_identify_ms),
             short_clip_margin: fc.speaker.short_clip_margin.unwrap_or(sd.short_clip_margin),
+            min_margin: fc.speaker.min_margin.unwrap_or(sd.min_margin),
+            clear_margin: fc.speaker.clear_margin.unwrap_or(sd.clear_margin),
             embed_dims: fc.speaker.embed_dims.unwrap_or(sd.embed_dims),
         };
 
@@ -2126,6 +2140,7 @@ impl Config {
             // with no config-file seed.
             personality: Personality::default(),
             pronunciations: Vec::new(),
+            music_display_style: Default::default(),
             radio: Default::default(),
         };
         let seed = PersistedSettings::from_runtime(&s, None);
@@ -2225,7 +2240,8 @@ impl Config {
             self.speaker.new_threshold,
             self.speaker.min_speech_ms,
         )
-        .with_short_clip(self.speaker.min_identify_ms, self.speaker.short_clip_margin);
+        .with_short_clip(self.speaker.min_identify_ms, self.speaker.short_clip_margin)
+        .with_household_margins(self.speaker.min_margin, self.speaker.clear_margin);
         let embedder: Arc<dyn SpeakerEmbedder> = match &self.speaker.model_path {
             Some(path) => {
                 use crate::speaker::embed::OnnxSpeakerEmbedder;
@@ -2508,7 +2524,7 @@ mod tests {
                     "openai": { "model": "gpt-x", "max_tokens": 512 }
                 },
                 "graphrag": { "embed_dims": 256, "ingest_interval_secs": 10, "recall_k": 9 },
-                "speaker": { "enabled": true, "match_threshold": 0.7 },
+                "speaker": { "enabled": true, "match_threshold": 0.7, "min_margin": 0.08, "clear_margin": 0 },
                 "music": { "enabled": true, "duck_percent": 250, "group": "g1" },
                 "calendar": {
                     "subscriptions": [ { "url": "https://ex.com/a.ics" }, { "name": "Work", "url": "https://ex.com/w.ics" } ],
@@ -2564,6 +2580,8 @@ mod tests {
         assert_eq!(c.graphrag.recall_k, 9);
         assert!(c.speaker.enabled);
         assert_eq!(c.speaker.match_threshold, 0.7);
+        assert_eq!(c.speaker.min_margin, 0.08);
+        assert_eq!(c.speaker.clear_margin, 0.0);
         assert!(c.music.enabled);
         assert_eq!(c.music.duck_percent, 100); // capped at 100
                                                // Calendar: bare URL auto-named, explicit name kept.

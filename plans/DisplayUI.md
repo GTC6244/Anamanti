@@ -30,7 +30,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **Overlays (always-on)** | idle `_AmbientClock` + weather-beside-clock chip, `StatusIndicator`, settings gear |
 | **Overlays (listening cue)** | `ListeningOverlay` — big glowing blue ring (hollow) that reacts to mic level while listening |
 | **Overlays (timers)** | `TimersOverlay` — big (idle) + compact (in-turn) |
-| **Overlays (music)** | `MusicControlOverlay` — compact transport bar while a track plays |
+| **Overlays (music)** | `MusicControlOverlay` — compact transport bar while a track plays (or `NowPlayingView` full screen, per the music display style) |
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
@@ -89,9 +89,10 @@ events; nothing here touches audio buffers or sockets directly.
 6. `WeatherView` **or** `SevenDayView` (weatherActive) — chosen by
    `state.weather!.isWeek`.
 7. `PlaceView` (placeActive).
-7a. `NowPlayingView` (`showNowPlaying`) / `NextUpView` (`showNextUp`) — the
-    device-toggled music full screens, 250 ms fade; gated so a Core-pushed mode
-    (recipe/weather/place) suppresses them.
+7a. `NowPlayingView` (`showNowPlaying`) / `NextUpView` (`showNextUp`) — the music
+    full screens, 250 ms fade, driven by `state.effectiveMusicScreen` (a Core-pushed
+    mode suppresses them; otherwise a tapped/voiced view, or the full-screen music
+    display style while someone is present).
 8. `ConversationView` — live transcript + reply, 300 ms fade, padded 28.
 9. `ListeningOverlay` — big glowing blue ring (hollow), centered, 250 ms fade;
    `IgnorePointer`, shown only while `state.listening` (wake word / follow-up listen
@@ -100,7 +101,8 @@ events; nothing here touches audio buffers or sockets directly.
 9a. `MusicControlOverlay` — compact transport bar, `Positioned(bottom: 18)`,
     centered, 250 ms fade; shown while `musicOverlayVisible` (a track is playing and
     no full music screen / Core mode / turn is up and someone is present). Tappable
-    (opens `NowPlayingView`).
+    (opens `NowPlayingView`); its expand button switches the music display style to
+    full screen.
 10. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
     hidden during a turn, off mode, any full-screen mode, or when timers exist.
 11. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
@@ -239,20 +241,35 @@ snapshot the **Anamanti Core** pushes over a **separate persistent channel**
 forwards each push's JSON to `AssistantController.applyMusicPush`, which folds it into
 `AssistantState.music` (a tolerant `MusicData`, `lib/src/engine/music_data.dart`); an
 empty payload is a `dismiss` (nothing playing). Because "Flutter owns presentation,"
-**the device decides what's on screen** — a push only provides data; the full screens
-open on a tap, not on a Core command.
+**the device decides what's on screen** — a push only provides data (including the
+household's `display_style` preference); the full screens open on a tap, by voice, or
+because the preference is full screen — never on a bare Core command.
 
-Presentation (`AssistantState.musicScreen` ∈ `hidden` / `nowPlaying` / `nextUp`):
+Presentation (`AssistantState.effectiveMusicScreen` ∈ `hidden` / `nowPlaying` / `nextUp`,
+resolved from a Core mode > the explicitly opened `musicScreen` > the **music display
+style**):
+
+**Display style** ([`MusicDisplayStylePlan.md`](./MusicDisplayStylePlan.md)): a Core-owned
+household preference, `AssistantState.musicDisplayStyle` ∈ `compact` (default — the bar) /
+`fullscreen` (the `NowPlayingView` shows automatically whenever Spotify or radio plays and
+someone is present; it yields to Core modes and returns when they close, and falls to the
+away clock when nobody is there). Mirrored from the `display_style` field on each
+now-playing push; changed from the config page (Music & Devices → Displays), the bar's
+expand button, the full view's minimize button, or by voice ("make the music full screen" /
+"use the small music player" → `music_screen` `fullscreen`/`compact`).
 - **`MusicControlOverlay`** — `lib/src/ui/music_control_overlay.dart`. The compact
   transport bar (artwork + title/artist + prev / play-pause / next + volume) that rides
   the ambient screen whenever a track is playing and no full music screen / Core mode /
   turn is up. Keys: `music-overlay-open` / `-previous` / `-play-pause` / `-next` /
-  `-volume` (+ `-volume-up`). Tapping it → `openNowPlaying`.
+  `-volume` (+ `-volume-up`), `-fullscreen` (expand → full-screen style). Tapping it →
+  `openNowPlaying`.
 - **`NowPlayingView`** — `lib/src/ui/now_playing_view.dart`. Full-screen now-playing:
   album artwork (graceful network fallback), title/artist/album, a progress bar, the
   transport row, and a volume slider. Keys: `music-close`, `music-previous`,
   `music-play-pause`, `music-next`, `music-volume`, `music-show-queue`. Opened by tapping
-  the overlay; the close control returns to the overlay (**never stops playback**).
+  the overlay or by the full-screen style; the minimize control (`music-close`,
+  `close_fullscreen` icon) returns to the overlay and, with the full-screen style set,
+  switches it to compact (**never stops playback**).
 - **`NextUpView`** — `lib/src/ui/next_up_view.dart`. Full-screen up-next queue list
   (`music.nextUp`), reached from the now-playing view's "Up next" control. Keys:
   `next-up-close`, `next-up-back`. Empty queue shows "Nothing queued".
@@ -287,7 +304,9 @@ voice. Whenever the music full screen is open, `AssistantController` pushes a
 `WakeWordEventKind.musicScreen` (target screen in the event's `recipeAction` string, the
 same carrier `fontAdjust` uses) → `AssistantController._applyMusicScreen`, which routes
 "show me what's playing" → `openNowPlaying`, "what's up next" → `showMusicQueue`, and "hide
-the music" → `closeMusicScreen` (the same methods touch uses). A Core-pushed mode
+the music" → `closeMusicScreen` (the same methods touch uses), and "make the music full
+screen" / "use the small music player" (`screen` = `fullscreen` / `compact`) →
+`setMusicDisplayStyle` (already persisted by the Core, so not sent back). A Core-pushed mode
 (recipe/weather/place) sets `musicScreen: hidden` so the music full screen yields to it.
 Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_control` tool.
 
