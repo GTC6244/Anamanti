@@ -184,7 +184,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
   records provenance (`said_by_speaker_id`, resolution, confidence, `turn_id`). A
   **read-only short-clip match** (`speaker.min_identify_ms`, default 600 ms, plus
   `short_clip_margin`) identifies short questions like "who am I?" without creating or
-  updating voiceprints. The prompt's identity line comes from the **voiceprint name**
+  updating voiceprints. Matching is also **household-relative**: each score is compared
+  with the closest *other named* voiceprint (anonymous clusters are not rivals — they are
+  often fragments of a known voice). A match that barely leads another person
+  (`speaker.min_margin`, 0.05) is only tentative and trains nobody; a tentative-band match
+  to a named person that leads every other named person by `speaker.clear_margin` (0.20;
+  needs ≥ 2 named people; `0` disables) is identified without training the voiceprint. The
+  lead is logged per turn (`speaker_margin` in the chat log). The prompt's identity line comes from the **voiceprint name**
   (reconciled to the household roster's spelling — "Christina" → *Kristina*), never from
   memory text; "who am I?" is a deterministic fast path; "my name is X" only names an
   identified, still-anonymous voiceprint with the roster spelling (`speakers.name_source`

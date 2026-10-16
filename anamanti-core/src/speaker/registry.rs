@@ -137,42 +137,50 @@ impl SpeakerRegistry {
     /// so two concurrent turns from the same new voice can't both see "no match" and
     /// mint two clusters.
     ///
-    /// - best cosine ≥ `match_threshold` ⇒ [`Attribution::Matched`]: the profile's
-    ///   centroid absorbs the sample;
-    /// - `new_threshold ≤ cosine < match_threshold` ⇒ [`Attribution::Tentative`]:
-    ///   attributed, centroid untouched;
+    /// The nearest profile plus its closest **named** rival (household-relative
+    /// scoring input), or `None` when no profiles exist yet. Read-only.
+    pub fn rank(&self, embedding: &[f32]) -> Result<Option<Ranked>> {
+        let conn = self.conn.lock().unwrap();
+        rank(&conn, embedding)
+    }
+
+    /// Identify `embedding` **and act on the decision atomically**: one lock and
+    /// one SQLite write transaction cover the nearest-centroid scan and its outcome,
+    /// so two concurrent turns from the same new voice can't both see "no match" and
+    /// mint two clusters. The decision is [`MatchPolicy::decide`]:
+    ///
+    /// - [`Attribution::Matched`] (confident and unambiguous): the profile's centroid
+    ///   absorbs the sample;
+    /// - [`Attribution::Tentative`] / [`Attribution::Distinct`]: attributed, centroid
+    ///   untouched;
     /// - otherwise (or no profiles) ⇒ [`Attribution::Created`]: a new anonymous
     ///   cluster seeded with `embedding`.
     pub fn identify_or_create(
         &self,
         embedding: &[f32],
-        match_threshold: f32,
-        new_threshold: f32,
+        policy: &MatchPolicy,
     ) -> Result<Identified> {
         let mut conn = self.conn.lock().unwrap();
         // IMMEDIATE takes the write lock up front, so another process sharing the
         // file can't interleave its own identify-or-create either.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let out = match best_match(&tx, embedding)? {
-            Some((id, score)) if score >= match_threshold => {
-                fold_into(&tx, &id, embedding)?;
-                let (name, name_source) = name_of(&tx, &id)?;
-                Identified {
-                    id,
-                    name,
-                    name_source,
-                    score,
-                    attribution: Attribution::Matched,
+        let ranked = rank(&tx, embedding)?;
+        let attribution = ranked
+            .as_ref()
+            .map_or(Attribution::Created, |r| policy.decide(r));
+        let out = match (ranked, attribution) {
+            (Some(r), attribution) if attribution != Attribution::Created => {
+                if attribution == Attribution::Matched {
+                    fold_into(&tx, &r.id, embedding)?;
                 }
-            }
-            Some((id, score)) if score >= new_threshold => {
-                let (name, name_source) = name_of(&tx, &id)?;
+                let (name, name_source) = name_of(&tx, &r.id)?;
                 Identified {
-                    id,
+                    margin: r.margin(),
+                    id: r.id,
                     name,
                     name_source,
-                    score,
-                    attribution: Attribution::Tentative,
+                    score: r.score,
+                    attribution,
                 }
             }
             _ => {
@@ -183,6 +191,7 @@ impl SpeakerRegistry {
                     name: None,
                     name_source: None,
                     score: 0.0,
+                    margin: None,
                     attribution: Attribution::Created,
                 }
             }
@@ -439,8 +448,11 @@ impl SpeakerRegistry {
 pub enum Attribution {
     /// Confident match; the profile's centroid absorbed the sample.
     Matched,
-    /// Borderline match; attributed without touching the centroid.
+    /// Borderline (or ambiguous) match; attributed without touching the centroid.
     Tentative,
+    /// Below the match threshold but a clear household winner (see
+    /// [`MatchPolicy::clear_margin`]): identified, centroid untouched.
+    Distinct,
     /// No usable match; a new anonymous cluster was created.
     Created,
 }
@@ -456,24 +468,124 @@ pub struct Identified {
     pub name_source: Option<NameSource>,
     /// Cosine similarity to the matched centroid (`0.0` for a new cluster).
     pub score: f32,
+    /// Lead over the closest other named person (`None` with no rival or a new cluster).
+    pub margin: Option<f32>,
     pub attribution: Attribution,
+}
+
+/// The nearest profile to an embedding **and its closest named rival** — the input to
+/// household-relative scoring.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ranked {
+    /// The best-scoring profile.
+    pub id: String,
+    /// Its cosine similarity.
+    pub score: f32,
+    /// Whether that profile has been named by a person (enrollment / admin / voice).
+    pub labeled: bool,
+    /// The best-scoring **labeled** profile other than `id`, with its cosine. `None`
+    /// when no other named person exists. Anonymous clusters are deliberately not
+    /// rivals: they are often fragments of a known person's voice, and a near-tie with
+    /// your own fragment is not evidence that someone else is speaking.
+    pub runner_up: Option<(String, f32)>,
+}
+
+impl Ranked {
+    /// How far the best match leads its named rival (`None` with no rival).
+    pub fn margin(&self) -> Option<f32> {
+        self.runner_up.as_ref().map(|(_, s)| self.score - s)
+    }
+}
+
+/// How a cosine score — and its lead over the rest of the household — turns into an
+/// [`Attribution`]. The household is a small, closed set, so *relative* evidence ("much
+/// closer to Dana than to anyone else") complements the absolute thresholds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MatchPolicy {
+    /// Cosine ≥ this ⇒ a confident match (if also unambiguous).
+    pub match_threshold: f32,
+    /// Cosine below this ⇒ no usable match.
+    pub new_threshold: f32,
+    /// A score ≥ `match_threshold` whose lead over the named runner-up is below this
+    /// is **ambiguous**: downgraded to tentative so neither person's voiceprint absorbs
+    /// a sample that could be the other's. `0` disables the check.
+    pub min_margin: f32,
+    /// A score in `[new_threshold, match_threshold)` for a **named** profile that leads
+    /// another named person by at least this is a clear household winner:
+    /// [`Attribution::Distinct`] (identified, centroid untouched). `0` disables it.
+    pub clear_margin: f32,
+}
+
+impl MatchPolicy {
+    /// Absolute thresholds only (no household-relative scoring).
+    pub fn absolute(match_threshold: f32, new_threshold: f32) -> Self {
+        Self {
+            match_threshold,
+            new_threshold,
+            min_margin: 0.0,
+            clear_margin: 0.0,
+        }
+    }
+
+    /// Decide how `r` is attributed. Never returns [`Attribution::Created`] for a score
+    /// ≥ `new_threshold`; below it, `Created` means "no usable match" (the caller
+    /// decides whether that mints a cluster).
+    pub fn decide(&self, r: &Ranked) -> Attribution {
+        let margin = r.margin();
+        if r.score >= self.match_threshold {
+            if margin.is_some_and(|m| m < self.min_margin) {
+                Attribution::Tentative
+            } else {
+                Attribution::Matched
+            }
+        } else if r.score >= self.new_threshold {
+            if self.clear_margin > 0.0
+                && r.labeled
+                && margin.is_some_and(|m| m >= self.clear_margin)
+            {
+                Attribution::Distinct
+            } else {
+                Attribution::Tentative
+            }
+        } else {
+            Attribution::Created
+        }
+    }
 }
 
 /// Nearest profile to `embedding` by cosine (`None` when there are no profiles).
 fn best_match(conn: &Connection, embedding: &[f32]) -> Result<Option<(String, f32)>> {
-    let mut stmt = conn.prepare("SELECT id, centroid FROM speakers")?;
+    Ok(rank(conn, embedding)?.map(|r| (r.id, r.score)))
+}
+
+/// Score `embedding` against every profile: the best match plus its best **named**
+/// rival (`None` when there are no profiles).
+fn rank(conn: &Connection, embedding: &[f32]) -> Result<Option<Ranked>> {
+    let mut stmt = conn.prepare("SELECT id, centroid, labeled FROM speakers")?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, i64>(2)? != 0,
+        ))
     })?;
-    let mut best: Option<(String, f32)> = None;
+    let mut scored = Vec::new();
     for row in rows {
-        let (id, blob) = row?;
-        let score = cosine(embedding, &decode_vec(&blob));
-        if best.as_ref().is_none_or(|(_, b)| score > *b) {
-            best = Some((id, score));
-        }
+        let (id, blob, labeled) = row?;
+        scored.push((id, cosine(embedding, &decode_vec(&blob)), labeled));
     }
-    Ok(best)
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut it = scored.into_iter();
+    let Some((id, score, labeled)) = it.next() else {
+        return Ok(None);
+    };
+    let runner_up = it.find(|(_, _, l)| *l).map(|(id, s, _)| (id, s));
+    Ok(Some(Ranked {
+        id,
+        score,
+        labeled,
+        runner_up,
+    }))
 }
 
 /// Insert a new anonymous one-sample cluster `id` seeded with `embedding`.
@@ -793,11 +905,15 @@ mod tests {
     fn identify_or_create_matches_tentatively_attributes_or_creates() {
         let reg = SpeakerRegistry::open_in_memory().unwrap();
         let a = l2_normalize(vec![1.0, 0.0]);
-        let first = reg.identify_or_create(&a, 0.9, 0.5).unwrap();
+        let first = reg
+            .identify_or_create(&a, &MatchPolicy::absolute(0.9, 0.5))
+            .unwrap();
         assert_eq!(first.attribution, Attribution::Created);
 
         reg.rename(&first.id, "Sam").unwrap();
-        let again = reg.identify_or_create(&a, 0.9, 0.5).unwrap();
+        let again = reg
+            .identify_or_create(&a, &MatchPolicy::absolute(0.9, 0.5))
+            .unwrap();
         assert_eq!(again.attribution, Attribution::Matched);
         assert_eq!(again.id, first.id);
         assert_eq!(again.name.as_deref(), Some("Sam"));
@@ -805,17 +921,146 @@ mod tests {
 
         // cos(45°) ≈ 0.71: between the thresholds → attributed, centroid untouched.
         let near = reg
-            .identify_or_create(&l2_normalize(vec![1.0, 1.0]), 0.9, 0.5)
+            .identify_or_create(
+                &l2_normalize(vec![1.0, 1.0]),
+                &MatchPolicy::absolute(0.9, 0.5),
+            )
             .unwrap();
         assert_eq!(near.attribution, Attribution::Tentative);
         assert_eq!(near.id, first.id);
         assert_eq!(reg.get(&first.id).unwrap().unwrap().samples, 2);
 
         let other = reg
-            .identify_or_create(&l2_normalize(vec![-1.0, 0.2]), 0.9, 0.5)
+            .identify_or_create(
+                &l2_normalize(vec![-1.0, 0.2]),
+                &MatchPolicy::absolute(0.9, 0.5),
+            )
             .unwrap();
         assert_eq!(other.attribution, Attribution::Created);
         assert_eq!(reg.count().unwrap(), 2);
+    }
+
+    /// A unit vector at `deg` degrees in the plane (cosine between two = cos of the gap).
+    fn at(deg: f32) -> Vec<f32> {
+        let r = deg.to_radians();
+        vec![r.cos(), r.sin()]
+    }
+
+    fn ranked(score: f32, labeled: bool, rival: Option<f32>) -> Ranked {
+        Ranked {
+            id: "spk-a".into(),
+            score,
+            labeled,
+            runner_up: rival.map(|s| ("spk-b".to_string(), s)),
+        }
+    }
+
+    #[test]
+    fn rank_reports_the_best_named_rival_and_ignores_anonymous_clusters() {
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let sam = reg.create_labeled("Sam", &at(0.0), 5).unwrap();
+        // An anonymous fragment very close to Sam is not a rival …
+        reg.create_cluster(&at(5.0)).unwrap();
+        let dana = reg.create_labeled("Dana", &at(60.0), 5).unwrap();
+
+        let r = reg.rank(&at(0.0)).unwrap().unwrap();
+        assert_eq!(r.id, sam);
+        assert!(r.labeled);
+        let (rival, rival_score) = r.runner_up.clone().unwrap();
+        assert_eq!(
+            rival, dana,
+            "the named runner-up, not the closer anonymous fragment"
+        );
+        assert!((rival_score - 0.5).abs() < 1e-4);
+        assert!((r.margin().unwrap() - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn policy_downgrades_ambiguous_matches_and_promotes_clear_household_winners() {
+        let p = MatchPolicy {
+            match_threshold: 0.6,
+            new_threshold: 0.4,
+            min_margin: 0.05,
+            clear_margin: 0.2,
+        };
+        // Above the match threshold and well ahead of everyone: confident.
+        assert_eq!(
+            p.decide(&ranked(0.7, true, Some(0.3))),
+            Attribution::Matched
+        );
+        // No other named person to compare against: absolute thresholds alone.
+        assert_eq!(p.decide(&ranked(0.7, true, None)), Attribution::Matched);
+        // Above the match threshold but neck-and-neck with another person: ambiguous.
+        assert_eq!(
+            p.decide(&ranked(0.7, true, Some(0.68))),
+            Attribution::Tentative
+        );
+        // Borderline score, but far closer to this person than to anyone else.
+        assert_eq!(
+            p.decide(&ranked(0.5, true, Some(0.2))),
+            Attribution::Distinct
+        );
+        // … not with too small a lead,
+        assert_eq!(
+            p.decide(&ranked(0.5, true, Some(0.35))),
+            Attribution::Tentative
+        );
+        // … not for an anonymous cluster,
+        assert_eq!(
+            p.decide(&ranked(0.5, false, Some(0.1))),
+            Attribution::Tentative
+        );
+        // … and not without a second named person to be distinct from.
+        assert_eq!(p.decide(&ranked(0.5, true, None)), Attribution::Tentative);
+        // Below the new threshold nothing is promoted.
+        assert_eq!(
+            p.decide(&ranked(0.3, true, Some(-0.5))),
+            Attribution::Created
+        );
+
+        // Margins of 0 reproduce the absolute-threshold behavior.
+        let abs = MatchPolicy::absolute(0.6, 0.4);
+        assert_eq!(
+            abs.decide(&ranked(0.7, true, Some(0.69))),
+            Attribution::Matched
+        );
+        assert_eq!(
+            abs.decide(&ranked(0.5, true, Some(-0.5))),
+            Attribution::Tentative
+        );
+    }
+
+    #[test]
+    fn ambiguous_match_does_not_fold_and_distinct_winner_is_identified_without_folding() {
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let sam = reg.create_labeled("Sam", &at(0.0), 5).unwrap();
+        let dana = reg.create_labeled("Dana", &at(60.0), 5).unwrap();
+        let p = MatchPolicy {
+            match_threshold: 0.8,
+            new_threshold: 0.5,
+            min_margin: 0.05,
+            clear_margin: 0.2,
+        };
+
+        // Halfway between them: cos 30° ≈ 0.87 to both — above match, but a tie.
+        let tie = reg.identify_or_create(&at(30.0), &p).unwrap();
+        assert_eq!(tie.attribution, Attribution::Tentative);
+        assert!(tie.margin.unwrap().abs() < 1e-4);
+        assert_eq!(reg.get(&sam).unwrap().unwrap().samples, 5);
+        assert_eq!(reg.get(&dana).unwrap().unwrap().samples, 5);
+
+        // 40° away from Sam on the far side: cos 40° ≈ 0.77 (below match) vs Dana
+        // cos 100° ≈ -0.17 — a clear household winner.
+        let clear = reg.identify_or_create(&at(-40.0), &p).unwrap();
+        assert_eq!(clear.attribution, Attribution::Distinct);
+        assert_eq!(clear.id, sam);
+        assert_eq!(clear.name.as_deref(), Some("Sam"));
+        assert_eq!(
+            reg.get(&sam).unwrap().unwrap().samples,
+            5,
+            "centroid untouched"
+        );
+        assert_eq!(reg.count().unwrap(), 2, "no cluster minted");
     }
 
     #[test]
