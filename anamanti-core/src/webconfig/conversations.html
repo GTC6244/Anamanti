@@ -296,9 +296,10 @@ async function fixSpeaker(r){
   } catch (e) { ui.toast(false, 'Could not re-attribute: ' + errMsg(e)); btn.disabled = false; }
 }
 // Escape the system prompt and highlight the speaker sections that were sent: the
-// identity line ("# Who is speaking"), "# About this person" and "# Household facts".
+// identity line ("# Who is speaking"), "# About this person", "# Household facts" and
+// "# Earlier conversations".
 function highlightPrompt(text){
-  const HL = /^# (Who is speaking|About this person|Household facts)/;
+  const HL = /^# (Who is speaking|About this person|Household facts|Earlier conversations)/;
   let out = '', open = false;
   String(text).split('\n').forEach((line, i) => {
     const head = /^# /.test(line);

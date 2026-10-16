@@ -1008,7 +1008,7 @@ impl HelixMemory {
         speaker_id: Option<&str>,
         k: usize,
         max_items: usize,
-    ) -> Result<(Vec<String>, Vec<String>)> {
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
         self.check_dims(&query)?;
         let fetch = k
             .saturating_mul(RECALL_OVERFETCH)
@@ -1035,6 +1035,7 @@ impl HelixMemory {
 
         let mut out: Vec<String> = Vec::new();
         let mut household: Vec<String> = Vec::new();
+        let mut turns: Vec<String> = Vec::new();
         let is_household =
             |i: &Value| i.get("speaker_id").and_then(Value::as_str) == Some(HOUSEHOLD);
         let mut turn_ids: Vec<u64> = Vec::new();
@@ -1047,6 +1048,7 @@ impl HelixMemory {
                 if is_household(item) {
                     household.push(text.to_string());
                 }
+                turns.push(text.to_string());
                 out.push(text.to_string());
             }
             if let Some(id) = item.get(P_ID).and_then(Value::as_u64) {
@@ -1101,7 +1103,9 @@ impl HelixMemory {
         out.truncate(max_items);
         household.retain(|h| out.contains(h));
         household.dedup();
-        Ok((out, household))
+        turns.retain(|t| out.contains(t));
+        turns.dedup();
+        Ok((out, household, turns))
     }
 
     /// Total node count (tests/logging).
