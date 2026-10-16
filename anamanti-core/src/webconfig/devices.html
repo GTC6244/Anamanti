@@ -6,6 +6,20 @@
   .dv-group { display: grid; grid-template-columns: minmax(0, 9rem) auto auto minmax(0, 1fr); align-items: center; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid var(--border); font-size: .82rem; }
   .dv-group:last-child { border-bottom: 0; }
   .dv-clients { color: var(--muted); min-width: 0; }
+  .dv-np { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; align-items: center; gap: .75rem; padding: .35rem 0 .2rem; font-size: .84rem; }
+  .dv-np .art { width: 56px; height: 56px; border-radius: 6px; object-fit: cover; background: var(--border); }
+  .dv-np .art.logo { object-fit: contain; }
+  .dv-np .t { font-weight: 600; }
+  .dv-np .s { color: var(--muted); font-size: .78rem; }
+  .dv-np .ctl { display: flex; align-items: center; gap: .35rem; }
+  .dv-np .ctl button { min-width: 2.2rem; justify-content: center; }
+  .dv-np .vol { display: flex; align-items: center; gap: .4rem; grid-column: 2 / 4; }
+  .dv-np .vol input { flex: 1; accent-color: var(--accent, #3b82f6); }
+  .dv-np .live { display: inline-block; padding: 0 .35rem; margin-right: .35rem; border-radius: 4px; background: #dc2626; color: #fff; font-size: .68rem; font-weight: 700; letter-spacing: .04em; vertical-align: 1px; }
+  .dv-np-empty { grid-column: 1 / 4; color: var(--muted); font-size: .82rem; }
+  .dv-client { display: grid; grid-template-columns: minmax(0, 12rem) minmax(8rem, 1fr) 3rem auto; align-items: center; gap: .6rem; padding: .3rem 0 .3rem 1rem; font-size: .82rem; }
+  .dv-client input[type=range] { width: 100%; accent-color: var(--accent, #3b82f6); }
+  .dv-client.muted input[type=range] { opacity: .45; }
   .dv-snap-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .82rem; }
   .rd-logo { width: 36px; height: 36px; border-radius: 6px; object-fit: contain; background: var(--border); flex: none; }
   .rd-logo.lg { width: 64px; height: 64px; }
@@ -81,7 +95,7 @@
         </span>
       </div>
     </div>
-    <p class="desc">Local multiroom audio: the Core starts and stops snapserver, librespot and mpv, but never handles the audio itself. Spotify voice control is set up under <a href="/integrations#spotify">Integrations → Spotify</a>.</p>
+    <p class="desc">Local multiroom audio: the Core starts and stops snapserver, which runs the Spotify (librespot) and radio (mpv) players itself; the Core only sends them commands and never handles the audio. Spotify is linked under <a href="/integrations#spotify">Integrations → Spotify</a>.</p>
 
     <div id="musicLoading">
       <div class="skeleton" style="height:28px;margin-bottom:.45rem"></div>
@@ -98,6 +112,9 @@
     </div>
 
     <div id="musicOn" hidden>
+      <div class="section-label">Now playing</div>
+      <div id="npBox" class="dv-np" aria-live="polite"></div>
+
       <div class="section-label">Processes</div>
       <div class="table-wrap" style="max-height:220px">
         <table>
@@ -267,13 +284,103 @@ ui.hydrate();
     $('snapHead').innerHTML = ui.status('ok', 'reachable') + '<code>' + esc(addr) + '</code><span class="hint">' + groups.length + ' group' + (groups.length === 1 ? '' : 's') + '</span>';
     if (!groups.length) { $('snapGroups').innerHTML = '<div class="hint" style="padding:.4rem 0">Connected. No groups yet.</div>'; return; }
     $('snapGroups').innerHTML = groups.map(g => {
-      const clients = (g.clients || []).map(c => esc(c.name || c.id) + ' (' + esc(c.volume) + '%' + (c.muted ? ', muted' : '') + ')').join(', ');
-      return '<div class="dv-group"><span class="mono ellipsis" title="' + escAttr(g.id) + '">' + esc(g.id) + '</span>'
+      const clients = g.clients || [];
+      const head = '<div class="dv-group"><span class="mono ellipsis" title="' + escAttr(g.id) + '">' + esc(g.id) + '</span>'
         + '<span class="chip neutral">' + ui.icon('music') + esc(g.stream || '—') + '</span>'
-        + (g.muted ? ui.status('warn', 'muted') : '<span class="chip neutral">unmuted</span>')
-        + '<span class="dv-clients ellipsis" title="' + escAttr((g.clients || []).map(c => c.name || c.id).join(', ')) + '">' + (clients || '<span class="faint">no clients</span>') + '</span></div>';
+        + (g.muted ? ui.status('warn', 'group muted') : '<span class="chip neutral">unmuted</span>')
+        + '<span class="dv-clients">' + (clients.length ? clients.length + ' speaker' + (clients.length === 1 ? '' : 's') : '<span class="faint">no clients</span>') + '</span></div>';
+      return head + clients.map(renderClient).join('');
     }).join('');
   }
+  // One snapclient: its own volume slider + mute. This is the speaker's level in the
+  // Snapcast mix (what ducking lowers while the assistant talks) — separate from the
+  // Spotify/radio source volume and from the speaker host's system volume.
+  function renderClient(c){
+    const id = escAttr(c.id);
+    const name = c.name || c.id;
+    return '<div class="dv-client' + (c.muted ? ' muted' : '') + '" data-client="' + id + '">'
+      + '<span class="ellipsis" title="' + escAttr(name + ' · ' + c.id) + '">' + ui.icon('speaker') + esc(name) + '</span>'
+      + '<input type="range" min="0" max="100" step="1" value="' + esc(c.volume) + '" aria-label="Volume for ' + escAttr(name) + '">'
+      + '<span class="num mono" data-pct>' + esc(c.volume) + '%</span>'
+      + '<button type="button" class="sm' + (c.muted ? '' : ' ghost') + '" data-mute="' + (c.muted ? '0' : '1') + '">' + (c.muted ? 'Unmute' : 'Mute') + '</button>'
+      + '</div>';
+  }
+  async function setClientVolume(client, body){
+    try {
+      const r = await ui.req(postJSON('/music/volume', Object.assign({ client }, body)));
+      if (r.deferred) ui.toast(true, 'The assistant is speaking. The new volume applies when it finishes.');
+      return true;
+    } catch (e) { ui.toast(false, String(e.message || e)); return false; }
+  }
+  // ---------------------------------------------------------------- Now playing
+  // The radio when a station is on, else Spotify — the same snapshot + transport the
+  // display's music screen uses (/music/nowplaying.json, /music/transport).
+  let np = null;          // last snapshot
+  let npDragging = false; // don't re-render the volume slider mid-drag
+  function renderNowPlaying(j){
+    const box = $('npBox');
+    np = j.now_playing || null;
+    if (!np) {
+      const why = j.linked
+        ? 'Nothing playing. Start a station below, ask by voice, or pick <b>Ambient</b> in the Spotify app.'
+        : 'Nothing playing. Start a station below' + (j.radio ? '' : ' (needs the mpv player)') + ', or <a href="/integrations#spotify">link Spotify</a>.';
+      box.innerHTML = '<div class="dv-np-empty">' + why + '</div>';
+      return;
+    }
+    const radio = np.source === 'radio';
+    const art = np.artwork_uri
+      ? '<img class="art' + (radio ? ' logo' : '') + '" src="' + escAttr(np.artwork_uri) + '" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility=\'hidden\'">'
+      : '<span class="art"></span>';
+    const title = esc(np.track_title || (radio ? np.station_name : '') || '—');
+    const sub = radio
+      ? '<span class="live">LIVE</span>' + esc(np.artist ? np.artist + ' · ' + np.station_name : np.station_name)
+      : esc([np.artist, np.album].filter(Boolean).join(' · ')) + (np.playing ? '' : ' <span class="faint">(paused)</span>');
+    const mid = radio
+      ? '<button type="button" class="sm" data-np="pause" aria-label="Stop the radio" title="Stop">' + ui.icon('stop') + '</button>'
+      : (np.playing
+          ? '<button type="button" class="sm" data-np="pause" aria-label="Pause" title="Pause">&#10074;&#10074;</button>'
+          : '<button type="button" class="sm primary" data-np="resume" aria-label="Play" title="Play">' + ui.icon('play') + '</button>');
+    const vol = Number(np.volume_percent) || 0;
+    box.innerHTML = art
+      + '<div style="min-width:0"><div class="t ellipsis" title="' + escAttr(np.track_title || '') + '">' + title + '</div><div class="s ellipsis">' + sub + '</div></div>'
+      + '<div class="ctl">'
+      + '<button type="button" class="sm ghost" data-np="previous" aria-label="' + (radio ? 'Previous station' : 'Previous track') + '" title="Previous">&#9198;</button>'
+      + mid
+      + '<button type="button" class="sm ghost" data-np="next" aria-label="' + (radio ? 'Next station' : 'Next track') + '" title="Next">&#9197;</button>'
+      + '</div>'
+      + '<div class="vol"><span class="faint">' + ui.icon('speaker') + '</span>'
+      + '<input type="range" min="0" max="100" step="1" value="' + vol + '" data-np-vol aria-label="' + (radio ? 'Radio' : 'Spotify') + ' volume">'
+      + '<span class="num mono" data-np-pct>' + vol + '%</span></div>';
+  }
+  async function loadNowPlaying(){
+    if (npDragging) return;
+    try { renderNowPlaying(await getJSON('/music/nowplaying.json')); }
+    catch (e) { $('npBox').innerHTML = '<div class="dv-np-empty">Could not read what is playing: ' + esc(String(e.message || e)) + '</div>'; }
+  }
+  async function npSend(body){
+    try {
+      const r = await ui.req(postJSON('/music/transport', body));
+      if (body.action !== 'volume') ui.toast(true, r.message);
+    } catch (e) { ui.toast(false, String(e.message || e)); }
+    // Radio actions change the station list's "playing" row too.
+    if (np && np.source === 'radio' && body.action !== 'volume') loadRadio();
+    setTimeout(loadNowPlaying, body.action === 'volume' ? 300 : 900);
+  }
+  $('npBox').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-np]');
+    if (b) busy(b, () => npSend({ action: b.dataset.np }));
+  });
+  $('npBox').addEventListener('input', (e) => {
+    if (!e.target.matches('[data-np-vol]')) return;
+    npDragging = true;
+    $('npBox').querySelector('[data-np-pct]').textContent = e.target.value + '%';
+  });
+  $('npBox').addEventListener('change', async (e) => {
+    if (!e.target.matches('[data-np-vol]')) return;
+    npDragging = false;
+    await npSend({ action: 'volume', value: Number(e.target.value) });
+  });
+
   async function loadMusic(){
     let j;
     try { j = await getJSON('/music/status.json'); }
@@ -294,6 +401,7 @@ ui.hydrate();
     $('runChip').innerHTML = ui.status(up === procs.length && up ? 'ok' : up ? 'warn' : 'off', up + ' of ' + procs.length + ' running');
     renderProcs(procs);
     renderSnap(j);
+    loadNowPlaying();
   }
   async function act(url, body, okMsg, delay){
     try {
@@ -315,6 +423,23 @@ ui.hydrate();
   $('startAll').addEventListener('click', () => busy($('startAll'), () => act('/music/startall', undefined, 'Starting all music processes.', 800)));
   ui.confirm($('stopAll'), () => act('/music/stopall', undefined, 'Stopped all music processes.', 800), 'Stop all?');
   $('musicRefresh').addEventListener('click', () => busy($('musicRefresh'), loadMusic));
+  // Per-speaker volume: live % while dragging, one POST on release; mute toggles.
+  $('snapGroups').addEventListener('input', (e) => {
+    const row = e.target.closest('.dv-client');
+    if (row && e.target.type === 'range') row.querySelector('[data-pct]').textContent = e.target.value + '%';
+  });
+  $('snapGroups').addEventListener('change', async (e) => {
+    const row = e.target.closest('.dv-client');
+    if (!row || e.target.type !== 'range') return;
+    if (!await setClientVolume(row.dataset.client, { volume: Number(e.target.value) })) loadMusic();
+  });
+  $('snapGroups').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-mute]');
+    if (!b) return;
+    b.disabled = true;
+    await setClientVolume(b.closest('.dv-client').dataset.client, { muted: b.dataset.mute === '1' });
+    loadMusic();
+  });
   $('playBtn').addEventListener('click', () => {
     const url = $('playUrl').value.trim();
     if (!url) { ui.toast(false, 'Enter a stream URL or file path.'); $('playUrl').focus(); return; }
@@ -468,5 +593,7 @@ ui.hydrate();
 
   Promise.all([loadDisplays(), loadMusic(), loadRadio()]).then(() => ui.reveal());
   setInterval(() => { if (!document.hidden) loadDisplays(); }, 10000);
+  // Keep the now-playing strip live (song titles change; Spotify may be driven from a phone).
+  setInterval(() => { if (!document.hidden && !$('musicOn').hidden) loadNowPlaying(); }, 5000);
 })();
 </script>

@@ -19,7 +19,7 @@ use serde::Serialize;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
-use super::{MpvControl, SnapcastClient};
+use super::{apply_client_volume, MpvControl, MusicDucker, SnapcastClient};
 
 /// Kill any process whose full command line matches `pattern` (via `pkill -f`).
 /// Best-effort and fire-and-forget: a non-zero exit (pkill returns 1 when
@@ -48,9 +48,9 @@ fn reap_stale(pattern: &str, key: &str) {
 pub enum ManagedProc {
     /// The Snapcast server (sync hub + JSON-RPC control).
     Snapserver,
-    /// librespot — the Spotify Connect device feeding the Spotify snapfifo.
+    /// librespot — the Spotify Connect device (FIFO layout only; normally launched by snapserver).
     Librespot,
-    /// mpv — the web-URL player feeding the Web snapfifo, driven over JSON IPC.
+    /// mpv — the web-URL player driven over JSON IPC (FIFO layout only; normally launched by snapserver).
     MpvWeb,
 }
 
@@ -133,6 +133,12 @@ impl MusicSupervisor {
             specs,
             running: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Whether this supervisor launches `proc` at all (with `music.players_in_snapserver`
+    /// only snapserver is managed; it runs the players itself).
+    pub fn manages(&self, proc: ManagedProc) -> bool {
+        self.specs.contains_key(&proc)
     }
 
     /// Start `proc`. Errors if it is already running (per this supervisor) or the
@@ -247,9 +253,28 @@ pub struct MusicHub {
     pub snapcast: SnapcastClient,
     pub snapserver_addr: String,
     pub mpv: Option<MpvControl>,
+    /// The turn ducker, when duck-on-speech is on — manual volume changes go through
+    /// it so a restore doesn't revert them.
+    pub ducker: Option<Arc<MusicDucker>>,
 }
 
 impl MusicHub {
+    /// Set one snapclient's volume and/or mute from the config page. Returns whether
+    /// the volume change was deferred until the assistant stops speaking (ducked).
+    pub async fn set_client_volume(
+        &self,
+        client_id: &str,
+        percent: Option<u8>,
+        muted: Option<bool>,
+    ) -> Result<bool> {
+        match &self.ducker {
+            Some(d) => d.set_manual(client_id, percent, muted).await,
+            None => apply_client_volume(&self.snapcast, client_id, percent, muted)
+                .await
+                .map(|()| false),
+        }
+    }
+
     /// Start all managed processes (used by boot autostart and the "Start all" UI
     /// button). Skips snapserver if one is already reachable — e.g. a
     /// launchd-managed server — so we neither spawn a duplicate (port clash) nor
@@ -266,6 +291,9 @@ impl MusicHub {
             log::warn!("music: could not start snapserver: {e:#}");
         }
         for proc in [ManagedProc::Librespot, ManagedProc::MpvWeb] {
+            if !self.supervisor.manages(proc) {
+                continue; // launched by snapserver (music.players_in_snapserver)
+            }
             if let Err(e) = self.supervisor.start(proc).await {
                 log::warn!("music: could not start {}: {e:#}", proc.key());
             }

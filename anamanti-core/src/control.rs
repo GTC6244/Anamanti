@@ -22,7 +22,7 @@ use crate::llm::anthropic_auth::AnthropicAuth;
 use crate::llm::catalog::ModelCatalog;
 use crate::memory::graphview::NodeId;
 use crate::memory::{EmbedStatus, GraphRagController, MemoryStore};
-use crate::music::{NowPlayingService, SpotifyCommand};
+use crate::music::NowPlayingService;
 use crate::orchestrator::ServiceConnector;
 use crate::settings::{SettingsUpdate, SharedSettings};
 use crate::speaker::{SpeakerRegistry, SpeakerService};
@@ -142,28 +142,8 @@ pub async fn music_control_response(
     let Some((action, value)) = request.music_control_command() else {
         return WyomingEvent::music_result(false, "music-control request missing `action`");
     };
-    let cmd = match SpotifyCommand::transport(&action, value) {
-        Ok(Some(cmd)) => cmd,
-        Ok(None) => {
-            return WyomingEvent::music_result(false, format!("unknown music action `{action}`"))
-        }
-        Err(e) => return WyomingEvent::music_result(false, format!("{e:#}")),
-    };
-    // While a radio station is on, the controls drive the radio (pause = stop,
-    // next/previous = change station, volume = player volume) — even with Spotify
-    // unlinked.
-    if let Some(radio) = now_playing.radio() {
-        if let Some(res) = radio.transport(&cmd).await {
-            return match res {
-                Ok(msg) => WyomingEvent::music_result(true, msg),
-                Err(e) => WyomingEvent::music_result(false, format!("{e:#}")),
-            };
-        }
-    }
-    let Some(controller) = now_playing.controller(settings) else {
-        return WyomingEvent::music_result(false, "Spotify isn't linked on the Anamanti Core");
-    };
-    match controller.command(cmd).await {
+    // Radio while a station is on, else Spotify (shared with the config page).
+    match now_playing.transport(settings, &action, value).await {
         Ok(msg) => WyomingEvent::music_result(true, msg),
         Err(e) => WyomingEvent::music_result(false, format!("{e:#}")),
     }

@@ -104,6 +104,7 @@
     "conf": "/opt/homebrew/etc/snapserver.conf",
     "spotify_device_name": "Ambient",
     "autostart": true,
+    "players_in_snapserver": true,
     "nowplaying_refresh_secs": 5
   },
 

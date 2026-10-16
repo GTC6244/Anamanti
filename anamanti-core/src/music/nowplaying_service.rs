@@ -26,7 +26,7 @@ use std::time::Duration;
 use serde_json::{to_value as json_to_value, Value};
 use tokio::sync::mpsc;
 
-use crate::music::{NowPlaying, RadioPlayer, RoutedSpotify, SpotifyController};
+use crate::music::{NowPlaying, RadioPlayer, RoutedSpotify, SpotifyCommand, SpotifyController};
 use crate::notify::ChannelRegistry;
 use crate::settings::{SharedSettings, SpotifyConfig};
 use crate::wyoming::protocol::WyomingEvent;
@@ -131,6 +131,44 @@ impl NowPlayingService {
         });
         *cached = ctrl.map(|ctrl| (cfg, ctrl));
         cached.as_ref().map(|(_, ctrl)| ctrl.clone())
+    }
+
+    /// Apply one on-screen transport action (`pause`/`resume`/`next`/`previous`/
+    /// `volume`, as [`SpotifyCommand::transport`] parses them) to whatever is audible:
+    /// while a radio station is on it drives the radio (pause = stop, next/previous =
+    /// change station, volume = player volume) — even with Spotify unlinked — else
+    /// Spotify. Shared by the display's controls ([`crate::control`]) and the config
+    /// page. `Ok` carries the speakable confirmation; `Err` is a speakable reason.
+    pub async fn transport(
+        &self,
+        settings: &SharedSettings,
+        action: &str,
+        value: Option<i64>,
+    ) -> anyhow::Result<String> {
+        let cmd = SpotifyCommand::transport(action, value)?
+            .ok_or_else(|| anyhow::anyhow!("unknown music action `{action}`"))?;
+        if let Some(radio) = &self.radio {
+            if let Some(res) = radio.transport(&cmd).await {
+                return res;
+            }
+        }
+        let controller = self
+            .controller(settings)
+            .ok_or_else(|| anyhow::anyhow!("Spotify isn't linked on the Anamanti Core"))?;
+        controller.command(cmd).await
+    }
+
+    /// What is audible right now, read on demand (no hand-off side effects, unlike the
+    /// periodic [`Self::tick`]): the radio snapshot when a station is on, else Spotify's
+    /// playback. `Ok(None)` = nothing loaded or Spotify not linked.
+    pub async fn current(&self, settings: &SharedSettings) -> anyhow::Result<Option<NowPlaying>> {
+        if let Some(radio) = self.radio.as_ref().filter(|r| r.is_playing()) {
+            return Ok(radio.now_playing().await);
+        }
+        match self.controller(settings) {
+            Some(ctrl) => ctrl.now_playing().await,
+            None => Ok(None),
+        }
     }
 
     /// One tick's snapshot: the radio when a station is on, else Spotify. `spotify_was_playing`
