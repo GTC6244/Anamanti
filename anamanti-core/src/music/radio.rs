@@ -1,5 +1,5 @@
 //! Internet radio (`plans/RadioPlan.md`): a curated station catalog played through the
-//! **existing** mpv web player → `Web` snapfifo → snapserver, i.e. the same Snapcast
+//! **existing** mpv web player → snapserver's `Web` stream, i.e. the same Snapcast
 //! speakers Spotify plays on. Still control-only: the Core loads a URL into mpv and
 //! points the snapserver groups at the `Web` stream; it never touches PCM.
 //!
@@ -416,17 +416,21 @@ impl RadioPlayer {
         self.play(stations[idx].clone(), None).await
     }
 
-    /// Stop the radio and point the speakers back at the Spotify stream.
+    /// Stop the radio and point the speakers back at the Spotify stream. Best-effort:
+    /// the station is cleared and the speakers re-routed **even if mpv fails** (a hung or
+    /// dead player must not leave the house stuck on `Web` with "playing" state). An mpv
+    /// failure is still reported as the `Err`, after that cleanup.
     pub async fn stop(&self) -> Result<String> {
         let _op = self.op.lock().await;
         let was = self.current().map(|s| s.name);
-        self.output
-            .stop()
-            .await
-            .context("couldn't stop the radio player")?;
+        let stopped = self.output.stop().await;
         self.set_current(None);
         if let Err(e) = self.output.route(SPOTIFY_STREAM).await {
             log::warn!("radio: could not switch the speakers back to {SPOTIFY_STREAM}: {e:#}");
+        }
+        if let Err(e) = stopped {
+            log::warn!("radio: mpv stop failed (state cleared, speakers re-routed): {e:#}");
+            return Err(e.context("the radio player didn't respond to stop"));
         }
         Ok(match was {
             Some(name) => format!("Stopped {name}."),
@@ -595,6 +599,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         icy: Mutex<Option<String>>,
         idle: Mutex<bool>,
+        /// Make `stop` fail (a hung/dead mpv).
+        stop_fails: Mutex<bool>,
     }
 
     impl FakeOutput {
@@ -615,6 +621,9 @@ mod tests {
         }
         async fn stop(&self) -> Result<()> {
             self.log("stop".into());
+            if *self.stop_fails.lock().unwrap() {
+                anyhow::bail!("mpv IPC timed out");
+            }
             Ok(())
         }
         async fn is_idle(&self) -> Result<bool> {
@@ -774,6 +783,23 @@ mod tests {
         assert_eq!(p.stop().await.unwrap(), "Stopped 107.5 Dave Rocks.");
         assert!(!p.is_playing());
         assert_eq!(out.calls()[2..], ["stop", "route Spotify"]);
+    }
+
+    #[tokio::test]
+    async fn stop_clears_and_reroutes_even_when_mpv_fails() {
+        let (out, p) = player();
+        p.play_id("cjdv", None).await.unwrap();
+        *out.stop_fails.lock().unwrap() = true;
+        let err = p.stop().await.unwrap_err();
+        assert!(format!("{err:#}").contains("mpv IPC timed out"), "{err:#}");
+        // Still cleaned up: no station, speakers back on Spotify.
+        assert!(!p.is_playing());
+        assert!(p.now_playing().await.is_none());
+        assert_eq!(out.calls()[2..], ["stop", "route Spotify"]);
+        // The op lock was released: a fresh play goes through.
+        *out.stop_fails.lock().unwrap() = false;
+        p.play_id("CHYM", None).await.unwrap();
+        assert_eq!(p.current().unwrap().id, "CHYM");
     }
 
     #[tokio::test]
