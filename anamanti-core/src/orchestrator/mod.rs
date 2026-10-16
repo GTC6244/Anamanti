@@ -18,6 +18,7 @@
 //! so production dials TCP while tests wire in-memory mock servers — the turn
 //! logic is identical either way.
 
+mod home;
 mod prompt;
 mod speech_out;
 mod system1_handlers;
@@ -181,6 +182,10 @@ pub struct Pipeline {
     /// push. `None` when weather is disabled — the weather intent then defers to
     /// System-2. Set via `with_weather`.
     weather: Option<Arc<dyn crate::weather::WeatherProvider>>,
+    /// The Home Assistant hub for the pre-System-1 home-command fast path
+    /// (`orchestrator::home`). `None` when HA isn't configured. Set via
+    /// `with_home_assistant`; the same instance backs the `home_control` tool.
+    home_assistant: Option<Arc<crate::home_assistant::HomeAssistant>>,
     /// Pre-loaded in-process whisper.cpp STT engine. Loaded once at boot via
     /// [`with_whisper_engine`](Self::with_whisper_engine) whenever the
     /// `stt-whisper-local` feature is compiled and the model file is present —
@@ -223,6 +228,7 @@ impl Pipeline {
             llm_first_token_timeout: LLM_FIRST_TOKEN_TIMEOUT,
             follow_up: FollowUpConfig::default(),
             weather: None,
+            home_assistant: None,
             whisper_engine: None,
             #[cfg(feature = "vad-silero")]
             silero: None,
@@ -297,6 +303,15 @@ impl Pipeline {
     /// [`SharedSettings::apply_system1`].
     pub fn with_system1(self, system1: Arc<dyn crate::system1::DecisionEngine>) -> Self {
         self.settings.set_system1(system1);
+        self
+    }
+
+    /// Attach the Home Assistant hub for the home-command fast path.
+    pub fn with_home_assistant(
+        mut self,
+        hub: Option<Arc<crate::home_assistant::HomeAssistant>>,
+    ) -> Self {
+        self.home_assistant = hub;
         self
     }
 
@@ -637,6 +652,18 @@ impl Pipeline {
             let delivery = self.speak_fast_reply(ctx, &reply).await;
             return Ok(Reply {
                 text: reply.text,
+                memories_written,
+                delivery,
+            });
+        }
+
+        // Home Assistant fast path (plans/HomeAssistantPlan.md): an imperative home
+        // command ("turn off the office lights") is matched by string code against the
+        // cached device catalog and carried out with one direct REST call — before
+        // System-1, memory recall and the LLM. Non-commands cost nothing here.
+        if let Some((text, delivery)) = self.run_home_fast_path(ctx, transcript).await {
+            return Ok(Reply {
+                text,
                 memories_written,
                 delivery,
             });

@@ -785,6 +785,69 @@ fn appsaid_save_sets_worker_url_and_default_recipient() {
 }
 
 #[test]
+fn home_assistant_status_save_and_token_never_leak_the_token() {
+    let s = settings();
+    let v: Value = serde_json::from_str(&post(&s, "/home-assistant/save", b"{}")).unwrap();
+    assert_eq!(
+        (v["ok"].as_bool(), v["token_set"].as_bool()),
+        (Some(true), Some(false))
+    );
+
+    post(
+        &s,
+        "/home-assistant/save",
+        br#"{"base_url":"http://homeassistant.local:8123/","default_room":"Kitchen"}"#,
+    );
+    let out = post(
+        &s,
+        "/home-assistant/token",
+        br#"{"token":"ha-secret-token"}"#,
+    );
+    assert!(
+        !out.contains("ha-secret-token"),
+        "status must never echo the token"
+    );
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["base_url"], "http://homeassistant.local:8123");
+    assert_eq!(v["default_room"], "Kitchen");
+    assert_eq!(v["token_set"], true);
+    assert_eq!(v["configured"], true);
+    assert_eq!(
+        s.home_assistant_settings().token.as_deref(),
+        Some("ha-secret-token")
+    );
+
+    // A blank re-save keeps the token; an explicit clear removes it.
+    post(&s, "/home-assistant/token", br#"{"token":""}"#);
+    assert!(s.home_assistant_settings().token_set());
+    post(&s, "/home-assistant/token", br#"{"clear":true}"#);
+    assert!(!s.home_assistant_settings().token_set());
+
+    // Blank fields clear on save.
+    post(&s, "/home-assistant/save", br#"{"default_room":""}"#);
+    assert_eq!(s.home_assistant_settings().default_room, None);
+    assert!(s.home_assistant_settings().base_url.is_some());
+}
+
+#[tokio::test]
+async fn home_assistant_test_is_refused_until_configured() {
+    // (The route is async; the inventory test drives it over a socket.)
+    let out = super::home_assistant::ha_test_json(&settings()).await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(v["error"].as_str().unwrap().contains("URL and token"));
+}
+
+#[test]
+fn integrations_page_has_the_home_assistant_tile() {
+    let (status, _c, body) = route("GET", "/integrations", b"", &settings());
+    assert_eq!(status, "200 OK");
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains(r#"data-panel="home_assistant""#));
+    assert!(html.contains("/home-assistant/status.json"));
+}
+
+#[test]
 fn invalid_json_is_a_400() {
     let (status, _c, _b) = route("POST", "/config", b"not json", &settings());
     assert_eq!(status, "400 Bad Request");
@@ -1439,6 +1502,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/radio/stations.json", "", "200 OK", JSON),
     ("GET", "/cadora/status.json", "", "200 OK", JSON),
     ("GET", "/appsaid/status.json", "", "200 OK", JSON),
+    ("GET", "/home-assistant/status.json", "", "200 OK", JSON),
     ("GET", "/speakers.json", "", "200 OK", JSON),
     // Mutations, each with a well-formed body …
     ("POST", "/config", r#"{"tts_voice":"amy"}"#, "200 OK", JSON),
@@ -1502,6 +1566,10 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/cadora/link", "{}", "200 OK", JSON),
     ("POST", "/appsaid/save", "{}", "200 OK", JSON),
     ("POST", "/appsaid/token", "{}", "200 OK", JSON),
+    ("POST", "/home-assistant/save", "{}", "200 OK", JSON),
+    ("POST", "/home-assistant/token", "{}", "200 OK", JSON),
+    // Unconfigured ⇒ rejected in-band before any network call.
+    ("POST", "/home-assistant/test", "{}", "200 OK", JSON),
     (
         "POST",
         "/memory/attribute",
@@ -1543,6 +1611,8 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/cadora/link", "not json", "200 OK", JSON),
     ("POST", "/appsaid/save", "not json", "200 OK", JSON),
     ("POST", "/appsaid/token", "not json", "200 OK", JSON),
+    ("POST", "/home-assistant/save", "not json", "200 OK", JSON),
+    ("POST", "/home-assistant/token", "not json", "200 OK", JSON),
     ("POST", "/memory/attribute", "not json", "200 OK", JSON),
     ("POST", "/memory/delete", "not json", "200 OK", JSON),
     (

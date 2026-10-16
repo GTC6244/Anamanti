@@ -15,6 +15,7 @@ use super::general::{
     about_json, config_save, models_json, notifications_status_json, notifications_test_json,
     voices_json,
 };
+use super::home_assistant::{ha_save_json, ha_status_json, ha_test_json, ha_token_json};
 use super::household::{
     appsaid_save_json, appsaid_status_json, appsaid_token_json, cadora_link_json, cadora_save_json,
     cadora_status_json, household_save_json, household_status_json, personality_save_json,
@@ -250,6 +251,23 @@ pub(super) static ROUTES: &[Route] = &[
     post(
         "/appsaid/token",
         Sync(|s, r| with_json(r, |d| appsaid_token_json(s.settings(), d))),
+    ),
+    // Home Assistant (plans/HomeAssistantPlan.md).
+    get(
+        "/home-assistant/status.json",
+        Sync(|s, _| Reply::json(ha_status_json(s.settings()))),
+    ),
+    post(
+        "/home-assistant/save",
+        Sync(|s, r| with_json(r, |d| ha_save_json(s.settings(), d))),
+    ),
+    post(
+        "/home-assistant/token",
+        Sync(|s, r| with_json(r, |d| ha_token_json(s.settings(), d))),
+    ),
+    post(
+        "/home-assistant/test",
+        Async(|s, _| Box::pin(async move { Reply::json(ha_test_json(s.settings()).await) })),
     ),
     // Tools tab (directions / weather / places credentials), Speech, System-1.
     get(

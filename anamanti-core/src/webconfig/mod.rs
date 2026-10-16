@@ -46,6 +46,7 @@ use crate::settings::SharedSettings;
 mod debug;
 mod drive;
 mod general;
+mod home_assistant;
 mod household;
 mod memory;
 mod music;

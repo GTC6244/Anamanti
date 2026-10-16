@@ -1113,6 +1113,30 @@ there is no Display UI.
 
 ---
 
+
+### 8.5 Home Assistant: a zero-model fast path ahead of System-1
+
+Home commands are the clearest case where the model adds latency without adding value,
+so they are answered **before** System-1, memory recall and the LLM
+(`plans/HomeAssistantPlan.md`). `Pipeline::respond_and_speak` runs, in order:
+`parse_command` (memory) → **`run_home_fast_path`** (`orchestrator/home.rs`) →
+`run_system1` → System-2.
+
+- **Shape first, no I/O:** `home_assistant::matcher::parse` recognizes an imperative
+  command's sentence shape with string code; anything else returns `None` instantly.
+- **Resolve against a cache:** `home_assistant::catalog::resolve` maps the target phrase
+  to entities in a cached HA catalog (room groups, "all lights", the display's room,
+  exact names, a unique trailing-word match) and **refuses to guess** — ambiguity falls
+  through. `exact_only` devices (fireplace) are never in a group.
+- **Act directly:** one `POST /api/services/…` call, then a fixed `FastReply` (follow-up
+  window left open). An HA error is spoken ("couldn't reach Home Assistant"), not handed
+  to the LLM.
+- **One hub, two callers:** the `HomeAssistant` hub (connection + catalog cache) is built
+  once in `Config::llm_factory`, held on `LlmFactory`, and shared by the pipeline and the
+  `home_control` tool (`llm/rig/tools/home.rs`), which uses the same resolver.
+- **Room:** `DeviceContext.room` (from `audio-start` `data.room`), else
+  `home_assistant.default_room`.
+
 ## 9. Cross-references
 
 - Delivery phases & open questions → [`Plan.MD`](./Plan.MD)

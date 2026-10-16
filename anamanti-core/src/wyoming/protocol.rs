@@ -237,6 +237,11 @@ pub struct DeviceContext {
     pub timers: TimerContext,
     /// Font-scaling state, reported regardless of `widget`.
     pub font: FontContext,
+    /// The room this display is in (`audio-start` `data.room`, a device setting), e.g.
+    /// `"Kitchen"`, so a bare "turn off the lights" means that room's lights
+    /// (`plans/HomeAssistantPlan.md` §A2). `None` when the device doesn't report one —
+    /// the Core's `home_assistant.default_room` then applies.
+    pub room: Option<String>,
 }
 
 impl DeviceContext {
@@ -333,6 +338,12 @@ pub fn device_context(data: &Value) -> DeviceContext {
         widget: display_context(data),
         timers: timer_context(data),
         font: font_context(data),
+        room: data
+            .get("room")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -648,6 +659,15 @@ mod tests {
         assert_eq!(dev.timers.running, 1);
         assert_eq!(dev.timers.next_remaining_secs, Some(30));
         assert!(dev.timers.labels.is_empty());
+    }
+
+    #[test]
+    fn device_context_reads_the_display_room() {
+        let mut ev = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0);
+        ev.data["room"] = serde_json::json!("  Kitchen ");
+        assert_eq!(device_context(&ev.data).room.as_deref(), Some("Kitchen"));
+        ev.data["room"] = serde_json::json!("");
+        assert_eq!(device_context(&ev.data).room, None);
     }
 
     #[test]

@@ -63,7 +63,11 @@ radio variant of the display's now-playing screen over the existing `anamanti-mu
 [`SpeakerScopedMemoryPlan.md`](./plans/SpeakerScopedMemoryPlan.md) (memory scopes
 `person` / `household` / `unknown`: a fact said by an unrecognized voice is kept but never
 recalled for anyone; per-turn speaker resolution `identified|tentative|new|unknown`;
-"who am I?" answered from the voiceprint; admin-console speaker tags + unknown-fact review).
+"who am I?" answered from the voiceprint; admin-console speaker tags + unknown-fact review), and
+[`HomeAssistantPlan.md`](./plans/HomeAssistantPlan.md) (Home Assistant: a **pre-System-1 home-command
+fast path** — string-matched against a cached HA device catalog, one direct REST call, a fixed spoken
+confirmation, no model — plus the `home_control` rig tool as the LLM fallback; HA's Assist is
+deliberately not used. Part B, planned: an opt-in on-screen HA dashboard widget).
 
 ---
 
@@ -346,6 +350,9 @@ anamanti-core/scripts/build-webui-css.sh
 #     UI: Intelligence → `/intelligence#llm` when Anthropic auth = subscription)
 #   OPENROUTER_API_KEY                   (the System-1 `jev` decision backend on OpenRouter;
 #     UI: Intelligence → `/intelligence#system1`. Only needed when system1.backend=jev)
+#   HOME_ASSISTANT_TOKEN                 (Home Assistant long-lived access token for the
+#     home-command fast path + the home_control tool; UI: Integrations →
+#     `/integrations#home_assistant` (masked, also on Keys & Accounts). Absent ⇒ both off)
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
 #     process start, so it has no config-page control)
 #
@@ -434,6 +441,15 @@ anamanti-core/scripts/build-webui-css.sh
 #     4-char code → fills in the address; auto-adds the person if new). The roster is
 #     DERIVED from members with an appsaid address; the legacy `appsaid.recipients` config
 #     map is folded into the household at boot as a one-time seed.)
+#   home_assistant{base_url,default_room,exact_only,dashboard_path} (plans/HomeAssistantPlan.md)
+#     → the pre-System-1 home-command fast path + the home_control tool, both off unless
+#     base_url + the HOME_ASSISTANT_TOKEN secret are set. default_room = the room a bare
+#     "turn off the lights" means when the display doesn't report one (a device sends
+#     `room` on audio-start); exact_only (default ["fireplace"]) = devices never swept up
+#     by room-wide/"all" commands. The device catalog is cached (pre-warmed at boot, 60 s
+#     stale-while-refresh). base_url + default_room (and the token) are runtime-settable on
+#     Integrations → Home Assistant (with a read-only "Test connection") and persisted to
+#     settings_path; the shared hub is reconfigured live, no restart.
 #   tool_cache{"<tool>": <seconds>, …} — per-tool response-cache TTLs, a flat map keyed by
 #     tool name, overlaid on built-in defaults; `0` disables a tool's cache. Generic
 #     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults
@@ -722,6 +738,11 @@ Android toolchain again.
   after the metadata frame; one socket carries outbound audio and inbound
   transcript + TTS audio. Frame types/constructors/decoders are defined **once**, in
   the shared `anamanti-protocol` crate — never copied into either side's `protocol.rs`.
+- **Turn order (fast paths first):** `respond_and_speak` tries, in order, the explicit
+  memory command (`parse_command`), the **Home Assistant fast path**
+  (`orchestrator/home.rs`), **System-1**, then System-2 (recall + LLM). A new zero-model
+  fast path belongs before System-1 and must reject non-matching turns with pure string
+  code (no I/O) so ordinary turns pay nothing.
 - **Reuse the shared seams (DRY):** a new LLM tool is a `VoiceTool` registered in
   `Tools::build` (architecture.md §8); a new persistent push channel wraps
   `ChannelRegistry` (Core) and `push_channel::run` + `start_channel` (device); a new

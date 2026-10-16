@@ -171,6 +171,28 @@
       <div id="asSends"></div>
     </div>
 
+    <!-- Home Assistant -->
+    <div class="drawer-panel" data-panel="home_assistant" hidden>
+      <p class="desc">Voice control of your <b>Home Assistant</b> lights, switches, scenes and TV. Common commands ("turn off the office lights", "porch lights on", "is the deck light on?") run on a fast path before the LLM — one direct call to Home Assistant, no model. Anything unusual falls back to the <code>home_control</code> tool.</p>
+      <div id="haStatus"></div>
+      <div class="field">
+        <label for="ha_url">Home Assistant URL <span class="hint">e.g. http://homeassistant.local:8123</span></label>
+        <input id="ha_url" type="text" class="mono" placeholder="http://homeassistant.local:8123" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="ha_room">Default room <span class="hint">what a bare "turn off the lights" means; must match an HA area name; blank clears</span></label>
+        <input id="ha_room" type="text" placeholder="e.g. Kitchen" autocomplete="off">
+      </div>
+      <div class="btn-row" style="justify-content:flex-end"><button type="button" class="sm" data-action="save-ha">Save</button></div>
+      <div class="field">
+        <label>Long-lived access token <span class="hint">Home Assistant → your profile → Security → Long-lived access tokens</span></label>
+        <div class="inline"><div id="haKey" style="flex:1"></div><button type="button" class="sm primary" data-action="save-ha-token">Save token</button></div>
+      </div>
+      <div class="btn-row" style="justify-content:flex-end"><button type="button" class="sm" data-action="test-ha">Test connection</button></div>
+      <div class="callout" style="margin:.4rem 0 .8rem"><i data-icon="info"></i><div>Fireplace devices are never included in room-wide or "all lights" commands — they respond only to their exact name.</div></div>
+      <div id="haSends"></div>
+    </div>
+
     <!-- Spotify -->
     <div class="drawer-panel" data-panel="spotify" hidden>
       <p class="desc">Enables the <code>spotify_control</code> tool for Spotify Connect playback. Requires Spotify <b>Premium</b> and an app at developer.spotify.com.</p>
@@ -265,15 +287,16 @@ ui.hydrate();
     calendar:   { icon: 'calendar', name: 'Calendar',            tool: 'calendar_lookup',    loc: 'calendar.ics' },
     cadora:     { icon: 'cart',     name: 'Shopping list',       tool: 'shopping_list_add',  loc: 'cadora' },
     appsaid:    { icon: 'phone',    name: 'Phone messages',      tool: 'send_phone_message', loc: 'appsaid' },
+    home_assistant: { icon: 'home', name: 'Home Assistant',      tool: 'home_control',       loc: 'home_assistant' },
     spotify:    { icon: 'music',    name: 'Spotify',             tool: 'spotify_control',    loc: 'spotify' },
     drive:      { icon: 'photo',    name: 'Google Drive photos', tool: 'slideshow',          loc: 'drive' },
   };
   const ORDER = Object.keys(META);
-  const PROVIDER = { weather: 'Visual Crossing / Open-Meteo', places: 'Google Places', directions: 'Mapbox', calendar: '.ics feeds', cadora: 'Cadora · NextHaul', appsaid: 'AppSaid', spotify: 'Spotify Connect', drive: 'Google Drive' };
+  const PROVIDER = { weather: 'Visual Crossing / Open-Meteo', places: 'Google Places', directions: 'Mapbox', calendar: '.ics feeds', cadora: 'Cadora · NextHaul', appsaid: 'AppSaid', home_assistant: 'Home Assistant', spotify: 'Spotify Connect', drive: 'Google Drive' };
   const STATUS_TEXT = { active: 'Active', attention: 'Needs attention', inactive: 'Not set up', disabled: 'Disabled' };
   const EP = {
     weather: '/tools/weather/status.json', places: '/tools/places/status.json', directions: '/tools/status.json',
-    cadora: '/cadora/status.json', appsaid: '/appsaid/status.json', spotify: '/spotify/status.json', drive: '/drive/status.json',
+    cadora: '/cadora/status.json', appsaid: '/appsaid/status.json', home_assistant: '/home-assistant/status.json', spotify: '/spotify/status.json', drive: '/drive/status.json',
   };
   let ROWS = {}, ST = {}, BOOT = {}, current = null, filter = 'all';
 
@@ -284,6 +307,7 @@ ui.hydrate();
   }
   function locChip(key){
     const r = ROWS[key] || {};
+    if (key === 'home_assistant') return ui.loc(r.tier || 'lan');
     const keyless = r.keyless || (key === 'weather' && ST.weather && ST.weather.effective !== 'visualcrossing');
     return ui.loc(r.tier || 'cloud', keyless ? 'Cloud · keyless' : 'Cloud');
   }
@@ -351,6 +375,8 @@ ui.hydrate();
     onClear: () => act(null, () => postJSON('/tools/places/save', { clear: true }), 'Google Places key cleared.') });
   const dirKey = ui.secret($('dirKey'), { placeholder: 'pk.…' });
   const asKey = ui.secret($('asKey'), { placeholder: 'AppSaid app token' });
+  const haKey = ui.secret($('haKey'), { clearable: true, placeholder: 'Long-lived access token',
+    onClear: () => act(null, () => postJSON('/home-assistant/token', { clear: true }), 'Home Assistant token cleared.') });
   const spSecret = ui.secret($('spSecret'), { placeholder: 'Spotify client secret' });
   const drCid = ui.secret($('drCid'), { placeholder: '….apps.googleusercontent.com' });
   const drSecret = ui.secret($('drSecret'), { placeholder: 'GOCSPX-…' });
@@ -444,6 +470,18 @@ ui.hydrate();
     $('asSends').innerHTML = ui.sendsFor('appsaid');
   }
 
+  function renderHomeAssistant(){
+    const h = ST.home_assistant;
+    if (!h) { $('haStatus').innerHTML = errBlock('Home Assistant'); return; }
+    haKey.setState(h.token_set); haKey.reset();
+    $('haStatus').innerHTML = line('Status', h.active ? ui.status('ok', 'connected — fast path + home_control active') : (h.base_url || h.token_set ? ui.status('warn', h.base_url ? 'needs a token' : 'needs a URL') : ui.status('off', 'not configured')))
+      + line('Token', h.token_set ? ui.status('ok', 'set') : ui.status('off', 'not set'))
+      + (h.default_room ? line('Default room', '<span class="chip accent">' + esc(h.default_room) + '</span>') : line('Default room', '<span class="muted">none — a bare "lights" goes to the assistant</span>'));
+    $('ha_url').value = h.base_url || '';
+    $('ha_room').value = h.default_room || '';
+    $('haSends').innerHTML = ui.sendsFor('home_assistant', h.base_url, (ROWS.home_assistant || {}).tier);
+  }
+
   function renderSpotify(){
     const s = ST.spotify;
     if (!s) { $('spStatus').innerHTML = errBlock('Spotify'); return; }
@@ -519,7 +557,7 @@ ui.hydrate();
   }
 
   const RENDER = { weather: () => renderWeather(), places: () => renderPlaces(), directions: () => renderDirections(), calendar: () => renderCalendar(),
-    cadora: () => renderCadora(), appsaid: () => renderAppsaid(), spotify: () => renderSpotify(), drive: () => renderDrive() };
+    cadora: () => renderCadora(), appsaid: () => renderAppsaid(), home_assistant: () => renderHomeAssistant(), spotify: () => renderSpotify(), drive: () => renderDrive() };
   // Re-render every panel, or only `only` (after a save in one panel, so unsaved
   // edits in the other panels are not overwritten by the refresh).
   function renderPanels(only){
@@ -607,6 +645,13 @@ ui.hydrate();
       return act(b, () => postJSON('/appsaid/token', { app_token: k }), 'AppSaid token saved.');
     },
     'save-appsaid': (b) => !ST.appsaid ? ui.toast(false, 'AppSaid status did not load — reload before saving.') : act(b, () => postJSON('/appsaid/save', { worker_url: $('as_worker').value.trim(), default_recipient: $('as_default').value.trim() }), 'AppSaid settings saved.'),
+    'save-ha': (b) => !ST.home_assistant ? ui.toast(false, 'Home Assistant status did not load — reload before saving.') : act(b, () => postJSON('/home-assistant/save', { base_url: $('ha_url').value.trim(), default_room: $('ha_room').value.trim() }), 'Home Assistant settings saved.'),
+    'save-ha-token': (b) => {
+      const k = haKey.value();
+      if (!k) { ui.toast(false, 'Paste a token first (Add / Replace).'); return; }
+      return act(b, () => postJSON('/home-assistant/token', { token: k }), 'Home Assistant token saved.');
+    },
+    'test-ha': (b) => act(b, () => postJSON('/home-assistant/test', {}), (r) => r.message || 'Connected.'),
     'save-spotify': (b) => {
       const body = {};
       const cid = $('sp_cid').value.trim(); if (cid) body.client_id = cid;

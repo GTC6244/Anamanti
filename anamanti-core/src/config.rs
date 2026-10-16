@@ -216,6 +216,10 @@ pub struct Config {
     /// secret app token is NOT here — it seeds from `APPSAID_APP_TOKEN`. Overlaid by
     /// the persisted settings file.
     pub appsaid: AppSaidConfig,
+    /// Home Assistant (`plans/HomeAssistantPlan.md`): base URL, the default display room,
+    /// exact-only device names and the dashboard path. The long-lived token is NOT here —
+    /// it is a secret, read from `HOME_ASSISTANT_TOKEN`.
+    pub home_assistant: crate::home_assistant::HomeAssistantConfig,
     /// Per-tool response-cache TTLs (`tool_cache` in the file), keyed by tool name (e.g.
     /// `weather_lookup`, default 3600 s). Installed process-wide at boot; see
     /// [`crate::cache`]. `0` disables caching for a tool.
@@ -783,6 +787,7 @@ impl Default for Config {
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
             appsaid: AppSaidConfig::default(),
+            home_assistant: crate::home_assistant::HomeAssistantConfig::default(),
             tool_cache: crate::cache::ToolCacheConfig::default(),
         }
     }
@@ -896,6 +901,8 @@ pub struct FileConfig {
     pub cadora: FileCadora,
     #[serde(default)]
     pub appsaid: FileAppSaid,
+    #[serde(default)]
+    pub home_assistant: FileHomeAssistant,
     /// Per-tool cache TTLs in seconds, keyed by tool name (e.g. `weather_lookup`). A flat
     /// map so it stays generic; overlaid on the built-in defaults, `0` disables a tool's
     /// cache. Absent ⇒ defaults only (see [`crate::cache::ToolCacheConfig`]).
@@ -1147,6 +1154,24 @@ pub struct FileAppSaid {
     pub recipients: std::collections::BTreeMap<String, String>,
     /// Optional default recipient name used when the model omits `recipient`.
     pub default_recipient: Option<String>,
+}
+
+/// The `home_assistant` block of the config file (`plans/HomeAssistantPlan.md`). The
+/// long-lived access token is deliberately NOT a field — it is env-only
+/// (`HOME_ASSISTANT_TOKEN`), never written to `anamanti.json`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileHomeAssistant {
+    /// HA base URL, e.g. `http://homeassistant.local:8123`.
+    pub base_url: Option<String>,
+    /// The room a display is in when it doesn't report one (e.g. `"Kitchen"`), so a
+    /// bare "turn off the lights" means that room's lights.
+    pub default_room: Option<String>,
+    /// Name/id fragments of devices that must be named exactly — never swept up by a
+    /// room-wide or "all" command. Default `["fireplace"]`; `[]` disables.
+    pub exact_only: Option<Vec<String>>,
+    /// The dashboard path the display widget opens (default `lovelace/0`).
+    pub dashboard_path: Option<String>,
 }
 
 /// Trim a config string and drop it when empty.
@@ -1537,6 +1562,28 @@ impl Config {
             default_recipient: nonempty(fc.appsaid.default_recipient),
         };
 
+        let home_assistant = {
+            let d = crate::home_assistant::HomeAssistantConfig::default();
+            crate::home_assistant::HomeAssistantConfig {
+                base_url: nonempty(fc.home_assistant.base_url)
+                    .map(|s| s.trim_end_matches('/').to_string()),
+                default_room: nonempty(fc.home_assistant.default_room),
+                exact_only: fc
+                    .home_assistant
+                    .exact_only
+                    .map(|v| {
+                        v.into_iter()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or(d.exact_only),
+                dashboard_path: nonempty(fc.home_assistant.dashboard_path)
+                    .map(|s| s.trim_start_matches('/').to_string())
+                    .unwrap_or(d.dashboard_path),
+            }
+        };
+
         let ollama_url = match &llm {
             LlmChoice::Ollama { url, .. } => url.clone(),
             _ => fc
@@ -1621,6 +1668,7 @@ impl Config {
             spotify,
             cadora,
             appsaid,
+            home_assistant,
             tool_cache: {
                 let mut tc = crate::cache::ToolCacheConfig::default();
                 tc.overlay(fc.tool_cache);
@@ -1822,6 +1870,11 @@ impl Config {
             // Seeded per-build from the resolved AppSaid config in `shared_settings`
             // (and refreshed by `apply`/`apply_appsaid`).
             appsaid: None,
+            // The one Home Assistant hub (connection + cached device catalog), built once
+            // here and shared by every rebuilt backend's `home_control` tool and by the
+            // pipeline's fast path. It starts unconnected; `LlmFactory::for_settings`
+            // points it at the live URL + token (config seed / env / config page).
+            home_assistant: Some(crate::home_assistant::from_config(&self.home_assistant)),
             // Prebuilt from the config: the calendar source (web .ics) and the
             // directions provider (Mapbox). The Mapbox token is seeded from the env
             // secret here but is runtime-settable (Tools tab) — `shared_settings`
@@ -2010,6 +2063,15 @@ impl Config {
         self.appsaid.clone()
     }
 
+    /// The Home Assistant long-lived access token — a secret, read from
+    /// `HOME_ASSISTANT_TOKEN` (never from the JSON config).
+    pub fn initial_home_assistant_token(&self) -> Option<String> {
+        env::var("HOME_ASSISTANT_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Initial AppSaid sender app token — a secret, seeded from `APPSAID_APP_TOKEN`.
     /// Runtime-settable from the config page; persisted to the settings file (0600).
     pub fn initial_appsaid_app_token(&self) -> Option<String> {
@@ -2085,6 +2147,13 @@ impl Config {
             spotify: self.initial_spotify(),
             cadora: self.initial_cadora(),
             appsaid,
+            // Home Assistant: URL + room seed from the config file, the token from the
+            // HOME_ASSISTANT_TOKEN secret; the persisted overlay (config page) wins.
+            home_assistant: crate::settings::HomeAssistantSettings {
+                base_url: self.home_assistant.base_url.clone(),
+                token: self.initial_home_assistant_token(),
+                default_room: self.home_assistant.default_room.clone(),
+            },
             weather_provider: self.weather.provider.clone(),
             visualcrossing_key: self.initial_visualcrossing_key(),
             google_places_key: self.initial_google_places_key(),

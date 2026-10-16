@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use super::drive::drive_status_json;
 use super::general::about_json;
+use super::home_assistant::ha_status_json;
 use super::household::{appsaid_status_json, cadora_status_json};
 use super::music::spotify_status_json;
 use super::tools::{places_status_json, stt_status_json, system1_status_json, weather_status_json};
@@ -670,6 +671,7 @@ pub(super) fn integrations_summary(s: &AppServices) -> Vec<Value> {
     let places = parse(places_status_json(settings));
     let cadora = parse(cadora_status_json(settings));
     let appsaid = parse(appsaid_status_json(settings));
+    let ha = parse(ha_status_json(settings));
     let spotify = parse(spotify_status_json(settings));
     let drive = parse(drive_status_json(settings));
     let feeds = s.debug.boot.config["integrations"]["calendar_feeds"]
@@ -725,6 +727,21 @@ pub(super) fn integrations_summary(s: &AppServices) -> Vec<Value> {
             },
         }),
         json!({
+            "key": "home_assistant", "name": "Home Assistant", "tool": "home_control",
+            // Wherever the HA server is (normally the LAN), classified from its URL.
+            "tier": match ha["base_url"].as_str().filter(|u| !u.is_empty()) {
+                Some(url) => classify_addr(url).as_str(),
+                None => "lan",
+            },
+            "status": if b(&ha, "active") { "active" } else if b(&ha, "configured") || b(&ha, "token_set") || ha["base_url"].as_str().is_some_and(|u| !u.is_empty()) { "attention" } else { "inactive" },
+            "detail": if b(&ha, "active") {
+                match ha["default_room"].as_str().filter(|r| !r.is_empty()) {
+                    Some(room) => format!("connected · default room {room}"),
+                    None => "connected".to_string(),
+                }
+            } else if b(&ha, "token_set") { "needs a URL".to_string() } else if ha["base_url"].as_str().is_some_and(|u| !u.is_empty()) { "needs a token".to_string() } else { "not configured".to_string() },
+        }),
+        json!({
             "key": "spotify", "name": "Spotify", "tool": "spotify_control", "tier": "cloud",
             "status": if b(&spotify, "linked") { "active" } else if b(&spotify, "configured") { "attention" } else { "inactive" },
             "detail": if b(&spotify, "linked") { "linked" } else if b(&spotify, "configured") { "credentials set, not linked" } else { "no credentials" },
@@ -769,6 +786,7 @@ pub(super) fn keys_json(s: &AppServices) -> String {
     let places = parse(places_status_json(settings));
     let cadora = parse(cadora_status_json(settings));
     let appsaid = parse(appsaid_status_json(settings));
+    let ha = parse(ha_status_json(settings));
     let spotify = parse(spotify_status_json(settings));
     let drive = parse(drive_status_json(settings));
     let b = |v: &Value, k: &str| v[k].as_bool().unwrap_or(false);
@@ -885,6 +903,16 @@ pub(super) fn keys_json(s: &AppServices) -> String {
             "Phone messages",
             "/integrations#appsaid",
             json!({ "endpoint": "/appsaid/token", "name": "app_token" }),
+        ),
+        key(
+            "home_assistant_token",
+            "Home Assistant token",
+            "secret",
+            b(&ha, "token_set"),
+            "HOME_ASSISTANT_TOKEN",
+            "Home Assistant",
+            "/integrations#home_assistant",
+            json!({ "endpoint": "/home-assistant/token", "name": "token", "clear": true }),
         ),
         key(
             "spotify",

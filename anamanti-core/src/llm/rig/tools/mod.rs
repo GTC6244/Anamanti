@@ -15,10 +15,12 @@
 //!
 //! Layout: `search` (web search providers + `internet_search`), `device` (timers,
 //! personality, font), `display` (recipe / weather / places screens and their
-//! `close_*` tools, and the music player's `music_screen`), `services` (calendar, directions, Spotify, radio, shopping list, phone).
+//! `close_*` tools, and the music player's `music_screen`), `services` (calendar, directions, Spotify, radio, shopping list, phone), and `home`
+//! (`home_control`, the Home Assistant fallback).
 
 mod device;
 mod display;
+mod home;
 mod search;
 mod services;
 #[cfg(test)]
@@ -75,6 +77,8 @@ pub struct ToolDeps {
     pub places: Option<Arc<dyn crate::places::PlacesProvider>>,
     /// Internet-radio player for `radio_control` (present only with ≥1 station).
     pub radio: Option<Arc<crate::music::RadioPlayer>>,
+    /// Home Assistant hub for `home_control` (`plans/HomeAssistantPlan.md`).
+    pub home_assistant: Option<Arc<crate::home_assistant::HomeAssistant>>,
 }
 
 /// Per-call context handed to [`VoiceTool::invoke`].
@@ -291,6 +295,9 @@ impl Tools {
         }
         if let Some(provider) = deps.places {
             tools.extend(display::places_tools(provider, deps.home_location));
+        }
+        if let Some(hub) = deps.home_assistant {
+            tools.push(home::home_control(hub));
         }
         Self::from_tools(tools)
     }
