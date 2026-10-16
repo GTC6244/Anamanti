@@ -20,7 +20,7 @@ to a curated station list).
 
 | Question | Decision |
 | --- | --- |
-| **Audio path** | The **existing** `mpv` web player (`ManagedProc::MpvWeb`, `--ao=pcm` → `snap-web` fifo, resampled to 48000:16:2) → snapserver's **`Web`** stream. PCM never enters the Core (unchanged invariant). No new process, no snapserver config change. |
+| **Audio path** | The **existing** `mpv` web player (`--ao=pcm`, resampled to 48000:16:2) → snapserver's **`Web`** stream. PCM never enters the Core (unchanged invariant). **Amended 2026-10-15:** the `snap-web` named FIFO never played on macOS (snapserver's FIFO reader stalls; mpv then blocks writing the full pipe), so snapserver now launches mpv itself as a `process://` source reading its stdout, and the Core only drives it over IPC (`music.players_in_snapserver`). |
 | **Output destination** | The same Snapcast group(s) Spotify plays on. Starting a station points **every** snapserver group at the `Web` stream (`Group.SetStream`); Spotify taking over (voice, display controls, or a phone/Connect start seen by the now-playing poll) stops the radio and points them back at `Spotify`. One audible source at a time. |
 | **Spotify ↔ radio hand-off** | Radio start **pauses Spotify** (best-effort). Any Spotify play/resume/next/previous (tool or display) **stops the radio first** (a `SpotifyController` decorator). The now-playing poll, when it sees Spotify actually playing while radio is on, stops the radio (covers starts from a phone). |
 | **Station ids** | Each station has a short stable **`id`** (the call sign, e.g. `CJDV`, unique, case-insensitive) plus a display **name** and optional **aliases** for voice ("Dave", "Dave Rocks", "one oh seven five"). The id is what the display, tool and web UI key on. |

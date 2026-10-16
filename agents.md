@@ -60,6 +60,10 @@ voice via an `enroll` display context on the ordinary turn — no second audio p
 Core's Music & Devices page with Radio Browser logo lookup, played by the existing mpv →
 snapserver `Web` stream on the same speakers as Spotify, the `radio_control` tool, and a
 radio variant of the display's now-playing screen over the existing `anamanti-music` push), and
+[`MusicDisplayStylePlan.md`](./plans/MusicDisplayStylePlan.md) (the music widget while
+Spotify/radio plays — compact bar or full screen: one Core-owned, persisted preference stamped
+on every now-playing push, settable from Music & Devices, the display's expand/minimize
+button, or the `music_screen` tool's `fullscreen`/`compact` actions), and
 [`SpeakerScopedMemoryPlan.md`](./plans/SpeakerScopedMemoryPlan.md) (memory scopes
 `person` / `household` / `unknown`: a fact said by an unrecognized voice is kept but never
 recalled for anyone; per-turn speaker resolution `identified|tentative|new|unknown`;

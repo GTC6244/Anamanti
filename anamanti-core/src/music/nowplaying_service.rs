@@ -19,6 +19,11 @@
 //! is on, the push carries the radio snapshot instead of Spotify's, and a station change
 //! wakes the loop at once (no 5 s wait). If Spotify starts playing while the radio is on
 //! (e.g. from a phone via Spotify Connect) the radio stops and Spotify takes over.
+//!
+//! **Display style** (`plans/MusicDisplayStylePlan.md`): every `now_playing` push carries
+//! the household's [`MusicDisplayStyle`] as `display_style` inside the snapshot, so all
+//! displays show the same widget (compact bar / full screen) for Spotify and radio alike.
+//! [`NowPlayingService::set_display_style`] persists a change and re-pushes at once.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,22 +31,29 @@ use std::time::Duration;
 use serde_json::{to_value as json_to_value, Value};
 use tokio::sync::mpsc;
 
-use crate::music::{NowPlaying, RadioPlayer, RoutedSpotify, SpotifyController};
+use crate::music::{
+    MusicDisplayStyle, NowPlaying, RadioPlayer, RoutedSpotify, SpotifyCommand, SpotifyController,
+};
 use crate::notify::ChannelRegistry;
 use crate::settings::{SharedSettings, SpotifyConfig};
 use crate::wyoming::protocol::WyomingEvent;
 
-/// Serialize a snapshot to the JSON `music` payload carried in the frame; an empty
-/// object on the impossible serialize failure keeps the push infallible.
-fn to_value(np: &NowPlaying) -> Value {
-    json_to_value(np).unwrap_or_default()
+/// Serialize a snapshot to the JSON `music` payload carried in the frame, stamped with
+/// the display `style` (`display_style`); an empty object on the impossible serialize
+/// failure keeps the push infallible.
+fn to_value(np: &NowPlaying, style: MusicDisplayStyle) -> Value {
+    let mut v = json_to_value(np).unwrap_or_default();
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("display_style".into(), Value::from(style.as_str()));
+    }
+    v
 }
 
 /// The `anamanti-music` frame for a snapshot: `now_playing`, or `dismiss` when nothing
 /// is playing.
-fn to_event(snapshot: Option<&NowPlaying>) -> WyomingEvent {
+fn to_event(snapshot: Option<&NowPlaying>, style: MusicDisplayStyle) -> WyomingEvent {
     match snapshot {
-        Some(np) => WyomingEvent::music_now_playing(to_value(np)),
+        Some(np) => WyomingEvent::music_now_playing(to_value(np, style)),
         None => WyomingEvent::music_dismiss(),
     }
 }
@@ -60,6 +72,10 @@ pub struct NowPlayingService {
     controller: Mutex<Option<(SpotifyConfig, Arc<dyn SpotifyController>)>>,
     /// The internet-radio player, when music routing is on.
     radio: Option<Arc<RadioPlayer>>,
+    /// The display-style preference stamped onto every push. Mirrors
+    /// [`SharedSettings::music_display_style`] (the store of record): refreshed each
+    /// periodic tick and set at once by [`Self::set_display_style`].
+    style: Mutex<MusicDisplayStyle>,
 }
 
 impl NowPlayingService {
@@ -90,7 +106,7 @@ impl NowPlayingService {
             .lock()
             .unwrap()
             .as_ref()
-            .map(|np| to_event(Some(np)));
+            .map(|np| to_event(Some(np), self.style()));
         self.channels.register((), initial)
     }
 
@@ -109,9 +125,35 @@ impl NowPlayingService {
     /// late joiner doesn't replay a stale track). Dead channels are pruned. Returns the
     /// delivery count.
     pub fn broadcast(&self, snapshot: Option<NowPlaying>) -> usize {
-        let event = to_event(snapshot.as_ref());
+        let event = to_event(snapshot.as_ref(), self.style());
         *self.last.lock().unwrap() = snapshot;
         self.channels.broadcast(&event)
+    }
+
+    /// The display-style preference currently stamped onto pushes.
+    pub fn style(&self) -> MusicDisplayStyle {
+        *self.style.lock().unwrap()
+    }
+
+    /// Mirror the stored preference into the push without re-sending (the periodic tick
+    /// calls this before each broadcast so a change made elsewhere — e.g. by voice —
+    /// reaches every display on the next tick).
+    pub fn sync_style(&self, style: MusicDisplayStyle) {
+        *self.style.lock().unwrap() = style;
+    }
+
+    /// Change the household's music-widget preference: persist it in `settings` (the
+    /// store of record), then re-push the cached snapshot (if anything is playing) so
+    /// every connected display switches at once rather than on the next tick. Shared by
+    /// the config page and the display's on-screen toggle. Returns the delivery count.
+    pub fn set_display_style(&self, settings: &SharedSettings, style: MusicDisplayStyle) -> usize {
+        settings.set_music_display_style(style);
+        self.sync_style(style);
+        let last = self.last.lock().unwrap().clone();
+        match last {
+            Some(np) => self.channels.broadcast(&to_event(Some(&np), style)),
+            None => 0,
+        }
     }
 
     /// The live Spotify controller for the *current* credentials in `settings`, or `None`
@@ -131,6 +173,44 @@ impl NowPlayingService {
         });
         *cached = ctrl.map(|ctrl| (cfg, ctrl));
         cached.as_ref().map(|(_, ctrl)| ctrl.clone())
+    }
+
+    /// Apply one on-screen transport action (`pause`/`resume`/`next`/`previous`/
+    /// `volume`, as [`SpotifyCommand::transport`] parses them) to whatever is audible:
+    /// while a radio station is on it drives the radio (pause = stop, next/previous =
+    /// change station, volume = player volume) — even with Spotify unlinked — else
+    /// Spotify. Shared by the display's controls ([`crate::control`]) and the config
+    /// page. `Ok` carries the speakable confirmation; `Err` is a speakable reason.
+    pub async fn transport(
+        &self,
+        settings: &SharedSettings,
+        action: &str,
+        value: Option<i64>,
+    ) -> anyhow::Result<String> {
+        let cmd = SpotifyCommand::transport(action, value)?
+            .ok_or_else(|| anyhow::anyhow!("unknown music action `{action}`"))?;
+        if let Some(radio) = &self.radio {
+            if let Some(res) = radio.transport(&cmd).await {
+                return res;
+            }
+        }
+        let controller = self
+            .controller(settings)
+            .ok_or_else(|| anyhow::anyhow!("Spotify isn't linked on the Anamanti Core"))?;
+        controller.command(cmd).await
+    }
+
+    /// What is audible right now, read on demand (no hand-off side effects, unlike the
+    /// periodic [`Self::tick`]): the radio snapshot when a station is on, else Spotify's
+    /// playback. `Ok(None)` = nothing loaded or Spotify not linked.
+    pub async fn current(&self, settings: &SharedSettings) -> anyhow::Result<Option<NowPlaying>> {
+        if let Some(radio) = self.radio.as_ref().filter(|r| r.is_playing()) {
+            return Ok(radio.now_playing().await);
+        }
+        match self.controller(settings) {
+            Some(ctrl) => ctrl.now_playing().await,
+            None => Ok(None),
+        }
     }
 
     /// One tick's snapshot: the radio when a station is on, else Spotify. `spotify_was_playing`
@@ -199,6 +279,7 @@ pub fn spawn_periodic(
         let mut spotify_was_playing = false;
         loop {
             if service.connected() > 0 {
+                service.sync_style(settings.music_display_style());
                 match service.tick(&settings, &mut spotify_was_playing).await {
                     Some(Ok(snapshot)) => {
                         let playing = snapshot.is_some();
@@ -279,6 +360,72 @@ mod tests {
         svc.broadcast(None); // playback stopped
         let (_id, mut rx) = svc.register();
         // Nothing cached → nothing replayed on connect.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pushes_carry_the_display_style_and_a_change_repushes_at_once() {
+        let settings = crate::settings::SharedSettings::fixed(
+            Arc::new(crate::llm::mock::MockLlm::default()),
+            "mock",
+            None,
+        );
+        let svc = NowPlayingService::new();
+        let (_id, mut rx) = svc.register();
+        svc.broadcast(Some(snapshot()));
+        let got = rx.try_recv().unwrap();
+        assert_eq!(
+            got.data["music"]["display_style"],
+            serde_json::json!("compact")
+        );
+
+        assert_eq!(
+            svc.set_display_style(&settings, MusicDisplayStyle::Fullscreen),
+            1
+        );
+        assert_eq!(
+            settings.music_display_style(),
+            MusicDisplayStyle::Fullscreen
+        );
+        let got = rx
+            .try_recv()
+            .expect("style change re-pushed the cached snapshot");
+        assert_eq!(got.data["action"], serde_json::json!("now_playing"));
+        assert_eq!(
+            got.data["music"]["display_style"],
+            serde_json::json!("fullscreen")
+        );
+        assert_eq!(
+            got.data["music"]["track_title"],
+            serde_json::json!("Paranoid Android")
+        );
+
+        // A late joiner is replayed with the current style too.
+        let (_id2, mut rx2) = svc.register();
+        let got = rx2.try_recv().unwrap();
+        assert_eq!(
+            got.data["music"]["display_style"],
+            serde_json::json!("fullscreen")
+        );
+    }
+
+    #[test]
+    fn a_style_change_with_nothing_playing_persists_but_pushes_nothing() {
+        let settings = crate::settings::SharedSettings::fixed(
+            Arc::new(crate::llm::mock::MockLlm::default()),
+            "mock",
+            None,
+        );
+        let svc = NowPlayingService::new();
+        let (_id, mut rx) = svc.register();
+        assert_eq!(
+            svc.set_display_style(&settings, MusicDisplayStyle::Fullscreen),
+            0
+        );
+        assert_eq!(
+            settings.music_display_style(),
+            MusicDisplayStyle::Fullscreen
+        );
         assert!(rx.try_recv().is_err());
     }
 

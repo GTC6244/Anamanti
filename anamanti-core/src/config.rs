@@ -247,6 +247,14 @@ pub struct SpeakerConfig {
     /// Extra cosine a short-clip match needs above `match_threshold` to count as
     /// identified (short clips embed less reliably); otherwise it is at most tentative.
     pub short_clip_margin: f32,
+    /// Household-relative scoring: cosine lead a match needs over the closest *other
+    /// named person* to be confident; a closer race is only tentative and trains no
+    /// voiceprint. `0` disables.
+    pub min_margin: f32,
+    /// Household-relative scoring: a match to a named person between `new_threshold`
+    /// and `match_threshold` that leads every other named person by at least this is
+    /// identified (its voiceprint is not trained). Needs ≥ 2 named people. `0` disables.
+    pub clear_margin: f32,
     /// Embedding dimensionality the ONNX model produces (ECAPA-TDNN → 192).
     pub embed_dims: usize,
 }
@@ -261,6 +269,8 @@ impl Default for SpeakerConfig {
             min_speech_ms: 1200,
             min_identify_ms: 600,
             short_clip_margin: 0.10,
+            min_margin: 0.05,
+            clear_margin: 0.20,
             embed_dims: 192,
         }
     }
@@ -531,6 +541,14 @@ pub struct MusicConfig {
     /// orchestrator boots, and stop them on shutdown (`music.autostart`,
     /// default on when music is enabled). The Music tab's manual buttons still work.
     pub autostart: bool,
+    /// The players (mpv, librespot) are launched **by snapserver** as `process://` /
+    /// `librespot://` sources reading their stdout, not by the Core writing named FIFOs
+    /// (`music.players_in_snapserver`, default on — matching the committed
+    /// `deploy/snapcast/snapserver.conf`). On macOS snapserver's FIFO reader stalls (its
+    /// open→EOF→reopen loop trips macOS kqueue FIFO bugs: the writer fills the pipe and
+    /// blocks forever), so the FIFO layout only works on Linux. When on, the Core
+    /// supervises snapserver alone. Set `false` only with a `pipe://` snapserver.conf.
+    pub players_in_snapserver: bool,
     /// How often (seconds) the now-playing push polls Spotify for the current track +
     /// queue and fans it out to the display's music screen (`music.nowplaying_refresh_secs`,
     /// default 5). Clamped to a 1s floor at use.
@@ -559,6 +577,7 @@ impl Default for MusicConfig {
             snapserver_conf: PathBuf::from("/opt/homebrew/etc/snapserver.conf"),
             spotify_device_name: "Ambient".to_string(),
             autostart: true,
+            players_in_snapserver: true,
             nowplaying_refresh_secs: 5,
         }
     }
@@ -977,6 +996,8 @@ pub struct FileSpeaker {
     pub min_speech_ms: Option<u32>,
     pub min_identify_ms: Option<u32>,
     pub short_clip_margin: Option<f32>,
+    pub min_margin: Option<f32>,
+    pub clear_margin: Option<f32>,
     pub embed_dims: Option<usize>,
 }
 
@@ -1043,6 +1064,7 @@ pub struct FileMusic {
     pub conf: Option<PathBuf>,
     pub spotify_device_name: Option<String>,
     pub autostart: Option<bool>,
+    pub players_in_snapserver: Option<bool>,
     pub nowplaying_refresh_secs: Option<u64>,
 }
 
@@ -1353,6 +1375,8 @@ impl Config {
             min_speech_ms: fc.speaker.min_speech_ms.unwrap_or(sd.min_speech_ms),
             min_identify_ms: fc.speaker.min_identify_ms.unwrap_or(sd.min_identify_ms),
             short_clip_margin: fc.speaker.short_clip_margin.unwrap_or(sd.short_clip_margin),
+            min_margin: fc.speaker.min_margin.unwrap_or(sd.min_margin),
+            clear_margin: fc.speaker.clear_margin.unwrap_or(sd.clear_margin),
             embed_dims: fc.speaker.embed_dims.unwrap_or(sd.embed_dims),
         };
 
@@ -1437,6 +1461,10 @@ impl Config {
             spotify_device_name: nonempty(fc.music.spotify_device_name)
                 .unwrap_or_else(|| md.spotify_device_name.clone()),
             autostart: fc.music.autostart.unwrap_or(md.autostart),
+            players_in_snapserver: fc
+                .music
+                .players_in_snapserver
+                .unwrap_or(md.players_in_snapserver),
             nowplaying_refresh_secs: fc
                 .music
                 .nowplaying_refresh_secs
@@ -1780,18 +1808,27 @@ impl Config {
                 reap_pattern: Some(format!("input-ipc-server={}", mpv_ipc.display())),
             },
         );
+        if m.players_in_snapserver {
+            // snapserver launches the players itself (process:// / librespot:// sources),
+            // so spawning them here would start duplicates fighting over the IPC socket
+            // and the Spotify device name.
+            specs.retain(|proc, _| *proc == ManagedProc::Snapserver);
+        }
         Some(Arc::new(MusicSupervisor::new(specs)))
     }
 
     /// Build the [`MusicHub`] (supervisor + snapserver control + mpv control) the
-    /// config-page Music tab drives, or `None` when music is disabled.
-    pub fn build_hub(&self) -> Option<MusicHub> {
+    /// config-page Music tab drives, or `None` when music is disabled. `ducker` is the
+    /// same instance the turn pipeline ducks with, so manual volume changes survive a
+    /// restore.
+    pub fn build_hub(&self, ducker: Option<Arc<MusicDucker>>) -> Option<MusicHub> {
         let supervisor = self.build_supervisor()?;
         Some(MusicHub {
             supervisor,
             snapcast: SnapcastClient::new(self.music.snapserver_addr),
             snapserver_addr: self.music.snapserver_addr.to_string(),
             mpv: self.mpv_control(),
+            ducker,
         })
     }
 
@@ -2172,6 +2209,7 @@ impl Config {
             // with no config-file seed.
             personality: Personality::default(),
             pronunciations: Vec::new(),
+            music_display_style: Default::default(),
             radio: Default::default(),
         };
         let seed = PersistedSettings::from_runtime(&s, None);
@@ -2271,7 +2309,8 @@ impl Config {
             self.speaker.new_threshold,
             self.speaker.min_speech_ms,
         )
-        .with_short_clip(self.speaker.min_identify_ms, self.speaker.short_clip_margin);
+        .with_short_clip(self.speaker.min_identify_ms, self.speaker.short_clip_margin)
+        .with_household_margins(self.speaker.min_margin, self.speaker.clear_margin);
         let embedder: Arc<dyn SpeakerEmbedder> = match &self.speaker.model_path {
             Some(path) => {
                 use crate::speaker::embed::OnnxSpeakerEmbedder;
@@ -2554,7 +2593,7 @@ mod tests {
                     "openai": { "model": "gpt-x", "max_tokens": 512 }
                 },
                 "graphrag": { "embed_dims": 256, "ingest_interval_secs": 10, "recall_k": 9 },
-                "speaker": { "enabled": true, "match_threshold": 0.7 },
+                "speaker": { "enabled": true, "match_threshold": 0.7, "min_margin": 0.08, "clear_margin": 0 },
                 "music": { "enabled": true, "duck_percent": 250, "group": "g1" },
                 "calendar": {
                     "subscriptions": [ { "url": "https://ex.com/a.ics" }, { "name": "Work", "url": "https://ex.com/w.ics" } ],
@@ -2610,6 +2649,8 @@ mod tests {
         assert_eq!(c.graphrag.recall_k, 9);
         assert!(c.speaker.enabled);
         assert_eq!(c.speaker.match_threshold, 0.7);
+        assert_eq!(c.speaker.min_margin, 0.08);
+        assert_eq!(c.speaker.clear_margin, 0.0);
         assert!(c.music.enabled);
         assert_eq!(c.music.duck_percent, 100); // capped at 100
                                                // Calendar: bare URL auto-named, explicit name kept.
@@ -2674,6 +2715,25 @@ mod tests {
         assert!(c.config_addr.is_none());
         assert!(c.settings_path.is_none());
         assert!(c.music.mpv_ipc.is_none());
+    }
+
+    #[test]
+    fn players_in_snapserver_limits_the_supervisor_to_snapserver() {
+        // Default: snapserver launches mpv + librespot itself; the Core runs only it.
+        let c = Config::from_file(parse(r#"{ "settings_path": "none" }"#)).unwrap();
+        assert!(c.music.players_in_snapserver);
+        let sup = c.build_supervisor().unwrap();
+        assert!(sup.manages(ManagedProc::Snapserver));
+        assert!(!sup.manages(ManagedProc::Librespot));
+        assert!(!sup.manages(ManagedProc::MpvWeb));
+
+        // Opt-out (Linux FIFO layout): the Core launches all three.
+        let c = Config::from_file(parse(
+            r#"{ "settings_path": "none", "music": { "players_in_snapserver": false } }"#,
+        ))
+        .unwrap();
+        let sup = c.build_supervisor().unwrap();
+        assert!(ManagedProc::all().into_iter().all(|p| sup.manages(p)));
     }
 
     #[test]

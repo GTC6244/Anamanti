@@ -5,6 +5,7 @@
 import 'dart:async';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
+import 'package:anamanti_display/src/engine/music_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -29,6 +30,10 @@ const _radioJson = '''
  "album":"107.5 Dave Rocks","artwork_uri":"","duration_secs":0,"volume_percent":80,
  "next_up":[],"source":"radio","station_id":"CJDV","station_name":"107.5 Dave Rocks"}
 ''';
+
+/// [json] with the Core's `display_style` stamped in (as the now-playing push does).
+String _withStyle(String json, String style) =>
+    json.replaceFirst('{', '{"display_style":"$style",');
 
 WakeWordConfig _cfg() => WakeWordConfig(
   melspecModelPath: '',
@@ -338,6 +343,186 @@ void main() {
       controller.applyMusicPush(_radioJson);
       controller.playPauseMusic();
       expect(sink.single['action'], 'pause');
+    });
+  });
+
+  group('music display style (compact bar / full screen)', () {
+    test(
+      'a fullscreen push shows now-playing; a compact push returns to the bar',
+      () {
+        final controller = _controller([]);
+        addTearDown(controller.dispose);
+
+        controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+        expect(
+          controller.state.musicDisplayStyle,
+          MusicDisplayStyle.fullscreen,
+        );
+        expect(controller.state.musicScreen, MusicScreen.hidden);
+        expect(controller.state.effectiveMusicScreen, MusicScreen.nowPlaying);
+        expect(controller.state.musicScreenActive, isTrue);
+
+        controller.applyMusicPush(_withStyle(_musicJson, 'compact'));
+        expect(controller.state.effectiveMusicScreen, MusicScreen.hidden);
+      },
+    );
+
+    test('radio uses the same preference', () {
+      final controller = _controller([]);
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_withStyle(_radioJson, 'fullscreen'));
+      expect(controller.state.music!.isRadio, isTrue);
+      expect(controller.state.effectiveMusicScreen, MusicScreen.nowPlaying);
+    });
+
+    test('a push from an older Core (no style) keeps the current style', () {
+      final controller = _controller([]);
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+      controller.applyMusicPush(_pausedJson);
+      expect(controller.state.musicDisplayStyle, MusicDisplayStyle.fullscreen);
+    });
+
+    test(
+      'expand persists fullscreen via the control sink and shows at once',
+      () {
+        final calls = <Map<String, Object?>>[];
+        final controller = _controller(calls);
+        addTearDown(controller.dispose);
+        controller.applyMusicPush(_musicJson);
+
+        controller.expandMusic();
+        expect(calls.last, {'action': 'display_fullscreen', 'value': null});
+        expect(controller.state.effectiveMusicScreen, MusicScreen.nowPlaying);
+
+        // Re-expanding is a no-op on the wire.
+        calls.clear();
+        controller.expandMusic();
+        expect(calls, isEmpty);
+      },
+    );
+
+    test('minimizing the full-screen preference switches it to compact', () {
+      final calls = <Map<String, Object?>>[];
+      final controller = _controller(calls);
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+      controller.showMusicQueue();
+      expect(controller.state.effectiveMusicScreen, MusicScreen.nextUp);
+
+      controller.closeMusicScreen();
+      expect(calls.last, {'action': 'display_compact', 'value': null});
+      expect(controller.state.musicDisplayStyle, MusicDisplayStyle.compact);
+      expect(controller.state.effectiveMusicScreen, MusicScreen.hidden);
+      expect(controller.state.musicActive, isTrue);
+    });
+
+    test('a stale push racing a local change does not flip it back', () {
+      final controller = _controller([]);
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_withStyle(_musicJson, 'compact'));
+      controller.expandMusic();
+      // A tick stamped before the Core applied the change.
+      controller.applyMusicPush(_withStyle(_musicJson, 'compact'));
+      expect(controller.state.musicDisplayStyle, MusicDisplayStyle.fullscreen);
+      // The Core agrees → the guard clears, and later changes from elsewhere apply.
+      controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+      controller.applyMusicPush(_withStyle(_musicJson, 'compact'));
+      expect(controller.state.musicDisplayStyle, MusicDisplayStyle.compact);
+    });
+
+    test(
+      'nobody present: the full-screen preference yields to the away face',
+      () async {
+        final engine = StreamController<WakeWordEvent>.broadcast();
+        final controller = AssistantController(
+          config: _cfg(),
+          startEngine: (_) => engine.stream,
+        )..start();
+        addTearDown(controller.dispose);
+        controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+        expect(controller.state.effectiveMusicScreen, MusicScreen.nowPlaying);
+
+        engine.add(wakeEvent(WakeWordEventKind.presence)); // present: false
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.effectiveMusicScreen, MusicScreen.hidden);
+        expect(controller.state.screenAwake, isFalse);
+      },
+    );
+
+    test(
+      'a Core screen wins, and full screen returns when it closes',
+      () async {
+        final engine = StreamController<WakeWordEvent>.broadcast();
+        final controller = AssistantController(
+          config: _cfg(),
+          startEngine: (_) => engine.stream,
+        )..start();
+        addTearDown(controller.dispose);
+        controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+
+        engine.add(
+          wakeEvent(
+            WakeWordEventKind.showPlace,
+            placeJson: '{"name":"Blue Bottle","address":"1 Main St"}',
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.effectiveMusicScreen, MusicScreen.hidden);
+
+        engine.add(wakeEvent(WakeWordEventKind.dismissPlace));
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.effectiveMusicScreen, MusicScreen.nowPlaying);
+      },
+    );
+
+    test(
+      'voice fullscreen/compact switch the style without re-persisting',
+      () async {
+        final calls = <Map<String, Object?>>[];
+        final engine = StreamController<WakeWordEvent>.broadcast();
+        final controller = AssistantController(
+          config: _cfg(),
+          startEngine: (_) => engine.stream,
+          musicControl: ({required String action, int? value}) =>
+              calls.add({'action': action, 'value': value}),
+        )..start();
+        addTearDown(controller.dispose);
+        controller.applyMusicPush(_musicJson);
+
+        engine.add(_musicScreenEvent('fullscreen'));
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.effectiveMusicScreen, MusicScreen.nowPlaying);
+
+        engine.add(_musicScreenEvent('compact'));
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.effectiveMusicScreen, MusicScreen.hidden);
+        // The Core already stored it (the voice tool), so nothing is sent back.
+        expect(calls, isEmpty);
+      },
+    );
+
+    test('the full-screen preference pushes music display context', () {
+      final ctx = <String>[];
+      final controller = AssistantController(
+        config: _cfg(),
+        setMusicContext:
+            ({
+              required bool active,
+              required bool playing,
+              required String title,
+              required String artist,
+              required String screen,
+            }) => ctx.add(screen),
+      );
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+      expect(ctx, ['now_playing']);
+      // An identical refresh doesn't re-send.
+      controller.applyMusicPush(_withStyle(_musicJson, 'fullscreen'));
+      expect(ctx, ['now_playing']);
+      controller.applyMusicPush('');
+      expect(ctx, ['now_playing', 'hidden']);
     });
   });
 }

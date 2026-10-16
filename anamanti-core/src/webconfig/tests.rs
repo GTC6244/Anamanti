@@ -362,6 +362,31 @@ async fn music_status_reports_disabled_without_a_hub() {
 }
 
 #[test]
+fn music_display_style_reads_saves_and_rejects_unknown() {
+    let s = settings();
+    let (_st, _c, body) = route("GET", "/music/display.json", b"", &s);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["style"], "compact");
+
+    let out = post(&s, "/music/display", br#"{"style":"fullscreen"}"#);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["style"], "fullscreen");
+    assert_eq!(
+        s.music_display_style(),
+        crate::music::MusicDisplayStyle::Fullscreen
+    );
+
+    let out = post(&s, "/music/display", br#"{"style":"sideways"}"#);
+    assert!(out.contains("\"ok\":false"), "{out}");
+    assert_eq!(
+        s.music_display_style(),
+        crate::music::MusicDisplayStyle::Fullscreen,
+        "a bad value leaves the preference alone"
+    );
+}
+
+#[test]
 fn get_config_reports_current_backend() {
     let (status, ctype, body) = route("GET", "/config?_=1", b"", &settings());
     assert_eq!(status, "200 OK");
@@ -1551,6 +1576,29 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
         JSON,
     ),
     ("POST", "/music/stopweb", "{}", "200 OK", JSON),
+    (
+        "POST",
+        "/music/volume",
+        r#"{"client":"a","volume":50}"#,
+        "200 OK",
+        JSON,
+    ),
+    ("GET", "/music/nowplaying.json", "", "200 OK", JSON),
+    ("GET", "/music/display.json", "", "200 OK", JSON),
+    (
+        "POST",
+        "/music/display",
+        r#"{"style":"fullscreen"}"#,
+        "200 OK",
+        JSON,
+    ),
+    (
+        "POST",
+        "/music/transport",
+        r#"{"action":"pause"}"#,
+        "200 OK",
+        JSON,
+    ),
     ("POST", "/music/startall", "{}", "200 OK", JSON),
     ("POST", "/music/stopall", "{}", "200 OK", JSON),
     ("POST", "/drive/save", "{}", "200 OK", JSON),
@@ -1605,6 +1653,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/drive/save", "not json", "200 OK", JSON),
     ("POST", "/spotify/save", "not json", "200 OK", JSON),
     ("POST", "/radio/save", "not json", "200 OK", JSON),
+    ("POST", "/music/display", "not json", "200 OK", JSON),
     ("POST", "/radio/lookup", "not json", "200 OK", JSON),
     ("POST", "/radio/play", "not json", "200 OK", JSON),
     ("POST", "/cadora/save", "not json", "200 OK", JSON),

@@ -96,6 +96,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             system1: anamanti_core::settings::System1Runtime::default(),
             personality: anamanti_core::settings::Personality::default(),
             pronunciations: Vec::new(),
+            music_display_style: Default::default(),
             radio: Default::default(),
         },
     );

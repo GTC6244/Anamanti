@@ -184,7 +184,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
   records provenance (`said_by_speaker_id`, resolution, confidence, `turn_id`). A
   **read-only short-clip match** (`speaker.min_identify_ms`, default 600 ms, plus
   `short_clip_margin`) identifies short questions like "who am I?" without creating or
-  updating voiceprints. The prompt's identity line comes from the **voiceprint name**
+  updating voiceprints. Matching is also **household-relative**: each score is compared
+  with the closest *other named* voiceprint (anonymous clusters are not rivals — they are
+  often fragments of a known voice). A match that barely leads another person
+  (`speaker.min_margin`, 0.05) is only tentative and trains nobody; a tentative-band match
+  to a named person that leads every other named person by `speaker.clear_margin` (0.20;
+  needs ≥ 2 named people; `0` disables) is identified without training the voiceprint. The
+  lead is logged per turn (`speaker_margin` in the chat log). The prompt's identity line comes from the **voiceprint name**
   (reconciled to the household roster's spelling — "Christina" → *Kristina*), never from
   memory text; "who am I?" is a deterministic fast path; "my name is X" only names an
   identified, still-anonymous voiceprint with the roster spelling (`speakers.name_source`
@@ -751,6 +757,16 @@ mDNS + `instance_id` pin the voice path uses):
   `audio-start` when a music screen is open, and the Core's `music_screen` rig tool emits a
   `DeviceAction::MusicScreen` relayed as an `anamanti-music` `screen` frame on the per-turn
   socket (show now-playing / up-next / close). Playback transport stays on `spotify_control`.
+- **Music display style** ([`MusicDisplayStylePlan.md`](./MusicDisplayStylePlan.md)): which
+  widget shows while music plays (compact bar / full screen) is a Core-owned, persisted
+  preference (`SharedSettings::music_display_style`) stamped as `display_style` on every
+  `now_playing` push, so all displays follow it for Spotify and radio alike. It is set from
+  the config page or the display's expand/minimize button (`anamanti-music-control`
+  `display_fullscreen`/`display_compact` → `NowPlayingService::set_display_style`, which
+  persists and re-pushes at once), or by voice (`music_screen` `fullscreen`/`compact` →
+  `DeviceAction::MusicDisplayStyle`: persisted Core-side **and** relayed as a `screen`
+  frame). The device resolves what's on screen in `AssistantState.effectiveMusicScreen`
+  (Core mode > explicit view > style, the style only while someone is present).
 - **Internet radio** ([`RadioPlan.md`](./RadioPlan.md)) rides the same push. A curated
   station catalog (settings overlay `radio.stations`, edited on Music & Devices) is played
   by the existing mpv web player into the snapserver `Web` stream; the Core's
@@ -1145,8 +1161,10 @@ so they are answered **before** System-1, memory recall and the LLM
 - **Music (planned, pre-implementation):** house-wide music is a **Mac-hosted,
   Snapcast-routed** capability that is deliberately **separate from the Wyoming/TTS
   audio path and the device's cpal/oboe path** — music PCM never enters
-  `anamanti_core`. Sources (librespot + web-URL player) write raw PCM to
-  snapfifos on the Mac; snapserver (on the Mac) fans out to snapclient speakers;
+  `anamanti_core`. Sources (librespot + the idle mpv web-URL player) are **launched by snapserver**
+  (`librespot://` / `process://` sources reading their stdout — named snapfifos stall
+  on macOS, see `deploy/snapcast/snapserver.conf`); snapserver (on the Mac) fans out to
+  snapclient speakers;
   the Anamanti Core only controls (Web API / mpv IPC / snapserver JSON-RPC ducking).
   Design → [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (transport) +
   [`MusicPlan.md`](./MusicPlan.md) (Spotify source + control plane).

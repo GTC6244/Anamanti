@@ -321,7 +321,12 @@ async fn run() -> Result<()> {
     // failure disables the page but never stops the orchestrator.
     // The Music tab's control hub (process supervisor + snapserver/mpv control),
     // shared into the config page. `None` when music is disabled in the config file.
-    let music_hub = config.build_hub();
+    // House-wide music routing (Snapcast) control plane. Dormant unless music is
+    // enabled in the config file; when on, the ducker lowers the music group's volume
+    // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
+    // One instance, shared by the turn pipeline and the hub (manual volume changes).
+    let music_ducker = config.build_ducker();
+    let music_hub = config.build_hub(music_ducker.clone());
 
     // Proactive-notification registry (Approach A): shared by the device-facing
     // server (which registers each device's persistent notify channel) and the
@@ -370,12 +375,7 @@ async fn run() -> Result<()> {
             config.music.nowplaying_refresh().as_secs(),
         );
     }
-    // House-wide music routing (Snapcast) control plane. Dormant unless music is
-    // enabled in the config file; when on, the ducker lowers the music group's volume
-    // while the assistant speaks. Best-effort — a missing snapserver never breaks a turn.
-    let ducker = config
-        .build_ducker()
-        .map(|d| d as Arc<dyn anamanti_core::server::Ducker>);
+    let ducker = music_ducker.map(|d| d as Arc<dyn anamanti_core::server::Ducker>);
 
     // Every shared service handle, built once: the device server, its control protocol
     // and the config page all share this one `Arc`.
@@ -449,7 +449,7 @@ async fn run() -> Result<()> {
     // the orchestrator lifecycle, when enabled. The Music tab's buttons still work.
     if let Some(hub) = &music_hub {
         if config.music.autostart {
-            log::info!("music: auto-starting managed processes (snapserver, librespot, mpv)");
+            log::info!("music: auto-starting managed music processes");
             hub.start_all().await;
         }
     }

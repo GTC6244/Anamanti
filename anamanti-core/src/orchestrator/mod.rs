@@ -488,10 +488,14 @@ impl Pipeline {
         let speaker = self.identify_speaker(&voiced_pcm).await;
         let speaker = self.with_follow_up_continuity(speaker, ctx.followup_depth);
         log::info!(
-            "speaker: {} {} ({:.2}{}{})",
+            "speaker: {} {} ({:.2}{}{}{})",
             speaker.speaker_id,
             speaker.resolution.as_str(),
             speaker.confidence,
+            speaker
+                .margin
+                .map(|m| format!(", lead {m:+.2}"))
+                .unwrap_or_default(),
             if speaker.short_clip {
                 ", short clip"
             } else {
@@ -997,6 +1001,7 @@ impl Pipeline {
             speaker_name: speaker.name.clone(),
             speaker_resolution: Some(speaker.resolution.as_str().to_string()),
             speaker_confidence: Some(speaker.confidence),
+            speaker_margin: speaker.margin,
             speaker_inherited: speaker.inherited,
             speaker_short_clip: speaker.short_clip,
             timing: Some(timing),

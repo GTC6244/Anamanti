@@ -57,6 +57,19 @@ impl From<AudioFormat> for protocol::AudioFormat {
     }
 }
 
+/// Upper bound on dialing the Core. Without it a dial to an unreachable host (the
+/// Mac asleep, a stale cached address) waits out the OS SYN retries (~1–2 min),
+/// holding the turn — and so the engine's raised in-turn wake-word threshold —
+/// for that whole time.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on any single frame write. A peer that stops reading (but keeps the
+/// socket open) fills the TCP send buffer and parks the write forever; because the
+/// write runs inside `run_turn`'s `select!` arm, the idle watchdog can't preempt it,
+/// so the turn — and the raised in-turn threshold — would be stuck. A timed-out
+/// write aborts the turn (the socket is dropped, so a partial frame is harmless).
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A live Wyoming connection: buffered reader + writer halves plus the PCM format
 /// for outgoing audio frames. Generic over the IO so it works with a real
 /// `TcpStream` in production and a duplex pipe in tests.
@@ -64,6 +77,8 @@ pub struct WyomingConnection<R, W> {
     reader: R,
     writer: W,
     format: AudioFormat,
+    /// Per-write deadline ([`WRITE_TIMEOUT`] by default; shortened in tests).
+    write_timeout: Duration,
     timestamp_ms: u64,
     /// Follow-up chain depth to stamp on this turn's `audio-start` (0 = an ordinary
     /// wake-word turn; >0 = the device auto-opened this turn after a reply, so the
@@ -98,9 +113,12 @@ impl WyomingConnection<BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tc
     /// set so the tiny newline-delimited control frames flush immediately rather
     /// than waiting on Nagle's algorithm.
     pub async fn connect(endpoint: &WyomingEndpoint, format: AudioFormat) -> Result<Self> {
-        let stream = TcpStream::connect(endpoint.socket_addr())
-            .await
-            .with_context(|| format!("dialing Wyoming host {endpoint}"))?;
+        let stream =
+            tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint.socket_addr()))
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out after {CONNECT_TIMEOUT:?}"))
+                .and_then(|r| r.map_err(anyhow::Error::from))
+                .with_context(|| format!("dialing Wyoming host {endpoint}"))?;
         stream.set_nodelay(true).ok();
         let (read_half, write_half) = stream.into_split();
         Ok(Self::from_halves(
@@ -122,6 +140,7 @@ where
             reader,
             writer,
             format,
+            write_timeout: WRITE_TIMEOUT,
             timestamp_ms: 0,
             followup_depth: 0,
             followup_wait_secs: 0,
@@ -129,6 +148,29 @@ where
             timer_context: None,
             font_context: None,
         }
+    }
+
+    /// Override the per-write deadline (tests use a short one).
+    #[cfg(test)]
+    fn set_write_timeout(&mut self, timeout: Duration) {
+        self.write_timeout = timeout;
+    }
+
+    /// Write one frame, bounded by [`Self::write_timeout`] (see [`WRITE_TIMEOUT`]).
+    async fn write(&mut self, ev: &WyomingEvent, what: &'static str) -> Result<()> {
+        tokio::time::timeout(
+            self.write_timeout,
+            protocol::write_event(&mut self.writer, ev),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "timed out after {:?} (peer not reading)",
+                self.write_timeout
+            )
+        })
+        .and_then(|r| r.map_err(anyhow::Error::from))
+        .context(what)
     }
 
     /// Set the display context stamped on this turn's `audio-start` (in the `screen`
@@ -196,9 +238,7 @@ where
                 map.insert("screen".into(), serde_json::Value::Object(screen));
             }
         }
-        protocol::write_event(&mut self.writer, &ev)
-            .await
-            .context("sending audio-start")
+        self.write(&ev, "sending audio-start").await
     }
 
     /// Send one `audio-chunk` carrying `samples` as little-endian `i16` PCM. The
@@ -213,26 +253,21 @@ where
         // Advance the running timestamp by this chunk's wall-clock duration (ms).
         let frames = samples.len() as u64 / self.format.channels.max(1) as u64;
         self.timestamp_ms += frames * 1000 / self.format.rate.max(1) as u64;
-        protocol::write_event(&mut self.writer, &ev)
-            .await
-            .context("sending audio-chunk")
+        self.write(&ev, "sending audio-chunk").await
     }
 
     /// Send the `audio-stop` footer that ends the outbound audio stream.
     pub async fn send_audio_stop(&mut self) -> Result<()> {
         let ev = WyomingEvent::audio_stop(self.timestamp_ms);
-        protocol::write_event(&mut self.writer, &ev)
-            .await
-            .context("sending audio-stop")
+        self.write(&ev, "sending audio-stop").await
     }
 
     /// Send an `anamanti-interrupt` (barge-in) frame so the orchestrator aborts the
     /// in-flight reply's LLM generation + TTS at once, rather than only noticing
     /// when the socket is torn down.
     pub async fn send_interrupt(&mut self) -> Result<()> {
-        protocol::write_event(&mut self.writer, &WyomingEvent::interrupt())
+        self.write(&WyomingEvent::interrupt(), "sending interrupt")
             .await
-            .context("sending interrupt")
     }
 
     /// Read the next event from the server, or `None` on a clean close.
@@ -1010,5 +1045,47 @@ mod tests {
         assert_eq!(updates.last(), Some(&TurnUpdate::Finished));
         drop(conn);
         let _ = server.await;
+    }
+
+    /// A peer that keeps the socket open but stops reading fills the send buffer.
+    /// Previously the blocked `send_chunk` (inside the `select!` arm) also starved the
+    /// idle watchdog, so the turn — and the engine's raised in-turn wake-word
+    /// threshold — stuck indefinitely. The per-write deadline must abort the turn.
+    #[tokio::test]
+    async fn run_turn_aborts_when_peer_stops_reading() {
+        // A tiny pipe whose server end is held but never read: writes soon block.
+        let (client_io, _server_io) = tokio::io::duplex(256);
+        let (cr, cw) = tokio::io::split(client_io);
+        let mut conn =
+            WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default());
+        conn.set_write_timeout(Duration::from_millis(50));
+
+        let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(8);
+        let (_int_tx, int_rx) = mpsc::channel::<()>(1);
+        // Keep feeding PCM so the turn has something to (try to) stream.
+        let feeder =
+            tokio::spawn(async move { while pcm_tx.send(vec![0i16; 1024]).await.is_ok() {} });
+
+        // Long idle watchdog: only the write deadline can end this turn in time.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_turn(
+                &mut conn,
+                pcm_rx,
+                |_| {},
+                |_, _| {},
+                int_rx,
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("run_turn must not hang on a peer that stopped reading");
+
+        let err = result.expect_err("a stalled write should abort the turn");
+        assert!(
+            format!("{err:#}").contains("timed out"),
+            "unexpected error: {err:#}"
+        );
+        feeder.abort();
     }
 }

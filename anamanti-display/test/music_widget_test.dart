@@ -426,5 +426,48 @@ void main() {
       expect(opened, isTrue);
       expect(volume, 35); // 40 - 5 step
     });
+
+    testWidgets(
+      'the full-screen button shows only with onExpand and fires it',
+      (tester) async {
+        final music = MusicData.tryParse(_musicJson)!;
+        Widget overlay({VoidCallback? onExpand}) => MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: MusicControlOverlay(
+                music: music,
+                onPlayPause: () {},
+                onNext: () {},
+                onPrevious: () {},
+                onVolume: (_) {},
+                onExpand: onExpand,
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(overlay());
+        expect(find.byKey(const Key('music-overlay-fullscreen')), findsNothing);
+
+        var expanded = false;
+        await tester.pumpWidget(overlay(onExpand: () => expanded = true));
+        await tester.tap(find.byKey(const Key('music-overlay-fullscreen')));
+        expect(expanded, isTrue);
+      },
+    );
+  });
+
+  group('MusicData display style', () {
+    test('parses display_style and tolerates absence / junk', () {
+      MusicDisplayStyle? styleOf(String extra) =>
+          MusicData.tryParse('{"track_title":"x"$extra}')!.displayStyle;
+      expect(
+        styleOf(',"display_style":"fullscreen"'),
+        MusicDisplayStyle.fullscreen,
+      );
+      expect(styleOf(',"display_style":"compact"'), MusicDisplayStyle.compact);
+      expect(styleOf(''), isNull);
+      expect(styleOf(',"display_style":"sideways"'), isNull);
+    });
   });
 }

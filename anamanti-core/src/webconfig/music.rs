@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use super::{fail, keep_or_set, parse_json_body};
-use crate::music::{ManagedProc, MusicHub, NowPlayingService, RadioCatalog};
+use crate::music::{ManagedProc, MusicDisplayStyle, MusicHub, NowPlayingService, RadioCatalog};
 use crate::settings::{SharedSettings, SpotifyUpdate};
 
 const MUSIC_DISABLED: &str = "music routing is disabled";
@@ -115,6 +115,39 @@ pub(super) async fn music_stopweb_json(music: Option<&MusicHub>) -> String {
         return fail(NO_MPV);
     };
     done(mpv.stop().await)
+}
+
+/// `POST /music/volume` — body `{ client, volume?, muted? }` sets one snapclient's
+/// volume (0–100) and/or mute. Replies `{ ok, deferred }`: `deferred` means the
+/// assistant is speaking (music ducked) and the new level applies when it finishes.
+pub(super) async fn music_volume_json(music: Option<&MusicHub>, body: &[u8]) -> String {
+    let Some(hub) = music else {
+        return fail(MUSIC_DISABLED);
+    };
+    let data = match parse_json_body(body) {
+        Ok(v) => v,
+        Err(invalid) => return invalid,
+    };
+    let client = data
+        .get("client")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if client.is_empty() {
+        return fail("missing client");
+    }
+    let percent = data
+        .get("volume")
+        .and_then(Value::as_f64)
+        .map(|v| v.round().clamp(0.0, 100.0) as u8);
+    let muted = data.get("muted").and_then(Value::as_bool);
+    if percent.is_none() && muted.is_none() {
+        return fail("nothing to set (volume or muted)");
+    }
+    match hub.set_client_volume(client, percent, muted).await {
+        Ok(deferred) => json!({ "ok": true, "deferred": deferred }).to_string(),
+        Err(e) => fail(format!("{e:#}")),
+    }
 }
 
 /// `POST /music/startall` — start all managed processes (skips a snapserver that is
@@ -264,6 +297,47 @@ pub(super) async fn radio_lookup_json(body: &[u8]) -> String {
     }
 }
 
+/// `GET /music/nowplaying.json` — what is audible right now (the radio when a station
+/// is on, else Spotify), read on demand for the Music page's now-playing strip:
+/// `{ ok, linked, radio, now_playing }` where `now_playing` is the same snapshot the
+/// display's music screen receives, or `null` when nothing is loaded.
+pub(super) async fn music_nowplaying_json(
+    settings: &SharedSettings,
+    now_playing: &NowPlayingService,
+) -> String {
+    let linked = now_playing.controller(settings).is_some();
+    let radio = now_playing.radio().is_some();
+    match now_playing.current(settings).await {
+        Ok(np) => {
+            json!({ "ok": true, "linked": linked, "radio": radio, "now_playing": np }).to_string()
+        }
+        Err(e) => fail(format!("{e:#}")),
+    }
+}
+
+/// `POST /music/transport` — body `{ action, value? }` (`pause`/`resume`/`next`/
+/// `previous`/`volume` + 0–100). The same path as the display's on-screen controls:
+/// it drives the radio while a station is on, else Spotify.
+pub(super) async fn music_transport_json(
+    settings: &SharedSettings,
+    now_playing: &NowPlayingService,
+    body: &[u8],
+) -> String {
+    let data = match parse_json_body(body) {
+        Ok(v) => v,
+        Err(invalid) => return invalid,
+    };
+    let action = data.get("action").and_then(Value::as_str).unwrap_or("");
+    let value = data
+        .get("value")
+        .and_then(Value::as_f64)
+        .map(|v| v.round() as i64);
+    match now_playing.transport(settings, action, value).await {
+        Ok(msg) => json!({ "ok": true, "message": msg }).to_string(),
+        Err(e) => fail(format!("{e:#}")),
+    }
+}
+
 /// `POST /radio/play` — body `{ id }`: play that station on the house speakers
 /// (pausing Spotify first, best-effort).
 pub(super) async fn radio_play_json(
@@ -296,4 +370,29 @@ pub(super) async fn radio_stop_json(settings: &SharedSettings) -> String {
         Ok(msg) => json!({ "ok": true, "message": msg, "current": null }).to_string(),
         Err(e) => fail(format!("{e:#}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Display style (compact bar / full-screen now-playing)
+// ---------------------------------------------------------------------------
+
+/// `GET /music/display.json` — `{ ok, style }`: which music widget the displays show
+/// while Spotify or the radio plays (`"compact"` / `"fullscreen"`).
+pub(super) fn music_display_json(settings: &SharedSettings) -> String {
+    json!({ "ok": true, "style": settings.music_display_style().as_str() }).to_string()
+}
+
+/// `POST /music/display` — body `{ style }`: set the music-widget preference, persist it,
+/// and re-push now-playing so every connected display switches at once.
+pub(super) fn music_display_save_json(
+    settings: &SharedSettings,
+    now_playing: &NowPlayingService,
+    data: &Value,
+) -> String {
+    let raw = data.get("style").and_then(Value::as_str).unwrap_or("");
+    let Some(style) = MusicDisplayStyle::parse(raw) else {
+        return fail(format!("unknown style {raw:?} (use compact or fullscreen)"));
+    };
+    let pushed = now_playing.set_display_style(settings, style);
+    json!({ "ok": true, "style": style.as_str(), "pushed": pushed }).to_string()
 }
