@@ -37,6 +37,10 @@ pub struct RecallResult {
     /// The subset of `hits` that are **household** facts (true for everyone) rather
     /// than the reader's own — the prompt presents the two separately.
     pub household: Vec<String>,
+    /// The subset of `hits` that are past conversation **turns** (`"{transcript}\n{reply}"`
+    /// from the Helix `Turn` nodes) rather than durable facts. The prompt shows them as
+    /// earlier exchanges — context, not facts about the person and not replies to copy.
+    pub turns: Vec<String>,
     /// Query-embedding round-trip latency in ms (GraphRAG only; the OpenAI call).
     pub embed_ms: Option<u64>,
     /// Local vector KNN + graph-expansion latency in ms (GraphRAG only).
@@ -196,7 +200,7 @@ impl Recall for HelixRecall {
         let qvec = self.embedder.embed_query(transcript).await?;
         let embed_ms = t0.elapsed().as_millis() as u64;
         let t1 = Instant::now();
-        let (hits, household) = self
+        let (hits, household, turns) = self
             .helix
             .recall_scoped(qvec, speaker_id, self.k, limit)
             .await?;
@@ -204,6 +208,7 @@ impl Recall for HelixRecall {
         Ok(RecallResult {
             hits,
             household,
+            turns,
             embed_ms: Some(embed_ms),
             search_ms: Some(search_ms),
         })

@@ -395,6 +395,23 @@ const NON_ANSWER_MARKERS: &[&str] = &[
     "i'm not able to find",
     "i am not able to find",
     "i don't have that",
+    // Refusals / capability deflections ("telling stories isn't really my thing — I can
+    // play music, check the weather…"). Stored, these were recalled verbatim and the
+    // model repeated the refusal word for word on every later ask.
+    "i can't do that",
+    "i cannot do that",
+    "i'm not able to",
+    "i am not able to",
+    "i'm unable to",
+    "i am unable to",
+    "isn't really my thing",
+    "not really my thing",
+    "isn't one of my strengths",
+    "isn't something i can",
+    "not something i can do",
+    "i don't have a tool",
+    "i don't have the ability",
+    "something i can actually do",
 ];
 
 /// Whether a reply reads as a non-answer (see [`NON_ANSWER_MARKERS`]).
@@ -464,6 +481,32 @@ mod tests {
                 !is_non_answer(reply),
                 "should keep as a real answer: {reply}"
             );
+        }
+    }
+
+    #[test]
+    fn flags_refusals_and_capability_deflections() {
+        for reply in [
+            "I can help with lots of things around the house\u{2014}play music, check the \
+             weather, look up recipes, control lights, set timers, and more. But telling \
+             stories isn't really my thing. Is there something I can actually do for you?",
+            "I don't have a tool to tell stories, so I can't do that for you.",
+            "Storytelling isn't one of my strengths, so I redirect to what I can do well.",
+            "Sorry, I\u{2019}m not able to write poems.",
+            "I'm unable to help with that.",
+        ] {
+            assert!(is_non_answer(reply), "should flag as non-answer: {reply}");
+        }
+    }
+
+    #[test]
+    fn keeps_stories_and_jokes() {
+        for reply in [
+            "Once upon a time, a young dolphin named Pip raced the tide to the reef.",
+            "Why did the dolphin cross the bay? To get to the other tide.",
+            "Dolphins sleep with one half of their brain at a time.",
+        ] {
+            assert!(!is_non_answer(reply), "should keep: {reply}");
         }
     }
 

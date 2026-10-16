@@ -75,10 +75,18 @@ fn resolve_home_address(
 }
 
 /// Default persona/system prompt: concise, speakable replies for an ambient
-/// display. Kept short because the reply is spoken aloud via Piper.
+/// display. Kept short because the reply is spoken aloud via Piper. It explicitly
+/// allows open-ended requests (stories, jokes, explanations): with a tool-heavy
+/// preamble and no such line, the model concluded it was a tools-only assistant and
+/// refused "tell me a story" with a list of its tools.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a friendly, concise voice assistant for a home \
-ambient display. Answer in one or two short spoken sentences. Do not use markdown, lists, or \
-emoji. If you don't know, say so briefly.";
+ambient display. Your replies are spoken aloud, so do not use markdown, lists, or emoji. Keep \
+ordinary answers to one or two short sentences. You are also a general conversational \
+assistant: answer general-knowledge questions, tell stories, jokes, or poems, explain things, \
+and chat directly from your own knowledge — a story or explanation may run a short spoken \
+paragraph. Tools are only for actions and live information; never refuse a request just \
+because no tool covers it, and do not list your features unless asked what you can do. If \
+you don't know a fact, say so briefly.";
 
 /// Which LLM backend the pipeline should use.
 #[derive(Debug, Clone)]

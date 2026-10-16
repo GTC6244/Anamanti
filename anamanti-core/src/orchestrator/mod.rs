@@ -719,7 +719,8 @@ impl Pipeline {
                 crate::memory::RecallResult::default()
             });
         let recall_ms = recall_start.elapsed().as_millis() as u64;
-        let memory = prompt::RecalledMemory::split(&recalled.hits, &recalled.household);
+        let memory =
+            prompt::RecalledMemory::split(&recalled.hits, &recalled.household, &recalled.turns);
         let context_chars = memory.chars();
         ctx.timing.recall_ms = Some(recall_ms);
         // Record which backend actually answered (the boot fallback is silent, so this

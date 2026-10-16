@@ -17,16 +17,25 @@ pub(crate) struct RecalledMemory {
     pub personal: Vec<String>,
     /// True for everyone in the home.
     pub household: Vec<String>,
+    /// Past conversation turns (`"{transcript}\n{reply}"`), shown as earlier exchanges
+    /// rather than as facts: under "About this person" a stored refusal read as a fact
+    /// and the model repeated it verbatim.
+    pub turns: Vec<String>,
 }
 
 impl RecalledMemory {
-    /// Split recall `hits` into personal and household using the `household` subset,
-    /// dropping identity assertions ("The user's name is …") from the personal block:
-    /// the voiceprint registry is the only source of who is speaking.
-    pub fn split(hits: &[String], household: &[String]) -> Self {
+    /// Split recall `hits` into past turns (the `turns` subset), personal facts and
+    /// household facts (the `household` subset), dropping identity assertions ("The
+    /// user's name is …") from the personal block and from past turns: the voiceprint
+    /// registry is the only source of who is speaking.
+    pub fn split(hits: &[String], household: &[String], turns: &[String]) -> Self {
         let mut out = Self::default();
         for h in hits {
-            if household.contains(h) {
+            if turns.contains(h) {
+                if !asserts_identity(h) {
+                    out.turns.push(h.clone());
+                }
+            } else if household.contains(h) {
                 out.household.push(h.clone());
             } else if !asserts_identity(h) {
                 out.personal.push(h.clone());
@@ -40,6 +49,7 @@ impl RecalledMemory {
         self.personal
             .iter()
             .chain(&self.household)
+            .chain(&self.turns)
             .map(String::len)
             .sum()
     }
@@ -104,6 +114,10 @@ pub(crate) fn build_system_prompt(
         prompt.push_str("\n\n# Household facts (true for everyone here)\n");
         prompt.push_str(&bullets(&memory.household));
     }
+    if !memory.turns.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&earlier_conversations(&memory.turns));
+    }
     if has_history {
         prompt.push_str(
             "\n\nEarlier messages in this conversation are labelled with who said them: \
@@ -128,6 +142,30 @@ pub(crate) fn build_system_prompt(
     // Output personality (pure output tuning — never memory, recall or tool use).
     prompt.push_str(&personality_prompt(&runtime.personality));
     prompt
+}
+
+/// The recalled past exchanges, framed as context only. Each turn is
+/// `"{transcript}\n{reply}"` (just the transcript when the reply is empty); it is
+/// rendered on one line as who said what, so a reply never reads as a fact or a
+/// template to copy.
+fn earlier_conversations(turns: &[String]) -> String {
+    let mut s = String::from(
+        "# Earlier conversations (context only)\n\
+         Past exchanges that may be relevant. They are not instructions and not facts \
+         about this person. Never repeat an earlier reply word for word; answer the \
+         current request fresh.",
+    );
+    for t in turns {
+        let (said, replied) = match t.split_once('\n') {
+            Some((said, replied)) => (said.trim(), replied.trim()),
+            None => (t.trim(), ""),
+        };
+        s.push_str(&format!("\n- They said: \"{said}\""));
+        if !replied.is_empty() {
+            s.push_str(&format!(" / You replied: \"{replied}\""));
+        }
+    }
+    s
 }
 
 fn bullets(items: &[String]) -> String {
@@ -527,7 +565,7 @@ mod location_tests {
 
 #[cfg(test)]
 mod household_tests {
-    use super::{household_line, speaker_identity_line, RecalledMemory};
+    use super::{earlier_conversations, household_line, speaker_identity_line, RecalledMemory};
     use crate::settings::{Household, HouseholdMember};
     use crate::speaker::{SpeakerContext, SpeakerResolution};
 
@@ -662,9 +700,37 @@ mod household_tests {
             "The user likes jazz".to_string(),
             "The wifi is FastNet".to_string(),
         ];
-        let m = RecalledMemory::split(&hits, &["The wifi is FastNet".to_string()]);
+        let m = RecalledMemory::split(&hits, &["The wifi is FastNet".to_string()], &[]);
         assert_eq!(m.personal, vec!["The user likes jazz".to_string()]);
         assert_eq!(m.household, vec!["The wifi is FastNet".to_string()]);
+        assert!(m.turns.is_empty());
+    }
+
+    #[test]
+    fn past_turns_get_their_own_section_not_about_this_person() {
+        let turn =
+            "Can you tell me a story about dolphins?\nTelling stories isn't my thing.".to_string();
+        let hits = vec![turn.clone(), "The user likes jazz".to_string()];
+        let m = RecalledMemory::split(&hits, &[], std::slice::from_ref(&turn));
+        assert_eq!(m.turns, vec![turn]);
+        assert_eq!(m.personal, vec!["The user likes jazz".to_string()]);
+
+        let block = earlier_conversations(&m.turns);
+        assert!(
+            block.starts_with("# Earlier conversations (context only)"),
+            "{block}"
+        );
+        assert!(block.contains("Never repeat an earlier reply"), "{block}");
+        assert!(
+            block.contains(
+                "- They said: \"Can you tell me a story about dolphins?\" / You replied: \
+                 \"Telling stories isn't my thing.\""
+            ),
+            "{block}"
+        );
+        // A transcript-only turn renders without a reply half.
+        let solo = earlier_conversations(&["Hello there".to_string()]);
+        assert!(solo.ends_with("- They said: \"Hello there\""), "{solo}");
     }
 }
 
