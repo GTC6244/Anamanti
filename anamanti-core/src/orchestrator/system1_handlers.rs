@@ -129,6 +129,7 @@ impl Pipeline {
             Intent::Time | Intent::Date => Some(FastReply::say(spoken_clock_reply(intent))),
             Intent::TimerCancel => timer_cancel_reply(&ctx.device_ctx),
             Intent::TimerQuery => timer_query_reply(&ctx.device_ctx),
+            Intent::TimerAdjust => timer_adjust_reply(transcript, &ctx.device_ctx),
             Intent::WeatherDismiss | Intent::RecipeDismiss | Intent::PlaceDismiss => {
                 screen_dismiss_reply(intent, &ctx.device_ctx)
             }
@@ -244,6 +245,36 @@ fn timer_query_reply(device_ctx: &DeviceContext) -> Option<FastReply> {
     ))
 }
 
+/// The System-1 `timer_adjust` fast path: add or remove time on the running timer.
+/// **Preconditions (ground truth):** exactly one timer is running (so a bare, unlabeled
+/// "add five minutes" is unambiguous — with zero or several running, or a labeled
+/// request, defer to System-2's `adjust_timer` tool), and the transcript carries an
+/// unambiguous signed delta ([`parse_timer_adjust`]). The signed magnitude is clamped to
+/// the shared cap so the delta can't overflow the device's deadline math.
+fn timer_adjust_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<FastReply> {
+    if device_ctx.timers.running != 1 {
+        return None; // nothing to adjust, or ambiguous which timer → defer
+    }
+    let delta = crate::system1::parse_timer_adjust(transcript)?; // unclear → defer
+    let magnitude = delta.unsigned_abs().min(MAX_TIMER_SECS);
+    if magnitude == 0 {
+        return None;
+    }
+    let (delta_secs, verb, preposition) = if delta < 0 {
+        (-(magnitude as i64), "Took", "off")
+    } else {
+        (magnitude as i64, "Added", "to")
+    };
+    let text = format!(
+        "{verb} {} {preposition} your timer.",
+        human_duration(magnitude)
+    );
+    Some(FastReply::say(text).with_action(DeviceAction::AdjustTimer {
+        label: None,
+        delta_secs,
+    }))
+}
+
 /// The System-1 `weather_dismiss` / `recipe_dismiss` / `place_dismiss` fast path: close
 /// the named screen and give a brief ack. **Precondition:** that screen must actually be
 /// the foreground widget (ground truth from `device_ctx`), else defer — "close the
@@ -357,6 +388,38 @@ mod tests {
         assert!(timer_reply("set a timer for 10 minutes").is_some());
         assert!(timer_reply("set a timer for 25 hours").is_none());
         assert!(timer_reply("set a timer").is_none());
+    }
+
+    #[test]
+    fn timer_adjust_resolves_only_with_one_timer_and_a_clear_signed_delta() {
+        // One running timer + a clear "add" → a positive delta and a spoken confirmation.
+        let r = timer_adjust_reply("add five minutes to the timer", &ctx_with(None, 1)).unwrap();
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::AdjustTimer {
+                label: None,
+                delta_secs: 300
+            })
+        ));
+        assert_eq!(r.text, "Added 5 minutes to your timer.");
+        // "take a minute off" → a negative delta.
+        let r = timer_adjust_reply("take a minute off the timer", &ctx_with(None, 1)).unwrap();
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::AdjustTimer {
+                label: None,
+                delta_secs: -60
+            })
+        ));
+        assert_eq!(r.text, "Took 1 minute off your timer.");
+        // No timer running → defer.
+        assert!(timer_adjust_reply("add five minutes", &ctx_with(None, 0)).is_none());
+        // Several timers → ambiguous which one → defer.
+        assert!(timer_adjust_reply("add five minutes", &ctx_with(None, 2)).is_none());
+        // One timer but no clear direction (absolute "set to") → defer.
+        assert!(
+            timer_adjust_reply("change the timer to ten minutes", &ctx_with(None, 1)).is_none()
+        );
     }
 
     #[test]

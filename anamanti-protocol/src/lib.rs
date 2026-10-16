@@ -393,6 +393,14 @@ pub enum TimerCommand {
     },
     /// Cancel timers matching `label`, or *all* timers when `label` is `None`.
     Cancel { label: Option<String> },
+    /// Add (`delta_secs > 0`) or remove (`delta_secs < 0`) time on timers matching
+    /// `label`, or on *all* timers when `label` is `None`. The device holds the
+    /// authoritative deadline, so the Mac sends only the signed delta; the device
+    /// re-anchors each timer's remaining time (floored at 1s, capped at the 24h max).
+    Adjust {
+        label: Option<String>,
+        delta_secs: i64,
+    },
 }
 
 /// A recipe-mode command decoded from an `anamanti-recipe` frame. `Show` carries the
@@ -799,6 +807,17 @@ impl WyomingEvent {
         Self::with_data(types::TIMER, json!({ "action": "cancel", "label": label }))
     }
 
+    /// An `anamanti-timer` **adjust** action (orchestrator → device): add
+    /// (`delta_secs > 0`) or remove (`delta_secs < 0`) time on timers matching
+    /// `label`, or on *all* timers when `label` is `None`. The device applies the
+    /// signed delta to its own deadline (it owns the authoritative countdown).
+    pub fn timer_adjust(delta_secs: i64, label: Option<&str>) -> Self {
+        Self::with_data(
+            types::TIMER,
+            json!({ "action": "adjust", "delta_secs": delta_secs, "label": label }),
+        )
+    }
+
     /// Decode an `anamanti-timer` frame into a [`TimerCommand`], or `None` if this is
     /// not a timer frame or its `action` is unrecognized. A `start` with no/invalid
     /// `duration_secs` is rejected (returns `None`).
@@ -821,6 +840,10 @@ impl WyomingEvent {
                 })
             }
             "cancel" => Some(TimerCommand::Cancel { label }),
+            "adjust" => {
+                let delta_secs = self.data.get("delta_secs").and_then(Value::as_i64)?;
+                Some(TimerCommand::Adjust { label, delta_secs })
+            }
             _ => None,
         }
     }

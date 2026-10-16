@@ -217,10 +217,32 @@ async fn timer_frame_roundtrips_and_decodes_command() {
         Some(TimerCommand::Cancel { label: None })
     );
 
-    // A non-timer frame yields no command; a start missing a duration is rejected.
+    // Adjust: a signed delta (add on a labeled timer) round-trips.
+    let add = roundtrip(&WyomingEvent::timer_adjust(120, Some("pasta"))).await;
+    assert_eq!(
+        add.timer_command(),
+        Some(TimerCommand::Adjust {
+            label: Some("pasta".to_string()),
+            delta_secs: 120
+        })
+    );
+    // Adjust-all with a negative delta (remove time) and a null label.
+    let remove = roundtrip(&WyomingEvent::timer_adjust(-60, None)).await;
+    assert_eq!(
+        remove.timer_command(),
+        Some(TimerCommand::Adjust {
+            label: None,
+            delta_secs: -60
+        })
+    );
+
+    // A non-timer frame yields no command; a start missing a duration is rejected,
+    // as is an adjust missing its delta.
     assert_eq!(WyomingEvent::interrupt().timer_command(), None);
     let bad = WyomingEvent::with_data(types::TIMER, json!({ "action": "start" }));
     assert_eq!(bad.timer_command(), None);
+    let bad_adjust = WyomingEvent::with_data(types::TIMER, json!({ "action": "adjust" }));
+    assert_eq!(bad_adjust.timer_command(), None);
 }
 
 #[tokio::test]

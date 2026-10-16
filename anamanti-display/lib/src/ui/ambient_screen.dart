@@ -133,6 +133,14 @@ class AmbientScreen extends StatelessWidget {
           // blue ring, which reacts to the live mic level. Suppressed when the user
           // has turned the ring off in settings.
           final listening = state.listening && listeningRingEnabled;
+          // The compact timer badge shows whenever timers are running and the big
+          // screen-filling presentation is NOT up — i.e. while a turn is active or any
+          // full-screen mode (recipe/weather/place/music) covers the idle screen — so a
+          // running timer stays glanceable instead of being hidden behind those views.
+          // It is the top-most layer in the Stack (see the end of `children`), so it
+          // always has z-order precedence over every other overlay and banner.
+          final compactTimersVisible =
+              state.timers.isNotEmpty && (active || modeActive) && !offMode;
           return Stack(
             fit: StackFit.expand,
             children: [
@@ -410,31 +418,6 @@ class AmbientScreen extends StatelessWidget {
                 ),
               ),
 
-              // Compact timer badge, top-center — the presentation while a turn is
-              // active, so the timers yield the screen to the live conversation but
-              // stay glanceable. Padded clear of the settings button (top-left) and
-              // status chip (top-right).
-              Positioned(
-                top: 16,
-                left: 64,
-                right: 120,
-                child: AnimatedOpacity(
-                  opacity: active ? 1 : 0,
-                  duration: const Duration(milliseconds: 300),
-                  child: IgnorePointer(
-                    ignoring: !active,
-                    child: Align(
-                      alignment: Alignment.topCenter,
-                      child: TimersOverlay(
-                        compact: true,
-                        timers: state.timers,
-                        onDismiss: assistant.dismissTimer,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
               // Discreet settings control, top-left. Fades out during a turn and in
               // away mode so it never competes with the conversation or the face.
               if (onOpenSettings != null)
@@ -508,6 +491,34 @@ class AmbientScreen extends StatelessWidget {
                     );
                   },
                 ),
+
+              // Compact timer badge, top-center — the TOP-MOST layer so a running timer
+              // always has z-order precedence over every other overlay and banner. Shown
+              // whenever timers run and the big screen-filling presentation is hidden (a
+              // turn is active or a full-screen mode is up), so the timer stays glanceable
+              // instead of disappearing behind the conversation, music, recipe, weather,
+              // or place views. Padded clear of the settings button (top-left) and status
+              // chip (top-right).
+              Positioned(
+                top: 16,
+                left: 64,
+                right: 120,
+                child: AnimatedOpacity(
+                  opacity: compactTimersVisible ? 1 : 0,
+                  duration: const Duration(milliseconds: 300),
+                  child: IgnorePointer(
+                    ignoring: !compactTimersVisible,
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: TimersOverlay(
+                        compact: true,
+                        timers: state.timers,
+                        onDismiss: assistant.dismissTimer,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ],
           );
         },

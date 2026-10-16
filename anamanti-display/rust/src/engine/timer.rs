@@ -135,12 +135,22 @@ impl TimerManager {
                 duration_secs,
             } => self.start(label, duration_secs),
             TimerCommand::Cancel { label } => self.cancel(label),
+            TimerCommand::Adjust { label, delta_secs } => self.adjust(label, delta_secs),
         }
     }
 
     fn start(&self, label: Option<String>, duration_secs: u64) {
-        let secs = duration_secs.clamp(1, MAX_TIMER_SECS);
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.spawn_countdown(id, label, duration_secs);
+    }
+
+    /// Spawn the countdown task for timer `id` and register its [`TimerEntry`], clamping
+    /// `duration_secs` to the valid range. Shared by [`start`](Self::start) (a fresh id)
+    /// and [`adjust`](Self::adjust) (re-arming an existing id with new remaining time).
+    /// Emits `timer_started(id, …, remaining)` so Flutter (re-)anchors the countdown and
+    /// progress ring to the new deadline.
+    fn spawn_countdown(&self, id: u32, label: Option<String>, duration_secs: u64) {
+        let secs = duration_secs.clamp(1, MAX_TIMER_SECS);
         let inner = self.inner.clone();
         let task_label = label.clone();
         let task = self.inner.handle.spawn(async move {
@@ -214,6 +224,35 @@ impl TimerManager {
                 entry.abort.abort();
                 let _ = self.inner.sink.add(WakeWordEvent::timer_cancelled(id));
             }
+        }
+    }
+
+    /// Add (`delta_secs > 0`) or remove (`delta_secs < 0`) time on timers matching
+    /// `label` (every timer when `label` is `None`). The device owns the authoritative
+    /// deadline, so each matched timer's *remaining* time is recomputed from its own
+    /// deadline, shifted by `delta_secs`, and floored at 1s (removing more than is left
+    /// just rings it momentarily) — then its countdown task is aborted and re-armed with
+    /// the new remaining time. `spawn_countdown` re-emits `timer_started` so Flutter
+    /// re-anchors the countdown/ring to the new deadline.
+    fn adjust(&self, label: Option<String>, delta_secs: i64) {
+        let now = Instant::now();
+        // Collect the re-arm plan under the lock (id, label, new remaining), aborting the
+        // old tasks and removing their entries as we go; spawn outside the lock.
+        let rearm: Vec<(u32, Option<String>, u64)> = {
+            let mut timers = self.inner.timers.lock().unwrap();
+            let ids = ids_matching(timers.iter().map(|(id, e)| (*id, &e.label)), &label);
+            ids.into_iter()
+                .filter_map(|id| {
+                    let entry = timers.remove(&id)?;
+                    entry.abort.abort();
+                    let remaining = entry.deadline.saturating_duration_since(now).as_secs() as i64;
+                    let new_secs = remaining.saturating_add(delta_secs).max(1) as u64;
+                    Some((id, entry.label, new_secs))
+                })
+                .collect()
+        };
+        for (id, entry_label, new_secs) in rearm {
+            self.spawn_countdown(id, entry_label, new_secs);
         }
     }
 }

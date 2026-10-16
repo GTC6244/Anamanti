@@ -590,6 +590,7 @@ text. So an intent is only **Resolve-able** (answer + skip System-2) when its ar
 | `end_session` | `audio_stop` **without** a `listen` frame | none | planned. Ends the follow-up chain → device returns to IDLE / wake-word (see §15.3) |
 | `stop_dismiss` | context ladder (§17) | none (referent from device state) | planned. Bare "stop"/"never mind"/"dismiss" |
 | `timer_query` | spoken, from timer context params | none | planned. Resolved **only when the device reports an active timer** (§17.1); the remaining time comes from the context parameters, so no Core-side timer state is needed |
+| `timer_adjust` | `AdjustTimer{None, delta_secs}` | signed delta via `parse_timer_adjust` | ✅ shipped. Resolved **only when exactly one timer runs** and the transcript has an unambiguous direction (add/remove) + amount; zero/several timers, a labeled target, or an absolute "set to" → defer to the `adjust_timer` tool |
 
 ### 15.2 Tier C — Route-only (classify → filler + tool hint; System-2 answers)
 

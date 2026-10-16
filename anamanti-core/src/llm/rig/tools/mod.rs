@@ -147,6 +147,7 @@ pub(crate) fn emit(actions: Option<&ActionSink>, action: DeviceAction, what: &st
     let target = match action {
         DeviceAction::StartTimer { .. }
         | DeviceAction::CancelTimer { .. }
+        | DeviceAction::AdjustTimer { .. }
         | DeviceAction::SetPersonality { .. } => "device",
         _ => "display",
     };
