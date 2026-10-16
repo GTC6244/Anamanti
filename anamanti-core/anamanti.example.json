@@ -167,6 +167,12 @@
     "default_recipient": "Mom"
   },
 
+  "home_assistant": {
+    "base_url": "http://homeassistant.local:8123",
+    "default_room": "Kitchen",
+    "exact_only": ["fireplace"],
+    "dashboard_path": "lovelace/0"
+  },
   "tool_cache": {
     "weather_lookup": 3600
   }

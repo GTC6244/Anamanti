@@ -175,6 +175,21 @@ async fn run() -> Result<()> {
     // live settings so a config-page provider/key switch retargets it without restart.
     let weather_provider = settings.current_weather_provider();
 
+    // Home Assistant (plans/HomeAssistantPlan.md): the one hub shared by the pipeline's
+    // pre-System-1 fast path and the `home_control` tool. Warm its device catalog now so
+    // the first spoken command doesn't pay a cold fetch.
+    let home_assistant = settings.home_assistant();
+    match &home_assistant {
+        Some(hub) if hub.is_configured() => {
+            log::info!("home assistant: enabled (fast path + home_control tool)");
+            hub.prewarm();
+        }
+        _ => log::info!(
+            "home assistant: off until a URL + token are set (config page → Integrations → \
+             Home Assistant, or home_assistant.base_url + HOME_ASSISTANT_TOKEN)"
+        ),
+    }
+
     let mut pipeline = Pipeline::with_settings(
         settings,
         memory,
@@ -185,7 +200,8 @@ async fn run() -> Result<()> {
     .with_promptlog(promptlog.clone())
     .with_follow_up(config.follow_up.clone())
     .with_audio_dump(config.audio_dump_dir.clone())
-    .with_weather(weather_provider.clone());
+    .with_weather(weather_provider.clone())
+    .with_home_assistant(home_assistant);
     // Home location + household roster are grounded from the runtime settings
     // snapshot each turn (seeded from the config file's home_location at boot, then
     // editable from the config dashboard's Household tab), not fixed onto the pipeline.

@@ -669,6 +669,46 @@ pub struct AppSaidUpdate {
     pub default_recipient: Option<Option<String>>,
 }
 
+/// Home Assistant connection settings (`plans/HomeAssistantPlan.md`): the base URL,
+/// the secret long-lived access **token**, and the default display room. Seeded at boot
+/// from `anamanti.json` (`home_assistant.base_url` / `default_room`) and the
+/// `HOME_ASSISTANT_TOKEN` env secret; editable on the config page (Integrations → Home
+/// Assistant) and persisted here — the token in plaintext in the 0600 settings file,
+/// never echoed back. A change reconfigures the shared hub live (fast path + tool).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HomeAssistantSettings {
+    /// HA base URL, e.g. `http://homeassistant.local:8123`. `None` ⇒ integration off.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Secret long-lived access token. `None` ⇒ integration off.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// The room a bare "turn off the lights" means when the display doesn't report one.
+    #[serde(default)]
+    pub default_room: Option<String>,
+}
+
+impl HomeAssistantSettings {
+    /// True once a token is stored (never the value).
+    pub fn token_set(&self) -> bool {
+        is_set(&self.token)
+    }
+
+    /// True when both a base URL and a token are present.
+    pub fn configured(&self) -> bool {
+        is_set(&self.base_url) && self.token_set()
+    }
+}
+
+/// A requested change to the Home Assistant settings (tri-state per field, like
+/// [`AppSaidUpdate`]). Applied by [`SharedSettings::apply_home_assistant`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HomeAssistantUpdate {
+    pub base_url: Option<Option<String>>,
+    pub token: Option<Option<String>>,
+    pub default_room: Option<Option<String>>,
+}
+
 /// A requested change to the directions tool config. `mapbox_token` is tri-state:
 /// `None` = leave unchanged; `Some(None)`/`Some(Some(""))` = clear; `Some(Some(v))` =
 /// set. Applied by [`SharedSettings::apply_directions`], which rebuilds the backend so
@@ -978,6 +1018,10 @@ pub struct PersistedSettings {
     /// Defaulted (empty) for older files.
     #[serde(default)]
     pub appsaid: AppSaidConfig,
+    /// Home Assistant connection (URL + secret token + default room). Defaulted (empty)
+    /// for older files, which then fall back to the config/env seed.
+    #[serde(default)]
+    pub home_assistant: HomeAssistantSettings,
     /// Runtime-set weather provider label (`visualcrossing`/`openmeteo`). Defaulted
     /// (absent) for older files, which then fall back to the `weather.provider` seed.
     #[serde(default)]
@@ -1254,6 +1298,10 @@ pub struct LlmFactory {
     /// [`SharedSettings::apply_radio`]. Also wraps the Spotify controller
     /// ([`RoutedSpotify`]) so the two sources hand off cleanly.
     pub radio: Option<Arc<RadioPlayer>>,
+    /// The Home Assistant hub (`plans/HomeAssistantPlan.md`) for the `home_control` tool
+    /// and the pipeline's fast path, or `None` when HA isn't configured. Built once at
+    /// boot (like `radio`) so its cached device catalog survives LLM rebuilds.
+    pub home_assistant: Option<Arc<crate::home_assistant::HomeAssistant>>,
 }
 
 impl LlmFactory {
@@ -1273,6 +1321,16 @@ impl LlmFactory {
         });
         f.cadora = s.cadora.controller();
         f.appsaid = s.appsaid.messenger();
+        // The Home Assistant hub is shared (pipeline fast path + tool), so it is
+        // reconfigured in place rather than rebuilt; unchanged settings are a no-op.
+        if let Some(hub) = &f.home_assistant {
+            let ha = &s.home_assistant;
+            hub.configure(
+                ha.base_url.as_deref(),
+                ha.token.as_deref(),
+                ha.default_room.as_deref(),
+            );
+        }
         f.directions = crate::directions::from_token(
             &f.directions_provider,
             non_blank(&s.mapbox_token).as_deref(),
@@ -1335,6 +1393,8 @@ impl LlmFactory {
             places: self.places.clone(),
             // Advertised only with at least one station configured.
             radio: self.radio.clone().filter(|r| r.has_stations()),
+            // Advertised only once a URL + token are set.
+            home_assistant: self.home_assistant.clone().filter(|h| h.is_configured()),
         }
     }
 
@@ -1560,6 +1620,9 @@ pub struct RuntimeSettings {
     /// Cadora, a change here rebuilds the backend (via [`AppSaidConfig::messenger`]) so
     /// the `send_phone_message` tool is advertised/withdrawn live.
     pub appsaid: AppSaidConfig,
+    /// Home Assistant connection (URL + secret token + default room). A change
+    /// reconfigures the shared hub (fast path + `home_control` tool) live.
+    pub home_assistant: HomeAssistantSettings,
     /// The selected weather forecast provider label (`visualcrossing` / `openmeteo`).
     /// Runtime-settable (config page Tools tab); seeded from `weather.provider` at boot.
     /// A change rebuilds the `weather_lookup` tool + retargets the ambient push live.
@@ -2094,6 +2157,11 @@ impl RuntimeSettings {
         a.default_recipient =
             overlay_seeded(a.default_recipient.take(), p.appsaid.default_recipient);
 
+        let ha = &mut self.home_assistant;
+        ha.base_url = overlay_seeded(ha.base_url.take(), p.home_assistant.base_url);
+        ha.token = overlay_seeded(ha.token.take(), p.home_assistant.token);
+        ha.default_room = overlay_seeded(ha.default_room.take(), p.home_assistant.default_room);
+
         // System-1: only when the persisted backend is non-empty (a real save), so an
         // older file — which lacks these fields — can't disable a config-file seed.
         if !p.system1_backend.is_empty() {
@@ -2172,6 +2240,14 @@ impl PersistedSettings {
                 default_recipient: sd(
                     |p| &p.appsaid.default_recipient,
                     &s.appsaid.default_recipient,
+                ),
+            },
+            home_assistant: HomeAssistantSettings {
+                base_url: sd(|p| &p.home_assistant.base_url, &s.home_assistant.base_url),
+                token: sd(|p| &p.home_assistant.token, &s.home_assistant.token),
+                default_room: sd(
+                    |p| &p.home_assistant.default_room,
+                    &s.home_assistant.default_room,
                 ),
             },
             weather_provider: Some(s.weather_provider.clone()),
@@ -2288,6 +2364,7 @@ impl SharedSettings {
             places_enabled: true,
             places_provider: "google".to_string(),
             radio: None,
+            home_assistant: None,
         };
         Self::new(
             factory,
@@ -2315,6 +2392,7 @@ impl SharedSettings {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -2872,6 +2950,29 @@ impl SharedSettings {
         })
     }
 
+    /// A snapshot of the Home Assistant settings (the token is inside — callers that
+    /// report status must use [`HomeAssistantSettings::token_set`], never the value).
+    pub fn home_assistant_settings(&self) -> HomeAssistantSettings {
+        self.inner.read().unwrap().home_assistant.clone()
+    }
+
+    /// Apply a Home Assistant settings change (URL / token / default room), reconfigure
+    /// the shared hub and rebuild the LLM so `home_control` is advertised/withdrawn, and
+    /// persist (0600). Best-effort rebuild like [`Self::apply_appsaid`]. Returns the
+    /// resulting settings.
+    pub fn apply_home_assistant(&self, update: &HomeAssistantUpdate) -> HomeAssistantSettings {
+        self.mutate(Some("home_assistant"), |c| {
+            let ha = &mut c.home_assistant;
+            apply_tristate(&mut ha.base_url, &update.base_url);
+            if let Some(url) = ha.base_url.as_mut() {
+                *url = url.trim().trim_end_matches('/').to_string();
+            }
+            apply_tristate(&mut ha.token, &update.token);
+            apply_tristate(&mut ha.default_room, &update.default_room);
+            ha.clone()
+        })
+    }
+
     /// Apply an AppSaid config change (worker URL, app token, default recipient),
     /// rebuild the LLM so the `send_phone_message` tool is advertised/withdrawn to
     /// match, and persist (best-effort, 0600). Empty-string sets are treated as clears.
@@ -2937,6 +3038,12 @@ impl SharedSettings {
     /// status for the device Settings screen's functions snapshot.
     pub fn calendar_active(&self) -> bool {
         self.factory.calendar.is_some()
+    }
+
+    /// The shared Home Assistant hub, or `None` when HA isn't configured. The same
+    /// instance the `home_control` tool uses, so the fast path shares its catalog cache.
+    pub fn home_assistant(&self) -> Option<Arc<crate::home_assistant::HomeAssistant>> {
+        self.factory.home_assistant.clone()
     }
 
     /// Build a weather provider instance from the *current* live provider label + Visual
@@ -3022,6 +3129,7 @@ mod tests {
             places_enabled: true,
             places_provider: "google".to_string(),
             radio: None,
+            home_assistant: None,
         }
     }
 
@@ -3067,6 +3175,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -3328,6 +3437,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -3607,6 +3717,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -3936,6 +4047,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -4028,6 +4140,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -4130,6 +4243,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -4219,6 +4333,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -4299,6 +4414,7 @@ mod tests {
                 spotify: SpotifyConfig::default(),
                 cadora: CadoraConfig::default(),
                 appsaid: AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".to_string(),
                 visualcrossing_key: None,
                 google_places_key: None,
@@ -4431,6 +4547,119 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn home_assistant_save_configures_the_shared_hub_live() {
+        let mut f = tool_factory();
+        let hub = crate::home_assistant::from_config(&Default::default());
+        f.home_assistant = Some(hub.clone());
+        let s = shared(f);
+        let advertised = |s: &SharedSettings| {
+            last_build(s)
+                .tool_deps(false, "duckduckgo", None)
+                .home_assistant
+                .is_some()
+        };
+        assert!(!hub.is_configured());
+
+        let out = s.apply_home_assistant(&HomeAssistantUpdate {
+            base_url: Some(Some(" http://ha.local:8123/ ".into())),
+            default_room: Some(Some("Kitchen".into())),
+            ..Default::default()
+        });
+        assert_eq!(out.base_url.as_deref(), Some("http://ha.local:8123"));
+        assert!(!hub.is_configured(), "no token yet");
+        assert!(!advertised(&s), "home_control needs a token");
+
+        s.apply_home_assistant(&HomeAssistantUpdate {
+            token: Some(Some("ha-token".into())),
+            ..Default::default()
+        });
+        assert!(hub.is_configured());
+        assert_eq!(hub.default_room().as_deref(), Some("Kitchen"));
+        assert!(advertised(&s), "home_control is live");
+
+        // An unrelated save keeps it.
+        s.apply_places_tool(&PlacesToolUpdate {
+            google_places_key: Some(Some("gp-key".into())),
+        });
+        assert!(hub.is_configured() && advertised(&s));
+
+        // Clearing the token turns the fast path and the tool off.
+        s.apply_home_assistant(&HomeAssistantUpdate {
+            token: Some(None),
+            ..Default::default()
+        });
+        assert!(!hub.is_configured());
+        assert!(!advertised(&s));
+    }
+
+    /// Live, **read-only**: apply the URL + token exactly as the config page does, run
+    /// "Test connection", and answer a status question through the fast path against
+    /// the real Home Assistant. Never switches anything. Ignored by default:
+    /// `HOME_ASSISTANT_URL=… HOME_ASSISTANT_TOKEN=… cargo test --lib live_settings_to_home_assistant -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs a live Home Assistant (HOME_ASSISTANT_URL + HOME_ASSISTANT_TOKEN)"]
+    async fn live_settings_to_home_assistant() {
+        let mut f = tool_factory();
+        let hub = crate::home_assistant::from_config(&Default::default());
+        f.home_assistant = Some(hub.clone());
+        let s = shared(f);
+        s.apply_home_assistant(&HomeAssistantUpdate {
+            base_url: Some(std::env::var("HOME_ASSISTANT_URL").ok()),
+            token: Some(std::env::var("HOME_ASSISTANT_TOKEN").ok()),
+            default_room: Some(Some("Office".into())),
+        });
+        assert!(hub.is_configured());
+        let (entities, rooms, ms) = hub.test_connection().await.expect("test connection");
+        println!("test connection: {entities} devices in {rooms} rooms ({ms} ms)");
+        assert!(entities > 0);
+        for q in [
+            "is the porch light on",
+            "are the office lights on",
+            "are the lights on",
+        ] {
+            let t0 = std::time::Instant::now();
+            let said = hub.handle_utterance(q, None).await;
+            println!("{q:30} → {said:?} ({} ms)", t0.elapsed().as_millis());
+            assert!(said.is_some(), "{q}");
+        }
+    }
+
+    #[test]
+    fn home_assistant_settings_persist_and_reload() {
+        let mut live = runtime_for(&factory_with_key(None));
+        live.home_assistant = HomeAssistantSettings {
+            base_url: Some("http://ha.local:8123".into()),
+            token: Some("ha-token".into()),
+            default_room: Some("Kitchen".into()),
+        };
+        let json = serde_json::to_value(PersistedSettings::from_runtime(&live, None)).unwrap();
+        let mut fresh = runtime_for(&factory_with_key(None));
+        fresh.overlay_persisted(serde_json::from_value(json.clone()).unwrap());
+        assert_eq!(fresh.home_assistant, live.home_assistant);
+
+        // An older file without the block keeps the boot seed.
+        let mut older = json.clone();
+        older.as_object_mut().unwrap().remove("home_assistant");
+        let mut seeded = runtime_for(&factory_with_key(None));
+        seeded.home_assistant.base_url = Some("http://seed:8123".into());
+        seeded.overlay_persisted(serde_json::from_value(older).unwrap());
+        assert_eq!(
+            seeded.home_assistant.base_url.as_deref(),
+            Some("http://seed:8123")
+        );
+
+        // A token cleared on the page (seeded from env at boot) stays cleared.
+        let seed = PersistedSettings::from_runtime(&live, None);
+        let mut cleared = live.clone();
+        cleared.home_assistant.token = None;
+        let snap = PersistedSettings::from_runtime(&cleared, Some(&seed));
+        assert_eq!(snap.home_assistant.token.as_deref(), Some(""));
+        let mut reboot = live.clone();
+        reboot.overlay_persisted(snap);
+        assert_eq!(reboot.home_assistant.token, None);
     }
 
     #[test]

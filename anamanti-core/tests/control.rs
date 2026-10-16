@@ -50,6 +50,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         places_enabled: true,
         places_provider: "google".to_string(),
         radio: None,
+        home_assistant: None,
     };
     let (llm, backend, model) = factory
         .build(
@@ -88,6 +89,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             spotify: SpotifyConfig::default(),
             cadora: CadoraConfig::default(),
             appsaid: AppSaidConfig::default(),
+            home_assistant: Default::default(),
             weather_provider: "visualcrossing".to_string(),
             visualcrossing_key: None,
             google_places_key: None,

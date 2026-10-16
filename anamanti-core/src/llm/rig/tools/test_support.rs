@@ -180,7 +180,8 @@ impl crate::places::PlacesProvider for StaticPlaces {
 }
 
 /// Every integration configured with offline doubles (Tavily web search + recipe,
-/// calendar, directions, Spotify, radio, shopping list, phone, weather, places), home in
+/// calendar, directions, Spotify, radio, shopping list, phone, weather, places, Home
+/// Assistant), home in
 /// Austin. Building it does no I/O.
 pub(crate) fn fully_configured_deps() -> ToolDeps {
     ToolDeps {
@@ -197,6 +198,13 @@ pub(crate) fn fully_configured_deps() -> ToolDeps {
         weather_imperial: true,
         places: Some(Arc::new(StaticPlaces)),
         radio: Some(static_radio()),
+        home_assistant: Some(crate::home_assistant::tests::hub_with(
+            Arc::new(crate::home_assistant::tests::FakeApi {
+                catalog: crate::home_assistant::catalog::tests::house(),
+                ..Default::default()
+            }),
+            None,
+        )),
     }
 }
 

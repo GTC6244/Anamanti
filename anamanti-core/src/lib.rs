@@ -26,6 +26,7 @@ pub mod db;
 pub mod directions;
 pub mod discovery;
 pub mod drive_consent;
+pub mod home_assistant;
 pub mod household;
 pub mod http;
 pub mod ids;

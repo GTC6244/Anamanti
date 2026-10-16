@@ -1316,6 +1316,7 @@ mod tests {
                 places_enabled: true,
                 places_provider: "google".to_string(),
                 radio: None,
+                home_assistant: None,
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -1341,6 +1342,7 @@ mod tests {
                 spotify: crate::settings::SpotifyConfig::default(),
                 cadora: crate::settings::CadoraConfig::default(),
                 appsaid: crate::settings::AppSaidConfig::default(),
+                home_assistant: Default::default(),
                 weather_provider: "visualcrossing".into(),
                 visualcrossing_key: None,
                 google_places_key: None,

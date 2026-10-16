@@ -409,6 +409,22 @@ Tool calling runs on the **rig** engine, now the default (`anamanti-core/src/llm
 Adding a capability = one `VoiceTool` registered in `Tools::build`
 (`llm/rig/tools/mod.rs`). See Plan §3 "Tool calling & actions" and architecture.md §8.
 
+- [x] **Home Assistant fast path + `home_control` tool** (Part A P1,
+      `plans/HomeAssistantPlan.md`): pre-System-1 string-matched home commands against a
+      cached HA catalog, direct REST calls, `default_room` / `room` on audio-start,
+      `exact_only` fireplace guard. Unit-tested offline; live dry run via
+      `cargo test --lib live_dry_run -- --ignored --nocapture`.
+- [ ] **Home Assistant live QA:** spoken commands on the Echo Show against the real HA
+      (fast-path latency in the turn log: `path=home`).
+- [x] **Home Assistant config page (P2):** Integrations → Home Assistant (URL, masked
+      token, default room, read-only Test connection) + a Keys & Accounts entry;
+      runtime-settable, persisted (0600), hub reconfigured live.
+- [ ] **Deploy to production** (Mac mini): rebuild + runbook, then set the URL/token/room
+      on Integrations → Home Assistant.
+- [ ] **Display `room` setting:** device Settings → Display "This display is in…", sent
+      as `room` on every `audio-start` (ship with Part B device work).
+- [ ] **Home Assistant dashboard widget (Part B):** W0 on-device WebView spike first.
+
 - [x] **Weather context**: inject a configured home location + units
       (`ANAMANTI_HOME_LOCATION` / `ANAMANTI_WEATHER_UNITS`) into the system prompt so
       "what's the weather" resolves "here" (`orchestrator::location_line`).
