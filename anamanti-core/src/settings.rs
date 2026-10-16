@@ -30,7 +30,9 @@ use crate::llm::{
     anthropic::AnthropicBackend, mock::MockLlm, ollama::OllamaBackend, openai::OpenAiBackend,
     LlmBackend,
 };
-use crate::music::{RadioCatalog, RadioPlayer, RoutedSpotify, SpotifyController, SpotifyWebApi};
+use crate::music::{
+    MusicDisplayStyle, RadioCatalog, RadioPlayer, RoutedSpotify, SpotifyController, SpotifyWebApi,
+};
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
 /// clients, or the rig-core agent framework (selected at runtime with
@@ -1017,6 +1019,10 @@ pub struct PersistedSettings {
     /// Internet-radio station catalog. Defaulted (empty) for older files.
     #[serde(default)]
     pub radio: RadioCatalog,
+    /// Which music widget the display shows while playing (compact bar / full screen).
+    /// Defaulted (compact) for older files; an unknown value reads as compact.
+    #[serde(default)]
+    pub music_display_style: MusicDisplayStyle,
 }
 
 fn default_system1_base_url() -> String {
@@ -1583,6 +1589,10 @@ pub struct RuntimeSettings {
     /// change refreshes the [`RadioPlayer`] catalog and rebuilds the LLM so the
     /// `radio_control` tool's station list stays current.
     pub radio: RadioCatalog,
+    /// Which music widget the display shows while Spotify or the radio plays — the
+    /// compact bar or the full-screen now-playing view. GUI/voice/display-editable,
+    /// stamped onto every now-playing push; orthogonal to the LLM rebuild path.
+    pub music_display_style: MusicDisplayStyle,
 }
 
 /// Default System-1 HTTP base URL (local `laya-serve`).
@@ -2100,6 +2110,7 @@ impl RuntimeSettings {
         self.personality = p.personality;
         self.pronunciations = p.pronunciations;
         self.radio = p.radio;
+        self.music_display_style = p.music_display_style;
     }
 }
 
@@ -2175,6 +2186,7 @@ impl PersistedSettings {
             personality: s.personality.clone(),
             pronunciations: s.pronunciations.clone(),
             radio: s.radio.clone(),
+            music_display_style: s.music_display_style,
         }
     }
 }
@@ -2309,6 +2321,7 @@ impl SharedSettings {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
         )
@@ -2586,6 +2599,19 @@ impl SharedSettings {
             c.radio = cleaned.clone();
         });
         cleaned
+    }
+
+    /// The live music-widget preference (compact bar / full-screen now-playing).
+    pub fn music_display_style(&self) -> MusicDisplayStyle {
+        self.inner.read().unwrap().music_display_style
+    }
+
+    /// Set the music-widget preference (config page, the display's on-screen toggle, or
+    /// the voice `music_screen` tool) and persist it (best-effort, 0600). Never rebuilds
+    /// the LLM. Callers that also want every display updated at once go through
+    /// [`NowPlayingService::set_display_style`](crate::music::NowPlayingService::set_display_style).
+    pub fn set_music_display_style(&self, style: MusicDisplayStyle) {
+        self.mutate(None, |c| c.music_display_style = style);
     }
 
     /// Set the active personality by spoken/typed name (the `set_personality` voice tool).
@@ -3047,6 +3073,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
         )
@@ -3307,6 +3334,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -3585,6 +3613,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -3913,6 +3942,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4005,6 +4035,7 @@ mod tests {
                 stt: SttRuntime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4037,6 +4068,18 @@ mod tests {
         assert_eq!(p.pronunciations.len(), 1);
         assert_eq!(p.pronunciations[0].canonical, "Zehrs");
         assert_eq!(p.pronunciations[0].variants, vec!["zairs".to_string()]);
+        assert_eq!(p.music_display_style, MusicDisplayStyle::Compact);
+
+        // The music-widget preference persists the same way (and leaves the rest alone).
+        s.set_music_display_style(MusicDisplayStyle::Fullscreen);
+        assert_eq!(s.music_display_style(), MusicDisplayStyle::Fullscreen);
+        let p = load_persisted(&path).expect("settings file should exist");
+        assert_eq!(p.music_display_style, MusicDisplayStyle::Fullscreen);
+        assert_eq!(p.pronunciations.len(), 1);
+        let mut reloaded = s.snapshot();
+        reloaded.music_display_style = MusicDisplayStyle::Compact;
+        reloaded.overlay_persisted(p);
+        assert_eq!(reloaded.music_display_style, MusicDisplayStyle::Fullscreen);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4093,6 +4136,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4181,6 +4225,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4260,6 +4305,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                music_display_style: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),

@@ -84,11 +84,11 @@ class NextUpView extends StatelessWidget {
           ),
           IconButton(
             key: const Key('next-up-close'),
-            tooltip: 'Close',
+            tooltip: 'Small player',
             onPressed: onClose,
             iconSize: 32,
             icon: Icon(
-              Icons.close,
+              Icons.close_fullscreen,
               color: Colors.white.withValues(alpha: 0.85),
             ),
           ),

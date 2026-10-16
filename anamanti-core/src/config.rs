@@ -2140,6 +2140,7 @@ impl Config {
             // with no config-file seed.
             personality: Personality::default(),
             pronunciations: Vec::new(),
+            music_display_style: Default::default(),
             radio: Default::default(),
         };
         let seed = PersistedSettings::from_runtime(&s, None);

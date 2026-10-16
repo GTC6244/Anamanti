@@ -48,6 +48,12 @@
         <div class="skeleton" style="height:38px;margin-bottom:.4rem"></div>
         <div class="skeleton" style="height:38px"></div>
       </div>
+      <div class="section-label">Music player on the display</div>
+      <div class="seg" role="radiogroup" aria-label="Music player style" id="mdStyle">
+        <label><input type="radio" name="mdStyle" value="compact" checked><span>Small bar</span></label>
+        <label><input type="radio" name="mdStyle" value="fullscreen"><span>Full screen</span></label>
+      </div>
+      <p class="hint" style="margin-top:.35rem">What every display shows while Spotify or the radio plays. Also switchable from the expand / minimize button on the display, or by voice (<i>"make the music full screen"</i>, <i>"use the small music player"</i>).</p>
     </section>
 
     <section class="card" id="notify">
@@ -312,6 +318,25 @@ ui.hydrate();
       return true;
     } catch (e) { ui.toast(false, String(e.message || e)); return false; }
   }
+  // ---------------------------------------------------------------- Music player style
+  // Which widget the displays show while music plays (/music/display.json). The display
+  // button and the voice tool change it too, so it is re-read with the displays list.
+  function setStyleRadio(style){
+    const r = document.querySelector('input[name="mdStyle"][value="' + style + '"]');
+    if (r) r.checked = true;
+  }
+  async function loadMusicStyle(){
+    try { const j = await getJSON('/music/display.json'); if (j.ok) setStyleRadio(j.style); }
+    catch (e) { /* non-fatal: the radio keeps its last value */ }
+  }
+  $('mdStyle').addEventListener('change', async (e) => {
+    if (!e.target.matches('input[name="mdStyle"]')) return;
+    try {
+      const r = await ui.req(postJSON('/music/display', { style: e.target.value }));
+      ui.toast(true, r.style === 'fullscreen' ? 'Displays will show music full screen.' : 'Displays will show the small music bar.');
+    } catch (err) { ui.toast(false, String(err.message || err)); loadMusicStyle(); }
+  });
+
   // ---------------------------------------------------------------- Now playing
   // The radio when a station is on, else Spotify — the same snapshot + transport the
   // display's music screen uses (/music/nowplaying.json, /music/transport).
@@ -591,8 +616,8 @@ ui.hydrate();
     renderRadio(); setTimeout(loadMusic, 600);
   }));
 
-  Promise.all([loadDisplays(), loadMusic(), loadRadio()]).then(() => ui.reveal());
-  setInterval(() => { if (!document.hidden) loadDisplays(); }, 10000);
+  Promise.all([loadDisplays(), loadMusic(), loadRadio(), loadMusicStyle()]).then(() => ui.reveal());
+  setInterval(() => { if (!document.hidden) { loadDisplays(); loadMusicStyle(); } }, 10000);
   // Keep the now-playing strip live (song titles change; Spotify may be driven from a phone).
   setInterval(() => { if (!document.hidden && !$('musicOn').hidden) loadNowPlaying(); }, 5000);
 })();

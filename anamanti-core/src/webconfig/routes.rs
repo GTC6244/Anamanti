@@ -22,10 +22,11 @@ use super::household::{
 };
 use super::memory::{embeddings_status_json, embeddings_switch_json};
 use super::music::{
-    music_nowplaying_json, music_play_json, music_proc_json, music_startall_json,
-    music_status_json, music_stopall_json, music_stopweb_json, music_transport_json,
-    music_volume_json, radio_lookup_json, radio_play_json, radio_save_json, radio_stations_json,
-    radio_stop_json, spotify_link_json, spotify_save_json, spotify_status_json,
+    music_display_json, music_display_save_json, music_nowplaying_json, music_play_json,
+    music_proc_json, music_startall_json, music_status_json, music_stopall_json,
+    music_stopweb_json, music_transport_json, music_volume_json, radio_lookup_json,
+    radio_play_json, radio_save_json, radio_stations_json, radio_stop_json, spotify_link_json,
+    spotify_save_json, spotify_status_json,
 };
 use super::speakers::{
     conversations_attribute_async, memory_attribute_async, memory_delete_async, speakers_json,
@@ -382,6 +383,18 @@ pub(super) static ROUTES: &[Route] = &[
         Async(|s, _| {
             Box::pin(async move {
                 Reply::json(music_nowplaying_json(s.settings(), &s.now_playing).await)
+            })
+        }),
+    ),
+    get(
+        "/music/display.json",
+        Sync(|s, _| Reply::json(music_display_json(s.settings()))),
+    ),
+    post(
+        "/music/display",
+        Sync(|s, r| {
+            with_json(r, |d| {
+                music_display_save_json(s.settings(), &s.now_playing, d)
             })
         }),
     ),

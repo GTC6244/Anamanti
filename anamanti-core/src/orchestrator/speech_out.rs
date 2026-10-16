@@ -155,6 +155,7 @@ pub(crate) fn device_action_event(action: &DeviceAction) -> Option<WyomingEvent>
             MusicNav::Queue => "up_next",
             MusicNav::Close => "hidden",
         }),
+        DeviceAction::MusicDisplayStyle(style) => WyomingEvent::music_screen(style.as_str()),
         DeviceAction::AdjustFont(dir) => WyomingEvent::font_adjust(match dir {
             FontDirection::Increase => "increase",
             FontDirection::Decrease => "decrease",
@@ -183,6 +184,12 @@ where
             Err(e) => log::warn!("set_personality ignored: {e}"),
         }
         return Ok(());
+    }
+    if let DeviceAction::MusicDisplayStyle(style) = action {
+        // Persist first so the next periodic push to every display agrees with the
+        // frame this display is about to receive.
+        settings.set_music_display_style(*style);
+        log::info!("music display style set to {}", style.as_str());
     }
     if let Some(event) = device_action_event(action) {
         protocol::write_event(writer, &event).await?;
@@ -582,5 +589,29 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn music_display_style_persists_and_relays_a_screen_frame() {
+        use crate::music::MusicDisplayStyle;
+        let settings = crate::settings::SharedSettings::fixed(
+            std::sync::Arc::new(crate::llm::mock::MockLlm::default()),
+            "mock",
+            None,
+        );
+        let action = DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Fullscreen);
+        assert_eq!(
+            device_action_event(&action),
+            Some(WyomingEvent::music_screen("fullscreen"))
+        );
+        let mut wire: Vec<u8> = Vec::new();
+        apply_device_action(&action, &mut wire, &settings)
+            .await
+            .unwrap();
+        assert_eq!(
+            settings.music_display_style(),
+            MusicDisplayStyle::Fullscreen
+        );
+        assert_eq!(wire, WyomingEvent::music_screen("fullscreen").to_bytes());
     }
 }
