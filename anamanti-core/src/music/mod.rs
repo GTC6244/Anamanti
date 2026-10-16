@@ -3,8 +3,9 @@
 //! This module is the orchestrator's **control-only** side of the house-wide
 //! music feature (`plans/snapcast_routing_plan.md`). It never touches audio PCM —
 //! music is produced by external sibling processes (librespot for Spotify, an
-//! `mpv`/`ffmpeg` player for web URLs) that write raw PCM into snapfifos read by a
-//! **snapserver** on the Mac. Here we only:
+//! idle `mpv` for web URLs / radio) that **snapserver launches itself** and reads over
+//! their stdout (`deploy/snapcast/snapserver.conf`; named FIFOs stall on macOS). Here
+//! we only:
 //!
 //! * talk to snapserver over its **JSON-RPC control API** (TCP :1705,
 //!   newline-delimited JSON-RPC 2.0) to **duck** the music while the assistant
@@ -32,6 +33,20 @@ pub use supervisor::{ManagedProc, MusicHub, MusicSupervisor, ProcSpec, ProcStatu
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// Upper bound on one mpv IPC / snapserver JSON-RPC round trip. Both peers are local
+/// and answer in milliseconds; a wedged peer (e.g. mpv blocked writing a full pipe
+/// nobody drains — its core thread then never services IPC) must surface as an error
+/// instead of hanging the caller, which may be holding the radio's op lock.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run `fut` under [`CONTROL_TIMEOUT`], naming `what` in the timeout error.
+async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(CONTROL_TIMEOUT, fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("{what} timed out after {CONTROL_TIMEOUT:?}"))?
+}
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -87,8 +102,13 @@ impl SnapcastClient {
         Self { addr }
     }
 
-    /// Issue one JSON-RPC method call and return its `result` value.
+    /// Issue one JSON-RPC method call and return its `result` value. Bounded by
+    /// [`CONTROL_TIMEOUT`].
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        bounded("snapserver JSON-RPC", self.call_unbounded(method, params)).await
+    }
+
+    async fn call_unbounded(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let stream = TcpStream::connect(self.addr)
             .await
             .with_context(|| format!("connecting to snapserver control at {}", self.addr))?;
@@ -339,6 +359,65 @@ impl MusicDucker {
         log::debug!("music restored {} clients", record.clients.len());
         Ok(())
     }
+
+    /// Apply a **manual** (config-page) volume/mute change to one client without the
+    /// ducker undoing it. When that client is currently ducked, the change replaces the
+    /// remembered level so [`Self::restore`] lands on the user's choice; the client
+    /// stays at the duck level until then (a mute applies at once). Otherwise it is
+    /// applied directly. Holds the duck lock throughout, so it can't interleave with a
+    /// `duck()` snapshot. Returns whether the volume change was deferred to the restore.
+    pub async fn set_manual(
+        &self,
+        client_id: &str,
+        percent: Option<u8>,
+        muted: Option<bool>,
+    ) -> Result<bool> {
+        let mut active = self.active.lock().await;
+        let ducked = active
+            .as_mut()
+            .and_then(|r| r.clients.iter_mut().find(|(id, _, _)| id == client_id));
+        if let Some((_, saved_pct, saved_muted)) = ducked {
+            if let Some(p) = percent {
+                *saved_pct = p.min(100);
+            }
+            if let Some(m) = muted {
+                *saved_muted = m;
+                self.client
+                    .set_client_volume(client_id, self.duck_percent, m)
+                    .await?;
+            }
+            return Ok(percent.is_some());
+        }
+        apply_client_volume(&self.client, client_id, percent, muted).await?;
+        Ok(false)
+    }
+}
+
+/// Set one client's volume and/or mute, filling the unspecified half from the live
+/// snapserver status (`Client.SetVolume` always takes both).
+pub async fn apply_client_volume(
+    snapcast: &SnapcastClient,
+    client_id: &str,
+    percent: Option<u8>,
+    muted: Option<bool>,
+) -> Result<()> {
+    let (percent, muted) = match (percent, muted) {
+        (Some(p), Some(m)) => (p, m),
+        _ => {
+            let status = snapcast.get_status().await?;
+            let c = status
+                .groups
+                .iter()
+                .flat_map(|g| &g.clients)
+                .find(|c| c.id == client_id)
+                .with_context(|| format!("no snapclient with id {client_id}"))?;
+            (
+                percent.unwrap_or(c.volume_percent()),
+                muted.unwrap_or(c.volume_muted()),
+            )
+        }
+    };
+    snapcast.set_client_volume(client_id, percent, muted).await
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +426,7 @@ impl MusicDucker {
 
 /// Controls a sibling `mpv` process over its JSON IPC Unix socket
 /// (`mpv --input-ipc-server=<path> --idle --no-video`). The mpv process decodes a
-/// URL to PCM and writes it to the web snapfifo; this only sends control commands
+/// URL to PCM for snapserver's `Web` stream; this only sends control commands
 /// (load/stop) — never audio.
 #[derive(Debug, Clone)]
 pub struct MpvControl {
@@ -361,8 +440,13 @@ impl MpvControl {
         }
     }
 
-    /// Send one mpv IPC command array and return its `data` (if any).
+    /// Send one mpv IPC command array and return its `data` (if any). Bounded by
+    /// [`CONTROL_TIMEOUT`]: a hung mpv is an error, not a hang.
     pub async fn command(&self, args: Vec<Value>) -> Result<Value> {
+        bounded("mpv IPC", self.command_unbounded(args)).await
+    }
+
+    async fn command_unbounded(&self, args: Vec<Value>) -> Result<Value> {
         use tokio::net::UnixStream;
         let stream = UnixStream::connect(&self.socket)
             .await
@@ -491,6 +575,57 @@ mod tests {
             }
         });
         (addr, requests)
+    }
+
+    /// The `(id, percent, muted)` of every `Client.SetVolume` the fake received.
+    async fn set_volume_calls(reqs: &TokioMutex<Vec<Value>>) -> Vec<(String, u64, bool)> {
+        reqs.lock()
+            .await
+            .iter()
+            .filter(|r| r["method"] == "Client.SetVolume")
+            .map(|r| {
+                let p = &r["params"];
+                (
+                    p["id"].as_str().unwrap().to_string(),
+                    p["volume"]["percent"].as_u64().unwrap(),
+                    p["volume"]["muted"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn manual_volume_applies_directly_when_not_ducked() {
+        let (addr, reqs) = spawn_fake_snapserver().await;
+        let ducker = MusicDucker::new(addr, GroupSelector::Auto, 25);
+        // Volume only: mute is filled in from the live status (a = 80%, unmuted).
+        assert!(!ducker.set_manual("a", Some(45), None).await.unwrap());
+        // Mute only: percent is filled in from the live status (b = 60%).
+        assert!(!ducker.set_manual("b", None, Some(true)).await.unwrap());
+        assert_eq!(
+            set_volume_calls(&reqs).await,
+            vec![("a".into(), 45, false), ("b".into(), 60, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_volume_while_ducked_survives_the_restore() {
+        let (addr, reqs) = spawn_fake_snapserver().await;
+        let ducker = MusicDucker::new(addr, GroupSelector::Auto, 25);
+        ducker.duck().await.unwrap(); // a 80→25, b 60→25
+        assert!(ducker.set_manual("a", Some(40), None).await.unwrap()); // deferred
+        assert!(!ducker.set_manual("b", None, Some(true)).await.unwrap()); // mute now
+        ducker.restore().await.unwrap();
+        assert_eq!(
+            set_volume_calls(&reqs).await,
+            vec![
+                ("a".into(), 25, false), // duck
+                ("b".into(), 25, false),
+                ("b".into(), 25, true),  // the mute, applied at the duck level
+                ("a".into(), 40, false), // restore lands on the manual level…
+                ("b".into(), 60, true),  // …and keeps the manual mute
+            ]
+        );
     }
 
     #[tokio::test]
@@ -646,6 +781,27 @@ mod tests {
         assert_eq!(got[0]["command"][0], json!("loadfile"));
         assert_eq!(got[0]["command"][1], json!("http://example.com/stream.mp3"));
         assert_eq!(got[1]["command"], json!(["stop"]));
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A wedged mpv (accepts the IPC connection, never answers — what happens when its
+    /// AO thread is blocked writing a full, undrained pipe) must time out, not hang.
+    #[tokio::test(start_paused = true)]
+    async fn mpv_command_times_out_when_mpv_never_answers() {
+        use tokio::net::UnixListener;
+        let sock =
+            std::env::temp_dir().join(format!("ambient-mpv-hang-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream); // keep it open, never reply
+            }
+        });
+
+        let err = MpvControl::new(&sock).stop().await.unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
         let _ = std::fs::remove_file(&sock);
     }
 }

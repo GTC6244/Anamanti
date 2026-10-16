@@ -1127,8 +1127,10 @@ there is no Display UI.
 - **Music (planned, pre-implementation):** house-wide music is a **Mac-hosted,
   Snapcast-routed** capability that is deliberately **separate from the Wyoming/TTS
   audio path and the device's cpal/oboe path** — music PCM never enters
-  `anamanti_core`. Sources (librespot + web-URL player) write raw PCM to
-  snapfifos on the Mac; snapserver (on the Mac) fans out to snapclient speakers;
+  `anamanti_core`. Sources (librespot + the idle mpv web-URL player) are **launched by snapserver**
+  (`librespot://` / `process://` sources reading their stdout — named snapfifos stall
+  on macOS, see `deploy/snapcast/snapserver.conf`); snapserver (on the Mac) fans out to
+  snapclient speakers;
   the Anamanti Core only controls (Web API / mpv IPC / snapserver JSON-RPC ducking).
   Design → [`snapcast_routing_plan.md`](./snapcast_routing_plan.md) (transport) +
   [`MusicPlan.md`](./MusicPlan.md) (Spotify source + control plane).

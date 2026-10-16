@@ -537,6 +537,14 @@ pub struct MusicConfig {
     /// orchestrator boots, and stop them on shutdown (`music.autostart`,
     /// default on when music is enabled). The Music tab's manual buttons still work.
     pub autostart: bool,
+    /// The players (mpv, librespot) are launched **by snapserver** as `process://` /
+    /// `librespot://` sources reading their stdout, not by the Core writing named FIFOs
+    /// (`music.players_in_snapserver`, default on — matching the committed
+    /// `deploy/snapcast/snapserver.conf`). On macOS snapserver's FIFO reader stalls (its
+    /// open→EOF→reopen loop trips macOS kqueue FIFO bugs: the writer fills the pipe and
+    /// blocks forever), so the FIFO layout only works on Linux. When on, the Core
+    /// supervises snapserver alone. Set `false` only with a `pipe://` snapserver.conf.
+    pub players_in_snapserver: bool,
     /// How often (seconds) the now-playing push polls Spotify for the current track +
     /// queue and fans it out to the display's music screen (`music.nowplaying_refresh_secs`,
     /// default 5). Clamped to a 1s floor at use.
@@ -565,6 +573,7 @@ impl Default for MusicConfig {
             snapserver_conf: PathBuf::from("/opt/homebrew/etc/snapserver.conf"),
             spotify_device_name: "Ambient".to_string(),
             autostart: true,
+            players_in_snapserver: true,
             nowplaying_refresh_secs: 5,
         }
     }
@@ -1048,6 +1057,7 @@ pub struct FileMusic {
     pub conf: Option<PathBuf>,
     pub spotify_device_name: Option<String>,
     pub autostart: Option<bool>,
+    pub players_in_snapserver: Option<bool>,
     pub nowplaying_refresh_secs: Option<u64>,
 }
 
@@ -1426,6 +1436,10 @@ impl Config {
             spotify_device_name: nonempty(fc.music.spotify_device_name)
                 .unwrap_or_else(|| md.spotify_device_name.clone()),
             autostart: fc.music.autostart.unwrap_or(md.autostart),
+            players_in_snapserver: fc
+                .music
+                .players_in_snapserver
+                .unwrap_or(md.players_in_snapserver),
             nowplaying_refresh_secs: fc
                 .music
                 .nowplaying_refresh_secs
@@ -1746,18 +1760,27 @@ impl Config {
                 reap_pattern: Some(format!("input-ipc-server={}", mpv_ipc.display())),
             },
         );
+        if m.players_in_snapserver {
+            // snapserver launches the players itself (process:// / librespot:// sources),
+            // so spawning them here would start duplicates fighting over the IPC socket
+            // and the Spotify device name.
+            specs.retain(|proc, _| *proc == ManagedProc::Snapserver);
+        }
         Some(Arc::new(MusicSupervisor::new(specs)))
     }
 
     /// Build the [`MusicHub`] (supervisor + snapserver control + mpv control) the
-    /// config-page Music tab drives, or `None` when music is disabled.
-    pub fn build_hub(&self) -> Option<MusicHub> {
+    /// config-page Music tab drives, or `None` when music is disabled. `ducker` is the
+    /// same instance the turn pipeline ducks with, so manual volume changes survive a
+    /// restore.
+    pub fn build_hub(&self, ducker: Option<Arc<MusicDucker>>) -> Option<MusicHub> {
         let supervisor = self.build_supervisor()?;
         Some(MusicHub {
             supervisor,
             snapcast: SnapcastClient::new(self.music.snapserver_addr),
             snapserver_addr: self.music.snapserver_addr.to_string(),
             mpv: self.mpv_control(),
+            ducker,
         })
     }
 
@@ -2622,6 +2645,25 @@ mod tests {
         assert!(c.config_addr.is_none());
         assert!(c.settings_path.is_none());
         assert!(c.music.mpv_ipc.is_none());
+    }
+
+    #[test]
+    fn players_in_snapserver_limits_the_supervisor_to_snapserver() {
+        // Default: snapserver launches mpv + librespot itself; the Core runs only it.
+        let c = Config::from_file(parse(r#"{ "settings_path": "none" }"#)).unwrap();
+        assert!(c.music.players_in_snapserver);
+        let sup = c.build_supervisor().unwrap();
+        assert!(sup.manages(ManagedProc::Snapserver));
+        assert!(!sup.manages(ManagedProc::Librespot));
+        assert!(!sup.manages(ManagedProc::MpvWeb));
+
+        // Opt-out (Linux FIFO layout): the Core launches all three.
+        let c = Config::from_file(parse(
+            r#"{ "settings_path": "none", "music": { "players_in_snapserver": false } }"#,
+        ))
+        .unwrap();
+        let sup = c.build_supervisor().unwrap();
+        assert!(ManagedProc::all().into_iter().all(|p| sup.manages(p)));
     }
 
     #[test]
