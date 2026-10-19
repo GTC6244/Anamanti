@@ -66,8 +66,11 @@ pub struct EnrollScreen {
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
-/// model which tab is showing and whether the pane is scrolled to the top/bottom, so it
-/// can drive the screen with `recipe_control` (switch tab / scroll) or `close_recipe`.
+/// model which tab is showing, whether the pane is scrolled to the top/bottom and which
+/// step is highlighted, so it can drive the screen with `recipe_control` (switch tab /
+/// scroll / go to a step) or `close_recipe` — and carries the recipe's **ingredients and
+/// steps** so recipe questions ("how many tomatoes?") are answered from what is on screen
+/// (System-1 `recipe_ingredient` lookup, or the System-2 prompt).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecipeScreen {
     pub title: String,
@@ -77,7 +80,21 @@ pub struct RecipeScreen {
     pub at_bottom: bool,
     pub ingredient_count: u32,
     pub step_count: u32,
+    /// The highlighted step, 1-based (`0` = none). Set by a voice "go to step N" or a tap.
+    pub highlighted_step: u32,
+    /// The ingredient lines, in order (capped at [`MAX_RECIPE_LINES`] ×
+    /// [`MAX_RECIPE_LINE_CHARS`]). Empty from an older device that doesn't send them.
+    pub ingredients: Vec<String>,
+    /// The step texts, in order (same caps). Empty from an older device.
+    pub steps: Vec<String>,
 }
+
+/// Most ingredient / step lines read from a recipe `screen` block (a bound on what a
+/// device can inflate every turn's prompt with; real recipes are far below it).
+pub const MAX_RECIPE_LINES: usize = 80;
+/// Longest single ingredient / step line kept (longer lines are truncated on a char
+/// boundary).
+pub const MAX_RECIPE_LINE_CHARS: usize = 600;
 
 /// The weather screen's state, as carried in a [`DisplayContext::Weather`]. Tells the
 /// model the forecast is on screen (and what it currently shows), so it can answer
@@ -426,6 +443,22 @@ fn parse_recipe_screen(recipe: &Map<String, Value>) -> Option<RecipeScreen> {
         .and_then(Value::as_str)
         .unwrap_or("overview")
         .to_string();
+    let lines = |k: &str| -> Vec<String> {
+        recipe
+            .get(k)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .take(MAX_RECIPE_LINES)
+                    .map(|l| l.chars().take(MAX_RECIPE_LINE_CHARS).collect())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     Some(RecipeScreen {
         title: s("title"),
         tab,
@@ -433,6 +466,9 @@ fn parse_recipe_screen(recipe: &Map<String, Value>) -> Option<RecipeScreen> {
         at_bottom: b("at_bottom", false),
         ingredient_count: n("ingredient_count"),
         step_count: n("step_count"),
+        highlighted_step: n("highlighted_step"),
+        ingredients: lines("ingredients"),
+        steps: lines("steps"),
     })
 }
 
@@ -549,8 +585,30 @@ mod tests {
                 at_bottom: true,
                 ingredient_count: 6,
                 step_count: 4,
+                ..Default::default()
             }))
         );
+
+        // A newer device also sends the highlighted step and the recipe's lines; blank
+        // and non-string entries are dropped, the lists are capped.
+        let full = json!({
+            "screen": {
+                "kind": "recipe",
+                "recipe": {
+                    "title": "Salsa",
+                    "tab": "steps",
+                    "highlighted_step": 2,
+                    "ingredients": ["4 ripe tomatoes, chopped", "  ", 7, "1 onion"],
+                    "steps": (0..200).map(|i| format!("step {i}")).collect::<Vec<_>>(),
+                },
+            },
+        });
+        let Some(DisplayContext::Recipe(r)) = display_context(&full) else {
+            panic!("expected a recipe context");
+        };
+        assert_eq!(r.highlighted_step, 2);
+        assert_eq!(r.ingredients, vec!["4 ripe tomatoes, chopped", "1 onion"]);
+        assert_eq!(r.steps.len(), MAX_RECIPE_LINES);
 
         // A device with the weather screen up stamps a `weather` block.
         let weather = json!({

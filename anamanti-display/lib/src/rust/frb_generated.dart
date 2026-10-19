@@ -286,6 +286,9 @@ abstract class RustLibApi extends BaseApi {
     required bool atBottom,
     required int ingredientCount,
     required int stepCount,
+    required int highlightedStep,
+    required List<String> ingredients,
+    required List<String> steps,
   });
 
   void crateApiEngineSetWeatherContext({
@@ -1669,6 +1672,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required bool atBottom,
     required int ingredientCount,
     required int stepCount,
+    required int highlightedStep,
+    required List<String> ingredients,
+    required List<String> steps,
   }) {
     return handler.executeSync(
       SyncTask(
@@ -1681,6 +1687,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_bool(atBottom, serializer);
           sse_encode_u_32(ingredientCount, serializer);
           sse_encode_u_32(stepCount, serializer);
+          sse_encode_u_32(highlightedStep, serializer);
+          sse_encode_list_String(ingredients, serializer);
+          sse_encode_list_String(steps, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 39)!;
         },
         codec: SseCodec(
@@ -1696,6 +1705,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           atBottom,
           ingredientCount,
           stepCount,
+          highlightedStep,
+          ingredients,
+          steps,
         ],
         apiImpl: this,
       ),
@@ -1713,6 +1725,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "atBottom",
           "ingredientCount",
           "stepCount",
+          "highlightedStep",
+          "ingredients",
+          "steps",
         ],
       );
 

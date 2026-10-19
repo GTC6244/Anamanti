@@ -398,6 +398,10 @@ async fn run_turn_task(
                     log::info!("turn: recipe scroll {direction}");
                     WakeWordEvent::recipe_scroll(direction)
                 }
+                wyoming::protocol::RecipeCommand::Step(step) => {
+                    log::info!("turn: recipe go to step {step}");
+                    WakeWordEvent::recipe_step(step)
+                }
             },
             // A weather command on the voice-turn socket: surface it to the UI (which
             // owns the weather screen). `Show` opens the full screen; `Current` (also

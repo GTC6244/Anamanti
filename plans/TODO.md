@@ -550,6 +550,18 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       recipe" and confirm the screen reacts and the model reliably calls
       `recipe_control` / `close_recipe` (needs the Mac Anamanti Core + a spoken turn;
       not drivable headlessly).
+- [x] **Recipe go-to-step highlight + recipe questions (2026-10-19)** — "go to step N" /
+      "next step" scrolls the step into view and highlights it (`recipe_control`
+      `go_to_step` / System-1 `recipe_step` → `anamanti-recipe` `step`); the recipe screen
+      context carries `highlighted_step` + the ingredient/step lines so "how many tomatoes?"
+      is answered from the screen (System-1 `recipe_ingredient` conditional lookup, else the
+      System-2 prompt). See [`RecipePlan.md`](./RecipePlan.md).
+- [ ] **Verify recipe steps + questions on hardware** (release APK + matching Core): with a
+      long recipe up, "go to step 7" lands step 7 on screen highlighted; "next step" →
+      step 8; "how many tomatoes do I need?" answers from the recipe (check the Core log
+      for `system1 … recipe_ingredient` vs a System-2 answer); re-run the System-1
+      calibration corpus (`tests/system1_calibration.rs --ignored`) against the live
+      backend for the two new intents.
 - [x] **Music now-playing UI + on-screen & voice control (MusicPlan P6, PR #91)** — a
       persistent `role="music"` push (`NowPlayingService`, polled every
       `music.nowplaying_refresh_secs`), the compact `MusicControlOverlay` +

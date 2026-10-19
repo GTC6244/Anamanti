@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
+// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `recipe_step`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChannelHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
@@ -73,8 +73,10 @@ void noteUserActivity() =>
 
 /// Report the recipe screen's state as the device's **display context** so the next
 /// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know a
-/// recipe is up (and which tab / scroll position) so it can drive the screen by voice
-/// (switch tabs, scroll, close).
+/// recipe is up (and which tab / scroll position / highlighted step) so it can drive the
+/// screen by voice (switch tabs, scroll, go to a step, close) — plus the recipe's
+/// ingredient lines and steps, so recipe questions ("how many tomatoes?") are answered
+/// from what is on screen (the Core's System-1 lookup or its System-2 prompt).
 ///
 /// This is the recipe screen's setter for the general display-context mechanism (see
 /// [`crate::engine::set_display_context`]); other voice-controllable screens — music,
@@ -83,7 +85,8 @@ void noteUserActivity() =>
 ///
 /// Flutter calls this when recipe mode opens or closes and whenever the active tab or a
 /// pane's scroll position changes. `active == false` clears the context (idle screen);
-/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`.
+/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`;
+/// `highlighted_step` is 1-based (`0` = none).
 void setRecipeContext({
   required bool active,
   required String title,
@@ -92,6 +95,9 @@ void setRecipeContext({
   required bool atBottom,
   required int ingredientCount,
   required int stepCount,
+  required int highlightedStep,
+  required List<String> ingredients,
+  required List<String> steps,
 }) => RustLib.instance.api.crateApiEngineSetRecipeContext(
   active: active,
   title: title,
@@ -100,6 +106,9 @@ void setRecipeContext({
   atBottom: atBottom,
   ingredientCount: ingredientCount,
   stepCount: stepCount,
+  highlightedStep: highlightedStep,
+  ingredients: ingredients,
+  steps: steps,
 );
 
 /// Report the weather screen's state as the device's **display context** so the next
@@ -866,6 +875,11 @@ enum WakeWordEventKind {
   /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
   /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
   recipeScroll,
+
+  /// Recipe mode: jump to a step by voice — switch to the Steps tab, scroll that step
+  /// into view and highlight it. `recipe_action` is the 1-based step number as a
+  /// decimal string (the generic string carrier, as `RecipeScroll`).
+  recipeStep,
 
   /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
   /// command. The direction (`"increase"` / `"decrease"`) rides the generic

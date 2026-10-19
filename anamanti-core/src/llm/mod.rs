@@ -121,7 +121,8 @@ pub enum FontDirection {
 }
 
 /// A voice navigation command for the open recipe screen (relayed as an
-/// `anamanti-recipe` `navigate`/`scroll` frame). Emitted by the `recipe_control` tool.
+/// `anamanti-recipe` `navigate`/`scroll`/`step` frame). Emitted by the `recipe_control`
+/// tool and the System-1 `recipe_step` fast path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecipeNav {
     /// Switch to the Overview tab.
@@ -138,6 +139,9 @@ pub enum RecipeNav {
     ScrollTop,
     /// Jump to the bottom of the active pane.
     ScrollBottom,
+    /// Jump to a step (1-based): switch to the Steps tab, scroll it into view and
+    /// highlight it (relayed as an `anamanti-recipe` `step` frame).
+    Step(u32),
 }
 
 /// The per-turn channel a tool pushes [`DeviceAction`]s onto. Unbounded so a tool's

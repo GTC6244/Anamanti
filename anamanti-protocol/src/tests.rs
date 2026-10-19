@@ -270,12 +270,19 @@ async fn recipe_frame_roundtrips_and_decodes_command() {
         scroll.recipe_command(),
         Some(RecipeCommand::Scroll("down".to_string()))
     );
+    let step = roundtrip(&WyomingEvent::recipe_step(4)).await;
+    assert_eq!(step.recipe_command(), Some(RecipeCommand::Step(4)));
 
     // A non-recipe frame yields nothing; missing params are rejected.
     assert_eq!(WyomingEvent::interrupt().recipe_command(), None);
-    for action in ["show", "navigate", "scroll"] {
+    for action in ["show", "navigate", "scroll", "step"] {
         let bad = WyomingEvent::with_data(types::RECIPE, json!({ "action": action }));
         assert_eq!(bad.recipe_command(), None, "{action}");
+    }
+    // Steps are 1-based: a zero (or negative) step is rejected.
+    for n in [json!(0), json!(-2), json!("3")] {
+        let bad = WyomingEvent::with_data(types::RECIPE, json!({ "action": "step", "step": n }));
+        assert_eq!(bad.recipe_command(), None, "{n}");
     }
 }
 

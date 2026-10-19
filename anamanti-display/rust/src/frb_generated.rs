@@ -1544,6 +1544,9 @@ fn wire__crate__api__engine__set_recipe_context_impl(
             let api_at_bottom = <bool>::sse_decode(&mut deserializer);
             let api_ingredient_count = <u32>::sse_decode(&mut deserializer);
             let api_step_count = <u32>::sse_decode(&mut deserializer);
+            let api_highlighted_step = <u32>::sse_decode(&mut deserializer);
+            let api_ingredients = <Vec<String>>::sse_decode(&mut deserializer);
+            let api_steps = <Vec<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok({
@@ -1555,6 +1558,9 @@ fn wire__crate__api__engine__set_recipe_context_impl(
                         api_at_bottom,
                         api_ingredient_count,
                         api_step_count,
+                        api_highlighted_step,
+                        api_ingredients,
+                        api_steps,
                     );
                 })?;
                 Ok(output_ok)
@@ -2788,10 +2794,11 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             23 => crate::api::engine::WakeWordEventKind::DismissPlace,
             24 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
             25 => crate::api::engine::WakeWordEventKind::RecipeScroll,
-            26 => crate::api::engine::WakeWordEventKind::FontAdjust,
-            27 => crate::api::engine::WakeWordEventKind::MusicScreen,
-            28 => crate::api::engine::WakeWordEventKind::Presence,
-            29 => crate::api::engine::WakeWordEventKind::EnrollResult,
+            26 => crate::api::engine::WakeWordEventKind::RecipeStep,
+            27 => crate::api::engine::WakeWordEventKind::FontAdjust,
+            28 => crate::api::engine::WakeWordEventKind::MusicScreen,
+            29 => crate::api::engine::WakeWordEventKind::Presence,
+            30 => crate::api::engine::WakeWordEventKind::EnrollResult,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -3492,10 +3499,11 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::DismissPlace => 23.into_dart(),
             Self::RecipeNavigate => 24.into_dart(),
             Self::RecipeScroll => 25.into_dart(),
-            Self::FontAdjust => 26.into_dart(),
-            Self::MusicScreen => 27.into_dart(),
-            Self::Presence => 28.into_dart(),
-            Self::EnrollResult => 29.into_dart(),
+            Self::RecipeStep => 26.into_dart(),
+            Self::FontAdjust => 27.into_dart(),
+            Self::MusicScreen => 28.into_dart(),
+            Self::Presence => 29.into_dart(),
+            Self::EnrollResult => 30.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -4135,10 +4143,11 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::DismissPlace => 23,
                 crate::api::engine::WakeWordEventKind::RecipeNavigate => 24,
                 crate::api::engine::WakeWordEventKind::RecipeScroll => 25,
-                crate::api::engine::WakeWordEventKind::FontAdjust => 26,
-                crate::api::engine::WakeWordEventKind::MusicScreen => 27,
-                crate::api::engine::WakeWordEventKind::Presence => 28,
-                crate::api::engine::WakeWordEventKind::EnrollResult => 29,
+                crate::api::engine::WakeWordEventKind::RecipeStep => 26,
+                crate::api::engine::WakeWordEventKind::FontAdjust => 27,
+                crate::api::engine::WakeWordEventKind::MusicScreen => 28,
+                crate::api::engine::WakeWordEventKind::Presence => 29,
+                crate::api::engine::WakeWordEventKind::EnrollResult => 30,
                 _ => {
                     unimplemented!("");
                 }

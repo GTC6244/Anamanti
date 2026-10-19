@@ -48,6 +48,9 @@ typedef RecipeContextSink =
       required bool atBottom,
       required int ingredientCount,
       required int stepCount,
+      required int highlightedStep,
+      required List<String> ingredients,
+      required List<String> steps,
     });
 
 /// Pushes the current weather-screen state down to the native engine, so the next voice
@@ -233,6 +236,8 @@ class AssistantState {
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
+    this.recipeStep = 0,
+    this.recipeStepSeq = 0,
     this.enrollSeq = 0,
     this.enrollResultJson = '',
   });
@@ -342,6 +347,17 @@ class AssistantState {
   /// The direction of the most recent voice scroll command: `'up'` / `'down'` (a page)
   /// or `'top'` / `'bottom'`. Read together with [recipeScrollSeq].
   final String recipeScrollDir;
+
+  /// The highlighted recipe step, 1-based (0 = none). Set by a voice "go to step N"
+  /// (`recipeStep` event) or a tap on a step; the [RecipeView] draws it as a bubble and
+  /// the pushed screen context reports it, so "next step" can resolve.
+  final int recipeStep;
+
+  /// A counter bumped on each voice step jump (paired with [recipeStep]). The
+  /// [RecipeView] scrolls the highlighted step into view whenever this changes — a
+  /// counter, so asking for the same step again still brings it back on screen after
+  /// the user scrolled away. 0 = no jump yet.
+  final int recipeStepSeq;
 
   /// Monotonic counter bumped each time a voice-enrollment capture result arrives
   /// (SpeakerEnrollmentPlan.md Phase 2). The enroll screen watches it (a counter, so a
@@ -488,6 +504,8 @@ class AssistantState {
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
+    int? recipeStep,
+    int? recipeStepSeq,
     int? enrollSeq,
     String? enrollResultJson,
   }) {
@@ -523,6 +541,8 @@ class AssistantState {
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
+      recipeStep: recipeStep ?? this.recipeStep,
+      recipeStepSeq: recipeStepSeq ?? this.recipeStepSeq,
       enrollSeq: enrollSeq ?? this.enrollSeq,
       enrollResultJson: enrollResultJson ?? this.enrollResultJson,
     );
@@ -964,6 +984,7 @@ class AssistantController extends ChangeNotifier {
             _state.copyWith(
               recipe: recipe,
               recipeTab: 0,
+              recipeStep: 0,
               clearWeather: true,
               clearPlace: true,
               musicScreen: MusicScreen.hidden,
@@ -992,6 +1013,7 @@ class AssistantController extends ChangeNotifier {
               clearRecipe: true,
               clearPlace: true,
               recipeTab: 0,
+              recipeStep: 0,
               musicScreen: MusicScreen.hidden,
             ),
           );
@@ -1025,6 +1047,7 @@ class AssistantController extends ChangeNotifier {
               clearRecipe: true,
               clearWeather: true,
               recipeTab: 0,
+              recipeStep: 0,
               musicScreen: MusicScreen.hidden,
             ),
           );
@@ -1053,6 +1076,26 @@ class AssistantController extends ChangeNotifier {
               recipeScrollDir: e.recipeAction,
             ),
           );
+        }
+      case WakeWordEventKind.recipeStep:
+        // Voice "go to step 4" / "next step": switch to the Steps tab, highlight the
+        // step, and bump the seq so the view scrolls it into view. An unparseable or
+        // out-of-range step is ignored.
+        final step = int.tryParse(e.recipeAction.trim());
+        final r = _state.recipe;
+        if (r != null && step != null && step >= 1 && step <= r.steps.length) {
+          if (_state.recipeTab != 2) {
+            _recipeAtTop = true;
+            _recipeAtBottom = false;
+          }
+          _emit(
+            _state.copyWith(
+              recipeTab: 2,
+              recipeStep: step,
+              recipeStepSeq: _state.recipeStepSeq + 1,
+            ),
+          );
+          _pushRecipeContext();
         }
       case WakeWordEventKind.musicScreen:
         // Voice `music_screen` command ("show me what's playing" / "what's up next" /
@@ -1434,6 +1477,16 @@ class AssistantController extends ChangeNotifier {
     _pushRecipeContext();
   }
 
+  /// Highlight a recipe step from the UI (a tap on it in the Steps tab), 1-based. The
+  /// pushed context then tells the orchestrator which step the user is on, so "next
+  /// step" continues from there. Tapping the highlighted step again clears it.
+  void selectRecipeStep(int step) {
+    final r = _state.recipe;
+    if (r == null || step < 1 || step > r.steps.length) return;
+    _emit(_state.copyWith(recipeStep: step == _state.recipeStep ? 0 : step));
+    _pushRecipeContext();
+  }
+
   void _setRecipeTab(int index) {
     final clamped = index.clamp(0, 2);
     if (clamped == _state.recipeTab) return;
@@ -1445,11 +1498,12 @@ class AssistantController extends ChangeNotifier {
   }
 
   void _clearRecipe() {
-    _emit(_state.copyWith(clearRecipe: true, recipeTab: 0));
+    _emit(_state.copyWith(clearRecipe: true, recipeTab: 0, recipeStep: 0));
     _pushRecipeContext();
   }
 
-  /// Push the current recipe-screen state (active/tab/scroll/counts) down to the
+  /// Push the current recipe-screen state (active/tab/scroll/counts/highlighted step
+  /// plus the ingredient and step lines) down to the
   /// native engine so the next voice turn carries it to the orchestrator. A no-op
   /// when no sink is wired (tests).
   void _pushRecipeContext() {
@@ -1465,6 +1519,9 @@ class AssistantController extends ChangeNotifier {
         atBottom: false,
         ingredientCount: 0,
         stepCount: 0,
+        highlightedStep: 0,
+        ingredients: const [],
+        steps: const [],
       );
       return;
     }
@@ -1477,6 +1534,11 @@ class AssistantController extends ChangeNotifier {
       atBottom: _recipeAtBottom,
       ingredientCount: r.ingredients.length,
       stepCount: r.steps.length,
+      // The recipe's lines ride the context so the Core can answer "how many tomatoes?"
+      // from what is on screen (System-1 lookup, else the System-2 prompt).
+      highlightedStep: _state.recipeStep,
+      ingredients: r.ingredients,
+      steps: r.steps,
     );
   }
 

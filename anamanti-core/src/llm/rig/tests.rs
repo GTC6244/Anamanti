@@ -443,9 +443,11 @@ async fn a_plain_text_turn_streams_token_by_token() {
         1
     );
     let req = &model.requests.lock().unwrap()[0];
-    assert_eq!(req.tools.len(), 4);
+    assert_eq!(req.tools.len(), 5);
     assert!(!req.forbid_tools);
-    assert!(req.preamble.starts_with("sys\n\nYou can start and cancel"));
+    assert!(req
+        .preamble
+        .starts_with("sys\n\nYou can start, cancel, and adjust"));
 }
 
 #[tokio::test]
@@ -525,7 +527,7 @@ async fn hitting_the_round_cap_makes_one_final_round_with_tools_forbidden() {
     assert!(requests[..MAX_TOOL_ROUNDS].iter().all(|r| !r.forbid_tools));
     let last = requests.last().unwrap();
     assert!(last.forbid_tools);
-    assert_eq!(last.tools.len(), 4, "tools stay defined for the history");
+    assert_eq!(last.tools.len(), 5, "tools stay defined for the history");
 }
 
 #[tokio::test]

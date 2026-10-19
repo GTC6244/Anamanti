@@ -4,7 +4,8 @@
 // [AssistantState.recipe]). Three bottom tabs — Overview / Ingredients / Steps —
 // switch a full-screen [IndexedStack]. Landscape-first with large, arm's-length type.
 // The user leaves recipe mode by voice ("done cooking") or the close control, which
-// calls [onClose].
+// calls [onClose]. A voice "go to step N" switches to Steps, scrolls that step into
+// view and draws it as a highlighted bubble ([highlightedStep] / [stepSeq]).
 
 import 'package:flutter/material.dart';
 
@@ -20,6 +21,9 @@ class RecipeView extends StatefulWidget {
     this.scrollSeq = 0,
     this.scrollDir = '',
     this.onScrollPositionChanged,
+    this.highlightedStep = 0,
+    this.stepSeq = 0,
+    this.onStepSelected,
   });
 
   final RecipeData recipe;
@@ -46,6 +50,17 @@ class RecipeView extends StatefulWidget {
   /// can tell the orchestrator whether a scroll command would do anything.
   final void Function(bool atTop, bool atBottom)? onScrollPositionChanged;
 
+  /// The highlighted step, 1-based (0 = none): drawn as an accent bubble on the Steps
+  /// tab. Set by voice ("go to step 4") or a tap via [onStepSelected].
+  final int highlightedStep;
+
+  /// Bumped on each voice step jump; the view scrolls [highlightedStep] into view
+  /// whenever it changes (a counter, so re-asking for the same step re-scrolls).
+  final int stepSeq;
+
+  /// Called with the 1-based step number when the user taps a step.
+  final ValueChanged<int>? onStepSelected;
+
   @override
   State<RecipeView> createState() => _RecipeViewState();
 }
@@ -53,6 +68,20 @@ class RecipeView extends StatefulWidget {
 class _RecipeViewState extends State<RecipeView> {
   int _tab = 0;
   late final List<ScrollController> _controllers;
+
+  /// One key per step row, so a voice step jump can find the row's render box and
+  /// [Scrollable.ensureVisible] it. Rebuilt when the step count changes.
+  List<GlobalKey> _stepKeys = const [];
+
+  List<GlobalKey> _keysFor(int n) {
+    if (_stepKeys.length != n) {
+      _stepKeys = List.generate(
+        n,
+        (i) => GlobalKey(debugLabel: 'recipe-step-$i'),
+      );
+    }
+    return _stepKeys;
+  }
 
   static const _bg = Color(0xFF14120E);
   static const _accent = Color(0xFFE8A33D);
@@ -100,6 +129,29 @@ class _RecipeViewState extends State<RecipeView> {
     if (widget.scrollSeq != old.scrollSeq && widget.scrollSeq > 0) {
       _applyScroll(widget.scrollDir);
     }
+    // A new voice step jump: the controller already switched to Steps; once the frame
+    // with the new tab + highlight is laid out, bring that step on screen.
+    if (widget.stepSeq != old.stepSeq && widget.stepSeq > 0) {
+      _tab = 2;
+      final step = widget.highlightedStep;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToStep(step));
+    }
+  }
+
+  /// Scroll the Steps pane so step [step] (1-based) is fully on screen, sitting just
+  /// below the top edge (the bubble plus as much of the following steps as fits). The
+  /// rows are built eagerly (a recipe is a few dozen steps at most), so every row has
+  /// a laid-out render box to measure even when it is far off screen.
+  void _scrollToStep(int step) {
+    if (!mounted || step < 1 || step > _stepKeys.length) return;
+    final ctx = _stepKeys[step - 1].currentContext;
+    if (ctx == null) return;
+    Scrollable.ensureVisible(
+      ctx,
+      alignment: 0.05,
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+    ).then((_) => _reportPosition());
   }
 
   /// Scroll the active pane in response to a voice command. A page is ~85% of the
@@ -186,6 +238,11 @@ class _RecipeViewState extends State<RecipeView> {
                     numbered: true,
                     emptyLabel: 'No steps listed.',
                     controller: _controllers[2],
+                    itemKeys: _keysFor(r.steps.length),
+                    highlighted: widget.highlightedStep - 1,
+                    onItemTap: widget.onStepSelected == null
+                        ? null
+                        : (i) => widget.onStepSelected!(i + 1),
                   ),
                 ],
               ),
@@ -408,7 +465,9 @@ class _OverviewTab extends StatelessWidget {
 }
 
 /// The Ingredients / Steps tab: a large, scrollable list. `numbered` renders step
-/// numbers; otherwise a bullet accent for ingredients.
+/// numbers; otherwise a bullet accent for ingredients. The [highlighted] row (0-based,
+/// -1 = none) is drawn as an accent bubble. Rows are built eagerly (not lazily) with
+/// optional [itemKeys], so a step far off screen can still be measured and scrolled to.
 class _ListTab extends StatelessWidget {
   const _ListTab({
     super.key,
@@ -417,6 +476,9 @@ class _ListTab extends StatelessWidget {
     required this.numbered,
     required this.emptyLabel,
     this.controller,
+    this.itemKeys,
+    this.highlighted = -1,
+    this.onItemTap,
   });
 
   final List<String> items;
@@ -424,6 +486,9 @@ class _ListTab extends StatelessWidget {
   final bool numbered;
   final String emptyLabel;
   final ScrollController? controller;
+  final List<GlobalKey>? itemKeys;
+  final int highlighted;
+  final ValueChanged<int>? onItemTap;
 
   @override
   Widget build(BuildContext context) {
@@ -438,44 +503,101 @@ class _ListTab extends StatelessWidget {
         ),
       );
     }
-    return ListView.separated(
+    return SingleChildScrollView(
       controller: controller,
-      padding: const EdgeInsets.fromLTRB(28, 12, 28, 24),
-      itemCount: items.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 14),
-      itemBuilder: (context, i) {
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 34,
-              child: numbered
-                  ? Text(
-                      '${i + 1}',
-                      style: TextStyle(
-                        color: accent,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    )
-                  : Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Icon(Icons.circle, size: 9, color: accent),
-                    ),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < items.length; i++)
+            _row(
+              i,
+              key: itemKeys != null && i < itemKeys!.length
+                  ? itemKeys![i]
+                  : null,
             ),
-            Expanded(
+        ],
+      ),
+    );
+  }
+
+  Widget _row(int i, {Key? key}) {
+    final selected = i == highlighted;
+    final row = AnimatedContainer(
+      key: key,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOut,
+      // The bubble: an accent-tinted, rounded card with an accent outline. Unselected
+      // rows keep the same padding and a transparent border so nothing shifts when
+      // the highlight moves.
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
+      decoration: BoxDecoration(
+        color: selected ? accent.withValues(alpha: 0.18) : Colors.transparent,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: selected ? accent : Colors.transparent,
+          width: 2,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 44,
+            child: numbered
+                ? Align(
+                    alignment: Alignment.topLeft,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      width: 34,
+                      height: 34,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: selected ? accent : Colors.transparent,
+                      ),
+                      child: Text(
+                        '${i + 1}',
+                        key: selected
+                            ? const Key('recipe-step-highlighted')
+                            : null,
+                        style: TextStyle(
+                          color: selected ? const Color(0xFF14120E) : accent,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  )
+                : Padding(
+                    padding: const EdgeInsets.only(top: 10, left: 4),
+                    child: Icon(Icons.circle, size: 9, color: accent),
+                  ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(top: numbered ? 2 : 0),
               child: Text(
                 items[i],
-                style: const TextStyle(
+                style: TextStyle(
                   color: Colors.white,
                   fontSize: 21,
                   height: 1.35,
+                  fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
                 ),
               ),
             ),
-          ],
-        );
-      },
+          ),
+        ],
+      ),
+    );
+    final tap = onItemTap;
+    if (tap == null) return row;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => tap(i),
+      child: row,
     );
   }
 }

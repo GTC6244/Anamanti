@@ -31,7 +31,7 @@ WakeWordConfig _cfg() => WakeWordConfig(
   smoothingWindow: 2,
   fireOnPeak: false,
   playbackBufferSecs: 30,
-      captureGainDb: 0,
+  captureGainDb: 0,
   useAudiorecord: false,
   micSource: 6,
   platformAec: false,
@@ -68,7 +68,8 @@ WakeWordEvent _ev(
   weatherJson: '',
   placeJson: '',
   recipeAction: recipeAction,
-  enrollJson: '',);
+  enrollJson: '',
+);
 
 void main() {
   group('RecipeData.tryParse', () {
@@ -142,6 +143,9 @@ void main() {
               required bool atBottom,
               required int ingredientCount,
               required int stepCount,
+              required int highlightedStep,
+              required List<String> ingredients,
+              required List<String> steps,
             }) => ctxCalls.add({
               'active': active,
               'tab': tab,
@@ -149,6 +153,9 @@ void main() {
               'atBottom': atBottom,
               'ingredientCount': ingredientCount,
               'stepCount': stepCount,
+              'highlightedStep': highlightedStep,
+              'ingredients': ingredients,
+              'steps': steps,
             }),
       )..start();
       addTearDown(controller.dispose);
@@ -161,6 +168,14 @@ void main() {
       expect(ctxCalls.last['tab'], 'overview');
       expect(ctxCalls.last['ingredientCount'], 3);
       expect(ctxCalls.last['stepCount'], 3);
+      // The recipe's lines ride the context (for "how many …?" questions).
+      expect(ctxCalls.last['ingredients'], [
+        '200g spaghetti',
+        '2 eggs',
+        '100g pancetta',
+      ]);
+      expect(ctxCalls.last['steps'], hasLength(3));
+      expect(ctxCalls.last['highlightedStep'], 0);
 
       // Voice "show the ingredients" switches the tab and re-pushes context.
       engine.add(
@@ -191,6 +206,69 @@ void main() {
       controller.dismissRecipe();
       expect(controller.state.recipeActive, isFalse);
       expect(ctxCalls.last['active'], isFalse);
+      expect(ctxCalls.last['ingredients'], isEmpty);
+    },
+  );
+
+  test(
+    'voice step jump switches to Steps, highlights, and reports it',
+    () async {
+      final engine = StreamController<WakeWordEvent>.broadcast();
+      final ctxCalls = <Map<String, Object?>>[];
+      final controller = AssistantController(
+        config: _cfg(),
+        startEngine: (_) => engine.stream,
+        setRecipeContext:
+            ({
+              required bool active,
+              required String title,
+              required String tab,
+              required bool atTop,
+              required bool atBottom,
+              required int ingredientCount,
+              required int stepCount,
+              required int highlightedStep,
+              required List<String> ingredients,
+              required List<String> steps,
+            }) =>
+                ctxCalls.add({'tab': tab, 'highlightedStep': highlightedStep}),
+      )..start();
+      addTearDown(controller.dispose);
+
+      engine.add(_ev(WakeWordEventKind.showRecipe, recipeJson: _recipeJson));
+      await Future<void>.delayed(Duration.zero);
+
+      engine.add(_ev(WakeWordEventKind.recipeStep, recipeAction: '2'));
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.recipeTab, 2);
+      expect(controller.state.recipeStep, 2);
+      expect(controller.state.recipeStepSeq, 1);
+      expect(ctxCalls.last, {'tab': 'steps', 'highlightedStep': 2});
+
+      // Asking for the same step again still bumps the seq (re-scroll).
+      engine.add(_ev(WakeWordEventKind.recipeStep, recipeAction: '2'));
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.recipeStepSeq, 2);
+
+      // Out of range / garbage → ignored.
+      for (final bad in ['0', '9', 'two', '']) {
+        engine.add(_ev(WakeWordEventKind.recipeStep, recipeAction: bad));
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.state.recipeStep, 2, reason: bad);
+      }
+
+      // A tap highlights a step; tapping it again clears the highlight.
+      controller.selectRecipeStep(3);
+      expect(controller.state.recipeStep, 3);
+      expect(ctxCalls.last['highlightedStep'], 3);
+      controller.selectRecipeStep(3);
+      expect(controller.state.recipeStep, 0);
+
+      // A newly shown recipe starts with no highlight.
+      controller.selectRecipeStep(1);
+      engine.add(_ev(WakeWordEventKind.showRecipe, recipeJson: _recipeJson));
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.state.recipeStep, 0);
     },
   );
 
@@ -274,5 +352,64 @@ void main() {
     await tester.pumpAndSettle();
     expect(tappedTab, 2);
     expect(find.text('Boil the pasta.'), findsOneWidget);
+  });
+
+  testWidgets('RecipeView scrolls a far-off step into view and highlights it', (
+    tester,
+  ) async {
+    // A long recipe whose last step starts well below the fold.
+    final steps = List.generate(30, (i) => 'Step text number ${i + 1}. ' * 4);
+    final recipe = RecipeData(title: 'Long', steps: steps);
+    var highlighted = 0;
+    var seq = 0;
+    var tab = 0;
+    late StateSetter rebuild;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: StatefulBuilder(
+          builder: (context, setState) {
+            rebuild = setState;
+            return RecipeView(
+              recipe: recipe,
+              onClose: () {},
+              tab: tab,
+              highlightedStep: highlighted,
+              stepSeq: seq,
+              onStepSelected: (n) => setState(() => highlighted = n),
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Voice "go to step 28": the controller sets the Steps tab + the step + bumps seq.
+    rebuild(() {
+      tab = 2;
+      highlighted = 28;
+      seq = 1;
+    });
+    await tester.pumpAndSettle();
+
+    final bubble = find.byKey(const Key('recipe-step-highlighted'));
+    expect(bubble, findsOneWidget);
+    expect(tester.widget<Text>(bubble).data, '28');
+    // The highlighted step is actually on screen (not just built off-screen).
+    final screen = tester.getRect(find.byType(RecipeView));
+    final row = tester.getRect(bubble);
+    expect(
+      screen.contains(row.topLeft) && screen.contains(row.bottomRight),
+      isTrue,
+    );
+    // And step 1 has scrolled out of view.
+    final first = tester.getRect(find.text(steps.first));
+    expect(first.bottom < screen.top + 80, isTrue);
+
+    // A tap on another step reports it (1-based) and moves the highlight.
+    await tester.tap(find.text(steps[26]));
+    await tester.pumpAndSettle();
+    expect(highlighted, 27);
+    expect(tester.widget<Text>(bubble).data, '27');
   });
 }

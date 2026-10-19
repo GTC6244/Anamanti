@@ -638,10 +638,12 @@ predictable memory use and no GC pauses under the 1 GB limit.
   single-turn.
 - **`anamanti-recipe`** (Anamanti Core → device): a project-local **device-action** frame
   driving the guided-recipe screen (`data.action` = `show` + `recipe` object /
-  `dismiss` / `navigate` + `target` tab / `scroll` + `direction`). Emitted by the LLM
-  **tools** the model calls on the Mac — `recipe_lookup` (fetch + parse → `show`),
-  `close_recipe` (`dismiss`), and `recipe_control` (`navigate` to Overview/Ingredients/
-  Steps, or `scroll` up/down/top/bottom). The device owns the resulting screen state —
+  `dismiss` / `navigate` + `target` tab / `scroll` + `direction` / `step` + a 1-based
+  `step` number). Emitted by the LLM **tools** the model calls on the Mac —
+  `recipe_lookup` (fetch + parse → `show`), `close_recipe` (`dismiss`), and
+  `recipe_control` (`navigate` to Overview/Ingredients/Steps, `scroll`
+  up/down/top/bottom, or `go_to_step` → `step`, which shows + highlights that step) —
+  and by the System-1 `recipe_dismiss` / `recipe_step` fast paths. The device owns the resulting screen state —
   it persists across turns and idle while you cook — so, like timers, this is
   fire-and-forget from the Mac. See `plans/RecipePlan.md`.
 - **`anamanti-font`** (Anamanti Core → device): a project-local **device-action** frame
@@ -656,8 +658,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
   every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload.
   The kinds that ship today:
   - **recipe:** `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
-    ingredient_count, step_count}}` — the model can `recipe_control` (switch tab / scroll)
-    or `close_recipe`.
+    ingredient_count, step_count, highlighted_step, ingredients[], steps[]}}` — the model
+    can `recipe_control` (switch tab / scroll / go to a step) or `close_recipe`, and the
+    recipe's lines (capped Core-side at 80 lines × 600 chars) are listed in the prompt so
+    it answers recipe questions from what's on screen; System-1 `recipe_step` /
+    `recipe_ingredient` use the same fields (highlighted step, ingredient lines).
   - **weather:** `{kind:"weather", weather:{location, units, temp, description}}` — the
     model knows the forecast is up and for where, so it answers follow-ups in context
     ("what about tomorrow" → `weather_lookup` for the same place) and closes it on "close

@@ -439,9 +439,12 @@ fn weather_screen_line(screen: &WeatherScreen) -> String {
     )
 }
 
-/// The prompt line for the recipe screen: names the active tab and whether the pane is
-/// scrolled to the top/bottom, so the model can decide whether a `recipe_control`
-/// (switch tab / scroll) or `close_recipe` call is useful.
+/// The prompt block for the recipe screen: names the active tab, whether the pane is
+/// scrolled to the top/bottom and which step is highlighted, so the model can decide
+/// whether a `recipe_control` (switch tab / scroll / go to a step) or `close_recipe` call
+/// is useful — then lists the recipe's ingredients and numbered steps (when the device
+/// sent them) so the model answers recipe questions ("how many tomatoes?", "how long does
+/// it bake?") from what is on screen instead of guessing or looking it up again.
 fn recipe_screen_line(screen: &RecipeScreen) -> String {
     let tab = match screen.tab.as_str() {
         "ingredients" => "Ingredients",
@@ -463,13 +466,43 @@ fn recipe_screen_line(screen: &RecipeScreen) -> String {
     } else {
         " It is scrolled partway."
     };
-    format!(
+    let highlighted = if screen.highlighted_step > 0 {
+        format!(
+            " Step {} is highlighted (the step the user is on — \"next step\" is step {}).",
+            screen.highlighted_step,
+            screen.highlighted_step + 1
+        )
+    } else {
+        " No step is highlighted yet (\"next step\" means step 1).".to_string()
+    };
+    let mut out = format!(
         "The recipe screen is currently open on the display, showing {dish} \
-         ({ing} ingredients, {steps} steps) on the {tab} tab.{position} Use the \
-         `recipe_control` tool to switch tabs or scroll it, or `close_recipe` to close it.",
+         ({ing} ingredients, {steps} steps) on the {tab} tab.{position}{highlighted} Use the \
+         `recipe_control` tool to switch tabs, scroll, or go to a step (`go_to_step` \
+         scrolls it into view and highlights it), or `close_recipe` to close it.",
         ing = screen.ingredient_count,
         steps = screen.step_count,
-    )
+    );
+    if !screen.ingredients.is_empty() || !screen.steps.is_empty() {
+        out.push_str(
+            " Answer questions about this recipe (quantities, times, temperatures, what a \
+             step says) from the recipe below.",
+        );
+    }
+    if !screen.ingredients.is_empty() {
+        out.push_str("\nIngredients:");
+        for line in &screen.ingredients {
+            out.push_str("\n- ");
+            out.push_str(line);
+        }
+    }
+    if !screen.steps.is_empty() {
+        out.push_str("\nSteps:");
+        for (i, line) in screen.steps.iter().enumerate() {
+            out.push_str(&format!("\n{}. {line}", i + 1));
+        }
+    }
+    out
 }
 
 /// Recognize a "switch personality" voice command and return the name to apply — a
@@ -842,5 +875,45 @@ mod personality_switch_tests {
             detect_personality_switch("what's the weather today?", &p),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod recipe_screen_tests {
+    use super::recipe_screen_line;
+    use crate::wyoming::protocol::RecipeScreen;
+
+    #[test]
+    fn lists_ingredients_and_numbered_steps_and_the_highlighted_step() {
+        let line = recipe_screen_line(&RecipeScreen {
+            title: "Salsa".to_string(),
+            tab: "steps".to_string(),
+            at_top: true,
+            ingredient_count: 2,
+            step_count: 2,
+            highlighted_step: 1,
+            ingredients: vec!["4 ripe tomatoes".into(), "1 onion".into()],
+            steps: vec!["Chop.".into(), "Mix.".into()],
+            ..Default::default()
+        });
+        assert!(line.contains("Step 1 is highlighted"), "{line}");
+        assert!(line.contains("\"next step\" is step 2"), "{line}");
+        assert!(line.contains("\n- 4 ripe tomatoes\n- 1 onion"), "{line}");
+        assert!(line.contains("\n1. Chop.\n2. Mix."), "{line}");
+        assert!(line.contains("go_to_step"), "{line}");
+    }
+
+    #[test]
+    fn an_older_device_without_lines_gets_only_the_summary() {
+        let line = recipe_screen_line(&RecipeScreen {
+            title: "Salsa".to_string(),
+            ..Default::default()
+        });
+        assert!(line.contains("No step is highlighted"), "{line}");
+        assert!(
+            !line.contains("Ingredients:") && !line.contains("Steps:"),
+            "{line}"
+        );
+        assert!(!line.contains('\n'), "{line}");
     }
 }

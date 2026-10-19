@@ -204,6 +204,9 @@ class AmbientScreen extends StatelessWidget {
                           scrollDir: state.recipeScrollDir,
                           onScrollPositionChanged:
                               assistant.reportRecipeScrollPosition,
+                          highlightedStep: state.recipeStep,
+                          stepSeq: state.recipeStepSeq,
+                          onStepSelected: assistant.selectRecipeStep,
                         )
                       : const SizedBox.shrink(),
                 ),

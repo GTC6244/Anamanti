@@ -74,6 +74,8 @@ fn corpus() -> Vec<Case> {
     let wdismiss: &[&str] = &["weather_dismiss", "stop_dismiss"];
     let rdismiss: &[&str] = &["recipe_dismiss", "stop_dismiss"];
     let endsess: &[&str] = &["end_session", "stop_dismiss"];
+    let rstep: &[&str] = &["recipe_step"];
+    let ringredient: &[&str] = &["recipe_ingredient"];
 
     vec![
         // weather (present/future resolve; past + named place defer)
@@ -99,6 +101,16 @@ fn corpus() -> Vec<Case> {
         // screen dismiss (with that screen up)
         with_screen(case("close the weather", Resolve(wdismiss)), "weather"),
         with_screen(case("close the recipe", Resolve(rdismiss)), "recipe"),
+        // recipe on screen: go to a step / an ingredient quantity lookup
+        with_screen(case("go to step four", Resolve(rstep)), "recipe"),
+        with_screen(case("next step", Resolve(rstep)), "recipe"),
+        with_screen(
+            case("how many tomatoes do I need", Resolve(ringredient)),
+            "recipe",
+        ),
+        with_screen(case("how much flour", Resolve(ringredient)), "recipe"),
+        // …but a cooking-time question is open-ended → System-2 (it has the steps).
+        with_screen(case("how long does it bake", Defer), "recipe"),
         // end session
         case("that's all thanks", Resolve(endsess)),
         case("nothing else", Resolve(endsess)),
