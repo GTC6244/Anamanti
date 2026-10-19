@@ -98,17 +98,20 @@ events; nothing here touches audio buffers or sockets directly.
    `IgnorePointer`, shown only while `state.listening` (wake word / follow-up listen
    → end-of-speech). Reacts to `state.micLevel`. Mounted only while shown so its
    pulse controller isn't spinning during idle.
-9a. `MusicControlOverlay` — compact transport bar, `Positioned(bottom: 18)`,
-    centered, 250 ms fade; shown while `musicOverlayVisible` (a track is playing and
+9a. **Bottom strip** — one `Positioned(left: 28, right: 20, bottom: 24)` `Row`:
+    the idle clock (item 10) on the left, then an `Expanded` **bottom-widget slot**
+    right-aligned in line with it (see *Bottom-edge layout rule* below). Today the
+    slot holds `MusicControlOverlay` — the compact transport bar, 250 ms fade; shown while `musicOverlayVisible` (a track is playing and
     no full music screen / Core mode / turn is up and someone is present). Tappable
     (opens `NowPlayingView`); its expand button switches the music display style to
     full screen.
-10. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
+10. Idle clock (`_AmbientClock`, small) — the left child of the bottom strip;
     hidden during a turn, off mode, any full-screen mode, or when timers exist.
 11. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
 12. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
 13. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
-    `open-settings`; fades out during a turn and in away mode.
+    `open-settings`; **hidden by default** — shown only for 5 s after a touch, and only
+    when no widget is displayed and not in away mode (see §2).
 14. `NotificationBanner` — shows even in away mode.
 15. `UpdateBanner` — in-app updater prompt/progress (selfUpdate flavor).
 16. Compact `TimersOverlay` (`compact: true`) — top-center chip row, the **top-most
@@ -158,24 +161,43 @@ Core-owned path).
 
 **`_AmbientClock` / `_AmbientClockState`** — `lib/src/ui/ambient_screen.dart` (file-private)
 - A 1 s-ticking 12-hour clock (`h:mm AM/PM`) in two variants:
-  - **Idle** (bottom-left): 44px time, the weather chip beside it, and the hint
-    "Say the wake word to begin".
+  - **Idle** (bottom-left): 50px time with the weather chip beside it (no hint
+    text — the "Say the wake word to begin" line was removed 2026-10-19).
   - **Away/off** (`large: true`): centered 168px dimmed (white α 0.5) time only,
     `FittedBox` to guard overflow.
 - **`_weatherChip(WeatherData)`** (key `idle-weather`): the weather-beside-clock
-  indicator — a condition `Icon` (30px) + current temperature with unit suffix
-  (28px), sourced from `state.weatherCurrent`; hidden when null.
+  indicator — a condition `Icon` (34px) + current temperature with unit suffix
+  (32px), sourced from `state.weatherCurrent`; hidden when null.
 
 **`StatusIndicator`** — `lib/src/ui/status_indicator.dart`
-- Top-right pill (icon + label + color) mapping `AssistantState`:
+- Top-right status. **Healthy idle is a bare 14px green dot** (key
+  `status-ready-dot`, no label, no pill). Every other state is a pill (icon + label +
+  color) mapping `AssistantState`:
   `error` → "Reconnecting" (salmon); offline+idle → "Offline" (amber, the
   disconnected indicator); `listening` → "Listening"; `processing` →
   "Processing"; `connecting` → "Connecting"; `thinking` → "Thinking";
-  `speaking` → "Speaking"; `idle` → "Ready". Hidden only in away mode.
+  `speaking` → "Speaking"; `idle` → the green dot. Hidden only in away mode.
 
 **Settings gear** — `lib/src/ui/ambient_screen.dart`
-- Top-left `IconButton` (key `open-settings`, opacity 0.7) → `onOpenSettings`;
-  fades out during a turn and in away mode. The only entry to `SettingsScreen`.
+- Top-left `IconButton` (key `open-settings`, opacity 0.7) → `onOpenSettings`. The
+  only entry to `SettingsScreen`. **Hidden unless the screen was touched AND no widget
+  is displayed**: a translucent `Listener` (`_TouchReveal`, doesn't consume the touch)
+  reveals it for 5 s after each pointer-down, but only while there is no turn panel,
+  full-screen mode (recipe/weather/place/music), compact music bar, timer, or listening
+  ring on screen, and not in away mode. Hidden, it is disabled — the first touch only
+  reveals it; a second tap opens settings.
+
+### Bottom-edge layout rule (all current and upcoming bottom widgets)
+
+**No bottom widget may ever cover the time/weather (the idle clock).** The bottom edge
+is a single `Row` in `ambient_screen.dart`: the idle clock on the left, then an
+`Expanded` bottom-widget slot whose contents are **right-aligned, vertically in line
+with the time/weather**. A bottom widget only gets the width the clock leaves (its own
+content must shrink/ellipsize, as `MusicControlOverlay`'s title does). When adding a
+new bottom widget (e.g. a Home Assistant strip, a calendar "next up" chip), put it in
+that slot — **never** as its own `Positioned(bottom: …)` layered over the clock. If
+several bottom widgets can be visible at once, stack/arrange them inside the slot.
+Full-screen views are exempt (they hide the clock anyway).
 
 **`weatherIcon(code, isDay)` / `weatherIconColor(code, isDay)`** — `lib/src/ui/weather_icons.dart`
 - Shared helper (not a widget). Maps WMO codes → bundled Material icons + tints

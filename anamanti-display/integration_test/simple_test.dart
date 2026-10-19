@@ -6,6 +6,7 @@
 // path (wake word → STT → LLM → TTS playback) needs a live Wyoming host and is
 // validated separately.
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:anamanti_display/main.dart';
 import 'package:anamanti_display/src/rust/frb_generated.dart';
@@ -21,7 +22,7 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     await tester.pump(const Duration(seconds: 1));
 
-    // The idle ambient screen shows the wake-word hint (no turn is active).
-    expect(find.text('Say the wake word to begin'), findsOneWidget);
+    // The idle ambient screen shows the small idle clock (no turn is active).
+    expect(find.byKey(const Key('idle-clock')), findsOneWidget);
   });
 }

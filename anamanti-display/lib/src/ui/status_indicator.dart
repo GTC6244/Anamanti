@@ -11,9 +11,29 @@ class StatusIndicator extends StatelessWidget {
 
   final AssistantState state;
 
+  /// The healthy-idle color: a plain green dot, no label.
+  static const readyColor = Color(0xFF6FDC8C);
+
   @override
   Widget build(BuildContext context) {
     final (color, label, icon) = _describe(state);
+    if (label == null) {
+      // Healthy and idle: just a small green dot — no text, no pill. A thin dark
+      // ring keeps it visible against bright photos.
+      return Container(
+        key: const Key('status-ready-dot'),
+        width: 14,
+        height: 14,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: Colors.black.withValues(alpha: 0.35),
+            width: 1.5,
+          ),
+        ),
+      );
+    }
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.35),
@@ -24,7 +44,7 @@ class StatusIndicator extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 14, color: color),
+            Icon(icon!, size: 14, color: color),
             const SizedBox(width: 6),
             Text(
               label,
@@ -41,7 +61,8 @@ class StatusIndicator extends StatelessWidget {
     );
   }
 
-  (Color, String, IconData) _describe(AssistantState s) {
+  /// `(color, label, icon)`; a null label means "healthy idle" → the bare dot.
+  (Color, String?, IconData?) _describe(AssistantState s) {
     if (s.phase == TurnPhase.error) {
       return (const Color(0xFFFFB4A2), 'Reconnecting', Icons.sync_problem);
     }
@@ -61,7 +82,7 @@ class StatusIndicator extends StatelessWidget {
         return (const Color(0xFFA8F0C6), 'Speaking', Icons.volume_up);
       case TurnPhase.idle:
       case TurnPhase.error:
-        return (const Color(0xFFA8F0C6), 'Ready', Icons.check_circle);
+        return (readyColor, null, null);
     }
   }
 }

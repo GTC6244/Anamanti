@@ -94,11 +94,15 @@ class _Harness {
     startEngine: (_) => controller.stream,
   );
 
-  Future<void> pump(WidgetTester tester) async {
+  Future<void> pump(WidgetTester tester, {VoidCallback? onOpenSettings}) async {
     assistant.start();
     await slideshow.start();
     await tester.pumpWidget(MaterialApp(
-      home: AmbientScreen(assistant: assistant, slideshow: slideshow),
+      home: AmbientScreen(
+        assistant: assistant,
+        slideshow: slideshow,
+        onOpenSettings: onOpenSettings,
+      ),
     ));
     await tester.pump();
   }
@@ -123,12 +127,47 @@ class _Harness {
 }
 
 void main() {
-  testWidgets('idle ambient screen shows the wake-word hint', (tester) async {
+  testWidgets('idle ambient screen has no wake-word hint', (tester) async {
     final h = _Harness();
     await h.pump(tester);
 
-    expect(find.text('Say the wake word to begin'), findsOneWidget);
+    expect(find.text('Say the wake word to begin'), findsNothing);
 
+    await h.dispose(tester);
+  });
+
+  testWidgets('settings gear appears only after a touch on the bare idle screen',
+      (tester) async {
+    final h = _Harness();
+    await h.pump(tester, onOpenSettings: () {});
+
+    double gearOpacity() => tester
+        .widget<AnimatedOpacity>(find.ancestor(
+          of: find.byKey(const Key('open-settings')),
+          matching: find.byType(AnimatedOpacity),
+        ).first)
+        .opacity;
+
+    // Hidden until the screen is touched.
+    expect(gearOpacity(), 0);
+
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump();
+    expect(gearOpacity(), greaterThan(0));
+
+    // Fades away again a few seconds after the last touch.
+    await tester.pump(const Duration(seconds: 6));
+    expect(gearOpacity(), 0);
+
+    // A running timer is a widget on screen → a touch does not reveal the gear.
+    h.add(_event(WakeWordEventKind.timerStarted,
+        timerId: 1, timerLabel: 'tea', timerRemainingSecs: 60));
+    await h.settle(tester);
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump();
+    expect(gearOpacity(), 0);
+
+    await tester.pump(const Duration(seconds: 6));
     await h.dispose(tester);
   });
 
