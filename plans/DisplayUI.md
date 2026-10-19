@@ -131,11 +131,14 @@ events; nothing here touches audio buffers or sockets directly.
   `Image.network` (per-item auth `headers`) over a `LinearGradient`, or a pure
   gradient when there is no image (also the load/error fallback, 600 ms fade-in).
 - Started in `initState` (`_slideshow.start()`), independent of settings /
-  connectivity. Horizontal swipe → next/previous photo (resets the 10 s
-  auto-advance). `HitTestBehavior.opaque`.
+  connectivity. Horizontal swipe → next/previous photo (resets the
+  auto-advance timer to a full interval). `HitTestBehavior.opaque`.
 
 **`SlideshowController`** — `lib/src/slideshow/photo_source.dart`
-- Cycles a `PhotoSource`'s photos on a 10 s timer, decoupled from the assistant.
+- Cycles a `PhotoSource`'s photos on a timer, decoupled from the assistant. The
+  rotation time is **per device** — `AppSettings.slideIntervalSecs` (default 10 s,
+  clamped 3 s…10 min), set on Settings → Display → Photos ("Change photo every") and
+  applied live via `setInterval` (restarts the timer; no engine restart).
   Silently falls back to `LocalPhotoSource` if the configured source throws or
   returns empty.
 
@@ -583,7 +586,10 @@ and `settings_controller.dart`). Layout and rationale:
     `settings-photo-source`); Google Photos (Ambient API) link via QR
     (`settings-ambient-link`); Google Drive: Sync from Core (`settings-drive-sync`) +
     Choose folders (`settings-drive-pick`); *Adv*: raw folder-ID field
-    (`settings-drive-folders`). Links apply as soon as they complete.
+    (`settings-drive-folders`). Links apply as soon as they complete. **Change photo
+    every** (chips 5s…10m, `settings-slide-interval`, each
+    `settings-slide-interval-<secs>`; an off-preset stored value shows the nearest) —
+    the per-device background-photo rotation time, applied live.
 - **Household** — three large buttons that push the existing full screens: **People**
   (`settings-menu-people`), **Link a phone** (`settings-menu-pair-phone`), **Memory**
   (`settings-menu-memory`). See §10.

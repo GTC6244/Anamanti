@@ -218,11 +218,24 @@ PhotoSource photoSourceFromSettings(
 class SlideshowController extends ChangeNotifier {
   SlideshowController({
     PhotoSource? source,
-    this.interval = const Duration(seconds: 10),
+    this._interval = const Duration(seconds: kDefaultSlideIntervalSecs),
   }) : _source = source ?? const LocalPhotoSource();
 
   PhotoSource _source;
-  final Duration interval;
+  Duration _interval;
+
+  /// Time each photo stays on screen before auto-advancing. Per-device, from
+  /// [AppSettings.slideIntervalSecs]; change it live with [setInterval].
+  Duration get interval => _interval;
+
+  /// Change the auto-advance cadence (Settings → Display → Photos). If the slideshow
+  /// is already running, the timer restarts so the current photo gets a full new
+  /// interval. No-op when unchanged (so settings applies don't reset the cadence).
+  void setInterval(Duration interval) {
+    if (interval == _interval || interval <= Duration.zero) return;
+    _interval = interval;
+    if (_timer != null && !_disposed) _restartTimer();
+  }
 
   List<PhotoItem> _photos = const [];
   int _index = 0;
@@ -246,7 +259,7 @@ class SlideshowController extends ChangeNotifier {
 
   void _restartTimer() {
     _timer?.cancel();
-    _timer = Timer.periodic(interval, (_) => next());
+    _timer = Timer.periodic(_interval, (_) => next());
   }
 
   /// Swap the source (e.g. after linking a Google account in settings) and reload.
