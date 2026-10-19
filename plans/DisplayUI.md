@@ -111,7 +111,7 @@ events; nothing here touches audio buffers or sockets directly.
 12. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
 13. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
     `open-settings`; **hidden by default** — shown only for 5 s after a touch, and only
-    when no widget is displayed and not in away mode (see §2).
+    when no full-screen widget is displayed and not in away mode (see §2).
 14. `NotificationBanner` — shows even in away mode.
 15. `UpdateBanner` — in-app updater prompt/progress (selfUpdate flavor).
 16. Compact `TimersOverlay` (`compact: true`) — top-center chip row, the **top-most
@@ -180,12 +180,14 @@ Core-owned path).
 
 **Settings gear** — `lib/src/ui/ambient_screen.dart`
 - Top-left `IconButton` (key `open-settings`, opacity 0.7) → `onOpenSettings`. The
-  only entry to `SettingsScreen`. **Hidden unless the screen was touched AND no widget
-  is displayed**: a translucent `Listener` (`_TouchReveal`, doesn't consume the touch)
-  reveals it for 5 s after each pointer-down, but only while there is no turn panel,
-  full-screen mode (recipe/weather/place/music), compact music bar, timer, or listening
-  ring on screen, and not in away mode. Hidden, it is disabled — the first touch only
-  reveals it; a second tap opens settings.
+  only entry to `SettingsScreen`. **Hidden unless the screen was touched AND no
+  full-screen widget is displayed**: a translucent `Listener` (`_TouchReveal`, doesn't
+  consume the touch) reveals it for 5 s after each pointer-down. Only full-screen
+  widgets block it — the turn's conversation panel, a full-screen mode
+  (recipe/weather/place/music now-playing/up-next), or the big screen-filling idle
+  timers — plus away mode. Partial overlays (the compact music bar, the listening ring,
+  banners) never block it. Hidden, it is disabled — the first touch only reveals it; a
+  second tap opens settings.
 
 ### Bottom-edge layout rule (all current and upcoming bottom widgets)
 

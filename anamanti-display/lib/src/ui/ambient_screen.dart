@@ -144,16 +144,14 @@ class AmbientScreen extends StatelessWidget {
             // always has z-order precedence over every other overlay and banner.
             final compactTimersVisible =
                 state.timers.isNotEmpty && (active || modeActive) && !offMode;
-            // The settings gear shows only after a touch, and only on the bare idle
-            // screen — never while any widget (turn panel, full-screen mode, music
-            // bar, timers, listening ring) is displayed, nor in away mode.
-            final anyWidget =
-                active ||
-                modeActive ||
-                musicOverlayVisible ||
-                listening ||
-                state.timers.isNotEmpty;
-            final showSettings = touched && !anyWidget && !offMode;
+            // The settings gear shows only after a touch, and is blocked ONLY by a
+            // full-screen widget: the turn's conversation panel, a full-screen mode
+            // (recipe/weather/place/music now-playing/up-next), or the big
+            // screen-filling idle timers — and not in away mode. Partial overlays
+            // (the compact music bar, the listening ring, banners) never block it.
+            final fullScreenWidget =
+                active || modeActive || state.timers.isNotEmpty;
+            final showSettings = touched && !fullScreenWidget && !offMode;
             return Stack(
               fit: StackFit.expand,
               children: [
@@ -446,8 +444,8 @@ class AmbientScreen extends StatelessWidget {
 
                 // Discreet settings control, top-left. Hidden by default: it appears
                 // only for a few seconds after the screen is touched, and only when no
-                // widget is up (no turn, full-screen mode, music bar, timers, or
-                // listening ring) and we're not in away mode.
+                // full-screen widget is up (turn panel, full-screen mode, or big idle
+                // timers) and we're not in away mode.
                 if (onOpenSettings != null)
                   Positioned(
                     left: 12,

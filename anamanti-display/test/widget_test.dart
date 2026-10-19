@@ -171,6 +171,42 @@ void main() {
     await h.dispose(tester);
   });
 
+  testWidgets('compact music bar does not block the settings gear',
+      (tester) async {
+    // The Echo Show 8's 1280x800 screen (the default 800x600 test surface is too
+    // narrow for the clock + music bar row).
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final h = _Harness();
+    var opened = 0;
+    await h.pump(tester, onOpenSettings: () => opened++);
+    // Someone present so the music bar is shown (not away mode).
+    h.add(_event(WakeWordEventKind.presence, present: true));
+    await h.settle(tester);
+    h.assistant.applyMusicPush(
+        '{"playing":true,"track_title":"Midnight City","artist":"M83",'
+        '"album":"","artwork_uri":"","position_secs":0,"duration_secs":241,'
+        '"volume_percent":40,"next_up":[]}');
+    await h.settle(tester);
+    expect(find.text('Midnight City'), findsOneWidget);
+
+    double gearOpacity() => tester
+        .widget<AnimatedOpacity>(find.ancestor(
+          of: find.byKey(const Key('open-settings')),
+          matching: find.byType(AnimatedOpacity),
+        ).first)
+        .opacity;
+
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump();
+    expect(gearOpacity(), greaterThan(0));
+    await tester.tap(find.byKey(const Key('open-settings')));
+    expect(opened, 1);
+
+    await tester.pump(const Duration(seconds: 6));
+    await h.dispose(tester);
+  });
+
   testWidgets('away mode shows the big centered clock and hides the rest',
       (tester) async {
     final h = _Harness();
