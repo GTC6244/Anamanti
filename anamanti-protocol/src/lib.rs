@@ -280,7 +280,7 @@ pub mod types {
     pub const ANAMANTI_NOTIFY_ACK: &str = "anamanti-notify-ack";
 
     /// orchestrator → device: show / dismiss / drive the recipe-mode screen (data:
-    /// `action` = `"show"`/`"dismiss"`/`"navigate"`/`"scroll"`; for `show`, `recipe` is
+    /// `action` = `"show"`/`"dismiss"`/`"navigate"`/`"scroll"`/`"step"`; for `show`, `recipe` is
     /// the structured recipe object — `title`, `summary`, `source_url`, `image_url`,
     /// `servings`, `total_time`, `ingredients[]`, `steps[]`). A device action driven by
     /// the `recipe_lookup` tool; the device owns the screen state until dismissed.
@@ -416,6 +416,9 @@ pub enum RecipeCommand {
     Navigate(String),
     /// Scroll the active pane by voice: `"up"` / `"down"` (a page) or `"top"` / `"bottom"`.
     Scroll(String),
+    /// Jump to a step by voice (1-based): switch to the Steps tab, scroll that step into
+    /// view and highlight it.
+    Step(u32),
 }
 
 /// A font-scaling command decoded from an `anamanti-font` frame. `Adjust` carries the
@@ -882,10 +885,18 @@ impl WyomingEvent {
         )
     }
 
+    /// An `anamanti-recipe` **step** action (orchestrator → device): jump the recipe
+    /// screen to step `step` (1-based) — switch to the Steps tab, scroll that step into
+    /// view and highlight it.
+    pub fn recipe_step(step: u32) -> Self {
+        Self::with_data(types::RECIPE, json!({ "action": "step", "step": step }))
+    }
+
     /// Decode an `anamanti-recipe` frame into a [`RecipeCommand`], or `None` if this is
     /// not a recipe frame or its `action`/params are unrecognized. A `show` with no
-    /// `recipe` object, a `navigate` with no `target`, or a `scroll` with no
-    /// `direction` are all rejected (return `None`).
+    /// `recipe` object, a `navigate` with no `target`, a `scroll` with no
+    /// `direction`, or a `step` with no positive `step` number are all rejected
+    /// (return `None`).
     pub fn recipe_command(&self) -> Option<RecipeCommand> {
         if self.event_type != types::RECIPE {
             return None;
@@ -908,6 +919,12 @@ impl WyomingEvent {
                 .get("direction")
                 .and_then(Value::as_str)
                 .map(|d| RecipeCommand::Scroll(d.to_string())),
+            "step" => self
+                .data
+                .get("step")
+                .and_then(Value::as_u64)
+                .filter(|&n| n >= 1 && n <= u64::from(u32::MAX))
+                .map(|n| RecipeCommand::Step(n as u32)),
             _ => None,
         }
     }

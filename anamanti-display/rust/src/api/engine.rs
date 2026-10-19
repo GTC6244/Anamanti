@@ -280,6 +280,10 @@ pub enum WakeWordEventKind {
     /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
     /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
     RecipeScroll,
+    /// Recipe mode: jump to a step by voice — switch to the Steps tab, scroll that step
+    /// into view and highlight it. `recipe_action` is the 1-based step number as a
+    /// decimal string (the generic string carrier, as `RecipeScroll`).
+    RecipeStep,
     /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
     /// command. The direction (`"increase"` / `"decrease"`) rides the generic
     /// `recipe_action` field (the same string carrier as `RecipeScroll`). The UI bumps the
@@ -591,6 +595,13 @@ impl WakeWordEvent {
         }
     }
 
+    pub(crate) fn recipe_step(step: u32) -> Self {
+        Self {
+            recipe_action: step.to_string(),
+            ..Self::base(WakeWordEventKind::RecipeStep)
+        }
+    }
+
     pub(crate) fn music_screen(screen: String) -> Self {
         Self {
             recipe_action: screen,
@@ -661,8 +672,10 @@ pub fn note_user_activity() {
 
 /// Report the recipe screen's state as the device's **display context** so the next
 /// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know a
-/// recipe is up (and which tab / scroll position) so it can drive the screen by voice
-/// (switch tabs, scroll, close).
+/// recipe is up (and which tab / scroll position / highlighted step) so it can drive the
+/// screen by voice (switch tabs, scroll, go to a step, close) — plus the recipe's
+/// ingredient lines and steps, so recipe questions ("how many tomatoes?") are answered
+/// from what is on screen (the Core's System-1 lookup or its System-2 prompt).
 ///
 /// This is the recipe screen's setter for the general display-context mechanism (see
 /// [`crate::engine::set_display_context`]); other voice-controllable screens — music,
@@ -671,7 +684,9 @@ pub fn note_user_activity() {
 ///
 /// Flutter calls this when recipe mode opens or closes and whenever the active tab or a
 /// pane's scroll position changes. `active == false` clears the context (idle screen);
-/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`.
+/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`;
+/// `highlighted_step` is 1-based (`0` = none).
+#[allow(clippy::too_many_arguments)]
 #[frb(sync)]
 pub fn set_recipe_context(
     active: bool,
@@ -681,6 +696,9 @@ pub fn set_recipe_context(
     at_bottom: bool,
     ingredient_count: u32,
     step_count: u32,
+    highlighted_step: u32,
+    ingredients: Vec<String>,
+    steps: Vec<String>,
 ) {
     let screen = if active {
         Some(serde_json::json!({
@@ -692,6 +710,9 @@ pub fn set_recipe_context(
                 "at_bottom": at_bottom,
                 "ingredient_count": ingredient_count,
                 "step_count": step_count,
+                "highlighted_step": highlighted_step,
+                "ingredients": ingredients,
+                "steps": steps,
             },
         }))
     } else {

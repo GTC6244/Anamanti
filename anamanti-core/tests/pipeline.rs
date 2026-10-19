@@ -2120,3 +2120,65 @@ async fn a_device_that_hangs_up_mid_reply_reports_disconnected() {
     assert_eq!(result.unwrap(), TurnOutcome::Disconnected);
     await_duck_ops(&ducker, &["duck", "restore"]).await;
 }
+
+/// A recipe screen context as a device with the new fields stamps it.
+fn salsa_screen(highlighted_step: u32) -> serde_json::Value {
+    json!({
+        "kind": "recipe",
+        "recipe": {
+            "title": "Salsa",
+            "tab": "steps",
+            "ingredient_count": 3,
+            "step_count": 4,
+            "highlighted_step": highlighted_step,
+            "ingredients": ["4 ripe tomatoes, chopped", "1 small red onion", "1 lime"],
+            "steps": ["Chop.", "Mix.", "Season.", "Serve."],
+        },
+    })
+}
+
+/// System-1 `recipe_step`: "next step" with step 2 highlighted jumps to step 3 on the
+/// fast path (no LLM) and relays an `anamanti-recipe` step frame.
+#[tokio::test]
+async fn system1_recipe_step_jumps_to_the_next_step() {
+    let pipeline = panic_llm_system1("recipe_step");
+    let connector = MockConnector::new("next step");
+    let (_transcript, reply, kinds, _listen) =
+        run_turn_with_screen(&pipeline, &connector, Some(salsa_screen(2))).await;
+
+    assert_eq!(reply, "Here's step 3.");
+    assert!(
+        kinds.iter().any(|k| k == types::RECIPE),
+        "expected an anamanti-recipe (step) frame, got {kinds:?}"
+    );
+}
+
+/// System-1 `recipe_ingredient`: the conditional lookup answers from the ingredient
+/// lines in the recipe screen context, without the LLM.
+#[tokio::test]
+async fn system1_recipe_ingredient_answers_from_the_screen() {
+    let pipeline = panic_llm_system1("recipe_ingredient");
+    let connector = MockConnector::new("how many tomatoes do I need");
+    let (_transcript, reply, kinds, _listen) =
+        run_turn_with_screen(&pipeline, &connector, Some(salsa_screen(0))).await;
+
+    assert_eq!(reply, "The recipe calls for 4 ripe tomatoes, chopped.");
+    assert!(
+        !kinds.iter().any(|k| k == types::RECIPE),
+        "a lookup must not drive the screen, got {kinds:?}"
+    );
+}
+
+/// …and an ingredient the recipe doesn't have defers to System-2 (the MockLlm echo).
+#[tokio::test]
+async fn system1_recipe_ingredient_defers_when_nothing_matches() {
+    use anamanti_core::system1::mock::MockDecider;
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let pipeline = build_pipeline(memory)
+        .with_system1(Arc::new(MockDecider::resolve("recipe_ingredient", 0.99)));
+    let connector = MockConnector::new("how much butter");
+    let (_transcript, reply, _kinds, _listen) =
+        run_turn_with_screen(&pipeline, &connector, Some(salsa_screen(0))).await;
+
+    assert_eq!(reply, "You said: how much butter");
+}

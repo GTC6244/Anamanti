@@ -587,6 +587,8 @@ text. So an intent is only **Resolve-able** (answer + skip System-2) when its ar
 | `date` | spoken, from clock | none | planned |
 | `weather_dismiss` | `DismissWeather` | none | planned; gate on `screen == weather` |
 | `recipe_dismiss` | `DismissRecipe` | none | planned; gate on `screen == recipe` (your `close_recipe`) |
+| `recipe_step` | `RecipeControl(Step(n))` | step via `parse_recipe_step` (number / ordinal / next / previous / last, relative to the device-reported `highlighted_step`) | ✅ shipped (2026-10-19). Gated on a recipe screen + a parseable in-range step; else defer to `recipe_control` |
+| `recipe_ingredient` | spoken, from the on-screen ingredient lines | ingredient via `match_recipe_ingredients` | ✅ shipped (2026-10-19). **Conditional lookup:** resolves only on a quantity question ("how many/how much/amount") whose words match 1–3 ingredient lines in the recipe screen context; otherwise defer — System-2's prompt carries the full recipe |
 | `end_session` | `audio_stop` **without** a `listen` frame | none | planned. Ends the follow-up chain → device returns to IDLE / wake-word (see §15.3) |
 | `stop_dismiss` | context ladder (§17) | none (referent from device state) | planned. Bare "stop"/"never mind"/"dismiss" |
 | `timer_query` | spoken, from timer context params | none | planned. Resolved **only when the device reports an active timer** (§17.1); the remaining time comes from the context parameters, so no Core-side timer state is needed |
@@ -734,6 +736,11 @@ knee where the ✗ set is ~100% deferred. These double as `mock`/golden-decision
 - ✓ close the weather · dismiss the forecast — *(weather screen up)*
 - ✓ close the recipe · I'm done cooking — *(recipe screen up)*
 - ✗ defer: close the recipe *when no recipe screen is up* · go back to the ingredients *(→ recipe_nav)*
+
+**`recipe_step` / `recipe_ingredient`** (gate on a recipe screen)
+- ✓ go to step four · next step · previous step · what's the third step · show me the last step
+- ✓ how many tomatoes do I need · how much flour · what amount of red onion
+- ✗ defer: step 12 of an 8-step recipe *(out of range)* · how long does it bake *(not a quantity — System-2 has the steps)* · how much butter *(not in the recipe)* · how much oil *(4+ matching lines — ambiguous)*
 
 **`end_session`** (safest when `followup_depth > 0`)
 - ✓ that's all · I'm done · nothing else · goodbye · go to sleep · you can go now · we're good · thank you · thanks · gracias · merci *(a bare standalone sign-off thanks, any language)*

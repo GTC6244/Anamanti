@@ -437,6 +437,7 @@ mod tests {
             vec![
                 "set_timer",
                 "cancel_timer",
+                "adjust_timer",
                 "set_personality",
                 "adjust_font"
             ]

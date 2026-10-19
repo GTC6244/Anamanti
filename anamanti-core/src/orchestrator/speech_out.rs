@@ -152,6 +152,7 @@ pub(crate) fn device_action_event(action: &DeviceAction) -> Option<WyomingEvent>
             RecipeNav::ScrollDown => WyomingEvent::recipe_scroll("down"),
             RecipeNav::ScrollTop => WyomingEvent::recipe_scroll("top"),
             RecipeNav::ScrollBottom => WyomingEvent::recipe_scroll("bottom"),
+            RecipeNav::Step(n) => WyomingEvent::recipe_step(*n),
         },
         DeviceAction::MusicScreen(nav) => WyomingEvent::music_screen(match nav {
             MusicNav::NowPlaying => "now_playing",

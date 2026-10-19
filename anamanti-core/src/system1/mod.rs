@@ -49,6 +49,15 @@ pub enum Intent {
     WeatherDismiss,
     /// Close the recipe screen.
     RecipeDismiss,
+    /// Jump to a step of the recipe on screen ("go to step 4", "next step"). Resolves
+    /// only with a recipe up and a step number parsed from the transcript (pure string
+    /// code against the device-reported highlighted step); otherwise defers.
+    RecipeStep,
+    /// How much / how many of an ingredient the recipe on screen calls for ("how many
+    /// tomatoes do I need?"). A **conditional lookup**: resolves only when the asked-about
+    /// ingredient string-matches the device-reported ingredient lines; otherwise defers to
+    /// System-2, whose prompt carries the full recipe.
+    RecipeIngredient,
     /// Close the place card.
     PlaceDismiss,
     /// The user is done: end the follow-up chain.
@@ -63,7 +72,7 @@ pub enum Intent {
 
 impl Intent {
     /// Every intent, in the order the default router offers them.
-    pub const ALL: [Intent; 13] = [
+    pub const ALL: [Intent; 15] = [
         Intent::Weather,
         Intent::Timer,
         Intent::Time,
@@ -73,6 +82,8 @@ impl Intent {
         Intent::TimerAdjust,
         Intent::WeatherDismiss,
         Intent::RecipeDismiss,
+        Intent::RecipeStep,
+        Intent::RecipeIngredient,
         Intent::PlaceDismiss,
         Intent::EndSession,
         Intent::StopDismiss,
@@ -91,6 +102,8 @@ impl Intent {
             Intent::TimerAdjust => "timer_adjust",
             Intent::WeatherDismiss => "weather_dismiss",
             Intent::RecipeDismiss => "recipe_dismiss",
+            Intent::RecipeStep => "recipe_step",
+            Intent::RecipeIngredient => "recipe_ingredient",
             Intent::PlaceDismiss => "place_dismiss",
             Intent::EndSession => "end_session",
             Intent::StopDismiss => "stop_dismiss",
@@ -113,6 +126,15 @@ impl Intent {
             }
             Intent::WeatherDismiss => "close or dismiss the weather screen",
             Intent::RecipeDismiss => "close or dismiss the recipe screen",
+            Intent::RecipeStep => {
+                "go to, show, or read a particular step of the recipe on screen (\"go to step \
+                 four\", \"next step\", \"previous step\", \"what's step three\")"
+            }
+            Intent::RecipeIngredient => {
+                "ask how much or how many of an ingredient the recipe on screen needs (\"how \
+                 many tomatoes do I need\", \"how much flour\"); NOT cooking times, \
+                 temperatures, or substitutions"
+            }
             Intent::PlaceDismiss => "close or dismiss the place card",
             Intent::Place => {
                 "ask about a specific business, shop, restaurant, cafe, landmark, or point of \
@@ -297,6 +319,300 @@ pub fn parse_timer_adjust(text: &str) -> Option<i64> {
     };
     let secs = parse_duration_secs(&normalized)? as i64; // unclear amount → defer
     Some(sign * secs)
+}
+
+/// A spoken number word or ordinal (`"four"`, `"fourth"`, `"4th"`, `"4"`) as a value,
+/// for step numbers. Tens combine with a following unit in the caller ("twenty one").
+fn spoken_number(tok: &str) -> Option<u32> {
+    if let Ok(n) = tok.parse::<u32>() {
+        return Some(n);
+    }
+    // "1st" / "2nd" / "3rd" / "4th"
+    let digits: String = tok.chars().take_while(char::is_ascii_digit).collect();
+    if !digits.is_empty() && matches!(&tok[digits.len()..], "st" | "nd" | "rd" | "th") {
+        return digits.parse().ok();
+    }
+    Some(match tok {
+        "one" | "first" => 1,
+        "two" | "second" => 2,
+        "three" | "third" => 3,
+        "four" | "fourth" => 4,
+        "five" | "fifth" => 5,
+        "six" | "sixth" => 6,
+        "seven" | "seventh" => 7,
+        "eight" | "eighth" => 8,
+        "nine" | "ninth" => 9,
+        "ten" | "tenth" => 10,
+        "eleven" | "eleventh" => 11,
+        "twelve" | "twelfth" => 12,
+        "thirteen" | "thirteenth" => 13,
+        "fourteen" | "fourteenth" => 14,
+        "fifteen" | "fifteenth" => 15,
+        "sixteen" | "sixteenth" => 16,
+        "seventeen" | "seventeenth" => 17,
+        "eighteen" | "eighteenth" => 18,
+        "nineteen" | "nineteenth" => 19,
+        "twenty" | "twentieth" => 20,
+        "thirty" | "thirtieth" => 30,
+        _ => return None,
+    })
+}
+
+/// Parse a spoken "go to a recipe step" request into a 1-based step number, given the
+/// step currently highlighted on the device (`0` = none) and the recipe's step count
+/// (`0` = unknown). `None` (defer to System-2) when the transcript names no step, the
+/// reference is ambiguous, or the step is out of range. Deliberately conservative: it
+/// requires the word "step", then reads either a number next to it ("step 4", "step
+/// number four", "the fourth step", "3rd step"), a relative word ("next" / "previous" /
+/// "back"), or an end ("first" / "last" / "final").
+pub fn parse_recipe_step(text: &str, highlighted: u32, count: u32) -> Option<u32> {
+    let normalized = text.to_lowercase().replace('-', " ");
+    let toks: Vec<&str> = normalized
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let step_at = toks.iter().position(|t| *t == "step" || *t == "steps")?;
+    let has = |w: &str| toks.contains(&w);
+
+    // A number right after "step" (optionally "step number …"), tens + unit combined.
+    let after = |i: usize| -> Option<u32> {
+        let mut i = i;
+        if toks.get(i) == Some(&"number") {
+            i += 1;
+        }
+        let first = spoken_number(toks.get(i)?)?;
+        match toks.get(i + 1).and_then(|t| spoken_number(t)) {
+            Some(unit) if (first == 20 || first == 30) && unit < 10 => Some(first + unit),
+            _ => Some(first),
+        }
+    };
+    let n = if let Some(n) = after(step_at + 1) {
+        n
+    } else if has("next") {
+        highlighted + 1
+    } else if has("previous") || has("back") || has("prior") {
+        if highlighted <= 1 {
+            return None; // nothing before step 1 (or no step yet) → let System-2 say so
+        }
+        highlighted - 1
+    } else if has("last") || has("final") {
+        if count == 0 {
+            return None;
+        }
+        count
+    } else if step_at > 0 {
+        // An ordinal before "step": "the fourth step", "the 3rd step".
+        let prev = spoken_number(toks[step_at - 1])?;
+        // "twenty first step"
+        match step_at.checked_sub(2).and_then(|j| spoken_number(toks[j])) {
+            Some(tens) if (tens == 20 || tens == 30) && prev < 10 => tens + prev,
+            _ => prev,
+        }
+    } else {
+        return None;
+    };
+    if n == 0 || (count > 0 && n > count) {
+        return None; // out of range → defer (System-2 can tell them how many steps there are)
+    }
+    Some(n)
+}
+
+/// Words that never name an ingredient in a quantity question — question scaffolding,
+/// pronouns, and units — dropped before matching the ingredient lines.
+const INGREDIENT_STOPWORDS: &[&str] = &[
+    "how",
+    "many",
+    "much",
+    "what",
+    "whats",
+    "is",
+    "are",
+    "the",
+    "a",
+    "an",
+    "of",
+    "do",
+    "does",
+    "did",
+    "i",
+    "we",
+    "you",
+    "me",
+    "my",
+    "it",
+    "this",
+    "that",
+    "these",
+    "those",
+    "need",
+    "needs",
+    "needed",
+    "use",
+    "uses",
+    "used",
+    "call",
+    "calls",
+    "called",
+    "for",
+    "in",
+    "on",
+    "to",
+    "and",
+    "or",
+    "with",
+    "recipe",
+    "dish",
+    "there",
+    "amount",
+    "quantity",
+    "should",
+    "put",
+    "add",
+    "go",
+    "goes",
+    "again",
+    "please",
+    "tell",
+    "say",
+    "says",
+    "get",
+    "have",
+    "has",
+    "will",
+    "would",
+    "can",
+    "could",
+    "be",
+    "s",
+    "cup",
+    "cups",
+    "teaspoon",
+    "teaspoons",
+    "tsp",
+    "tablespoon",
+    "tablespoons",
+    "tbsp",
+    "gram",
+    "grams",
+    "g",
+    "kg",
+    "kilogram",
+    "kilograms",
+    "ounce",
+    "ounces",
+    "oz",
+    "pound",
+    "pounds",
+    "lb",
+    "lbs",
+    "ml",
+    "milliliter",
+    "milliliters",
+    "liter",
+    "liters",
+    "litre",
+    "litres",
+    "pinch",
+    "pinches",
+    "clove",
+    "cloves",
+    "can",
+    "cans",
+    "piece",
+    "pieces",
+    "stick",
+    "sticks",
+    "bunch",
+    "handful",
+    "total",
+    "all",
+    "altogether",
+    "exactly",
+    "about",
+    "roughly",
+    "approximately",
+    "so",
+    "um",
+    "uh",
+    "okay",
+    "ok",
+    "hey",
+];
+
+/// Crude English singularization for matching "tomatoes" ↔ "tomato", "berries" ↔ "berry".
+fn singular(word: &str) -> String {
+    if let Some(stem) = word.strip_suffix("ies").filter(|s| s.len() >= 2) {
+        format!("{stem}y")
+    } else if let Some(stem) = word.strip_suffix("oes") {
+        format!("{stem}o")
+    } else if let Some(stem) = word
+        .strip_suffix('s')
+        .filter(|s| !s.ends_with('s') && s.len() >= 2)
+    {
+        stem.to_string()
+    } else {
+        word.to_string()
+    }
+}
+
+/// Lowercased, singularized word tokens of `text`.
+fn ingredient_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .replace('-', " ")
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .map(|t| t.trim_matches('\'').replace('\'', ""))
+        .filter(|t| !t.is_empty())
+        .map(|t| singular(&t))
+        .collect()
+}
+
+/// Most ingredient lines a System-1 quantity answer will read out; more matches than
+/// this is ambiguous ("how much of everything?") → defer.
+const MAX_INGREDIENT_MATCHES: usize = 3;
+
+/// The **conditional System-1 lookup** for "how much / how many <ingredient>?": find the
+/// recipe ingredient line(s) the question asks about. Returns the matching lines (in
+/// recipe order) or `None` to defer — when it isn't a quantity question ("how many" /
+/// "how much" / "amount" / "quantity"), names no ingredient word, matches no line, or
+/// matches more than [`MAX_INGREDIENT_MATCHES`] lines. A line matches on the most
+/// question words it contains (so "how many tomatoes for the salsa" still finds "4 ripe
+/// tomatoes" even though "salsa" isn't in it); a tie returns all tied lines.
+pub fn match_recipe_ingredients<'a>(text: &str, ingredients: &'a [String]) -> Option<Vec<&'a str>> {
+    let lower = text.to_lowercase();
+    let quantity_question = ["how many", "how much", "amount", "quantity"]
+        .iter()
+        .any(|q| lower.contains(q));
+    if !quantity_question || ingredients.is_empty() {
+        return None;
+    }
+    let mut keywords: Vec<String> = ingredient_words(&lower)
+        .into_iter()
+        .filter(|w| !INGREDIENT_STOPWORDS.contains(&w.as_str()))
+        .filter(|w| w.parse::<f64>().is_err())
+        .collect();
+    keywords.dedup();
+    if keywords.is_empty() {
+        return None;
+    }
+    let scored: Vec<(usize, &str)> = ingredients
+        .iter()
+        .map(|line| {
+            let words = ingredient_words(line);
+            let score = keywords.iter().filter(|k| words.contains(k)).count();
+            (score, line.as_str())
+        })
+        .collect();
+    let best = scored.iter().map(|(n, _)| *n).max().unwrap_or(0);
+    if best == 0 {
+        return None;
+    }
+    let hits: Vec<&str> = scored
+        .into_iter()
+        .filter(|(n, _)| *n == best)
+        .map(|(_, l)| l)
+        .collect();
+    (hits.len() <= MAX_INGREDIENT_MATCHES).then_some(hits)
 }
 
 /// The turn state handed to a decision engine — **light context only** (no memory
@@ -531,6 +847,102 @@ mod tests {
         assert_eq!(parse_timer_adjust("take a minute off the timer"), Some(-60));
         assert_eq!(parse_timer_adjust("knock 30 seconds off"), Some(-30));
         assert_eq!(parse_timer_adjust("subtract 5 minutes"), Some(-300));
+    }
+
+    #[test]
+    fn parse_recipe_step_reads_numbers_ordinals_and_relative_steps() {
+        assert_eq!(parse_recipe_step("go to step 4", 0, 8), Some(4));
+        assert_eq!(parse_recipe_step("Go to step four.", 0, 8), Some(4));
+        assert_eq!(parse_recipe_step("show me step number six", 2, 8), Some(6));
+        assert_eq!(parse_recipe_step("what's the third step", 0, 8), Some(3));
+        assert_eq!(parse_recipe_step("read the 2nd step", 0, 8), Some(2));
+        assert_eq!(
+            parse_recipe_step("jump to step twenty one", 0, 30),
+            Some(21)
+        );
+        assert_eq!(parse_recipe_step("next step", 3, 8), Some(4));
+        assert_eq!(parse_recipe_step("next step please", 0, 8), Some(1));
+        assert_eq!(parse_recipe_step("go back a step", 3, 8), Some(2));
+        assert_eq!(parse_recipe_step("previous step", 5, 8), Some(4));
+        assert_eq!(parse_recipe_step("show me the last step", 0, 8), Some(8));
+        assert_eq!(parse_recipe_step("first step", 6, 8), Some(1));
+    }
+
+    #[test]
+    fn parse_recipe_step_defers_when_unclear_or_out_of_range() {
+        assert_eq!(parse_recipe_step("scroll down", 0, 8), None);
+        assert_eq!(parse_recipe_step("what's next", 2, 8), None);
+        assert_eq!(parse_recipe_step("go to step 12", 0, 8), None);
+        assert_eq!(parse_recipe_step("next step", 8, 8), None);
+        assert_eq!(parse_recipe_step("previous step", 1, 8), None);
+        assert_eq!(parse_recipe_step("previous step", 0, 8), None);
+        assert_eq!(parse_recipe_step("go to the step", 0, 8), None);
+        assert_eq!(parse_recipe_step("go to step zero", 0, 8), None);
+        // "steps for …" is not "step 4".
+        assert_eq!(
+            parse_recipe_step("what are the steps for the sauce", 0, 8),
+            None
+        );
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn match_recipe_ingredients_finds_the_asked_about_line() {
+        let ing = lines(&[
+            "4 ripe tomatoes, chopped",
+            "1 small red onion",
+            "2 cups all-purpose flour",
+            "1 tbsp olive oil",
+            "Salt and pepper to taste",
+        ]);
+        assert_eq!(
+            match_recipe_ingredients("How many tomatoes do I need?", &ing),
+            Some(vec!["4 ripe tomatoes, chopped"])
+        );
+        assert_eq!(
+            match_recipe_ingredients("how many tomatoes for the salsa", &ing),
+            Some(vec!["4 ripe tomatoes, chopped"])
+        );
+        assert_eq!(
+            match_recipe_ingredients("how much flour", &ing),
+            Some(vec!["2 cups all-purpose flour"])
+        );
+        assert_eq!(
+            match_recipe_ingredients("how many cups of flour does it call for", &ing),
+            Some(vec!["2 cups all-purpose flour"])
+        );
+        assert_eq!(
+            match_recipe_ingredients("how much salt", &ing),
+            Some(vec!["Salt and pepper to taste"])
+        );
+        assert_eq!(
+            match_recipe_ingredients("what amount of red onion", &ing),
+            Some(vec!["1 small red onion"])
+        );
+    }
+
+    #[test]
+    fn match_recipe_ingredients_defers_when_not_a_clear_quantity_lookup() {
+        let ing = lines(&["4 ripe tomatoes", "1 onion", "2 cups flour"]);
+        // Not a quantity question.
+        assert_eq!(match_recipe_ingredients("do I need tomatoes", &ing), None);
+        // No ingredient word.
+        assert_eq!(match_recipe_ingredients("how much do I need", &ing), None);
+        // An ingredient the recipe doesn't have.
+        assert_eq!(match_recipe_ingredients("how much butter", &ing), None);
+        // An older device that sent no lines.
+        assert_eq!(match_recipe_ingredients("how many tomatoes", &[]), None);
+        // Too many equally good matches → ambiguous.
+        let oils = lines(&[
+            "1 tbsp oil",
+            "oil for frying",
+            "2 tsp oil, divided",
+            "oil spray",
+        ]);
+        assert_eq!(match_recipe_ingredients("how much oil", &oils), None);
     }
 
     #[test]

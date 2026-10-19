@@ -114,13 +114,18 @@ impl VoiceTool for RecipeLookup {
              Whenever the user asks for a recipe, how to make or cook a dish, or to show a \
              recipe for something, you MUST call `recipe_lookup` with the dish name — never \
              recite a full recipe as prose. When a recipe is already on screen (the turn \
-             context will tell you, including which tab and scroll position), use \
-             `recipe_control` to navigate it — switching to the Overview / Ingredients / \
-             Steps tab or scrolling the current tab — whenever the user says things like \
-             \"show the ingredients\", \"go to the steps\", \"next\", \"scroll down\", \
-             \"scroll back up\", or \"start over\". Use `close_recipe` when they say they're \
-             done cooking or ask to close the recipe. Relay each tool's short spoken \
-             confirmation.",
+             context will tell you, including which tab, scroll position and highlighted \
+             step, plus the full ingredient list and steps), use `recipe_control` to \
+             navigate it — switching to the Overview / Ingredients / Steps tab or scrolling \
+             the current tab whenever the user says things like \"show the ingredients\", \
+             \"go to the steps\", \"scroll down\", \"scroll back up\", or \"start over\". \
+             For a specific step (\"go to step 4\", \"next step\", \"previous step\", \
+             \"what's step 3\") ALWAYS use `recipe_control` `go_to_step` with the step \
+             number — never scroll to find a step. Answer questions about the recipe on \
+             screen (\"how many tomatoes do I need?\", \"how long does it bake?\") directly \
+             from the ingredients and steps in the turn context — do not look the recipe \
+             up again. Use `close_recipe` when they say they're done cooking or ask to \
+             close the recipe. Relay each tool's short spoken confirmation.",
         )
     }
 
@@ -146,6 +151,9 @@ impl VoiceTool for RecipeLookup {
 struct RecipeControlArgs {
     /// One of the fixed navigation actions.
     action: String,
+    /// The 1-based step number for `go_to_step`.
+    #[serde(default)]
+    step: Option<u32>,
 }
 
 /// Navigate the open recipe screen ([`DeviceAction::RecipeControl`]).
@@ -161,7 +169,8 @@ impl VoiceTool for RecipeControl {
         definition(
             RECIPE_CONTROL,
             "Navigate the recipe screen that is already open on the display: switch \
-             which tab is showing, or scroll the current tab. Use ONLY when a recipe \
+             which tab is showing, scroll the current tab, or jump to a specific step \
+             (which is scrolled into view and highlighted). Use ONLY when a recipe \
              is currently on screen (the turn context says so). To close it, use \
              close_recipe instead.",
             json!({
@@ -176,11 +185,20 @@ impl VoiceTool for RecipeControl {
                             "scroll_up",
                             "scroll_down",
                             "scroll_top",
-                            "scroll_bottom"
+                            "scroll_bottom",
+                            "go_to_step"
                         ],
                         "description": "The navigation action: switch to the Overview / Ingredients / \
-                                        Steps tab, or scroll the current tab up/down a page or to the \
-                                        top/bottom."
+                                        Steps tab, scroll the current tab up/down a page or to the \
+                                        top/bottom, or `go_to_step` to show and highlight one step. \
+                                        For \"go to step 4\", \"next step\", \"previous step\" or \
+                                        \"what's step 3\" ALWAYS use go_to_step (never scroll) — work \
+                                        out the number from the highlighted step in the turn context."
+                    },
+                    "step": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The 1-based step number. Required for go_to_step; ignored otherwise."
                     }
                 },
                 "required": ["action"]
@@ -191,13 +209,23 @@ impl VoiceTool for RecipeControl {
     async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
         let args: RecipeControlArgs = parse_args(args, RECIPE_CONTROL)?;
         let (nav, confirmation) = match args.action.as_str() {
-            "show_overview" => (RecipeNav::TabOverview, "Showing the overview."),
-            "show_ingredients" => (RecipeNav::TabIngredients, "Showing the ingredients."),
-            "show_steps" => (RecipeNav::TabSteps, "Showing the steps."),
-            "scroll_up" => (RecipeNav::ScrollUp, "Scrolling up."),
-            "scroll_down" => (RecipeNav::ScrollDown, "Scrolling down."),
-            "scroll_top" => (RecipeNav::ScrollTop, "Back to the top."),
-            "scroll_bottom" => (RecipeNav::ScrollBottom, "Jumping to the bottom."),
+            "show_overview" => (RecipeNav::TabOverview, "Showing the overview.".to_string()),
+            "show_ingredients" => (
+                RecipeNav::TabIngredients,
+                "Showing the ingredients.".to_string(),
+            ),
+            "show_steps" => (RecipeNav::TabSteps, "Showing the steps.".to_string()),
+            "scroll_up" => (RecipeNav::ScrollUp, "Scrolling up.".to_string()),
+            "scroll_down" => (RecipeNav::ScrollDown, "Scrolling down.".to_string()),
+            "scroll_top" => (RecipeNav::ScrollTop, "Back to the top.".to_string()),
+            "scroll_bottom" => (
+                RecipeNav::ScrollBottom,
+                "Jumping to the bottom.".to_string(),
+            ),
+            "go_to_step" => match args.step.filter(|&n| n >= 1) {
+                Some(n) => (RecipeNav::Step(n), format!("Here's step {n}.")),
+                None => anyhow::bail!("recipe_control go_to_step needs a step number of 1 or more"),
+            },
             other => anyhow::bail!("unknown recipe_control action `{other}`"),
         };
         emit(
@@ -205,7 +233,7 @@ impl VoiceTool for RecipeControl {
             DeviceAction::RecipeControl(nav),
             "the recipe could update",
         )?;
-        Ok(confirmation.to_string())
+        Ok(confirmation)
     }
 }
 
@@ -680,6 +708,28 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "unknown recipe_control action `dance`");
+    }
+
+    #[tokio::test]
+    async fn recipe_control_go_to_step_needs_a_positive_step() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolCtx { actions: Some(&tx) };
+        let out = RecipeControl
+            .invoke(&json!({ "action": "go_to_step", "step": 4 }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out, "Here's step 4.");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::RecipeControl(RecipeNav::Step(4))
+        );
+        for bad in [
+            json!({ "action": "go_to_step" }),
+            json!({ "action": "go_to_step", "step": 0 }),
+        ] {
+            assert!(RecipeControl.invoke(&bad, &ctx).await.is_err(), "{bad}");
+        }
+        assert!(rx.try_recv().is_err(), "a rejected step emits nothing");
     }
 
     #[tokio::test]

@@ -436,11 +436,18 @@ mode; a live turn's `ConversationView` always draws above them.
   `IndexedStack` of 3 tabs with a bottom `_tabBar` (keys `recipe-tab-0/1/2`):
   **Overview** (`_OverviewTab` — hero image, summary, fact chips, source URL),
   **Ingredients** (`_ListTab`, key `recipe-ingredients`), **Steps** (`_ListTab`,
-  key `recipe-steps`, numbered).
+  key `recipe-steps`, numbered). Rows are built eagerly (`SingleChildScrollView` +
+  `Column`, a `GlobalKey` per step) so any step can be scrolled to; the highlighted
+  step is drawn as an amber **bubble** (tinted rounded card + accent outline + filled
+  number circle, key `recipe-step-highlighted`).
 - Triggered by `WakeWordEventKind.showRecipe` (Core `recipe_lookup`) →
   `AssistantState.recipe`; persists across turns while cooking. Tabs switch by
   touch **or** voice (`recipeNavigate`); voice scroll (`recipeScroll`) animates
-  the active pane; scroll position + tab reported back to Core as screen context.
+  the active pane; voice "go to step N" / "next step" (`recipeStep` →
+  `AssistantState.recipeStep` + `recipeStepSeq`) switches to Steps, scrolls the step
+  into view and highlights it; tapping a step highlights it too. Scroll position, tab,
+  highlighted step and the recipe's ingredient/step lines are reported back to Core as
+  screen context (so "how many tomatoes?" is answered from the screen).
   See [`RecipePlan.md`](./RecipePlan.md).
 
 **`WeatherView` / `_HourCell`** — `lib/src/ui/weather_view.dart`

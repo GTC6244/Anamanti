@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::llm::DeviceAction;
+use crate::llm::{DeviceAction, RecipeNav};
 use crate::system1::{Decision, DecisionRequest, Intent, Resolution};
 use crate::timer::MAX_TIMER_SECS;
 use crate::wyoming::protocol::{DeviceContext, DisplayContext};
@@ -136,6 +136,8 @@ impl Pipeline {
             // The user signalled they are done: a brief ack that ends the follow-up chain
             // (a bare `audio-stop`, no `listen`), returning the device to IDLE. Always
             // resolvable (a fresh "goodbye" turn just ends cleanly).
+            Intent::RecipeStep => recipe_step_reply(transcript, &ctx.device_ctx),
+            Intent::RecipeIngredient => recipe_ingredient_reply(transcript, &ctx.device_ctx),
             Intent::EndSession => Some(FastReply::say("Okay.").ending_session()),
             Intent::StopDismiss => stop_dismiss_reply(&ctx.device_ctx, ctx.followup_depth),
             // Route-only: the free-form place name needs the System-2 LLM.
@@ -289,6 +291,45 @@ fn screen_dismiss_reply(intent: Intent, device_ctx: &DeviceContext) -> Option<Fa
     Some(FastReply::say("Okay.").with_action(action))
 }
 
+/// The System-1 `recipe_step` fast path: jump the recipe screen to a step — the device
+/// switches to the Steps tab, scrolls that step into view and highlights it.
+/// **Preconditions (ground truth):** a recipe is the foreground widget, and the
+/// transcript names a step that [`parse_recipe_step`](crate::system1::parse_recipe_step)
+/// can resolve against the device-reported highlighted step and step count; otherwise
+/// defer to System-2's `recipe_control` tool.
+fn recipe_step_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<FastReply> {
+    let Some(DisplayContext::Recipe(screen)) = device_ctx.widget.as_ref() else {
+        return None; // no recipe on screen → defer
+    };
+    let step =
+        crate::system1::parse_recipe_step(transcript, screen.highlighted_step, screen.step_count)?;
+    Some(
+        FastReply::say(format!("Here's step {step}."))
+            .with_action(DeviceAction::RecipeControl(RecipeNav::Step(step))),
+    )
+}
+
+/// The System-1 `recipe_ingredient` fast path — a **conditional lookup**: answer "how
+/// many tomatoes do I need?" straight from the ingredient lines the device reported for
+/// the recipe on screen. **Preconditions (ground truth):** a recipe is the foreground
+/// widget and [`match_recipe_ingredients`](crate::system1::match_recipe_ingredients)
+/// finds the asked-about line(s); otherwise defer to System-2, whose prompt carries the
+/// full ingredient list and steps (so substitutions, totals across steps, or an
+/// ingredient named differently still get answered).
+fn recipe_ingredient_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<FastReply> {
+    let Some(DisplayContext::Recipe(screen)) = device_ctx.widget.as_ref() else {
+        return None; // no recipe on screen → defer
+    };
+    let hits = crate::system1::match_recipe_ingredients(transcript, &screen.ingredients)?;
+    let list = match hits.as_slice() {
+        [one] => one.to_string(),
+        [init @ .., last] => format!("{}, and {last}", init.join(", ")),
+        [] => return None,
+    };
+    let list = list.trim_end_matches(['.', ' ']);
+    Some(FastReply::say(format!("The recipe calls for {list}.")))
+}
+
 /// The System-1 `stop_dismiss` fast path: a bare "stop"/"cancel"/"never mind" whose
 /// target is not named. The **deterministic priority ladder** picks the referent from
 /// live device state (ground truth) — the classifier never chooses it (§17). A rung
@@ -369,7 +410,7 @@ fn weather_summary(report: &crate::weather::WeatherReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wyoming::protocol::{PlaceScreen, TimerContext};
+    use crate::wyoming::protocol::{PlaceScreen, RecipeScreen, TimerContext};
 
     fn ctx_with(widget: Option<DisplayContext>, running: u32) -> DeviceContext {
         DeviceContext {
@@ -429,6 +470,48 @@ mod tests {
         assert!(matches!(r.action, Some(DeviceAction::DismissPlace)));
         // Nothing open → defer.
         assert!(screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(None, 0)).is_none());
+    }
+
+    fn recipe_ctx(highlighted_step: u32) -> DeviceContext {
+        ctx_with(
+            Some(DisplayContext::Recipe(RecipeScreen {
+                title: "Salsa".to_string(),
+                step_count: 5,
+                highlighted_step,
+                ingredients: vec!["4 ripe tomatoes, chopped".into(), "1 onion".into()],
+                ..Default::default()
+            })),
+            0,
+        )
+    }
+
+    #[test]
+    fn recipe_step_jumps_and_highlights_only_with_a_recipe_up() {
+        let r = recipe_step_reply("go to step three", &recipe_ctx(0)).unwrap();
+        assert_eq!(r.text, "Here's step 3.");
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::RecipeControl(RecipeNav::Step(3)))
+        ));
+        let r = recipe_step_reply("next step", &recipe_ctx(3)).unwrap();
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::RecipeControl(RecipeNav::Step(4)))
+        ));
+        // Out of range, unparseable, or no recipe on screen → defer.
+        assert!(recipe_step_reply("go to step 9", &recipe_ctx(0)).is_none());
+        assert!(recipe_step_reply("scroll down", &recipe_ctx(0)).is_none());
+        assert!(recipe_step_reply("go to step 2", &ctx_with(None, 0)).is_none());
+    }
+
+    #[test]
+    fn recipe_ingredient_answers_from_the_on_screen_lines() {
+        let r = recipe_ingredient_reply("how many tomatoes do I need", &recipe_ctx(0)).unwrap();
+        assert_eq!(r.text, "The recipe calls for 4 ripe tomatoes, chopped.");
+        assert!(r.action.is_none());
+        // Not in the recipe, or no recipe up → defer to System-2.
+        assert!(recipe_ingredient_reply("how much butter", &recipe_ctx(0)).is_none());
+        assert!(recipe_ingredient_reply("how many tomatoes", &ctx_with(None, 0)).is_none());
     }
 
     #[test]
