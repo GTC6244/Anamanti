@@ -136,6 +136,8 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   Future<void> _boot() async {
     _settings = await _store.load();
+    // Apply this display's own photo-rotation cadence (device-local setting).
+    _slideshow.setInterval(Duration(seconds: _settings.slideIntervalSecs));
     // Ensure this display has a stable, globally-unique identity before any channel
     // dials the Core (so two displays on one Core are distinguishable). Minted once
     // from the Wi-Fi MAC, persisted, and reused on every later boot.
@@ -517,6 +519,8 @@ class _AmbientHomeState extends State<AmbientHome> {
     if (fontChanged) {
       _assistant?.updateFontScale(next.fontScale);
     }
+    // Photo rotation time is live: retime the running slideshow (no-op if unchanged).
+    _slideshow.setInterval(Duration(seconds: next.slideIntervalSecs));
     if (photoChanged) {
       // A new/changed link means new refresh tokens: re-mint before rebuilding.
       await _refreshGoogleTokens();

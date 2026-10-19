@@ -43,6 +43,13 @@ const double kFontScaleMin = 0.85;
 const double kFontScaleMax = 1.6;
 const double kFontScaleStep = 0.1;
 
+/// Idle-slideshow photo rotation bounds + default (seconds between background
+/// photos). Device-local; see [AppSettings.slideIntervalSecs]. The default matches
+/// the slideshow's long-standing fixed 10 s cadence.
+const int kDefaultSlideIntervalSecs = 10;
+const int kSlideIntervalMinSecs = 3;
+const int kSlideIntervalMaxSecs = 600;
+
 @immutable
 class AppSettings {
   const AppSettings({
@@ -69,6 +76,7 @@ class AppSettings {
     this.ringRelease = 0.08,
     this.ringDecay = 0.99,
     this.dimDelaySecs = 300,
+    this.slideIntervalSecs = kDefaultSlideIntervalSecs,
     this.photoSource = PhotoSourceKind.local,
     this.ambientRefreshToken = '',
     this.ambientDeviceId = '',
@@ -195,6 +203,14 @@ class AppSettings {
   /// minutes; the settings screen offers a fixed set of presets from 30 s to 1 hour.
   final int dimDelaySecs;
 
+  /// How long (seconds) each idle background photo stays on screen before the
+  /// slideshow cross-fades to the next one. **Per device** — each display keeps its
+  /// own value (it's stored in this device-local settings file, never on the Core).
+  /// Applied live to the running [SlideshowController] (no engine restart). Clamped
+  /// to [[kSlideIntervalMinSecs], [kSlideIntervalMaxSecs]]; defaults to
+  /// [kDefaultSlideIntervalSecs]. The settings screen offers presets from 5 s to 10 min.
+  final int slideIntervalSecs;
+
   /// Idle photo source.
   final PhotoSourceKind photoSource;
 
@@ -280,6 +296,7 @@ class AppSettings {
     double? ringRelease,
     double? ringDecay,
     int? dimDelaySecs,
+    int? slideIntervalSecs,
     PhotoSourceKind? photoSource,
     String? ambientRefreshToken,
     String? ambientDeviceId,
@@ -318,6 +335,7 @@ class AppSettings {
       ringRelease: ringRelease ?? this.ringRelease,
       ringDecay: ringDecay ?? this.ringDecay,
       dimDelaySecs: dimDelaySecs ?? this.dimDelaySecs,
+      slideIntervalSecs: slideIntervalSecs ?? this.slideIntervalSecs,
       photoSource: photoSource ?? this.photoSource,
       ambientRefreshToken: ambientRefreshToken ?? this.ambientRefreshToken,
       ambientDeviceId: ambientDeviceId ?? this.ambientDeviceId,
@@ -358,6 +376,7 @@ class AppSettings {
     'ringRelease': ringRelease,
     'ringDecay': ringDecay,
     'dimDelaySecs': dimDelaySecs,
+    'slideIntervalSecs': slideIntervalSecs,
     'photoSource': photoSource.name,
     'ambientRefreshToken': ambientRefreshToken,
     'ambientDeviceId': ambientDeviceId,
@@ -462,6 +481,12 @@ class AppSettings {
         min: 30,
         max: 3600,
       ),
+      slideIntervalSecs: asInt(
+        json['slideIntervalSecs'],
+        defaults.slideIntervalSecs,
+        min: kSlideIntervalMinSecs,
+        max: kSlideIntervalMaxSecs,
+      ),
       photoSource: PhotoSourceKind.values.firstWhere(
         (k) => k.name == json['photoSource'],
         orElse: () => defaults.photoSource,
@@ -537,6 +562,7 @@ class AppSettings {
       ringRelease == other.ringRelease &&
       ringDecay == other.ringDecay &&
       dimDelaySecs == other.dimDelaySecs &&
+      slideIntervalSecs == other.slideIntervalSecs &&
       photoSource == other.photoSource &&
       ambientRefreshToken == other.ambientRefreshToken &&
       ambientDeviceId == other.ambientDeviceId &&
@@ -572,7 +598,7 @@ class AppSettings {
     endpointCueEnabled,
     endpointSilenceMs,
     endpointRmsThreshold,
-    dimDelaySecs,
+    Object.hash(dimDelaySecs, slideIntervalSecs),
     photoSource,
     ambientRefreshToken,
     ambientDeviceId,

@@ -117,6 +117,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
   delay** — how long the screen stays bright after the room goes quiet before it
   dims to the away-mode clock — is a device-local setting (`AppSettings.dimDelaySecs`
   → the proximity detector's release window; Settings → *Display*).
+- **Photo rotation time:** how long each idle background photo stays up before the
+  slideshow cross-fades to the next is a **per-device**, device-local setting
+  (`AppSettings.slideIntervalSecs`, default 10 s, 3 s…10 min; Settings → *Display →
+  Photos*), applied live to `SlideshowController.setInterval` — it never touches the
+  Core, so each display in the house can rotate at its own pace.
 
 ### 2.3 Mac Mini services
 

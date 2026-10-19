@@ -135,6 +135,54 @@ void main() {
     controller.dispose();
   });
 
+  testWidgets('SlideshowController auto-advances on its interval, retimed live', (
+    tester,
+  ) async {
+    final controller = SlideshowController(
+      source: const AmbientPhotoSource(accessToken: 'AT', lister: _threeLister),
+      interval: const Duration(seconds: 10),
+    );
+    await controller.start();
+    expect(controller.interval, const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 10));
+    expect(controller.index, 1);
+
+    // Retiming restarts the timer: nothing at the old 10 s mark, advance at 30 s.
+    controller.setInterval(const Duration(seconds: 30));
+    expect(controller.interval, const Duration(seconds: 30));
+    await tester.pump(const Duration(seconds: 10));
+    expect(controller.index, 1);
+    await tester.pump(const Duration(seconds: 20));
+    expect(controller.index, 2);
+
+    // Same value / non-positive are no-ops (don't reset the cadence).
+    await tester.pump(const Duration(seconds: 20));
+    controller.setInterval(const Duration(seconds: 30));
+    controller.setInterval(Duration.zero);
+    await tester.pump(const Duration(seconds: 10));
+    expect(controller.index, 0); // wrapped 2 → 0 at the 30 s mark
+    controller.dispose();
+  });
+
+  test(
+    'SlideshowController.setInterval before start is used by start',
+    () async {
+      final controller = SlideshowController(
+        source: const AmbientPhotoSource(
+          accessToken: 'AT',
+          lister: _threeLister,
+        ),
+      );
+      expect(
+        controller.interval,
+        const Duration(seconds: kDefaultSlideIntervalSecs),
+      );
+      controller.setInterval(const Duration(seconds: 300));
+      expect(controller.interval, const Duration(seconds: 300));
+      controller.dispose();
+    },
+  );
+
   test(
     'SlideshowController falls back to local gradients when source throws',
     () async {

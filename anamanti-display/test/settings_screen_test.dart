@@ -398,6 +398,49 @@ void main() {
     expect(h.store.value.dimDelaySecs, 3600);
   });
 
+  testWidgets(
+    'photo rotation presets show the current value and apply on tap',
+    (tester) async {
+      final h = _Harness();
+      await h.pump(tester, initial: const AppSettings(slideIntervalSecs: 30));
+
+      await open(tester, 'display', 'photos');
+      expect(
+        tester
+            .widget<ChoiceChip>(
+              find.byKey(const Key('settings-slide-interval-30')),
+            )
+            .selected,
+        isTrue,
+      );
+
+      await tester.ensureVisible(
+        find.byKey(const Key('settings-slide-interval-300')),
+      );
+      await tester.tap(find.byKey(const Key('settings-slide-interval-300')));
+      await settle(tester);
+      expect(h.last!.slideIntervalSecs, 300);
+      expect(h.store.value.slideIntervalSecs, 300);
+    },
+  );
+
+  testWidgets('an off-preset photo rotation shows the nearest preset', (
+    tester,
+  ) async {
+    final h = _Harness();
+    await h.pump(tester, initial: const AppSettings(slideIntervalSecs: 40));
+
+    await open(tester, 'display', 'photos');
+    expect(
+      tester
+          .widget<ChoiceChip>(
+            find.byKey(const Key('settings-slide-interval-30')),
+          )
+          .selected,
+      isTrue,
+    );
+  });
+
   testWidgets('an off-preset dim delay shows the nearest preset', (
     tester,
   ) async {

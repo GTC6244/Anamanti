@@ -38,7 +38,8 @@ speaks the reply back through the Echo Show's speakers.
   anyone. "Who am I?" is answered from the voice, not from memory. Enroll on the
   display under Settings → People → Add a voice.
 - 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
-  with an idle photo slideshow from a Google Photos/Drive folder.
+  with an idle photo slideshow from a Google Photos/Drive folder (how often the
+  photo changes is set per display, 5 s to 10 min).
 - 🔔 **Proactive notifications** — the Mac can push a visual notification to the
   display *without* you asking (a reminder, an alert), over a persistent connection
   the device holds open to its pinned Anamanti Core. Visual-only today (no spoken

@@ -1,5 +1,6 @@
 // Settings → Display: what the screen looks like. Screen (dim delay, font size, the
-// listening ring) and Photos (the idle slideshow source + Google linking).
+// listening ring) and Photos (the idle slideshow source + Google linking + how often
+// the background photo changes).
 
 import 'package:flutter/material.dart';
 
@@ -24,15 +25,31 @@ const List<int> kDimDelayPresets = <int>[
   3600,
 ];
 
-/// The preset closest to [seconds], so a persisted value that predates the preset
-/// list (or an out-of-range one) still shows a valid selection.
-int nearestDimPreset(int seconds) {
-  var best = kDimDelayPresets.first;
-  for (final p in kDimDelayPresets) {
+/// The fixed "change photo every" choices (seconds): 5s … 10m, ascending. Includes
+/// the 10 s default ([kDefaultSlideIntervalSecs]).
+const List<int> kSlideIntervalPresets = <int>[
+  5,
+  10,
+  15,
+  30,
+  60,
+  120,
+  300,
+  600,
+];
+
+/// The entry of [presets] closest to [seconds], so a persisted value that predates
+/// the preset list (or an out-of-range one) still shows a valid selection.
+int nearestPreset(List<int> presets, int seconds) {
+  var best = presets.first;
+  for (final p in presets) {
     if ((p - seconds).abs() < (best - seconds).abs()) best = p;
   }
   return best;
 }
+
+/// [nearestPreset] over [kDimDelayPresets].
+int nearestDimPreset(int seconds) => nearestPreset(kDimDelayPresets, seconds);
 
 /// Human-readable seconds → "45s" / "2m" / "1h".
 String formatDimDelay(int s) {
@@ -260,6 +277,33 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
                   ? 'Drive is linked · ${s.driveFolderIds.length} folder(s).'
                   : 'Drive is not linked yet.',
           }),
+        ),
+        const SettingsHeader(
+          'Change photo every',
+          caption:
+              'How long each background photo stays up before the next one. '
+              'Set separately on each display.',
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+          child: Wrap(
+            key: const Key('settings-slide-interval'),
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final p in kSlideIntervalPresets)
+                ChoiceChip(
+                  key: Key('settings-slide-interval-$p'),
+                  label: Text(formatDimDelay(p)),
+                  selected:
+                      p ==
+                      nearestPreset(kSlideIntervalPresets, s.slideIntervalSecs),
+                  showCheckmark: false,
+                  onSelected: (_) =>
+                      _c.updateLocal(s.copyWith(slideIntervalSecs: p)),
+                ),
+            ],
+          ),
         ),
       ],
       right: [
