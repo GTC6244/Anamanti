@@ -558,7 +558,7 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       System-2 prompt). See [`RecipePlan.md`](./RecipePlan.md).
 - [ ] **Verify recipe steps + questions on hardware** (release APK + matching Core): with a
       long recipe up, "go to step 7" lands step 7 on screen highlighted; "next step" →
-      step 8; "how many tomatoes do I need?" answers from the recipe (check the Core log
+      step 8, and each jump reads the step aloud; "how many tomatoes do I need?" answers from the recipe (check the Core log
       for `system1 … recipe_ingredient` vs a System-2 answer); re-run the System-1
       calibration corpus (`tests/system1_calibration.rs --ignored`) against the live
       backend for the two new intents.

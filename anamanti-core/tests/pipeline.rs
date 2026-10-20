@@ -2138,7 +2138,7 @@ fn salsa_screen(highlighted_step: u32) -> serde_json::Value {
 }
 
 /// System-1 `recipe_step`: "next step" with step 2 highlighted jumps to step 3 on the
-/// fast path (no LLM) and relays an `anamanti-recipe` step frame.
+/// fast path (no LLM), reads step 3 aloud, and relays an `anamanti-recipe` step frame.
 #[tokio::test]
 async fn system1_recipe_step_jumps_to_the_next_step() {
     let pipeline = panic_llm_system1("recipe_step");
@@ -2146,7 +2146,7 @@ async fn system1_recipe_step_jumps_to_the_next_step() {
     let (_transcript, reply, kinds, _listen) =
         run_turn_with_screen(&pipeline, &connector, Some(salsa_screen(2))).await;
 
-    assert_eq!(reply, "Here's step 3.");
+    assert_eq!(reply, "Step 3. Season.");
     assert!(
         kinds.iter().any(|k| k == types::RECIPE),
         "expected an anamanti-recipe (step) frame, got {kinds:?}"
