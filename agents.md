@@ -73,7 +73,12 @@ recalled for anyone; per-turn speaker resolution `identified|tentative|new|unkno
 [`HomeAssistantPlan.md`](./plans/HomeAssistantPlan.md) (Home Assistant: a **pre-System-1 home-command
 fast path** — string-matched against a cached HA device catalog, one direct REST call, a fixed spoken
 confirmation, no model — plus the `home_control` rig tool as the LLM fallback; HA's Assist is
-deliberately not used. Part B, planned: an opt-in on-screen HA dashboard widget).
+deliberately not used. Part B, planned: an opt-in on-screen HA dashboard widget), and
+[`CameraPlan.md`](./plans/CameraPlan.md) (live NVR camera view: a pre-System-1 camera fast
+path + `show_camera`/`close_camera` → the `anamanti-camera` frame on the speaking display;
+the device fetches the RTSP URL via `anamanti-get-camera-stream` and plays it through the
+**vendored, patched** `anamanti-display/third_party/video_player_android` in platform-view
+mode — see its `ANAMANTI_PATCHES.md` before upgrading `video_player`).
 
 ---
 
@@ -359,6 +364,8 @@ anamanti-core/scripts/build-webui-css.sh
 #   HOME_ASSISTANT_TOKEN                 (Home Assistant long-lived access token for the
 #     home-command fast path + the home_control tool; UI: Integrations →
 #     `/integrations#home_assistant` (masked, also on Keys & Accounts). Absent ⇒ both off)
+#   REOLINK_PASSWORD                     (the NVR password for the live camera view,
+#     plans/CameraPlan.md. Boot-time only — NOT runtime-settable yet. Absent ⇒ camera off)
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
 #     process start, so it has no config-page control)
 #
@@ -456,6 +463,11 @@ anamanti-core/scripts/build-webui-css.sh
 #     stale-while-refresh). base_url + default_room (and the token) are runtime-settable on
 #     Integrations → Home Assistant (with a read-only "Test connection") and persisted to
 #     settings_path; the shared hub is reconfigured live, no restart.
+#   camera{enabled,nvr_host,rtsp_port,username,cameras:[{name,channel}]} (plans/CameraPlan.md)
+#     → the camera fast path + show_camera/close_camera + the anamanti-get-camera-stream
+#     control reply; off unless nvr_host + username + ≥1 camera + REOLINK_PASSWORD are set.
+#     `channel` is the number the NVR's own UI shows (1-based; RTSP h264Preview_05_sub for 5).
+#     Boot-time only.
 #   tool_cache{"<tool>": <seconds>, …} — per-tool response-cache TTLs, a flat map keyed by
 #     tool name, overlaid on built-in defaults; `0` disables a tool's cache. Generic
 #     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults

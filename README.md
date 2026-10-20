@@ -63,6 +63,11 @@ speaks the reply back through the Echo Show's speakers.
   say "play Dave Rocks" / "next station" / "stop the radio". It plays on the same
   speakers as Spotify (mpv → Snapcast; starting one stops the other), and the display's
   now-playing screen shows the station logo, a LIVE badge and the current song.
+- 📹 **Front-door camera** — say "show me the front door" or "who's at the door?" and
+  the display you're talking to shows the live view from the Reolink NVR (video only,
+  ~1–3 s behind real time); "close it" or 60 s closes it. The NVR password stays on the
+  Mac (`REOLINK_PASSWORD`); the video goes straight from the NVR to the display and never
+  leaves the house. Set it up in the `camera` block of `anamanti.json`.
 - 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
   heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
   tuning* — it changes only how replies sound, never what the assistant knows or does.

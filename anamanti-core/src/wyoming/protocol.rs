@@ -37,6 +37,8 @@ pub enum DisplayContext {
     Place(PlaceScreen),
     /// The music player is up (`kind: "music"`).
     Music(MusicScreen),
+    /// The live camera view is up (`kind: "camera"`, `plans/CameraPlan.md`).
+    Camera(CameraScreen),
     /// The audio-diagnostics screen is up (`kind: "diagnostics"`). This is a
     /// **transcription-only** context: the turn pipeline echoes the STT transcript to
     /// the device for on-screen display and then stops — no speaker ID, no System-1, no
@@ -122,6 +124,14 @@ pub struct PlaceScreen {
     pub address: String,
 }
 
+/// The live camera view's state, as carried in a [`DisplayContext::Camera`]. Tells the
+/// Core a camera is on screen (and which), so "stop"/"close it" closes it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CameraScreen {
+    /// The camera shown (its configured display name, e.g. "Front Door").
+    pub name: String,
+}
+
 /// The music player's state, as carried in a [`DisplayContext::Music`]. Tells the model
 /// a music screen is up (and what's on it), so it can drive it with `music_screen`
 /// (show now-playing / show up-next / close) and answer "what's this song?".
@@ -153,6 +163,16 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         }
         "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
         "music" => parse_music_screen(screen.get("music")?.as_object()?).map(DisplayContext::Music),
+        // The camera block is optional detail: a bare `kind: "camera"` still means the
+        // view is up (so "stop" closes it).
+        "camera" => Some(DisplayContext::Camera(CameraScreen {
+            name: screen
+                .get("camera")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })),
         // The audio-diagnostics screen carries no state — its presence alone switches the
         // turn to transcription-only (the orchestrator short-circuits before any LLM work).
         "diagnostics" => Some(DisplayContext::Diagnostics),
@@ -275,6 +295,7 @@ impl DeviceContext {
             Some(DisplayContext::Weather(_)) => Some("weather"),
             Some(DisplayContext::Place(_)) => Some("place"),
             Some(DisplayContext::Music(_)) => Some("music"),
+            Some(DisplayContext::Camera(_)) => Some("camera"),
             // Diagnostics never reaches System-1/System-2 (the turn short-circuits before
             // them), so it reports no widget label — nothing can leak into a decision or
             // prompt even if that ordering changes later. Enrollment is the same: the turn
@@ -673,6 +694,23 @@ mod tests {
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
         let other = json!({ "screen": { "kind": "photos" } });
         assert_eq!(display_context(&other), None);
+    }
+
+    #[test]
+    fn camera_screen_parses_with_or_without_detail() {
+        let full = json!({ "screen": { "kind": "camera", "camera": { "name": "Front Door" } } });
+        assert_eq!(
+            display_context(&full),
+            Some(DisplayContext::Camera(CameraScreen {
+                name: "Front Door".into()
+            }))
+        );
+        assert_eq!(device_context(&full).widget_label(), Some("camera"));
+        let bare = json!({ "screen": { "kind": "camera" } });
+        assert_eq!(
+            display_context(&bare),
+            Some(DisplayContext::Camera(CameraScreen::default()))
+        );
     }
 
     #[test]

@@ -40,13 +40,15 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         WeatherConfig,
         deviceHardwareId,
         noteUserActivity,
+        setCameraContext,
         setFontContext,
         setMusicContext,
         setPlaceContext,
         setRecipeContext,
         setWeatherContext,
         updateDiagnosticsTuning;
-import 'package:anamanti_display/src/rust/api/settings.dart' show musicControl;
+import 'package:anamanti_display/src/rust/api/settings.dart'
+    show getCameraStream, musicControl;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -340,6 +342,15 @@ class _AmbientHomeState extends State<AmbientHome> {
       setRecipeContext: setRecipeContext,
       setWeatherContext: setWeatherContext,
       setPlaceContext: setPlaceContext,
+      // Live camera view (plans/CameraPlan.md): tell the orchestrator a camera view is up
+      // (so "stop" closes it), and pull the stream URL from the pinned Core on each open.
+      // The URL embeds the NVR credentials — it stays in memory, never persisted/logged.
+      setCameraContext: setCameraContext,
+      fetchCameraStream: (camera) => getCameraStream(
+        orchestratorKey: _settings.orchestratorKey,
+        discoveryTimeoutSecs: BigInt.zero,
+        camera: camera,
+      ),
       // On-screen music transport/volume → a short-lived control round-trip to the
       // pinned Core (fire-and-forget; errors are logged, never surfaced to the UI).
       musicControl: ({required String action, int? value}) {

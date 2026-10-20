@@ -1308,6 +1308,10 @@ pub struct LlmFactory {
     /// and the pipeline's fast path, or `None` when HA isn't configured. Built once at
     /// boot (like `radio`) so its cached device catalog survives LLM rebuilds.
     pub home_assistant: Option<Arc<crate::home_assistant::HomeAssistant>>,
+    /// The NVR camera hub (`plans/CameraPlan.md`) for the `show_camera` tool, the
+    /// pipeline's camera fast path and the `anamanti-get-camera-stream` control request,
+    /// or `None` when the camera isn't configured. Boot-time only.
+    pub camera: Option<Arc<crate::camera::CameraHub>>,
     /// The per-display music-style session state (`plans/MusicDisplayStylePlan.md`),
     /// shared by every rebuilt backend's `spotify_control` / `radio_control` /
     /// `music_screen` tools (which record the requesting display), the display's
@@ -1406,6 +1410,7 @@ impl LlmFactory {
             radio: self.radio.clone().filter(|r| r.has_stations()),
             // Advertised only once a URL + token are set.
             home_assistant: self.home_assistant.clone().filter(|h| h.is_configured()),
+            camera: self.camera.clone(),
             music_display: Some(self.music_display.clone()),
         }
     }
@@ -2378,6 +2383,7 @@ impl SharedSettings {
             places_provider: "google".to_string(),
             radio: None,
             home_assistant: None,
+            camera: None,
             music_display: Default::default(),
         };
         Self::new(
@@ -3078,6 +3084,13 @@ impl SharedSettings {
         self.factory.home_assistant.clone()
     }
 
+    /// The NVR camera hub (`plans/CameraPlan.md`), or `None` when the camera view isn't
+    /// configured. Shared by the fast path, the `show_camera` tool and the control
+    /// socket's stream request.
+    pub fn camera(&self) -> Option<Arc<crate::camera::CameraHub>> {
+        self.factory.camera.clone()
+    }
+
     /// Build a weather provider instance from the *current* live provider label + Visual
     /// Crossing key. Used by the ambient push each tick so a provider/key change on the
     /// config page retargets the push without a restart. `None` when weather is disabled.
@@ -3162,6 +3175,7 @@ mod tests {
             places_provider: "google".to_string(),
             radio: None,
             home_assistant: None,
+            camera: None,
             music_display: Default::default(),
         }
     }

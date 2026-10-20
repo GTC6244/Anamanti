@@ -23,6 +23,7 @@ import 'package:anamanti_display/src/engine/notification_controller.dart';
 import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
+import 'package:anamanti_display/src/ui/camera_view.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
 import 'package:anamanti_display/src/ui/listening_overlay.dart';
 import 'package:anamanti_display/src/ui/music_control_overlay.dart';
@@ -52,6 +53,7 @@ class AmbientScreen extends StatelessWidget {
     this.ringAttack = 0.65,
     this.ringRelease = 0.08,
     this.ringDecay = 0.99,
+    this.cameraPlayerFactory = defaultCameraPlayer,
   });
 
   final AssistantController assistant;
@@ -65,6 +67,10 @@ class AmbientScreen extends StatelessWidget {
   final double ringAttack;
   final double ringRelease;
   final double ringDecay;
+
+  /// Builds the live camera view's video player. Injectable so widget tests never
+  /// need a platform video implementation; production uses [defaultCameraPlayer].
+  final CameraPlayerFactory cameraPlayerFactory;
 
   /// Proactive notifications pushed by the orchestrator (Approach A). When null (as
   /// in widget tests that only exercise the turn UI) no banner is shown.
@@ -99,9 +105,12 @@ class AmbientScreen extends StatelessWidget {
             // takes over the idle presentation but yields to an active voice turn.
             final weatherActive = state.weatherActive;
             final placeActive = state.placeActive;
-            // Core-pushed full-screen modes (recipe/weather/place). These win over the
-            // device-toggled music screen, which is suppressed while one is up.
-            final coreMode = recipeActive || weatherActive || placeActive;
+            // Live camera view (plans/CameraPlan.md), opened by voice via the Core.
+            final cameraActive = state.cameraActive;
+            // Core-pushed full-screen modes (recipe/weather/place/camera). These win over
+            // the device-toggled music screen, which is suppressed while one is up.
+            final coreMode =
+                recipeActive || weatherActive || placeActive || cameraActive;
             // Music: `musicActive` means a track is playing. Which widget shows follows the
             // display's style (`musicDisplayStyle`, chosen per display by the Core),
             // or a view the user explicitly opened (tap / voice); a Core-pushed mode always
@@ -265,6 +274,27 @@ class AmbientScreen extends StatelessWidget {
                             key: ValueKey(state.place!.name),
                             place: state.place!,
                             onClose: assistant.dismissPlace,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+
+                // Camera mode: the full-screen live camera view (video only). Same
+                // precedence as the place card — above the idle presentation, below the
+                // conversation panel. Keyed on the open sequence so a new show (or a
+                // reopen) builds a fresh player, and the player is disposed as soon as the
+                // view closes. Dismissed by the ✕, voice "stop", or the 60 s auto-close.
+                AnimatedOpacity(
+                  opacity: cameraActive ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !cameraActive,
+                    child: cameraActive
+                        ? CameraView(
+                            key: ValueKey('camera:${state.camera!.seq}'),
+                            session: state.camera!,
+                            onClose: assistant.dismissCamera,
+                            playerFactory: cameraPlayerFactory,
                           )
                         : const SizedBox.shrink(),
                   ),

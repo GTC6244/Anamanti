@@ -281,6 +281,13 @@ pub enum WakeWordEventKind {
     ShowPlace,
     /// Place mode: dismiss the full-screen place card and return to idle/ambient.
     DismissPlace,
+    /// Camera mode (`plans/CameraPlan.md`): the orchestrator asked to open the live
+    /// camera view. The camera's display name (e.g. `"Front Door"`) rides the generic
+    /// `recipe_action` string carrier (as `FontAdjust` does). The frame never carries
+    /// the stream URL — the UI fetches it with `get_camera_stream`.
+    ShowCamera,
+    /// Camera mode: close the live camera view and return to idle/ambient.
+    DismissCamera,
     /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
     /// (`"overview"` / `"ingredients"` / `"steps"`).
     RecipeNavigate,
@@ -604,6 +611,19 @@ impl WakeWordEvent {
         Self::base(WakeWordEventKind::DismissPlace)
     }
 
+    /// Open the live camera view of `camera` (its display name, carried on the
+    /// `recipe_action` string field).
+    pub(crate) fn show_camera(camera: String) -> Self {
+        Self {
+            recipe_action: camera,
+            ..Self::base(WakeWordEventKind::ShowCamera)
+        }
+    }
+
+    pub(crate) fn dismiss_camera() -> Self {
+        Self::base(WakeWordEventKind::DismissCamera)
+    }
+
     pub(crate) fn enroll_result(enroll_json: String) -> Self {
         Self {
             enroll_json,
@@ -814,6 +834,32 @@ pub fn set_place_context(active: bool, name: String, address: String) {
         None
     };
     crate::engine::set_display_context(screen);
+}
+
+/// The `screen` block for the live camera view's display context, or `None` when the
+/// view is closed (`plans/CameraPlan.md`). Split out of [`set_camera_context`] so the
+/// shape is unit-testable without the engine.
+fn camera_context(active: bool, name: &str) -> Option<serde_json::Value> {
+    active.then(|| {
+        serde_json::json!({
+            "kind": "camera",
+            "camera": { "name": name },
+        })
+    })
+}
+
+/// Report the live camera view's state as the device's **display context** so the next
+/// voice turn's `audio-start` tells the orchestrator a camera view is up (and which
+/// camera), letting a bare "stop" / "close it" close it. The camera view's setter for the
+/// general display-context mechanism (see [`set_place_context`] /
+/// [`crate::engine::set_display_context`]). Carries only the camera's display name —
+/// never the stream URL.
+///
+/// Flutter calls this when the camera view opens or closes. `active == false` clears the
+/// context (idle screen); `name` is ignored then.
+#[frb(sync)]
+pub fn set_camera_context(active: bool, name: String) {
+    crate::engine::set_display_context(camera_context(active, &name));
 }
 
 /// Push the music player's current state as this turn's display context (see
@@ -1246,4 +1292,33 @@ pub fn start_music_channel(config: MusicConfig, sink: StreamSink<MusicPush>) -> 
 /// Stop the music now-playing channel (if any) and join its thread. Idempotent.
 pub fn stop_music_channel() {
     stop_channel(&MUSIC);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_context_carries_only_the_camera_name() {
+        let screen = camera_context(true, "Front Door").expect("active => Some");
+        assert_eq!(screen["kind"], "camera");
+        assert_eq!(screen["camera"]["name"], "Front Door");
+        // The context never carries the stream URL (it embeds NVR credentials).
+        assert_eq!(screen["camera"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn camera_context_clears_when_inactive() {
+        assert!(camera_context(false, "Front Door").is_none());
+    }
+
+    #[test]
+    fn camera_events_ride_the_recipe_action_carrier() {
+        let show = WakeWordEvent::show_camera("Front Door".to_string());
+        assert!(matches!(show.kind, WakeWordEventKind::ShowCamera));
+        assert_eq!(show.recipe_action, "Front Door");
+        let dismiss = WakeWordEvent::dismiss_camera();
+        assert!(matches!(dismiss.kind, WakeWordEventKind::DismissCamera));
+        assert!(dismiss.recipe_action.is_empty());
+    }
 }

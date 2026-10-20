@@ -18,6 +18,7 @@
 //! so production dials TCP while tests wire in-memory mock servers — the turn
 //! logic is identical either way.
 
+mod camera;
 mod home;
 mod prompt;
 mod speech_out;
@@ -666,6 +667,17 @@ impl Pipeline {
         // cached device catalog and carried out with one direct REST call — before
         // System-1, memory recall and the LLM. Non-commands cost nothing here.
         if let Some((text, delivery)) = self.run_home_fast_path(ctx, transcript).await {
+            return Ok(Reply {
+                text,
+                memories_written,
+                delivery,
+            });
+        }
+
+        // Camera fast path (plans/CameraPlan.md): "show the front door" opens the live
+        // view on this display; "stop"/"close it" closes an open one. Pure string match,
+        // so non-camera turns cost nothing.
+        if let Some((text, delivery)) = self.run_camera_fast_path(ctx, transcript).await {
             return Ok(Reply {
                 text,
                 memories_written,

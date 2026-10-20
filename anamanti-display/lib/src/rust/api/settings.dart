@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `block_on`, `decode_pcm_le`, `preferred`, `timeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Discover every orchestrator on the LAN for the settings "Orchestrator"
 /// dropdown. Pure mDNS — unfiltered by any current selection — so the picker can
@@ -67,6 +67,22 @@ Future<DriveToken> getDriveToken({
 }) => RustLib.instance.api.crateApiSettingsGetDriveToken(
   orchestratorKey: orchestratorKey,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
+);
+
+/// Fetch the live stream for the camera named `camera` (its display name from the
+/// `ShowCamera` event; blank = the Core's first configured camera), each time the
+/// camera view opens. The returned `url` embeds the NVR credentials: the caller keeps
+/// it in memory only and must never persist or log it. A Core-side failure comes back
+/// as `ok: false` with a speakable `message`; a transport failure (no Core, timeout —
+/// e.g. an older Core that doesn't know the frame) is an `Err`.
+Future<CameraStream> getCameraStream({
+  required String orchestratorKey,
+  required BigInt discoveryTimeoutSecs,
+  required String camera,
+}) => RustLib.instance.api.crateApiSettingsGetCameraStream(
+  orchestratorKey: orchestratorKey,
+  discoveryTimeoutSecs: discoveryTimeoutSecs,
+  camera: camera,
 );
 
 /// Fetch the read-only snapshot of the Core's configured functions (cloud/local,
@@ -324,6 +340,49 @@ Future<void> enrollCancel({
   session: session,
   discoveryTimeoutSecs: discoveryTimeoutSecs,
 );
+
+/// The live stream for one camera, pulled from the Core each time the camera view
+/// opens (`plans/CameraPlan.md`, `anamanti-get-camera-stream` → `anamanti-camera-stream`).
+///
+/// **`url` embeds the NVR credentials** (`rtsp://user:pass@host:554/...`): the device
+/// holds it in memory only — never persisted, never logged. For that reason this type
+/// deliberately has a hand-written `Debug` that redacts `url` (in
+/// `wyoming/control.rs`, outside the FRB-scanned `api` module).
+class CameraStream {
+  /// Whether the Core resolved a stream. When `false`, `message` is a speakable
+  /// reason and `camera`/`url` are empty.
+  final bool ok;
+
+  /// The resolved camera display name (e.g. `"Front Door"`).
+  final String camera;
+
+  /// The `rtsp://` URL **with credentials embedded**. Empty when `ok` is false.
+  final String url;
+
+  /// A human-readable failure reason (empty on success).
+  final String message;
+
+  const CameraStream({
+    required this.ok,
+    required this.camera,
+    required this.url,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      ok.hashCode ^ camera.hashCode ^ url.hashCode ^ message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CameraStream &&
+          runtimeType == other.runtimeType &&
+          ok == other.ok &&
+          camera == other.camera &&
+          url == other.url &&
+          message == other.message;
+}
 
 /// The Google Drive photo-slideshow bundle the orchestrator owns, pulled by the
 /// device to drive the idle slideshow. The device mints Drive access tokens

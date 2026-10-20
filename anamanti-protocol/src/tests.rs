@@ -143,6 +143,9 @@ fn type_constants_are_stable() {
         (types::RECIPE, "anamanti-recipe"),
         (types::WEATHER, "anamanti-weather"),
         (types::PLACE, "anamanti-place"),
+        (types::CAMERA, "anamanti-camera"),
+        (types::GET_CAMERA_STREAM, "anamanti-get-camera-stream"),
+        (types::CAMERA_STREAM, "anamanti-camera-stream"),
         (types::FONT, "anamanti-font"),
         (types::MUSIC, "anamanti-music"),
         (types::MUSIC_CONTROL, "anamanti-music-control"),
@@ -337,6 +340,32 @@ async fn place_frame_roundtrips_and_decodes_command() {
     assert_eq!(WyomingEvent::interrupt().place_command(), None);
     let bad = WyomingEvent::with_data(types::PLACE, json!({ "action": "show" }));
     assert_eq!(bad.place_command(), None);
+}
+
+#[tokio::test]
+async fn camera_frames_roundtrip_and_decode() {
+    let show = WyomingEvent::camera_show("Front Door");
+    let back = roundtrip(&show).await;
+    assert_eq!(back, show);
+    assert_eq!(
+        back.camera_command(),
+        Some(CameraCommand::Show("Front Door".to_string()))
+    );
+    // The show frame never carries a URL/credential.
+    assert!(back.data.get("url").is_none());
+
+    let dismiss = roundtrip(&WyomingEvent::camera_dismiss()).await;
+    assert_eq!(dismiss.camera_command(), Some(CameraCommand::Dismiss));
+
+    assert_eq!(WyomingEvent::interrupt().camera_command(), None);
+    let blank = WyomingEvent::with_data(types::CAMERA, json!({ "action": "show", "camera": " " }));
+    assert_eq!(blank.camera_command(), None);
+    let unknown = WyomingEvent::with_data(types::CAMERA, json!({ "action": "zoom" }));
+    assert_eq!(unknown.camera_command(), None);
+
+    let req = roundtrip(&WyomingEvent::get_camera_stream("Front Door")).await;
+    assert_eq!(req.event_type, types::GET_CAMERA_STREAM);
+    assert_eq!(req.data["camera"], "Front Door");
 }
 
 #[tokio::test]
