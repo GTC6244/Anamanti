@@ -406,7 +406,7 @@ pub(super) static ROUTES: &[Route] = &[
     ),
     get(
         "/music/display.json",
-        Sync(|s, _| Reply::json(music_display_json(s.settings()))),
+        Sync(|s, _| Reply::json(music_display_json(s.settings(), &s.now_playing))),
     ),
     post(
         "/music/display",

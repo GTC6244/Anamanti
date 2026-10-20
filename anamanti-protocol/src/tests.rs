@@ -368,6 +368,23 @@ async fn music_frames_roundtrip_and_decode() {
     );
     assert_eq!(WyomingEvent::music_dismiss().music_control_command(), None);
 
+    // The display stamps its id so the Core knows which display pressed the button.
+    let tagged = roundtrip(
+        &WyomingEvent::music_control("display_fullscreen", None).with_device_id(" kitchen "),
+    )
+    .await;
+    assert_eq!(tagged.music_control_device_id(), Some("kitchen"));
+    assert_eq!(
+        tagged.music_control_command(),
+        Some(("display_fullscreen".to_string(), None))
+    );
+    assert_eq!(pause.music_control_device_id(), None);
+    let blank = WyomingEvent::music_control("pause", None).with_device_id("  ");
+    assert!(blank.data.get("device_id").is_none());
+    let start = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0).with_device_id("den");
+    assert_eq!(start.data["device_id"], serde_json::json!("den"));
+    assert_eq!(start.music_control_device_id(), None);
+
     let hello = WyomingEvent::hello_music("dev", "core", "Kitchen");
     assert_eq!(hello.data["role"], json!("music"));
     assert_eq!(hello.hello_device_id(), Some("dev"));

@@ -21,9 +21,11 @@
 //! (e.g. from a phone via Spotify Connect) the radio stops and Spotify takes over.
 //!
 //! **Display style** (`plans/MusicDisplayStylePlan.md`): every `now_playing` push carries
-//! the household's [`MusicDisplayStyle`] as `display_style` inside the snapshot, so all
-//! displays show the same widget (compact bar / full screen) for Spotify and radio alike.
-//! [`NowPlayingService::set_display_style`] persists a change and re-pushes at once.
+//! *that display's* [`MusicDisplayStyle`] as `display_style` inside the snapshot — each
+//! channel remembers the `device_id` it was opened with, and the shared
+//! [`MusicDisplayRouter`] decides per display (its session choice → its pinned preference →
+//! full screen on the display that asked for the music, compact elsewhere). A style change
+//! signals the router, which wakes the push loop to re-send the cached snapshot at once.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,9 +34,10 @@ use serde_json::{to_value as json_to_value, Value};
 use tokio::sync::mpsc;
 
 use crate::music::{
-    MusicDisplayStyle, NowPlaying, RadioPlayer, RoutedSpotify, SpotifyCommand, SpotifyController,
+    MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, NowPlaying, RadioPlayer,
+    RoutedSpotify, SpotifyCommand, SpotifyController,
 };
-use crate::notify::ChannelRegistry;
+use crate::notify::{ChannelRegistry, ConnectedDevice};
 use crate::settings::{SharedSettings, SpotifyConfig};
 use crate::wyoming::protocol::WyomingEvent;
 
@@ -63,7 +66,9 @@ fn to_event(snapshot: Option<&NowPlaying>, style: MusicDisplayStyle) -> WyomingE
 /// to the device-facing server (which registers live channels) and the periodic push.
 #[derive(Default)]
 pub struct NowPlayingService {
-    channels: ChannelRegistry<()>,
+    /// One entry per open music channel, carrying the identity the display announced so
+    /// each push can be stamped with that display's own style.
+    channels: ChannelRegistry<ConnectedDevice>,
     /// The most recent now-playing snapshot (`None` = nothing playing), replayed to a
     /// channel the moment it connects.
     last: Mutex<Option<NowPlaying>>,
@@ -72,10 +77,12 @@ pub struct NowPlayingService {
     controller: Mutex<Option<(SpotifyConfig, Arc<dyn SpotifyController>)>>,
     /// The internet-radio player, when music routing is on.
     radio: Option<Arc<RadioPlayer>>,
-    /// The display-style preference stamped onto every push. Mirrors
-    /// [`SharedSettings::music_display_style`] (the store of record): refreshed each
-    /// periodic tick and set at once by [`Self::set_display_style`].
-    style: Mutex<MusicDisplayStyle>,
+    /// The per-display style session (shared with the voice tools and the settings,
+    /// which own the one per-Core instance; a bare `new()` gets its own).
+    display: Arc<MusicDisplayRouter>,
+    /// The per-display pinned styles. Mirrors [`SharedSettings::music_display_pins`] (the
+    /// store of record), refreshed before every push by [`Self::sync_pins`].
+    pins: Mutex<MusicDisplayPins>,
 }
 
 impl NowPlayingService {
@@ -91,23 +98,44 @@ impl NowPlayingService {
         }
     }
 
+    /// Share the per-Core display-style session (from
+    /// [`SharedSettings::music_display_router`]) instead of a private one.
+    pub fn with_display(mut self, display: Arc<MusicDisplayRouter>) -> Self {
+        self.display = display;
+        self
+    }
+
     /// The attached radio player, if any.
     pub fn radio(&self) -> Option<&Arc<RadioPlayer>> {
         self.radio.as_ref()
     }
 
-    /// Register a newly-opened music channel. Returns a connection handle (used to
-    /// [`deregister`](Self::deregister) on close) and the receiver the connection task
-    /// drains to write pushes out. If a snapshot is already cached it is queued
-    /// immediately so the device shows now-playing without waiting for the next tick.
-    pub fn register(&self) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
+    /// The per-display style session this service stamps pushes from.
+    pub fn display(&self) -> &Arc<MusicDisplayRouter> {
+        &self.display
+    }
+
+    /// Register a newly-opened music channel for the display `device_id` (named `name`).
+    /// Returns a connection handle (used to [`deregister`](Self::deregister) on close) and
+    /// the receiver the connection task drains to write pushes out. If a snapshot is
+    /// already cached it is queued immediately (with this display's style) so the device
+    /// shows now-playing without waiting for the next tick.
+    pub fn register(
+        &self,
+        device_id: &str,
+        name: &str,
+    ) -> (u64, mpsc::UnboundedReceiver<WyomingEvent>) {
         let initial = self
             .last
             .lock()
             .unwrap()
             .as_ref()
-            .map(|np| to_event(Some(np), self.style()));
-        self.channels.register((), initial)
+            .map(|np| to_event(Some(np), self.style_for(device_id)));
+        let meta = ConnectedDevice {
+            device_id: device_id.to_string(),
+            name: name.to_string(),
+        };
+        self.channels.register(meta, initial)
     }
 
     /// Drop a channel from the registry (its task is ending / the device closed).
@@ -121,39 +149,68 @@ impl NowPlayingService {
     }
 
     /// Cache `snapshot` and push it to every connected device. `Some` fans out a
-    /// `now_playing` frame; `None` fans out a `dismiss` frame (and clears the cache so a
-    /// late joiner doesn't replay a stale track). Dead channels are pruned. Returns the
-    /// delivery count.
+    /// `now_playing` frame stamped with each display's own style; `None` fans out a
+    /// `dismiss` frame (and clears the cache so a late joiner doesn't replay a stale
+    /// track). Music going from loaded to nothing ends the display-style session. Dead
+    /// channels are pruned. Returns the delivery count.
     pub fn broadcast(&self, snapshot: Option<NowPlaying>) -> usize {
-        let event = to_event(snapshot.as_ref(), self.style());
+        self.display.set_active(snapshot.is_some());
+        let delivered = self.push(snapshot.as_ref());
         *self.last.lock().unwrap() = snapshot;
-        self.channels.broadcast(&event)
+        delivered
     }
 
-    /// The display-style preference currently stamped onto pushes.
-    pub fn style(&self) -> MusicDisplayStyle {
-        *self.style.lock().unwrap()
+    /// Send `snapshot` to every channel, each with its display's style.
+    fn push(&self, snapshot: Option<&NowPlaying>) -> usize {
+        let pins = self.pins.lock().unwrap().clone();
+        self.channels
+            .broadcast_with(|dev| to_event(snapshot, self.display.style_for(&dev.device_id, &pins)))
     }
 
-    /// Mirror the stored preference into the push without re-sending (the periodic tick
-    /// calls this before each broadcast so a change made elsewhere — e.g. by voice —
-    /// reaches every display on the next tick).
-    pub fn sync_style(&self, style: MusicDisplayStyle) {
-        *self.style.lock().unwrap() = style;
+    /// The style `device_id` gets right now (see [`MusicDisplayRouter::style_for`]).
+    pub fn style_for(&self, device_id: &str) -> MusicDisplayStyle {
+        self.display
+            .style_for(device_id, &self.pins.lock().unwrap())
     }
 
-    /// Change the household's music-widget preference: persist it in `settings` (the
-    /// store of record), then re-push the cached snapshot (if anything is playing) so
-    /// every connected display switches at once rather than on the next tick. Shared by
-    /// the config page and the display's on-screen toggle. Returns the delivery count.
-    pub fn set_display_style(&self, settings: &SharedSettings, style: MusicDisplayStyle) -> usize {
-        settings.set_music_display_style(style);
-        self.sync_style(style);
+    /// Mirror the stored per-display pins into the push without re-sending (called before
+    /// every push so a config-page pin applies on the next one).
+    pub fn sync_pins(&self, pins: MusicDisplayPins) {
+        *self.pins.lock().unwrap() = pins;
+    }
+
+    /// Re-send the cached snapshot (if anything is playing) with every display's current
+    /// style — after a style change, so the displays switch at once rather than on the
+    /// next tick. No Spotify call. Returns the delivery count.
+    pub fn repush(&self, settings: &SharedSettings) -> usize {
+        self.sync_pins(settings.music_display_pins());
         let last = self.last.lock().unwrap().clone();
         match last {
-            Some(np) => self.channels.broadcast(&to_event(Some(&np), style)),
+            Some(np) => self.push(Some(&np)),
             None => 0,
         }
+    }
+
+    /// Every display holding a music channel open, with the style it is being sent now
+    /// (de-duplicated by `device_id`, sorted by name then id) — for the config page.
+    pub fn display_styles(&self) -> Vec<(ConnectedDevice, MusicDisplayStyle)> {
+        let mut seen = std::collections::BTreeMap::new();
+        for dev in self.channels.list(ConnectedDevice::clone) {
+            seen.entry(dev.device_id.clone()).or_insert(dev);
+        }
+        let mut out: Vec<_> = seen
+            .into_values()
+            .map(|dev| {
+                let style = self.style_for(&dev.device_id);
+                (dev, style)
+            })
+            .collect();
+        out.sort_by(|(a, _), (b, _)| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.device_id.cmp(&b.device_id))
+        });
+        out
     }
 
     /// The live Spotify controller for the *current* credentials in `settings`, or `None`
@@ -276,10 +333,14 @@ pub fn spawn_periodic(
         // A station change (play/stop/step) wakes the loop early so the screen updates
         // at once; with no radio this is a Notify nobody signals.
         let wake = service.radio().map(|r| r.changed()).unwrap_or_default();
+        // A display-style change (a play request, a display's button, voice, a config-page
+        // pin) re-sends the cached snapshot at once — no Spotify call, and the next tick
+        // stays on schedule.
+        let restyle = service.display().changed();
         let mut spotify_was_playing = false;
         loop {
             if service.connected() > 0 {
-                service.sync_style(settings.music_display_style());
+                service.sync_pins(settings.music_display_pins());
                 match service.tick(&settings, &mut spotify_was_playing).await {
                     Some(Ok(snapshot)) => {
                         let playing = snapshot.is_some();
@@ -290,9 +351,16 @@ pub fn spawn_periodic(
                     None => log::debug!("music push: nothing linked/playing; skipping tick"),
                 }
             }
-            tokio::select! {
-                _ = tokio::time::sleep(interval) => {}
-                _ = wake.notified() => {}
+            let next_tick = tokio::time::Instant::now() + interval;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(next_tick) => break,
+                    _ = wake.notified() => break,
+                    _ = restyle.notified() => {
+                        let n = service.repush(&settings);
+                        log::debug!("music push: display style changed → {n} device(s)");
+                    }
+                }
             }
         }
     });
@@ -321,8 +389,8 @@ mod tests {
         let svc = NowPlayingService::new();
         assert_eq!(svc.connected(), 0);
 
-        let (id_a, mut rx_a) = svc.register();
-        let (_id_b, rx_b) = svc.register();
+        let (id_a, mut rx_a) = svc.register("dev", "");
+        let (_id_b, rx_b) = svc.register("dev", "");
         assert_eq!(svc.connected(), 2);
 
         drop(rx_b);
@@ -345,7 +413,7 @@ mod tests {
     fn a_new_channel_gets_the_last_snapshot_immediately() {
         let svc = NowPlayingService::new();
         svc.broadcast(Some(snapshot())); // caches, nobody connected yet
-        let (_id, mut rx) = svc.register();
+        let (_id, mut rx) = svc.register("dev", "");
         let got = rx
             .try_recv()
             .expect("late joiner replayed the cached snapshot");
@@ -358,81 +426,102 @@ mod tests {
         let svc = NowPlayingService::new();
         svc.broadcast(Some(snapshot()));
         svc.broadcast(None); // playback stopped
-        let (_id, mut rx) = svc.register();
+        let (_id, mut rx) = svc.register("dev", "");
         // Nothing cached → nothing replayed on connect.
         assert!(rx.try_recv().is_err());
     }
 
-    #[test]
-    fn pushes_carry_the_display_style_and_a_change_repushes_at_once() {
-        let settings = crate::settings::SharedSettings::fixed(
+    fn settings() -> Arc<SharedSettings> {
+        crate::settings::SharedSettings::fixed(
             Arc::new(crate::llm::mock::MockLlm::default()),
             "mock",
             None,
-        );
-        let svc = NowPlayingService::new();
-        let (_id, mut rx) = svc.register();
-        svc.broadcast(Some(snapshot()));
-        let got = rx.try_recv().unwrap();
-        assert_eq!(
-            got.data["music"]["display_style"],
-            serde_json::json!("compact")
-        );
+        )
+    }
 
-        assert_eq!(
-            svc.set_display_style(&settings, MusicDisplayStyle::Fullscreen),
-            1
-        );
-        assert_eq!(
-            settings.music_display_style(),
-            MusicDisplayStyle::Fullscreen
-        );
-        let got = rx
-            .try_recv()
-            .expect("style change re-pushed the cached snapshot");
-        assert_eq!(got.data["action"], serde_json::json!("now_playing"));
-        assert_eq!(
-            got.data["music"]["display_style"],
-            serde_json::json!("fullscreen")
-        );
+    fn style_of(ev: &WyomingEvent) -> &str {
+        ev.data["music"]["display_style"].as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn each_display_gets_its_own_style_full_screen_where_the_music_was_asked_for() {
+        let settings = settings();
+        let svc = NowPlayingService::new().with_display(settings.music_display_router());
+        let (_k, mut kitchen) = svc.register("kitchen", "Kitchen");
+        let (_d, mut den) = svc.register("den", "Den");
+
+        // Asked for from the kitchen display: full screen there, compact in the den.
+        settings
+            .music_display_router()
+            .play_requested(Some("kitchen"), crate::music::PlayRequest::Play);
+        assert_eq!(svc.broadcast(Some(snapshot())), 2);
+        assert_eq!(style_of(&kitchen.try_recv().unwrap()), "fullscreen");
+        assert_eq!(style_of(&den.try_recv().unwrap()), "compact");
+
+        // The den chooses full screen and the kitchen minimizes: each one separately,
+        // re-pushed at once from the cache.
+        let router = settings.music_display_router();
+        router.choose("den", MusicDisplayStyle::Fullscreen);
+        router.choose("kitchen", MusicDisplayStyle::Compact);
+        assert_eq!(svc.repush(&settings), 2);
+        let got = kitchen.try_recv().unwrap();
+        assert_eq!(style_of(&got), "compact");
         assert_eq!(
             got.data["music"]["track_title"],
             serde_json::json!("Paranoid Android")
         );
+        assert_eq!(style_of(&den.try_recv().unwrap()), "fullscreen");
 
-        // A late joiner is replayed with the current style too.
-        let (_id2, mut rx2) = svc.register();
-        let got = rx2.try_recv().unwrap();
+        // A late joiner is replayed with its own style (automatic: not the requester).
+        let (_b, mut bedroom) = svc.register("bedroom", "Bedroom");
+        assert_eq!(style_of(&bedroom.try_recv().unwrap()), "compact");
+
+        // The config page lists every display with what it is being sent.
+        let listed: Vec<_> = svc
+            .display_styles()
+            .into_iter()
+            .map(|(d, s)| (d.name, s))
+            .collect();
         assert_eq!(
-            got.data["music"]["display_style"],
-            serde_json::json!("fullscreen")
+            listed,
+            vec![
+                ("Bedroom".to_string(), MusicDisplayStyle::Compact),
+                ("Den".to_string(), MusicDisplayStyle::Fullscreen),
+                ("Kitchen".to_string(), MusicDisplayStyle::Compact),
+            ]
         );
     }
 
     #[test]
-    fn a_style_change_with_nothing_playing_persists_but_pushes_nothing() {
-        let settings = crate::settings::SharedSettings::fixed(
-            Arc::new(crate::llm::mock::MockLlm::default()),
-            "mock",
-            None,
-        );
-        let svc = NowPlayingService::new();
-        let (_id, mut rx) = svc.register();
-        assert_eq!(
-            svc.set_display_style(&settings, MusicDisplayStyle::Fullscreen),
-            0
-        );
-        assert_eq!(
-            settings.music_display_style(),
-            MusicDisplayStyle::Fullscreen
-        );
-        assert!(rx.try_recv().is_err());
+    fn a_pin_applies_and_the_session_ends_when_the_music_stops() {
+        let settings = settings();
+        let svc = NowPlayingService::new().with_display(settings.music_display_router());
+        let (_d, mut den) = svc.register("den", "Den");
+        settings.set_music_display_pin("den", Some(MusicDisplayStyle::Fullscreen));
+        // Nothing playing: a pin persists but pushes nothing.
+        assert_eq!(svc.repush(&settings), 0);
+        assert!(den.try_recv().is_err());
+
+        // Music started outside any display: compact everywhere except the pinned den.
+        let (_k, mut kitchen) = svc.register("kitchen", "Kitchen");
+        svc.broadcast(Some(snapshot()));
+        assert_eq!(style_of(&den.try_recv().unwrap()), "fullscreen");
+        assert_eq!(style_of(&kitchen.try_recv().unwrap()), "compact");
+
+        // The kitchen's session choice is forgotten when the music stops.
+        settings
+            .music_display_router()
+            .choose("kitchen", MusicDisplayStyle::Fullscreen);
+        svc.broadcast(None);
+        assert_eq!(kitchen.try_recv().unwrap().data["action"], "dismiss");
+        assert_eq!(svc.style_for("kitchen"), MusicDisplayStyle::Compact);
+        assert_eq!(svc.style_for("den"), MusicDisplayStyle::Fullscreen);
     }
 
     #[test]
     fn dismiss_frame_is_pushed_to_live_channels() {
         let svc = NowPlayingService::new();
-        let (_id, mut rx) = svc.register();
+        let (_id, mut rx) = svc.register("dev", "");
         svc.broadcast(None);
         let got = rx.try_recv().expect("live channel received the dismiss");
         assert_eq!(got.event_type, types::MUSIC);

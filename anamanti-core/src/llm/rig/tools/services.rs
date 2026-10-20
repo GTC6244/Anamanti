@@ -20,7 +20,9 @@ use crate::appsaid::{OutgoingMessage, PhoneMessenger};
 use crate::cadora::{GroceryCommand, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, LiveHomeLocation, TravelMode};
-use crate::music::{RadioPlayer, SearchKind, SpotifyCommand, SpotifyController};
+use crate::music::{
+    MusicDisplayRouter, PlayRequest, RadioPlayer, SearchKind, SpotifyCommand, SpotifyController,
+};
 
 /// Tool name: read the user's connected calendars.
 pub(super) const CALENDAR_LOOKUP: &str = "calendar_lookup";
@@ -286,9 +288,28 @@ impl VoiceTool for DirectionsLookup {
 // ---------------------------------------------------------------------------
 
 /// The `spotify_control` tool. The controller targets the librespot Connect device;
-/// audio never flows through here.
-pub(super) fn spotify_control(controller: Arc<dyn SpotifyController>) -> Arc<dyn VoiceTool> {
-    Arc::new(SpotifyControl { controller })
+/// audio never flows through here. `display` (when present) records which display a
+/// play request came from, so the music shows full screen there.
+pub(super) fn spotify_control(
+    controller: Arc<dyn SpotifyController>,
+    display: Option<Arc<MusicDisplayRouter>>,
+) -> Arc<dyn VoiceTool> {
+    Arc::new(SpotifyControl {
+        controller,
+        display,
+    })
+}
+
+/// Tell the per-display music style that `ctx`'s display asked for music (before the
+/// play is issued, so the first push of the new music already shows full screen there).
+fn note_play_request(
+    display: Option<&Arc<MusicDisplayRouter>>,
+    ctx: &ToolCtx<'_>,
+    kind: PlayRequest,
+) {
+    if let Some(display) = display {
+        display.play_requested(ctx.device_id, kind);
+    }
 }
 
 /// Typed arguments for `spotify_control`.
@@ -334,6 +355,7 @@ impl SpotifyArgs {
 
 struct SpotifyControl {
     controller: Arc<dyn SpotifyController>,
+    display: Option<Arc<MusicDisplayRouter>>,
 }
 
 #[async_trait]
@@ -390,11 +412,23 @@ impl VoiceTool for SpotifyControl {
         )
     }
 
-    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
         let args: SpotifyArgs = parse_args(args, SPOTIFY_CONTROL)?;
-        async { self.controller.command(args.into_command()?).await }
-            .await
-            .context("spotify control failed")
+        async {
+            let command = args.into_command()?;
+            match &command {
+                SpotifyCommand::Play { .. } => {
+                    note_play_request(self.display.as_ref(), ctx, PlayRequest::Play)
+                }
+                SpotifyCommand::Resume => {
+                    note_play_request(self.display.as_ref(), ctx, PlayRequest::Resume)
+                }
+                _ => {}
+            }
+            self.controller.command(command).await
+        }
+        .await
+        .context("spotify control failed")
     }
 }
 
@@ -403,12 +437,18 @@ impl VoiceTool for SpotifyControl {
 // ---------------------------------------------------------------------------
 
 /// The `radio_control` tool over the shared [`RadioPlayer`]. `spotify` (when linked) is
-/// paused as a station starts so the two sources never play at once.
+/// paused as a station starts so the two sources never play at once. `display` (when
+/// present) records which display asked for a station, so it shows full screen there.
 pub(super) fn radio_control(
     radio: Arc<RadioPlayer>,
     spotify: Option<Arc<dyn SpotifyController>>,
+    display: Option<Arc<MusicDisplayRouter>>,
 ) -> Arc<dyn VoiceTool> {
-    Arc::new(RadioControl { radio, spotify })
+    Arc::new(RadioControl {
+        radio,
+        spotify,
+        display,
+    })
 }
 
 /// Typed arguments for `radio_control`.
@@ -424,14 +464,16 @@ struct RadioArgs {
 struct RadioControl {
     radio: Arc<RadioPlayer>,
     spotify: Option<Arc<dyn SpotifyController>>,
+    display: Option<Arc<MusicDisplayRouter>>,
 }
 
 impl RadioControl {
-    async fn run(&self, args: RadioArgs) -> Result<String> {
+    async fn run(&self, args: RadioArgs, ctx: &ToolCtx<'_>) -> Result<String> {
         let station = args.station.as_deref().map(str::trim).unwrap_or_default();
         match args.action.trim().to_lowercase().as_str() {
             "play" | "start" | "tune" => {
                 anyhow::ensure!(!station.is_empty(), "which station should I play?");
+                note_play_request(self.display.as_ref(), ctx, PlayRequest::Play);
                 self.radio
                     .play_named(station, self.spotify.as_deref())
                     .await
@@ -508,9 +550,9 @@ impl VoiceTool for RadioControl {
         )
     }
 
-    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
         let args: RadioArgs = parse_args(args, RADIO_CONTROL)?;
-        self.run(args).await.context("radio control failed")
+        self.run(args, ctx).await.context("radio control failed")
     }
 }
 
@@ -745,9 +787,9 @@ mod tests {
 
     #[tokio::test]
     async fn spotify_errors_carry_the_tool_prefix() {
-        let tool = spotify_control(Arc::new(StaticSpotify::default()));
+        let tool = spotify_control(Arc::new(StaticSpotify::default()), None);
         let err = tool
-            .invoke(&json!({ "action": "teleport" }), &ToolCtx { actions: None })
+            .invoke(&json!({ "action": "teleport" }), &ToolCtx::new(None))
             .await
             .unwrap_err();
         assert_eq!(
@@ -764,7 +806,7 @@ mod tests {
         let provider = Arc::new(StaticDirections::default());
         let home = home("Austin, TX");
         let tool = directions_lookup(provider.clone(), home.clone(), true);
-        let ctx = ToolCtx { actions: None };
+        let ctx = ToolCtx::new(None);
 
         tool.invoke(&json!({ "destination": "the airport" }), &ctx)
             .await
@@ -800,10 +842,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_voice_play_marks_the_speaking_display_as_the_one_that_asked() {
+        use crate::music::{MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle};
+        let router = Arc::new(MusicDisplayRouter::new());
+        let pins = MusicDisplayPins::new();
+        let ctx = |id| ToolCtx {
+            actions: None,
+            device_id: Some(id),
+        };
+        let spotify = spotify_control(Arc::new(StaticSpotify::default()), Some(router.clone()));
+        spotify
+            .invoke(
+                &json!({ "action": "play", "query": "Radiohead" }),
+                &ctx("kitchen"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            router.style_for("kitchen", &pins),
+            MusicDisplayStyle::Fullscreen
+        );
+        assert_eq!(router.style_for("den", &pins), MusicDisplayStyle::Compact);
+        // Transport from another display doesn't take the music over.
+        router.set_active(true);
+        spotify
+            .invoke(&json!({ "action": "pause" }), &ctx("den"))
+            .await
+            .unwrap();
+        spotify
+            .invoke(&json!({ "action": "resume" }), &ctx("den"))
+            .await
+            .unwrap();
+        assert_eq!(router.initiator().as_deref(), Some("kitchen"));
+
+        // A station asked for from the den moves full screen there.
+        let radio = radio_control(static_radio(), None, Some(router.clone()));
+        radio
+            .invoke(&json!({ "action": "play", "station": "dave" }), &ctx("den"))
+            .await
+            .unwrap();
+        assert_eq!(
+            router.style_for("den", &pins),
+            MusicDisplayStyle::Fullscreen
+        );
+        assert_eq!(
+            router.style_for("kitchen", &pins),
+            MusicDisplayStyle::Compact
+        );
+    }
+
+    #[tokio::test]
     async fn radio_control_plays_lists_and_stops() {
         let radio = static_radio();
-        let tool = radio_control(radio.clone(), None);
-        let ctx = ToolCtx { actions: None };
+        let tool = radio_control(radio.clone(), None, None);
+        let ctx = ToolCtx::new(None);
         assert!(tool
             .definition()
             .description
@@ -835,7 +927,7 @@ mod tests {
     async fn calendar_accepts_null_args() {
         let tool = calendar_lookup(Arc::new(StaticCalendar(Vec::new())));
         let out = tool
-            .invoke(&Value::Null, &ToolCtx { actions: None })
+            .invoke(&Value::Null, &ToolCtx::new(None))
             .await
             .unwrap();
         assert!(!out.is_empty());

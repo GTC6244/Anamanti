@@ -165,6 +165,30 @@ pub fn display_context() -> Option<serde_json::Value> {
     display_slot().lock().unwrap().clone()
 }
 
+/// This display's stable `device_id` (the id it announces in its `anamanti-hello`
+/// frames), stamped on every turn's `audio-start` and every `anamanti-music-control` so the
+/// Core knows which display asked — e.g. to show music full screen on the display a play
+/// request came from (`plans/MusicDisplayStylePlan.md`). Recorded whenever a persistent
+/// push channel starts (they are all handed the id); empty until then.
+static DEVICE_ID: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn device_id_slot() -> &'static Mutex<String> {
+    DEVICE_ID.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// Record this display's `device_id` (blank ids are ignored, keeping the last good one).
+pub fn set_device_id(device_id: &str) {
+    let id = device_id.trim();
+    if !id.is_empty() {
+        *device_id_slot().lock().unwrap() = id.to_string();
+    }
+}
+
+/// This display's `device_id`, or `""` before any push channel has started.
+pub fn device_id() -> String {
+    device_id_slot().lock().unwrap().clone()
+}
+
 /// The font-scaling context — whether a resizable text surface is on screen and the
 /// current global font scale — stamped as the `screen.font` sibling of every turn's
 /// `audio-start` (orthogonal to the foreground widget, exactly like `screen.timers`).

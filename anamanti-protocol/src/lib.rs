@@ -1085,6 +1085,35 @@ impl WyomingEvent {
         )
     }
 
+    /// Stamp the sending display's stable `device_id` (the id it announces in its
+    /// `anamanti-hello` frames) as a top-level `data.device_id` — on a turn's
+    /// `audio-start` and on an `anamanti-music-control`, so the Core knows *which* display
+    /// asked (e.g. to show the music full screen there). A blank id, or a frame whose
+    /// data isn't an object, is left unchanged.
+    pub fn with_device_id(mut self, device_id: &str) -> Self {
+        let id = device_id.trim();
+        if !id.is_empty() {
+            if let Value::Object(map) = &mut self.data {
+                map.insert("device_id".into(), Value::String(id.to_string()));
+            }
+        }
+        self
+    }
+
+    /// The sending display's `device_id` from an `anamanti-music-control` frame (see
+    /// [`with_device_id`](Self::with_device_id)); `None` for another frame type, or from
+    /// an older display that doesn't send one.
+    pub fn music_control_device_id(&self) -> Option<&str> {
+        if self.event_type != types::MUSIC_CONTROL {
+            return None;
+        }
+        self.data
+            .get("device_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+    }
+
     /// Decode an `anamanti-music-control` frame into `(action, value)`; `None` for a
     /// frame of another type or with no `action`.
     pub fn music_control_command(&self) -> Option<(String, Option<i64>)> {

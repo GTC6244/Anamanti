@@ -447,9 +447,10 @@ class AssistantState {
   /// [musicDisplayStyle]; read [effectiveMusicScreen] for that.
   final MusicScreen musicScreen;
 
-  /// The household's music-widget preference (compact bar / full screen), owned by the
-  /// Core and mirrored here from the now-playing pushes, the on-screen expand/minimize
-  /// button, and the voice `music_screen` tool. Shared by Spotify and radio.
+  /// This display's music widget (compact bar / full screen), chosen per display by the
+  /// Core and mirrored here from this display's now-playing pushes, its on-screen
+  /// expand/minimize button, and the voice `music_screen` tool. Shared by Spotify and
+  /// radio. By default full screen where the play request came from, compact elsewhere.
   final MusicDisplayStyle musicDisplayStyle;
 
   /// Whether music is currently playing (there is a now-playing snapshot). The compact
@@ -1295,9 +1296,10 @@ class AssistantController extends ChangeNotifier {
   /// user has open. A malformed non-empty payload is ignored (keeps the last snapshot)
   /// rather than crashing. Called by the app shell's music-channel subscription.
   ///
-  /// The push also carries the Core's [MusicDisplayStyle] (`display_style`); a change
-  /// made elsewhere (config page, another display, voice) is adopted here — except a
-  /// stale value racing a change this display just made (see [_pendingStyle]).
+  /// The push also carries this display's [MusicDisplayStyle] (`display_style`, chosen
+  /// per display by the Core); a change made elsewhere (a new play request, a config-page
+  /// pin, voice) is adopted here — except a stale value racing a change this display just
+  /// made (see [_pendingStyle]).
   void applyMusicPush(String nowPlayingJson) {
     if (nowPlayingJson.trim().isEmpty) {
       if (_state.music != null) {
@@ -1357,10 +1359,11 @@ class AssistantController extends ChangeNotifier {
     return pushed;
   }
 
-  /// Switch the music widget preference on this display at once and (when [persist]) tell
-  /// the Core, which stores it and re-pushes so every display follows. `persist` is false
-  /// when the change came *from* the Core (the voice tool already stored it). Any
-  /// explicitly opened view is reset so the new preference is what shows.
+  /// Switch this display's music widget at once and (when [persist]) tell the Core, which
+  /// records it as this display's choice for the current music (other displays are not
+  /// affected). `persist` is false when the change came *from* the Core (the voice tool
+  /// already recorded it). Any explicitly opened view is reset so the new style is what
+  /// shows.
   void setMusicDisplayStyle(MusicDisplayStyle style, {bool persist = true}) {
     final changed = style != _state.musicDisplayStyle;
     _pendingStyle = style;
@@ -1376,7 +1379,7 @@ class AssistantController extends ChangeNotifier {
     }
   }
 
-  /// The compact bar's expand button: show music full screen from now on.
+  /// The compact bar's expand button: show the current music full screen on this display.
   void expandMusic() => setMusicDisplayStyle(MusicDisplayStyle.fullscreen);
 
   /// Open the full-screen now-playing view (the user tapped the compact control overlay,
@@ -1400,8 +1403,8 @@ class AssistantController extends ChangeNotifier {
   void backToNowPlaying() => openNowPlaying();
 
   /// Close any full music screen and return to the compact control overlay (music keeps
-  /// playing — this never stops playback). With the full-screen preference this is the
-  /// minimize control: it switches the preference to compact, since otherwise the full
+  /// playing — this never stops playback). With this display's style full screen this is
+  /// the minimize control: it switches this display to compact, since otherwise the full
   /// screen would simply come straight back.
   void closeMusicScreen() {
     if (_state.musicActive &&
@@ -1414,7 +1417,7 @@ class AssistantController extends ChangeNotifier {
 
   /// Apply a voice `music_screen` command (from the engine stream) by routing it through
   /// the same methods a touch uses. `screen` ∈ `now_playing` / `up_next` / `hidden`, or a
-  /// style switch `fullscreen` / `compact` (already persisted by the Core).
+  /// style switch `fullscreen` / `compact` (already recorded for this display by the Core).
   void _applyMusicScreen(String screen) {
     final style = MusicDisplayStyle.tryParse(screen);
     if (style != null) {

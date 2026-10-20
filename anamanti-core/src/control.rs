@@ -142,13 +142,23 @@ pub async fn music_control_response(
     let Some((action, value)) = request.music_control_command() else {
         return WyomingEvent::music_result(false, "music-control request missing `action`");
     };
-    // The on-screen widget toggle (`display_compact` / `display_fullscreen`): a display
-    // preference, not transport — persist it and re-push so every display follows.
+    // The on-screen widget toggle (`display_compact` / `display_fullscreen`): that
+    // display's choice for the current music, not transport — record it for the display
+    // that sent it (only that one changes) and re-push so its next push agrees.
     if let Some(style) = action
         .strip_prefix("display_")
         .and_then(crate::music::MusicDisplayStyle::parse)
     {
-        now_playing.set_display_style(settings, style);
+        let Some(device_id) = request.music_control_device_id() else {
+            // An older display that doesn't identify itself: nothing to attach the choice
+            // to. Its own screen has already switched locally.
+            return WyomingEvent::music_result(
+                false,
+                "this display didn't send its device id; update the display app",
+            );
+        };
+        now_playing.display().choose(device_id, style);
+        now_playing.repush(settings);
         return WyomingEvent::music_result(true, format!("Music player: {}.", style.as_str()));
     }
     // Radio while a station is on, else Spotify (shared with the config page).
@@ -1317,6 +1327,7 @@ mod tests {
                 places_provider: "google".to_string(),
                 radio: None,
                 home_assistant: None,
+                music_display: Default::default(),
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -1349,7 +1360,7 @@ mod tests {
                 system1: crate::settings::System1Runtime::default(),
                 personality: crate::settings::Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
         );
@@ -1654,40 +1665,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn music_control_display_toggle_sets_the_style_without_spotify() {
-        // The on-screen widget toggle is a display preference: it succeeds even with
-        // Spotify unlinked and lands in the settings store of record.
+    async fn music_control_display_toggle_is_that_displays_choice_without_spotify() {
+        // The on-screen widget toggle is a per-display choice: it succeeds even with
+        // Spotify unlinked and changes only the display that pressed it.
+        use crate::music::MusicDisplayStyle::{Compact, Fullscreen};
         let s = settings();
         let np = NowPlayingService::new();
+        let toggle = |action: &str, device: &str| {
+            WyomingEvent::music_control(action, None).with_device_id(device)
+        };
+        let resp = music_control_response(&toggle("display_fullscreen", "den"), &s, &np).await;
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(np.style_for("den"), Fullscreen);
+        assert_eq!(
+            np.style_for("kitchen"),
+            Compact,
+            "other displays unaffected"
+        );
+        let resp = music_control_response(&toggle("display_compact", "den"), &s, &np).await;
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(np.style_for("den"), Compact);
+        // Nothing household-wide is persisted.
+        assert!(s.music_display_pins().is_empty());
+        // An older display that sends no id is answered in-band, changing nothing.
         let resp = music_control_response(
             &WyomingEvent::music_control("display_fullscreen", None),
             &s,
             &np,
         )
         .await;
-        assert_eq!(resp.data["ok"], json!(true));
-        assert_eq!(
-            s.music_display_style(),
-            crate::music::MusicDisplayStyle::Fullscreen
-        );
-        let resp = music_control_response(
-            &WyomingEvent::music_control("display_compact", None),
-            &s,
-            &np,
-        )
-        .await;
-        assert_eq!(resp.data["ok"], json!(true));
-        assert_eq!(
-            s.music_display_style(),
-            crate::music::MusicDisplayStyle::Compact
-        );
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(!np.display().has_choice(""));
         // An unknown style falls through to transport and is rejected as unknown.
-        let resp = music_control_response(
-            &WyomingEvent::music_control("display_sideways", None),
-            &s,
-            &np,
-        )
-        .await;
+        let resp = music_control_response(&toggle("display_sideways", "den"), &s, &np).await;
         assert_eq!(resp.data["ok"], json!(false));
     }
 

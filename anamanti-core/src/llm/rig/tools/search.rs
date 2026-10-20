@@ -280,10 +280,7 @@ mod tests {
     async fn internet_search_invoke_runs_the_provider() {
         let tool = internet_search(Arc::new(StaticSearch("Sunny, 21C.")));
         let out = tool
-            .invoke(
-                &json!({ "query": "weather in paris" }),
-                &ToolCtx { actions: None },
-            )
+            .invoke(&json!({ "query": "weather in paris" }), &ToolCtx::new(None))
             .await
             .unwrap();
         assert_eq!(out, "Sunny, 21C.");
@@ -321,7 +318,7 @@ mod tests {
     async fn search_failures_reach_the_model_with_the_tool_prefix() {
         let tool = internet_search(Arc::new(DuckDuckGoSearch::with_base_url(refused_base())));
         let err = tool
-            .invoke(&json!({ "query": "x" }), &ToolCtx { actions: None })
+            .invoke(&json!({ "query": "x" }), &ToolCtx::new(None))
             .await
             .unwrap_err();
         let text = format!("{err:#}");

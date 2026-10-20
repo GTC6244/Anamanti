@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use super::{close_tool, definition, emit, parse_args, ToolCtx, VoiceTool};
 use crate::directions::LiveHomeLocation;
 use crate::llm::{ActionSink, DeviceAction, MusicNav, RecipeNav};
-use crate::music::MusicDisplayStyle;
+use crate::music::{MusicDisplayRouter, MusicDisplayStyle};
 use crate::recipe::RecipeProvider;
 
 /// Tool name: show a recipe on the display.
@@ -252,9 +252,10 @@ impl VoiceTool for RecipeControl {
 // ---------------------------------------------------------------------------
 
 /// The `music_screen` tool. Advertised wherever `spotify_control` is (screen-only;
-/// transport stays on `spotify_control`).
-pub(super) fn music_screen() -> Arc<dyn VoiceTool> {
-    Arc::new(MusicScreen)
+/// transport stays on `spotify_control`). `display` (when present) records a
+/// `fullscreen` / `compact` request as the speaking display's choice for this music.
+pub(super) fn music_screen(display: Option<Arc<MusicDisplayRouter>>) -> Arc<dyn VoiceTool> {
+    Arc::new(MusicScreen { display })
 }
 
 /// Typed arguments for `music_screen`.
@@ -266,7 +267,9 @@ struct MusicScreenArgs {
 
 /// Show / switch / close the on-screen music player ([`DeviceAction::MusicScreen`]).
 /// The device decides whether anything is playing.
-struct MusicScreen;
+struct MusicScreen {
+    display: Option<Arc<MusicDisplayRouter>>,
+}
 
 #[async_trait]
 impl VoiceTool for MusicScreen {
@@ -279,9 +282,9 @@ impl VoiceTool for MusicScreen {
             MUSIC_SCREEN,
             "Control what the music player shows on the display (Spotify and radio share \
              it): open the full now-playing screen, open the up-next queue, close the \
-             player back to the ambient screen, or switch which widget is shown whenever \
-             music plays — `fullscreen` (the big full-screen player, remembered) or \
-             `compact` (the small bar, remembered). Use this for requests like \"show me \
+             player back to the ambient screen, or switch which widget THIS display shows \
+             while the current music plays — `fullscreen` (the big full-screen player) or \
+             `compact` (the small bar). Use this for requests like \"show me \
              what's playing\", \"show the queue / what's up next\", \"hide the music\", \
              \"make the music full screen\" or \"use the small music player\". This only \
              changes the SCREEN — to play/pause/skip/change volume use spotify_control \
@@ -295,7 +298,7 @@ impl VoiceTool for MusicScreen {
                         "description": "The screen action: `show` opens the now-playing view, \
                                         `show_queue` opens the up-next list, `close` returns to \
                                         the ambient display, `fullscreen` / `compact` switch \
-                                        (and remember) the widget shown while music plays."
+                                        the widget this display shows while music plays."
                     }
                 },
                 "required": ["action"]
@@ -310,10 +313,11 @@ impl VoiceTool for MusicScreen {
              Call `music_screen` with action=show when the user says things like \"show me \
              what's playing\" or \"pull up the music\", action=show_queue for \"what's up \
              next\" or \"show the queue\", and action=close for \"hide the music\" or \"close \
-             the player\". To change which music widget is shown whenever music plays, \
-             call it with action=fullscreen (\"make the music full screen\", \"use the big \
-             player\") or action=compact (\"use the small music player\", \"shrink the \
-             music\"); that choice is remembered for Spotify and radio. The turn context will \
+             the player\". To change which music widget this display shows while the music \
+             plays, call it with action=fullscreen (\"make the music full screen\", \"use the \
+             big player\") or action=compact (\"use the small music player\", \"shrink the \
+             music\"); it applies to this display only (each display chooses separately) \
+             until the music stops or something new is played. The turn context will \
              tell you when the music screen is already open and what's on it. Relay its short \
              spoken confirmation.",
         )
@@ -336,7 +340,7 @@ impl VoiceTool for MusicScreen {
             ),
             "fullscreen" => (
                 DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Fullscreen),
-                "Okay, music will play full screen.",
+                "Okay, the music is full screen.",
             ),
             "compact" => (
                 DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Compact),
@@ -344,7 +348,14 @@ impl VoiceTool for MusicScreen {
             ),
             other => anyhow::bail!("unknown music_screen action `{other}`"),
         };
-        emit(ctx.actions, action, "the music screen could update")?;
+        emit(ctx.actions, action.clone(), "the music screen could update")?;
+        // A style switch is this display's choice for the current music: record it so its
+        // now-playing pushes agree with the frame it is about to receive.
+        if let (DeviceAction::MusicDisplayStyle(style), Some(display), Some(id)) =
+            (&action, &self.display, ctx.device_id)
+        {
+            display.choose(id, *style);
+        }
         Ok(confirmation.to_string())
     }
 }
@@ -655,7 +666,7 @@ mod tests {
     async fn weather_lookup_defaults_to_hourly_layout_and_passes_daily_through() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         weather_tool()
-            .invoke(&json!({}), &ToolCtx { actions: Some(&tx) })
+            .invoke(&json!({}), &ToolCtx::new(Some(&tx)))
             .await
             .unwrap();
         match rx.try_recv().unwrap() {
@@ -675,10 +686,7 @@ mod tests {
     async fn weather_lookup_week_layout_selects_the_7_day_widget() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         weather_tool()
-            .invoke(
-                &json!({ "layout": "Week" }),
-                &ToolCtx { actions: Some(&tx) },
-            )
+            .invoke(&json!({ "layout": "Week" }), &ToolCtx::new(Some(&tx)))
             .await
             .unwrap();
         match rx.try_recv().unwrap() {
@@ -691,7 +699,7 @@ mod tests {
     #[tokio::test]
     async fn display_tools_check_for_a_display_before_fetching() {
         let err = weather_tool()
-            .invoke(&json!({}), &ToolCtx { actions: None })
+            .invoke(&json!({}), &ToolCtx::new(None))
             .await
             .unwrap_err();
         assert_eq!(
@@ -703,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn recipe_control_maps_actions_and_rejects_unknown_ones() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = ToolCtx { actions: Some(&tx) };
+        let ctx = ToolCtx::new(Some(&tx));
         let out = RecipeControl
             .invoke(&json!({ "action": "show_steps" }), &ctx)
             .await
@@ -723,7 +731,7 @@ mod tests {
     #[tokio::test]
     async fn recipe_control_go_to_step_needs_a_positive_step() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = ToolCtx { actions: Some(&tx) };
+        let ctx = ToolCtx::new(Some(&tx));
         let out = RecipeControl
             .invoke(&json!({ "action": "go_to_step", "step": 4 }), &ctx)
             .await
@@ -746,14 +754,14 @@ mod tests {
     #[tokio::test]
     async fn music_screen_maps_actions_and_rejects_unknown_ones() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = ToolCtx { actions: Some(&tx) };
+        let ctx = ToolCtx::new(Some(&tx));
+        let tool = MusicScreen { display: None };
         for (action, nav) in [
             ("show", MusicNav::NowPlaying),
             ("show_queue", MusicNav::Queue),
             ("close", MusicNav::Close),
         ] {
-            MusicScreen
-                .invoke(&json!({ "action": action }), &ctx)
+            tool.invoke(&json!({ "action": action }), &ctx)
                 .await
                 .unwrap();
             assert_eq!(rx.try_recv().unwrap(), DeviceAction::MusicScreen(nav));
@@ -762,8 +770,7 @@ mod tests {
             ("fullscreen", MusicDisplayStyle::Fullscreen),
             ("compact", MusicDisplayStyle::Compact),
         ] {
-            MusicScreen
-                .invoke(&json!({ "action": action }), &ctx)
+            tool.invoke(&json!({ "action": action }), &ctx)
                 .await
                 .unwrap();
             assert_eq!(
@@ -771,15 +778,49 @@ mod tests {
                 DeviceAction::MusicDisplayStyle(style)
             );
         }
-        let err = MusicScreen
+        let err = tool
             .invoke(&json!({ "action": "teleport" }), &ctx)
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "unknown music_screen action `teleport`");
         // With no display attached a valid action reports so (and emits nothing).
-        assert!(MusicScreen
-            .invoke(&json!({ "action": "show" }), &ToolCtx { actions: None })
+        assert!(tool
+            .invoke(&json!({ "action": "show" }), &ToolCtx::new(None))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn music_screen_style_is_the_speaking_displays_choice_only() {
+        let router = Arc::new(MusicDisplayRouter::new());
+        let tool = MusicScreen {
+            display: Some(router.clone()),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolCtx {
+            actions: Some(&tx),
+            device_id: Some("den"),
+        };
+        tool.invoke(&json!({ "action": "fullscreen" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Fullscreen)
+        );
+        let pins = crate::music::MusicDisplayPins::new();
+        assert_eq!(
+            router.style_for("den", &pins),
+            MusicDisplayStyle::Fullscreen
+        );
+        assert_eq!(
+            router.style_for("kitchen", &pins),
+            MusicDisplayStyle::Compact
+        );
+        // Screen navigation is not a style choice.
+        tool.invoke(&json!({ "action": "show" }), &ctx)
+            .await
+            .unwrap();
+        assert!(!router.has_choice("kitchen"));
     }
 }

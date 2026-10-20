@@ -152,7 +152,7 @@ mod tests {
     }
 
     async fn call(tool: &Arc<dyn VoiceTool>, args: Value) -> Result<String> {
-        tool.invoke(&args, &ToolCtx { actions: None }).await
+        tool.invoke(&args, &ToolCtx::new(None)).await
     }
 
     #[tokio::test]

@@ -1920,6 +1920,7 @@ impl Config {
             // pipeline's fast path. It starts unconnected; `LlmFactory::for_settings`
             // points it at the live URL + token (config seed / env / config page).
             home_assistant: Some(crate::home_assistant::from_config(&self.home_assistant)),
+            music_display: Default::default(),
             // Prebuilt from the config: the calendar source (web .ics) and the
             // directions provider (Mapbox). The Mapbox token is seeded from the env
             // secret here but is runtime-settable (Tools tab) — `shared_settings`
@@ -2217,7 +2218,7 @@ impl Config {
             // with no config-file seed.
             personality: Personality::default(),
             pronunciations: Vec::new(),
-            music_display_style: Default::default(),
+            music_display_pins: Default::default(),
             radio: Default::default(),
         };
         let seed = PersistedSettings::from_runtime(&s, None);

@@ -4,8 +4,8 @@
 // artist, and album, a progress bar with mm:ss position/duration labels, a
 // transport row (previous / play-pause / next), a volume slider, and an optional
 // "up next" button. Landscape-first with large, arm's-length type. Left by voice
-// or the minimize control (back to the compact bar; with the full-screen music
-// preference set, minimizing switches it to compact).
+// or the minimize control (back to the compact bar; when this display's style is full
+// screen, minimizing switches this display — only — to compact).
 //
 // For live radio (`MusicData.isRadio`) the header is the station name with a LIVE
 // badge, the logo is shown uncropped, the song from the stream is the headline, the

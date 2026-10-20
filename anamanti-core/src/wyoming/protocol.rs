@@ -259,6 +259,11 @@ pub struct DeviceContext {
     /// (`plans/HomeAssistantPlan.md` §A2). `None` when the device doesn't report one —
     /// the Core's `home_assistant.default_room` then applies.
     pub room: Option<String>,
+    /// The stable id of the display this turn came from (`audio-start` `data.device_id`,
+    /// the same id it announces in its `anamanti-hello` frames), so a play request can show
+    /// full screen on the display that asked (`plans/MusicDisplayStylePlan.md`). `None`
+    /// from an older display that doesn't send one.
+    pub device_id: Option<String>,
 }
 
 impl DeviceContext {
@@ -355,13 +360,19 @@ pub fn device_context(data: &Value) -> DeviceContext {
         widget: display_context(data),
         timers: timer_context(data),
         font: font_context(data),
-        room: data
-            .get("room")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(str::to_string),
+        room: trimmed_str(data, "room"),
+        device_id: trimmed_str(data, "device_id"),
     }
+}
+
+/// A top-level string field of an `audio-start` data block, trimmed; `None` when absent
+/// or blank.
+fn trimmed_str(data: &Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse the `weather` sub-object of a `screen` block into a [`WeatherScreen`].

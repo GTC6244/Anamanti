@@ -466,6 +466,8 @@ pub fn music_control(
             preferred(&orchestrator_key),
             &action,
             value,
+            // Which display pressed it, so the widget toggle changes only this display.
+            &crate::engine::device_id(),
         )
         .await
     })

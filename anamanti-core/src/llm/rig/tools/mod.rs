@@ -79,15 +79,31 @@ pub struct ToolDeps {
     pub radio: Option<Arc<crate::music::RadioPlayer>>,
     /// Home Assistant hub for `home_control` (`plans/HomeAssistantPlan.md`).
     pub home_assistant: Option<Arc<crate::home_assistant::HomeAssistant>>,
+    /// The per-display music-style session (`plans/MusicDisplayStylePlan.md`): the
+    /// music tools record which display asked to play (shown full screen) and the
+    /// `music_screen` tool's full-screen / compact choice for the speaking display.
+    pub music_display: Option<Arc<crate::music::MusicDisplayRouter>>,
 }
 
 /// Per-call context handed to [`VoiceTool::invoke`].
 pub(crate) struct ToolCtx<'a> {
     /// The per-turn device-action sink, or `None` when no device is attached.
     pub(crate) actions: Option<&'a ActionSink>,
+    /// The stable `device_id` of the display this turn came from (`audio-start`
+    /// `data.device_id`), or `None` when it doesn't identify itself.
+    pub(crate) device_id: Option<&'a str>,
 }
 
 impl<'a> ToolCtx<'a> {
+    /// A context with the action sink only (no display identity), for tests.
+    #[cfg(test)]
+    pub(crate) fn new(actions: Option<&'a ActionSink>) -> Self {
+        Self {
+            actions,
+            device_id: None,
+        }
+    }
+
     /// The action sink, or an error carrying `missing` (spoken back by the model) when
     /// no device is attached. Tools that fetch before emitting check this first so
     /// they never fetch for a display that isn't there.
@@ -261,10 +277,17 @@ impl Tools {
             ));
         }
         if let Some(controller) = deps.spotify.clone() {
-            tools.push(services::spotify_control(controller));
+            tools.push(services::spotify_control(
+                controller,
+                deps.music_display.clone(),
+            ));
         }
         if let Some(radio) = deps.radio {
-            tools.push(services::radio_control(radio, deps.spotify));
+            tools.push(services::radio_control(
+                radio,
+                deps.spotify,
+                deps.music_display.clone(),
+            ));
         }
         // The on-screen music player is voice-driven wherever Spotify or radio is.
         if tools.iter().any(|t| {
@@ -273,7 +296,7 @@ impl Tools {
                 services::SPOTIFY_CONTROL | services::RADIO_CONTROL
             )
         }) {
-            tools.push(display::music_screen());
+            tools.push(display::music_screen(deps.music_display.clone()));
         }
         if let Some(controller) = deps.grocery {
             tools.push(services::shopping_list_add(controller));
@@ -365,16 +388,28 @@ impl Tools {
     /// Execute a model-requested tool call by name. `actions` is the per-turn
     /// device-action sink (`None` makes action tools report that no device is
     /// attached).
+    #[cfg(test)]
     pub(crate) async fn dispatch(
         &self,
         name: &str,
         args: &Value,
         actions: Option<&ActionSink>,
     ) -> Result<String> {
+        self.dispatch_with(name, args, &ToolCtx::new(actions)).await
+    }
+
+    /// Execute a model-requested tool call by name with the turn's full [`ToolCtx`]
+    /// (action sink + the requesting display's id).
+    pub(crate) async fn dispatch_with(
+        &self,
+        name: &str,
+        args: &Value,
+        ctx: &ToolCtx<'_>,
+    ) -> Result<String> {
         let Some(&i) = self.by_name.get(name) else {
             anyhow::bail!("model called unknown tool `{name}`");
         };
-        self.tools[i].invoke(args, &ToolCtx { actions }).await
+        self.tools[i].invoke(args, ctx).await
     }
 }
 

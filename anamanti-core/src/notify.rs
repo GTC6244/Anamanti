@@ -107,9 +107,16 @@ impl<M> ChannelRegistry<M> {
     /// Send `event` to every channel, pruning the dead ones. Returns how many channels
     /// it was delivered to.
     pub fn broadcast(&self, event: &WyomingEvent) -> usize {
+        self.broadcast_with(|_| event.clone())
+    }
+
+    /// Send each channel the event `f` builds from that channel's metadata (a
+    /// per-device push, e.g. each display's own music widget style), pruning the dead
+    /// ones. Returns how many channels it was delivered to.
+    pub fn broadcast_with(&self, f: impl Fn(&M) -> WyomingEvent) -> usize {
         let mut conns = self.conns.lock().unwrap();
         let mut delivered = 0usize;
-        conns.retain(|_, (tx, _)| match tx.send(event.clone()) {
+        conns.retain(|_, (tx, meta)| match tx.send(f(meta)) {
             Ok(()) => {
                 delivered += 1;
                 true

@@ -362,28 +362,53 @@ async fn music_status_reports_disabled_without_a_hub() {
 }
 
 #[test]
-fn music_display_style_reads_saves_and_rejects_unknown() {
+fn music_display_pins_one_display_lists_it_and_rejects_unknown() {
+    use crate::music::MusicDisplayStyle::Fullscreen;
     let s = settings();
     let (_st, _c, body) = route("GET", "/music/display.json", b"", &s);
     let v: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["style"], "compact");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["displays"], serde_json::json!([]));
 
-    let out = post(&s, "/music/display", br#"{"style":"fullscreen"}"#);
+    let out = post(
+        &s,
+        "/music/display",
+        br#"{"device_id":"kitchen","style":"fullscreen"}"#,
+    );
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], true);
+    assert_eq!(v["pin"], "fullscreen");
     assert_eq!(v["style"], "fullscreen");
+    assert_eq!(s.music_display_pins().get("kitchen"), Some(&Fullscreen));
+
+    // An offline pinned display is still listed so its pin can be cleared.
+    let (_st, _c, body) = route("GET", "/music/display.json", b"", &s);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["displays"][0]["device_id"], "kitchen");
+    assert_eq!(v["displays"][0]["connected"], false);
+    assert_eq!(v["displays"][0]["pin"], "fullscreen");
+
+    for bad in [
+        &br#"{"device_id":"kitchen","style":"sideways"}"#[..],
+        &br#"{"style":"compact"}"#[..],
+    ] {
+        let out = post(&s, "/music/display", bad);
+        assert!(out.contains("\"ok\":false"), "{out}");
+    }
     assert_eq!(
-        s.music_display_style(),
-        crate::music::MusicDisplayStyle::Fullscreen
+        s.music_display_pins().get("kitchen"),
+        Some(&Fullscreen),
+        "a bad request leaves the pin alone"
     );
 
-    let out = post(&s, "/music/display", br#"{"style":"sideways"}"#);
-    assert!(out.contains("\"ok\":false"), "{out}");
-    assert_eq!(
-        s.music_display_style(),
-        crate::music::MusicDisplayStyle::Fullscreen,
-        "a bad value leaves the preference alone"
+    let out = post(
+        &s,
+        "/music/display",
+        br#"{"device_id":"kitchen","style":"auto"}"#,
     );
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["pin"], "auto");
+    assert!(s.music_display_pins().is_empty());
 }
 
 #[test]

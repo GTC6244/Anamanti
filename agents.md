@@ -61,9 +61,11 @@ Core's Music & Devices page with Radio Browser logo lookup, played by the existi
 snapserver `Web` stream on the same speakers as Spotify, the `radio_control` tool, and a
 radio variant of the display's now-playing screen over the existing `anamanti-music` push), and
 [`MusicDisplayStylePlan.md`](./plans/MusicDisplayStylePlan.md) (the music widget while
-Spotify/radio plays — compact bar or full screen: one Core-owned, persisted preference stamped
-on every now-playing push, settable from Music & Devices, the display's expand/minimize
-button, or the `music_screen` tool's `fullscreen`/`compact` actions), and
+Spotify/radio plays — compact bar or full screen, **per display**: full screen on the display
+the play request came from, compact elsewhere; each display can switch itself for the current
+music via its expand/minimize button or the `music_screen` tool, and Music & Devices can pin a
+display. Core-owned (`MusicDisplayRouter` + persisted pins), stamped per display on each
+now-playing push; the display sends its `device_id` on `audio-start` + music-control), and
 [`SpeakerScopedMemoryPlan.md`](./plans/SpeakerScopedMemoryPlan.md) (memory scopes
 `person` / `household` / `unknown`: a fact said by an unrecognized voice is kept but never
 recalled for anyone; per-turn speaker resolution `identified|tentative|new|unknown`;
