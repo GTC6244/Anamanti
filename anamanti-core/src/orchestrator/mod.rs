@@ -798,6 +798,9 @@ impl Pipeline {
         // push `DeviceAction`s here and the drive loop relays them to the device on the
         // same socket. Unbounded so a tool's `invoke` never blocks.
         let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceAction>();
+        // Which display this turn came from, for tools that act per display (a play
+        // request shows full screen on the display that asked).
+        let device_id = ctx.device_ctx.device_id.clone();
 
         // Timing (surfaced in `/chatlog`): LLM + TTS interleave in the streaming path, so
         // we capture two anchors — `llm_ms` = time to the first reply token, `tts_ms` =
@@ -839,6 +842,7 @@ impl Pipeline {
                     None => {
                         let turn = LlmTurn::new(system_prompt, transcript)
                             .with_actions(action_tx)
+                            .with_device_id(device_id.clone())
                             .with_history(history);
                         tokio::time::timeout_at(first_deadline, runtime.llm.respond(turn))
                             .await

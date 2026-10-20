@@ -106,6 +106,10 @@ pub struct WyomingConnection<R, W> {
     /// is emitted even on an idle screen. Lets the Core resolve "increase/decrease font"
     /// only when there is something to resize. `None` when never set.
     font_context: Option<serde_json::Value>,
+    /// This display's stable `device_id`, stamped as the top-level `device_id` of this
+    /// turn's `audio-start` so the Core knows which display is speaking (e.g. to show
+    /// requested music full screen here). Blank = omitted.
+    device_id: String,
 }
 
 impl WyomingConnection<BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf> {
@@ -147,6 +151,7 @@ where
             display_context: None,
             timer_context: None,
             font_context: None,
+            device_id: String::new(),
         }
     }
 
@@ -196,6 +201,12 @@ where
         self.font_context = font;
     }
 
+    /// Set this display's `device_id`, stamped on this turn's `audio-start`. Blank leaves
+    /// it off. Call before [`Self::send_audio_start`].
+    pub fn set_device_id(&mut self, device_id: impl Into<String>) {
+        self.device_id = device_id.into();
+    }
+
     /// Mark this turn as a **follow-up** (the device auto-opened the mic after a reply,
     /// no wake word) so its `audio-start` carries `followup_depth` + the `wait_secs`
     /// listen window to echo back. `depth == 0` leaves it an ordinary turn. Call before
@@ -214,7 +225,8 @@ where
             self.timestamp_ms,
             self.followup_depth,
             self.followup_wait_secs,
-        );
+        )
+        .with_device_id(&self.device_id);
         // Stamp the turn's `screen` block: the foreground widget context (e.g. recipe
         // tab/scroll state) so the orchestrator's LLM can drive the display, PLUS the
         // orthogonal `timers` state so the Core/System-1 can see a background timer. The
@@ -696,6 +708,17 @@ mod tests {
         assert_eq!(start.data["screen"]["font"]["scalable"], json!(true));
         assert_eq!(start.data["screen"]["font"]["scale"], json!(1.1));
         assert!(start.data["screen"].get("kind").is_none());
+    }
+
+    #[tokio::test]
+    async fn audio_start_stamps_the_device_id_when_known() {
+        let (mut conn, server_io) = duplex_conn();
+        conn.set_device_id("anamanti-140ac5942aca");
+        let start = audio_start_frame(conn, server_io).await;
+        assert_eq!(start.data["device_id"], json!("anamanti-140ac5942aca"));
+        let (conn, server_io) = duplex_conn();
+        let start = audio_start_frame(conn, server_io).await;
+        assert!(start.data.get("device_id").is_none());
     }
 
     #[tokio::test]

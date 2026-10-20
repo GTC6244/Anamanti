@@ -88,12 +88,12 @@ pub enum DeviceAction {
     /// screen state (and whether anything is playing). Transport (play/pause/skip/volume)
     /// is the separate `spotify_control` tool, not this.
     MusicScreen(MusicNav),
-    /// Switch which music widget the display shows while playing — the compact bar or
-    /// the full-screen now-playing view — and remember it. **Both** Core-side and a
-    /// device frame: the orchestrator persists it to
-    /// [`SharedSettings`](crate::settings::SharedSettings) (so every display's next
-    /// now-playing push carries it) and relays an `anamanti-music` `screen` frame
-    /// (`"fullscreen"` / `"compact"`) so the speaking display switches at once.
+    /// Switch which music widget the speaking display shows while the current music
+    /// plays — the compact bar or the full-screen now-playing view. Relayed as an
+    /// `anamanti-music` `screen` frame (`"fullscreen"` / `"compact"`) so that display
+    /// switches at once; the `music_screen` tool has already recorded it as that
+    /// display's choice in the [`MusicDisplayRouter`](crate::music::MusicDisplayRouter)
+    /// so its later now-playing pushes agree. Other displays are unaffected.
     MusicDisplayStyle(crate::music::MusicDisplayStyle),
 }
 
@@ -170,6 +170,10 @@ pub struct LlmTurn {
     /// device. `None` disables device actions for this turn. Only backends whose
     /// [`Capabilities::tools`] is set read it (the rig engine).
     pub actions: Option<ActionSink>,
+    /// The stable `device_id` of the display this turn came from, handed to the tools
+    /// (e.g. so a play request shows full screen on the display that asked). `None`
+    /// when the display doesn't identify itself.
+    pub device_id: Option<String>,
 }
 
 impl LlmTurn {
@@ -179,7 +183,14 @@ impl LlmTurn {
             user_message: user_message.into(),
             history: Vec::new(),
             actions: None,
+            device_id: None,
         }
+    }
+
+    /// Record which display this turn came from (see [`Self::device_id`]).
+    pub fn with_device_id(mut self, device_id: Option<String>) -> Self {
+        self.device_id = device_id;
+        self
     }
 
     /// Attach the per-turn device-action sink so action tools (timers) can relay to

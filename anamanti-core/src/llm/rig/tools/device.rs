@@ -404,7 +404,7 @@ mod tests {
         args: Value,
         tx: Option<&crate::llm::ActionSink>,
     ) -> Result<String> {
-        tool.invoke(&args, &ToolCtx { actions: tx }).await
+        tool.invoke(&args, &ToolCtx::new(tx)).await
     }
 
     #[tokio::test]

@@ -31,7 +31,8 @@ use crate::llm::{
     LlmBackend,
 };
 use crate::music::{
-    MusicDisplayStyle, RadioCatalog, RadioPlayer, RoutedSpotify, SpotifyController, SpotifyWebApi,
+    MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, RadioCatalog, RadioPlayer,
+    RoutedSpotify, SpotifyController, SpotifyWebApi,
 };
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
@@ -1063,10 +1064,15 @@ pub struct PersistedSettings {
     /// Internet-radio station catalog. Defaulted (empty) for older files.
     #[serde(default)]
     pub radio: RadioCatalog,
-    /// Which music widget the display shows while playing (compact bar / full screen).
-    /// Defaulted (compact) for older files; an unknown value reads as compact.
-    #[serde(default)]
-    pub music_display_style: MusicDisplayStyle,
+    /// Per-display pinned music widget (`device_id` → compact bar / full screen); a display
+    /// with no entry is automatic. Defaulted (empty) for older files, and read leniently
+    /// (garbled entries are dropped). Older files' household-wide `music_display_style`
+    /// key is ignored — the automatic per-display rule replaced it.
+    #[serde(
+        default,
+        deserialize_with = "crate::music::display_style::deserialize_pins"
+    )]
+    pub music_display_pins: MusicDisplayPins,
 }
 
 fn default_system1_base_url() -> String {
@@ -1302,6 +1308,11 @@ pub struct LlmFactory {
     /// and the pipeline's fast path, or `None` when HA isn't configured. Built once at
     /// boot (like `radio`) so its cached device catalog survives LLM rebuilds.
     pub home_assistant: Option<Arc<crate::home_assistant::HomeAssistant>>,
+    /// The per-display music-style session state (`plans/MusicDisplayStylePlan.md`),
+    /// shared by every rebuilt backend's `spotify_control` / `radio_control` /
+    /// `music_screen` tools (which record the requesting display), the display's
+    /// on-screen toggle, and the now-playing push. Created once per Core.
+    pub music_display: Arc<MusicDisplayRouter>,
 }
 
 impl LlmFactory {
@@ -1395,6 +1406,7 @@ impl LlmFactory {
             radio: self.radio.clone().filter(|r| r.has_stations()),
             // Advertised only once a URL + token are set.
             home_assistant: self.home_assistant.clone().filter(|h| h.is_configured()),
+            music_display: Some(self.music_display.clone()),
         }
     }
 
@@ -1652,10 +1664,11 @@ pub struct RuntimeSettings {
     /// change refreshes the [`RadioPlayer`] catalog and rebuilds the LLM so the
     /// `radio_control` tool's station list stays current.
     pub radio: RadioCatalog,
-    /// Which music widget the display shows while Spotify or the radio plays — the
-    /// compact bar or the full-screen now-playing view. GUI/voice/display-editable,
-    /// stamped onto every now-playing push; orthogonal to the LLM rebuild path.
-    pub music_display_style: MusicDisplayStyle,
+    /// Per-display pinned music widget (`device_id` → compact bar / full screen), set on
+    /// the config page; a display with no pin is automatic (full screen where the play
+    /// request came from, compact elsewhere). Read by the now-playing push for each
+    /// display; orthogonal to the LLM rebuild path. See [`MusicDisplayRouter`].
+    pub music_display_pins: MusicDisplayPins,
 }
 
 /// Default System-1 HTTP base URL (local `laya-serve`).
@@ -2178,7 +2191,7 @@ impl RuntimeSettings {
         self.personality = p.personality;
         self.pronunciations = p.pronunciations;
         self.radio = p.radio;
-        self.music_display_style = p.music_display_style;
+        self.music_display_pins = p.music_display_pins;
     }
 }
 
@@ -2262,7 +2275,7 @@ impl PersistedSettings {
             personality: s.personality.clone(),
             pronunciations: s.pronunciations.clone(),
             radio: s.radio.clone(),
-            music_display_style: s.music_display_style,
+            music_display_pins: s.music_display_pins.clone(),
         }
     }
 }
@@ -2365,6 +2378,7 @@ impl SharedSettings {
             places_provider: "google".to_string(),
             radio: None,
             home_assistant: None,
+            music_display: Default::default(),
         };
         Self::new(
             factory,
@@ -2399,7 +2413,7 @@ impl SharedSettings {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
         )
@@ -2679,17 +2693,35 @@ impl SharedSettings {
         cleaned
     }
 
-    /// The live music-widget preference (compact bar / full-screen now-playing).
-    pub fn music_display_style(&self) -> MusicDisplayStyle {
-        self.inner.read().unwrap().music_display_style
+    /// The live per-display pinned music widgets (`device_id` → style; absent = automatic).
+    pub fn music_display_pins(&self) -> MusicDisplayPins {
+        self.inner.read().unwrap().music_display_pins.clone()
     }
 
-    /// Set the music-widget preference (config page, the display's on-screen toggle, or
-    /// the voice `music_screen` tool) and persist it (best-effort, 0600). Never rebuilds
-    /// the LLM. Callers that also want every display updated at once go through
-    /// [`NowPlayingService::set_display_style`](crate::music::NowPlayingService::set_display_style).
-    pub fn set_music_display_style(&self, style: MusicDisplayStyle) {
-        self.mutate(None, |c| c.music_display_style = style);
+    /// Pin `device_id`'s music widget (`Some`), or return it to automatic (`None`), and
+    /// persist it (best-effort, 0600). Never rebuilds the LLM. Also forgets that display's
+    /// choice for the current session so the new pin shows at once; the now-playing push
+    /// re-sends on the router's change signal. A blank `device_id` is ignored.
+    pub fn set_music_display_pin(&self, device_id: &str, style: Option<MusicDisplayStyle>) {
+        let id = device_id.trim().to_string();
+        if id.is_empty() {
+            return;
+        }
+        self.mutate(None, |c| match style {
+            Some(s) => {
+                c.music_display_pins.insert(id.clone(), s);
+            }
+            None => {
+                c.music_display_pins.remove(&id);
+            }
+        });
+        self.factory.music_display.forget(&id);
+    }
+
+    /// The shared per-display music-style session state (who started the music, and what
+    /// each display chose since). One per Core; see [`MusicDisplayRouter`].
+    pub fn music_display_router(&self) -> Arc<MusicDisplayRouter> {
+        self.factory.music_display.clone()
     }
 
     /// Set the active personality by spoken/typed name (the `set_personality` voice tool).
@@ -3130,6 +3162,7 @@ mod tests {
             places_provider: "google".to_string(),
             radio: None,
             home_assistant: None,
+            music_display: Default::default(),
         }
     }
 
@@ -3182,7 +3215,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
         )
@@ -3444,7 +3477,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -3724,7 +3757,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4054,7 +4087,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4148,7 +4181,7 @@ mod tests {
                 stt: SttRuntime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4181,18 +4214,31 @@ mod tests {
         assert_eq!(p.pronunciations.len(), 1);
         assert_eq!(p.pronunciations[0].canonical, "Zehrs");
         assert_eq!(p.pronunciations[0].variants, vec!["zairs".to_string()]);
-        assert_eq!(p.music_display_style, MusicDisplayStyle::Compact);
+        assert!(p.music_display_pins.is_empty());
 
-        // The music-widget preference persists the same way (and leaves the rest alone).
-        s.set_music_display_style(MusicDisplayStyle::Fullscreen);
-        assert_eq!(s.music_display_style(), MusicDisplayStyle::Fullscreen);
+        // A display's pinned music widget persists the same way (and leaves the rest
+        // alone); clearing it returns that display to automatic.
+        s.set_music_display_pin("kitchen", Some(MusicDisplayStyle::Fullscreen));
+        s.set_music_display_pin("den", Some(MusicDisplayStyle::Compact));
+        s.set_music_display_pin("  ", Some(MusicDisplayStyle::Fullscreen)); // ignored
+        let want = MusicDisplayPins::from([
+            ("den".to_string(), MusicDisplayStyle::Compact),
+            ("kitchen".to_string(), MusicDisplayStyle::Fullscreen),
+        ]);
+        assert_eq!(s.music_display_pins(), want);
         let p = load_persisted(&path).expect("settings file should exist");
-        assert_eq!(p.music_display_style, MusicDisplayStyle::Fullscreen);
+        assert_eq!(p.music_display_pins, want);
         assert_eq!(p.pronunciations.len(), 1);
         let mut reloaded = s.snapshot();
-        reloaded.music_display_style = MusicDisplayStyle::Compact;
+        reloaded.music_display_pins.clear();
         reloaded.overlay_persisted(p);
-        assert_eq!(reloaded.music_display_style, MusicDisplayStyle::Fullscreen);
+        assert_eq!(reloaded.music_display_pins, want);
+        s.set_music_display_pin("den", None);
+        let p = load_persisted(&path).expect("settings file should exist");
+        assert_eq!(
+            p.music_display_pins.keys().collect::<Vec<_>>(),
+            vec!["kitchen"]
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4250,7 +4296,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4340,7 +4386,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),
@@ -4421,7 +4467,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
             Some(path.clone()),

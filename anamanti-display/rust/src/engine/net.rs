@@ -335,6 +335,9 @@ async fn run_turn_task(
     // resolve "increase/decrease font" only when there's something to resize. `None`
     // (no `font` block) until the UI first reports it.
     conn.set_font_context(crate::engine::font_context());
+    // Stamp this display's id so the Core knows which display is speaking (a play request
+    // shows full screen here; other displays keep the small bar).
+    conn.set_device_id(crate::engine::device_id());
 
     // Idle watchdog for this turn: a follow-up turn keeps the mic open for the listen
     // window; give the device a small margin past it so the orchestrator's no-speech

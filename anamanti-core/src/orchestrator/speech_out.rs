@@ -189,12 +189,6 @@ where
         }
         return Ok(());
     }
-    if let DeviceAction::MusicDisplayStyle(style) = action {
-        // Persist first so the next periodic push to every display agrees with the
-        // frame this display is about to receive.
-        settings.set_music_display_style(*style);
-        log::info!("music display style set to {}", style.as_str());
-    }
     if let Some(event) = device_action_event(action) {
         protocol::write_event(writer, &event).await?;
     }
@@ -596,7 +590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn music_display_style_persists_and_relays_a_screen_frame() {
+    async fn music_display_style_relays_a_screen_frame_and_persists_nothing() {
         use crate::music::MusicDisplayStyle;
         let settings = crate::settings::SharedSettings::fixed(
             std::sync::Arc::new(crate::llm::mock::MockLlm::default()),
@@ -612,10 +606,9 @@ mod tests {
         apply_device_action(&action, &mut wire, &settings)
             .await
             .unwrap();
-        assert_eq!(
-            settings.music_display_style(),
-            MusicDisplayStyle::Fullscreen
-        );
+        // The choice is per display (recorded by the `music_screen` tool), never a
+        // household-wide setting.
+        assert!(settings.music_display_pins().is_empty());
         assert_eq!(wire, WyomingEvent::music_screen("fullscreen").to_bytes());
     }
 }

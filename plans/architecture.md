@@ -793,15 +793,20 @@ mDNS + `instance_id` pin the voice path uses):
   `DeviceAction::MusicScreen` relayed as an `anamanti-music` `screen` frame on the per-turn
   socket (show now-playing / up-next / close). Playback transport stays on `spotify_control`.
 - **Music display style** ([`MusicDisplayStylePlan.md`](./MusicDisplayStylePlan.md)): which
-  widget shows while music plays (compact bar / full screen) is a Core-owned, persisted
-  preference (`SharedSettings::music_display_style`) stamped as `display_style` on every
-  `now_playing` push, so all displays follow it for Spotify and radio alike. It is set from
-  the config page or the display's expand/minimize button (`anamanti-music-control`
-  `display_fullscreen`/`display_compact` → `NowPlayingService::set_display_style`, which
-  persists and re-pushes at once), or by voice (`music_screen` `fullscreen`/`compact` →
-  `DeviceAction::MusicDisplayStyle`: persisted Core-side **and** relayed as a `screen`
-  frame). The device resolves what's on screen in `AssistantState.effectiveMusicScreen`
-  (Core mode > explicit view > style, the style only while someone is present).
+  widget shows while music plays (compact bar / full screen) is decided **per display** by
+  the Core and stamped as that display's `display_style` on its own `now_playing` push
+  (`NowPlayingService` records each music channel's `device_id` and pushes with
+  `ChannelRegistry::broadcast_with`). Resolution (`MusicDisplayRouter::style_for`): the
+  display's choice for the current music (its expand/minimize button → `anamanti-music-control`
+  `display_fullscreen`/`display_compact`; or voice to it → `music_screen`
+  `fullscreen`/`compact`, also relayed as a `screen` frame) → its persisted pin
+  (`SharedSettings::music_display_pins`, config page) → full screen on the session's
+  initiator (the display whose voice turn ran `spotify_control`/`radio_control` `play`),
+  compact elsewhere. To know who asked, the display stamps its `device_id` on every
+  `audio-start` (→ `DeviceContext.device_id` → `LlmTurn` → `ToolCtx`) and every
+  `anamanti-music-control`. Music stopping ends the session. The device resolves what's on
+  screen in `AssistantState.effectiveMusicScreen` (Core mode > explicit view > style, the
+  style only while someone is present).
 - **Internet radio** ([`RadioPlan.md`](./RadioPlan.md)) rides the same push. A curated
   station catalog (settings overlay `radio.stations`, edited on Music & Devices) is played
   by the existing mpv web player into the snapserver `Web` stream; the Core's

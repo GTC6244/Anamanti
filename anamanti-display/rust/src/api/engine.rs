@@ -1065,6 +1065,8 @@ pub fn start_notify_channel(
         device_id,
         device_name,
     } = config;
+    // Remember this display's id for the per-turn `audio-start` + music-control stamps.
+    crate::engine::set_device_id(&device_id);
     start_channel(
         &NOTIFY,
         "notify",
@@ -1146,6 +1148,8 @@ pub fn start_weather_channel(
         device_id,
         device_name,
     } = config;
+    // Remember this display's id for the per-turn `audio-start` + music-control stamps.
+    crate::engine::set_device_id(&device_id);
     start_channel(
         &WEATHER,
         "weather",
@@ -1217,6 +1221,8 @@ pub fn start_music_channel(config: MusicConfig, sink: StreamSink<MusicPush>) -> 
         device_id,
         device_name,
     } = config;
+    // Remember this display's id for the per-turn `audio-start` + music-control stamps.
+    crate::engine::set_device_id(&device_id);
     start_channel(
         &MUSIC,
         "music",

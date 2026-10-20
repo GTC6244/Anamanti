@@ -103,7 +103,7 @@ class AmbientScreen extends StatelessWidget {
             // device-toggled music screen, which is suppressed while one is up.
             final coreMode = recipeActive || weatherActive || placeActive;
             // Music: `musicActive` means a track is playing. Which widget shows follows the
-            // household preference (`musicDisplayStyle`: the compact bar or full screen),
+            // display's style (`musicDisplayStyle`, chosen per display by the Core),
             // or a view the user explicitly opened (tap / voice); a Core-pushed mode always
             // wins. `effectiveMusicScreen` resolves all of that in one place.
             final musicScreen = state.effectiveMusicScreen;

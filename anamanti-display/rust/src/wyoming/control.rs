@@ -776,16 +776,20 @@ pub async fn link_speaker(
 /// Issue a music transport/volume command (`pause`/`resume`/`next`/`previous`/`volume`)
 /// from the display's on-screen controls. Returns the Core's short spoken confirmation;
 /// an in-band failure (Spotify not linked, device asleep, unknown action) is an `Err`
-/// carrying its reason. `value` is the 0–100 percent for `"volume"`.
+/// carrying its reason. `value` is the 0–100 percent for `"volume"`. `device_id` (this
+/// display's id; blank = omitted) tells the Core which display pressed the button — the
+/// `display_fullscreen` / `display_compact` toggle changes only that display.
 pub async fn music_control(
     cache: &EndpointCache,
     timeout: Duration,
     preferred: Option<&str>,
     action: &str,
     value: Option<i64>,
+    device_id: &str,
 ) -> Result<String> {
     let endpoint = resolve(cache, timeout, preferred).await?;
-    let resp = round_trip(&endpoint, WyomingEvent::music_control(action, value)).await?;
+    let request = WyomingEvent::music_control(action, value).with_device_id(device_id);
+    let resp = round_trip(&endpoint, request).await?;
     ok_message(&resp, "music control failed")
 }
 
@@ -1605,15 +1609,23 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let msg = music_control(&cache, Duration::from_millis(0), None, "volume", Some(40))
-            .await
-            .unwrap();
+        let msg = music_control(
+            &cache,
+            Duration::from_millis(0),
+            None,
+            "volume",
+            Some(40),
+            "den",
+        )
+        .await
+        .unwrap();
         assert_eq!(msg, "Set the volume to 40 percent.");
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::MUSIC_CONTROL);
         assert_eq!(request.data["action"], json!("volume"));
         assert_eq!(request.data["value"], json!(40));
+        assert_eq!(request.data["device_id"], json!("den"));
     }
 
     #[tokio::test]
@@ -1625,7 +1637,7 @@ mod tests {
         serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let err = music_control(&cache, Duration::from_millis(0), None, "pause", None)
+        let err = music_control(&cache, Duration::from_millis(0), None, "pause", None, "")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("linked"));

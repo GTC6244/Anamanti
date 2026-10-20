@@ -1,9 +1,11 @@
 import 'dart:convert';
 
-/// Which music widget the display shows while something is playing — the household
-/// preference owned by the Core (`plans/MusicDisplayStylePlan.md`), shared by Spotify and
-/// radio. Carried on every now-playing push as `display_style`; changed from the config
-/// page, the on-screen expand/minimize button, or by voice.
+/// Which music widget this display shows while something is playing
+/// (`plans/MusicDisplayStylePlan.md`), shared by Spotify and radio. Chosen **per display**
+/// by the Core and carried on this display's now-playing pushes as `display_style`: full
+/// screen on the display the play request came from and compact elsewhere, unless this
+/// display chose otherwise (its expand/minimize button, or voice spoken to it) or has a
+/// pin on the config page.
 enum MusicDisplayStyle {
   /// The compact transport bar riding the ambient screen (the default).
   compact,
@@ -109,8 +111,8 @@ class MusicData {
   final String stationId;
   final String stationName;
 
-  /// The household's music-widget preference stamped on this push by the Core, or
-  /// `null` from an older Core (then the device keeps its current style).
+  /// This display's music widget, stamped on this push by the Core, or `null` from an
+  /// older Core (then the device keeps its current style).
   final MusicDisplayStyle? displayStyle;
 
   bool get hasArtwork => artworkUri.trim().isNotEmpty;

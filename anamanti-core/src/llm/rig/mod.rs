@@ -43,7 +43,7 @@ use rig_core::providers::{anthropic, ollama, openai};
 use rig_core::streaming::StreamedAssistantContent;
 
 use super::anthropic_auth::AnthropicTokenProvider;
-use super::{ActionSink, Capabilities, LlmBackend, LlmTurn, ReplyStream};
+use super::{Capabilities, LlmBackend, LlmTurn, ReplyStream};
 pub use tools::{ToolDeps, Tools};
 
 /// Upper bound on tool-negotiation rounds per turn, so a model that loops on tool
@@ -442,7 +442,7 @@ async fn run_tools(
     messages: &mut Vec<Message>,
     text: String,
     calls: Vec<ToolCall>,
-    actions: Option<&ActionSink>,
+    ctx: &tools::ToolCtx<'_>,
 ) {
     let mut content: Vec<AssistantContent> = Vec::with_capacity(calls.len() + 1);
     if !text.trim().is_empty() {
@@ -461,7 +461,7 @@ async fn run_tools(
         );
         let tool_start = Instant::now();
         let result = tools
-            .dispatch(&call.function.name, &call.function.arguments, actions)
+            .dispatch_with(&call.function.name, &call.function.arguments, ctx)
             .await
             .unwrap_or_else(|e| crate::http::redact_secrets(&format!("tool error: {e:#}")));
         log::info!(
@@ -491,6 +491,7 @@ fn run_turn(
         let preamble = tools.preamble(&turn.system_prompt);
         let defs = tools.definitions().to_vec();
         let actions = turn.actions;
+        let device_id = turn.device_id;
         let stream_rounds = defs.is_empty() || model.streams_tool_calls();
         let mut messages = seed_messages(turn.history, turn.user_message);
         let mut reply = ReplyJoin::default();
@@ -569,7 +570,11 @@ fn run_turn(
             if calls.is_empty() {
                 break;
             }
-            run_tools(&tools, &mut messages, text, calls, actions.as_ref()).await;
+            let ctx = tools::ToolCtx {
+                actions: actions.as_ref(),
+                device_id: device_id.as_deref(),
+            };
+            run_tools(&tools, &mut messages, text, calls, &ctx).await;
         }
         log::info!("rig LLM turn complete in {}ms", started.elapsed().as_millis());
     };

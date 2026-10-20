@@ -363,7 +363,12 @@ async fn run() -> Result<()> {
     // task) when music is disabled in the config. When the internet-radio player is on
     // (plans/RadioPlan.md) the push reports the playing station instead.
     let radio = pipeline.settings().radio_player();
-    let music_svc = Arc::new(NowPlayingService::with_radio(radio.clone()));
+    // Each display's push carries its own music widget style, from the per-Core session
+    // the voice tools also record play requests in (plans/MusicDisplayStylePlan.md).
+    let music_svc = Arc::new(
+        NowPlayingService::with_radio(radio.clone())
+            .with_display(pipeline.settings().music_display_router()),
+    );
     if config.music.enabled {
         anamanti_core::music::nowplaying_service::spawn_periodic(
             music_svc.clone(),

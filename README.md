@@ -54,9 +54,10 @@ speaks the reply back through the Echo Show's speakers.
   Echo Show). While a track plays, a compact control bar rides the idle screen; tap it
   for a full now-playing screen (artwork, progress, transport, volume) and the up-next
   queue — or just say "show me what's playing" / "what's up next" / "hide the music".
-  Prefer the big player? Choose **full screen** (Music & Devices, the expand button on
-  the bar, or say "make the music full screen") and it shows whenever Spotify or the
-  radio plays; minimize or say "use the small music player" to go back.
+  The display you asked shows the music **full screen**; every other display shows the
+  small bar. Each display can switch on its own — the expand / minimize button, or say
+  "make the music full screen" / "use the small music player" to it — and Music & Devices
+  can pin any display to always full screen or always the small bar.
 - 📻 **Internet radio** — curate stations on the Core's **Music & Devices** page (paste a
   stream URL, **Look up** fills the name + logo from the Radio Browser directory), then
   say "play Dave Rocks" / "next station" / "stop the radio". It plays on the same

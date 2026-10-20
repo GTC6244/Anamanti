@@ -25,7 +25,7 @@ pub mod radio;
 pub mod radio_browser;
 pub mod spotify;
 pub mod supervisor;
-pub use display_style::MusicDisplayStyle;
+pub use display_style::{MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, PlayRequest};
 pub use nowplaying_service::NowPlayingService;
 pub use radio::{RadioCatalog, RadioPlayer, RadioStation, RoutedSpotify};
 pub use spotify::{
