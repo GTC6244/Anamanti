@@ -292,7 +292,8 @@ fn screen_dismiss_reply(intent: Intent, device_ctx: &DeviceContext) -> Option<Fa
 }
 
 /// The System-1 `recipe_step` fast path: jump the recipe screen to a step — the device
-/// switches to the Steps tab, scrolls that step into view and highlights it.
+/// switches to the Steps tab, scrolls that step into view and highlights it — and
+/// **reads the step aloud** from the step lines the device reported.
 /// **Preconditions (ground truth):** a recipe is the foreground widget, and the
 /// transcript names a step that [`parse_recipe_step`](crate::system1::parse_recipe_step)
 /// can resolve against the device-reported highlighted step and step count; otherwise
@@ -304,9 +305,25 @@ fn recipe_step_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<Fas
     let step =
         crate::system1::parse_recipe_step(transcript, screen.highlighted_step, screen.step_count)?;
     Some(
-        FastReply::say(format!("Here's step {step}."))
+        FastReply::say(recipe_step_speech(step, &screen.steps))
             .with_action(DeviceAction::RecipeControl(RecipeNav::Step(step))),
     )
+}
+
+/// What to say for a step jump: "Step 3. Chop the onion." — the step's own text when
+/// the device sent it, else (an older device, or a step past the Core-side line cap)
+/// the bare "Here's step 3."
+fn recipe_step_speech(step: u32, steps: &[String]) -> String {
+    let text = (step as usize)
+        .checked_sub(1)
+        .and_then(|i| steps.get(i))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    match text {
+        Some(text) if text.ends_with(['.', '!', '?']) => format!("Step {step}. {text}"),
+        Some(text) => format!("Step {step}. {text}."),
+        None => format!("Here's step {step}."),
+    }
 }
 
 /// The System-1 `recipe_ingredient` fast path — a **conditional lookup**: answer "how
@@ -502,6 +519,24 @@ mod tests {
         assert!(recipe_step_reply("go to step 9", &recipe_ctx(0)).is_none());
         assert!(recipe_step_reply("scroll down", &recipe_ctx(0)).is_none());
         assert!(recipe_step_reply("go to step 2", &ctx_with(None, 0)).is_none());
+    }
+
+    #[test]
+    fn recipe_step_reads_the_step_aloud_when_the_device_sent_it() {
+        let mut ctx = recipe_ctx(1);
+        if let Some(DisplayContext::Recipe(screen)) = ctx.widget.as_mut() {
+            screen.steps = vec![
+                "Chop the tomatoes.".into(),
+                "  Stir in the lime juice  ".into(),
+            ];
+        }
+        let r = recipe_step_reply("next step", &ctx).unwrap();
+        assert_eq!(r.text, "Step 2. Stir in the lime juice.");
+        let r = recipe_step_reply("go to step 1", &ctx).unwrap();
+        assert_eq!(r.text, "Step 1. Chop the tomatoes.");
+        // A step past the reported lines (an older device / the line cap) → bare jump.
+        let r = recipe_step_reply("go to step 4", &ctx).unwrap();
+        assert_eq!(r.text, "Here's step 4.");
     }
 
     #[test]

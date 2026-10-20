@@ -124,8 +124,10 @@ impl VoiceTool for RecipeLookup {
              number — never scroll to find a step. Answer questions about the recipe on \
              screen (\"how many tomatoes do I need?\", \"how long does it bake?\") directly \
              from the ingredients and steps in the turn context — do not look the recipe \
-             up again. Use `close_recipe` when they say they're done cooking or ask to \
-             close the recipe. Relay each tool's short spoken confirmation.",
+             up again. After a `go_to_step`, read that step to the user word for word from \
+             the numbered steps in the turn context (\"Step 4. Simmer for ten minutes.\"). \
+             Use `close_recipe` when they say they're done cooking or ask to close the \
+             recipe. Relay each tool's short spoken confirmation.",
         )
     }
 
@@ -223,7 +225,15 @@ impl VoiceTool for RecipeControl {
                 "Jumping to the bottom.".to_string(),
             ),
             "go_to_step" => match args.step.filter(|&n| n >= 1) {
-                Some(n) => (RecipeNav::Step(n), format!("Here's step {n}.")),
+                Some(n) => (
+                    RecipeNav::Step(n),
+                    format!(
+                        "Step {n} is now shown and highlighted. Read step {n} to the user word \
+                         for word from the recipe steps in the turn context, starting \
+                         \"Step {n}.\" (if the context has no text for it, just say \
+                         \"Here's step {n}.\")."
+                    ),
+                ),
                 None => anyhow::bail!("recipe_control go_to_step needs a step number of 1 or more"),
             },
             other => anyhow::bail!("unknown recipe_control action `{other}`"),
@@ -718,7 +728,8 @@ mod tests {
             .invoke(&json!({ "action": "go_to_step", "step": 4 }), &ctx)
             .await
             .unwrap();
-        assert_eq!(out, "Here's step 4.");
+        assert!(out.starts_with("Step 4 is now shown"), "{out}");
+        assert!(out.contains("Read step 4 to the user"), "{out}");
         assert_eq!(
             rx.try_recv().unwrap(),
             DeviceAction::RecipeControl(RecipeNav::Step(4))

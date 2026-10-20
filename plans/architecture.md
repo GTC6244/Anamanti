@@ -647,7 +647,8 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `step` number). Emitted by the LLM **tools** the model calls on the Mac —
   `recipe_lookup` (fetch + parse → `show`), `close_recipe` (`dismiss`), and
   `recipe_control` (`navigate` to Overview/Ingredients/Steps, `scroll`
-  up/down/top/bottom, or `go_to_step` → `step`, which shows + highlights that step) —
+  up/down/top/bottom, or `go_to_step` → `step`, which shows + highlights that step; the spoken reply reads the
+  step's text from the device-reported `steps[]`) —
   and by the System-1 `recipe_dismiss` / `recipe_step` fast paths. The device owns the resulting screen state —
   it persists across turns and idle while you cook — so, like timers, this is
   fire-and-forget from the Mac. See `plans/RecipePlan.md`.
