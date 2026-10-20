@@ -39,7 +39,12 @@ speaks the reply back through the Echo Show's speakers.
   display under Settings → People → Add a voice.
 - 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder (how often the
-  photo changes is set per display, 5 s to 10 min).
+  photo changes is set per display, 5 s to 10 min). The front camera doubles as a
+  presence sensor (brightens when you walk up, dims when the room is empty) and as a
+  **light sensor**: when the lights go off at night the screen dims right down so it
+  doesn't light up a dark room (Settings → Display → Night). Close the privacy shutter
+  and you choose what that means: a dim clock, or awake by day and dim during your
+  night hours. Nothing from the camera is stored or leaves the device.
 - 🔔 **Proactive notifications** — the Mac can push a visual notification to the
   display *without* you asking (a reminder, an alert), over a persistent connection
   the device holds open to its pinned Anamanti Core. Visual-only today (no spoken

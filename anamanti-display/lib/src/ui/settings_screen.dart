@@ -198,6 +198,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ],
       SettingsSection.display => const [
         _TabSpec('screen', 'Screen'),
+        _TabSpec('night', 'Night'),
         _TabSpec('photos', 'Photos'),
       ],
       SettingsSection.device => [
@@ -305,9 +306,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       case SettingsSection.diagnostics:
         return _diagnosticsPage();
       case SettingsSection.display:
-        return tab == 'photos'
-            ? DisplayPhotosTab(controller: _c)
-            : DisplayScreenTab(controller: _c);
+        return switch (tab) {
+          'photos' => DisplayPhotosTab(controller: _c),
+          'night' => DisplayNightTab(controller: _c, assistant: widget.assistant),
+          _ => DisplayScreenTab(controller: _c),
+        };
       case SettingsSection.household:
         return _householdPage();
       case SettingsSection.device:

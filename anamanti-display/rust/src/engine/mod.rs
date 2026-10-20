@@ -344,6 +344,9 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // §5). It's fully independent of the audio pipeline and degrades silently if the
     // camera can't be opened (permission denied, privacy shutter closed, no camera)
     // — capture, wake-word detection, and the Wyoming turn all run regardless.
+    // The same frames also drive the camera-as-lux-sensor (`camera/ambient.rs`),
+    // which emits `AmbientLight` events so the UI can dim the screen when the room's
+    // lights go off.
     #[cfg(target_os = "android")]
     let camera_proximity = config.camera_proximity;
     #[cfg(target_os = "android")]
@@ -352,6 +355,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
             sink.clone(),
             config.proximity_motion_threshold,
             config.proximity_release_secs,
+            config.night_dark_lux,
             PROXIMITY_WIDTH,
             PROXIMITY_HEIGHT,
             PROXIMITY_FPS,

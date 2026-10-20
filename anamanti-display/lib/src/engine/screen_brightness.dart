@@ -12,6 +12,10 @@
 // exactly the set of causes that lift the away-face blackout, so the backlight and
 // the on-screen presentation stay in lockstep.
 //
+// Night dimming layers on top: while the camera-as-lux-sensor reports the room's
+// lights are off (`AssistantState.roomDark`, gated by the "Dim at night" setting),
+// both levels drop to their night values so the display doesn't light up a dark room.
+//
 // It is deliberately tiny and injectable (the channel can be faked) so unit tests
 // can assert the awake→bright / asleep→dim mapping with no device.
 
@@ -25,6 +29,8 @@ class ScreenBrightnessController {
     MethodChannel? channel,
     this.nearBrightness = WakeWordDefaults.brightnessNear,
     this.awayBrightness = WakeWordDefaults.brightnessAway,
+    this.nightNearBrightness = WakeWordDefaults.nightBrightnessNear,
+    this.nightAwayBrightness = WakeWordDefaults.nightBrightnessAway,
   }) : _channel = channel ?? const MethodChannel('anamanti_display/brightness');
 
   final MethodChannel _channel;
@@ -35,16 +41,27 @@ class ScreenBrightnessController {
   /// Absolute window brightness [0,1] when the screen has dimmed to the away face.
   final double awayBrightness;
 
-  /// Last state actuated, so we only cross the channel on a real change.
-  bool? _lastAwake;
+  /// Awake brightness while the room's lights are off (night dimming).
+  final double nightNearBrightness;
 
-  /// Apply the brightness for [awake]. No-ops if unchanged since the last call, so
-  /// it's safe to call on every state emit (it dedupes the high-frequency stream down
-  /// to real awake/asleep transitions).
-  Future<void> apply(bool awake) async {
-    if (_lastAwake == awake) return;
-    _lastAwake = awake;
-    final level = awake ? nearBrightness : awayBrightness;
+  /// Away brightness while the room's lights are off (night dimming).
+  final double nightAwayBrightness;
+
+  /// Last level actuated, so we only cross the channel on a real change.
+  double? _lastLevel;
+
+  /// The backlight level for an [awake]/asleep screen in a lit or [dark] room.
+  double levelFor(bool awake, {bool dark = false}) => dark
+      ? (awake ? nightNearBrightness : nightAwayBrightness)
+      : (awake ? nearBrightness : awayBrightness);
+
+  /// Apply the brightness for [awake] (and [dark], the night-dimming state). No-ops
+  /// if the target is unchanged since the last call, so it's safe to call on every
+  /// state emit (it dedupes the high-frequency stream down to real transitions).
+  Future<void> apply(bool awake, {bool dark = false}) async {
+    final level = levelFor(awake, dark: dark);
+    if (_lastLevel == level) return;
+    _lastLevel = level;
     try {
       await _channel.invokeMethod<void>('setBrightness', level);
     } catch (_) {
@@ -55,7 +72,7 @@ class ScreenBrightnessController {
 
   /// Hand brightness back to the system/user default (e.g. on shutdown).
   Future<void> reset() async {
-    _lastAwake = null;
+    _lastLevel = null;
     try {
       await _channel.invokeMethod<void>('setBrightness', -1.0);
     } catch (_) {

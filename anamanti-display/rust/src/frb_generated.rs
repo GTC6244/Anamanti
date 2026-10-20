@@ -2685,6 +2685,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_cameraProximity = <bool>::sse_decode(deserializer);
         let mut var_proximityMotionThreshold = <f32>::sse_decode(deserializer);
         let mut var_proximityReleaseSecs = <u32>::sse_decode(deserializer);
+        let mut var_nightDarkLux = <f32>::sse_decode(deserializer);
         return crate::api::engine::WakeWordConfig {
             melspec_model_path: var_melspecModelPath,
             embedding_model_path: var_embeddingModelPath,
@@ -2707,6 +2708,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
             camera_proximity: var_cameraProximity,
             proximity_motion_threshold: var_proximityMotionThreshold,
             proximity_release_secs: var_proximityReleaseSecs,
+            night_dark_lux: var_nightDarkLux,
         };
     }
 }
@@ -2731,6 +2733,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_timerLabel = <String>::sse_decode(deserializer);
         let mut var_timerRemainingSecs = <u32>::sse_decode(deserializer);
         let mut var_present = <bool>::sse_decode(deserializer);
+        let mut var_dark = <bool>::sse_decode(deserializer);
+        let mut var_lux = <f32>::sse_decode(deserializer);
+        let mut var_covered = <bool>::sse_decode(deserializer);
         let mut var_recipeJson = <String>::sse_decode(deserializer);
         let mut var_weatherJson = <String>::sse_decode(deserializer);
         let mut var_placeJson = <String>::sse_decode(deserializer);
@@ -2754,6 +2759,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             timer_label: var_timerLabel,
             timer_remaining_secs: var_timerRemainingSecs,
             present: var_present,
+            dark: var_dark,
+            lux: var_lux,
+            covered: var_covered,
             recipe_json: var_recipeJson,
             weather_json: var_weatherJson,
             place_json: var_placeJson,
@@ -2798,7 +2806,8 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             27 => crate::api::engine::WakeWordEventKind::FontAdjust,
             28 => crate::api::engine::WakeWordEventKind::MusicScreen,
             29 => crate::api::engine::WakeWordEventKind::Presence,
-            30 => crate::api::engine::WakeWordEventKind::EnrollResult,
+            30 => crate::api::engine::WakeWordEventKind::AmbientLight,
+            31 => crate::api::engine::WakeWordEventKind::EnrollResult,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -3413,6 +3422,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.camera_proximity.into_into_dart().into_dart(),
             self.proximity_motion_threshold.into_into_dart().into_dart(),
             self.proximity_release_secs.into_into_dart().into_dart(),
+            self.night_dark_lux.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3449,6 +3459,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.timer_label.into_into_dart().into_dart(),
             self.timer_remaining_secs.into_into_dart().into_dart(),
             self.present.into_into_dart().into_dart(),
+            self.dark.into_into_dart().into_dart(),
+            self.lux.into_into_dart().into_dart(),
+            self.covered.into_into_dart().into_dart(),
             self.recipe_json.into_into_dart().into_dart(),
             self.weather_json.into_into_dart().into_dart(),
             self.place_json.into_into_dart().into_dart(),
@@ -3503,7 +3516,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::FontAdjust => 27.into_dart(),
             Self::MusicScreen => 28.into_dart(),
             Self::Presence => 29.into_dart(),
-            Self::EnrollResult => 30.into_dart(),
+            Self::AmbientLight => 30.into_dart(),
+            Self::EnrollResult => 31.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -4081,6 +4095,7 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <bool>::sse_encode(self.camera_proximity, serializer);
         <f32>::sse_encode(self.proximity_motion_threshold, serializer);
         <u32>::sse_encode(self.proximity_release_secs, serializer);
+        <f32>::sse_encode(self.night_dark_lux, serializer);
     }
 }
 
@@ -4104,6 +4119,9 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <String>::sse_encode(self.timer_label, serializer);
         <u32>::sse_encode(self.timer_remaining_secs, serializer);
         <bool>::sse_encode(self.present, serializer);
+        <bool>::sse_encode(self.dark, serializer);
+        <f32>::sse_encode(self.lux, serializer);
+        <bool>::sse_encode(self.covered, serializer);
         <String>::sse_encode(self.recipe_json, serializer);
         <String>::sse_encode(self.weather_json, serializer);
         <String>::sse_encode(self.place_json, serializer);
@@ -4147,7 +4165,8 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::FontAdjust => 27,
                 crate::api::engine::WakeWordEventKind::MusicScreen => 28,
                 crate::api::engine::WakeWordEventKind::Presence => 29,
-                crate::api::engine::WakeWordEventKind::EnrollResult => 30,
+                crate::api::engine::WakeWordEventKind::AmbientLight => 30,
+                crate::api::engine::WakeWordEventKind::EnrollResult => 31,
                 _ => {
                     unimplemented!("");
                 }

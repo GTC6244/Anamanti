@@ -2635,8 +2635,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordConfig dco_decode_wake_word_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 21)
-      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
+    if (arr.length != 22)
+      throw Exception('unexpected arr length: expect 22 but see ${arr.length}');
     return WakeWordConfig(
       melspecModelPath: dco_decode_String(arr[0]),
       embeddingModelPath: dco_decode_String(arr[1]),
@@ -2659,6 +2659,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       cameraProximity: dco_decode_bool(arr[18]),
       proximityMotionThreshold: dco_decode_f_32(arr[19]),
       proximityReleaseSecs: dco_decode_u_32(arr[20]),
+      nightDarkLux: dco_decode_f_32(arr[21]),
     );
   }
 
@@ -2666,8 +2667,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WakeWordEvent dco_decode_wake_word_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 22)
-      throw Exception('unexpected arr length: expect 22 but see ${arr.length}');
+    if (arr.length != 25)
+      throw Exception('unexpected arr length: expect 25 but see ${arr.length}');
     return WakeWordEvent(
       kind: dco_decode_wake_word_event_kind(arr[0]),
       message: dco_decode_String(arr[1]),
@@ -2686,11 +2687,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerLabel: dco_decode_String(arr[14]),
       timerRemainingSecs: dco_decode_u_32(arr[15]),
       present: dco_decode_bool(arr[16]),
-      recipeJson: dco_decode_String(arr[17]),
-      weatherJson: dco_decode_String(arr[18]),
-      placeJson: dco_decode_String(arr[19]),
-      recipeAction: dco_decode_String(arr[20]),
-      enrollJson: dco_decode_String(arr[21]),
+      dark: dco_decode_bool(arr[17]),
+      lux: dco_decode_f_32(arr[18]),
+      covered: dco_decode_bool(arr[19]),
+      recipeJson: dco_decode_String(arr[20]),
+      weatherJson: dco_decode_String(arr[21]),
+      placeJson: dco_decode_String(arr[22]),
+      recipeAction: dco_decode_String(arr[23]),
+      enrollJson: dco_decode_String(arr[24]),
     );
   }
 
@@ -3411,6 +3415,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_cameraProximity = sse_decode_bool(deserializer);
     var var_proximityMotionThreshold = sse_decode_f_32(deserializer);
     var var_proximityReleaseSecs = sse_decode_u_32(deserializer);
+    var var_nightDarkLux = sse_decode_f_32(deserializer);
     return WakeWordConfig(
       melspecModelPath: var_melspecModelPath,
       embeddingModelPath: var_embeddingModelPath,
@@ -3433,6 +3438,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       cameraProximity: var_cameraProximity,
       proximityMotionThreshold: var_proximityMotionThreshold,
       proximityReleaseSecs: var_proximityReleaseSecs,
+      nightDarkLux: var_nightDarkLux,
     );
   }
 
@@ -3456,6 +3462,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_timerLabel = sse_decode_String(deserializer);
     var var_timerRemainingSecs = sse_decode_u_32(deserializer);
     var var_present = sse_decode_bool(deserializer);
+    var var_dark = sse_decode_bool(deserializer);
+    var var_lux = sse_decode_f_32(deserializer);
+    var var_covered = sse_decode_bool(deserializer);
     var var_recipeJson = sse_decode_String(deserializer);
     var var_weatherJson = sse_decode_String(deserializer);
     var var_placeJson = sse_decode_String(deserializer);
@@ -3479,6 +3488,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timerLabel: var_timerLabel,
       timerRemainingSecs: var_timerRemainingSecs,
       present: var_present,
+      dark: var_dark,
+      lux: var_lux,
+      covered: var_covered,
       recipeJson: var_recipeJson,
       weatherJson: var_weatherJson,
       placeJson: var_placeJson,
@@ -4161,6 +4173,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.cameraProximity, serializer);
     sse_encode_f_32(self.proximityMotionThreshold, serializer);
     sse_encode_u_32(self.proximityReleaseSecs, serializer);
+    sse_encode_f_32(self.nightDarkLux, serializer);
   }
 
   @protected
@@ -4186,6 +4199,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.timerLabel, serializer);
     sse_encode_u_32(self.timerRemainingSecs, serializer);
     sse_encode_bool(self.present, serializer);
+    sse_encode_bool(self.dark, serializer);
+    sse_encode_f_32(self.lux, serializer);
+    sse_encode_bool(self.covered, serializer);
     sse_encode_String(self.recipeJson, serializer);
     sse_encode_String(self.weatherJson, serializer);
     sse_encode_String(self.placeJson, serializer);

@@ -15,6 +15,9 @@ WakeWordEvent wakeEvent(
   String placeJson = '',
   String recipeAction = '',
   String enrollJson = '',
+  bool dark = false,
+  double lux = 0,
+  bool covered = false,
 }) => WakeWordEvent(
   kind: kind,
   message: message,
@@ -38,4 +41,7 @@ WakeWordEvent wakeEvent(
   placeJson: placeJson,
   recipeAction: recipeAction,
   enrollJson: enrollJson,
+  dark: dark,
+  lux: lux,
+  covered: covered,
 );

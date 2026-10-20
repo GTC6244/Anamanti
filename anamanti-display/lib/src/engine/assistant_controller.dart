@@ -25,6 +25,7 @@ import 'package:flutter/foundation.dart';
 import 'package:anamanti_display/src/engine/recipe_data.dart';
 import 'package:anamanti_display/src/engine/place_data.dart';
 import 'package:anamanti_display/src/engine/music_data.dart';
+import 'package:anamanti_display/src/engine/night_schedule.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart'
@@ -225,6 +226,11 @@ class AssistantState {
     this.timers = const [],
     this.audioPlaying = false,
     this.userPresent = true,
+    this.roomDark = false,
+    this.ambientLux,
+    this.cameraCovered = false,
+    this.coveredMode = CoveredCameraMode.clock,
+    this.scheduledNight = false,
     this.followUp = false,
     this.recipe,
     this.weather,
@@ -319,6 +325,43 @@ class AssistantState {
   /// stays bright if the camera is unavailable (permission denied / privacy shutter),
   /// rather than sitting dim (Plan.MD §5).
   final bool userPresent;
+
+  /// Whether the camera-as-lux-sensor judges the room's lights to be off
+  /// (`camera/ambient.rs`). The UI dims the backlight to its night levels while this
+  /// is set (and night dimming is enabled). Defaults to `false` so an unavailable or
+  /// still-settling camera never dims the screen.
+  final bool roomDark;
+
+  /// The lux sensor's latest smoothed illuminance estimate, or `null` before the
+  /// first reading (or with no camera). A live readout for tuning in Settings.
+  final double? ambientLux;
+
+  /// Whether the camera lens looks covered (privacy shutter / tape) — near-black,
+  /// near-uniform frames, reported by the lux sensor. A covered camera can't see the
+  /// room, so its presence and darkness readings are resolved per [coveredMode].
+  final bool cameraCovered;
+
+  /// What a covered camera means (the user's Settings → Display → Night choice).
+  final CoveredCameraMode coveredMode;
+
+  /// Whether the current time is inside the user's night window. Only consulted
+  /// while the camera is covered in [CoveredCameraMode.schedule].
+  final bool scheduledNight;
+
+  /// The covered camera is being overridden by the day/night schedule.
+  bool get _scheduleOverrides =>
+      cameraCovered && coveredMode == CoveredCameraMode.schedule;
+
+  /// Presence as the screen should treat it: the camera's [userPresent], except that a
+  /// covered camera on the day/night schedule counts as "someone's here" by day (the
+  /// camera can't see anyone, so the screen stays awake) and defers to [userPresent]
+  /// (voice/touch activity) at night.
+  bool get effectivePresent =>
+      userPresent || (_scheduleOverrides && !scheduledNight);
+
+  /// Whether the room should be treated as dark for night dimming: the lux sensor's
+  /// [roomDark], or — for a covered camera on the schedule — the night window.
+  bool get effectiveRoomDark => _scheduleOverrides ? scheduledNight : roomDark;
 
   /// Whether the current turn was auto-opened as a **follow-up** to a question the
   /// assistant just asked (no wake word). Lets the UI show a "listening for your
@@ -425,7 +468,7 @@ class AssistantState {
     }
     if (musicScreen != MusicScreen.hidden) return musicScreen;
     if (musicDisplayStyle == MusicDisplayStyle.fullscreen &&
-        (userPresent || displayActive)) {
+        (effectivePresent || displayActive)) {
       return MusicScreen.nowPlaying;
     }
     return MusicScreen.hidden;
@@ -461,7 +504,7 @@ class AssistantState {
   /// camera-presence flip. (Historically the backlight tracked only [userPresent],
   /// so a turn/mode that woke the display left the backlight stuck dim.)
   bool get screenAwake =>
-      userPresent ||
+      effectivePresent ||
       displayActive ||
       recipeActive ||
       weatherActive ||
@@ -489,6 +532,11 @@ class AssistantState {
     List<TimerModel>? timers,
     bool? audioPlaying,
     bool? userPresent,
+    bool? roomDark,
+    double? ambientLux,
+    bool? cameraCovered,
+    CoveredCameraMode? coveredMode,
+    bool? scheduledNight,
     bool? followUp,
     RecipeData? recipe,
     bool clearRecipe = false,
@@ -530,6 +578,11 @@ class AssistantState {
       timers: timers ?? this.timers,
       audioPlaying: audioPlaying ?? this.audioPlaying,
       userPresent: userPresent ?? this.userPresent,
+      roomDark: roomDark ?? this.roomDark,
+      ambientLux: ambientLux ?? this.ambientLux,
+      cameraCovered: cameraCovered ?? this.cameraCovered,
+      coveredMode: coveredMode ?? this.coveredMode,
+      scheduledNight: scheduledNight ?? this.scheduledNight,
       followUp: followUp ?? this.followUp,
       recipe: clearRecipe ? null : (recipe ?? this.recipe),
       weather: clearWeather ? null : (weather ?? this.weather),
@@ -641,6 +694,7 @@ class AssistantController extends ChangeNotifier {
       cameraProximity: c.cameraProximity,
       proximityMotionThreshold: c.proximityMotionThreshold,
       proximityReleaseSecs: c.proximityReleaseSecs,
+      nightDarkLux: c.nightDarkLux,
     );
   }
 
@@ -968,6 +1022,17 @@ class AssistantController extends ChangeNotifier {
         // Camera proximity transition (brighten on approach / dim when quiet). The
         // brightness actuation lives in the UI layer, which reads `userPresent`.
         _emit(_state.copyWith(userPresent: e.present));
+      case WakeWordEventKind.ambientLight:
+        // Camera lux reading: lights off/on (dims the backlight to night levels) plus
+        // the live estimate shown in Settings. Not user activity (see above).
+        _emit(
+          _state.copyWith(
+            roomDark: e.dark,
+            ambientLux: e.lux,
+            cameraCovered: e.covered,
+            scheduledNight: _nightWindow.isNight(_clock()),
+          ),
+        );
       case WakeWordEventKind.showRecipe:
         // The orchestrator pushed a parsed recipe; open recipe mode on the Overview
         // tab. A payload that fails to parse is ignored (recipe stays as it was)
@@ -1425,6 +1490,33 @@ class AssistantController extends ChangeNotifier {
   /// Mirror the latest global font scale (from [AppSettings.fontScale]) after the app
   /// shell applies a voice adjustment, and re-push the font context so the next turn
   /// reports the new value (and whether it is now at the min/max bound).
+  /// Live-apply the "when the camera is covered" setting: [mode] and the daily night
+  /// [window]. In [CoveredCameraMode.schedule] a once-a-minute tick keeps
+  /// [AssistantState.scheduledNight] current so the screen dims/wakes at the window's
+  /// edges even with no engine events. Safe to call any time (no engine restart).
+  void updateCoveredCamera(CoveredCameraMode mode, NightWindow window) {
+    _nightWindow = window;
+    _nightTick?.cancel();
+    _nightTick = null;
+    if (mode == CoveredCameraMode.schedule) {
+      _nightTick = Timer.periodic(const Duration(minutes: 1), (_) {
+        final night = _nightWindow.isNight(_clock());
+        if (night != _state.scheduledNight) {
+          _emit(_state.copyWith(scheduledNight: night));
+        }
+      });
+    }
+    _emit(
+      _state.copyWith(
+        coveredMode: mode,
+        scheduledNight: window.isNight(_clock()),
+      ),
+    );
+  }
+
+  NightWindow _nightWindow = const NightWindow();
+  Timer? _nightTick;
+
   void updateFontScale(double scale) {
     _fontScale = scale;
     _pushFontContext();
@@ -1687,6 +1779,7 @@ class AssistantController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _nightTick?.cancel();
     _disposed = true;
     _reconnectTimer?.cancel();
     _offlinePollTimer?.cancel();

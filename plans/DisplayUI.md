@@ -368,6 +368,18 @@ Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_contro
   lockstep, so the screen can never "wake" visually while the backlight stays dim. The
   "Dim screen after" setting controls the camera's release window (how long with no
   motion before away mode); it is not a separate dimmer.
+- **Night dimming:** when the camera-as-lux-sensor reports the room's lights are off
+  (`AssistantState.roomDark`, from `AmbientLight` events) and "Dim at night" is on,
+  both levels drop to `nightBrightnessNear` (0.15) / `nightBrightnessAway` (0.02). No
+  new on-screen element — only the backlight changes; turning a light on restores the
+  normal levels within ~2 s.
+- **Covered camera** (privacy shutter / tape — near-black, near-uniform frames held
+  10 s, `AssistantState.cameraCovered`): **Clock mode** (default) keeps the blind
+  camera's reading — dark + nobody there, so the dim away clock; **Day & night times**
+  treats the room as occupied and lit by day (full ambient screen, normal levels) and
+  as empty and dark during the night window (dim away clock at night levels; a touch or
+  voice turn wakes it at 0.15). Resolved by `effectivePresent` / `effectiveRoomDark`,
+  which feed `screenAwake` and the backlight.
 
 ---
 
@@ -582,6 +594,14 @@ and `settings_controller.dart`). Layout and rationale:
     scale) with a live preview line; Listening ring on/off (`settings-listening-ring`)
     + Reactivity (`settings-ring-reactivity`); *Adv*: Attack / Release / Auto-range
     (`settings-ring-attack|release|decay`). Ring dials are disabled while the ring is off.
+  - **Night** — *Lights off*: Dim at night (`settings-night-dim`, ⓘ explains the camera
+    is a light sensor) + "Lights off means" chips Pitch dark / Dark / Dim
+    (`settings-night-dark`, each `settings-night-dark-<3|8|20>`, disabled while night
+    dimming is off) with a live `~N lux (lit|dark|camera covered)` readout when the
+    engine runs. *When the camera is covered*: chips Clock mode / Day & night times
+    (`settings-covered-clock|schedule`) with a one-line explanation of the selected
+    mode, and Night hours `From – To` time pickers (`settings-night-start|end`, default
+    21:00 – 07:00; enabled only for Day & night times).
   - **Photos** — idle photo source (segmented Gradients · Google Photos · Drive,
     `settings-photo-source`); Google Photos (Ambient API) link via QR
     (`settings-ambient-link`); Google Drive: Sync from Core (`settings-drive-sync`) +
