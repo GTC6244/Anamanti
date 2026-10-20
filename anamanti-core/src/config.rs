@@ -228,6 +228,10 @@ pub struct Config {
     /// exact-only device names and the dashboard path. The long-lived token is NOT here —
     /// it is a secret, read from `HOME_ASSISTANT_TOKEN`.
     pub home_assistant: crate::home_assistant::HomeAssistantConfig,
+    /// Live NVR camera view (`plans/CameraPlan.md`): NVR host, RTSP port, user and the
+    /// camera→channel map. The NVR password is NOT here — it is a secret, read from
+    /// `REOLINK_PASSWORD`. Boot-time only (not runtime-settable yet).
+    pub camera: crate::camera::CameraConfig,
     /// Per-tool response-cache TTLs (`tool_cache` in the file), keyed by tool name (e.g.
     /// `weather_lookup`, default 3600 s). Installed process-wide at boot; see
     /// [`crate::cache`]. `0` disables caching for a tool.
@@ -815,6 +819,7 @@ impl Default for Config {
             cadora: CadoraConfig::default(),
             appsaid: AppSaidConfig::default(),
             home_assistant: crate::home_assistant::HomeAssistantConfig::default(),
+            camera: crate::camera::CameraConfig::default(),
             tool_cache: crate::cache::ToolCacheConfig::default(),
         }
     }
@@ -930,6 +935,8 @@ pub struct FileConfig {
     pub appsaid: FileAppSaid,
     #[serde(default)]
     pub home_assistant: FileHomeAssistant,
+    #[serde(default)]
+    pub camera: FileCamera,
     /// Per-tool cache TTLs in seconds, keyed by tool name (e.g. `weather_lookup`). A flat
     /// map so it stays generic; overlaid on the built-in defaults, `0` disables a tool's
     /// cache. Absent ⇒ defaults only (see [`crate::cache::ToolCacheConfig`]).
@@ -1202,6 +1209,33 @@ pub struct FileHomeAssistant {
     pub exact_only: Option<Vec<String>>,
     /// The dashboard path the display widget opens (default `lovelace/0`).
     pub dashboard_path: Option<String>,
+}
+
+/// The `camera` block of the config file (`plans/CameraPlan.md`). The NVR password is
+/// deliberately NOT a field — it is env-only (`REOLINK_PASSWORD`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileCamera {
+    /// Master switch (default `true`).
+    pub enabled: Option<bool>,
+    /// NVR host or IP, e.g. `192.168.1.29`.
+    pub nvr_host: Option<String>,
+    /// NVR RTSP port (default 554).
+    pub rtsp_port: Option<u16>,
+    /// The NVR user (a dedicated view-only account).
+    pub username: Option<String>,
+    /// The cameras the display can show: `[{ "name": "Front Door", "channel": 5 }]`.
+    /// `channel` is the number the NVR's own UI shows (1-based).
+    #[serde(default)]
+    pub cameras: Vec<FileCameraSpec>,
+}
+
+/// One `camera.cameras[]` entry.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileCameraSpec {
+    pub name: String,
+    pub channel: u32,
 }
 
 /// Trim a config string and drop it when empty.
@@ -1620,6 +1654,25 @@ impl Config {
             }
         };
 
+        let camera = {
+            let d = crate::camera::CameraConfig::default();
+            crate::camera::CameraConfig {
+                enabled: fc.camera.enabled.unwrap_or(d.enabled),
+                nvr_host: nonempty(fc.camera.nvr_host),
+                rtsp_port: fc.camera.rtsp_port.unwrap_or(d.rtsp_port),
+                username: nonempty(fc.camera.username),
+                cameras: fc
+                    .camera
+                    .cameras
+                    .into_iter()
+                    .map(|c| crate::camera::CameraSpec {
+                        name: c.name.trim().to_string(),
+                        channel: c.channel,
+                    })
+                    .collect(),
+            }
+        };
+
         let ollama_url = match &llm {
             LlmChoice::Ollama { url, .. } => url.clone(),
             _ => fc
@@ -1705,6 +1758,7 @@ impl Config {
             cadora,
             appsaid,
             home_assistant,
+            camera,
             tool_cache: {
                 let mut tc = crate::cache::ToolCacheConfig::default();
                 tc.overlay(fc.tool_cache);
@@ -1920,6 +1974,9 @@ impl Config {
             // pipeline's fast path. It starts unconnected; `LlmFactory::for_settings`
             // points it at the live URL + token (config seed / env / config page).
             home_assistant: Some(crate::home_assistant::from_config(&self.home_assistant)),
+            // The NVR camera hub (plans/CameraPlan.md): boot-time config + the
+            // REOLINK_PASSWORD secret; `None` (feature off) when anything is missing.
+            camera: crate::camera::from_config(&self.camera, self.camera_password().as_deref()),
             music_display: Default::default(),
             // Prebuilt from the config: the calendar source (web .ics) and the
             // directions provider (Mapbox). The Mapbox token is seeded from the env
@@ -2116,6 +2173,12 @@ impl Config {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// The NVR password for the camera view — a secret, read from `REOLINK_PASSWORD`
+    /// (never from the JSON config). Boot-time only.
+    pub fn camera_password(&self) -> Option<String> {
+        env::var("REOLINK_PASSWORD").ok().filter(|s| !s.is_empty())
     }
 
     /// Initial AppSaid sender app token — a secret, seeded from `APPSAID_APP_TOKEN`.

@@ -349,6 +349,7 @@ pub(crate) fn display_context_line(ctx: &DisplayContext) -> String {
         DisplayContext::Weather(screen) => weather_screen_line(screen),
         DisplayContext::Place(screen) => place_screen_line(screen),
         DisplayContext::Music(screen) => music_screen_line(screen),
+        DisplayContext::Camera(screen) => camera_screen_line(screen),
         // Diagnostics and enrollment are suppressing contexts: the turn never reaches the
         // LLM, so there is no prompt line to contribute. (These arms are unreachable in
         // practice — the orchestrator short-circuits such turns before building the prompt.)
@@ -402,6 +403,17 @@ fn music_screen_line(screen: &MusicScreen) -> String {
 /// The prompt line for the place card: names the place on screen so the model can answer
 /// follow-ups in context ("is it open on Sunday?" → `places_lookup` for the same place)
 /// or `close_places` when the user says to close it.
+/// The prompt line for an open live camera view (`plans/CameraPlan.md`).
+fn camera_screen_line(screen: &crate::wyoming::protocol::CameraScreen) -> String {
+    let name = screen.name.trim();
+    let which = if name.is_empty() { "a camera" } else { name };
+    format!(
+        "The live camera view is currently open on the display, showing {which}. Use \
+         `show_camera` to switch cameras and `close_camera` to close it. You cannot see \
+         the video yourself, so never describe what is on camera."
+    )
+}
+
 fn place_screen_line(screen: &PlaceScreen) -> String {
     let name = screen.name.trim();
     let which = if name.is_empty() {

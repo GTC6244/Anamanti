@@ -34,7 +34,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
-| **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView`, `NowPlayingView`, `NextUpView` |
+| **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView`, `CameraView`, `NowPlayingView`, `NextUpView` |
 | **Settings (route)** | `SettingsScreen`: a side rail of six sections — Assistant (Brain · Capabilities) / Listening (Wake word · Microphone · End of speech) / Audio Diagnostics / Display (Screen · Photos) / Household / Device (Connection · Updates · Maintenance) — plus `AudioDiagnosticsView` |
 | **People / enrollment** (pushed from Settings → Household → People) | `PeopleScreen`, `SpeakerEnrollScreen` |
 | **Memory** (pushed from Settings → Household → Memory) | `MemoryScreen` (tabs: Facts / Conversations / Keywords) |
@@ -71,7 +71,7 @@ events; nothing here touches audio buffers or sockets directly.
   pushed `SettingsScreen` route is **outside** this subtree, so it stays at the
   default size. See [`FontScalePlan.md`](./FontScalePlan.md).
 - Derived flags: `active = state.displayActive` (turn in flight **or** reply audio
-  still playing); `recipeActive` / `weatherActive` / `placeActive`;
+  still playing); `recipeActive` / `weatherActive` / `placeActive` / `cameraActive`;
   `modeActive = any full-screen mode`; `offMode = !userPresent && !active &&
   !modeActive` (away/off face).
 
@@ -89,6 +89,8 @@ events; nothing here touches audio buffers or sockets directly.
 6. `WeatherView` **or** `SevenDayView` (weatherActive) — chosen by
    `state.weather!.isWeek`.
 7. `PlaceView` (placeActive).
+7b. `CameraView` (cameraActive) — the live camera view, 250 ms fade, keyed on the
+    open sequence so each show builds a fresh player.
 7a. `NowPlayingView` (`showNowPlaying`) / `NextUpView` (`showNextUp`) — the music
     full screens, 250 ms fade, driven by `state.effectiveMusicScreen` (a Core-pushed
     mode suppresses them; otherwise a tapped/voiced view, or the full-screen music
@@ -353,7 +355,7 @@ same carrier `fontAdjust` uses) → `AssistantController._applyMusicScreen`, whi
 the music" → `closeMusicScreen` (the same methods touch uses), and "make the music full
 screen" / "use the small music player" (`screen` = `fullscreen` / `compact`) →
 `setMusicDisplayStyle` (already recorded for this display by the Core, so not sent back). A Core-pushed mode
-(recipe/weather/place) sets `musicScreen: hidden` so the music full screen yields to it.
+(recipe/weather/place/camera) sets `musicScreen: hidden` so the music full screen yields to it.
 Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_control` tool.
 
 ## 5. Overlays — away / off mode
@@ -433,9 +435,10 @@ Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_contro
   `Stream<WakeWordEvent>` into an immutable `AssistantState`. Owns turn phases
   (`idle/listening/processing/connecting/thinking/speaking/error`), online/offline
   resilience (backoff reconnect + 3 s offline poll), the local end-of-speech cue,
-  timers, camera `userPresent` presence, follow-up turns, and the three
-  full-screen modes with auto-close timers (weather 60 s, place 5 min). Pushes
-  recipe/weather/place screen context back to Core so voice can drive the screen.
+  timers, camera `userPresent` presence, follow-up turns, and the Core-pushed
+  full-screen modes with auto-close timers (weather 60 s, place 5 min, live camera
+  60 s). Pushes recipe/weather/place/camera screen context back to Core so voice can
+  drive (or close) the screen.
   Loading any full-screen mode unloads the previous one so they never stack.
 
 Full state-machine flow: `agents.md` cheat-sheet + `architecture.md §4`.
@@ -491,6 +494,36 @@ mode; a live turn's `ConversationView` always draws above them.
   + price level, address / phone / website lines, weekly hours. Triggered by
   `showPlace` (Core `places_lookup`) → `AssistantState.place`; auto-closes after
   5 min. See [`PlacesPlan.md`](./PlacesPlan.md).
+
+**`CameraView`** — `lib/src/ui/camera_view.dart` (live front-door camera,
+[`CameraPlan.md`](./CameraPlan.md))
+- Full-screen black background with the NVR's live RTSP **sub-stream** (H.264,
+  640×360) centered at its aspect ratio, **video only** (volume 0; no audio path; it
+  doesn't take audio focus). A top gradient bar holds a camera icon + the camera name
+  (key `camera-name`) and a ✕ close (key `camera-close`). A spinner (key
+  `camera-loading`) shows until the player first reports ready; an error state (key
+  `camera-error`, "Couldn't reach the camera" + the Core's reason when it gave one)
+  shows when the stream fetch fails or the player errors.
+- Played with `video_player` (`VideoPlayerController.networkUrl`) using
+  **`VideoViewType.platformView`** — mandatory: the Echo Show's MTK hardware decoder
+  fails on the default texture view. The Android implementation is the vendored,
+  patched `third_party/video_player_android` (RTP over TCP + a low-latency start
+  buffer for RTSP; see its `ANAMANTI_PATCHES.md`). `VideoPlayerValue.position` is not
+  used as a liveness signal (it stays ~0 for live RTSP). The player is disposed as soon
+  as the view closes.
+- **Triggers:** voice only for now — the Core's camera fast path ("show the front
+  door", "who's at the door") or its `show_camera` tool sends `anamanti-camera`
+  (`show`, camera name) on that display's turn socket → `WakeWordEventKind.showCamera`
+  (name in the `recipeAction` carrier) → `AssistantState.camera` (`CameraSession`,
+  `lib/src/engine/camera_session.dart`). The controller then pulls the stream URL from
+  the Core with the FRB `getCameraStream` (`anamanti-get-camera-stream` →
+  `anamanti-camera-stream`). The URL embeds the NVR credentials: it is held in memory
+  only, never persisted or logged. A newer show replaces the camera (fresh fetch,
+  restarted timer).
+- **Dismiss:** the ✕, voice "stop" / "close it" (the display stamps
+  `screen: {kind: "camera", camera: {name}}` on `audio-start` via `set_camera_context`,
+  so the Core's stop ladder sends `anamanti-camera` `dismiss` → `dismissCamera`), or the
+  **60 s auto-close**. Opening any other Core mode closes it, and vice versa.
 
 **Data models** (tolerant `tryParse(json)` mirrors of Core structs; a malformed
 payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart`),

@@ -369,6 +369,9 @@ fn stop_dismiss_reply(device_ctx: &DeviceContext, followup_depth: u32) -> Option
         // The music player has no System-1 dismiss intent — defer to the LLM, whose
         // `music_screen` / `spotify_control` tools cover close vs. stop-the-music.
         Some(DisplayContext::Music(_)) => None,
+        // The camera view is closed by the camera fast path (which runs before System-1);
+        // anything that reaches here defers to the LLM's `close_camera` tool.
+        Some(DisplayContext::Camera(_)) => None,
         // The diagnostics and enrollment screens are suppressing contexts that never
         // reach here (the turn short-circuits earlier), and have no voice dismiss.
         Some(DisplayContext::Diagnostics) | Some(DisplayContext::Enroll(_)) | None => None,

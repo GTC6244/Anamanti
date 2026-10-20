@@ -144,6 +144,8 @@ pub(crate) fn device_action_event(action: &DeviceAction) -> Option<WyomingEvent>
             serde_json::to_value(report).unwrap_or(serde_json::Value::Null),
         ),
         DeviceAction::DismissPlace => WyomingEvent::place_dismiss(),
+        DeviceAction::ShowCamera { name } => WyomingEvent::camera_show(name),
+        DeviceAction::DismissCamera => WyomingEvent::camera_dismiss(),
         DeviceAction::RecipeControl(nav) => match nav {
             RecipeNav::TabOverview => WyomingEvent::recipe_navigate("overview"),
             RecipeNav::TabIngredients => WyomingEvent::recipe_navigate("ingredients"),

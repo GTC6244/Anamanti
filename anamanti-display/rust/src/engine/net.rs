@@ -437,6 +437,19 @@ async fn run_turn_task(
                     WakeWordEvent::dismiss_place()
                 }
             },
+            // A camera-view command relayed on the voice socket. `Show` opens the live
+            // view of the named camera (the UI then fetches the stream URL itself);
+            // `Dismiss` closes it. The view is UI-owned and outlives the turn.
+            TurnUpdate::Camera(cmd) => match cmd {
+                wyoming::protocol::CameraCommand::Show(camera) => {
+                    log::info!("turn: show camera {camera:?}");
+                    WakeWordEvent::show_camera(camera)
+                }
+                wyoming::protocol::CameraCommand::Dismiss => {
+                    log::info!("turn: dismiss camera");
+                    WakeWordEvent::dismiss_camera()
+                }
+            },
             TurnUpdate::Music(screen) => {
                 log::info!("turn: music screen -> {screen}");
                 WakeWordEvent::music_screen(screen)

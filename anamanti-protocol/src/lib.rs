@@ -298,6 +298,22 @@ pub mod types {
     /// `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`, `photo_uri`, …).
     pub const PLACE: &str = "anamanti-place";
 
+    /// orchestrator → device: show/dismiss the full-screen live camera view
+    /// (`plans/CameraPlan.md`; data: `action` = `"show"` / `"dismiss"`; for `show`,
+    /// `camera` is the camera's display name, e.g. `"Front Door"`). The frame **never**
+    /// carries the stream URL or any credential: on `show` the device fetches the URL
+    /// over the control socket ([`GET_CAMERA_STREAM`]) and holds it in memory only.
+    pub const CAMERA: &str = "anamanti-camera";
+    /// device → orchestrator: fetch the live stream URL for a camera (data: `camera`,
+    /// the display name from the `show` frame; empty/absent = the first configured
+    /// camera). A control request answered on the control socket.
+    pub const GET_CAMERA_STREAM: &str = "anamanti-get-camera-stream";
+    /// orchestrator → device: the stream for a camera (data: `ok`; on success `camera`
+    /// (the resolved display name) and `url` (an `rtsp://` URL **with the NVR
+    /// credentials embedded**); on failure a speakable `message`). Like the Drive
+    /// bundle, the credential rides the device↔orchestrator LAN hop only.
+    pub const CAMERA_STREAM: &str = "anamanti-camera-stream";
+
     /// orchestrator → device: adjust the global on-screen font scale (data: `action` =
     /// `"adjust"`, `direction` = `"increase"` / `"decrease"`). A device action driven by
     /// the `adjust_font` tool / System-1 intent when the turn's `screen.font` context says
@@ -451,6 +467,16 @@ pub enum PlaceCommand {
     /// Show this place report full-screen on the place card (voice-triggered).
     Show(Value),
     /// Dismiss the full-screen place card and return to the idle/ambient display.
+    Dismiss,
+}
+
+/// A camera command decoded from an `anamanti-camera` frame (`plans/CameraPlan.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CameraCommand {
+    /// Open the live view of the named camera (its display name). The device then
+    /// fetches the stream URL itself over the control socket.
+    Show(String),
+    /// Close the live camera view and return to the idle/ambient display.
     Dismiss,
 }
 
@@ -1001,6 +1027,46 @@ impl WyomingEvent {
             "dismiss" => Some(PlaceCommand::Dismiss),
             _ => None,
         }
+    }
+
+    // ---- device actions: camera ----
+
+    /// An `anamanti-camera` **show** action (orchestrator → device): open the live view
+    /// of `camera` (its display name). Carries no URL or credential.
+    pub fn camera_show(camera: &str) -> Self {
+        Self::with_data(types::CAMERA, json!({ "action": "show", "camera": camera }))
+    }
+
+    /// An `anamanti-camera` **dismiss** action (orchestrator → device): close the live
+    /// camera view.
+    pub fn camera_dismiss() -> Self {
+        Self::with_data(types::CAMERA, json!({ "action": "dismiss" }))
+    }
+
+    /// Decode an `anamanti-camera` frame into a [`CameraCommand`], or `None` if this is
+    /// not a camera frame or its `action` is unrecognized. A `show` with no non-blank
+    /// `camera` name is rejected.
+    pub fn camera_command(&self) -> Option<CameraCommand> {
+        if self.event_type != types::CAMERA {
+            return None;
+        }
+        match self.data.get("action").and_then(Value::as_str)? {
+            "show" => self
+                .data
+                .get("camera")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| CameraCommand::Show(s.to_string())),
+            "dismiss" => Some(CameraCommand::Dismiss),
+            _ => None,
+        }
+    }
+
+    /// An `anamanti-get-camera-stream` control request (device → orchestrator) for the
+    /// camera named `camera` (blank = the first configured camera).
+    pub fn get_camera_stream(camera: &str) -> Self {
+        Self::with_data(types::GET_CAMERA_STREAM, json!({ "camera": camera }))
     }
 
     // ---- device actions: font ----

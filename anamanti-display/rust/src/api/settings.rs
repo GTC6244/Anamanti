@@ -98,6 +98,26 @@ pub struct DriveToken {
     pub scope: String,
 }
 
+/// The live stream for one camera, pulled from the Core each time the camera view
+/// opens (`plans/CameraPlan.md`, `anamanti-get-camera-stream` → `anamanti-camera-stream`).
+///
+/// **`url` embeds the NVR credentials** (`rtsp://user:pass@host:554/...`): the device
+/// holds it in memory only — never persisted, never logged. For that reason this type
+/// deliberately has a hand-written `Debug` that redacts `url` (in
+/// `wyoming/control.rs`, outside the FRB-scanned `api` module).
+#[derive(Clone)]
+pub struct CameraStream {
+    /// Whether the Core resolved a stream. When `false`, `message` is a speakable
+    /// reason and `camera`/`url` are empty.
+    pub ok: bool,
+    /// The resolved camera display name (e.g. `"Front Door"`).
+    pub camera: String,
+    /// The `rtsp://` URL **with credentials embedded**. Empty when `ok` is false.
+    pub url: String,
+    /// A human-readable failure reason (empty on success).
+    pub message: String,
+}
+
 /// One capability row in the Core's "functions" snapshot, shown read-only on the
 /// device Settings screen. Describes whether a function runs in the `cloud` or
 /// `local`ly (or is `off`), which model it uses, and whether a required API key is
@@ -376,6 +396,29 @@ pub fn get_drive_token(
             &cache,
             timeout(discovery_timeout_secs),
             preferred(&orchestrator_key),
+        )
+        .await
+    })
+}
+
+/// Fetch the live stream for the camera named `camera` (its display name from the
+/// `ShowCamera` event; blank = the Core's first configured camera), each time the
+/// camera view opens. The returned `url` embeds the NVR credentials: the caller keeps
+/// it in memory only and must never persist or log it. A Core-side failure comes back
+/// as `ok: false` with a speakable `message`; a transport failure (no Core, timeout —
+/// e.g. an older Core that doesn't know the frame) is an `Err`.
+pub fn get_camera_stream(
+    orchestrator_key: String,
+    discovery_timeout_secs: u64,
+    camera: String,
+) -> Result<CameraStream> {
+    block_on(async move {
+        let cache = EndpointCache::new();
+        control::get_camera_stream(
+            &cache,
+            timeout(discovery_timeout_secs),
+            preferred(&orchestrator_key),
+            &camera,
         )
         .await
     })

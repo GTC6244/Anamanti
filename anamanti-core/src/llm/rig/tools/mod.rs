@@ -79,6 +79,8 @@ pub struct ToolDeps {
     pub radio: Option<Arc<crate::music::RadioPlayer>>,
     /// Home Assistant hub for `home_control` (`plans/HomeAssistantPlan.md`).
     pub home_assistant: Option<Arc<crate::home_assistant::HomeAssistant>>,
+    /// NVR camera hub for `show_camera` / `close_camera` (`plans/CameraPlan.md`).
+    pub camera: Option<Arc<crate::camera::CameraHub>>,
     /// The per-display music-style session (`plans/MusicDisplayStylePlan.md`): the
     /// music tools record which display asked to play (shown full screen) and the
     /// `music_screen` tool's full-screen / compact choice for the speaking display.
@@ -322,6 +324,9 @@ impl Tools {
         }
         if let Some(hub) = deps.home_assistant {
             tools.push(home::home_control(hub));
+        }
+        if let Some(hub) = deps.camera {
+            tools.extend(display::camera_tools(hub));
         }
         Self::from_tools(tools)
     }
