@@ -106,6 +106,7 @@ use flutter_rust_bridge::frb;
 /// or the settings screen (Phase 6) and hands them to the engine. The Wyoming
 /// host itself is discovered over mDNS at turn time, so no address is configured
 /// here (architecture.md §5).
+#[frb]
 pub struct WakeWordConfig {
     /// Path to the melspectrogram ONNX model (`melspectrogram.onnx`).
     pub melspec_model_path: String,
@@ -191,6 +192,12 @@ pub struct WakeWordConfig {
     /// Seconds of no motion before the screen is allowed to dim again. `0` uses the
     /// engine default (`presence::DEFAULT_RELEASE`).
     pub proximity_release_secs: u32,
+    /// Camera-as-lux-sensor darkness threshold (estimated lux): the room counts as
+    /// "lights off" once it stays below this, and lit again above 3× it (hysteresis).
+    /// `0` uses the engine default (`ambient::DEFAULT_DARK_LUX`). Only meaningful with
+    /// `camera_proximity` — the lux sensor shares its frames. See `camera/ambient.rs`.
+    #[frb(default = 0.0)]
+    pub night_dark_lux: f32,
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -298,6 +305,13 @@ pub enum WakeWordEventKind {
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
     /// transitions, never per frame.
     Presence,
+    /// The camera-as-lux-sensor's reading (`camera/ambient.rs`): `dark` is whether
+    /// the room's lights are judged off, `lux` the smoothed illuminance estimate.
+    /// Emitted when `dark` flips and every few seconds otherwise (a live readout for
+    /// Settings); the UI dims the screen to its night levels while `dark`. `covered`
+    /// reports a covered lens (privacy shutter / tape), which the UI resolves per the
+    /// user's "when the camera is covered" setting.
+    AmbientLight,
     /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
     /// guided capture (a training sample or the verify check). `enroll_json` carries the
     /// raw `anamanti-enroll-result` data block (phase / accepted / samples / consistency /
@@ -310,6 +324,7 @@ pub enum WakeWordEventKind {
 /// boundary stays dependency-free; fields not relevant to a given `kind` carry
 /// neutral defaults. `Clone` lets the engine fan the sink out to the Phase-3
 /// Wyoming turn task (which emits on the same stream).
+#[frb]
 #[derive(Clone)]
 pub struct WakeWordEvent {
     pub kind: WakeWordEventKind,
@@ -355,6 +370,18 @@ pub struct WakeWordEvent {
     /// Camera proximity state (`Presence`): `true` = someone approached (brighten),
     /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
     pub present: bool,
+    /// Lux sensor (`AmbientLight`): whether the room's lights are off. Neutral
+    /// `false` for every other kind.
+    #[frb(default = false)]
+    pub dark: bool,
+    /// Lux sensor (`AmbientLight`): smoothed estimated illuminance in lux. `0` for
+    /// every other kind.
+    #[frb(default = 0.0)]
+    pub lux: f32,
+    /// Lux sensor (`AmbientLight`): whether the lens looks covered (near-black and
+    /// near-uniform frames — privacy shutter or tape). `false` for every other kind.
+    #[frb(default = false)]
+    pub covered: bool,
     /// The parsed recipe as a JSON string (`ShowRecipe`); empty for every other kind.
     /// The UI decodes it into the recipe-mode tabs.
     pub recipe_json: String,
@@ -393,6 +420,9 @@ impl WakeWordEvent {
             timer_label: String::new(),
             timer_remaining_secs: 0,
             present: false,
+            dark: false,
+            lux: 0.0,
+            covered: false,
             recipe_json: String::new(),
             weather_json: String::new(),
             place_json: String::new(),
@@ -622,6 +652,17 @@ impl WakeWordEvent {
         Self {
             present,
             ..Self::base(WakeWordEventKind::Presence)
+        }
+    }
+
+    // Constructed only by the Android camera bridge; on host builds it's unused.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn ambient_light(dark: bool, lux: f32, covered: bool) -> Self {
+        Self {
+            dark,
+            lux,
+            covered,
+            ..Self::base(WakeWordEventKind::AmbientLight)
         }
     }
 }

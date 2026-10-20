@@ -59,6 +59,16 @@ class WakeWordDefaults {
   static const double brightnessNear = 1.0;
   static const double brightnessAway = 0.25;
 
+  /// Night dimming: the same two levels while the camera-as-lux-sensor reports the
+  /// room's lights are off (`camera/ambient.rs`) — low enough not to light up a dark
+  /// bedroom, while still readable when someone walks up.
+  static const double nightBrightnessNear = 0.15;
+  static const double nightBrightnessAway = 0.02;
+
+  /// Estimated lux below which the room counts as dark (lit again above 3×). The
+  /// camera-derived estimate is approximate; Settings shows the live reading.
+  static const double nightDarkLux = kDefaultNightDarkLux;
+
   static const String melspecFile = 'melspectrogram.onnx';
   static const String embeddingFile = 'embedding_model.onnx';
   static String wakewordFile(String name) => '$name.onnx';
@@ -94,6 +104,7 @@ Future<WakeWordConfig> buildWakeWordConfig({
   bool cameraProximity = WakeWordDefaults.cameraProximity,
   double proximityMotionThreshold = WakeWordDefaults.proximityMotionThreshold,
   int proximityReleaseSecs = WakeWordDefaults.proximityReleaseSecs,
+  double nightDarkLux = WakeWordDefaults.nightDarkLux,
   String orchestratorKey = '',
 }) async {
   final dir = await wakeWordModelDir();
@@ -119,6 +130,7 @@ Future<WakeWordConfig> buildWakeWordConfig({
     cameraProximity: cameraProximity,
     proximityMotionThreshold: proximityMotionThreshold,
     proximityReleaseSecs: proximityReleaseSecs,
+    nightDarkLux: nightDarkLux,
   );
 }
 
@@ -142,6 +154,9 @@ Future<WakeWordConfig> buildWakeWordConfigFrom(AppSettings settings) {
     // How long the screen stays bright after the room goes quiet before dimming to
     // the away-mode clock — the proximity detector's release window (Plan.MD §5).
     proximityReleaseSecs: settings.dimDelaySecs,
+    // How dark the room must get before night dimming kicks in (the lux sensor's
+    // threshold; whether to dim at all is applied UI-side, no engine restart).
+    nightDarkLux: settings.nightDarkLux,
     orchestratorKey: settings.orchestratorKey,
   );
 }

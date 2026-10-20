@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `recipe_step`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
+// These functions are ignored because they are not marked as `pub`: `ambient_light`, `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `recipe_step`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChannelHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
@@ -522,6 +522,12 @@ class WakeWordConfig {
   /// engine default (`presence::DEFAULT_RELEASE`).
   final int proximityReleaseSecs;
 
+  /// Camera-as-lux-sensor darkness threshold (estimated lux): the room counts as
+  /// "lights off" once it stays below this, and lit again above 3× it (hysteresis).
+  /// `0` uses the engine default (`ambient::DEFAULT_DARK_LUX`). Only meaningful with
+  /// `camera_proximity` — the lux sensor shares its frames. See `camera/ambient.rs`.
+  final double nightDarkLux;
+
   const WakeWordConfig({
     required this.melspecModelPath,
     required this.embeddingModelPath,
@@ -544,6 +550,7 @@ class WakeWordConfig {
     required this.cameraProximity,
     required this.proximityMotionThreshold,
     required this.proximityReleaseSecs,
+    this.nightDarkLux = 0.0,
   });
 
   @override
@@ -568,7 +575,8 @@ class WakeWordConfig {
       platformNs.hashCode ^
       cameraProximity.hashCode ^
       proximityMotionThreshold.hashCode ^
-      proximityReleaseSecs.hashCode;
+      proximityReleaseSecs.hashCode ^
+      nightDarkLux.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -595,7 +603,8 @@ class WakeWordConfig {
           platformNs == other.platformNs &&
           cameraProximity == other.cameraProximity &&
           proximityMotionThreshold == other.proximityMotionThreshold &&
-          proximityReleaseSecs == other.proximityReleaseSecs;
+          proximityReleaseSecs == other.proximityReleaseSecs &&
+          nightDarkLux == other.nightDarkLux;
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
@@ -664,6 +673,18 @@ class WakeWordEvent {
   /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
   final bool present;
 
+  /// Lux sensor (`AmbientLight`): whether the room's lights are off. Neutral
+  /// `false` for every other kind.
+  final bool dark;
+
+  /// Lux sensor (`AmbientLight`): smoothed estimated illuminance in lux. `0` for
+  /// every other kind.
+  final double lux;
+
+  /// Lux sensor (`AmbientLight`): whether the lens looks covered (near-black and
+  /// near-uniform frames — privacy shutter or tape). `false` for every other kind.
+  final bool covered;
+
   /// The parsed recipe as a JSON string (`ShowRecipe`); empty for every other kind.
   /// The UI decodes it into the recipe-mode tabs.
   final String recipeJson;
@@ -703,6 +724,9 @@ class WakeWordEvent {
     required this.timerLabel,
     required this.timerRemainingSecs,
     required this.present,
+    this.dark = false,
+    this.lux = 0.0,
+    this.covered = false,
     required this.recipeJson,
     required this.weatherJson,
     required this.placeJson,
@@ -729,6 +753,9 @@ class WakeWordEvent {
       timerLabel.hashCode ^
       timerRemainingSecs.hashCode ^
       present.hashCode ^
+      dark.hashCode ^
+      lux.hashCode ^
+      covered.hashCode ^
       recipeJson.hashCode ^
       weatherJson.hashCode ^
       placeJson.hashCode ^
@@ -757,6 +784,9 @@ class WakeWordEvent {
           timerLabel == other.timerLabel &&
           timerRemainingSecs == other.timerRemainingSecs &&
           present == other.present &&
+          dark == other.dark &&
+          lux == other.lux &&
+          covered == other.covered &&
           recipeJson == other.recipeJson &&
           weatherJson == other.weatherJson &&
           placeJson == other.placeJson &&
@@ -897,6 +927,14 @@ enum WakeWordEventKind {
   /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
   /// transitions, never per frame.
   presence,
+
+  /// The camera-as-lux-sensor's reading (`camera/ambient.rs`): `dark` is whether
+  /// the room's lights are judged off, `lux` the smoothed illuminance estimate.
+  /// Emitted when `dark` flips and every few seconds otherwise (a live readout for
+  /// Settings); the UI dims the screen to its night levels while `dark`. `covered`
+  /// reports a covered lens (privacy shutter / tape), which the UI resolves per the
+  /// user's "when the camera is covered" setting.
+  ambientLight,
 
   /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
   /// guided capture (a training sample or the verify check). `enroll_json` carries the

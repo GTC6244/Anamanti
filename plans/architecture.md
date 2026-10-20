@@ -92,6 +92,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
   (mean absolute luma delta) and emits a `Presence` event when someone approaches or
   the room goes quiet. No ML / no face recognition / no frames leave the device. The
   brightness *actuation* is presentation and lives in Flutter (§2.2), not here.
+  The same frames make the camera a **lux sensor**: each push also carries the
+  capture's exposure time / ISO / aperture (from the Camera2 `CaptureResult` — frame
+  brightness alone is useless because auto-exposure normalizes it), and
+  `camera::ambient` estimates illuminance (`E ≈ 2.5·N²/(t·S/100)` scaled by the frame's
+  distance from mid-grey), smooths it, and applies hysteresis (dark < `night_dark_lux`,
+  lit again > 3×) + dwell (10 s to go dark, 2 s to come back) before emitting an
+  `AmbientLight` event (`dark`, `lux`, `covered`) on a flip, plus a reading every 5 s.
+  `covered` is a separate debounced check for a **covered lens** (privacy shutter /
+  tape): frames with mean luma < 12 and stddev < 6 (0..255) held 10 s, cleared after
+  2 s of normal frames (a pitch-black room can read as covered too).
 
 ### 2.2 Flutter UI (Echo Show)
 
@@ -117,6 +127,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
   delay** — how long the screen stays bright after the room goes quiet before it
   dims to the away-mode clock — is a device-local setting (`AppSettings.dimDelaySecs`
   → the proximity detector's release window; Settings → *Display*).
+  **Night dimming:** `AmbientLight` events fold into `AssistantState.roomDark` /
+  `ambientLux`; while the room is dark and `AppSettings.nightDimEnabled` is on, the
+  controller uses night levels (awake 0.15 / away 0.02 instead of 1.0 / 0.25). The
+  toggle applies live; the darkness threshold (`AppSettings.nightDarkLux` →
+  `WakeWordConfig.nightDarkLux`) restarts the engine. **Covered camera:**
+  `AppSettings.coveredCameraMode` picks what a covered lens means — `clock` (default:
+  take the blind camera's dark + absent reading) or `schedule` (awake by day, dark +
+  absent during `nightStartMinutes`→`nightEndMinutes`, default 21:00→07:00, kept current
+  by a once-a-minute tick in `AssistantController.updateCoveredCamera`). Resolved in
+  `AssistantState.effectivePresent` / `effectiveRoomDark`; applied live.
 - **Photo rotation time:** how long each idle background photo stays up before the
   slideshow cross-fades to the next is a **per-device**, device-local setting
   (`AppSettings.slideIntervalSecs`, default 10 s, 3 s…10 min; Settings → *Display →
