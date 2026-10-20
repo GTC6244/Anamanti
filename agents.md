@@ -431,8 +431,9 @@ anamanti-core/scripts/build-webui-css.sh
 #     is the OAuth callback the consent flow binds + registers, default
 #     http://127.0.0.1:8888/callback)
 #   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
-#     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
-#     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
+#     shopping list, via Cadora's voice API — NextHaul + Cadora share one API on
+#     Cloudflare Workers, no direct database access; base_url default
+#     https://api.getcadora.com/cadora (the retired cadora-server.fly.dev maps to it). Link: mint a 6-digit code in NextHaul → Settings →
 #     Voice & Integrations, enter it on the config page → Integrations → "Shopping list
 #     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)

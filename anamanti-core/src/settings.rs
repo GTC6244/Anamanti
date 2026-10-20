@@ -20,9 +20,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::appsaid::{AppSaidClient, PhoneMessenger};
-use crate::cadora::{
-    CadoraVoiceApi, GroceryController, DEFAULT_BASE_URL as CADORA_DEFAULT_BASE_URL,
-};
+use crate::cadora::{normalize_base_url, CadoraVoiceApi, GroceryController};
 use crate::calendar::CalendarSource;
 use crate::directions::DirectionsProvider;
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
@@ -510,14 +508,11 @@ pub struct CadoraConfig {
 }
 
 impl CadoraConfig {
-    /// The base URL to target, defaulting to the built-in Cadora server when unset.
+    /// The base URL to target: the built-in Cadora API when unset, and also when a
+    /// stale seed/persisted value still names the retired Fly server
+    /// (`crate::cadora::normalize_base_url`).
     pub fn base_url_or_default(&self) -> String {
-        self.base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(CADORA_DEFAULT_BASE_URL)
-            .to_string()
+        normalize_base_url(self.base_url.as_deref())
     }
 
     /// True once a voice-link token exists — the tool can be built.

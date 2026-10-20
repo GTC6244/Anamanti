@@ -154,7 +154,7 @@
   },
 
   "cadora": {
-    "base_url": "https://cadora-server.fly.dev",
+    "base_url": "https://api.getcadora.com/cadora",
     "link_token": null
   },
 

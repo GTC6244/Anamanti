@@ -1022,8 +1022,8 @@ phone) and `search.rs` (`internet_search`).
   & Integrations) mints a one-time **6-digit code** (`/voice/links/pair`); enter it on
   the config page (Household tab) and the Anamanti Core redeems it
   (`/voice/links/redeem`) for a durable voice-link token stored in the 0600 settings
-  file. It never touches Supabase directly — Cadora owns list creation, member
-  attribution, and dedupe. The **`send_phone_message`** tool has the same external
+  file. It only ever calls Cadora's API (`https://api.getcadora.com/cadora`, on
+  Cloudflare Workers) — Cadora owns list creation, member attribution, and dedupe. The **`send_phone_message`** tool has the same external
   shape: it holds an injected `Arc<dyn PhoneMessenger>` (`anamanti-core/src/appsaid/`)
   and pushes a message — often a Google Maps link — to a named family member's phone
   via **AppSaid** (a self-hosted HTML-push worker), one `POST {worker_url}/v1/messages`
