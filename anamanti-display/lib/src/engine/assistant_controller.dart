@@ -22,11 +22,14 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:anamanti_display/src/engine/camera_session.dart';
 import 'package:anamanti_display/src/engine/recipe_data.dart';
 import 'package:anamanti_display/src/engine/place_data.dart';
 import 'package:anamanti_display/src/engine/music_data.dart';
+import 'package:anamanti_display/src/engine/night_schedule.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
+import 'package:anamanti_display/src/rust/api/settings.dart' show CameraStream;
 import 'package:anamanti_display/src/settings/app_settings.dart'
     show kFontScaleMin, kFontScaleMax;
 
@@ -48,6 +51,9 @@ typedef RecipeContextSink =
       required bool atBottom,
       required int ingredientCount,
       required int stepCount,
+      required int highlightedStep,
+      required List<String> ingredients,
+      required List<String> steps,
     });
 
 /// Pushes the current weather-screen state down to the native engine, so the next voice
@@ -73,6 +79,20 @@ typedef PlaceContextSink =
       required String name,
       required String address,
     });
+
+/// Pushes the live camera view's state down to the native engine, so the next voice
+/// turn's `audio-start` tells the orchestrator a camera view is up (and which camera),
+/// letting "stop" / "close it" close it. Carries only the camera's name — never the
+/// stream URL. Production wires the native [setCameraContext]; null (the default, for
+/// tests) disables it.
+typedef CameraContextSink =
+    void Function({required bool active, required String name});
+
+/// Fetches the live stream for a camera (by display name) from the Core when the
+/// camera view opens. Production wires the FRB `getCameraStream`; tests inject a fake.
+/// The returned URL embeds the NVR credentials: callers keep it in memory only and
+/// never log it. Null (the default) skips the fetch, leaving the view loading.
+typedef CameraStreamFetcher = Future<CameraStream> Function(String camera);
 
 /// Pushes the current font-scaling context down to the native engine, so the next voice
 /// turn's `audio-start` tells the orchestrator whether a resizable text surface is on
@@ -129,6 +149,25 @@ enum MusicScreen {
 
   /// The full-screen up-next queue list.
   nextUp,
+}
+
+/// Which of the two timer widgets is on screen — the link between the
+/// [FullScreenTimersView] (screen-filling, idle) and the [CompactTimersOverlay]
+/// (top-center chip row). Resolved in one place by [AssistantState.effectiveTimerDisplay];
+/// the ambient screen only reads it. Follows the dual-form widget convention in
+/// `agents.md` (same shape as [MusicDisplayStyle] / [AssistantState.effectiveMusicScreen]).
+enum TimerDisplayStyle {
+  /// The compact chip row, shown while a turn or any full-screen mode covers the idle
+  /// screen so a running timer stays glanceable.
+  compact,
+
+  /// The big screen-filling timers — the idle presentation.
+  fullscreen;
+
+  /// The form timers take while nothing covers the idle screen, unless
+  /// [AssistantState.timerDisplayStyle] says otherwise: the big screen-filling timers,
+  /// so a running timer is readable across the room.
+  static const defaultStyle = TimerDisplayStyle.fullscreen;
 }
 
 /// Where the current voice turn is, from the UI's point of view.
@@ -220,19 +259,29 @@ class AssistantState {
     this.lastDetectionScore = 0.0,
     this.captureReady = false,
     this.timers = const [],
+    this.timerSpotlight = false,
     this.audioPlaying = false,
     this.userPresent = true,
+    this.roomDark = false,
+    this.ambientLux,
+    this.cameraCovered = false,
+    this.coveredMode = CoveredCameraMode.clock,
+    this.scheduledNight = false,
     this.followUp = false,
     this.recipe,
     this.weather,
     this.weatherCurrent,
     this.place,
+    this.camera,
     this.music,
     this.musicScreen = MusicScreen.hidden,
-    this.musicDisplayStyle = MusicDisplayStyle.compact,
+    this.musicDisplayStyle = MusicDisplayStyle.defaultStyle,
+    this.timerDisplayStyle = TimerDisplayStyle.defaultStyle,
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
+    this.recipeStep = 0,
+    this.recipeStepSeq = 0,
     this.enrollSeq = 0,
     this.enrollResultJson = '',
   });
@@ -301,6 +350,14 @@ class AssistantState {
   /// they run and display during idle and during a turn alike.
   final List<TimerModel> timers;
 
+  /// Whether a timer was just started in the current exchange, so the big
+  /// screen-filling timers should take the screen over the conversation panel right
+  /// away (instead of waiting for the turn to end). Set when a **new** timer id starts
+  /// (an `adjust_timer` re-emit of an existing id doesn't count); cleared when the
+  /// user speaks again (a wake word or a new transcript), so the next exchange gets
+  /// the conversation panel back. Full-screen modes (recipe/weather/music…) still win.
+  final bool timerSpotlight;
+
   /// Whether the reply's TTS audio is still playing out of the speaker. Set when
   /// SPEAKING begins and stays true past the turn's return to idle — because the
   /// device relays audio faster than real-time, so the ring keeps playing after the
@@ -314,6 +371,43 @@ class AssistantState {
   /// stays bright if the camera is unavailable (permission denied / privacy shutter),
   /// rather than sitting dim (Plan.MD §5).
   final bool userPresent;
+
+  /// Whether the camera-as-lux-sensor judges the room's lights to be off
+  /// (`camera/ambient.rs`). The UI dims the backlight to its night levels while this
+  /// is set (and night dimming is enabled). Defaults to `false` so an unavailable or
+  /// still-settling camera never dims the screen.
+  final bool roomDark;
+
+  /// The lux sensor's latest smoothed illuminance estimate, or `null` before the
+  /// first reading (or with no camera). A live readout for tuning in Settings.
+  final double? ambientLux;
+
+  /// Whether the camera lens looks covered (privacy shutter / tape) — near-black,
+  /// near-uniform frames, reported by the lux sensor. A covered camera can't see the
+  /// room, so its presence and darkness readings are resolved per [coveredMode].
+  final bool cameraCovered;
+
+  /// What a covered camera means (the user's Settings → Display → Night choice).
+  final CoveredCameraMode coveredMode;
+
+  /// Whether the current time is inside the user's night window. Only consulted
+  /// while the camera is covered in [CoveredCameraMode.schedule].
+  final bool scheduledNight;
+
+  /// The covered camera is being overridden by the day/night schedule.
+  bool get _scheduleOverrides =>
+      cameraCovered && coveredMode == CoveredCameraMode.schedule;
+
+  /// Presence as the screen should treat it: the camera's [userPresent], except that a
+  /// covered camera on the day/night schedule counts as "someone's here" by day (the
+  /// camera can't see anyone, so the screen stays awake) and defers to [userPresent]
+  /// (voice/touch activity) at night.
+  bool get effectivePresent =>
+      userPresent || (_scheduleOverrides && !scheduledNight);
+
+  /// Whether the room should be treated as dark for night dimming: the lux sensor's
+  /// [roomDark], or — for a covered camera on the schedule — the night window.
+  bool get effectiveRoomDark => _scheduleOverrides ? scheduledNight : roomDark;
 
   /// Whether the current turn was auto-opened as a **follow-up** to a question the
   /// assistant just asked (no wake word). Lets the UI show a "listening for your
@@ -342,6 +436,17 @@ class AssistantState {
   /// The direction of the most recent voice scroll command: `'up'` / `'down'` (a page)
   /// or `'top'` / `'bottom'`. Read together with [recipeScrollSeq].
   final String recipeScrollDir;
+
+  /// The highlighted recipe step, 1-based (0 = none). Set by a voice "go to step N"
+  /// (`recipeStep` event) or a tap on a step; the [RecipeView] draws it as a bubble and
+  /// the pushed screen context reports it, so "next step" can resolve.
+  final int recipeStep;
+
+  /// A counter bumped on each voice step jump (paired with [recipeStep]). The
+  /// [RecipeView] scrolls the highlighted step into view whenever this changes — a
+  /// counter, so asking for the same step again still brings it back on screen after
+  /// the user scrolled away. 0 = no jump yet.
+  final int recipeStepSeq;
 
   /// Monotonic counter bumped each time a voice-enrollment capture result arrives
   /// (SpeakerEnrollmentPlan.md Phase 2). The enroll screen watches it (a counter, so a
@@ -377,6 +482,15 @@ class AssistantState {
   /// Whether the full-screen place card is currently on screen.
   bool get placeActive => place != null;
 
+  /// The live camera view, or `null` when it's closed (plans/CameraPlan.md). Opened by
+  /// voice (the Core's camera fast path / `show_camera` tool); closed by the ✕, voice
+  /// "stop" / "close it", or the auto-close timeout. Outlives the voice turn. Its
+  /// [CameraSession.url] embeds credentials: memory only, never logged.
+  final CameraSession? camera;
+
+  /// Whether the full-screen live camera view is currently on screen.
+  bool get cameraActive => camera != null;
+
   /// The current music now-playing snapshot pushed by the Core over the persistent music
   /// channel, or `null` when nothing is playing (a `dismiss` push). Independent of the
   /// voice turn — music plays and updates during idle. Drives the compact control overlay
@@ -388,9 +502,10 @@ class AssistantState {
   /// [musicDisplayStyle]; read [effectiveMusicScreen] for that.
   final MusicScreen musicScreen;
 
-  /// The household's music-widget preference (compact bar / full screen), owned by the
-  /// Core and mirrored here from the now-playing pushes, the on-screen expand/minimize
-  /// button, and the voice `music_screen` tool. Shared by Spotify and radio.
+  /// This display's music widget (compact bar / full screen), chosen per display by the
+  /// Core and mirrored here from this display's now-playing pushes, its on-screen
+  /// expand/minimize button, and the voice `music_screen` tool. Shared by Spotify and
+  /// radio. By default full screen where the play request came from, compact elsewhere.
   final MusicDisplayStyle musicDisplayStyle;
 
   /// Whether music is currently playing (there is a now-playing snapshot). The compact
@@ -404,12 +519,16 @@ class AssistantState {
   /// someone is there (present or mid-turn), so an unattended display still falls to the
   /// dim away clock rather than holding the backlight up all night.
   MusicScreen get effectiveMusicScreen {
-    if (!musicActive || recipeActive || weatherActive || placeActive) {
+    if (!musicActive ||
+        recipeActive ||
+        weatherActive ||
+        placeActive ||
+        cameraActive) {
       return MusicScreen.hidden;
     }
     if (musicScreen != MusicScreen.hidden) return musicScreen;
     if (musicDisplayStyle == MusicDisplayStyle.fullscreen &&
-        (userPresent || displayActive)) {
+        (effectivePresent || displayActive)) {
       return MusicScreen.nowPlaying;
     }
     return MusicScreen.hidden;
@@ -417,6 +536,31 @@ class AssistantState {
 
   /// Whether a full-screen music view (now-playing or up-next) is currently on screen.
   bool get musicScreenActive => effectiveMusicScreen != MusicScreen.hidden;
+
+  /// The timer form preferred while nothing covers the idle screen. Starts at
+  /// [TimerDisplayStyle.defaultStyle] (the big timers). Nothing changes it yet; it's the
+  /// hook for a future setting or voice command. Read [effectiveTimerDisplay] for what
+  /// is actually on screen.
+  final TimerDisplayStyle timerDisplayStyle;
+
+  /// The timer widget actually on screen, or `null` for neither (no timers, or away
+  /// mode — only the clock shows). Compact whenever something covers the idle screen —
+  /// the conversation panel (a turn or its reply audio), a Core-pushed mode
+  /// (recipe/weather/place/camera), or a full music screen; otherwise this display's
+  /// [timerDisplayStyle] (full screen by default). Exception: right after a timer is
+  /// set ([timerSpotlight]) the big timers replace the conversation panel mid-turn —
+  /// full-screen modes still win.
+  /// The single source of truth for which timer widget shows ([TimerDisplayStyle]).
+  TimerDisplayStyle? get effectiveTimerDisplay {
+    if (timers.isEmpty || !screenAwake) return null;
+    final covered = (displayActive && !timerSpotlight) ||
+        recipeActive ||
+        weatherActive ||
+        placeActive ||
+        cameraActive ||
+        musicScreenActive;
+    return covered ? TimerDisplayStyle.compact : timerDisplayStyle;
+  }
 
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
@@ -445,11 +589,12 @@ class AssistantState {
   /// camera-presence flip. (Historically the backlight tracked only [userPresent],
   /// so a turn/mode that woke the display left the backlight stuck dim.)
   bool get screenAwake =>
-      userPresent ||
+      effectivePresent ||
       displayActive ||
       recipeActive ||
       weatherActive ||
       placeActive ||
+      cameraActive ||
       (musicActive && musicScreen != MusicScreen.hidden);
 
   AssistantState copyWith({
@@ -471,8 +616,14 @@ class AssistantState {
     double? lastDetectionScore,
     bool? captureReady,
     List<TimerModel>? timers,
+    bool? timerSpotlight,
     bool? audioPlaying,
     bool? userPresent,
+    bool? roomDark,
+    double? ambientLux,
+    bool? cameraCovered,
+    CoveredCameraMode? coveredMode,
+    bool? scheduledNight,
     bool? followUp,
     RecipeData? recipe,
     bool clearRecipe = false,
@@ -481,13 +632,18 @@ class AssistantState {
     WeatherData? weatherCurrent,
     PlaceData? place,
     bool clearPlace = false,
+    CameraSession? camera,
+    bool clearCamera = false,
     MusicData? music,
     bool clearMusic = false,
     MusicScreen? musicScreen,
     MusicDisplayStyle? musicDisplayStyle,
+    TimerDisplayStyle? timerDisplayStyle,
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
+    int? recipeStep,
+    int? recipeStepSeq,
     int? enrollSeq,
     String? enrollResultJson,
   }) {
@@ -510,19 +666,29 @@ class AssistantState {
       lastDetectionScore: lastDetectionScore ?? this.lastDetectionScore,
       captureReady: captureReady ?? this.captureReady,
       timers: timers ?? this.timers,
+      timerSpotlight: timerSpotlight ?? this.timerSpotlight,
       audioPlaying: audioPlaying ?? this.audioPlaying,
       userPresent: userPresent ?? this.userPresent,
+      roomDark: roomDark ?? this.roomDark,
+      ambientLux: ambientLux ?? this.ambientLux,
+      cameraCovered: cameraCovered ?? this.cameraCovered,
+      coveredMode: coveredMode ?? this.coveredMode,
+      scheduledNight: scheduledNight ?? this.scheduledNight,
       followUp: followUp ?? this.followUp,
       recipe: clearRecipe ? null : (recipe ?? this.recipe),
       weather: clearWeather ? null : (weather ?? this.weather),
       weatherCurrent: weatherCurrent ?? this.weatherCurrent,
       place: clearPlace ? null : (place ?? this.place),
+      camera: clearCamera ? null : (camera ?? this.camera),
       music: clearMusic ? null : (music ?? this.music),
       musicScreen: musicScreen ?? this.musicScreen,
       musicDisplayStyle: musicDisplayStyle ?? this.musicDisplayStyle,
+      timerDisplayStyle: timerDisplayStyle ?? this.timerDisplayStyle,
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,
+      recipeStep: recipeStep ?? this.recipeStep,
+      recipeStepSeq: recipeStepSeq ?? this.recipeStepSeq,
       enrollSeq: enrollSeq ?? this.enrollSeq,
       enrollResultJson: enrollResultJson ?? this.enrollResultJson,
     );
@@ -545,24 +711,32 @@ class AssistantController extends ChangeNotifier {
     VoidCallback? onUserActivity,
     Duration weatherAutoClose = const Duration(seconds: 60),
     Duration placeAutoClose = const Duration(minutes: 5),
+    Duration cameraAutoClose = const Duration(seconds: 60),
     RecipeContextSink? setRecipeContext,
     WeatherContextSink? setWeatherContext,
     PlaceContextSink? setPlaceContext,
+    CameraContextSink? setCameraContext,
+    CameraStreamFetcher? fetchCameraStream,
     MusicControlSink? musicControl,
     MusicContextSink? setMusicContext,
     FontContextSink? setFontContext,
+    void Function(int id)? dismissNativeTimer,
     void Function(String direction)? onFontAdjust,
     double fontScale = 1.0,
   }) : _config = config,
        _onUserActivity = onUserActivity,
        _weatherAutoClose = weatherAutoClose,
        _placeAutoClose = placeAutoClose,
+       _cameraAutoClose = cameraAutoClose,
        _setRecipeContext = setRecipeContext,
        _setWeatherContext = setWeatherContext,
        _setPlaceContext = setPlaceContext,
+       _setCameraContext = setCameraContext,
+       _fetchCameraStream = fetchCameraStream,
        _musicControl = musicControl,
        _setMusicContext = setMusicContext,
        _setFontContext = setFontContext,
+       _dismissNativeTimer = dismissNativeTimer,
        _onFontAdjust = onFontAdjust,
        _fontScale = fontScale,
        // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
@@ -621,6 +795,7 @@ class AssistantController extends ChangeNotifier {
       cameraProximity: c.cameraProximity,
       proximityMotionThreshold: c.proximityMotionThreshold,
       proximityReleaseSecs: c.proximityReleaseSecs,
+      nightDarkLux: c.nightDarkLux,
     );
   }
 
@@ -658,6 +833,16 @@ class AssistantController extends ChangeNotifier {
   final Duration _placeAutoClose;
   Timer? _placeAutoCloseTimer;
 
+  /// How long the live camera view stays up before it closes on its own (default 60 s),
+  /// so a forgotten view doesn't hold the screen awake and the NVR stream open. Reset by
+  /// each new show; cancelled on an early voice/touch dismiss or when another
+  /// full-screen widget replaces it.
+  final Duration _cameraAutoClose;
+  Timer? _cameraAutoCloseTimer;
+
+  /// Monotonic open counter for [CameraSession.seq] (drops stale stream fetches).
+  int _cameraSeq = 0;
+
   /// Sink for pushing recipe-screen context to the native engine (see
   /// [RecipeContextSink]); null disables it (tests with no native library).
   final RecipeContextSink? _setRecipeContext;
@@ -669,6 +854,14 @@ class AssistantController extends ChangeNotifier {
   /// Sink for pushing place-card context to the native engine (see [PlaceContextSink]);
   /// null disables it (tests with no native library).
   final PlaceContextSink? _setPlaceContext;
+
+  /// Sink for pushing camera-view context to the native engine (see
+  /// [CameraContextSink]); null disables it (tests with no native library).
+  final CameraContextSink? _setCameraContext;
+
+  /// Fetches a camera's stream URL from the Core (see [CameraStreamFetcher]); null
+  /// skips the fetch (tests that don't exercise it).
+  final CameraStreamFetcher? _fetchCameraStream;
 
   /// Sink for sending music transport/volume commands to the Core (see
   /// [MusicControlSink]); null disables it (tests with no native library), so taps are
@@ -682,6 +875,10 @@ class AssistantController extends ChangeNotifier {
   /// Sink for pushing font-scaling context to the native engine (see [FontContextSink]);
   /// null disables it (tests with no native library).
   final FontContextSink? _setFontContext;
+
+  /// Turns a timer off in the native engine (stopping a ringing alarm's repeats).
+  /// Production wires the native `dismissTimer`; null (tests) only clears the UI.
+  final void Function(int id)? _dismissNativeTimer;
 
   /// Called when a voice "increase font" / "decrease font" command arrives, with the
   /// direction `'increase'` / `'decrease'`. The app shell applies + persists the new
@@ -841,6 +1038,7 @@ class AssistantController extends ChangeNotifier {
             reply: '',
             audioPlaying: false,
             followUp: false,
+            timerSpotlight: false,
             // Record the fire for the diagnostics screen's flash + history.
             detectionSeq: _state.detectionSeq + 1,
             lastDetectionScore: e.score,
@@ -863,6 +1061,8 @@ class AssistantController extends ChangeNotifier {
             phase: TurnPhase.thinking,
             online: true,
             transcript: e.transcript,
+            // The user said something new: give the conversation panel back.
+            timerSpotlight: false,
           ),
         );
       case WakeWordEventKind.replyToken:
@@ -916,8 +1116,12 @@ class AssistantController extends ChangeNotifier {
         // no per-second events from Rust. Replace any existing timer with this id.
         final total = Duration(seconds: e.timerRemainingSecs);
         final deadline = _clock().add(total);
+        // A brand-new timer takes the screen right away (see [timerSpotlight]); an
+        // adjust re-emits the same id and leaves the current view alone.
+        final isNew = !_state.timers.any((t) => t.id == e.timerId);
         _emit(
           _state.copyWith(
+            timerSpotlight: isNew ? true : null,
             timers: [
               ..._state.timers.where((t) => t.id != e.timerId),
               TimerModel(
@@ -948,6 +1152,17 @@ class AssistantController extends ChangeNotifier {
         // Camera proximity transition (brighten on approach / dim when quiet). The
         // brightness actuation lives in the UI layer, which reads `userPresent`.
         _emit(_state.copyWith(userPresent: e.present));
+      case WakeWordEventKind.ambientLight:
+        // Camera lux reading: lights off/on (dims the backlight to night levels) plus
+        // the live estimate shown in Settings. Not user activity (see above).
+        _emit(
+          _state.copyWith(
+            roomDark: e.dark,
+            ambientLux: e.lux,
+            cameraCovered: e.covered,
+            scheduledNight: _nightWindow.isNight(_clock()),
+          ),
+        );
       case WakeWordEventKind.showRecipe:
         // The orchestrator pushed a parsed recipe; open recipe mode on the Overview
         // tab. A payload that fails to parse is ignored (recipe stays as it was)
@@ -958,19 +1173,25 @@ class AssistantController extends ChangeNotifier {
         if (recipe != null) {
           _weatherAutoCloseTimer?.cancel();
           _placeAutoCloseTimer?.cancel();
+          _cameraAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
           _emit(
             _state.copyWith(
               recipe: recipe,
               recipeTab: 0,
+              recipeStep: 0,
               clearWeather: true,
               clearPlace: true,
+              clearCamera: true,
               musicScreen: MusicScreen.hidden,
             ),
           );
-          _pushRecipeContext();
+          // The display context is a single slot: clear the replaced screens first so
+          // the newly opened one's (active) context is the last write and wins.
           _pushPlaceContext();
+          _pushCameraContext();
+          _pushRecipeContext();
         }
       case WakeWordEventKind.dismissRecipe:
         _clearRecipe();
@@ -983,6 +1204,7 @@ class AssistantController extends ChangeNotifier {
           // Loading a full-screen widget unloads the previous one (here: the recipe
           // screen) so they never stack.
           _placeAutoCloseTimer?.cancel();
+          _cameraAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
           _emit(
@@ -991,13 +1213,17 @@ class AssistantController extends ChangeNotifier {
               weatherCurrent: weather,
               clearRecipe: true,
               clearPlace: true,
+              clearCamera: true,
               recipeTab: 0,
+              recipeStep: 0,
               musicScreen: MusicScreen.hidden,
             ),
           );
           _scheduleWeatherAutoClose();
-          _pushWeatherContext();
+          // Clear the replaced screens' context first; the active one is written last.
           _pushPlaceContext();
+          _pushCameraContext();
+          _pushWeatherContext();
         }
       case WakeWordEventKind.weatherCurrent:
         // An ambient refresh (from the persistent channel or riding a show): update the
@@ -1017,6 +1243,7 @@ class AssistantController extends ChangeNotifier {
         final place = PlaceData.tryParse(e.placeJson);
         if (place != null) {
           _weatherAutoCloseTimer?.cancel();
+          _cameraAutoCloseTimer?.cancel();
           _recipeAtTop = true;
           _recipeAtBottom = false;
           _emit(
@@ -1024,19 +1251,29 @@ class AssistantController extends ChangeNotifier {
               place: place,
               clearRecipe: true,
               clearWeather: true,
+              clearCamera: true,
               recipeTab: 0,
+              recipeStep: 0,
               musicScreen: MusicScreen.hidden,
             ),
           );
           _schedulePlaceAutoClose();
           _pushRecipeContext();
           _pushWeatherContext();
+          _pushCameraContext();
           _pushPlaceContext();
         }
       case WakeWordEventKind.dismissPlace:
         _placeAutoCloseTimer?.cancel();
         _emit(_state.copyWith(clearPlace: true));
         _pushPlaceContext();
+      case WakeWordEventKind.showCamera:
+        // The orchestrator asked for the live camera view. The camera's display name
+        // rides the generic [WakeWordEvent.recipeAction] carrier; the stream URL is
+        // fetched from the Core here, never carried on the frame.
+        _openCamera(e.recipeAction.trim());
+      case WakeWordEventKind.dismissCamera:
+        _closeCamera();
       case WakeWordEventKind.recipeNavigate:
         // Voice tab switch ("show the ingredients" / "go to the steps").
         if (_state.recipe != null) {
@@ -1053,6 +1290,26 @@ class AssistantController extends ChangeNotifier {
               recipeScrollDir: e.recipeAction,
             ),
           );
+        }
+      case WakeWordEventKind.recipeStep:
+        // Voice "go to step 4" / "next step": switch to the Steps tab, highlight the
+        // step, and bump the seq so the view scrolls it into view. An unparseable or
+        // out-of-range step is ignored.
+        final step = int.tryParse(e.recipeAction.trim());
+        final r = _state.recipe;
+        if (r != null && step != null && step >= 1 && step <= r.steps.length) {
+          if (_state.recipeTab != 2) {
+            _recipeAtTop = true;
+            _recipeAtBottom = false;
+          }
+          _emit(
+            _state.copyWith(
+              recipeTab: 2,
+              recipeStep: step,
+              recipeStepSeq: _state.recipeStepSeq + 1,
+            ),
+          );
+          _pushRecipeContext();
         }
       case WakeWordEventKind.musicScreen:
         // Voice `music_screen` command ("show me what's playing" / "what's up next" /
@@ -1181,15 +1438,120 @@ class AssistantController extends ChangeNotifier {
     }
   }
 
+  /// Open (or retarget) the full-screen live camera view on [name]. Loading a
+  /// full-screen widget unloads the previous one (recipe / weather / place) so they
+  /// never stack. A newer show while one is open replaces it (new name, fresh fetch,
+  /// restarted auto-close).
+  void _openCamera(String name) {
+    _weatherAutoCloseTimer?.cancel();
+    _placeAutoCloseTimer?.cancel();
+    _recipeAtTop = true;
+    _recipeAtBottom = false;
+    final seq = ++_cameraSeq;
+    _emit(
+      _state.copyWith(
+        camera: CameraSession(name: name, seq: seq),
+        clearRecipe: true,
+        clearWeather: true,
+        clearPlace: true,
+        recipeTab: 0,
+        recipeStep: 0,
+        musicScreen: MusicScreen.hidden,
+      ),
+    );
+    _scheduleCameraAutoClose();
+    // Clear the replaced screens' context first; the camera's is written last.
+    _pushRecipeContext();
+    _pushWeatherContext();
+    _pushPlaceContext();
+    _pushCameraContext();
+    unawaited(_loadCameraStream(seq, name));
+  }
+
+  /// Fetch the stream URL for the camera session [seq] and fold the result in. A reply
+  /// for a session that's no longer current (closed, or replaced by a newer show) is
+  /// dropped. Never logs the URL.
+  Future<void> _loadCameraStream(int seq, String name) async {
+    final fetch = _fetchCameraStream;
+    if (fetch == null) return;
+    CameraStream? result;
+    Object? failure;
+    try {
+      result = await fetch(name);
+    } catch (e) {
+      failure = e;
+    }
+    final current = _state.camera;
+    if (_disposed || current == null || current.seq != seq) return;
+    if (result != null && result.ok && result.url.isNotEmpty) {
+      final resolved = result.camera.trim();
+      final renamed = resolved.isNotEmpty && resolved != current.name;
+      _emit(
+        _state.copyWith(
+          camera: current.copyWith(
+            name: renamed ? resolved : null,
+            url: result.url,
+          ),
+        ),
+      );
+      if (renamed) _pushCameraContext();
+      return;
+    }
+    // Only the failure reason is logged — never the URL.
+    debugPrint(
+      'camera stream unavailable: ${failure ?? (result?.message ?? '')}',
+    );
+    _emit(
+      _state.copyWith(
+        camera: current.copyWith(
+          error: failure != null ? '' : (result?.message ?? ''),
+        ),
+      ),
+    );
+  }
+
+  /// (Re)arm the live camera view's auto-close (default 60 s). A new show restarts the
+  /// clock; firing closes the view and clears its display context.
+  void _scheduleCameraAutoClose() {
+    _cameraAutoCloseTimer?.cancel();
+    if (_cameraAutoClose <= Duration.zero) return;
+    _cameraAutoCloseTimer = Timer(_cameraAutoClose, _closeCamera);
+  }
+
+  /// Close the live camera view (voice dismiss, touch, or auto-close). A no-op when it
+  /// isn't open. Dropping the session also drops the in-memory stream URL.
+  void _closeCamera() {
+    _cameraAutoCloseTimer?.cancel();
+    if (_state.camera != null) {
+      _emit(_state.copyWith(clearCamera: true));
+      _pushCameraContext();
+    }
+  }
+
+  /// Push the current camera-view state (active + which camera) down to the native
+  /// engine so the next voice turn carries it to the orchestrator. Never the URL. A
+  /// no-op when no sink is wired (tests).
+  void _pushCameraContext() {
+    final sink = _setCameraContext;
+    if (sink == null) return;
+    final c = _state.camera;
+    sink(active: c != null, name: c?.name ?? '');
+  }
+
+  /// Dismiss the live camera view from the UI (the user taps ✕). Voice dismissal
+  /// arrives instead as a `dismissCamera` event.
+  void dismissCamera() => _closeCamera();
+
   /// Fold a music now-playing push (from the persistent music channel) into state. An
   /// empty/blank payload is a `dismiss` (nothing playing) → clear music and hide any
   /// full music screen; otherwise parse the snapshot and keep whatever music screen the
   /// user has open. A malformed non-empty payload is ignored (keeps the last snapshot)
   /// rather than crashing. Called by the app shell's music-channel subscription.
   ///
-  /// The push also carries the Core's [MusicDisplayStyle] (`display_style`); a change
-  /// made elsewhere (config page, another display, voice) is adopted here — except a
-  /// stale value racing a change this display just made (see [_pendingStyle]).
+  /// The push also carries this display's [MusicDisplayStyle] (`display_style`, chosen
+  /// per display by the Core); a change made elsewhere (a new play request, a config-page
+  /// pin, voice) is adopted here — except a stale value racing a change this display just
+  /// made (see [_pendingStyle]).
   void applyMusicPush(String nowPlayingJson) {
     if (nowPlayingJson.trim().isEmpty) {
       if (_state.music != null) {
@@ -1249,10 +1611,11 @@ class AssistantController extends ChangeNotifier {
     return pushed;
   }
 
-  /// Switch the music widget preference on this display at once and (when [persist]) tell
-  /// the Core, which stores it and re-pushes so every display follows. `persist` is false
-  /// when the change came *from* the Core (the voice tool already stored it). Any
-  /// explicitly opened view is reset so the new preference is what shows.
+  /// Switch this display's music widget at once and (when [persist]) tell the Core, which
+  /// records it as this display's choice for the current music (other displays are not
+  /// affected). `persist` is false when the change came *from* the Core (the voice tool
+  /// already recorded it). Any explicitly opened view is reset so the new style is what
+  /// shows.
   void setMusicDisplayStyle(MusicDisplayStyle style, {bool persist = true}) {
     final changed = style != _state.musicDisplayStyle;
     _pendingStyle = style;
@@ -1268,7 +1631,7 @@ class AssistantController extends ChangeNotifier {
     }
   }
 
-  /// The compact bar's expand button: show music full screen from now on.
+  /// The compact bar's expand button: show the current music full screen on this display.
   void expandMusic() => setMusicDisplayStyle(MusicDisplayStyle.fullscreen);
 
   /// Open the full-screen now-playing view (the user tapped the compact control overlay,
@@ -1292,8 +1655,8 @@ class AssistantController extends ChangeNotifier {
   void backToNowPlaying() => openNowPlaying();
 
   /// Close any full music screen and return to the compact control overlay (music keeps
-  /// playing — this never stops playback). With the full-screen preference this is the
-  /// minimize control: it switches the preference to compact, since otherwise the full
+  /// playing — this never stops playback). With this display's style full screen this is
+  /// the minimize control: it switches this display to compact, since otherwise the full
   /// screen would simply come straight back.
   void closeMusicScreen() {
     if (_state.musicActive &&
@@ -1306,7 +1669,7 @@ class AssistantController extends ChangeNotifier {
 
   /// Apply a voice `music_screen` command (from the engine stream) by routing it through
   /// the same methods a touch uses. `screen` ∈ `now_playing` / `up_next` / `hidden`, or a
-  /// style switch `fullscreen` / `compact` (already persisted by the Core).
+  /// style switch `fullscreen` / `compact` (already recorded for this display by the Core).
   void _applyMusicScreen(String screen) {
     final style = MusicDisplayStyle.tryParse(screen);
     if (style != null) {
@@ -1375,6 +1738,18 @@ class AssistantController extends ChangeNotifier {
   /// Go back to the previous track.
   void previousTrack() => _musicControl?.call(action: 'previous');
 
+  /// Jump to the up-next track at [index] (0-based into [MusicData.nextUp]) — the user
+  /// tapped a row on the up-next list. The Core skips forward to it (`skip_to`), and this
+  /// display returns to the now-playing view so the new track is what's on screen. A
+  /// no-op for an out-of-range index or live radio (which has no queue).
+  void skipToQueueTrack(int index) {
+    final music = _state.music;
+    if (music == null || music.isRadio) return;
+    if (index < 0 || index >= music.nextUp.length) return;
+    _musicControl?.call(action: 'skip_to', value: index);
+    openNowPlaying();
+  }
+
   /// Set the music volume (0–100 percent).
   void setMusicVolume(int percent) =>
       _musicControl?.call(action: 'volume', value: percent.clamp(0, 100));
@@ -1382,6 +1757,33 @@ class AssistantController extends ChangeNotifier {
   /// Mirror the latest global font scale (from [AppSettings.fontScale]) after the app
   /// shell applies a voice adjustment, and re-push the font context so the next turn
   /// reports the new value (and whether it is now at the min/max bound).
+  /// Live-apply the "when the camera is covered" setting: [mode] and the daily night
+  /// [window]. In [CoveredCameraMode.schedule] a once-a-minute tick keeps
+  /// [AssistantState.scheduledNight] current so the screen dims/wakes at the window's
+  /// edges even with no engine events. Safe to call any time (no engine restart).
+  void updateCoveredCamera(CoveredCameraMode mode, NightWindow window) {
+    _nightWindow = window;
+    _nightTick?.cancel();
+    _nightTick = null;
+    if (mode == CoveredCameraMode.schedule) {
+      _nightTick = Timer.periodic(const Duration(minutes: 1), (_) {
+        final night = _nightWindow.isNight(_clock());
+        if (night != _state.scheduledNight) {
+          _emit(_state.copyWith(scheduledNight: night));
+        }
+      });
+    }
+    _emit(
+      _state.copyWith(
+        coveredMode: mode,
+        scheduledNight: window.isNight(_clock()),
+      ),
+    );
+  }
+
+  NightWindow _nightWindow = const NightWindow();
+  Timer? _nightTick;
+
   void updateFontScale(double scale) {
     _fontScale = scale;
     _pushFontContext();
@@ -1434,6 +1836,16 @@ class AssistantController extends ChangeNotifier {
     _pushRecipeContext();
   }
 
+  /// Highlight a recipe step from the UI (a tap on it in the Steps tab), 1-based. The
+  /// pushed context then tells the orchestrator which step the user is on, so "next
+  /// step" continues from there. Tapping the highlighted step again clears it.
+  void selectRecipeStep(int step) {
+    final r = _state.recipe;
+    if (r == null || step < 1 || step > r.steps.length) return;
+    _emit(_state.copyWith(recipeStep: step == _state.recipeStep ? 0 : step));
+    _pushRecipeContext();
+  }
+
   void _setRecipeTab(int index) {
     final clamped = index.clamp(0, 2);
     if (clamped == _state.recipeTab) return;
@@ -1445,11 +1857,12 @@ class AssistantController extends ChangeNotifier {
   }
 
   void _clearRecipe() {
-    _emit(_state.copyWith(clearRecipe: true, recipeTab: 0));
+    _emit(_state.copyWith(clearRecipe: true, recipeTab: 0, recipeStep: 0));
     _pushRecipeContext();
   }
 
-  /// Push the current recipe-screen state (active/tab/scroll/counts) down to the
+  /// Push the current recipe-screen state (active/tab/scroll/counts/highlighted step
+  /// plus the ingredient and step lines) down to the
   /// native engine so the next voice turn carries it to the orchestrator. A no-op
   /// when no sink is wired (tests).
   void _pushRecipeContext() {
@@ -1465,6 +1878,9 @@ class AssistantController extends ChangeNotifier {
         atBottom: false,
         ingredientCount: 0,
         stepCount: 0,
+        highlightedStep: 0,
+        ingredients: const [],
+        steps: const [],
       );
       return;
     }
@@ -1477,13 +1893,20 @@ class AssistantController extends ChangeNotifier {
       atBottom: _recipeAtBottom,
       ingredientCount: r.ingredients.length,
       stepCount: r.steps.length,
+      // The recipe's lines ride the context so the Core can answer "how many tomatoes?"
+      // from what is on screen (System-1 lookup, else the System-2 prompt).
+      highlightedStep: _state.recipeStep,
+      ingredients: r.ingredients,
+      steps: r.steps,
     );
   }
 
-  /// Dismiss a timer from the UI (e.g. the user taps a finished/ringing chip).
-  /// Device-side the timer has already fired or been cancelled; this only clears the
-  /// chip.
+  /// Turn a timer off from the UI — the ringing timer's "Cancel timer" button (or a
+  /// tap on its chip). Tells the engine to stop the alarm (which otherwise repeats
+  /// every 5 s) and clears it from the screen right away; the engine's
+  /// `timerCancelled` that follows is then a no-op.
   void dismissTimer(int id) {
+    _dismissNativeTimer?.call(id);
     if (_state.timers.any((t) => t.id == id)) {
       _emit(
         _state.copyWith(
@@ -1625,11 +2048,13 @@ class AssistantController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _nightTick?.cancel();
     _disposed = true;
     _reconnectTimer?.cancel();
     _offlinePollTimer?.cancel();
     _weatherAutoCloseTimer?.cancel();
     _placeAutoCloseTimer?.cancel();
+    _cameraAutoCloseTimer?.cancel();
     _sub?.cancel();
     super.dispose();
   }

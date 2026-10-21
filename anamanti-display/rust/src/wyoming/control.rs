@@ -19,7 +19,7 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 use crate::api::settings::{
-    DriveToken, EntityInfo, EntityRef, FunctionStatus, MemoryEntry, ModelInfo,
+    CameraStream, DriveToken, EntityInfo, EntityRef, FunctionStatus, MemoryEntry, ModelInfo,
     OrchestratorSettings, SettingsUpdate, SpeakerClipInfo, SpeakerInfo, TurnInfo, VoiceInfo,
 };
 
@@ -178,6 +178,61 @@ fn parse_drive_token(ev: &WyomingEvent) -> DriveToken {
         refresh_token: s("refresh_token"),
         folder_ids,
         scope: s("scope"),
+    }
+}
+
+/// Redacting `Debug` for [`CameraStream`]: its `url` embeds the NVR credentials, so
+/// a stray `{:?}` must never print it. (Lives here, outside the FRB-scanned `api`
+/// module, so codegen never sees the trait impl.)
+impl std::fmt::Debug for CameraStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CameraStream")
+            .field("ok", &self.ok)
+            .field("camera", &self.camera)
+            .field(
+                "url",
+                &if self.url.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("message", &self.message)
+            .finish()
+    }
+}
+
+/// Parse an `anamanti-camera-stream` reply. A success with no `url` is treated as a
+/// failure (there is nothing to play), so callers only ever see `ok` with a URL.
+fn parse_camera_stream(ev: &WyomingEvent) -> CameraStream {
+    let s = |k: &str| {
+        ev.data
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let ok = ev.data.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let url = s("url");
+    if ok && !url.is_empty() {
+        CameraStream {
+            ok: true,
+            camera: s("camera"),
+            url,
+            message: String::new(),
+        }
+    } else {
+        let message = s("message");
+        CameraStream {
+            ok: false,
+            camera: String::new(),
+            url: String::new(),
+            message: if message.is_empty() {
+                "The camera isn't available right now.".to_string()
+            } else {
+                message
+            },
+        }
     }
 }
 
@@ -401,6 +456,35 @@ pub async fn get_drive_token(
         ));
     }
     Ok(parse_drive_token(&resp))
+}
+
+/// Fetch the live stream URL for the camera named `camera` (blank = the Core's
+/// first configured camera), each time the camera view opens (`plans/CameraPlan.md`).
+/// A Core-side refusal comes back as `ok: false` with a speakable `message` (not an
+/// `Err`); a wrong reply type is an `Err`. **The URL embeds the NVR credentials** —
+/// only `ok`/`camera`/`message` are ever logged.
+pub async fn get_camera_stream(
+    cache: &EndpointCache,
+    timeout: Duration,
+    preferred: Option<&str>,
+    camera: &str,
+) -> Result<CameraStream> {
+    let endpoint = resolve(cache, timeout, preferred).await?;
+    let resp = round_trip(&endpoint, WyomingEvent::get_camera_stream(camera)).await?;
+    if resp.event_type != types::CAMERA_STREAM {
+        return Err(anyhow!(
+            "unexpected reply to a camera stream request: {}",
+            resp.event_type
+        ));
+    }
+    let stream = parse_camera_stream(&resp);
+    log::info!(
+        "camera stream: ok={} camera={:?} message={:?}",
+        stream.ok,
+        stream.camera,
+        stream.message
+    );
+    Ok(stream)
 }
 
 /// Fetch the Core's read-only "functions" snapshot (one row per configured
@@ -773,19 +857,23 @@ pub async fn link_speaker(
     ok_message(&resp, "linking failed")
 }
 
-/// Issue a music transport/volume command (`pause`/`resume`/`next`/`previous`/`volume`)
-/// from the display's on-screen controls. Returns the Core's short spoken confirmation;
-/// an in-band failure (Spotify not linked, device asleep, unknown action) is an `Err`
-/// carrying its reason. `value` is the 0–100 percent for `"volume"`.
+/// Issue a music transport/volume command (`pause`/`resume`/`next`/`previous`/`volume`/
+/// `skip_to`) from the display's on-screen controls. Returns the Core's short spoken
+/// confirmation; an in-band failure (Spotify not linked, device asleep, unknown action) is
+/// an `Err` carrying its reason. `value` is the 0–100 percent for `"volume"` and the
+/// 0-based up-next index for `"skip_to"`. `device_id` (this display's id; blank = omitted) tells the Core which display pressed the button — the
+/// `display_fullscreen` / `display_compact` toggle changes only that display.
 pub async fn music_control(
     cache: &EndpointCache,
     timeout: Duration,
     preferred: Option<&str>,
     action: &str,
     value: Option<i64>,
+    device_id: &str,
 ) -> Result<String> {
     let endpoint = resolve(cache, timeout, preferred).await?;
-    let resp = round_trip(&endpoint, WyomingEvent::music_control(action, value)).await?;
+    let request = WyomingEvent::music_control(action, value).with_device_id(device_id);
+    let resp = round_trip(&endpoint, request).await?;
     ok_message(&resp, "music control failed")
 }
 
@@ -1011,6 +1099,86 @@ mod tests {
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::GET_DRIVE_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn get_camera_stream_sends_the_name_and_parses_the_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::CAMERA_STREAM,
+            json!({
+                "ok": true,
+                "camera": "Front Door",
+                "url": "rtsp://user:pass@192.168.1.29:554/h264Preview_05_sub",
+            }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let stream = get_camera_stream(&cache, Duration::from_millis(0), None, "Front Door")
+            .await
+            .unwrap();
+        assert!(stream.ok);
+        assert_eq!(stream.camera, "Front Door");
+        assert_eq!(
+            stream.url,
+            "rtsp://user:pass@192.168.1.29:554/h264Preview_05_sub"
+        );
+        assert!(stream.message.is_empty());
+
+        let request = server.await.unwrap();
+        assert_eq!(request.event_type, types::GET_CAMERA_STREAM);
+        assert_eq!(
+            request.data.get("camera").and_then(Value::as_str),
+            Some("Front Door")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_camera_stream_surfaces_an_in_band_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = WyomingEvent::with_data(
+            types::CAMERA_STREAM,
+            json!({ "ok": false, "message": "The camera isn't set up yet." }),
+        );
+        let server = serve_once(listener, response).await;
+
+        let cache = cache_for(addr);
+        let stream = get_camera_stream(&cache, Duration::from_millis(0), None, "")
+            .await
+            .unwrap();
+        assert!(!stream.ok);
+        assert!(stream.url.is_empty());
+        assert_eq!(stream.message, "The camera isn't set up yet.");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn camera_stream_ok_without_a_url_is_a_failure() {
+        let ev = WyomingEvent::with_data(
+            types::CAMERA_STREAM,
+            json!({ "ok": true, "camera": "Front Door" }),
+        );
+        let stream = parse_camera_stream(&ev);
+        assert!(!stream.ok);
+        assert!(!stream.message.is_empty());
+    }
+
+    #[test]
+    fn camera_stream_debug_never_prints_the_url() {
+        let stream = CameraStream {
+            ok: true,
+            camera: "Front Door".to_string(),
+            url: "rtsp://user:secret@192.168.1.29:554/h264Preview_05_sub".to_string(),
+            message: String::new(),
+        };
+        let shown = format!("{stream:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(!shown.contains("rtsp://"), "{shown}");
+        assert!(shown.contains("<redacted>"));
+        assert!(shown.contains("Front Door"));
     }
 
     #[tokio::test]
@@ -1605,15 +1773,23 @@ mod tests {
         let server = serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let msg = music_control(&cache, Duration::from_millis(0), None, "volume", Some(40))
-            .await
-            .unwrap();
+        let msg = music_control(
+            &cache,
+            Duration::from_millis(0),
+            None,
+            "volume",
+            Some(40),
+            "den",
+        )
+        .await
+        .unwrap();
         assert_eq!(msg, "Set the volume to 40 percent.");
 
         let request = server.await.unwrap();
         assert_eq!(request.event_type, types::MUSIC_CONTROL);
         assert_eq!(request.data["action"], json!("volume"));
         assert_eq!(request.data["value"], json!(40));
+        assert_eq!(request.data["device_id"], json!("den"));
     }
 
     #[tokio::test]
@@ -1625,7 +1801,7 @@ mod tests {
         serve_once(listener, response).await;
 
         let cache = cache_for(addr);
-        let err = music_control(&cache, Duration::from_millis(0), None, "pause", None)
+        let err = music_control(&cache, Duration::from_millis(0), None, "pause", None, "")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("linked"));

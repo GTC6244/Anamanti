@@ -37,6 +37,8 @@ pub enum DisplayContext {
     Place(PlaceScreen),
     /// The music player is up (`kind: "music"`).
     Music(MusicScreen),
+    /// The live camera view is up (`kind: "camera"`, `plans/CameraPlan.md`).
+    Camera(CameraScreen),
     /// The audio-diagnostics screen is up (`kind: "diagnostics"`). This is a
     /// **transcription-only** context: the turn pipeline echoes the STT transcript to
     /// the device for on-screen display and then stops — no speaker ID, no System-1, no
@@ -66,8 +68,11 @@ pub struct EnrollScreen {
 }
 
 /// The recipe screen's state, as carried in a [`DisplayContext::Recipe`]. Tells the
-/// model which tab is showing and whether the pane is scrolled to the top/bottom, so it
-/// can drive the screen with `recipe_control` (switch tab / scroll) or `close_recipe`.
+/// model which tab is showing, whether the pane is scrolled to the top/bottom and which
+/// step is highlighted, so it can drive the screen with `recipe_control` (switch tab /
+/// scroll / go to a step) or `close_recipe` — and carries the recipe's **ingredients and
+/// steps** so recipe questions ("how many tomatoes?") are answered from what is on screen
+/// (System-1 `recipe_ingredient` lookup, or the System-2 prompt).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecipeScreen {
     pub title: String,
@@ -77,7 +82,21 @@ pub struct RecipeScreen {
     pub at_bottom: bool,
     pub ingredient_count: u32,
     pub step_count: u32,
+    /// The highlighted step, 1-based (`0` = none). Set by a voice "go to step N" or a tap.
+    pub highlighted_step: u32,
+    /// The ingredient lines, in order (capped at [`MAX_RECIPE_LINES`] ×
+    /// [`MAX_RECIPE_LINE_CHARS`]). Empty from an older device that doesn't send them.
+    pub ingredients: Vec<String>,
+    /// The step texts, in order (same caps). Empty from an older device.
+    pub steps: Vec<String>,
 }
+
+/// Most ingredient / step lines read from a recipe `screen` block (a bound on what a
+/// device can inflate every turn's prompt with; real recipes are far below it).
+pub const MAX_RECIPE_LINES: usize = 80;
+/// Longest single ingredient / step line kept (longer lines are truncated on a char
+/// boundary).
+pub const MAX_RECIPE_LINE_CHARS: usize = 600;
 
 /// The weather screen's state, as carried in a [`DisplayContext::Weather`]. Tells the
 /// model the forecast is on screen (and what it currently shows), so it can answer
@@ -103,6 +122,14 @@ pub struct PlaceScreen {
     pub name: String,
     /// Its one-line address.
     pub address: String,
+}
+
+/// The live camera view's state, as carried in a [`DisplayContext::Camera`]. Tells the
+/// Core a camera is on screen (and which), so "stop"/"close it" closes it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CameraScreen {
+    /// The camera shown (its configured display name, e.g. "Front Door").
+    pub name: String,
 }
 
 /// The music player's state, as carried in a [`DisplayContext::Music`]. Tells the model
@@ -136,6 +163,16 @@ pub fn display_context(data: &Value) -> Option<DisplayContext> {
         }
         "place" => parse_place_screen(screen.get("place")?.as_object()?).map(DisplayContext::Place),
         "music" => parse_music_screen(screen.get("music")?.as_object()?).map(DisplayContext::Music),
+        // The camera block is optional detail: a bare `kind: "camera"` still means the
+        // view is up (so "stop" closes it).
+        "camera" => Some(DisplayContext::Camera(CameraScreen {
+            name: screen
+                .get("camera")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })),
         // The audio-diagnostics screen carries no state — its presence alone switches the
         // turn to transcription-only (the orchestrator short-circuits before any LLM work).
         "diagnostics" => Some(DisplayContext::Diagnostics),
@@ -242,6 +279,11 @@ pub struct DeviceContext {
     /// (`plans/HomeAssistantPlan.md` §A2). `None` when the device doesn't report one —
     /// the Core's `home_assistant.default_room` then applies.
     pub room: Option<String>,
+    /// The stable id of the display this turn came from (`audio-start` `data.device_id`,
+    /// the same id it announces in its `anamanti-hello` frames), so a play request can show
+    /// full screen on the display that asked (`plans/MusicDisplayStylePlan.md`). `None`
+    /// from an older display that doesn't send one.
+    pub device_id: Option<String>,
 }
 
 impl DeviceContext {
@@ -253,6 +295,7 @@ impl DeviceContext {
             Some(DisplayContext::Weather(_)) => Some("weather"),
             Some(DisplayContext::Place(_)) => Some("place"),
             Some(DisplayContext::Music(_)) => Some("music"),
+            Some(DisplayContext::Camera(_)) => Some("camera"),
             // Diagnostics never reaches System-1/System-2 (the turn short-circuits before
             // them), so it reports no widget label — nothing can leak into a decision or
             // prompt even if that ordering changes later. Enrollment is the same: the turn
@@ -338,13 +381,19 @@ pub fn device_context(data: &Value) -> DeviceContext {
         widget: display_context(data),
         timers: timer_context(data),
         font: font_context(data),
-        room: data
-            .get("room")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(str::to_string),
+        room: trimmed_str(data, "room"),
+        device_id: trimmed_str(data, "device_id"),
     }
+}
+
+/// A top-level string field of an `audio-start` data block, trimmed; `None` when absent
+/// or blank.
+fn trimmed_str(data: &Value, key: &str) -> Option<String> {
+    data.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse the `weather` sub-object of a `screen` block into a [`WeatherScreen`].
@@ -426,6 +475,22 @@ fn parse_recipe_screen(recipe: &Map<String, Value>) -> Option<RecipeScreen> {
         .and_then(Value::as_str)
         .unwrap_or("overview")
         .to_string();
+    let lines = |k: &str| -> Vec<String> {
+        recipe
+            .get(k)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .take(MAX_RECIPE_LINES)
+                    .map(|l| l.chars().take(MAX_RECIPE_LINE_CHARS).collect())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     Some(RecipeScreen {
         title: s("title"),
         tab,
@@ -433,6 +498,9 @@ fn parse_recipe_screen(recipe: &Map<String, Value>) -> Option<RecipeScreen> {
         at_bottom: b("at_bottom", false),
         ingredient_count: n("ingredient_count"),
         step_count: n("step_count"),
+        highlighted_step: n("highlighted_step"),
+        ingredients: lines("ingredients"),
+        steps: lines("steps"),
     })
 }
 
@@ -549,8 +617,30 @@ mod tests {
                 at_bottom: true,
                 ingredient_count: 6,
                 step_count: 4,
+                ..Default::default()
             }))
         );
+
+        // A newer device also sends the highlighted step and the recipe's lines; blank
+        // and non-string entries are dropped, the lists are capped.
+        let full = json!({
+            "screen": {
+                "kind": "recipe",
+                "recipe": {
+                    "title": "Salsa",
+                    "tab": "steps",
+                    "highlighted_step": 2,
+                    "ingredients": ["4 ripe tomatoes, chopped", "  ", 7, "1 onion"],
+                    "steps": (0..200).map(|i| format!("step {i}")).collect::<Vec<_>>(),
+                },
+            },
+        });
+        let Some(DisplayContext::Recipe(r)) = display_context(&full) else {
+            panic!("expected a recipe context");
+        };
+        assert_eq!(r.highlighted_step, 2);
+        assert_eq!(r.ingredients, vec!["4 ripe tomatoes, chopped", "1 onion"]);
+        assert_eq!(r.steps.len(), MAX_RECIPE_LINES);
 
         // A device with the weather screen up stamps a `weather` block.
         let weather = json!({
@@ -604,6 +694,23 @@ mod tests {
         // An unknown screen kind (a screen this Core doesn't understand yet) is ignored.
         let other = json!({ "screen": { "kind": "photos" } });
         assert_eq!(display_context(&other), None);
+    }
+
+    #[test]
+    fn camera_screen_parses_with_or_without_detail() {
+        let full = json!({ "screen": { "kind": "camera", "camera": { "name": "Front Door" } } });
+        assert_eq!(
+            display_context(&full),
+            Some(DisplayContext::Camera(CameraScreen {
+                name: "Front Door".into()
+            }))
+        );
+        assert_eq!(device_context(&full).widget_label(), Some("camera"));
+        let bare = json!({ "screen": { "kind": "camera" } });
+        assert_eq!(
+            display_context(&bare),
+            Some(DisplayContext::Camera(CameraScreen::default()))
+        );
     }
 
     #[test]

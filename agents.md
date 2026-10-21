@@ -61,9 +61,11 @@ Core's Music & Devices page with Radio Browser logo lookup, played by the existi
 snapserver `Web` stream on the same speakers as Spotify, the `radio_control` tool, and a
 radio variant of the display's now-playing screen over the existing `anamanti-music` push), and
 [`MusicDisplayStylePlan.md`](./plans/MusicDisplayStylePlan.md) (the music widget while
-Spotify/radio plays — compact bar or full screen: one Core-owned, persisted preference stamped
-on every now-playing push, settable from Music & Devices, the display's expand/minimize
-button, or the `music_screen` tool's `fullscreen`/`compact` actions), and
+Spotify/radio plays — compact bar or full screen, **per display**: full screen on the display
+the play request came from, compact elsewhere; each display can switch itself for the current
+music via its expand/minimize button or the `music_screen` tool, and Music & Devices can pin a
+display. Core-owned (`MusicDisplayRouter` + persisted pins), stamped per display on each
+now-playing push; the display sends its `device_id` on `audio-start` + music-control), and
 [`SpeakerScopedMemoryPlan.md`](./plans/SpeakerScopedMemoryPlan.md) (memory scopes
 `person` / `household` / `unknown`: a fact said by an unrecognized voice is kept but never
 recalled for anyone; per-turn speaker resolution `identified|tentative|new|unknown`;
@@ -79,7 +81,12 @@ after STT, with a per-language Piper voice and localized fast-path phrases/canne
 current STT engine and the current memory embedder, and English must not regress (every phase is gated
 on English non-regression + pt parity). Core-only: the Display is left as is (English chrome;
 streamed text may be pt), and the weather screen + ambient push stay English. System-1 handles pt
-after Phase 2 calibration).
+after Phase 2 calibration), and
+[`CameraPlan.md`](./plans/CameraPlan.md) (live NVR camera view: a pre-System-1 camera fast
+path + `show_camera`/`close_camera` → the `anamanti-camera` frame on the speaking display;
+the device fetches the RTSP URL via `anamanti-get-camera-stream` and plays it through the
+**vendored, patched** `anamanti-display/third_party/video_player_android` in platform-view
+mode — see its `ANAMANTI_PATCHES.md` before upgrading `video_player`).
 
 ---
 
@@ -365,6 +372,8 @@ anamanti-core/scripts/build-webui-css.sh
 #   HOME_ASSISTANT_TOKEN                 (Home Assistant long-lived access token for the
 #     home-command fast path + the home_control tool; UI: Integrations →
 #     `/integrations#home_assistant` (masked, also on Keys & Accounts). Absent ⇒ both off)
+#   REOLINK_PASSWORD                     (the NVR password for the live camera view,
+#     plans/CameraPlan.md. Boot-time only — NOT runtime-settable yet. Absent ⇒ camera off)
 #   RUST_LOG                             (standard env_logger filter; env-only — read at
 #     process start, so it has no config-page control)
 #
@@ -436,9 +445,10 @@ anamanti-core/scripts/build-webui-css.sh
 #     tool; Premium; easiest setup is config page → Integrations → Spotify → "Connect Spotify". redirect_url
 #     is the OAuth callback the consent flow binds + registers, default
 #     http://127.0.0.1:8888/callback)
-#   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
-#     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
-#     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
+#   cadora{base_url,link_token} (shopping_list_add + calendar_add tools → the shared
+#     household shopping list and Cadora family calendar, via Cadora's voice API — NextHaul + Cadora share one API on
+#     Cloudflare Workers, no direct database access; base_url default
+#     https://api.getcadora.com/cadora (the retired cadora-server.fly.dev maps to it). Link: mint a 6-digit code in NextHaul → Settings →
 #     Voice & Integrations, enter it on the config page → Integrations → "Shopping list
 #     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)
@@ -462,6 +472,11 @@ anamanti-core/scripts/build-webui-css.sh
 #     stale-while-refresh). base_url + default_room (and the token) are runtime-settable on
 #     Integrations → Home Assistant (with a read-only "Test connection") and persisted to
 #     settings_path; the shared hub is reconfigured live, no restart.
+#   camera{enabled,nvr_host,rtsp_port,username,cameras:[{name,channel}]} (plans/CameraPlan.md)
+#     → the camera fast path + show_camera/close_camera + the anamanti-get-camera-stream
+#     control reply; off unless nvr_host + username + ≥1 camera + REOLINK_PASSWORD are set.
+#     `channel` is the number the NVR's own UI shows (1-based; RTSP h264Preview_05_sub for 5).
+#     Boot-time only.
 #   tool_cache{"<tool>": <seconds>, …} — per-tool response-cache TTLs, a flat map keyed by
 #     tool name, overlaid on built-in defaults; `0` disables a tool's cache. Generic
 #     (crate::cache::ToolCache) but only read-only tools are wired: weather_lookup defaults
@@ -744,6 +759,29 @@ Android toolchain again.
   lint with `cargo clippy`.
 - **Dart/Flutter:** stream-driven widgets (no polling); landscape-first layout for
   the 8-inch screen; `flutter format` / `dart analyze`.
+- **Dual-form display widgets (compact + full screen):** any on-screen feature that has
+  both a small form (a bar, chip row, or badge riding the ambient screen) and a
+  full-screen form is built as **two separate widgets linked by a state enum**, never as
+  one widget with a `compact: bool` flag. Concretely:
+  1. An enum named `<Feature>DisplayStyle { compact, fullscreen }` names the two forms.
+     Its doc comment names both widgets so either one can be found from the other.
+  2. **Every such enum declares a default**: `static const defaultStyle = …`, with a doc
+     comment saying why that form is the default. The state has a
+     `<feature>DisplayStyle` field that starts at that default; it's the one place a
+     user, voice, or Core preference later changes the form. Never hard-code the
+     default form anywhere else.
+  3. **One** resolver getter on `AssistantState` decides which form is on screen (or
+     neither). It combines the `<feature>DisplayStyle` field with the screen context:
+     turn, Core-pushed modes, away mode. `AmbientScreen` only reads that getter and maps
+     it to each widget's opacity/`IgnorePointer`. Visibility rules are never re-derived
+     inline from raw flags.
+  Reference implementations: **music** (`MusicDisplayStyle`, default `compact` until the
+  Core stamps a per-display style → `effectiveMusicScreen`; `MusicControlOverlay` /
+  `NowPlayingView`) and **timers** (`TimerDisplayStyle`, default `fullscreen`, the big
+  widget → `effectiveTimerDisplay`; `FullScreenTimersView` / `CompactTimersOverlay`;
+  forced to compact whenever a turn or full-screen mode covers the idle screen, except that a
+  just-set timer (`timerSpotlight`) keeps the big form over the conversation panel). New dual-form widgets (e.g. the planned HA dashboard
+  widget) follow the same shape, and are listed as a linked pair in `DisplayUI.md`.
 - **FRB:** change Rust signatures, then regenerate — never hand-edit generated
   bindings.
 - **Wyoming:** newline-delimited (`\n`) JSON control frames; raw PCM immediately

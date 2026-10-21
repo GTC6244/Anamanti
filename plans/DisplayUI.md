@@ -29,12 +29,12 @@ events; nothing here touches audio buffers or sockets directly.
 | **Backgrounds / idle** | `SlideshowView`, `SlideshowController`, `PhotoSource` backends (local / Ambient / Drive) |
 | **Overlays (always-on)** | idle `_AmbientClock` + weather-beside-clock chip, `StatusIndicator`, settings gear |
 | **Overlays (listening cue)** | `ListeningOverlay` — big glowing blue ring (hollow) that reacts to mic level while listening |
-| **Overlays (timers)** | `TimersOverlay` — big (idle) + compact (in-turn) |
-| **Overlays (music)** | `MusicControlOverlay` — compact transport bar while a track plays (or `NowPlayingView` full screen, per the music display style) |
+| **Overlays (timers)** | `FullScreenTimersView` (idle) + `CompactTimersOverlay` (in-turn / over a mode) — linked by `TimerDisplayStyle` |
+| **Overlays (music)** | `MusicControlOverlay` — compact transport bar while a track plays (or `NowPlayingView` full screen, per this display's music display style) |
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
 | **Conversation UI** | `ConversationView` (user + assistant bubbles) |
-| **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView`, `NowPlayingView`, `NextUpView` |
+| **Full-screen views** (pushed by Core) | `RecipeView`, `WeatherView`, `SevenDayView`, `PlaceView`, `CameraView`, `NowPlayingView`, `NextUpView` |
 | **Settings (route)** | `SettingsScreen`: a side rail of six sections — Assistant (Brain · Capabilities) / Listening (Wake word · Microphone · End of speech) / Audio Diagnostics / Display (Screen · Photos) / Household / Device (Connection · Updates · Maintenance) — plus `AudioDiagnosticsView` |
 | **People / enrollment** (pushed from Settings → Household → People) | `PeopleScreen`, `SpeakerEnrollScreen` |
 | **Memory** (pushed from Settings → Household → Memory) | `MemoryScreen` (tabs: Facts / Conversations / Keywords) |
@@ -71,7 +71,7 @@ events; nothing here touches audio buffers or sockets directly.
   pushed `SettingsScreen` route is **outside** this subtree, so it stays at the
   default size. See [`FontScalePlan.md`](./FontScalePlan.md).
 - Derived flags: `active = state.displayActive` (turn in flight **or** reply audio
-  still playing); `recipeActive` / `weatherActive` / `placeActive`;
+  still playing); `recipeActive` / `weatherActive` / `placeActive` / `cameraActive`;
   `modeActive = any full-screen mode`; `offMode = !userPresent && !active &&
   !modeActive` (away/off face).
 
@@ -83,12 +83,15 @@ events; nothing here touches audio buffers or sockets directly.
 3. Dim scrim — `IgnorePointer` + `AnimatedContainer` (400 ms), alpha 0.55 during
    an active turn / 0.15 otherwise; pointer-transparent so idle swipes reach the
    slideshow.
-4. Big `TimersOverlay` (`compact: false`) — screen-filling idle timers; fades out
-   during a turn, in away mode, or in any full-screen mode.
+4. `FullScreenTimersView` — screen-filling idle timers, shown while
+   `effectiveTimerDisplay == TimerDisplayStyle.fullscreen`; fades out during a turn,
+   in away mode, or in any full-screen mode.
 5. `RecipeView` (recipeActive) — 250 ms fade.
 6. `WeatherView` **or** `SevenDayView` (weatherActive) — chosen by
    `state.weather!.isWeek`.
 7. `PlaceView` (placeActive).
+7b. `CameraView` (cameraActive) — the live camera view, 250 ms fade, keyed on the
+    open sequence so each show builds a fresh player.
 7a. `NowPlayingView` (`showNowPlaying`) / `NextUpView` (`showNextUp`) — the music
     full screens, 250 ms fade, driven by `state.effectiveMusicScreen` (a Core-pushed
     mode suppresses them; otherwise a tapped/voiced view, or the full-screen music
@@ -98,22 +101,25 @@ events; nothing here touches audio buffers or sockets directly.
    `IgnorePointer`, shown only while `state.listening` (wake word / follow-up listen
    → end-of-speech). Reacts to `state.micLevel`. Mounted only while shown so its
    pulse controller isn't spinning during idle.
-9a. `MusicControlOverlay` — compact transport bar, `Positioned(bottom: 18)`,
-    centered, 250 ms fade; shown while `musicOverlayVisible` (a track is playing and
+9a. **Bottom strip** — one `Positioned(left: 28, right: 20, bottom: 24)` `Row`:
+    the idle clock (item 10) on the left, then an `Expanded` **bottom-widget slot**
+    right-aligned in line with it (see *Bottom-edge layout rule* below). Today the
+    slot holds `MusicControlOverlay` — the compact transport bar, 250 ms fade; shown while `musicOverlayVisible` (a track is playing and
     no full music screen / Core mode / turn is up and someone is present). Tappable
-    (opens `NowPlayingView`); its expand button switches the music display style to
-    full screen.
-10. Idle clock (`_AmbientClock`, small) — `Positioned(left: 28, bottom: 24)`;
+    (opens `NowPlayingView`); its expand button switches this display's music display
+    style to full screen (other displays keep theirs).
+10. Idle clock (`_AmbientClock`, small) — the left child of the bottom strip;
     hidden during a turn, off mode, any full-screen mode, or when timers exist.
 11. Away-mode face (`_AmbientClock`, large) — centered dimmed clock, 500 ms fade.
 12. `StatusIndicator` — `Positioned(right: 20, top: 18)`; hidden in away mode.
 13. Settings gear `IconButton` — `Positioned(left: 12, top: 10)`, key
-    `open-settings`; fades out during a turn and in away mode.
+    `open-settings`; **hidden by default** — shown only for 5 s after a touch, and only
+    when no full-screen widget is displayed and not in away mode (see §2).
 14. `NotificationBanner` — shows even in away mode.
 15. `UpdateBanner` — in-app updater prompt/progress (selfUpdate flavor).
-16. Compact `TimersOverlay` (`compact: true`) — top-center chip row, the **top-most
+16. `CompactTimersOverlay` — top-center chip row, the **top-most
     layer** so a running timer always has z-order precedence over every other overlay
-    and banner. Shown (`compactTimersVisible`) whenever timers run and the big
+    and banner. Shown (`effectiveTimerDisplay == TimerDisplayStyle.compact`) whenever timers run and the big
     screen-filling presentation is hidden — i.e. while a turn is active **or** any
     full-screen mode (recipe/weather/place/music) is up — so the timer stays glanceable
     instead of hiding behind those views; suppressed in away mode.
@@ -128,11 +134,14 @@ events; nothing here touches audio buffers or sockets directly.
   `Image.network` (per-item auth `headers`) over a `LinearGradient`, or a pure
   gradient when there is no image (also the load/error fallback, 600 ms fade-in).
 - Started in `initState` (`_slideshow.start()`), independent of settings /
-  connectivity. Horizontal swipe → next/previous photo (resets the 10 s
-  auto-advance). `HitTestBehavior.opaque`.
+  connectivity. Horizontal swipe → next/previous photo (resets the
+  auto-advance timer to a full interval). `HitTestBehavior.opaque`.
 
 **`SlideshowController`** — `lib/src/slideshow/photo_source.dart`
-- Cycles a `PhotoSource`'s photos on a 10 s timer, decoupled from the assistant.
+- Cycles a `PhotoSource`'s photos on a timer, decoupled from the assistant. The
+  rotation time is **per device** — `AppSettings.slideIntervalSecs` (default 10 s,
+  clamped 3 s…10 min), set on Settings → Display → Photos ("Change photo every") and
+  applied live via `setInterval` (restarts the timer; no engine restart).
   Silently falls back to `LocalPhotoSource` if the configured source throws or
   returns empty.
 
@@ -158,24 +167,45 @@ Core-owned path).
 
 **`_AmbientClock` / `_AmbientClockState`** — `lib/src/ui/ambient_screen.dart` (file-private)
 - A 1 s-ticking 12-hour clock (`h:mm AM/PM`) in two variants:
-  - **Idle** (bottom-left): 44px time, the weather chip beside it, and the hint
-    "Say the wake word to begin".
+  - **Idle** (bottom-left): 50px time with the weather chip beside it (no hint
+    text — the "Say the wake word to begin" line was removed 2026-10-19).
   - **Away/off** (`large: true`): centered 168px dimmed (white α 0.5) time only,
     `FittedBox` to guard overflow.
 - **`_weatherChip(WeatherData)`** (key `idle-weather`): the weather-beside-clock
-  indicator — a condition `Icon` (30px) + current temperature with unit suffix
-  (28px), sourced from `state.weatherCurrent`; hidden when null.
+  indicator — a condition `Icon` (34px) + current temperature with unit suffix
+  (32px), sourced from `state.weatherCurrent`; hidden when null.
 
 **`StatusIndicator`** — `lib/src/ui/status_indicator.dart`
-- Top-right pill (icon + label + color) mapping `AssistantState`:
+- Top-right status. **Healthy idle is a bare 14px green dot** (key
+  `status-ready-dot`, no label, no pill). Every other state is a pill (icon + label +
+  color) mapping `AssistantState`:
   `error` → "Reconnecting" (salmon); offline+idle → "Offline" (amber, the
   disconnected indicator); `listening` → "Listening"; `processing` →
   "Processing"; `connecting` → "Connecting"; `thinking` → "Thinking";
-  `speaking` → "Speaking"; `idle` → "Ready". Hidden only in away mode.
+  `speaking` → "Speaking"; `idle` → the green dot. Hidden only in away mode.
 
 **Settings gear** — `lib/src/ui/ambient_screen.dart`
-- Top-left `IconButton` (key `open-settings`, opacity 0.7) → `onOpenSettings`;
-  fades out during a turn and in away mode. The only entry to `SettingsScreen`.
+- Top-left `IconButton` (key `open-settings`, opacity 0.7) → `onOpenSettings`. The
+  only entry to `SettingsScreen`. **Hidden unless the screen was touched AND no
+  full-screen widget is displayed**: a translucent `Listener` (`_TouchReveal`, doesn't
+  consume the touch) reveals it for 5 s after each pointer-down. Only full-screen
+  widgets block it — the turn's conversation panel, a full-screen mode
+  (recipe/weather/place/music now-playing/up-next), or the big screen-filling idle
+  timers — plus away mode. Partial overlays (the compact music bar, the listening ring,
+  banners) never block it. Hidden, it is disabled — the first touch only reveals it; a
+  second tap opens settings.
+
+### Bottom-edge layout rule (all current and upcoming bottom widgets)
+
+**No bottom widget may ever cover the time/weather (the idle clock).** The bottom edge
+is a single `Row` in `ambient_screen.dart`: the idle clock on the left, then an
+`Expanded` bottom-widget slot whose contents are **right-aligned, vertically in line
+with the time/weather**. A bottom widget only gets the width the clock leaves (its own
+content must shrink/ellipsize, as `MusicControlOverlay`'s title does). When adding a
+new bottom widget (e.g. a Home Assistant strip, a calendar "next up" chip), put it in
+that slot — **never** as its own `Positioned(bottom: …)` layered over the clock. If
+several bottom widgets can be visible at once, stack/arrange them inside the slot.
+Full-screen views are exempt (they hide the clock anyway).
 
 **`weatherIcon(code, isDay)` / `weatherIconColor(code, isDay)`** — `lib/src/ui/weather_icons.dart`
 - Shared helper (not a widget). Maps WMO codes → bundled Material icons + tints
@@ -222,24 +252,41 @@ Core-owned path).
 
 ## 4. Overlays — timers
 
-**`TimersOverlay` / `_TimersOverlayState`** — `lib/src/ui/timers_overlay.dart`
-- On-device countdown timers; repaints twice a second to interpolate remaining
-  time and ring fill (no per-second Rust events needed). Two presentations:
-  - **Big (`compact: false`)** — `_FullTimers`: idle, screen-filling. 1 fills the
+**`FullScreenTimersView` + `CompactTimersOverlay`** — `lib/src/ui/timers_overlay.dart`
+- On-device countdown timers as a **linked dual-form pair** (the `agents.md` dual-form
+  widget convention): two widgets linked by `TimerDisplayStyle { compact, fullscreen }`.
+  Which one shows is resolved only by `AssistantState.effectiveTimerDisplay`: `null`
+  with no timers or in away mode, `compact` while a turn/reply audio, a Core-pushed mode,
+  or a full music screen covers the idle screen, otherwise `AssistantState.timerDisplayStyle`.
+  That field defaults to `TimerDisplayStyle.defaultStyle` = **`fullscreen`** (the big
+  widget). Nothing changes it yet; it's the hook for a future setting or voice command. Both share
+  `_TickingTimersState`, which repaints twice a second to interpolate remaining time and
+  ring fill (no per-second Rust events needed).
+  - **`FullScreenTimersView`** (`fullscreen`) — `_FullTimers`: idle, screen-filling. 1 fills the
     screen; 2–3 side-by-side; 4+ in a `GridView`. Each `_TimerCard`: name, a
     draining circular ring (`_RingPainter`, sweeps clockwise from 12 o'clock,
     fill = remaining/total), and a centered `mm:ss` / `h:mm:ss` readout — or
     "Time's up" + "Tap to dismiss" when ringing.
-  - **Compact (`compact: true`)** — `_CompactTimers`: a horizontal scrolling row of
+  - **`CompactTimersOverlay`** (`compact`) — `_CompactTimers`: a horizontal scrolling row of
     `_TimerChip`s (icon + name + `m:ss`). Mounted as the **top-most** Stack layer in
     `ambient_screen.dart` (z-order precedence over every overlay/banner) and shown
-    (`compactTimersVisible`) whenever timers run and the big presentation is hidden (a
+    whenever timers run and the full-screen form is hidden (a
     turn is active or a full-screen mode is up), so it stays glanceable over the
     conversation, music, recipe, weather, or place views.
+- **Shown full screen as soon as a timer is set (2026-10-21):** a `timerStarted` for a
+  **new** id sets `AssistantState.timerSpotlight` (folded into `effectiveTimerDisplay`), so
+  `FullScreenTimersView` replaces the
+  conversation panel immediately, mid-turn (the listening ring still overlays it); the
+  user speaking again (wake word / new transcript) clears it and brings the panel back.
+  Full-screen modes (recipe/weather/place/camera/music) still win. An adjust re-emit of
+  an existing id does not spotlight.
 - Fed by `AssistantState.timers` (Rust `timerStarted` / `timerFinished` /
-  `timerCancelled`). Only **ringing** timers are tappable → `onDismiss(id)` →
-  `AssistantController.dismissTimer`; running timers are not dismissible.
-  `resolveTimerNames` labels unnamed timers "Timer" / "Timer N".
+  `timerCancelled`). A **ringing** card shows a big **"Cancel timer"** button (key
+  `cancel-timer-<id>`; the card/chip is tappable too) → `onDismiss(id)` →
+  `AssistantController.dismissTimer`, which calls the native `dismiss_timer(id)` to stop
+  the engine's repeating alarm; running timers are not dismissible.
+  `resolveTimerNames` shows the spoken label (from either the Core's System-1 timer
+  fast path or the `set_timer` tool) and labels only unnamed timers "Timer" / "Timer N".
 - **Add/remove time:** the Core's `adjust_timer` tool sends an `anamanti-timer`
   `adjust` frame carrying a signed `delta_secs`; the device applies it to the running
   timer's own deadline (floored at 1s, capped at 24h) and re-emits `timerStarted` for
@@ -258,21 +305,24 @@ forwards each push's JSON to `AssistantController.applyMusicPush`, which folds i
 `AssistantState.music` (a tolerant `MusicData`, `lib/src/engine/music_data.dart`); an
 empty payload is a `dismiss` (nothing playing). Because "Flutter owns presentation,"
 **the device decides what's on screen** — a push only provides data (including the
-household's `display_style` preference); the full screens open on a tap, by voice, or
-because the preference is full screen — never on a bare Core command.
+display's own `display_style`); the full screens open on a tap, by voice, or because this
+display's style is full screen — never on a bare Core command.
 
 Presentation (`AssistantState.effectiveMusicScreen` ∈ `hidden` / `nowPlaying` / `nextUp`,
 resolved from a Core mode > the explicitly opened `musicScreen` > the **music display
 style**):
 
-**Display style** ([`MusicDisplayStylePlan.md`](./MusicDisplayStylePlan.md)): a Core-owned
-household preference, `AssistantState.musicDisplayStyle` ∈ `compact` (default — the bar) /
-`fullscreen` (the `NowPlayingView` shows automatically whenever Spotify or radio plays and
+**Display style** ([`MusicDisplayStylePlan.md`](./MusicDisplayStylePlan.md)): chosen **per
+display** by the Core, `AssistantState.musicDisplayStyle` ∈ `compact` (the bar) /
+`fullscreen` (the `NowPlayingView` shows automatically while Spotify or radio plays and
 someone is present; it yields to Core modes and returns when they close, and falls to the
-away clock when nobody is there). Mirrored from the `display_style` field on each
-now-playing push; changed from the config page (Music & Devices → Displays), the bar's
-expand button, the full view's minimize button, or by voice ("make the music full screen" /
-"use the small music player" → `music_screen` `fullscreen`/`compact`).
+away clock when nobody is there). By default it is full screen on the display the play
+request came from and compact on the others. Mirrored from the `display_style` field on this
+display's now-playing pushes; this display alone switches with the bar's expand button, the
+full view's minimize button, or by voice to it ("make the music full screen" / "use the
+small music player" → `music_screen` `fullscreen`/`compact`) for the current music; the
+config page (Music & Devices → Displays → "Music player on each display") pins a display to
+Automatic / Small bar / Full screen.
 - **`MusicControlOverlay`** — `lib/src/ui/music_control_overlay.dart`. The compact
   transport bar (artwork + title/artist + prev / play-pause / next + volume) that rides
   the ambient screen whenever a track is playing and no full music screen / Core mode /
@@ -287,8 +337,11 @@ expand button, the full view's minimize button, or by voice ("make the music ful
   `close_fullscreen` icon) returns to the overlay and, with the full-screen style set,
   switches it to compact (**never stops playback**).
 - **`NextUpView`** — `lib/src/ui/next_up_view.dart`. Full-screen up-next queue list
-  (`music.nextUp`), reached from the now-playing view's "Up next" control. Keys:
-  `next-up-close`, `next-up-back`. Empty queue shows "Nothing queued".
+  (`music.nextUp`), reached from the now-playing view's "Up next" control. **Tapping a
+  row jumps to that track** (`onSelect` → `AssistantController.skipToQueueTrack(i)` →
+  `anamanti-music-control` `skip_to` with the row's 0-based index; the Core jumps there —
+  one offset play within an album/playlist, else skipping forward `i + 1` tracks) and returns to the now-playing view. Keys: `next-up-close`,
+  `next-up-back`, `next-up-row-<i>`. Empty queue shows "Nothing queued".
 - **`AlbumArt`** — `lib/src/ui/album_art.dart`. The shared artwork tile all three surfaces
   use (overlay 40 px, up-next rows 56 px, now-playing 280 px): a rounded network image
   with a music-note fallback while loading, on error, or when there's no artwork URL.
@@ -322,8 +375,8 @@ same carrier `fontAdjust` uses) → `AssistantController._applyMusicScreen`, whi
 "show me what's playing" → `openNowPlaying`, "what's up next" → `showMusicQueue`, and "hide
 the music" → `closeMusicScreen` (the same methods touch uses), and "make the music full
 screen" / "use the small music player" (`screen` = `fullscreen` / `compact`) →
-`setMusicDisplayStyle` (already persisted by the Core, so not sent back). A Core-pushed mode
-(recipe/weather/place) sets `musicScreen: hidden` so the music full screen yields to it.
+`setMusicDisplayStyle` (already recorded for this display by the Core, so not sent back). A Core-pushed mode
+(recipe/weather/place/camera) sets `musicScreen: hidden` so the music full screen yields to it.
 Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_control` tool.
 
 ## 5. Overlays — away / off mode
@@ -341,6 +394,18 @@ Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_contro
   lockstep, so the screen can never "wake" visually while the backlight stays dim. The
   "Dim screen after" setting controls the camera's release window (how long with no
   motion before away mode); it is not a separate dimmer.
+- **Night dimming:** when the camera-as-lux-sensor reports the room's lights are off
+  (`AssistantState.roomDark`, from `AmbientLight` events) and "Dim at night" is on,
+  both levels drop to `nightBrightnessNear` (0.15) / `nightBrightnessAway` (0.02). No
+  new on-screen element — only the backlight changes; turning a light on restores the
+  normal levels within ~2 s.
+- **Covered camera** (privacy shutter / tape — near-black, near-uniform frames held
+  10 s, `AssistantState.cameraCovered`): **Clock mode** (default) keeps the blind
+  camera's reading — dark + nobody there, so the dim away clock; **Day & night times**
+  treats the room as occupied and lit by day (full ambient screen, normal levels) and
+  as empty and dark during the night window (dim away clock at night levels; a touch or
+  voice turn wakes it at 0.15). Resolved by `effectivePresent` / `effectiveRoomDark`,
+  which feed `screenAwake` and the backlight.
 
 ---
 
@@ -391,9 +456,10 @@ Playback-by-voice (play/pause/skip/volume) stays on the existing `spotify_contro
   `Stream<WakeWordEvent>` into an immutable `AssistantState`. Owns turn phases
   (`idle/listening/processing/connecting/thinking/speaking/error`), online/offline
   resilience (backoff reconnect + 3 s offline poll), the local end-of-speech cue,
-  timers, camera `userPresent` presence, follow-up turns, and the three
-  full-screen modes with auto-close timers (weather 60 s, place 5 min). Pushes
-  recipe/weather/place screen context back to Core so voice can drive the screen.
+  timers, camera `userPresent` presence, follow-up turns, and the Core-pushed
+  full-screen modes with auto-close timers (weather 60 s, place 5 min, live camera
+  60 s). Pushes recipe/weather/place/camera screen context back to Core so voice can
+  drive (or close) the screen.
   Loading any full-screen mode unloads the previous one so they never stack.
 
 Full state-machine flow: `agents.md` cheat-sheet + `architecture.md §4`.
@@ -414,11 +480,18 @@ mode; a live turn's `ConversationView` always draws above them.
   `IndexedStack` of 3 tabs with a bottom `_tabBar` (keys `recipe-tab-0/1/2`):
   **Overview** (`_OverviewTab` — hero image, summary, fact chips, source URL),
   **Ingredients** (`_ListTab`, key `recipe-ingredients`), **Steps** (`_ListTab`,
-  key `recipe-steps`, numbered).
+  key `recipe-steps`, numbered). Rows are built eagerly (`SingleChildScrollView` +
+  `Column`, a `GlobalKey` per step) so any step can be scrolled to; the highlighted
+  step is drawn as an amber **bubble** (tinted rounded card + accent outline + filled
+  number circle, key `recipe-step-highlighted`).
 - Triggered by `WakeWordEventKind.showRecipe` (Core `recipe_lookup`) →
   `AssistantState.recipe`; persists across turns while cooking. Tabs switch by
   touch **or** voice (`recipeNavigate`); voice scroll (`recipeScroll`) animates
-  the active pane; scroll position + tab reported back to Core as screen context.
+  the active pane; voice "go to step N" / "next step" (`recipeStep` →
+  `AssistantState.recipeStep` + `recipeStepSeq`) switches to Steps, scrolls the step
+  into view and highlights it; tapping a step highlights it too. Scroll position, tab,
+  highlighted step and the recipe's ingredient/step lines are reported back to Core as
+  screen context (so "how many tomatoes?" is answered from the screen).
   See [`RecipePlan.md`](./RecipePlan.md).
 
 **`WeatherView` / `_HourCell`** — `lib/src/ui/weather_view.dart`
@@ -442,6 +515,36 @@ mode; a live turn's `ConversationView` always draws above them.
   + price level, address / phone / website lines, weekly hours. Triggered by
   `showPlace` (Core `places_lookup`) → `AssistantState.place`; auto-closes after
   5 min. See [`PlacesPlan.md`](./PlacesPlan.md).
+
+**`CameraView`** — `lib/src/ui/camera_view.dart` (live front-door camera,
+[`CameraPlan.md`](./CameraPlan.md))
+- Full-screen black background with the NVR's live RTSP **sub-stream** (H.264,
+  640×360) centered at its aspect ratio, **video only** (volume 0; no audio path; it
+  doesn't take audio focus). A top gradient bar holds a camera icon + the camera name
+  (key `camera-name`) and a ✕ close (key `camera-close`). A spinner (key
+  `camera-loading`) shows until the player first reports ready; an error state (key
+  `camera-error`, "Couldn't reach the camera" + the Core's reason when it gave one)
+  shows when the stream fetch fails or the player errors.
+- Played with `video_player` (`VideoPlayerController.networkUrl`) using
+  **`VideoViewType.platformView`** — mandatory: the Echo Show's MTK hardware decoder
+  fails on the default texture view. The Android implementation is the vendored,
+  patched `third_party/video_player_android` (RTP over TCP + a low-latency start
+  buffer for RTSP; see its `ANAMANTI_PATCHES.md`). `VideoPlayerValue.position` is not
+  used as a liveness signal (it stays ~0 for live RTSP). The player is disposed as soon
+  as the view closes.
+- **Triggers:** voice only for now — the Core's camera fast path ("show the front
+  door", "who's at the door") or its `show_camera` tool sends `anamanti-camera`
+  (`show`, camera name) on that display's turn socket → `WakeWordEventKind.showCamera`
+  (name in the `recipeAction` carrier) → `AssistantState.camera` (`CameraSession`,
+  `lib/src/engine/camera_session.dart`). The controller then pulls the stream URL from
+  the Core with the FRB `getCameraStream` (`anamanti-get-camera-stream` →
+  `anamanti-camera-stream`). The URL embeds the NVR credentials: it is held in memory
+  only, never persisted or logged. A newer show replaces the camera (fresh fetch,
+  restarted timer).
+- **Dismiss:** the ✕, voice "stop" / "close it" (the display stamps
+  `screen: {kind: "camera", camera: {name}}` on `audio-start` via `set_camera_context`,
+  so the Core's stop ladder sends `anamanti-camera` `dismiss` → `dismissCamera`), or the
+  **60 s auto-close**. Opening any other Core mode closes it, and vice versa.
 
 **Data models** (tolerant `tryParse(json)` mirrors of Core structs; a malformed
 payload is ignored, not crashed): `RecipeData` (`lib/src/engine/recipe_data.dart`),
@@ -548,11 +651,22 @@ and `settings_controller.dart`). Layout and rationale:
     scale) with a live preview line; Listening ring on/off (`settings-listening-ring`)
     + Reactivity (`settings-ring-reactivity`); *Adv*: Attack / Release / Auto-range
     (`settings-ring-attack|release|decay`). Ring dials are disabled while the ring is off.
+  - **Night** — *Lights off*: Dim at night (`settings-night-dim`, ⓘ explains the camera
+    is a light sensor) + "Lights off means" chips Pitch dark / Dark / Dim
+    (`settings-night-dark`, each `settings-night-dark-<3|8|20>`, disabled while night
+    dimming is off) with a live `~N lux (lit|dark|camera covered)` readout when the
+    engine runs. *When the camera is covered*: chips Clock mode / Day & night times
+    (`settings-covered-clock|schedule`) with a one-line explanation of the selected
+    mode, and Night hours `From – To` time pickers (`settings-night-start|end`, default
+    21:00 – 07:00; enabled only for Day & night times).
   - **Photos** — idle photo source (segmented Gradients · Google Photos · Drive,
     `settings-photo-source`); Google Photos (Ambient API) link via QR
     (`settings-ambient-link`); Google Drive: Sync from Core (`settings-drive-sync`) +
     Choose folders (`settings-drive-pick`); *Adv*: raw folder-ID field
-    (`settings-drive-folders`). Links apply as soon as they complete.
+    (`settings-drive-folders`). Links apply as soon as they complete. **Change photo
+    every** (chips 5s…10m, `settings-slide-interval`, each
+    `settings-slide-interval-<secs>`; an off-preset stored value shows the nearest) —
+    the per-device background-photo rotation time, applied live.
 - **Household** — three large buttons that push the existing full screens: **People**
   (`settings-menu-people`), **Link a phone** (`settings-menu-pair-phone`), **Memory**
   (`settings-menu-memory`). See §10.

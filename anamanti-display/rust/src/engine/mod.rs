@@ -34,7 +34,7 @@ use crate::wakeword::{WakeWordDetector, WakeWordModelPaths};
 
 mod gate;
 mod net;
-mod timer;
+pub(crate) mod timer;
 use gate::DetectionGate;
 use net::Network;
 
@@ -163,6 +163,30 @@ pub fn set_display_context(screen: Option<serde_json::Value>) {
 /// when the display is idle.
 pub fn display_context() -> Option<serde_json::Value> {
     display_slot().lock().unwrap().clone()
+}
+
+/// This display's stable `device_id` (the id it announces in its `anamanti-hello`
+/// frames), stamped on every turn's `audio-start` and every `anamanti-music-control` so the
+/// Core knows which display asked — e.g. to show music full screen on the display a play
+/// request came from (`plans/MusicDisplayStylePlan.md`). Recorded whenever a persistent
+/// push channel starts (they are all handed the id); empty until then.
+static DEVICE_ID: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn device_id_slot() -> &'static Mutex<String> {
+    DEVICE_ID.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// Record this display's `device_id` (blank ids are ignored, keeping the last good one).
+pub fn set_device_id(device_id: &str) {
+    let id = device_id.trim();
+    if !id.is_empty() {
+        *device_id_slot().lock().unwrap() = id.to_string();
+    }
+}
+
+/// This display's `device_id`, or `""` before any push channel has started.
+pub fn device_id() -> String {
+    device_id_slot().lock().unwrap().clone()
 }
 
 /// The font-scaling context — whether a resizable text surface is on screen and the
@@ -344,6 +368,9 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // §5). It's fully independent of the audio pipeline and degrades silently if the
     // camera can't be opened (permission denied, privacy shutter closed, no camera)
     // — capture, wake-word detection, and the Wyoming turn all run regardless.
+    // The same frames also drive the camera-as-lux-sensor (`camera/ambient.rs`),
+    // which emits `AmbientLight` events so the UI can dim the screen when the room's
+    // lights go off.
     #[cfg(target_os = "android")]
     let camera_proximity = config.camera_proximity;
     #[cfg(target_os = "android")]
@@ -352,6 +379,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
             sink.clone(),
             config.proximity_motion_threshold,
             config.proximity_release_secs,
+            config.night_dark_lux,
             PROXIMITY_WIDTH,
             PROXIMITY_HEIGHT,
             PROXIMITY_FPS,

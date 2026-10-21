@@ -14,6 +14,8 @@
 // imagery — so the photo cycle is fully decoupled from connectivity and keeps
 // running when the Mac is offline.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
@@ -21,6 +23,7 @@ import 'package:anamanti_display/src/engine/notification_controller.dart';
 import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
+import 'package:anamanti_display/src/ui/camera_view.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
 import 'package:anamanti_display/src/ui/listening_overlay.dart';
 import 'package:anamanti_display/src/ui/music_control_overlay.dart';
@@ -50,6 +53,7 @@ class AmbientScreen extends StatelessWidget {
     this.ringAttack = 0.65,
     this.ringRelease = 0.08,
     this.ringDecay = 0.99,
+    this.cameraPlayerFactory = defaultCameraPlayer,
   });
 
   final AssistantController assistant;
@@ -63,6 +67,10 @@ class AmbientScreen extends StatelessWidget {
   final double ringAttack;
   final double ringRelease;
   final double ringDecay;
+
+  /// Builds the live camera view's video player. Injectable so widget tests never
+  /// need a platform video implementation; production uses [defaultCameraPlayer].
+  final CameraPlayerFactory cameraPlayerFactory;
 
   /// Proactive notifications pushed by the orchestrator (Approach A). When null (as
   /// in widget tests that only exercise the turn UI) no banner is shown.
@@ -80,456 +88,557 @@ class AmbientScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: AnimatedBuilder(
-        animation: assistant,
-        builder: (context, _) {
-          final state = assistant.state;
-          // Keep the panel (and dimmed scrim) up not just while the turn is active
-          // but for as long as the reply audio is still playing, so the text stays
-          // on screen until it stops being read aloud.
-          final active = state.displayActive;
-          // Recipe mode: a parsed recipe is on screen (persists across turns while
-          // cooking). It takes the screen over the idle presentation but yields to an
-          // active voice turn (the conversation panel draws above it).
-          final recipeActive = state.recipeActive;
-          // Weather mode: the full-screen forecast is on screen. Like recipe mode it
-          // takes over the idle presentation but yields to an active voice turn.
-          final weatherActive = state.weatherActive;
-          final placeActive = state.placeActive;
-          // Core-pushed full-screen modes (recipe/weather/place). These win over the
-          // device-toggled music screen, which is suppressed while one is up.
-          final coreMode = recipeActive || weatherActive || placeActive;
-          // Music: `musicActive` means a track is playing. Which widget shows follows the
-          // household preference (`musicDisplayStyle`: the compact bar or full screen),
-          // or a view the user explicitly opened (tap / voice); a Core-pushed mode always
-          // wins. `effectiveMusicScreen` resolves all of that in one place.
-          final musicScreen = state.effectiveMusicScreen;
-          final showNowPlaying = musicScreen == MusicScreen.nowPlaying;
-          final showNextUp = musicScreen == MusicScreen.nextUp;
-          final musicFullScreen = showNowPlaying || showNextUp;
-          // Any full-screen mode that overlays the idle presentation.
-          final modeActive = coreMode || musicFullScreen;
-          // Away / "off" mode: nobody in front of the display and no active turn.
-          // Only the big centered clock shows; everything else fades away. A turn
-          // always wins (saying the wake word implies you're here), so off mode is
-          // strictly the idle-and-absent case. Recipe/weather mode also imply
-          // engagement, so they suppress the away face.
-          // The inverse of [AssistantState.screenAwake] — the single source of truth
-          // shared with the backlight actuator so the away-face and the physical
-          // brightness always agree (equivalent to `!userPresent && !active &&
-          // !modeActive`).
-          final offMode = !state.screenAwake;
-          // The compact music control overlay rides the ambient screen when a track is
-          // playing, no full music screen is up, no Core mode is up, no turn is active,
-          // and someone is present.
-          final musicOverlayVisible =
-              state.musicActive &&
-              !musicFullScreen &&
-              !coreMode &&
-              !active &&
-              !offMode;
-          // "Listening" cue: the device is actively listening to the user (wake word
-          // or follow-up listen fired, through end-of-speech). Shows the big glowing
-          // blue ring, which reacts to the live mic level. Suppressed when the user
-          // has turned the ring off in settings.
-          final listening = state.listening && listeningRingEnabled;
-          // The compact timer badge shows whenever timers are running and the big
-          // screen-filling presentation is NOT up — i.e. while a turn is active or any
-          // full-screen mode (recipe/weather/place/music) covers the idle screen — so a
-          // running timer stays glanceable instead of being hidden behind those views.
-          // It is the top-most layer in the Stack (see the end of `children`), so it
-          // always has z-order precedence over every other overlay and banner.
-          final compactTimersVisible =
-              state.timers.isNotEmpty && (active || modeActive) && !offMode;
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              // Idle imagery, always cycling underneath.
-              SlideshowView(controller: slideshow),
+      body: _TouchReveal(
+        builder: (context, touched) => AnimatedBuilder(
+          animation: assistant,
+          builder: (context, _) {
+            final state = assistant.state;
+            // Keep the panel (and dimmed scrim) up not just while the turn is active
+            // but for as long as the reply audio is still playing, so the text stays
+            // on screen until it stops being read aloud.
+            final active = state.displayActive;
+            // Recipe mode: a parsed recipe is on screen (persists across turns while
+            // cooking). It takes the screen over the idle presentation but yields to an
+            // active voice turn (the conversation panel draws above it).
+            final recipeActive = state.recipeActive;
+            // Weather mode: the full-screen forecast is on screen. Like recipe mode it
+            // takes over the idle presentation but yields to an active voice turn.
+            final weatherActive = state.weatherActive;
+            final placeActive = state.placeActive;
+            // Live camera view (plans/CameraPlan.md), opened by voice via the Core.
+            final cameraActive = state.cameraActive;
+            // Core-pushed full-screen modes (recipe/weather/place/camera). These win over
+            // the device-toggled music screen, which is suppressed while one is up.
+            final coreMode =
+                recipeActive || weatherActive || placeActive || cameraActive;
+            // Music: `musicActive` means a track is playing. Which widget shows follows the
+            // display's style (`musicDisplayStyle`, chosen per display by the Core),
+            // or a view the user explicitly opened (tap / voice); a Core-pushed mode always
+            // wins. `effectiveMusicScreen` resolves all of that in one place.
+            final musicScreen = state.effectiveMusicScreen;
+            final showNowPlaying = musicScreen == MusicScreen.nowPlaying;
+            final showNextUp = musicScreen == MusicScreen.nextUp;
+            final musicFullScreen = showNowPlaying || showNextUp;
+            // Any full-screen mode that overlays the idle presentation.
+            final modeActive = coreMode || musicFullScreen;
+            // Away / "off" mode: nobody in front of the display and no active turn.
+            // Only the big centered clock shows; everything else fades away. A turn
+            // always wins (saying the wake word implies you're here), so off mode is
+            // strictly the idle-and-absent case. Recipe/weather mode also imply
+            // engagement, so they suppress the away face.
+            // The inverse of [AssistantState.screenAwake] — the single source of truth
+            // shared with the backlight actuator so the away-face and the physical
+            // brightness always agree (equivalent to `!userPresent && !active &&
+            // !modeActive`).
+            final offMode = !state.screenAwake;
+            // The compact music control overlay rides the ambient screen when a track is
+            // playing, no full music screen is up, no Core mode is up, no turn is active,
+            // and someone is present.
+            final musicOverlayVisible =
+                state.musicActive &&
+                !musicFullScreen &&
+                !coreMode &&
+                !active &&
+                !offMode;
+            // "Listening" cue: the device is actively listening to the user (wake word
+            // or follow-up listen fired, through end-of-speech). Shows the big glowing
+            // blue ring, which reacts to the live mic level. Suppressed when the user
+            // has turned the ring off in settings.
+            final listening = state.listening && listeningRingEnabled;
+            // Timers: which of the two linked timer widgets shows is resolved in one
+            // place by `effectiveTimerDisplay` ([TimerDisplayStyle]) — full screen while
+            // idle, the compact chip row while a turn or any full-screen mode covers the
+            // idle screen, neither in away mode.
+            final timerDisplay = state.effectiveTimerDisplay;
+            final fullTimersVisible =
+                timerDisplay == TimerDisplayStyle.fullscreen;
+            final compactTimersVisible =
+                timerDisplay == TimerDisplayStyle.compact;
+            // Whether the conversation panel (and its dim scrim) owns the screen: during
+            // a turn, unless a just-set timer has the big timers up instead
+            // (`timerSpotlight`, folded into `effectiveTimerDisplay`).
+            final panelActive = active && !fullTimersVisible;
+            // The settings gear shows only after a touch, and is blocked ONLY by a
+            // full-screen widget: the turn's conversation panel, a full-screen mode
+            // (recipe/weather/place/music now-playing/up-next), or the big
+            // screen-filling idle timers — and not in away mode. Partial overlays
+            // (the compact music bar, the listening ring, banners) never block it.
+            final fullScreenWidget = active || modeActive || fullTimersVisible;
+            final showSettings = touched && !fullScreenWidget && !offMode;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                // Idle imagery, always cycling underneath.
+                SlideshowView(controller: slideshow),
 
-              // Away mode blacks out the slideshow so only the big clock remains.
-              IgnorePointer(
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 500),
-                  color: Colors.black.withValues(alpha: offMode ? 1.0 : 0.0),
-                ),
-              ),
-
-              // Dim scrim that deepens while a turn is active so text stays legible.
-              // Pointer-transparent so idle swipes reach the slideshow below.
-              IgnorePointer(
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 400),
-                  color: Colors.black.withValues(alpha: active ? 0.55 : 0.15),
-                ),
-              ),
-
-              // Big, screen-filling timers — the idle presentation. Fades out while a
-              // turn is active (the conversation wins the screen) and in away mode
-              // (only the clock shows); survives as the compact badge below. Ignores
-              // pointers when hidden so it never steals taps meant for the conversation.
-              AnimatedOpacity(
-                opacity: (active || offMode || modeActive) ? 0 : 1,
-                duration: const Duration(milliseconds: 300),
-                child: IgnorePointer(
-                  ignoring: active || offMode || modeActive,
-                  child: TimersOverlay(
-                    timers: state.timers,
-                    onDismiss: assistant.dismissTimer,
+                // Away mode blacks out the slideshow so only the big clock remains.
+                IgnorePointer(
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 500),
+                    color: Colors.black.withValues(alpha: offMode ? 1.0 : 0.0),
                   ),
                 ),
-              ),
 
-              // Recipe mode: a full-screen 3-tab cooking view. Sits above the idle
-              // presentation but below the conversation panel, so a voice turn mid-cook
-              // ("next step", a follow-up) still overlays it. Dismissed by voice
-              // ("done cooking") or the view's own close control.
-              AnimatedOpacity(
-                opacity: recipeActive ? 1 : 0,
-                duration: const Duration(milliseconds: 250),
-                child: IgnorePointer(
-                  ignoring: !recipeActive,
-                  child: recipeActive
-                      ? RecipeView(
-                          key: ValueKey(
-                            state.recipe!.sourceUrl.isNotEmpty
-                                ? state.recipe!.sourceUrl
-                                : state.recipe!.title,
-                          ),
-                          recipe: state.recipe!,
-                          onClose: assistant.dismissRecipe,
-                          tab: state.recipeTab,
-                          onTabSelected: assistant.setRecipeTab,
-                          scrollSeq: state.recipeScrollSeq,
-                          scrollDir: state.recipeScrollDir,
-                          onScrollPositionChanged:
-                              assistant.reportRecipeScrollPosition,
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ),
-
-              // Weather mode: a full-screen forecast. The default hourly view (today's
-              // big conditions panel + a 10-hour row) or, when the report's layout is
-              // "week", the separate 7-day forecast widget (7 columns of highs/lows).
-              // Same precedence as recipe mode — above the idle presentation, below the
-              // conversation panel, so a voice turn still overlays it. Dismissed by
-              // voice or the view's own close control.
-              AnimatedOpacity(
-                opacity: weatherActive ? 1 : 0,
-                duration: const Duration(milliseconds: 250),
-                child: IgnorePointer(
-                  ignoring: !weatherActive,
-                  child: weatherActive
-                      ? (state.weather!.isWeek
-                            ? SevenDayView(
-                                key: ValueKey(
-                                  'week:${state.weather!.locationLabel}',
-                                ),
-                                weather: state.weather!,
-                                onClose: assistant.dismissWeather,
-                              )
-                            : WeatherView(
-                                key: ValueKey(state.weather!.locationLabel),
-                                weather: state.weather!,
-                                onClose: assistant.dismissWeather,
-                              ))
-                      : const SizedBox.shrink(),
-                ),
-              ),
-
-              // Place mode: a full-screen place card (photo + details). Same precedence
-              // as recipe/weather mode — above the idle presentation, below the
-              // conversation panel. Dismissed by voice or the view's own close control.
-              AnimatedOpacity(
-                opacity: placeActive ? 1 : 0,
-                duration: const Duration(milliseconds: 250),
-                child: IgnorePointer(
-                  ignoring: !placeActive,
-                  child: placeActive
-                      ? PlaceView(
-                          key: ValueKey(state.place!.name),
-                          place: state.place!,
-                          onClose: assistant.dismissPlace,
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ),
-
-              // Music now-playing: a full-screen view (artwork + transport + volume),
-              // shown while the full-screen preference is set (and someone is there), or
-              // opened by tapping the compact control overlay. Same precedence as the
-              // Core-pushed modes — above the idle presentation, below the conversation
-              // panel — and suppressed while a Core mode is up. The minimize control
-              // returns to the compact bar (music keeps playing).
-              AnimatedOpacity(
-                opacity: showNowPlaying ? 1 : 0,
-                duration: const Duration(milliseconds: 250),
-                child: IgnorePointer(
-                  ignoring: !showNowPlaying,
-                  child: showNowPlaying
-                      ? NowPlayingView(
-                          // Radio keys on the station so a new song from the
-                          // stream doesn't rebuild the whole view.
-                          key: ValueKey(
-                            state.music!.isRadio
-                                ? 'now-playing:radio:${state.music!.stationId}'
-                                : 'now-playing:${state.music!.trackTitle}',
-                          ),
-                          music: state.music!,
-                          onClose: assistant.closeMusicScreen,
-                          onPlayPause: assistant.playPauseMusic,
-                          onNext: assistant.nextTrack,
-                          onPrevious: assistant.previousTrack,
-                          onVolume: assistant.setMusicVolume,
-                          onShowQueue: assistant.showMusicQueue,
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ),
-
-              // Music up-next: the full-screen queue list, reached from the now-playing
-              // view's "Up next" control. Back returns to now-playing; close returns to
-              // the overlay.
-              AnimatedOpacity(
-                opacity: showNextUp ? 1 : 0,
-                duration: const Duration(milliseconds: 250),
-                child: IgnorePointer(
-                  ignoring: !showNextUp,
-                  child: showNextUp
-                      ? NextUpView(
-                          key: const ValueKey('next-up'),
-                          music: state.music!,
-                          onClose: assistant.closeMusicScreen,
-                          onBack: assistant.backToNowPlaying,
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ),
-
-              // The live conversation panel fades in for the duration of a turn.
-              AnimatedOpacity(
-                opacity: active ? 1 : 0,
-                duration: const Duration(milliseconds: 300),
-                child: IgnorePointer(
-                  ignoring: !active,
-                  child: Padding(
-                    padding: const EdgeInsets.all(28),
-                    child: ConversationView(state: state),
+                // Dim scrim that deepens while a turn is active so text stays legible.
+                // Pointer-transparent so idle swipes reach the slideshow below.
+                IgnorePointer(
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 400),
+                    color: Colors.black.withValues(
+                      alpha: panelActive ? 0.55 : 0.15,
+                    ),
                   ),
                 ),
-              ),
 
-              // "Listening" cue: a large glowing blue ring centered on screen while
-              // the device is listening to the user — from the wake word until
-              // end-of-speech — reacting to the live mic level. Draws above the
-              // conversation panel and below the status chip / settings / banner.
-              // Pointer-transparent — a touch should still reach the slideshow /
-              // dismiss controls beneath it. The ring widget only exists while shown
-              // so its pulse controller isn't spinning during the whole idle day.
-              IgnorePointer(
-                child: AnimatedOpacity(
-                  key: const Key('listening-cue'),
-                  opacity: listening ? 1 : 0,
-                  duration: const Duration(milliseconds: 250),
-                  child: listening
-                      ? ListeningOverlay(
-                          level: state.micLevel,
-                          reactivity: ringReactivity,
-                          attack: ringAttack,
-                          release: ringRelease,
-                          decay: ringDecay,
-                        )
-                      : const SizedBox.shrink(),
+                // Big, screen-filling timers — the idle presentation
+                // (`TimerDisplayStyle.fullscreen`), and also mid-turn the moment a new
+                // timer is set (`timerSpotlight`). Fades out while the conversation or a
+                // full-screen mode is up (survives as the compact overlay below) and in
+                // away mode (only the clock shows). Ignores pointers when hidden so it never steals
+                // taps meant for the conversation.
+                AnimatedOpacity(
+                  opacity: fullTimersVisible ? 1 : 0,
+                  duration: const Duration(milliseconds: 300),
+                  child: IgnorePointer(
+                    ignoring: !fullTimersVisible,
+                    child: FullScreenTimersView(
+                      timers: state.timers,
+                      onDismiss: assistant.dismissTimer,
+                    ),
+                  ),
                 ),
-              ),
 
-              // Compact music control overlay, bottom-center — the lightweight transport
-              // (artwork + title + prev/play-pause/next + volume) that rides the ambient
-              // screen while a track plays. Tapping it opens the full now-playing screen.
-              // Hidden during a turn, in away mode, and while any full screen is up.
-              Positioned(
-                left: 120,
-                right: 120,
-                bottom: 18,
-                child: AnimatedOpacity(
-                  key: const Key('music-overlay'),
-                  opacity: musicOverlayVisible ? 1 : 0,
+                // Recipe mode: a full-screen 3-tab cooking view. Sits above the idle
+                // presentation but below the conversation panel, so a voice turn mid-cook
+                // ("next step", a follow-up) still overlays it. Dismissed by voice
+                // ("done cooking") or the view's own close control.
+                AnimatedOpacity(
+                  opacity: recipeActive ? 1 : 0,
                   duration: const Duration(milliseconds: 250),
                   child: IgnorePointer(
-                    ignoring: !musicOverlayVisible,
-                    child: musicOverlayVisible
-                        ? Align(
-                            alignment: Alignment.bottomCenter,
-                            child: MusicControlOverlay(
-                              music: state.music!,
-                              onPlayPause: assistant.playPauseMusic,
-                              onNext: assistant.nextTrack,
-                              onPrevious: assistant.previousTrack,
-                              onVolume: assistant.setMusicVolume,
-                              onTap: assistant.openNowPlaying,
-                              onExpand: assistant.expandMusic,
+                    ignoring: !recipeActive,
+                    child: recipeActive
+                        ? RecipeView(
+                            key: ValueKey(
+                              state.recipe!.sourceUrl.isNotEmpty
+                                  ? state.recipe!.sourceUrl
+                                  : state.recipe!.title,
                             ),
+                            recipe: state.recipe!,
+                            onClose: assistant.dismissRecipe,
+                            tab: state.recipeTab,
+                            onTabSelected: assistant.setRecipeTab,
+                            scrollSeq: state.recipeScrollSeq,
+                            scrollDir: state.recipeScrollDir,
+                            onScrollPositionChanged:
+                                assistant.reportRecipeScrollPosition,
+                            highlightedStep: state.recipeStep,
+                            stepSeq: state.recipeStepSeq,
+                            onStepSelected: assistant.selectRecipeStep,
                           )
                         : const SizedBox.shrink(),
                   ),
                 ),
-              ),
 
-              // Idle clock, bottom-left. Yields to the big timer display, to a turn,
-              // and to away mode (where the large centered clock takes over).
-              Positioned(
-                left: 28,
-                bottom: 24,
-                child: AnimatedOpacity(
-                  key: const Key('idle-clock'),
-                  opacity:
-                      (active ||
-                          offMode ||
-                          modeActive ||
-                          state.timers.isNotEmpty)
-                      ? 0
-                      : 1,
-                  duration: const Duration(milliseconds: 300),
-                  child: _AmbientClock(weather: state.weatherCurrent),
-                ),
-              ),
-
-              // Away-mode face: a large, dimmed, centered clock. Fades in when the
-              // proximity sensor reports the room is empty; the low opacity (on top
-              // of the already-dimmed backlight) keeps it calm and glare-free.
-              IgnorePointer(
-                child: AnimatedOpacity(
-                  key: const Key('away-face'),
-                  opacity: offMode ? 1 : 0,
-                  duration: const Duration(milliseconds: 500),
-                  child: const Center(child: _AmbientClock(large: true)),
-                ),
-              ),
-
-              // Connection-status chip, top-right. Hidden in away mode.
-              Positioned(
-                right: 20,
-                top: 18,
-                child: AnimatedOpacity(
-                  opacity: offMode ? 0 : 1,
-                  duration: const Duration(milliseconds: 300),
-                  child: StatusIndicator(state: state),
-                ),
-              ),
-
-              // Discreet settings control, top-left. Fades out during a turn and in
-              // away mode so it never competes with the conversation or the face.
-              if (onOpenSettings != null)
-                Positioned(
-                  left: 12,
-                  top: 10,
-                  child: AnimatedOpacity(
-                    opacity: (active || offMode) ? 0 : 0.7,
-                    duration: const Duration(milliseconds: 300),
-                    child: IconButton(
-                      key: const Key('open-settings'),
-                      tooltip: 'Settings',
-                      onPressed: (active || offMode) ? null : onOpenSettings,
-                      icon: Icon(
-                        Icons.settings,
-                        color: Colors.white.withValues(alpha: 0.9),
-                      ),
-                    ),
+                // Weather mode: a full-screen forecast. The default hourly view (today's
+                // big conditions panel + a 10-hour row) or, when the report's layout is
+                // "week", the separate 7-day forecast widget (7 columns of highs/lows).
+                // Same precedence as recipe mode — above the idle presentation, below the
+                // conversation panel, so a voice turn still overlays it. Dismissed by
+                // voice or the view's own close control.
+                AnimatedOpacity(
+                  opacity: weatherActive ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !weatherActive,
+                    child: weatherActive
+                        ? (state.weather!.isWeek
+                              ? SevenDayView(
+                                  key: ValueKey(
+                                    'week:${state.weather!.locationLabel}',
+                                  ),
+                                  weather: state.weather!,
+                                  onClose: assistant.dismissWeather,
+                                )
+                              : WeatherView(
+                                  key: ValueKey(state.weather!.locationLabel),
+                                  weather: state.weather!,
+                                  onClose: assistant.dismissWeather,
+                                ))
+                        : const SizedBox.shrink(),
                   ),
                 ),
 
-              // Proactive notification banner, top layer so it sits above the
-              // conversation and clock. Rebuilds independently on its own controller,
-              // and shows even in away mode (an alert should draw attention).
-              if (notifications != null)
-                ListenableBuilder(
-                  listenable: notifications!,
-                  builder: (context, _) {
-                    final note = notifications!.current;
-                    return AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 250),
-                      child: note == null
-                          ? const SizedBox.shrink()
-                          : NotificationBanner(
-                              key: ValueKey(note.id),
-                              notification: note,
-                              onDismiss: notifications!.dismiss,
-                            ),
-                    );
-                  },
+                // Place mode: a full-screen place card (photo + details). Same precedence
+                // as recipe/weather mode — above the idle presentation, below the
+                // conversation panel. Dismissed by voice or the view's own close control.
+                AnimatedOpacity(
+                  opacity: placeActive ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !placeActive,
+                    child: placeActive
+                        ? PlaceView(
+                            key: ValueKey(state.place!.name),
+                            place: state.place!,
+                            onClose: assistant.dismissPlace,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
                 ),
 
-              // Update banner, top-most. Rebuilds on its own controller; shows an
-              // "update available" prompt and the download/install progress.
-              if (updates != null)
-                ListenableBuilder(
-                  listenable: updates!,
-                  builder: (context, _) {
-                    final visible = updates!.bannerVisible;
-                    return AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 250),
-                      child: !visible
-                          ? const SizedBox.shrink()
-                          : UpdateBanner(
-                              key: const ValueKey('update-banner'),
-                              controller: updates!,
-                              onAction: () {
-                                switch (updates!.status) {
-                                  case UpdateStatus.available:
-                                    updates!.download();
-                                  case UpdateStatus.readyToInstall:
-                                    updates!.install();
-                                  case UpdateStatus.error:
-                                    updates!.retry();
-                                  default:
-                                    break;
-                                }
-                              },
-                              onDismiss: updates!.dismissBanner,
-                            ),
-                    );
-                  },
+                // Camera mode: the full-screen live camera view (video only). Same
+                // precedence as the place card — above the idle presentation, below the
+                // conversation panel. Keyed on the open sequence so a new show (or a
+                // reopen) builds a fresh player, and the player is disposed as soon as the
+                // view closes. Dismissed by the ✕, voice "stop", or the 60 s auto-close.
+                AnimatedOpacity(
+                  opacity: cameraActive ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !cameraActive,
+                    child: cameraActive
+                        ? CameraView(
+                            key: ValueKey('camera:${state.camera!.seq}'),
+                            session: state.camera!,
+                            onClose: assistant.dismissCamera,
+                            playerFactory: cameraPlayerFactory,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
                 ),
 
-              // Compact timer badge, top-center — the TOP-MOST layer so a running timer
-              // always has z-order precedence over every other overlay and banner. Shown
-              // whenever timers run and the big screen-filling presentation is hidden (a
-              // turn is active or a full-screen mode is up), so the timer stays glanceable
-              // instead of disappearing behind the conversation, music, recipe, weather,
-              // or place views. Padded clear of the settings button (top-left) and status
-              // chip (top-right).
-              Positioned(
-                top: 16,
-                left: 64,
-                right: 120,
-                child: AnimatedOpacity(
-                  opacity: compactTimersVisible ? 1 : 0,
+                // Music now-playing: a full-screen view (artwork + transport + volume),
+                // shown while the full-screen preference is set (and someone is there), or
+                // opened by tapping the compact control overlay. Same precedence as the
+                // Core-pushed modes — above the idle presentation, below the conversation
+                // panel — and suppressed while a Core mode is up. The minimize control
+                // returns to the compact bar (music keeps playing).
+                AnimatedOpacity(
+                  opacity: showNowPlaying ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !showNowPlaying,
+                    child: showNowPlaying
+                        ? NowPlayingView(
+                            // Radio keys on the station so a new song from the
+                            // stream doesn't rebuild the whole view.
+                            key: ValueKey(
+                              state.music!.isRadio
+                                  ? 'now-playing:radio:${state.music!.stationId}'
+                                  : 'now-playing:${state.music!.trackTitle}',
+                            ),
+                            music: state.music!,
+                            onClose: assistant.closeMusicScreen,
+                            onPlayPause: assistant.playPauseMusic,
+                            onNext: assistant.nextTrack,
+                            onPrevious: assistant.previousTrack,
+                            onVolume: assistant.setMusicVolume,
+                            onShowQueue: assistant.showMusicQueue,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+
+                // Music up-next: the full-screen queue list, reached from the now-playing
+                // view's "Up next" control. Back returns to now-playing; close returns to
+                // the overlay.
+                AnimatedOpacity(
+                  opacity: showNextUp ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !showNextUp,
+                    child: showNextUp
+                        ? NextUpView(
+                            key: const ValueKey('next-up'),
+                            music: state.music!,
+                            onClose: assistant.closeMusicScreen,
+                            onBack: assistant.backToNowPlaying,
+                            onSelect: assistant.skipToQueueTrack,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+
+                // The live conversation panel fades in for the duration of a turn.
+                AnimatedOpacity(
+                  opacity: panelActive ? 1 : 0,
                   duration: const Duration(milliseconds: 300),
                   child: IgnorePointer(
-                    ignoring: !compactTimersVisible,
-                    child: Align(
-                      alignment: Alignment.topCenter,
-                      child: TimersOverlay(
-                        compact: true,
-                        timers: state.timers,
-                        onDismiss: assistant.dismissTimer,
+                    ignoring: !panelActive,
+                    child: Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: ConversationView(state: state),
+                    ),
+                  ),
+                ),
+
+                // "Listening" cue: a large glowing blue ring centered on screen while
+                // the device is listening to the user — from the wake word until
+                // end-of-speech — reacting to the live mic level. Draws above the
+                // conversation panel and below the status chip / settings / banner.
+                // Pointer-transparent — a touch should still reach the slideshow /
+                // dismiss controls beneath it. The ring widget only exists while shown
+                // so its pulse controller isn't spinning during the whole idle day.
+                IgnorePointer(
+                  child: AnimatedOpacity(
+                    key: const Key('listening-cue'),
+                    opacity: listening ? 1 : 0,
+                    duration: const Duration(milliseconds: 250),
+                    child: listening
+                        ? ListeningOverlay(
+                            level: state.micLevel,
+                            reactivity: ringReactivity,
+                            attack: ringAttack,
+                            release: ringRelease,
+                            decay: ringDecay,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+
+                // Bottom strip: the idle clock (time + weather) on the left, and the
+                // bottom-widget slot to its right. LAYOUT RULE (plans/DisplayUI.md,
+                // "Bottom-edge layout rule"): no bottom widget may ever cover the
+                // time/weather — they share this Row, so the slot can only take the
+                // space the clock leaves, right-aligned in line with it. Add any future
+                // bottom widget to the slot, never as its own bottom Positioned.
+                Positioned(
+                  left: 28,
+                  right: 20,
+                  bottom: 24,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      // Idle clock. Yields to the big timer display, to a turn, and to
+                      // away mode (where the large centered clock takes over).
+                      AnimatedOpacity(
+                        key: const Key('idle-clock'),
+                        opacity:
+                            (active ||
+                                offMode ||
+                                modeActive ||
+                                state.timers.isNotEmpty)
+                            ? 0
+                            : 1,
+                        duration: const Duration(milliseconds: 300),
+                        child: _AmbientClock(weather: state.weatherCurrent),
+                      ),
+                      const SizedBox(width: 24),
+                      // Bottom-widget slot, right-aligned. Today: the compact music
+                      // control bar (artwork + title + transport + volume) that rides
+                      // the ambient screen while a track plays; tapping it opens the
+                      // full now-playing screen. Hidden during a turn, in away mode,
+                      // and while any full screen is up.
+                      Expanded(
+                        child: AnimatedOpacity(
+                          key: const Key('music-overlay'),
+                          opacity: musicOverlayVisible ? 1 : 0,
+                          duration: const Duration(milliseconds: 250),
+                          child: IgnorePointer(
+                            ignoring: !musicOverlayVisible,
+                            child: musicOverlayVisible
+                                ? Align(
+                                    alignment: Alignment.centerRight,
+                                    child: MusicControlOverlay(
+                                      music: state.music!,
+                                      onPlayPause: assistant.playPauseMusic,
+                                      onNext: assistant.nextTrack,
+                                      onPrevious: assistant.previousTrack,
+                                      onVolume: assistant.setMusicVolume,
+                                      onTap: assistant.openNowPlaying,
+                                      onExpand: assistant.expandMusic,
+                                    ),
+                                  )
+                                : const SizedBox.shrink(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // Away-mode face: a large, dimmed, centered clock. Fades in when the
+                // proximity sensor reports the room is empty; the low opacity (on top
+                // of the already-dimmed backlight) keeps it calm and glare-free.
+                IgnorePointer(
+                  child: AnimatedOpacity(
+                    key: const Key('away-face'),
+                    opacity: offMode ? 1 : 0,
+                    duration: const Duration(milliseconds: 500),
+                    child: const Center(child: _AmbientClock(large: true)),
+                  ),
+                ),
+
+                // Connection-status chip, top-right. Hidden in away mode.
+                Positioned(
+                  right: 20,
+                  top: 18,
+                  child: AnimatedOpacity(
+                    opacity: offMode ? 0 : 1,
+                    duration: const Duration(milliseconds: 300),
+                    child: StatusIndicator(state: state),
+                  ),
+                ),
+
+                // Discreet settings control, top-left. Hidden by default: it appears
+                // only for a few seconds after the screen is touched, and only when no
+                // full-screen widget is up (turn panel, full-screen mode, or big idle
+                // timers) and we're not in away mode.
+                if (onOpenSettings != null)
+                  Positioned(
+                    left: 12,
+                    top: 10,
+                    child: AnimatedOpacity(
+                      opacity: showSettings ? 0.7 : 0,
+                      duration: const Duration(milliseconds: 300),
+                      child: IconButton(
+                        key: const Key('open-settings'),
+                        tooltip: 'Settings',
+                        onPressed: showSettings ? onOpenSettings : null,
+                        icon: Icon(
+                          Icons.settings,
+                          color: Colors.white.withValues(alpha: 0.9),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Proactive notification banner, top layer so it sits above the
+                // conversation and clock. Rebuilds independently on its own controller,
+                // and shows even in away mode (an alert should draw attention).
+                if (notifications != null)
+                  ListenableBuilder(
+                    listenable: notifications!,
+                    builder: (context, _) {
+                      final note = notifications!.current;
+                      return AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        child: note == null
+                            ? const SizedBox.shrink()
+                            : NotificationBanner(
+                                key: ValueKey(note.id),
+                                notification: note,
+                                onDismiss: notifications!.dismiss,
+                              ),
+                      );
+                    },
+                  ),
+
+                // Update banner, top-most. Rebuilds on its own controller; shows an
+                // "update available" prompt and the download/install progress.
+                if (updates != null)
+                  ListenableBuilder(
+                    listenable: updates!,
+                    builder: (context, _) {
+                      final visible = updates!.bannerVisible;
+                      return AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        child: !visible
+                            ? const SizedBox.shrink()
+                            : UpdateBanner(
+                                key: const ValueKey('update-banner'),
+                                controller: updates!,
+                                onAction: () {
+                                  switch (updates!.status) {
+                                    case UpdateStatus.available:
+                                      updates!.download();
+                                    case UpdateStatus.readyToInstall:
+                                      updates!.install();
+                                    case UpdateStatus.error:
+                                      updates!.retry();
+                                    default:
+                                      break;
+                                  }
+                                },
+                                onDismiss: updates!.dismissBanner,
+                              ),
+                      );
+                    },
+                  ),
+
+                // Compact timer badge, top-center — the TOP-MOST layer so a running timer
+                // always has z-order precedence over every other overlay and banner. Shown
+                // whenever timers run and the big screen-filling presentation is hidden (a
+                // turn is active or a full-screen mode is up), so the timer stays glanceable
+                // instead of disappearing behind the conversation, music, recipe, weather,
+                // or place views. Padded clear of the settings button (top-left) and status
+                // chip (top-right).
+                Positioned(
+                  top: 16,
+                  left: 64,
+                  right: 120,
+                  child: AnimatedOpacity(
+                    opacity: compactTimersVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 300),
+                    child: IgnorePointer(
+                      ignoring: !compactTimersVisible,
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: CompactTimersOverlay(
+                          timers: state.timers,
+                          onDismiss: assistant.dismissTimer,
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ],
-          );
-        },
+              ],
+            );
+          },
+        ),
       ),
+    );
+  }
+}
+
+/// Tracks whether the screen was touched recently: any pointer-down anywhere flips
+/// `touched` to true for [revealFor], re-armed by each new touch. Uses a
+/// translucent [Listener] so it observes touches without consuming them — swipes
+/// and taps still reach the slideshow and controls beneath.
+class _TouchReveal extends StatefulWidget {
+  const _TouchReveal({required this.builder});
+
+  final Widget Function(BuildContext context, bool touched) builder;
+
+  /// How long the touch-revealed controls stay up after the last touch.
+  static const revealFor = Duration(seconds: 5);
+
+  @override
+  State<_TouchReveal> createState() => _TouchRevealState();
+}
+
+class _TouchRevealState extends State<_TouchReveal> {
+  bool _touched = false;
+  Timer? _hide;
+
+  void _onTouch(PointerDownEvent _) {
+    _hide?.cancel();
+    _hide = Timer(_TouchReveal.revealFor, () {
+      if (mounted) setState(() => _touched = false);
+    });
+    if (!_touched) setState(() => _touched = true);
+  }
+
+  @override
+  void dispose() {
+    _hide?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _onTouch,
+      child: widget.builder(context, _touched),
     );
   }
 }
 
 /// A minimal ticking clock for the idle screen. In [large] mode it renders as the
 /// big, dimmed, centered away-mode face (time only); otherwise it's the small
-/// bottom-left idle clock with the wake-word hint.
+/// bottom-left idle clock (time + the weather chip).
 class _AmbientClock extends StatefulWidget {
   const _AmbientClock({this.large = false, this.weather});
 
@@ -583,32 +692,20 @@ class _AmbientClockState extends State<_AmbientClock> {
           );
         }
         final weather = widget.weather;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Text(
-                  _fmt(now),
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.92),
-                    fontSize: 44,
-                    fontWeight: FontWeight.w300,
-                    letterSpacing: 1.0,
-                  ),
-                ),
-                if (weather != null) _weatherChip(weather),
-              ],
-            ),
             Text(
-              'Say the wake word to begin',
+              _fmt(now),
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.6),
-                fontSize: 14,
+                color: Colors.white.withValues(alpha: 0.92),
+                fontSize: 50,
+                fontWeight: FontWeight.w300,
+                letterSpacing: 1.0,
               ),
             ),
+            if (weather != null) _weatherChip(weather),
           ],
         );
       },
@@ -627,7 +724,7 @@ class _AmbientClockState extends State<_AmbientClock> {
         children: [
           Icon(
             weatherIcon(c.weatherCode, isDay: c.isDay),
-            size: 30,
+            size: 34,
             color: weatherIconColor(c.weatherCode, isDay: c.isDay),
           ),
           const SizedBox(width: 6),
@@ -635,7 +732,7 @@ class _AmbientClockState extends State<_AmbientClock> {
             '${c.temp}${weather.unitSuffix}',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.92),
-              fontSize: 28,
+              fontSize: 32,
               fontWeight: FontWeight.w400,
             ),
           ),

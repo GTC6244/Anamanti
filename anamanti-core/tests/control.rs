@@ -51,6 +51,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         places_provider: "google".to_string(),
         radio: None,
         home_assistant: None,
+        camera: None,
+        music_display: Default::default(),
     };
     let (llm, backend, model) = factory
         .build(
@@ -97,7 +99,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             personality: anamanti_core::settings::Personality::default(),
             pronunciations: Vec::new(),
             language: Default::default(),
-            music_display_style: Default::default(),
+            music_display_pins: Default::default(),
             radio: Default::default(),
         },
     );

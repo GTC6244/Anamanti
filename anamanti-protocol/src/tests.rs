@@ -143,6 +143,9 @@ fn type_constants_are_stable() {
         (types::RECIPE, "anamanti-recipe"),
         (types::WEATHER, "anamanti-weather"),
         (types::PLACE, "anamanti-place"),
+        (types::CAMERA, "anamanti-camera"),
+        (types::GET_CAMERA_STREAM, "anamanti-get-camera-stream"),
+        (types::CAMERA_STREAM, "anamanti-camera-stream"),
         (types::FONT, "anamanti-font"),
         (types::MUSIC, "anamanti-music"),
         (types::MUSIC_CONTROL, "anamanti-music-control"),
@@ -270,12 +273,19 @@ async fn recipe_frame_roundtrips_and_decodes_command() {
         scroll.recipe_command(),
         Some(RecipeCommand::Scroll("down".to_string()))
     );
+    let step = roundtrip(&WyomingEvent::recipe_step(4)).await;
+    assert_eq!(step.recipe_command(), Some(RecipeCommand::Step(4)));
 
     // A non-recipe frame yields nothing; missing params are rejected.
     assert_eq!(WyomingEvent::interrupt().recipe_command(), None);
-    for action in ["show", "navigate", "scroll"] {
+    for action in ["show", "navigate", "scroll", "step"] {
         let bad = WyomingEvent::with_data(types::RECIPE, json!({ "action": action }));
         assert_eq!(bad.recipe_command(), None, "{action}");
+    }
+    // Steps are 1-based: a zero (or negative) step is rejected.
+    for n in [json!(0), json!(-2), json!("3")] {
+        let bad = WyomingEvent::with_data(types::RECIPE, json!({ "action": "step", "step": n }));
+        assert_eq!(bad.recipe_command(), None, "{n}");
     }
 }
 
@@ -333,6 +343,32 @@ async fn place_frame_roundtrips_and_decodes_command() {
 }
 
 #[tokio::test]
+async fn camera_frames_roundtrip_and_decode() {
+    let show = WyomingEvent::camera_show("Front Door");
+    let back = roundtrip(&show).await;
+    assert_eq!(back, show);
+    assert_eq!(
+        back.camera_command(),
+        Some(CameraCommand::Show("Front Door".to_string()))
+    );
+    // The show frame never carries a URL/credential.
+    assert!(back.data.get("url").is_none());
+
+    let dismiss = roundtrip(&WyomingEvent::camera_dismiss()).await;
+    assert_eq!(dismiss.camera_command(), Some(CameraCommand::Dismiss));
+
+    assert_eq!(WyomingEvent::interrupt().camera_command(), None);
+    let blank = WyomingEvent::with_data(types::CAMERA, json!({ "action": "show", "camera": " " }));
+    assert_eq!(blank.camera_command(), None);
+    let unknown = WyomingEvent::with_data(types::CAMERA, json!({ "action": "zoom" }));
+    assert_eq!(unknown.camera_command(), None);
+
+    let req = roundtrip(&WyomingEvent::get_camera_stream("Front Door")).await;
+    assert_eq!(req.event_type, types::GET_CAMERA_STREAM);
+    assert_eq!(req.data["camera"], "Front Door");
+}
+
+#[tokio::test]
 async fn music_frames_roundtrip_and_decode() {
     let snapshot = json!({ "playing": true, "track_title": "Paranoid Android" });
     let np = roundtrip(&WyomingEvent::music_now_playing(snapshot.clone())).await;
@@ -360,6 +396,23 @@ async fn music_frames_roundtrip_and_decode() {
         Some(("pause".to_string(), None))
     );
     assert_eq!(WyomingEvent::music_dismiss().music_control_command(), None);
+
+    // The display stamps its id so the Core knows which display pressed the button.
+    let tagged = roundtrip(
+        &WyomingEvent::music_control("display_fullscreen", None).with_device_id(" kitchen "),
+    )
+    .await;
+    assert_eq!(tagged.music_control_device_id(), Some("kitchen"));
+    assert_eq!(
+        tagged.music_control_command(),
+        Some(("display_fullscreen".to_string(), None))
+    );
+    assert_eq!(pause.music_control_device_id(), None);
+    let blank = WyomingEvent::music_control("pause", None).with_device_id("  ");
+    assert!(blank.data.get("device_id").is_none());
+    let start = WyomingEvent::audio_start(AudioFormat::PCM_16K_MONO, 0).with_device_id("den");
+    assert_eq!(start.data["device_id"], serde_json::json!("den"));
+    assert_eq!(start.music_control_device_id(), None);
 
     let hello = WyomingEvent::hello_music("dev", "core", "Kitchen");
     assert_eq!(hello.data["role"], json!("music"));

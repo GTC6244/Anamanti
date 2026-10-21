@@ -18,6 +18,7 @@
 //! so production dials TCP while tests wire in-memory mock servers — the turn
 //! logic is identical either way.
 
+mod camera;
 mod home;
 mod language;
 mod prompt;
@@ -716,6 +717,17 @@ impl Pipeline {
             });
         }
 
+        // Camera fast path (plans/CameraPlan.md): "show the front door" opens the live
+        // view on this display; "stop"/"close it" closes an open one. Pure string match,
+        // so non-camera turns cost nothing.
+        if let Some((text, delivery)) = self.run_camera_fast_path(ctx, transcript).await {
+            return Ok(Reply {
+                text,
+                memories_written,
+                delivery,
+            });
+        }
+
         // System-1 fast-decision fork (plans/system1-fast-decisions.md). Runs *before*
         // memory recall + the LLM; skipped entirely for the default `none` engine. On a
         // confident Resolve with a matching handler the turn is answered there.
@@ -851,6 +863,9 @@ impl Pipeline {
         // push `DeviceAction`s here and the drive loop relays them to the device on the
         // same socket. Unbounded so a tool's `invoke` never blocks.
         let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<DeviceAction>();
+        // Which display this turn came from, for tools that act per display (a play
+        // request shows full screen on the display that asked).
+        let device_id = ctx.device_ctx.device_id.clone();
 
         // Timing (surfaced in `/chatlog`): LLM + TTS interleave in the streaming path, so
         // we capture two anchors — `llm_ms` = time to the first reply token, `tts_ms` =
@@ -898,6 +913,7 @@ impl Pipeline {
                     None => {
                         let turn = LlmTurn::new(system_prompt, transcript)
                             .with_actions(action_tx)
+                            .with_device_id(device_id.clone())
                             .with_history(history);
                         tokio::time::timeout_at(first_deadline, runtime.llm.respond(turn))
                             .await

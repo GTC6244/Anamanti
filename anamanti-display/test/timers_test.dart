@@ -1,5 +1,5 @@
 // Phase 2 on-device timers: the controller folds timer events into `AssistantState`
-// and the TimersOverlay renders a live countdown with tap-to-dismiss.
+// and the timer widgets render a live countdown with tap-to-dismiss.
 
 import 'dart:async';
 
@@ -106,6 +106,54 @@ void main() {
     expect(controller.state.timers, isEmpty);
   });
 
+  test('Cancel timer turns the alarm off in the engine, not just the UI', () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final dismissed = <int>[];
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+      dismissNativeTimer: dismissed.add,
+    )..start();
+    addTearDown(controller.dispose);
+
+    engine.add(_ev(WakeWordEventKind.timerStarted, timerId: 7, timerRemainingSecs: 60));
+    engine.add(_ev(WakeWordEventKind.timerFinished, timerId: 7));
+    await Future<void>.delayed(Duration.zero);
+    controller.dismissTimer(7);
+    expect(dismissed, [7]);
+    expect(controller.state.timers, isEmpty);
+  });
+
+  test('a newly set timer spotlights the big view until the user speaks again',
+      () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+    )..start();
+    addTearDown(controller.dispose);
+
+    engine.add(_ev(WakeWordEventKind.detected));
+    engine.add(_ev(WakeWordEventKind.transcript));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isFalse);
+
+    // The turn sets a timer → the big timers take the screen right away.
+    engine.add(_ev(WakeWordEventKind.timerStarted, timerId: 1, timerRemainingSecs: 600));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isTrue);
+
+    // The user speaks again → the conversation panel comes back.
+    engine.add(_ev(WakeWordEventKind.transcript));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isFalse);
+
+    // An adjust re-emits the same id: not a new timer, so no spotlight.
+    engine.add(_ev(WakeWordEventKind.timerStarted, timerId: 1, timerRemainingSecs: 900));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isFalse);
+  });
+
   test('formatRemaining renders m:ss / h:mm:ss and clamps negatives', () {
     expect(formatRemaining(const Duration(seconds: 5)), '0:05');
     expect(formatRemaining(const Duration(minutes: 5)), '5:00');
@@ -129,6 +177,51 @@ void main() {
     );
   });
 
+  test('effectiveTimerDisplay links the two timer widgets', () {
+    final t = [
+      TimerModel(
+        id: 1,
+        label: 'pasta',
+        deadline: DateTime(2026, 1, 1, 12, 5),
+        total: const Duration(minutes: 5),
+      ),
+    ];
+    // No timers: neither widget.
+    expect(const AssistantState().effectiveTimerDisplay, isNull);
+    // Idle and someone present: the full-screen timers.
+    expect(AssistantState(timers: t).effectiveTimerDisplay, TimerDisplayStyle.fullscreen);
+    // A turn (or its reply audio) covers the idle screen: the compact overlay.
+    expect(
+      AssistantState(timers: t, phase: TurnPhase.listening).effectiveTimerDisplay,
+      TimerDisplayStyle.compact,
+    );
+    expect(
+      AssistantState(timers: t, audioPlaying: true).effectiveTimerDisplay,
+      TimerDisplayStyle.compact,
+    );
+    // Away mode (nobody there, nothing up): only the clock shows.
+    expect(AssistantState(timers: t, userPresent: false).effectiveTimerDisplay, isNull);
+  });
+
+  test('timers default to the big full-screen widget', () {
+    expect(TimerDisplayStyle.defaultStyle, TimerDisplayStyle.fullscreen);
+    expect(const AssistantState().timerDisplayStyle, TimerDisplayStyle.fullscreen);
+    final t = [
+      TimerModel(
+        id: 1,
+        label: '',
+        deadline: DateTime(2026, 1, 1, 12, 5),
+        total: const Duration(minutes: 5),
+      ),
+    ];
+    // A compact preference shows the chip row while idle too.
+    expect(
+      AssistantState(timers: t, timerDisplayStyle: TimerDisplayStyle.compact)
+          .effectiveTimerDisplay,
+      TimerDisplayStyle.compact,
+    );
+  });
+
   testWidgets('big display shows name, countdown, and dismisses a ringing timer',
       (tester) async {
     final now = DateTime(2026, 1, 1, 12, 0, 0);
@@ -145,7 +238,7 @@ void main() {
 
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: TimersOverlay(
+        body: FullScreenTimersView(
           timers: timers,
           clock: () => now,
           onDismiss: (id) => dismissed = id,
@@ -162,6 +255,12 @@ void main() {
 
     // A running timer isn't dismissable; tapping the ringing one dismisses it.
     await tester.tap(find.text("Time's up"));
+    expect(dismissed, 2);
+
+    // The ringing timer (only) has a "Cancel timer" button that turns it off.
+    expect(find.text('Cancel timer'), findsOneWidget);
+    dismissed = null;
+    await tester.tap(find.byKey(const ValueKey('cancel-timer-2')));
     expect(dismissed, 2);
 
     // Unmount so the overlay's periodic ticker is cancelled before the test ends.
@@ -182,8 +281,7 @@ void main() {
 
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: TimersOverlay(
-          compact: true,
+        body: CompactTimersOverlay(
           timers: timers,
           clock: () => now,
           onDismiss: (_) {},

@@ -280,7 +280,7 @@ pub mod types {
     pub const ANAMANTI_NOTIFY_ACK: &str = "anamanti-notify-ack";
 
     /// orchestrator → device: show / dismiss / drive the recipe-mode screen (data:
-    /// `action` = `"show"`/`"dismiss"`/`"navigate"`/`"scroll"`; for `show`, `recipe` is
+    /// `action` = `"show"`/`"dismiss"`/`"navigate"`/`"scroll"`/`"step"`; for `show`, `recipe` is
     /// the structured recipe object — `title`, `summary`, `source_url`, `image_url`,
     /// `servings`, `total_time`, `ingredients[]`, `steps[]`). A device action driven by
     /// the `recipe_lookup` tool; the device owns the screen state until dismissed.
@@ -297,6 +297,22 @@ pub mod types {
     /// = `"show"` / `"dismiss"`; for `show`, `place` is the structured report — `name`,
     /// `address`, `hours[]`, `open_now`, `rating`, `phone`, `website`, `photo_uri`, …).
     pub const PLACE: &str = "anamanti-place";
+
+    /// orchestrator → device: show/dismiss the full-screen live camera view
+    /// (`plans/CameraPlan.md`; data: `action` = `"show"` / `"dismiss"`; for `show`,
+    /// `camera` is the camera's display name, e.g. `"Front Door"`). The frame **never**
+    /// carries the stream URL or any credential: on `show` the device fetches the URL
+    /// over the control socket ([`GET_CAMERA_STREAM`]) and holds it in memory only.
+    pub const CAMERA: &str = "anamanti-camera";
+    /// device → orchestrator: fetch the live stream URL for a camera (data: `camera`,
+    /// the display name from the `show` frame; empty/absent = the first configured
+    /// camera). A control request answered on the control socket.
+    pub const GET_CAMERA_STREAM: &str = "anamanti-get-camera-stream";
+    /// orchestrator → device: the stream for a camera (data: `ok`; on success `camera`
+    /// (the resolved display name) and `url` (an `rtsp://` URL **with the NVR
+    /// credentials embedded**); on failure a speakable `message`). Like the Drive
+    /// bundle, the credential rides the device↔orchestrator LAN hop only.
+    pub const CAMERA_STREAM: &str = "anamanti-camera-stream";
 
     /// orchestrator → device: adjust the global on-screen font scale (data: `action` =
     /// `"adjust"`, `direction` = `"increase"` / `"decrease"`). A device action driven by
@@ -416,6 +432,9 @@ pub enum RecipeCommand {
     Navigate(String),
     /// Scroll the active pane by voice: `"up"` / `"down"` (a page) or `"top"` / `"bottom"`.
     Scroll(String),
+    /// Jump to a step by voice (1-based): switch to the Steps tab, scroll that step into
+    /// view and highlight it.
+    Step(u32),
 }
 
 /// A font-scaling command decoded from an `anamanti-font` frame. `Adjust` carries the
@@ -448,6 +467,16 @@ pub enum PlaceCommand {
     /// Show this place report full-screen on the place card (voice-triggered).
     Show(Value),
     /// Dismiss the full-screen place card and return to the idle/ambient display.
+    Dismiss,
+}
+
+/// A camera command decoded from an `anamanti-camera` frame (`plans/CameraPlan.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CameraCommand {
+    /// Open the live view of the named camera (its display name). The device then
+    /// fetches the stream URL itself over the control socket.
+    Show(String),
+    /// Close the live camera view and return to the idle/ambient display.
     Dismiss,
 }
 
@@ -882,10 +911,18 @@ impl WyomingEvent {
         )
     }
 
+    /// An `anamanti-recipe` **step** action (orchestrator → device): jump the recipe
+    /// screen to step `step` (1-based) — switch to the Steps tab, scroll that step into
+    /// view and highlight it.
+    pub fn recipe_step(step: u32) -> Self {
+        Self::with_data(types::RECIPE, json!({ "action": "step", "step": step }))
+    }
+
     /// Decode an `anamanti-recipe` frame into a [`RecipeCommand`], or `None` if this is
     /// not a recipe frame or its `action`/params are unrecognized. A `show` with no
-    /// `recipe` object, a `navigate` with no `target`, or a `scroll` with no
-    /// `direction` are all rejected (return `None`).
+    /// `recipe` object, a `navigate` with no `target`, a `scroll` with no
+    /// `direction`, or a `step` with no positive `step` number are all rejected
+    /// (return `None`).
     pub fn recipe_command(&self) -> Option<RecipeCommand> {
         if self.event_type != types::RECIPE {
             return None;
@@ -908,6 +945,12 @@ impl WyomingEvent {
                 .get("direction")
                 .and_then(Value::as_str)
                 .map(|d| RecipeCommand::Scroll(d.to_string())),
+            "step" => self
+                .data
+                .get("step")
+                .and_then(Value::as_u64)
+                .filter(|&n| n >= 1 && n <= u64::from(u32::MAX))
+                .map(|n| RecipeCommand::Step(n as u32)),
             _ => None,
         }
     }
@@ -984,6 +1027,46 @@ impl WyomingEvent {
             "dismiss" => Some(PlaceCommand::Dismiss),
             _ => None,
         }
+    }
+
+    // ---- device actions: camera ----
+
+    /// An `anamanti-camera` **show** action (orchestrator → device): open the live view
+    /// of `camera` (its display name). Carries no URL or credential.
+    pub fn camera_show(camera: &str) -> Self {
+        Self::with_data(types::CAMERA, json!({ "action": "show", "camera": camera }))
+    }
+
+    /// An `anamanti-camera` **dismiss** action (orchestrator → device): close the live
+    /// camera view.
+    pub fn camera_dismiss() -> Self {
+        Self::with_data(types::CAMERA, json!({ "action": "dismiss" }))
+    }
+
+    /// Decode an `anamanti-camera` frame into a [`CameraCommand`], or `None` if this is
+    /// not a camera frame or its `action` is unrecognized. A `show` with no non-blank
+    /// `camera` name is rejected.
+    pub fn camera_command(&self) -> Option<CameraCommand> {
+        if self.event_type != types::CAMERA {
+            return None;
+        }
+        match self.data.get("action").and_then(Value::as_str)? {
+            "show" => self
+                .data
+                .get("camera")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| CameraCommand::Show(s.to_string())),
+            "dismiss" => Some(CameraCommand::Dismiss),
+            _ => None,
+        }
+    }
+
+    /// An `anamanti-get-camera-stream` control request (device → orchestrator) for the
+    /// camera named `camera` (blank = the first configured camera).
+    pub fn get_camera_stream(camera: &str) -> Self {
+        Self::with_data(types::GET_CAMERA_STREAM, json!({ "camera": camera }))
     }
 
     // ---- device actions: font ----
@@ -1066,6 +1149,35 @@ impl WyomingEvent {
             types::MUSIC_CONTROL,
             json!({ "action": action.into(), "value": value }),
         )
+    }
+
+    /// Stamp the sending display's stable `device_id` (the id it announces in its
+    /// `anamanti-hello` frames) as a top-level `data.device_id` — on a turn's
+    /// `audio-start` and on an `anamanti-music-control`, so the Core knows *which* display
+    /// asked (e.g. to show the music full screen there). A blank id, or a frame whose
+    /// data isn't an object, is left unchanged.
+    pub fn with_device_id(mut self, device_id: &str) -> Self {
+        let id = device_id.trim();
+        if !id.is_empty() {
+            if let Value::Object(map) = &mut self.data {
+                map.insert("device_id".into(), Value::String(id.to_string()));
+            }
+        }
+        self
+    }
+
+    /// The sending display's `device_id` from an `anamanti-music-control` frame (see
+    /// [`with_device_id`](Self::with_device_id)); `None` for another frame type, or from
+    /// an older display that doesn't send one.
+    pub fn music_control_device_id(&self) -> Option<&str> {
+        if self.event_type != types::MUSIC_CONTROL {
+            return None;
+        }
+        self.data
+            .get("device_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
     }
 
     /// Decode an `anamanti-music-control` frame into `(action, value)`; `None` for a

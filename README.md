@@ -38,7 +38,13 @@ speaks the reply back through the Echo Show's speakers.
   anyone. "Who am I?" is answered from the voice, not from memory. Enroll on the
   display under Settings → People → Add a voice.
 - 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
-  with an idle photo slideshow from a Google Photos/Drive folder.
+  with an idle photo slideshow from a Google Photos/Drive folder (how often the
+  photo changes is set per display, 5 s to 10 min). The front camera doubles as a
+  presence sensor (brightens when you walk up, dims when the room is empty) and as a
+  **light sensor**: when the lights go off at night the screen dims right down so it
+  doesn't light up a dark room (Settings → Display → Night). Close the privacy shutter
+  and you choose what that means: a dim clock, or awake by day and dim during your
+  night hours. Nothing from the camera is stored or leaves the device.
 - 🔔 **Proactive notifications** — the Mac can push a visual notification to the
   display *without* you asking (a reminder, an alert), over a persistent connection
   the device holds open to its pinned Anamanti Core. Visual-only today (no spoken
@@ -47,10 +53,11 @@ speaks the reply back through the Echo Show's speakers.
   house speakers (Snapcast + librespot on the Mac; no music audio passes through the
   Echo Show). While a track plays, a compact control bar rides the idle screen; tap it
   for a full now-playing screen (artwork, progress, transport, volume) and the up-next
-  queue — or just say "show me what's playing" / "what's up next" / "hide the music".
-  Prefer the big player? Choose **full screen** (Music & Devices, the expand button on
-  the bar, or say "make the music full screen") and it shows whenever Spotify or the
-  radio plays; minimize or say "use the small music player" to go back.
+  queue (tap a queued track to jump straight to it) — or just say "show me what's playing" / "what's up next" / "hide the music".
+  The display you asked shows the music **full screen**; every other display shows the
+  small bar. Each display can switch on its own — the expand / minimize button, or say
+  "make the music full screen" / "use the small music player" to it — and Music & Devices
+  can pin any display to always full screen or always the small bar.
 - 📻 **Internet radio** — curate stations on the Core's **Music & Devices** page (paste a
   stream URL, **Look up** fills the name + logo from the Radio Browser directory), then
   say "play Dave Rocks" / "next station" / "stop the radio". It plays on the same
@@ -64,6 +71,11 @@ speaks the reply back through the Echo Show's speakers.
   luz do escritório" and "fala como um gângster" all work in Portuguese; English is
   unchanged. The Display's own screens stay English (the live transcript and reply show
   whatever was said). See [`plans/BilingualPlan.md`](plans/BilingualPlan.md).
+- 📹 **Front-door camera** — say "show me the front door" or "who's at the door?" and
+  the display you're talking to shows the live view from the Reolink NVR (video only,
+  ~1–3 s behind real time); "close it" or 60 s closes it. The NVR password stays on the
+  Mac (`REOLINK_PASSWORD`); the video goes straight from the NVR to the display and never
+  leaves the house. Set it up in the `camera` block of `anamanti.json`.
 - 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
   heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
   tuning* — it changes only how replies sound, never what the assistant knows or does.

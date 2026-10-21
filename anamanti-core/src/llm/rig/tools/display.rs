@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use super::{close_tool, definition, emit, parse_args, ToolCtx, VoiceTool};
 use crate::directions::LiveHomeLocation;
 use crate::llm::{ActionSink, DeviceAction, MusicNav, RecipeNav};
-use crate::music::MusicDisplayStyle;
+use crate::music::{MusicDisplayRouter, MusicDisplayStyle};
 use crate::recipe::RecipeProvider;
 
 /// Tool name: show a recipe on the display.
@@ -114,13 +114,20 @@ impl VoiceTool for RecipeLookup {
              Whenever the user asks for a recipe, how to make or cook a dish, or to show a \
              recipe for something, you MUST call `recipe_lookup` with the dish name — never \
              recite a full recipe as prose. When a recipe is already on screen (the turn \
-             context will tell you, including which tab and scroll position), use \
-             `recipe_control` to navigate it — switching to the Overview / Ingredients / \
-             Steps tab or scrolling the current tab — whenever the user says things like \
-             \"show the ingredients\", \"go to the steps\", \"next\", \"scroll down\", \
-             \"scroll back up\", or \"start over\". Use `close_recipe` when they say they're \
-             done cooking or ask to close the recipe. Relay each tool's short spoken \
-             confirmation.",
+             context will tell you, including which tab, scroll position and highlighted \
+             step, plus the full ingredient list and steps), use `recipe_control` to \
+             navigate it — switching to the Overview / Ingredients / Steps tab or scrolling \
+             the current tab whenever the user says things like \"show the ingredients\", \
+             \"go to the steps\", \"scroll down\", \"scroll back up\", or \"start over\". \
+             For a specific step (\"go to step 4\", \"next step\", \"previous step\", \
+             \"what's step 3\") ALWAYS use `recipe_control` `go_to_step` with the step \
+             number — never scroll to find a step. Answer questions about the recipe on \
+             screen (\"how many tomatoes do I need?\", \"how long does it bake?\") directly \
+             from the ingredients and steps in the turn context — do not look the recipe \
+             up again. After a `go_to_step`, read that step to the user word for word from \
+             the numbered steps in the turn context (\"Step 4. Simmer for ten minutes.\"). \
+             Use `close_recipe` when they say they're done cooking or ask to close the \
+             recipe. Relay each tool's short spoken confirmation.",
         )
     }
 
@@ -146,6 +153,9 @@ impl VoiceTool for RecipeLookup {
 struct RecipeControlArgs {
     /// One of the fixed navigation actions.
     action: String,
+    /// The 1-based step number for `go_to_step`.
+    #[serde(default)]
+    step: Option<u32>,
 }
 
 /// Navigate the open recipe screen ([`DeviceAction::RecipeControl`]).
@@ -161,7 +171,8 @@ impl VoiceTool for RecipeControl {
         definition(
             RECIPE_CONTROL,
             "Navigate the recipe screen that is already open on the display: switch \
-             which tab is showing, or scroll the current tab. Use ONLY when a recipe \
+             which tab is showing, scroll the current tab, or jump to a specific step \
+             (which is scrolled into view and highlighted). Use ONLY when a recipe \
              is currently on screen (the turn context says so). To close it, use \
              close_recipe instead.",
             json!({
@@ -176,11 +187,20 @@ impl VoiceTool for RecipeControl {
                             "scroll_up",
                             "scroll_down",
                             "scroll_top",
-                            "scroll_bottom"
+                            "scroll_bottom",
+                            "go_to_step"
                         ],
                         "description": "The navigation action: switch to the Overview / Ingredients / \
-                                        Steps tab, or scroll the current tab up/down a page or to the \
-                                        top/bottom."
+                                        Steps tab, scroll the current tab up/down a page or to the \
+                                        top/bottom, or `go_to_step` to show and highlight one step. \
+                                        For \"go to step 4\", \"next step\", \"previous step\" or \
+                                        \"what's step 3\" ALWAYS use go_to_step (never scroll) — work \
+                                        out the number from the highlighted step in the turn context."
+                    },
+                    "step": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The 1-based step number. Required for go_to_step; ignored otherwise."
                     }
                 },
                 "required": ["action"]
@@ -191,13 +211,31 @@ impl VoiceTool for RecipeControl {
     async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
         let args: RecipeControlArgs = parse_args(args, RECIPE_CONTROL)?;
         let (nav, confirmation) = match args.action.as_str() {
-            "show_overview" => (RecipeNav::TabOverview, "Showing the overview."),
-            "show_ingredients" => (RecipeNav::TabIngredients, "Showing the ingredients."),
-            "show_steps" => (RecipeNav::TabSteps, "Showing the steps."),
-            "scroll_up" => (RecipeNav::ScrollUp, "Scrolling up."),
-            "scroll_down" => (RecipeNav::ScrollDown, "Scrolling down."),
-            "scroll_top" => (RecipeNav::ScrollTop, "Back to the top."),
-            "scroll_bottom" => (RecipeNav::ScrollBottom, "Jumping to the bottom."),
+            "show_overview" => (RecipeNav::TabOverview, "Showing the overview.".to_string()),
+            "show_ingredients" => (
+                RecipeNav::TabIngredients,
+                "Showing the ingredients.".to_string(),
+            ),
+            "show_steps" => (RecipeNav::TabSteps, "Showing the steps.".to_string()),
+            "scroll_up" => (RecipeNav::ScrollUp, "Scrolling up.".to_string()),
+            "scroll_down" => (RecipeNav::ScrollDown, "Scrolling down.".to_string()),
+            "scroll_top" => (RecipeNav::ScrollTop, "Back to the top.".to_string()),
+            "scroll_bottom" => (
+                RecipeNav::ScrollBottom,
+                "Jumping to the bottom.".to_string(),
+            ),
+            "go_to_step" => match args.step.filter(|&n| n >= 1) {
+                Some(n) => (
+                    RecipeNav::Step(n),
+                    format!(
+                        "Step {n} is now shown and highlighted. Read step {n} to the user word \
+                         for word from the recipe steps in the turn context, starting \
+                         \"Step {n}.\" (if the context has no text for it, just say \
+                         \"Here's step {n}.\")."
+                    ),
+                ),
+                None => anyhow::bail!("recipe_control go_to_step needs a step number of 1 or more"),
+            },
             other => anyhow::bail!("unknown recipe_control action `{other}`"),
         };
         emit(
@@ -205,7 +243,7 @@ impl VoiceTool for RecipeControl {
             DeviceAction::RecipeControl(nav),
             "the recipe could update",
         )?;
-        Ok(confirmation.to_string())
+        Ok(confirmation)
     }
 }
 
@@ -214,9 +252,10 @@ impl VoiceTool for RecipeControl {
 // ---------------------------------------------------------------------------
 
 /// The `music_screen` tool. Advertised wherever `spotify_control` is (screen-only;
-/// transport stays on `spotify_control`).
-pub(super) fn music_screen() -> Arc<dyn VoiceTool> {
-    Arc::new(MusicScreen)
+/// transport stays on `spotify_control`). `display` (when present) records a
+/// `fullscreen` / `compact` request as the speaking display's choice for this music.
+pub(super) fn music_screen(display: Option<Arc<MusicDisplayRouter>>) -> Arc<dyn VoiceTool> {
+    Arc::new(MusicScreen { display })
 }
 
 /// Typed arguments for `music_screen`.
@@ -228,7 +267,9 @@ struct MusicScreenArgs {
 
 /// Show / switch / close the on-screen music player ([`DeviceAction::MusicScreen`]).
 /// The device decides whether anything is playing.
-struct MusicScreen;
+struct MusicScreen {
+    display: Option<Arc<MusicDisplayRouter>>,
+}
 
 #[async_trait]
 impl VoiceTool for MusicScreen {
@@ -241,9 +282,9 @@ impl VoiceTool for MusicScreen {
             MUSIC_SCREEN,
             "Control what the music player shows on the display (Spotify and radio share \
              it): open the full now-playing screen, open the up-next queue, close the \
-             player back to the ambient screen, or switch which widget is shown whenever \
-             music plays — `fullscreen` (the big full-screen player, remembered) or \
-             `compact` (the small bar, remembered). Use this for requests like \"show me \
+             player back to the ambient screen, or switch which widget THIS display shows \
+             while the current music plays — `fullscreen` (the big full-screen player) or \
+             `compact` (the small bar). Use this for requests like \"show me \
              what's playing\", \"show the queue / what's up next\", \"hide the music\", \
              \"make the music full screen\" or \"use the small music player\". This only \
              changes the SCREEN — to play/pause/skip/change volume use spotify_control \
@@ -257,7 +298,7 @@ impl VoiceTool for MusicScreen {
                         "description": "The screen action: `show` opens the now-playing view, \
                                         `show_queue` opens the up-next list, `close` returns to \
                                         the ambient display, `fullscreen` / `compact` switch \
-                                        (and remember) the widget shown while music plays."
+                                        the widget this display shows while music plays."
                     }
                 },
                 "required": ["action"]
@@ -272,10 +313,11 @@ impl VoiceTool for MusicScreen {
              Call `music_screen` with action=show when the user says things like \"show me \
              what's playing\" or \"pull up the music\", action=show_queue for \"what's up \
              next\" or \"show the queue\", and action=close for \"hide the music\" or \"close \
-             the player\". To change which music widget is shown whenever music plays, \
-             call it with action=fullscreen (\"make the music full screen\", \"use the big \
-             player\") or action=compact (\"use the small music player\", \"shrink the \
-             music\"); that choice is remembered for Spotify and radio. The turn context will \
+             the player\". To change which music widget this display shows while the music \
+             plays, call it with action=fullscreen (\"make the music full screen\", \"use the \
+             big player\") or action=compact (\"use the small music player\", \"shrink the \
+             music\"); it applies to this display only (each display chooses separately) \
+             until the music stops or something new is played. The turn context will \
              tell you when the music screen is already open and what's on it. Relay its short \
              spoken confirmation.",
         )
@@ -298,7 +340,7 @@ impl VoiceTool for MusicScreen {
             ),
             "fullscreen" => (
                 DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Fullscreen),
-                "Okay, music will play full screen.",
+                "Okay, the music is full screen.",
             ),
             "compact" => (
                 DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Compact),
@@ -306,7 +348,14 @@ impl VoiceTool for MusicScreen {
             ),
             other => anyhow::bail!("unknown music_screen action `{other}`"),
         };
-        emit(ctx.actions, action, "the music screen could update")?;
+        emit(ctx.actions, action.clone(), "the music screen could update")?;
+        // A style switch is this display's choice for the current music: record it so its
+        // now-playing pushes agree with the frame it is about to receive.
+        if let (DeviceAction::MusicDisplayStyle(style), Some(display), Some(id)) =
+            (&action, &self.display, ctx.device_id)
+        {
+            display.choose(id, *style);
+        }
         Ok(confirmation.to_string())
     }
 }
@@ -604,10 +653,145 @@ impl VoiceTool for PlacesLookup {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Camera (plans/CameraPlan.md)
+// ---------------------------------------------------------------------------
+
+pub(super) const SHOW_CAMERA: &str = "show_camera";
+const CLOSE_CAMERA: &str = "close_camera";
+
+/// `show_camera` and `close_camera`, in advertised order. The LLM fallback for wordings
+/// the camera fast path (`orchestrator::camera`) doesn't catch.
+pub(super) fn camera_tools(hub: Arc<crate::camera::CameraHub>) -> Vec<Arc<dyn VoiceTool>> {
+    vec![
+        Arc::new(ShowCamera { hub }),
+        close_tool(
+            CLOSE_CAMERA,
+            "Close the live camera view on the display and return to the idle screen. \
+             Use when the user asks to close/dismiss/stop the camera.",
+            DeviceAction::DismissCamera,
+            "the camera",
+            "Okay.",
+        ),
+    ]
+}
+
+/// Typed arguments for `show_camera`.
+#[derive(Debug, Default, Deserialize)]
+struct ShowCameraArgs {
+    /// The camera's name; omitted/blank = the first configured camera.
+    #[serde(default)]
+    camera: Option<String>,
+}
+
+/// Opens the live view of a configured camera on the display the user is talking to
+/// ([`DeviceAction::ShowCamera`]). The frame names the camera only; the display fetches
+/// the stream itself.
+struct ShowCamera {
+    hub: Arc<crate::camera::CameraHub>,
+}
+
+impl ShowCamera {
+    fn names(&self) -> Vec<String> {
+        self.hub.cameras().iter().map(|c| c.name.clone()).collect()
+    }
+}
+
+#[async_trait]
+impl VoiceTool for ShowCamera {
+    fn name(&self) -> &'static str {
+        SHOW_CAMERA
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        let names = self.names().join(", ");
+        definition(
+            SHOW_CAMERA,
+            &format!(
+                "Show a live security-camera view on the display. Use when the user \
+                 asks to see a camera, who is at the door, or what is happening \
+                 outside. Available cameras: {names}. You cannot see the video \
+                 yourself — never describe what the camera shows."
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "camera": {
+                        "type": "string",
+                        "description": format!(
+                            "Which camera to show; one of: {names}. Omit for the first one."
+                        )
+                    }
+                }
+            }),
+        )
+    }
+
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: ShowCameraArgs = super::parse_args_or_default(args, SHOW_CAMERA)?;
+        let sink = ctx.require_sink("no display is connected to show the camera on right now")?;
+        let want = args.camera.unwrap_or_default();
+        let Some(cam) = self.hub.resolve(&want) else {
+            return Ok(format!(
+                "There's no camera called \"{}\". The cameras are: {}.",
+                want.trim(),
+                self.names().join(", ")
+            ));
+        };
+        emit(
+            Some(sink),
+            DeviceAction::ShowCamera {
+                name: cam.name.clone(),
+            },
+            "the camera could show",
+        )?;
+        Ok(format!("Here's the {}.", cam.name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{home, StaticWeather};
     use super::*;
+
+    #[tokio::test]
+    async fn show_camera_resolves_names_and_emits_only_the_name() {
+        let tools = camera_tools(crate::camera::tests::hub());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let said = tools[0]
+            .invoke(&json!({ "camera": "back yard" }), &ToolCtx::new(Some(&tx)))
+            .await
+            .unwrap();
+        assert_eq!(said, "Here's the Back yard.");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::ShowCamera {
+                name: "Back yard".into()
+            }
+        );
+        // Omitted → the first camera; null args are accepted.
+        tools[0]
+            .invoke(&Value::Null, &ToolCtx::new(Some(&tx)))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::ShowCamera {
+                name: "Front Door".into()
+            }
+        );
+        // Unknown camera → a spoken list, nothing shown.
+        let said = tools[0]
+            .invoke(&json!({ "camera": "garage" }), &ToolCtx::new(Some(&tx)))
+            .await
+            .unwrap();
+        assert!(said.contains("Front Door, Back yard"), "{said}");
+        assert!(rx.try_recv().is_err());
+        // The advertised definition lists the cameras but never the password.
+        let def = serde_json::to_string(&tools[0].definition().parameters).unwrap()
+            + &tools[0].definition().description;
+        assert!(def.contains("Front Door") && !def.contains("p@ss"));
+    }
 
     fn weather_tool() -> Arc<dyn VoiceTool> {
         weather_tools(Arc::new(StaticWeather), home("Austin, TX"), true).remove(0)
@@ -617,7 +801,7 @@ mod tests {
     async fn weather_lookup_defaults_to_hourly_layout_and_passes_daily_through() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         weather_tool()
-            .invoke(&json!({}), &ToolCtx { actions: Some(&tx) })
+            .invoke(&json!({}), &ToolCtx::new(Some(&tx)))
             .await
             .unwrap();
         match rx.try_recv().unwrap() {
@@ -637,10 +821,7 @@ mod tests {
     async fn weather_lookup_week_layout_selects_the_7_day_widget() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         weather_tool()
-            .invoke(
-                &json!({ "layout": "Week" }),
-                &ToolCtx { actions: Some(&tx) },
-            )
+            .invoke(&json!({ "layout": "Week" }), &ToolCtx::new(Some(&tx)))
             .await
             .unwrap();
         match rx.try_recv().unwrap() {
@@ -653,7 +834,7 @@ mod tests {
     #[tokio::test]
     async fn display_tools_check_for_a_display_before_fetching() {
         let err = weather_tool()
-            .invoke(&json!({}), &ToolCtx { actions: None })
+            .invoke(&json!({}), &ToolCtx::new(None))
             .await
             .unwrap_err();
         assert_eq!(
@@ -665,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn recipe_control_maps_actions_and_rejects_unknown_ones() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = ToolCtx { actions: Some(&tx) };
+        let ctx = ToolCtx::new(Some(&tx));
         let out = RecipeControl
             .invoke(&json!({ "action": "show_steps" }), &ctx)
             .await
@@ -683,16 +864,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recipe_control_go_to_step_needs_a_positive_step() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolCtx::new(Some(&tx));
+        let out = RecipeControl
+            .invoke(&json!({ "action": "go_to_step", "step": 4 }), &ctx)
+            .await
+            .unwrap();
+        assert!(out.starts_with("Step 4 is now shown"), "{out}");
+        assert!(out.contains("Read step 4 to the user"), "{out}");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::RecipeControl(RecipeNav::Step(4))
+        );
+        for bad in [
+            json!({ "action": "go_to_step" }),
+            json!({ "action": "go_to_step", "step": 0 }),
+        ] {
+            assert!(RecipeControl.invoke(&bad, &ctx).await.is_err(), "{bad}");
+        }
+        assert!(rx.try_recv().is_err(), "a rejected step emits nothing");
+    }
+
+    #[tokio::test]
     async fn music_screen_maps_actions_and_rejects_unknown_ones() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = ToolCtx { actions: Some(&tx) };
+        let ctx = ToolCtx::new(Some(&tx));
+        let tool = MusicScreen { display: None };
         for (action, nav) in [
             ("show", MusicNav::NowPlaying),
             ("show_queue", MusicNav::Queue),
             ("close", MusicNav::Close),
         ] {
-            MusicScreen
-                .invoke(&json!({ "action": action }), &ctx)
+            tool.invoke(&json!({ "action": action }), &ctx)
                 .await
                 .unwrap();
             assert_eq!(rx.try_recv().unwrap(), DeviceAction::MusicScreen(nav));
@@ -701,8 +905,7 @@ mod tests {
             ("fullscreen", MusicDisplayStyle::Fullscreen),
             ("compact", MusicDisplayStyle::Compact),
         ] {
-            MusicScreen
-                .invoke(&json!({ "action": action }), &ctx)
+            tool.invoke(&json!({ "action": action }), &ctx)
                 .await
                 .unwrap();
             assert_eq!(
@@ -710,15 +913,49 @@ mod tests {
                 DeviceAction::MusicDisplayStyle(style)
             );
         }
-        let err = MusicScreen
+        let err = tool
             .invoke(&json!({ "action": "teleport" }), &ctx)
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "unknown music_screen action `teleport`");
         // With no display attached a valid action reports so (and emits nothing).
-        assert!(MusicScreen
-            .invoke(&json!({ "action": "show" }), &ToolCtx { actions: None })
+        assert!(tool
+            .invoke(&json!({ "action": "show" }), &ToolCtx::new(None))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn music_screen_style_is_the_speaking_displays_choice_only() {
+        let router = Arc::new(MusicDisplayRouter::new());
+        let tool = MusicScreen {
+            display: Some(router.clone()),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolCtx {
+            actions: Some(&tx),
+            device_id: Some("den"),
+        };
+        tool.invoke(&json!({ "action": "fullscreen" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::MusicDisplayStyle(MusicDisplayStyle::Fullscreen)
+        );
+        let pins = crate::music::MusicDisplayPins::new();
+        assert_eq!(
+            router.style_for("den", &pins),
+            MusicDisplayStyle::Fullscreen
+        );
+        assert_eq!(
+            router.style_for("kitchen", &pins),
+            MusicDisplayStyle::Compact
+        );
+        // Screen navigation is not a style choice.
+        tool.invoke(&json!({ "action": "show" }), &ctx)
+            .await
+            .unwrap();
+        assert!(!router.has_choice("kitchen"));
     }
 }

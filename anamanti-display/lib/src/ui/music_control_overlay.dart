@@ -4,8 +4,9 @@
 // ambient content but the transport stays glanceable and tappable. A tiny
 // artwork thumb, the track title/artist, previous / play-pause / next controls,
 // and a compact volume stepper. Tapping the title area opens the now-playing
-// card via [onTap]; the expand button ([onExpand]) switches the household music
-// preference to full screen (remembered, shared by Spotify and radio). For live radio the play/pause control is a stop button,
+// card via [onTap]; the expand button ([onExpand]) switches THIS display to the
+// full-screen player for the current music (other displays keep their own widget).
+// For live radio the play/pause control is a stop button,
 // previous/next change station, and the logo is shown uncropped.
 //
 // Uses keys DISTINCT from the full now-playing view so both can be mounted at

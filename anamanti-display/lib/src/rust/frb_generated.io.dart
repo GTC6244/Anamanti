@@ -77,6 +77,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WeatherConfig dco_decode_box_autoadd_weather_config(dynamic raw);
 
   @protected
+  CameraStream dco_decode_camera_stream(dynamic raw);
+
+  @protected
   DownloadProgress dco_decode_download_progress(dynamic raw);
 
   @protected
@@ -288,6 +291,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WeatherConfig sse_decode_box_autoadd_weather_config(
     SseDeserializer deserializer,
   );
+
+  @protected
+  CameraStream sse_decode_camera_stream(SseDeserializer deserializer);
 
   @protected
   DownloadProgress sse_decode_download_progress(SseDeserializer deserializer);
@@ -529,6 +535,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     WeatherConfig self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_camera_stream(CameraStream self, SseSerializer serializer);
 
   @protected
   void sse_encode_download_progress(

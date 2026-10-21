@@ -39,14 +39,17 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         NotifyConfig,
         WeatherConfig,
         deviceHardwareId,
+        dismissTimer,
         noteUserActivity,
+        setCameraContext,
         setFontContext,
         setMusicContext,
         setPlaceContext,
         setRecipeContext,
         setWeatherContext,
         updateDiagnosticsTuning;
-import 'package:anamanti_display/src/rust/api/settings.dart' show musicControl;
+import 'package:anamanti_display/src/rust/api/settings.dart'
+    show getCameraStream, musicControl;
 import 'package:anamanti_display/src/rust/frb_generated.dart';
 
 Future<void> main() async {
@@ -136,6 +139,8 @@ class _AmbientHomeState extends State<AmbientHome> {
 
   Future<void> _boot() async {
     _settings = await _store.load();
+    // Apply this display's own photo-rotation cadence (device-local setting).
+    _slideshow.setInterval(Duration(seconds: _settings.slideIntervalSecs));
     // Ensure this display has a stable, globally-unique identity before any channel
     // dials the Core (so two displays on one Core are distinguishable). Minted once
     // from the Wi-Fi MAC, persisted, and reused on every later boot.
@@ -338,6 +343,15 @@ class _AmbientHomeState extends State<AmbientHome> {
       setRecipeContext: setRecipeContext,
       setWeatherContext: setWeatherContext,
       setPlaceContext: setPlaceContext,
+      // Live camera view (plans/CameraPlan.md): tell the orchestrator a camera view is up
+      // (so "stop" closes it), and pull the stream URL from the pinned Core on each open.
+      // The URL embeds the NVR credentials — it stays in memory, never persisted/logged.
+      setCameraContext: setCameraContext,
+      fetchCameraStream: (camera) => getCameraStream(
+        orchestratorKey: _settings.orchestratorKey,
+        discoveryTimeoutSecs: BigInt.zero,
+        camera: camera,
+      ),
       // On-screen music transport/volume → a short-lived control round-trip to the
       // pinned Core (fire-and-forget; errors are logged, never surfaced to the UI).
       musicControl: ({required String action, int? value}) {
@@ -362,6 +376,9 @@ class _AmbientHomeState extends State<AmbientHome> {
       // Voice "increase font" / "decrease font": tell the orchestrator the current
       // global scale each turn, and apply + persist a requested adjustment here.
       setFontContext: setFontContext,
+      // The timer "Cancel timer" button: turn the timer off in the engine, which
+      // stops a ringing alarm's 5-second repeats.
+      dismissNativeTimer: (id) => dismissTimer(id: id),
       onFontAdjust: _onFontAdjust,
       fontScale: _settings.fontScale,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):
@@ -393,7 +410,14 @@ class _AmbientHomeState extends State<AmbientHome> {
     // a full-screen mode all restore full brightness — matching exactly when the
     // away-face blackout lifts. The old controller (if any) was just disposed,
     // dropping its listeners.
-    assistant.addListener(() => _brightness.apply(assistant.state.screenAwake));
+    // Night dimming rides the same path: while the camera lux sensor reports the
+    // lights are off (and the setting is on), both levels drop to their night values.
+    assistant.addListener(() => _applyBrightness(assistant.state));
+    // What a covered camera means (Clock mode vs the day/night schedule).
+    assistant.updateCoveredCamera(
+      _settings.coveredCameraMode,
+      _settings.nightWindow,
+    );
 
     // Proactive-notification channel: a persistent, device-dialed connection to the
     // pinned orchestrator that receives pushed visual notifications (Approach A).
@@ -491,7 +515,9 @@ class _AmbientHomeState extends State<AmbientHome> {
         next.endpointCueEnabled != _settings.endpointCueEnabled ||
         next.endpointSilenceMs != _settings.endpointSilenceMs ||
         next.endpointRmsThreshold != _settings.endpointRmsThreshold ||
-        next.dimDelaySecs != _settings.dimDelaySecs;
+        next.dimDelaySecs != _settings.dimDelaySecs ||
+        // The lux sensor's darkness threshold is baked into the engine config.
+        next.nightDarkLux != _settings.nightDarkLux;
     final photoChanged =
         next.photoSource != _settings.photoSource ||
         next.ambientRefreshToken != _settings.ambientRefreshToken ||
@@ -517,6 +543,12 @@ class _AmbientHomeState extends State<AmbientHome> {
     if (fontChanged) {
       _assistant?.updateFontScale(next.fontScale);
     }
+    // Night dimming on/off and the covered-camera choice are live: hand the latter to
+    // the controller, then re-apply the backlight for the current state.
+    _assistant?.updateCoveredCamera(next.coveredCameraMode, next.nightWindow);
+    _applyBrightness(_assistant?.state);
+    // Photo rotation time is live: retime the running slideshow (no-op if unchanged).
+    _slideshow.setInterval(Duration(seconds: next.slideIntervalSecs));
     if (photoChanged) {
       // A new/changed link means new refresh tokens: re-mint before rebuilding.
       await _refreshGoogleTokens();
@@ -542,6 +574,20 @@ class _AmbientHomeState extends State<AmbientHome> {
     await _updates?.updateConfig(
       baseUrl: next.updateBaseUrl,
       autoUpdateEnabled: next.autoUpdateEnabled,
+    );
+  }
+
+  /// Drive the backlight from the live assistant state: full/away levels from
+  /// [AssistantState.screenAwake], dropped to the night levels while the room counts
+  /// as dark ([AssistantState.effectiveRoomDark]: the camera lux sensor, or the night
+  /// window when a covered camera is on the schedule) and
+  /// [AppSettings.nightDimEnabled] is on. Deduped by
+  /// the controller, so it's cheap to call on every state emit.
+  void _applyBrightness(AssistantState? state) {
+    if (state == null) return;
+    _brightness.apply(
+      state.screenAwake,
+      dark: _settings.nightDimEnabled && state.effectiveRoomDark,
     );
   }
 

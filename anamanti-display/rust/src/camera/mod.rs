@@ -11,7 +11,13 @@
 //! Actuation (the actual backlight change) is presentation, so it stays in Flutter:
 //! Rust emits a `Presence` event on the engine's event stream and the Dart UI sets
 //! the window brightness.
+//!
+//! The same frames double as a **lux sensor** ([`ambient`]): from each frame's
+//! brightness plus the auto-exposure's exposure time / ISO, Rust estimates room
+//! illuminance and emits an `AmbientLight` event when the lights go off or come back
+//! on, so the UI can dim the screen at night.
 
+pub mod ambient;
 pub mod presence;
 
 /// Kotlin `CameraBridge` ↔ Rust proximity bridge — Android only. Opens the front

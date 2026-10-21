@@ -26,6 +26,32 @@ appears on the display with **Overview / Ingredients / Steps** tabs to cook alon
 > `set_recipe_context` FRB call,
 > and `RecipeView` scroll controllers driven by controller state. Suites green:
 > Anamanti Core 264, device-rust 88, Flutter 87; clippy + `dart analyze` clean.
+> **Update (2026-10-19): go-to-step + recipe questions.** *"Go to step 4"* / *"next
+> step"* now **puts that step on screen and highlights it** as an amber bubble (before,
+> the model could only page-scroll, so the step was rarely visible): a `go_to_step`
+> action on `recipe_control` (+ a `step` number) → `RecipeNav::Step` → a new
+> `anamanti-recipe` **`step`** sub-action (`{action:"step", step:n}`) → FRB
+> `WakeWordEventKind.recipeStep` → `AssistantState.recipeStep`/`recipeStepSeq` →
+> `RecipeView` switches to Steps and `Scrollable.ensureVisible`s the row (rows are now
+> built eagerly with a `GlobalKey` each, so far-off steps can be measured). Tapping a step
+> also highlights it. The recipe **screen context now carries the recipe itself** —
+> `highlighted_step` plus the `ingredients[]` and `steps[]` lines (capped at 80 × 600
+> chars Core-side) — so (a) the System-2 prompt lists the ingredients + numbered steps and
+> the model answers *"how many tomatoes do I need?"* / *"how long does it bake?"* from
+> what's on screen, and (b) two new **System-1** intents answer without the LLM:
+> `recipe_step` (pure-string step parse: "step four", "the third step", "next/previous/
+> last step") and `recipe_ingredient` — a **conditional lookup** that string-matches the
+> asked-about ingredient against the on-screen lines ("The recipe calls for 4 ripe
+> tomatoes, chopped.") and **defers to System-2** on no/ambiguous match or a non-quantity
+> question. A step jump now also **reads the step aloud** (see the read-out update below).
+>
+> **Update (2026-10-19): step read-out.** A step jump now speaks the step's text, not just
+> "Here's step 4." The System-1 `recipe_step` fast path speaks *"Step 4. Simmer for ten
+> minutes."* straight from the device-reported `steps[]` line (falling back to "Here's step
+> 4." when the line is missing — an older device or past the 80-line cap). The System-2
+> `recipe_control` `go_to_step` result tells the model to read that step word for word from
+> the numbered steps already in the turn prompt (the tool itself has no device context).
+>
 > **Deferred:** the LLM parse **fallback** (JSON-LD is the shipping parser —
 > see §3/§6) and **P5 on-device validation** (real dish → tabs on the Echo Show,
 > needs the Mac services + a Tavily key). This plan reads together with
@@ -58,6 +84,8 @@ boundary, not one skill:
 | **Mode lifecycle** | **Voice in; voice or touch out.** Voice opens it and it stays up indefinitely (you cook for 30+ min); dismiss by voice (*"done cooking" / "close the recipe"*) or an on-screen close control. No auto-timeout. |
 | **Voice navigation (added 2026-09-25)** | **Yes.** While a recipe is up you can switch tabs (*"show the ingredients", "go to the steps"*) and scroll the current pane (*"scroll down", "back to the top"*) by voice, as well as close it — a new `recipe_control` rig tool → `anamanti-recipe` `navigate`/`scroll` sub-actions → the `RecipeView`. Touch (tab bar taps, drag-scroll) still works and stays in sync. |
 | **Display context (added 2026-09-25)** | The device now tells the Core **what is on screen** so the model can drive it — a **general, extensible** mechanism (`protocol::display_context` → a `DisplayContext` enum), not recipe-specific. Each turn's `audio-start` carries a `screen` block discriminated by `kind` (today `kind:"recipe"` with title, active tab, scroll at-top/at-bottom, ingredient/step counts); the orchestrator injects a one-line description into the turn's system prompt (`display_context_line`, one arm per screen). Device→Core context (previously nonexistent) piggybacks on `audio-start` — no new persistent uplink. A future music/weather/photo screen adds a `DisplayContext` variant + a prompt-line arm + a device `set_<screen>_context` setter; the recipe screen uses `set_recipe_context`. |
+| **Go to step (added 2026-10-19)** | *"Go to step N" / "next step" / "previous step"* jumps to the Steps tab, **scrolls that step into view and highlights it** (an amber bubble), and **reads the step aloud** ("Step 4. Simmer for ten minutes."). Driven by `recipe_control` `go_to_step` (System-2) or the System-1 `recipe_step` fast path, over a new `anamanti-recipe` `step` sub-action. The device reports the highlighted step back so "next step" resolves relative to it. Never page-scroll to find a step. |
+| **Recipe questions (added 2026-10-19)** | The recipe's `ingredients[]` + `steps[]` ride the `kind:"recipe"` screen context (device → Core, every turn while open). System-2 gets them in the prompt; System-1 `recipe_ingredient` answers "how much/how many <ingredient>" directly when it string-matches 1–3 ingredient lines, else defers. Chosen over a Core-side cache of the last pushed recipe: the device owns the screen, and this survives a Core restart. |
 | **Audio path** | Recipe mode is **visual only** in v1 — no step-by-step **spoken read-out**, no timers auto-created from step durations (both are future adds). Voice *navigation* (tabs/scroll/close) is supported (see above); the model still speaks a short confirmation ("Here's a carbonara recipe" / "Showing the ingredients") via the normal Piper path. |
 
 If a task seems to require changing one of these, stop and confirm first.

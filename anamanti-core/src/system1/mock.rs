@@ -4,7 +4,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::{Decision, DecisionEngine, DecisionRequest, Resolution};
+use super::{Decision, DecisionEngine, DecisionRequest, Resolution, Temporal};
 
 /// A decision engine that always returns the same scripted decision.
 pub struct MockDecider {
@@ -26,6 +26,22 @@ impl MockDecider {
             decision: Decision::Resolve(Resolution {
                 intent: intent.into(),
                 confidence,
+                temporal: None,
+            }),
+        }
+    }
+
+    /// Like [`resolve`](Self::resolve), with a confident `temporal` answer attached.
+    pub fn resolve_with_temporal(
+        intent: impl Into<String>,
+        confidence: f64,
+        temporal: Temporal,
+    ) -> Self {
+        Self {
+            decision: Decision::Resolve(Resolution {
+                intent: intent.into(),
+                confidence,
+                temporal: Some(temporal),
             }),
         }
     }

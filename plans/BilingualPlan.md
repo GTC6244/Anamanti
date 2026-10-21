@@ -411,7 +411,8 @@ in the turn's language** (§0, §2.9).
    "Voltar ao normal." for "volta ao normal".
 6. **System-1 gate is precision-first.** An intent is enabled for pt when at least one pt case
    resolves correctly and **nothing** resolves into it wrongly; a missed resolve only costs
-   latency (System-2 answers in pt). `PT_BR_READY` = timer, time, date, timer_cancel,
+   latency (System-2 answers in pt). (The `recipe_step` / `recipe_ingredient` intents that arrived from `main` afterwards are
+   English-only until calibrated in pt.) `PT_BR_READY` = timer, time, date, timer_cancel,
    timer_query, timer_adjust, recipe_dismiss, end_session, stop_dismiss (stable across two
    calibration runs on `jev`). **Not enabled:** `weather` ("fecha a previsão do tempo" was
    classified as a weather request), `weather_dismiss` and `place_dismiss` (no pt phrasing
@@ -430,7 +431,7 @@ Piper's debug log recorded the voice per sentence.
 
 | Gate | Result |
 | --- | --- |
-| 1. Single-language unchanged | Unit + pipeline suites unchanged (`cargo test`: only the 4 failures that already exist on `main` from the timer-adjust merge); `tests/bilingual.rs` pins byte-identical English with no `language` block. |
+| 1. Single-language unchanged | Unit + pipeline suites unchanged (`cargo test` fully green after merging `main` 2026-10-21); `tests/bilingual.rs` pins byte-identical English with no `language` block. |
 | 2. English in bilingual mode | 14/14 same path and same System-1 decision as Core A; every canned reply identical (differences were only the clock minute / live temperature); English voice on every English sentence. One transcript differed by capitalisation (`good`/`Good`) — re-probed: identical audio gives identical text under both configs (ElevenLabs streaming variance). **Latency:** median STT 152 ms (B) vs 179 ms (A); median total 513 vs 529 ms. |
 | 3. Reply language = spoken language | All answerable turns correct after the fixes in §8.2 (incl. "how do you say good morning in Portuguese" → English, "responde em inglês" → English with the English voice). Two "mismatches" were the *checking* method on one-word replies ("Okay." re-transcribed as Korean/Hungarian, "Timer de 10 minutos iniciado." as Spanish) — the Piper log confirms the right voice for each. |
 | 4. Portuguese parity | Every English path has its pt twin on the same path (time/date/timer → System-1, memory commands → command, jokes/questions/personality → System-2/fast path), except weather (System-2 by the gate in §8.2 #6, still answered in pt). |

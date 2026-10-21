@@ -72,6 +72,12 @@ pub enum DeviceAction {
     ShowPlace(crate::places::PlaceReport),
     /// Dismiss the place card and return to the idle/ambient display.
     DismissPlace,
+    /// Open the live camera view of the named camera (`plans/CameraPlan.md`). Carries
+    /// only the display name — the device fetches the stream URL over the control
+    /// socket. Fire-and-forget: the device owns the view (and its auto-close).
+    ShowCamera { name: String },
+    /// Close the live camera view.
+    DismissCamera,
     /// Drive the already-open recipe screen by voice — switch tab or scroll a pane.
     /// Fire-and-forget: the device owns the screen state.
     RecipeControl(RecipeNav),
@@ -88,12 +94,12 @@ pub enum DeviceAction {
     /// screen state (and whether anything is playing). Transport (play/pause/skip/volume)
     /// is the separate `spotify_control` tool, not this.
     MusicScreen(MusicNav),
-    /// Switch which music widget the display shows while playing — the compact bar or
-    /// the full-screen now-playing view — and remember it. **Both** Core-side and a
-    /// device frame: the orchestrator persists it to
-    /// [`SharedSettings`](crate::settings::SharedSettings) (so every display's next
-    /// now-playing push carries it) and relays an `anamanti-music` `screen` frame
-    /// (`"fullscreen"` / `"compact"`) so the speaking display switches at once.
+    /// Switch which music widget the speaking display shows while the current music
+    /// plays — the compact bar or the full-screen now-playing view. Relayed as an
+    /// `anamanti-music` `screen` frame (`"fullscreen"` / `"compact"`) so that display
+    /// switches at once; the `music_screen` tool has already recorded it as that
+    /// display's choice in the [`MusicDisplayRouter`](crate::music::MusicDisplayRouter)
+    /// so its later now-playing pushes agree. Other displays are unaffected.
     MusicDisplayStyle(crate::music::MusicDisplayStyle),
 }
 
@@ -121,7 +127,8 @@ pub enum FontDirection {
 }
 
 /// A voice navigation command for the open recipe screen (relayed as an
-/// `anamanti-recipe` `navigate`/`scroll` frame). Emitted by the `recipe_control` tool.
+/// `anamanti-recipe` `navigate`/`scroll`/`step` frame). Emitted by the `recipe_control`
+/// tool and the System-1 `recipe_step` fast path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecipeNav {
     /// Switch to the Overview tab.
@@ -138,6 +145,9 @@ pub enum RecipeNav {
     ScrollTop,
     /// Jump to the bottom of the active pane.
     ScrollBottom,
+    /// Jump to a step (1-based): switch to the Steps tab, scroll it into view and
+    /// highlight it (relayed as an `anamanti-recipe` `step` frame).
+    Step(u32),
 }
 
 /// The per-turn channel a tool pushes [`DeviceAction`]s onto. Unbounded so a tool's
@@ -166,6 +176,10 @@ pub struct LlmTurn {
     /// device. `None` disables device actions for this turn. Only backends whose
     /// [`Capabilities::tools`] is set read it (the rig engine).
     pub actions: Option<ActionSink>,
+    /// The stable `device_id` of the display this turn came from, handed to the tools
+    /// (e.g. so a play request shows full screen on the display that asked). `None`
+    /// when the display doesn't identify itself.
+    pub device_id: Option<String>,
 }
 
 impl LlmTurn {
@@ -175,7 +189,14 @@ impl LlmTurn {
             user_message: user_message.into(),
             history: Vec::new(),
             actions: None,
+            device_id: None,
         }
+    }
+
+    /// Record which display this turn came from (see [`Self::device_id`]).
+    pub fn with_device_id(mut self, device_id: Option<String>) -> Self {
+        self.device_id = device_id;
+        self
     }
 
     /// Attach the per-turn device-action sink so action tools (timers) can relay to

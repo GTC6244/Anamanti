@@ -19,6 +19,7 @@ pub mod audio_dump;
 pub mod cache;
 pub mod cadora;
 pub mod calendar;
+pub mod camera;
 pub mod clock;
 pub mod config;
 pub mod control;

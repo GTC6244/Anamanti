@@ -30,6 +30,9 @@
   .rd-match:hover { background: var(--border); }
   .rd-editor { border: 1px solid var(--border); border-radius: 8px; padding: .75rem; margin-top: .6rem; }
   .rd-editor .inline { flex-wrap: nowrap; }
+  .md-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .6rem; padding: .35rem 0; border-bottom: 1px solid var(--border); font-size: .82rem; }
+  .md-row:last-child { border-bottom: 0; }
+  .md-row .now { color: var(--muted); font-size: .74rem; }
 </style>
 
 <div class="grid-12">
@@ -48,12 +51,9 @@
         <div class="skeleton" style="height:38px;margin-bottom:.4rem"></div>
         <div class="skeleton" style="height:38px"></div>
       </div>
-      <div class="section-label">Music player on the display</div>
-      <div class="seg" role="radiogroup" aria-label="Music player style" id="mdStyle">
-        <label><input type="radio" name="mdStyle" value="compact" checked><span>Small bar</span></label>
-        <label><input type="radio" name="mdStyle" value="fullscreen"><span>Full screen</span></label>
-      </div>
-      <p class="hint" style="margin-top:.35rem">What every display shows while Spotify or the radio plays. Also switchable from the expand / minimize button on the display, or by voice (<i>"make the music full screen"</i>, <i>"use the small music player"</i>).</p>
+      <div class="section-label">Music player on each display</div>
+      <div id="mdList" class="list"><div class="skeleton" style="height:34px"></div></div>
+      <p class="hint" style="margin-top:.35rem">What each display shows while Spotify or the radio plays. <b>Automatic</b>: full screen on the display the music was asked for from, the small bar on the others. While music plays, each display can also switch itself with its expand / minimize button or by voice (<i>"make the music full screen"</i>, <i>"use the small music player"</i>); that lasts until the music stops or something new is played.</p>
     </section>
 
     <section class="card" id="notify">
@@ -319,22 +319,46 @@ ui.hydrate();
     } catch (e) { ui.toast(false, String(e.message || e)); return false; }
   }
   // ---------------------------------------------------------------- Music player style
-  // Which widget the displays show while music plays (/music/display.json). The display
-  // button and the voice tool change it too, so it is re-read with the displays list.
-  function setStyleRadio(style){
-    const r = document.querySelector('input[name="mdStyle"][value="' + style + '"]');
-    if (r) r.checked = true;
+  // Which widget each display shows while music plays (/music/display.json): a pin per
+  // display (Automatic / Small bar / Full screen). The display's own button and voice
+  // change what it shows right now too, so this is re-read with the displays list.
+  const MD_PINS = [['auto', 'Automatic'], ['compact', 'Small bar'], ['fullscreen', 'Full screen']];
+  function renderMusicStyle(rows){
+    if (!rows.length) {
+      $('mdList').innerHTML = '<div class="hint" style="padding:.3rem 0">No display connected.</div>';
+      return;
+    }
+    $('mdList').innerHTML = rows.map((d, i) => {
+      const name = d.name && String(d.name).trim() ? esc(d.name) : '<span class="muted">' + esc(d.device_id) + '</span>';
+      const now = [];
+      if (!d.connected) now.push('offline');
+      if (d.initiator) now.push('the music was asked for here');
+      if (d.chosen) now.push('switched on the display');
+      now.push('showing: ' + (d.style === 'fullscreen' ? 'full screen' : 'small bar'));
+      const seg = MD_PINS.map(([v, label]) =>
+        '<label><input type="radio" name="md' + i + '" value="' + v + '" data-device="' + escAttr(d.device_id) + '"'
+        + (d.pin === v ? ' checked' : '') + '><span>' + label + '</span></label>').join('');
+      return '<div class="md-row"><div class="grow" style="min-width:0"><div class="title ellipsis" title="' + escAttr(d.device_id) + '">' + name + '</div>'
+        + '<div class="now ellipsis">' + esc(now.join(' · ')) + '</div></div>'
+        + '<div class="seg" role="radiogroup" aria-label="Music player on ' + escAttr(d.name || d.device_id) + '">' + seg + '</div></div>';
+    }).join('');
   }
   async function loadMusicStyle(){
-    try { const j = await getJSON('/music/display.json'); if (j.ok) setStyleRadio(j.style); }
-    catch (e) { /* non-fatal: the radio keeps its last value */ }
+    if ($('mdList').contains(document.activeElement)) return; // don't re-render mid-choice
+    try { const j = await getJSON('/music/display.json'); if (j.ok) renderMusicStyle(j.displays || []); }
+    catch (e) { /* non-fatal: the list keeps its last value */ }
   }
-  $('mdStyle').addEventListener('change', async (e) => {
-    if (!e.target.matches('input[name="mdStyle"]')) return;
+  $('mdList').addEventListener('change', async (e) => {
+    const input = e.target.closest('input[data-device]');
+    if (!input) return;
     try {
-      const r = await ui.req(postJSON('/music/display', { style: e.target.value }));
-      ui.toast(true, r.style === 'fullscreen' ? 'Displays will show music full screen.' : 'Displays will show the small music bar.');
-    } catch (err) { ui.toast(false, String(err.message || err)); loadMusicStyle(); }
+      const r = await ui.req(postJSON('/music/display', { device_id: input.dataset.device, style: input.value }));
+      ui.toast(true, r.pin === 'auto'
+        ? 'Automatic: full screen only where the music is asked for.'
+        : (r.pin === 'fullscreen' ? 'This display will show music full screen.' : 'This display will show the small music bar.'));
+    } catch (err) { ui.toast(false, String(err.message || err)); }
+    input.blur();
+    loadMusicStyle();
   });
 
   // ---------------------------------------------------------------- Now playing

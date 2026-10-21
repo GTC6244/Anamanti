@@ -49,6 +49,7 @@ void main() {
       ringRelease: 0.2,
       ringDecay: 0.95,
       dimDelaySecs: 45,
+      slideIntervalSecs: 120,
       photoSource: PhotoSourceKind.drive,
       ambientRefreshToken: 'refresh-abc',
       ambientDeviceId: 'dev-77',
@@ -101,6 +102,31 @@ void main() {
     expect(AppSettings.fromJson({'dimDelaySecs': 'nope'}).dimDelaySecs, 300);
     // A legacy file with no dim delay keeps the default.
     expect(AppSettings.fromJson({'wakeWord': 'hey_jarvis'}).dimDelaySecs, 300);
+  });
+
+  test('slideIntervalSecs defaults to 10s and clamps out-of-range values', () {
+    expect(const AppSettings().slideIntervalSecs, 10);
+    expect(
+      AppSettings.fromJson({'slideIntervalSecs': 1}).slideIntervalSecs,
+      kSlideIntervalMinSecs,
+    );
+    expect(
+      AppSettings.fromJson({'slideIntervalSecs': 99999}).slideIntervalSecs,
+      kSlideIntervalMaxSecs,
+    );
+    expect(
+      AppSettings.fromJson({'slideIntervalSecs': 'x'}).slideIntervalSecs,
+      10,
+    );
+    // A legacy settings file (pre-feature) keeps the old fixed 10 s cadence.
+    expect(
+      AppSettings.fromJson({'wakeWord': 'hey_jarvis'}).slideIntervalSecs,
+      10,
+    );
+    expect(
+      const AppSettings(slideIntervalSecs: 30),
+      isNot(const AppSettings(slideIntervalSecs: 60)),
+    );
   });
 
   test('listening-ring settings default and clamp/round-trip', () {

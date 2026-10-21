@@ -10,6 +10,8 @@
 
 import 'package:flutter/foundation.dart';
 
+import 'package:anamanti_display/src/engine/night_schedule.dart';
+
 /// Which idle-screen photo source to use.
 ///  * [local]   — built-in ambient gradients (offline fallback).
 ///  * [ambient] — Google Photos via the Ambient API (device-code/QR; partner-gated).
@@ -43,6 +45,19 @@ const double kFontScaleMin = 0.85;
 const double kFontScaleMax = 1.6;
 const double kFontScaleStep = 0.1;
 
+/// Idle-slideshow photo rotation bounds + default (seconds between background
+/// photos). Device-local; see [AppSettings.slideIntervalSecs]. The default matches
+/// the slideshow's long-standing fixed 10 s cadence.
+const int kDefaultSlideIntervalSecs = 10;
+const int kSlideIntervalMinSecs = 3;
+const int kSlideIntervalMaxSecs = 600;
+
+/// Night-dimming darkness threshold (estimated lux) default + bounds. See
+/// [AppSettings.nightDarkLux] (also `WakeWordDefaults.nightDarkLux`).
+const double kDefaultNightDarkLux = 8.0;
+const double kNightDarkLuxMin = 1.0;
+const double kNightDarkLuxMax = 50.0;
+
 @immutable
 class AppSettings {
   const AppSettings({
@@ -69,6 +84,12 @@ class AppSettings {
     this.ringRelease = 0.08,
     this.ringDecay = 0.99,
     this.dimDelaySecs = 300,
+    this.nightDimEnabled = true,
+    this.nightDarkLux = kDefaultNightDarkLux,
+    this.coveredCameraMode = CoveredCameraMode.clock,
+    this.nightStartMinutes = kDefaultNightStartMinutes,
+    this.nightEndMinutes = kDefaultNightEndMinutes,
+    this.slideIntervalSecs = kDefaultSlideIntervalSecs,
     this.photoSource = PhotoSourceKind.local,
     this.ambientRefreshToken = '',
     this.ambientDeviceId = '',
@@ -195,6 +216,41 @@ class AppSettings {
   /// minutes; the settings screen offers a fixed set of presets from 30 s to 1 hour.
   final int dimDelaySecs;
 
+  /// Whether to dim the screen further when the room's lights go off at night. The
+  /// front camera doubles as a lux sensor (`camera/ambient.rs`); while it reports the
+  /// room dark, the backlight drops to its night levels. Applied UI-side, so toggling
+  /// it takes effect live (no engine restart). Needs the Camera permission.
+  final bool nightDimEnabled;
+
+  /// Estimated lux below which the room counts as dark for night dimming (lit again
+  /// above 3×). Baked into the engine config, so changing it restarts the engine.
+  /// Clamped to [[kNightDarkLuxMin], [kNightDarkLuxMax]].
+  final double nightDarkLux;
+
+  /// What a covered camera (privacy shutter / tape) means: [CoveredCameraMode.clock]
+  /// dims to the away clock (the blind camera's own reading); [CoveredCameraMode.
+  /// schedule] keeps the screen awake by day and dims it during the night window
+  /// ([nightStartMinutes] → [nightEndMinutes]). Applied live (no engine restart).
+  final CoveredCameraMode coveredCameraMode;
+
+  /// Night window start / end, minutes after local midnight (0..1439). The window may
+  /// wrap past midnight (the default 21:00 → 07:00). Used by the
+  /// [CoveredCameraMode.schedule] mode.
+  final int nightStartMinutes;
+  final int nightEndMinutes;
+
+  /// The night window as a [NightWindow].
+  NightWindow get nightWindow =>
+      NightWindow(startMinutes: nightStartMinutes, endMinutes: nightEndMinutes);
+
+  /// How long (seconds) each idle background photo stays on screen before the
+  /// slideshow cross-fades to the next one. **Per device** — each display keeps its
+  /// own value (it's stored in this device-local settings file, never on the Core).
+  /// Applied live to the running [SlideshowController] (no engine restart). Clamped
+  /// to [[kSlideIntervalMinSecs], [kSlideIntervalMaxSecs]]; defaults to
+  /// [kDefaultSlideIntervalSecs]. The settings screen offers presets from 5 s to 10 min.
+  final int slideIntervalSecs;
+
   /// Idle photo source.
   final PhotoSourceKind photoSource;
 
@@ -280,6 +336,12 @@ class AppSettings {
     double? ringRelease,
     double? ringDecay,
     int? dimDelaySecs,
+    bool? nightDimEnabled,
+    double? nightDarkLux,
+    CoveredCameraMode? coveredCameraMode,
+    int? nightStartMinutes,
+    int? nightEndMinutes,
+    int? slideIntervalSecs,
     PhotoSourceKind? photoSource,
     String? ambientRefreshToken,
     String? ambientDeviceId,
@@ -318,6 +380,12 @@ class AppSettings {
       ringRelease: ringRelease ?? this.ringRelease,
       ringDecay: ringDecay ?? this.ringDecay,
       dimDelaySecs: dimDelaySecs ?? this.dimDelaySecs,
+      nightDimEnabled: nightDimEnabled ?? this.nightDimEnabled,
+      nightDarkLux: nightDarkLux ?? this.nightDarkLux,
+      coveredCameraMode: coveredCameraMode ?? this.coveredCameraMode,
+      nightStartMinutes: nightStartMinutes ?? this.nightStartMinutes,
+      nightEndMinutes: nightEndMinutes ?? this.nightEndMinutes,
+      slideIntervalSecs: slideIntervalSecs ?? this.slideIntervalSecs,
       photoSource: photoSource ?? this.photoSource,
       ambientRefreshToken: ambientRefreshToken ?? this.ambientRefreshToken,
       ambientDeviceId: ambientDeviceId ?? this.ambientDeviceId,
@@ -358,6 +426,12 @@ class AppSettings {
     'ringRelease': ringRelease,
     'ringDecay': ringDecay,
     'dimDelaySecs': dimDelaySecs,
+    'nightDimEnabled': nightDimEnabled,
+    'nightDarkLux': nightDarkLux,
+    'coveredCameraMode': coveredCameraMode.name,
+    'nightStartMinutes': nightStartMinutes,
+    'nightEndMinutes': nightEndMinutes,
+    'slideIntervalSecs': slideIntervalSecs,
     'photoSource': photoSource.name,
     'ambientRefreshToken': ambientRefreshToken,
     'ambientDeviceId': ambientDeviceId,
@@ -462,6 +536,37 @@ class AppSettings {
         min: 30,
         max: 3600,
       ),
+      nightDimEnabled: json['nightDimEnabled'] is bool
+          ? json['nightDimEnabled'] as bool
+          : defaults.nightDimEnabled,
+      nightDarkLux: json['nightDarkLux'] is num
+          ? (json['nightDarkLux'] as num).toDouble().clamp(
+              kNightDarkLuxMin,
+              kNightDarkLuxMax,
+            )
+          : defaults.nightDarkLux,
+      coveredCameraMode: CoveredCameraMode.values.firstWhere(
+        (m) => m.name == json['coveredCameraMode'],
+        orElse: () => defaults.coveredCameraMode,
+      ),
+      nightStartMinutes: asInt(
+        json['nightStartMinutes'],
+        defaults.nightStartMinutes,
+        min: 0,
+        max: 24 * 60 - 1,
+      ),
+      nightEndMinutes: asInt(
+        json['nightEndMinutes'],
+        defaults.nightEndMinutes,
+        min: 0,
+        max: 24 * 60 - 1,
+      ),
+      slideIntervalSecs: asInt(
+        json['slideIntervalSecs'],
+        defaults.slideIntervalSecs,
+        min: kSlideIntervalMinSecs,
+        max: kSlideIntervalMaxSecs,
+      ),
       photoSource: PhotoSourceKind.values.firstWhere(
         (k) => k.name == json['photoSource'],
         orElse: () => defaults.photoSource,
@@ -537,6 +642,12 @@ class AppSettings {
       ringRelease == other.ringRelease &&
       ringDecay == other.ringDecay &&
       dimDelaySecs == other.dimDelaySecs &&
+      nightDimEnabled == other.nightDimEnabled &&
+      nightDarkLux == other.nightDarkLux &&
+      coveredCameraMode == other.coveredCameraMode &&
+      nightStartMinutes == other.nightStartMinutes &&
+      nightEndMinutes == other.nightEndMinutes &&
+      slideIntervalSecs == other.slideIntervalSecs &&
       photoSource == other.photoSource &&
       ambientRefreshToken == other.ambientRefreshToken &&
       ambientDeviceId == other.ambientDeviceId &&
@@ -572,7 +683,15 @@ class AppSettings {
     endpointCueEnabled,
     endpointSilenceMs,
     endpointRmsThreshold,
-    dimDelaySecs,
+    Object.hash(
+      dimDelaySecs,
+      slideIntervalSecs,
+      nightDimEnabled,
+      nightDarkLux,
+      coveredCameraMode,
+      nightStartMinutes,
+      nightEndMinutes,
+    ),
     photoSource,
     ambientRefreshToken,
     ambientDeviceId,

@@ -55,6 +55,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MODELS
             | types::LIST_VOICES
             | types::GET_DRIVE_TOKEN
+            | types::GET_CAMERA_STREAM
             | types::MUSIC_CONTROL
             | types::GET_FUNCTIONS
             | types::PAIR_PHONE
@@ -142,13 +143,23 @@ pub async fn music_control_response(
     let Some((action, value)) = request.music_control_command() else {
         return WyomingEvent::music_result(false, "music-control request missing `action`");
     };
-    // The on-screen widget toggle (`display_compact` / `display_fullscreen`): a display
-    // preference, not transport — persist it and re-push so every display follows.
+    // The on-screen widget toggle (`display_compact` / `display_fullscreen`): that
+    // display's choice for the current music, not transport — record it for the display
+    // that sent it (only that one changes) and re-push so its next push agrees.
     if let Some(style) = action
         .strip_prefix("display_")
         .and_then(crate::music::MusicDisplayStyle::parse)
     {
-        now_playing.set_display_style(settings, style);
+        let Some(device_id) = request.music_control_device_id() else {
+            // An older display that doesn't identify itself: nothing to attach the choice
+            // to. Its own screen has already switched locally.
+            return WyomingEvent::music_result(
+                false,
+                "this display didn't send its device id; update the display app",
+            );
+        };
+        now_playing.display().choose(device_id, style);
+        now_playing.repush(settings);
         return WyomingEvent::music_result(true, format!("Music player: {}.", style.as_str()));
     }
     // Radio while a station is on, else Spotify (shared with the config page).
@@ -379,6 +390,41 @@ pub fn drive_token_response(settings: &SharedSettings) -> WyomingEvent {
             "scope": d.scope.unwrap_or_default(),
         }),
     )
+}
+
+/// Build the `anamanti-camera-stream` response (`plans/CameraPlan.md`): the RTSP
+/// sub-stream URL — **credential embedded** — for the requested camera. Like the Drive
+/// bundle it rides the device↔Core LAN hop only; the device holds it in memory. Never
+/// log the URL. An unconfigured camera or an unknown name answers `ok: false` with a
+/// speakable `message`.
+pub fn camera_stream_response(
+    request: &WyomingEvent,
+    hub: Option<&crate::camera::CameraHub>,
+) -> WyomingEvent {
+    let fail = |message: &str| {
+        WyomingEvent::with_data(
+            types::CAMERA_STREAM,
+            json!({ "ok": false, "message": message }),
+        )
+    };
+    let Some(hub) = hub else {
+        return fail("The camera isn't set up on Anamanti Core.");
+    };
+    let want = request
+        .data
+        .get("camera")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match hub.resolve(want) {
+        Some(cam) => {
+            log::info!("camera stream: serving {:?} to a display", cam.name);
+            WyomingEvent::with_data(
+                types::CAMERA_STREAM,
+                json!({ "ok": true, "camera": cam.name, "url": hub.stream_url(cam) }),
+            )
+        }
+        None => fail(&format!("There's no camera called {}.", want.trim())),
+    }
 }
 
 /// One capability row in the `anamanti-functions` snapshot. `mode` is the device's
@@ -614,12 +660,12 @@ pub fn functions_response(settings: &SharedSettings, embed: Option<&EmbedStatus>
         }),
     ));
 
-    // ---- Tools: shopping list (Cadora) ----
+    // ---- Tools: shopping list + calendar add (Cadora) ----
     let cadora = settings.cadora();
     let cadora_linked = cadora.linked();
     fns.push(func_entry(
         "Tools",
-        "Shopping list",
+        "Shopping & calendar",
         if cadora_linked { "cloud" } else { "off" },
         Some("Cadora"),
         None,
@@ -746,6 +792,7 @@ pub fn respond(
         types::LIST_SPEAKERS => speakers_response(speaker, settings),
         types::NAME_SPEAKER => name_speaker(request, speaker),
         types::GET_DRIVE_TOKEN => drive_token_response(settings),
+        types::GET_CAMERA_STREAM => camera_stream_response(request, settings.camera().as_deref()),
         types::DESCRIBE_SETTINGS => settings_response(settings, true, "current settings"),
         // The device path never accepts secrets (`allow_secrets = false`): provider keys
         // are entered only on the orchestrator's loopback config page, so cloud secrets
@@ -1317,6 +1364,8 @@ mod tests {
                 places_provider: "google".to_string(),
                 radio: None,
                 home_assistant: None,
+                camera: None,
+                music_display: Default::default(),
             },
             RuntimeSettings {
                 llm: Arc::new(crate::llm::mock::MockLlm::default()),
@@ -1350,7 +1399,7 @@ mod tests {
                 personality: crate::settings::Personality::default(),
                 pronunciations: Vec::new(),
                 language: Default::default(),
-                music_display_style: Default::default(),
+                music_display_pins: Default::default(),
                 radio: Default::default(),
             },
         );
@@ -1393,6 +1442,43 @@ mod tests {
         assert_eq!(resp.data["refresh_token"], json!("1//refresh"));
         assert_eq!(resp.data["folder_ids"][0], json!("1AbC"));
         assert_eq!(resp.data["scope"], json!("scope-x"));
+    }
+
+    #[test]
+    fn get_camera_stream_serves_the_url_or_a_speakable_failure() {
+        assert!(is_control_request(types::GET_CAMERA_STREAM));
+        // Unconfigured Core (the default test settings): ok=false + message, no URL.
+        let s = settings();
+        let mem = MemoryStore::open_in_memory().unwrap();
+        let resp = respond(
+            &WyomingEvent::get_camera_stream("Front Door"),
+            &mem,
+            &s,
+            None,
+        );
+        assert_eq!(resp.event_type, types::CAMERA_STREAM);
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data.get("url").is_none());
+        assert!(resp.data["message"]
+            .as_str()
+            .unwrap()
+            .contains("isn't set up"));
+
+        let hub = crate::camera::tests::hub();
+        let ok = camera_stream_response(&WyomingEvent::get_camera_stream("front door"), Some(&hub));
+        assert_eq!(ok.data["ok"], json!(true));
+        assert_eq!(ok.data["camera"], json!("Front Door"));
+        assert_eq!(
+            ok.data["url"],
+            json!("rtsp://anamanti:p%40ss%3Aw%2Frd@192.168.1.29:554/h264Preview_05_sub")
+        );
+        // Blank → the first camera.
+        let first = camera_stream_response(&WyomingEvent::get_camera_stream(""), Some(&hub));
+        assert_eq!(first.data["camera"], json!("Front Door"));
+        let unknown =
+            camera_stream_response(&WyomingEvent::get_camera_stream("garage"), Some(&hub));
+        assert_eq!(unknown.data["ok"], json!(false));
+        assert!(unknown.data.get("url").is_none());
     }
 
     #[test]
@@ -1655,40 +1741,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn music_control_display_toggle_sets_the_style_without_spotify() {
-        // The on-screen widget toggle is a display preference: it succeeds even with
-        // Spotify unlinked and lands in the settings store of record.
+    async fn music_control_display_toggle_is_that_displays_choice_without_spotify() {
+        // The on-screen widget toggle is a per-display choice: it succeeds even with
+        // Spotify unlinked and changes only the display that pressed it.
+        use crate::music::MusicDisplayStyle::{Compact, Fullscreen};
         let s = settings();
         let np = NowPlayingService::new();
+        let toggle = |action: &str, device: &str| {
+            WyomingEvent::music_control(action, None).with_device_id(device)
+        };
+        let resp = music_control_response(&toggle("display_fullscreen", "den"), &s, &np).await;
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(np.style_for("den"), Fullscreen);
+        assert_eq!(
+            np.style_for("kitchen"),
+            Compact,
+            "other displays unaffected"
+        );
+        let resp = music_control_response(&toggle("display_compact", "den"), &s, &np).await;
+        assert_eq!(resp.data["ok"], json!(true));
+        assert_eq!(np.style_for("den"), Compact);
+        // Nothing household-wide is persisted.
+        assert!(s.music_display_pins().is_empty());
+        // An older display that sends no id is answered in-band, changing nothing.
         let resp = music_control_response(
             &WyomingEvent::music_control("display_fullscreen", None),
             &s,
             &np,
         )
         .await;
-        assert_eq!(resp.data["ok"], json!(true));
-        assert_eq!(
-            s.music_display_style(),
-            crate::music::MusicDisplayStyle::Fullscreen
-        );
-        let resp = music_control_response(
-            &WyomingEvent::music_control("display_compact", None),
-            &s,
-            &np,
-        )
-        .await;
-        assert_eq!(resp.data["ok"], json!(true));
-        assert_eq!(
-            s.music_display_style(),
-            crate::music::MusicDisplayStyle::Compact
-        );
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(!np.display().has_choice(""));
         // An unknown style falls through to transport and is rejected as unknown.
-        let resp = music_control_response(
-            &WyomingEvent::music_control("display_sideways", None),
-            &s,
-            &np,
-        )
-        .await;
+        let resp = music_control_response(&toggle("display_sideways", "den"), &s, &np).await;
         assert_eq!(resp.data["ok"], json!(false));
     }
 

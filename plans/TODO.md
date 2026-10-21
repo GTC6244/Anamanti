@@ -496,6 +496,18 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       `dart analyze` clean; FRB codegen clean. **Pending on-device QA** (§4 of the plan):
       release APK, set `GOOGLE_PLACES_API_KEY` + a `home_address`, ask "what are the hours
       for <cafe>" → card with photo + hours; confirm disambiguation and voice/touch close.
+- [x] **Live NVR camera view** (2026-10-20, see `CameraPlan.md`): "show the front door" →
+      the speaking display plays the Reolink RLN8-410's channel-5 RTSP sub-stream full
+      screen (`CameraView`, vendored+patched `video_player_android`, platform view). Core
+      fast path + `show_camera`/`close_camera`, `anamanti-camera` frame, stream URL via
+      `anamanti-get-camera-stream`. Suites green (Core lib 712, protocol 34, device-rust 122,
+      Flutter 282); Core verified end to end with a test copy. **Pending on-device QA:**
+      deploy Core (add the `camera` block + `REOLINK_PASSWORD` to prod) and the APK, then
+      "show me the front door" → video in ~2–4 s; "close it"; 60 s auto-close.
+- [ ] **Camera — follow-ups** (deferred, `CameraPlan.md` §6): touch entry (idle-screen icon +
+      `cameraEnabled` setting); config-page drawer (runtime-settable camera config +
+      password); Core snapshot fallback when RTSP fails; the automatic "someone's at the
+      door" pop-up (trigger TBD — no NVR polling); more cameras by voice (just config).
 - [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
       tool returns real distance, travel time, and **live traffic** between two places
       (`driving`/`walking`/`cycling`). Lives in `anamanti-core/src/directions/` behind a
@@ -529,6 +541,39 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       slow/failing feed falls back to last-good bodies, plus conditional GET
       (ETag/`Last-Modified`) + gzip to make refreshes cheap. (Today: a synchronous
       TTL cache, `ANAMANTI_CALENDAR_CACHE_TTL`, default 300 s.)
+- [x] **Cadora / NextHaul — move to the Cloudflare API (phase 1, Core done 2026-10-20)**.
+      Cadora replaced the Fly server with Workers at `https://api.getcadora.com` (all
+      routes under `/cadora/*`; Fly scaled to zero 2026-10-17). The Core stays a pure API
+      client (`vl_…` voice-link token, `/voice/command` + `/voice/links/redeem`).
+      `cadora::DEFAULT_BASE_URL` is now `https://api.getcadora.com/cadora`;
+      `normalize_base_url` maps blank / the retired Fly host to it and adds `/cadora` to a
+      bare `api.getcadora.com` origin (so a stale seed or persisted value self-heals);
+      errors read the Workers `{code, message}` shape (legacy `error` still accepted),
+      tolerate a non-JSON error body, and a `429` redeem says to wait. Note
+      `/voice/command` answers `ok:true` even on a server-side failure — its apology
+      `speech` is relayed verbatim.
+- [ ] **Re-pair production with Cadora**: the old `vl_` token was minted against the
+      retired backend. Deploy the Core, then link on Integrations → Shopping & calendar:
+      either a 6-digit code from NextHaul (blocked until NextHaul's Voice & Integrations
+      screen targets `api.getcadora.com/cadora` — its `AppServerConfig` still defaults to
+      Fly), or a `vl_…` token minted in the **Cadora web app → Settings → Voice assistants
+      & integrations** (type *Other*), pasted under *Advanced*. Then verify a voice add
+      shows up in the NextHaul app.
+- [x] **Cadora calendar add (phase 2, Core done 2026-10-20)**: the `calendar_add` rig
+      tool ("put soccer on the calendar Thursday at 4") over Cadora's `add_event` voice
+      action (Cadora #231, live in production) — same `vl_…` link token, no user sign-in.
+      The seam is now `CadoraController` (`CadoraCommand::AddItem | AddEvent`); both tools
+      are advertised from one link. The model passes `date` (YYYY-MM-DD) + optional 24-h
+      `start_time`/`end_time`; `cadora::resolve_event_times` turns that into RFC 3339 with
+      the Core's local offset for that date (DST-correct, independent of Cadora's household
+      timezone), a bare date for all-day, and an end ≤ start crosses midnight. One-off events
+      only (no recurrence); household-visible, attributed to the link's member.
+- [ ] **Verify calendar add on hardware**: after re-pairing, say "put soccer on the
+      calendar Thursday at 4", "Friday is pizza day", "dentist on the 3rd from 9:30 to
+      10:15" — confirm the spoken confirmation names the right day/time and the events
+      appear in the Cadora app. Optional follow-ups: recurring events (needs an rrule on
+      Cadora's side), and reading Cadora's ICS feed (`/cadora/calendar`) via
+      `calendar.subscriptions` so `calendar_lookup` sees added events.
 - [ ] **Reminders** (deferred): pick a backend — macOS EventKit (local, no OAuth),
       Google Tasks/Calendar (OAuth), or generic CalDAV.
 - [x] **Recipe voice navigation + screen context (2026-09-25)** — the guided-recipe
@@ -550,6 +595,18 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       recipe" and confirm the screen reacts and the model reliably calls
       `recipe_control` / `close_recipe` (needs the Mac Anamanti Core + a spoken turn;
       not drivable headlessly).
+- [x] **Recipe go-to-step highlight + recipe questions (2026-10-19)** — "go to step N" /
+      "next step" scrolls the step into view and highlights it (`recipe_control`
+      `go_to_step` / System-1 `recipe_step` → `anamanti-recipe` `step`); the recipe screen
+      context carries `highlighted_step` + the ingredient/step lines so "how many tomatoes?"
+      is answered from the screen (System-1 `recipe_ingredient` conditional lookup, else the
+      System-2 prompt). See [`RecipePlan.md`](./RecipePlan.md).
+- [ ] **Verify recipe steps + questions on hardware** (release APK + matching Core): with a
+      long recipe up, "go to step 7" lands step 7 on screen highlighted; "next step" →
+      step 8, and each jump reads the step aloud; "how many tomatoes do I need?" answers from the recipe (check the Core log
+      for `system1 … recipe_ingredient` vs a System-2 answer); re-run the System-1
+      calibration corpus (`tests/system1_calibration.rs --ignored`) against the live
+      backend for the two new intents.
 - [x] **Music now-playing UI + on-screen & voice control (MusicPlan P6, PR #91)** — a
       persistent `role="music"` push (`NowPlayingService`, polled every
       `music.nowplaying_refresh_secs`), the compact `MusicControlOverlay` +
@@ -619,6 +676,4 @@ Remaining:
   `calibrate_portuguese` after a model update; enable each once nothing resolves into it wrongly.
 - [ ] Very short single words (< 250 ms voiced, e.g. a clipped "para") end the turn as silence
   (VAD `MIN_SPEECH_ONSET`) — language-independent; revisit if it shows up with real voices.
-- [ ] Pre-existing on `main` (not bilingual): 4 `llm::rig` tests fail since the timer-adjust
-  merge added `adjust_timer` without updating the tool snapshot/count tests.
 

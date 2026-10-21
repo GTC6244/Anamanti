@@ -106,6 +106,7 @@ use flutter_rust_bridge::frb;
 /// or the settings screen (Phase 6) and hands them to the engine. The Wyoming
 /// host itself is discovered over mDNS at turn time, so no address is configured
 /// here (architecture.md §5).
+#[frb]
 pub struct WakeWordConfig {
     /// Path to the melspectrogram ONNX model (`melspectrogram.onnx`).
     pub melspec_model_path: String,
@@ -191,6 +192,12 @@ pub struct WakeWordConfig {
     /// Seconds of no motion before the screen is allowed to dim again. `0` uses the
     /// engine default (`presence::DEFAULT_RELEASE`).
     pub proximity_release_secs: u32,
+    /// Camera-as-lux-sensor darkness threshold (estimated lux): the room counts as
+    /// "lights off" once it stays below this, and lit again above 3× it (hysteresis).
+    /// `0` uses the engine default (`ambient::DEFAULT_DARK_LUX`). Only meaningful with
+    /// `camera_proximity` — the lux sensor shares its frames. See `camera/ambient.rs`.
+    #[frb(default = 0.0)]
+    pub night_dark_lux: f32,
 }
 
 /// Discriminates the kind of [`WakeWordEvent`]. A unit-only enum so FRB maps it
@@ -274,12 +281,23 @@ pub enum WakeWordEventKind {
     ShowPlace,
     /// Place mode: dismiss the full-screen place card and return to idle/ambient.
     DismissPlace,
+    /// Camera mode (`plans/CameraPlan.md`): the orchestrator asked to open the live
+    /// camera view. The camera's display name (e.g. `"Front Door"`) rides the generic
+    /// `recipe_action` string carrier (as `FontAdjust` does). The frame never carries
+    /// the stream URL — the UI fetches it with `get_camera_stream`.
+    ShowCamera,
+    /// Camera mode: close the live camera view and return to idle/ambient.
+    DismissCamera,
     /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
     /// (`"overview"` / `"ingredients"` / `"steps"`).
     RecipeNavigate,
     /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
     /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
     RecipeScroll,
+    /// Recipe mode: jump to a step by voice — switch to the Steps tab, scroll that step
+    /// into view and highlight it. `recipe_action` is the 1-based step number as a
+    /// decimal string (the generic string carrier, as `RecipeScroll`).
+    RecipeStep,
     /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
     /// command. The direction (`"increase"` / `"decrease"`) rides the generic
     /// `recipe_action` field (the same string carrier as `RecipeScroll`). The UI bumps the
@@ -294,6 +312,13 @@ pub enum WakeWordEventKind {
     /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
     /// transitions, never per frame.
     Presence,
+    /// The camera-as-lux-sensor's reading (`camera/ambient.rs`): `dark` is whether
+    /// the room's lights are judged off, `lux` the smoothed illuminance estimate.
+    /// Emitted when `dark` flips and every few seconds otherwise (a live readout for
+    /// Settings); the UI dims the screen to its night levels while `dark`. `covered`
+    /// reports a covered lens (privacy shutter / tape), which the UI resolves per the
+    /// user's "when the camera is covered" setting.
+    AmbientLight,
     /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
     /// guided capture (a training sample or the verify check). `enroll_json` carries the
     /// raw `anamanti-enroll-result` data block (phase / accepted / samples / consistency /
@@ -306,6 +331,7 @@ pub enum WakeWordEventKind {
 /// boundary stays dependency-free; fields not relevant to a given `kind` carry
 /// neutral defaults. `Clone` lets the engine fan the sink out to the Phase-3
 /// Wyoming turn task (which emits on the same stream).
+#[frb]
 #[derive(Clone)]
 pub struct WakeWordEvent {
     pub kind: WakeWordEventKind,
@@ -351,6 +377,18 @@ pub struct WakeWordEvent {
     /// Camera proximity state (`Presence`): `true` = someone approached (brighten),
     /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
     pub present: bool,
+    /// Lux sensor (`AmbientLight`): whether the room's lights are off. Neutral
+    /// `false` for every other kind.
+    #[frb(default = false)]
+    pub dark: bool,
+    /// Lux sensor (`AmbientLight`): smoothed estimated illuminance in lux. `0` for
+    /// every other kind.
+    #[frb(default = 0.0)]
+    pub lux: f32,
+    /// Lux sensor (`AmbientLight`): whether the lens looks covered (near-black and
+    /// near-uniform frames — privacy shutter or tape). `false` for every other kind.
+    #[frb(default = false)]
+    pub covered: bool,
     /// The parsed recipe as a JSON string (`ShowRecipe`); empty for every other kind.
     /// The UI decodes it into the recipe-mode tabs.
     pub recipe_json: String,
@@ -389,6 +427,9 @@ impl WakeWordEvent {
             timer_label: String::new(),
             timer_remaining_secs: 0,
             present: false,
+            dark: false,
+            lux: 0.0,
+            covered: false,
             recipe_json: String::new(),
             weather_json: String::new(),
             place_json: String::new(),
@@ -570,6 +611,19 @@ impl WakeWordEvent {
         Self::base(WakeWordEventKind::DismissPlace)
     }
 
+    /// Open the live camera view of `camera` (its display name, carried on the
+    /// `recipe_action` string field).
+    pub(crate) fn show_camera(camera: String) -> Self {
+        Self {
+            recipe_action: camera,
+            ..Self::base(WakeWordEventKind::ShowCamera)
+        }
+    }
+
+    pub(crate) fn dismiss_camera() -> Self {
+        Self::base(WakeWordEventKind::DismissCamera)
+    }
+
     pub(crate) fn enroll_result(enroll_json: String) -> Self {
         Self {
             enroll_json,
@@ -588,6 +642,13 @@ impl WakeWordEvent {
         Self {
             recipe_action: direction,
             ..Self::base(WakeWordEventKind::RecipeScroll)
+        }
+    }
+
+    pub(crate) fn recipe_step(step: u32) -> Self {
+        Self {
+            recipe_action: step.to_string(),
+            ..Self::base(WakeWordEventKind::RecipeStep)
         }
     }
 
@@ -611,6 +672,17 @@ impl WakeWordEvent {
         Self {
             present,
             ..Self::base(WakeWordEventKind::Presence)
+        }
+    }
+
+    // Constructed only by the Android camera bridge; on host builds it's unused.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn ambient_light(dark: bool, lux: f32, covered: bool) -> Self {
+        Self {
+            dark,
+            lux,
+            covered,
+            ..Self::base(WakeWordEventKind::AmbientLight)
         }
     }
 }
@@ -648,6 +720,15 @@ pub fn update_diagnostics_tuning(gain_db: f32, threshold: f32, active_threshold:
     crate::engine::update_tuning(gain_db, threshold, active_threshold);
 }
 
+/// Turn off on-device timer `id` — the display's "Cancel timer" button. Silences a
+/// ringing alarm (which otherwise repeats every 5 s until turned off) or cancels a
+/// running countdown; the engine then emits `TimerCancelled` for it. A harmless no-op
+/// for an unknown id or when no engine is running.
+#[frb(sync)]
+pub fn dismiss_timer(id: u32) {
+    crate::engine::timer::dismiss_timer(id);
+}
+
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
 /// — so it resets the screen-dim countdown (and brightens the screen if it had
 /// already dimmed). Flutter calls this on each voice-turn transition and on screen
@@ -661,8 +742,10 @@ pub fn note_user_activity() {
 
 /// Report the recipe screen's state as the device's **display context** so the next
 /// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know a
-/// recipe is up (and which tab / scroll position) so it can drive the screen by voice
-/// (switch tabs, scroll, close).
+/// recipe is up (and which tab / scroll position / highlighted step) so it can drive the
+/// screen by voice (switch tabs, scroll, go to a step, close) — plus the recipe's
+/// ingredient lines and steps, so recipe questions ("how many tomatoes?") are answered
+/// from what is on screen (the Core's System-1 lookup or its System-2 prompt).
 ///
 /// This is the recipe screen's setter for the general display-context mechanism (see
 /// [`crate::engine::set_display_context`]); other voice-controllable screens — music,
@@ -671,7 +754,9 @@ pub fn note_user_activity() {
 ///
 /// Flutter calls this when recipe mode opens or closes and whenever the active tab or a
 /// pane's scroll position changes. `active == false` clears the context (idle screen);
-/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`.
+/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`;
+/// `highlighted_step` is 1-based (`0` = none).
+#[allow(clippy::too_many_arguments)]
 #[frb(sync)]
 pub fn set_recipe_context(
     active: bool,
@@ -681,6 +766,9 @@ pub fn set_recipe_context(
     at_bottom: bool,
     ingredient_count: u32,
     step_count: u32,
+    highlighted_step: u32,
+    ingredients: Vec<String>,
+    steps: Vec<String>,
 ) {
     let screen = if active {
         Some(serde_json::json!({
@@ -692,6 +780,9 @@ pub fn set_recipe_context(
                 "at_bottom": at_bottom,
                 "ingredient_count": ingredient_count,
                 "step_count": step_count,
+                "highlighted_step": highlighted_step,
+                "ingredients": ingredients,
+                "steps": steps,
             },
         }))
     } else {
@@ -752,6 +843,32 @@ pub fn set_place_context(active: bool, name: String, address: String) {
         None
     };
     crate::engine::set_display_context(screen);
+}
+
+/// The `screen` block for the live camera view's display context, or `None` when the
+/// view is closed (`plans/CameraPlan.md`). Split out of [`set_camera_context`] so the
+/// shape is unit-testable without the engine.
+fn camera_context(active: bool, name: &str) -> Option<serde_json::Value> {
+    active.then(|| {
+        serde_json::json!({
+            "kind": "camera",
+            "camera": { "name": name },
+        })
+    })
+}
+
+/// Report the live camera view's state as the device's **display context** so the next
+/// voice turn's `audio-start` tells the orchestrator a camera view is up (and which
+/// camera), letting a bare "stop" / "close it" close it. The camera view's setter for the
+/// general display-context mechanism (see [`set_place_context`] /
+/// [`crate::engine::set_display_context`]). Carries only the camera's display name —
+/// never the stream URL.
+///
+/// Flutter calls this when the camera view opens or closes. `active == false` clears the
+/// context (idle screen); `name` is ignored then.
+#[frb(sync)]
+pub fn set_camera_context(active: bool, name: String) {
+    crate::engine::set_display_context(camera_context(active, &name));
 }
 
 /// Push the music player's current state as this turn's display context (see
@@ -1003,6 +1120,8 @@ pub fn start_notify_channel(
         device_id,
         device_name,
     } = config;
+    // Remember this display's id for the per-turn `audio-start` + music-control stamps.
+    crate::engine::set_device_id(&device_id);
     start_channel(
         &NOTIFY,
         "notify",
@@ -1084,6 +1203,8 @@ pub fn start_weather_channel(
         device_id,
         device_name,
     } = config;
+    // Remember this display's id for the per-turn `audio-start` + music-control stamps.
+    crate::engine::set_device_id(&device_id);
     start_channel(
         &WEATHER,
         "weather",
@@ -1155,6 +1276,8 @@ pub fn start_music_channel(config: MusicConfig, sink: StreamSink<MusicPush>) -> 
         device_id,
         device_name,
     } = config;
+    // Remember this display's id for the per-turn `audio-start` + music-control stamps.
+    crate::engine::set_device_id(&device_id);
     start_channel(
         &MUSIC,
         "music",
@@ -1178,4 +1301,33 @@ pub fn start_music_channel(config: MusicConfig, sink: StreamSink<MusicPush>) -> 
 /// Stop the music now-playing channel (if any) and join its thread. Idempotent.
 pub fn stop_music_channel() {
     stop_channel(&MUSIC);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_context_carries_only_the_camera_name() {
+        let screen = camera_context(true, "Front Door").expect("active => Some");
+        assert_eq!(screen["kind"], "camera");
+        assert_eq!(screen["camera"]["name"], "Front Door");
+        // The context never carries the stream URL (it embeds NVR credentials).
+        assert_eq!(screen["camera"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn camera_context_clears_when_inactive() {
+        assert!(camera_context(false, "Front Door").is_none());
+    }
+
+    #[test]
+    fn camera_events_ride_the_recipe_action_carrier() {
+        let show = WakeWordEvent::show_camera("Front Door".to_string());
+        assert!(matches!(show.kind, WakeWordEventKind::ShowCamera));
+        assert_eq!(show.recipe_action, "Front Door");
+        let dismiss = WakeWordEvent::dismiss_camera();
+        assert!(matches!(dismiss.kind, WakeWordEventKind::DismissCamera));
+        assert!(dismiss.recipe_action.is_empty());
+    }
 }

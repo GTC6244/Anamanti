@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1998847547;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1156029600;
 
 // Section: executor
 
@@ -305,6 +305,38 @@ fn wire__crate__api__engine__device_hardware_id_impl(
         },
     )
 }
+fn wire__crate__api__engine__dismiss_timer_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "dismiss_timer",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_id = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::dismiss_timer(api_id);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__updater__download_update_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -527,6 +559,47 @@ fn wire__crate__api__settings__fetch_orchestrator_settings_impl(
                         let output_ok = crate::api::settings::fetch_orchestrator_settings(
                             api_orchestrator_key,
                             api_discovery_timeout_secs,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__settings__get_camera_stream_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "get_camera_stream",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_orchestrator_key = <String>::sse_decode(&mut deserializer);
+            let api_discovery_timeout_secs = <u64>::sse_decode(&mut deserializer);
+            let api_camera = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::settings::get_camera_stream(
+                            api_orchestrator_key,
+                            api_discovery_timeout_secs,
+                            api_camera,
                         )?;
                         Ok(output_ok)
                     })(),
@@ -1326,6 +1399,39 @@ fn wire__crate__api__settings__play_speaker_clips_impl(
         },
     )
 }
+fn wire__crate__api__engine__set_camera_context_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_camera_context",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_active = <bool>::sse_decode(&mut deserializer);
+            let api_name = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::engine::set_camera_context(api_active, api_name);
+                })?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__engine__set_diagnostics_context_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -1544,6 +1650,9 @@ fn wire__crate__api__engine__set_recipe_context_impl(
             let api_at_bottom = <bool>::sse_decode(&mut deserializer);
             let api_ingredient_count = <u32>::sse_decode(&mut deserializer);
             let api_step_count = <u32>::sse_decode(&mut deserializer);
+            let api_highlighted_step = <u32>::sse_decode(&mut deserializer);
+            let api_ingredients = <Vec<String>>::sse_decode(&mut deserializer);
+            let api_steps = <Vec<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             transform_result_sse::<_, ()>((move || {
                 let output_ok = Result::<_, ()>::Ok({
@@ -1555,6 +1664,9 @@ fn wire__crate__api__engine__set_recipe_context_impl(
                         api_at_bottom,
                         api_ingredient_count,
                         api_step_count,
+                        api_highlighted_step,
+                        api_ingredients,
+                        api_steps,
                     );
                 })?;
                 Ok(output_ok)
@@ -2055,6 +2167,22 @@ impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_u8().unwrap() != 0
+    }
+}
+
+impl SseDecode for crate::api::settings::CameraStream {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_ok = <bool>::sse_decode(deserializer);
+        let mut var_camera = <String>::sse_decode(deserializer);
+        let mut var_url = <String>::sse_decode(deserializer);
+        let mut var_message = <String>::sse_decode(deserializer);
+        return crate::api::settings::CameraStream {
+            ok: var_ok,
+            camera: var_camera,
+            url: var_url,
+            message: var_message,
+        };
     }
 }
 
@@ -2679,6 +2807,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
         let mut var_cameraProximity = <bool>::sse_decode(deserializer);
         let mut var_proximityMotionThreshold = <f32>::sse_decode(deserializer);
         let mut var_proximityReleaseSecs = <u32>::sse_decode(deserializer);
+        let mut var_nightDarkLux = <f32>::sse_decode(deserializer);
         return crate::api::engine::WakeWordConfig {
             melspec_model_path: var_melspecModelPath,
             embedding_model_path: var_embeddingModelPath,
@@ -2701,6 +2830,7 @@ impl SseDecode for crate::api::engine::WakeWordConfig {
             camera_proximity: var_cameraProximity,
             proximity_motion_threshold: var_proximityMotionThreshold,
             proximity_release_secs: var_proximityReleaseSecs,
+            night_dark_lux: var_nightDarkLux,
         };
     }
 }
@@ -2725,6 +2855,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
         let mut var_timerLabel = <String>::sse_decode(deserializer);
         let mut var_timerRemainingSecs = <u32>::sse_decode(deserializer);
         let mut var_present = <bool>::sse_decode(deserializer);
+        let mut var_dark = <bool>::sse_decode(deserializer);
+        let mut var_lux = <f32>::sse_decode(deserializer);
+        let mut var_covered = <bool>::sse_decode(deserializer);
         let mut var_recipeJson = <String>::sse_decode(deserializer);
         let mut var_weatherJson = <String>::sse_decode(deserializer);
         let mut var_placeJson = <String>::sse_decode(deserializer);
@@ -2748,6 +2881,9 @@ impl SseDecode for crate::api::engine::WakeWordEvent {
             timer_label: var_timerLabel,
             timer_remaining_secs: var_timerRemainingSecs,
             present: var_present,
+            dark: var_dark,
+            lux: var_lux,
+            covered: var_covered,
             recipe_json: var_recipeJson,
             weather_json: var_weatherJson,
             place_json: var_placeJson,
@@ -2786,12 +2922,16 @@ impl SseDecode for crate::api::engine::WakeWordEventKind {
             21 => crate::api::engine::WakeWordEventKind::DismissWeather,
             22 => crate::api::engine::WakeWordEventKind::ShowPlace,
             23 => crate::api::engine::WakeWordEventKind::DismissPlace,
-            24 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
-            25 => crate::api::engine::WakeWordEventKind::RecipeScroll,
-            26 => crate::api::engine::WakeWordEventKind::FontAdjust,
-            27 => crate::api::engine::WakeWordEventKind::MusicScreen,
-            28 => crate::api::engine::WakeWordEventKind::Presence,
-            29 => crate::api::engine::WakeWordEventKind::EnrollResult,
+            24 => crate::api::engine::WakeWordEventKind::ShowCamera,
+            25 => crate::api::engine::WakeWordEventKind::DismissCamera,
+            26 => crate::api::engine::WakeWordEventKind::RecipeNavigate,
+            27 => crate::api::engine::WakeWordEventKind::RecipeScroll,
+            28 => crate::api::engine::WakeWordEventKind::RecipeStep,
+            29 => crate::api::engine::WakeWordEventKind::FontAdjust,
+            30 => crate::api::engine::WakeWordEventKind::MusicScreen,
+            31 => crate::api::engine::WakeWordEventKind::Presence,
+            32 => crate::api::engine::WakeWordEventKind::AmbientLight,
+            33 => crate::api::engine::WakeWordEventKind::EnrollResult,
             _ => unreachable!("Invalid variant for WakeWordEventKind: {}", inner),
         };
     }
@@ -2838,63 +2978,64 @@ fn pde_ffi_dispatcher_primary_impl(
         4 => wire__crate__api__settings__delete_graph_node_impl(port, ptr, rust_vec_len, data_len),
         5 => wire__crate__api__settings__delete_memory_impl(port, ptr, rust_vec_len, data_len),
         6 => wire__crate__api__settings__delete_speaker_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__updater__download_update_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__settings__enroll_cancel_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__settings__enroll_finish_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__settings__fetch_orchestrator_settings_impl(
+        9 => wire__crate__api__updater__download_update_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__settings__enroll_cancel_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__settings__enroll_finish_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__settings__fetch_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        14 => wire__crate__api__settings__get_drive_token_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__settings__get_functions_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__settings__link_speaker_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__settings__list_entities_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__settings__list_household_members_impl(
+        15 => wire__crate__api__settings__get_camera_stream_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__settings__get_drive_token_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__settings__get_functions_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__engine__init_app_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__settings__link_speaker_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__settings__list_entities_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__settings__list_household_members_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        21 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
-        23 => {
+        23 => wire__crate__api__settings__list_memories_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__settings__list_models_impl(port, ptr, rust_vec_len, data_len),
+        25 => {
             wire__crate__api__settings__list_orchestrators_impl(port, ptr, rust_vec_len, data_len)
         }
-        24 => {
+        26 => {
             wire__crate__api__settings__list_speaker_clips_impl(port, ptr, rust_vec_len, data_len)
         }
-        25 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__settings__list_turns_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__settings__music_control_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__settings__pair_phone_impl(port, ptr, rust_vec_len, data_len),
-        33 => {
+        27 => wire__crate__api__settings__list_speakers_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__settings__list_turns_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__settings__list_voices_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__settings__merge_speakers_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__settings__music_control_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__settings__name_speaker_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__settings__pair_phone_impl(port, ptr, rust_vec_len, data_len),
+        35 => {
             wire__crate__api__settings__play_speaker_clips_impl(port, ptr, rust_vec_len, data_len)
         }
-        41 => wire__crate__api__engine__start_music_channel_impl(port, ptr, rust_vec_len, data_len),
-        42 => {
+        44 => wire__crate__api__engine__start_music_channel_impl(port, ptr, rust_vec_len, data_len),
+        45 => {
             wire__crate__api__engine__start_notify_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        43 => {
+        46 => {
             wire__crate__api__engine__start_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        44 => {
+        47 => {
             wire__crate__api__engine__start_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        45 => wire__crate__api__engine__stop_music_channel_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
-        47 => {
+        48 => wire__crate__api__engine__stop_music_channel_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__engine__stop_notify_channel_impl(port, ptr, rust_vec_len, data_len),
+        50 => {
             wire__crate__api__engine__stop_wake_word_engine_impl(port, ptr, rust_vec_len, data_len)
         }
-        48 => {
+        51 => {
             wire__crate__api__engine__stop_weather_channel_impl(port, ptr, rust_vec_len, data_len)
         }
-        50 => wire__crate__api__settings__update_orchestrator_settings_impl(
+        53 => wire__crate__api__settings__update_orchestrator_settings_impl(
             port,
             ptr,
             rust_vec_len,
@@ -2913,26 +3054,51 @@ fn pde_ffi_dispatcher_sync_impl(
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
         7 => wire__crate__api__engine__device_hardware_id_impl(ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__engine__engine_greeting_impl(ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__engine__engine_version_impl(ptr, rust_vec_len, data_len),
-        17 => {
+        8 => wire__crate__api__engine__dismiss_timer_impl(ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__engine__engine_greeting_impl(ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__engine__engine_version_impl(ptr, rust_vec_len, data_len),
+        19 => {
             wire__crate__api__engine__is_wake_word_engine_running_impl(ptr, rust_vec_len, data_len)
         }
-        31 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__engine__set_diagnostics_context_impl(ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__engine__set_enroll_context_impl(ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__engine__set_font_context_impl(ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__engine__set_music_context_impl(ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__engine__note_user_activity_impl(ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__engine__set_camera_context_impl(ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__engine__set_diagnostics_context_impl(ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__engine__set_enroll_context_impl(ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__engine__set_font_context_impl(ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__engine__set_music_context_impl(ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__engine__set_place_context_impl(ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__engine__set_recipe_context_impl(ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__engine__set_weather_context_impl(ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__engine__update_diagnostics_tuning_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
 
 // Section: rust2dart
 
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::settings::CameraStream {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.ok.into_into_dart().into_dart(),
+            self.camera.into_into_dart().into_dart(),
+            self.url.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::settings::CameraStream
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::settings::CameraStream>
+    for crate::api::settings::CameraStream
+{
+    fn into_into_dart(self) -> crate::api::settings::CameraStream {
+        self
+    }
+}
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::updater::DownloadProgress {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
@@ -3406,6 +3572,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordConfig {
             self.camera_proximity.into_into_dart().into_dart(),
             self.proximity_motion_threshold.into_into_dart().into_dart(),
             self.proximity_release_secs.into_into_dart().into_dart(),
+            self.night_dark_lux.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -3442,6 +3609,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEvent {
             self.timer_label.into_into_dart().into_dart(),
             self.timer_remaining_secs.into_into_dart().into_dart(),
             self.present.into_into_dart().into_dart(),
+            self.dark.into_into_dart().into_dart(),
+            self.lux.into_into_dart().into_dart(),
+            self.covered.into_into_dart().into_dart(),
             self.recipe_json.into_into_dart().into_dart(),
             self.weather_json.into_into_dart().into_dart(),
             self.place_json.into_into_dart().into_dart(),
@@ -3490,12 +3660,16 @@ impl flutter_rust_bridge::IntoDart for crate::api::engine::WakeWordEventKind {
             Self::DismissWeather => 21.into_dart(),
             Self::ShowPlace => 22.into_dart(),
             Self::DismissPlace => 23.into_dart(),
-            Self::RecipeNavigate => 24.into_dart(),
-            Self::RecipeScroll => 25.into_dart(),
-            Self::FontAdjust => 26.into_dart(),
-            Self::MusicScreen => 27.into_dart(),
-            Self::Presence => 28.into_dart(),
-            Self::EnrollResult => 29.into_dart(),
+            Self::ShowCamera => 24.into_dart(),
+            Self::DismissCamera => 25.into_dart(),
+            Self::RecipeNavigate => 26.into_dart(),
+            Self::RecipeScroll => 27.into_dart(),
+            Self::RecipeStep => 28.into_dart(),
+            Self::FontAdjust => 29.into_dart(),
+            Self::MusicScreen => 30.into_dart(),
+            Self::Presence => 31.into_dart(),
+            Self::AmbientLight => 32.into_dart(),
+            Self::EnrollResult => 33.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -3618,6 +3792,16 @@ impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::settings::CameraStream {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.ok, serializer);
+        <String>::sse_encode(self.camera, serializer);
+        <String>::sse_encode(self.url, serializer);
+        <String>::sse_encode(self.message, serializer);
     }
 }
 
@@ -4073,6 +4257,7 @@ impl SseEncode for crate::api::engine::WakeWordConfig {
         <bool>::sse_encode(self.camera_proximity, serializer);
         <f32>::sse_encode(self.proximity_motion_threshold, serializer);
         <u32>::sse_encode(self.proximity_release_secs, serializer);
+        <f32>::sse_encode(self.night_dark_lux, serializer);
     }
 }
 
@@ -4096,6 +4281,9 @@ impl SseEncode for crate::api::engine::WakeWordEvent {
         <String>::sse_encode(self.timer_label, serializer);
         <u32>::sse_encode(self.timer_remaining_secs, serializer);
         <bool>::sse_encode(self.present, serializer);
+        <bool>::sse_encode(self.dark, serializer);
+        <f32>::sse_encode(self.lux, serializer);
+        <bool>::sse_encode(self.covered, serializer);
         <String>::sse_encode(self.recipe_json, serializer);
         <String>::sse_encode(self.weather_json, serializer);
         <String>::sse_encode(self.place_json, serializer);
@@ -4133,12 +4321,16 @@ impl SseEncode for crate::api::engine::WakeWordEventKind {
                 crate::api::engine::WakeWordEventKind::DismissWeather => 21,
                 crate::api::engine::WakeWordEventKind::ShowPlace => 22,
                 crate::api::engine::WakeWordEventKind::DismissPlace => 23,
-                crate::api::engine::WakeWordEventKind::RecipeNavigate => 24,
-                crate::api::engine::WakeWordEventKind::RecipeScroll => 25,
-                crate::api::engine::WakeWordEventKind::FontAdjust => 26,
-                crate::api::engine::WakeWordEventKind::MusicScreen => 27,
-                crate::api::engine::WakeWordEventKind::Presence => 28,
-                crate::api::engine::WakeWordEventKind::EnrollResult => 29,
+                crate::api::engine::WakeWordEventKind::ShowCamera => 24,
+                crate::api::engine::WakeWordEventKind::DismissCamera => 25,
+                crate::api::engine::WakeWordEventKind::RecipeNavigate => 26,
+                crate::api::engine::WakeWordEventKind::RecipeScroll => 27,
+                crate::api::engine::WakeWordEventKind::RecipeStep => 28,
+                crate::api::engine::WakeWordEventKind::FontAdjust => 29,
+                crate::api::engine::WakeWordEventKind::MusicScreen => 30,
+                crate::api::engine::WakeWordEventKind::Presence => 31,
+                crate::api::engine::WakeWordEventKind::AmbientLight => 32,
+                crate::api::engine::WakeWordEventKind::EnrollResult => 33,
                 _ => {
                     unimplemented!("");
                 }

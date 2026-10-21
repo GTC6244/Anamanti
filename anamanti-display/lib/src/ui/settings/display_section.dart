@@ -1,10 +1,17 @@
 // Settings → Display: what the screen looks like. Screen (dim delay, font size, the
-// listening ring) and Photos (the idle slideshow source + Google linking).
+// listening ring), Night (night dimming via the camera light sensor + what a covered
+// camera means) and Photos (the idle slideshow source + Google linking + how often
+// the background photo changes).
 
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:qr_flutter/qr_flutter.dart';
 
+import 'package:anamanti_display/src/engine/assistant_controller.dart';
+import 'package:anamanti_display/src/engine/night_schedule.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
 import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 import 'package:anamanti_display/src/slideshow/ambient_photos.dart';
@@ -24,15 +31,31 @@ const List<int> kDimDelayPresets = <int>[
   3600,
 ];
 
-/// The preset closest to [seconds], so a persisted value that predates the preset
-/// list (or an out-of-range one) still shows a valid selection.
-int nearestDimPreset(int seconds) {
-  var best = kDimDelayPresets.first;
-  for (final p in kDimDelayPresets) {
+/// The fixed "change photo every" choices (seconds): 5s … 10m, ascending. Includes
+/// the 10 s default ([kDefaultSlideIntervalSecs]).
+const List<int> kSlideIntervalPresets = <int>[
+  5,
+  10,
+  15,
+  30,
+  60,
+  120,
+  300,
+  600,
+];
+
+/// The entry of [presets] closest to [seconds], so a persisted value that predates
+/// the preset list (or an out-of-range one) still shows a valid selection.
+int nearestPreset(List<int> presets, int seconds) {
+  var best = presets.first;
+  for (final p in presets) {
     if ((p - seconds).abs() < (best - seconds).abs()) best = p;
   }
   return best;
 }
+
+/// [nearestPreset] over [kDimDelayPresets].
+int nearestDimPreset(int seconds) => nearestPreset(kDimDelayPresets, seconds);
 
 /// Human-readable seconds → "45s" / "2m" / "1h".
 String formatDimDelay(int s) {
@@ -41,6 +64,34 @@ String formatDimDelay(int s) {
   final m = s ~/ 60;
   final rem = s % 60;
   return rem == 0 ? '${m}m' : '${m}m ${rem}s';
+}
+
+/// Night-dimming darkness choices: label → estimated-lux threshold, darkest first.
+/// "Dark" is the default ([kDefaultNightDarkLux]).
+const List<(String, double)> kNightDarkPresets = <(String, double)>[
+  ('Pitch dark', 3.0),
+  ('Dark', kDefaultNightDarkLux),
+  ('Dim', 20.0),
+];
+
+/// The [kNightDarkPresets] threshold closest to [lux] (by ratio — light levels are
+/// logarithmic), so a stored value off the preset list still shows a selection.
+double nearestNightDarkPreset(double lux) {
+  double dist(double p) => math.log(p / lux).abs();
+  var best = kNightDarkPresets.first.$2;
+  for (final (_, p) in kNightDarkPresets) {
+    if (dist(p) < dist(best)) best = p;
+  }
+  return best;
+}
+
+/// The lux sensor's live reading for the Settings readout, e.g. "Now ~120 lux (lit)"
+/// or "Now ~0.1 lux (camera covered)".
+String formatAmbientLux(double? lux, bool dark, {bool covered = false}) {
+  if (lux == null) return 'No reading yet (needs the Camera permission)';
+  final v = lux < 10 ? lux.toStringAsFixed(1) : lux.round().toString();
+  final what = covered ? 'camera covered' : (dark ? 'dark' : 'lit');
+  return 'Now ~$v lux ($what)';
 }
 
 /// Display → Screen.
@@ -184,6 +235,203 @@ class DisplayScreenTab extends StatelessWidget {
   }
 }
 
+/// The [CoveredCameraMode] choices: label + one-line explanation.
+const Map<CoveredCameraMode, (String, String)> kCoveredCameraModes = {
+  CoveredCameraMode.clock: (
+    'Clock mode',
+    'The screen dims to the clock, as if the room were dark and empty. Touch it '
+        'or speak to wake it.',
+  ),
+  CoveredCameraMode.schedule: (
+    'Day & night times',
+    'The screen stays awake by day and dims to the clock during night hours.',
+  ),
+};
+
+/// Display → Night: dimming when the lights go off (camera as a light sensor) and
+/// what a covered camera (privacy shutter / tape) means.
+class DisplayNightTab extends StatelessWidget {
+  const DisplayNightTab({super.key, required this.controller, this.assistant});
+
+  final SettingsController controller;
+
+  /// The live engine controller, for the lux / covered readout. Null in tests.
+  final ValueListenable<AssistantController?>? assistant;
+
+  Future<void> _pickTime(
+    BuildContext context,
+    int minutes,
+    AppSettings Function(int) apply,
+  ) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: minutes ~/ 60, minute: minutes % 60),
+    );
+    if (picked == null) return;
+    controller.updateLocal(apply(picked.hour * 60 + picked.minute));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final s = c.settings;
+    final schedule = s.coveredCameraMode == CoveredCameraMode.schedule;
+    return SettingsTabBody(
+      left: [
+        const SettingsHeader(
+          'Lights off',
+          caption: 'Dim the screen right down when the room goes dark.',
+        ),
+        SettingsSwitch(
+          key: const Key('settings-night-dim'),
+          icon: Icons.bedtime_outlined,
+          title: 'Dim at night',
+          info:
+              'When the room’s lights go off, the screen dims much further so it '
+              'doesn’t light up a dark room. The front camera is used as a light '
+              'sensor — no images are stored or sent anywhere. Turning a light on '
+              'restores normal brightness within a few seconds.',
+          value: s.nightDimEnabled,
+          onChanged: (v) => c.updateLocal(s.copyWith(nightDimEnabled: v)),
+        ),
+        _NightDarknessRow(controller: c, assistant: assistant),
+      ],
+      right: [
+        const SettingsHeader(
+          'When the camera is covered',
+          caption: 'Privacy shutter or tape: the camera can’t see the room.',
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+          child: Wrap(
+            key: const Key('settings-covered-mode'),
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final MapEntry(key: mode, value: (label, _))
+                  in kCoveredCameraModes.entries)
+                ChoiceChip(
+                  key: Key('settings-covered-${mode.name}'),
+                  label: Text(label),
+                  selected: mode == s.coveredCameraMode,
+                  showCheckmark: false,
+                  onSelected: (_) =>
+                      c.updateLocal(s.copyWith(coveredCameraMode: mode)),
+                ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+          child: Text(
+            kCoveredCameraModes[s.coveredCameraMode]!.$2,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        SettingsRow(
+          icon: Icons.schedule,
+          title: 'Night hours',
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextButton(
+                key: const Key('settings-night-start'),
+                onPressed: schedule
+                    ? () => _pickTime(
+                        context,
+                        s.nightStartMinutes,
+                        (m) => c.settings.copyWith(nightStartMinutes: m),
+                      )
+                    : null,
+                child: Text(formatMinutesOfDay(s.nightStartMinutes)),
+              ),
+              const Text('–'),
+              TextButton(
+                key: const Key('settings-night-end'),
+                onPressed: schedule
+                    ? () => _pickTime(
+                        context,
+                        s.nightEndMinutes,
+                        (m) => c.settings.copyWith(nightEndMinutes: m),
+                      )
+                    : null,
+                child: Text(formatMinutesOfDay(s.nightEndMinutes)),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// "Lights off means": the darkness threshold choice plus the live lux readout.
+class _NightDarknessRow extends StatelessWidget {
+  const _NightDarknessRow({required this.controller, this.assistant});
+
+  final SettingsController controller;
+  final ValueListenable<AssistantController?>? assistant;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final s = c.settings;
+    final selected = nearestNightDarkPreset(s.nightDarkLux);
+    final enabled = s.nightDimEnabled;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      child: Wrap(
+        key: const Key('settings-night-dark'),
+        spacing: 6,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _NightReadout(assistant: assistant),
+          for (final (label, lux) in kNightDarkPresets)
+            ChoiceChip(
+              key: Key('settings-night-dark-${lux.round()}'),
+              label: Text(label),
+              selected: lux == selected,
+              showCheckmark: false,
+              onSelected: enabled
+                  ? (_) => c.updateLocal(s.copyWith(nightDarkLux: lux))
+                  : null,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// "Lights off:" plus the lux sensor's live reading, when the engine is running.
+class _NightReadout extends StatelessWidget {
+  const _NightReadout({this.assistant});
+
+  final ValueListenable<AssistantController?>? assistant;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodySmall;
+    Widget label(AssistantState? state) => Text(
+      state == null
+          ? 'Lights off means:'
+          : 'Lights off means (${formatAmbientLux(state.ambientLux, state.roomDark, covered: state.cameraCovered)}):',
+      style: style,
+    );
+    final source = assistant;
+    if (source == null) return label(null);
+    return ValueListenableBuilder<AssistantController?>(
+      valueListenable: source,
+      builder: (context, engine, _) => engine == null
+          ? label(null)
+          : ListenableBuilder(
+              listenable: engine,
+              builder: (context, _) => label(engine.state),
+            ),
+    );
+  }
+}
+
 /// Display → Photos: the idle slideshow source and Google linking.
 class DisplayPhotosTab extends StatefulWidget {
   const DisplayPhotosTab({super.key, required this.controller});
@@ -260,6 +508,33 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
                   ? 'Drive is linked · ${s.driveFolderIds.length} folder(s).'
                   : 'Drive is not linked yet.',
           }),
+        ),
+        const SettingsHeader(
+          'Change photo every',
+          caption:
+              'How long each background photo stays up before the next one. '
+              'Set separately on each display.',
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+          child: Wrap(
+            key: const Key('settings-slide-interval'),
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final p in kSlideIntervalPresets)
+                ChoiceChip(
+                  key: Key('settings-slide-interval-$p'),
+                  label: Text(formatDimDelay(p)),
+                  selected:
+                      p ==
+                      nearestPreset(kSlideIntervalPresets, s.slideIntervalSecs),
+                  showCheckmark: false,
+                  onSelected: (_) =>
+                      _c.updateLocal(s.copyWith(slideIntervalSecs: p)),
+                ),
+            ],
+          ),
         ),
       ],
       right: [

@@ -12,9 +12,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::lang::{phrases, Lang};
-use crate::llm::DeviceAction;
-use crate::system1::{Decision, DecisionRequest, Intent, Resolution};
+use crate::llm::{DeviceAction, RecipeNav};
+use crate::system1::{Decision, DecisionRequest, Intent, Resolution, Temporal};
 use crate::timer::MAX_TIMER_SECS;
+use crate::weather::{ForecastWhen, SpokenDay};
 use crate::wyoming::protocol::{DeviceContext, DisplayContext};
 
 use super::speech_out::{Delivery, FastReply};
@@ -104,7 +105,10 @@ impl Pipeline {
                 );
                 return None;
             }
-            Ok(intent) => self.fast_reply_for(intent, ctx, transcript).await,
+            Ok(intent) => {
+                self.fast_reply_for(intent, ctx, transcript, r.temporal)
+                    .await
+            }
             Err(_) => None, // a custom config label: routable, but no handler
         };
         let Some(reply) = reply else {
@@ -133,10 +137,11 @@ impl Pipeline {
         intent: Intent,
         ctx: &mut TurnCtx<'_>,
         transcript: &str,
+        temporal: Option<Temporal>,
     ) -> Option<FastReply> {
         let lang = ctx.lang.lang;
         match intent {
-            Intent::Weather => self.weather_reply(ctx).await,
+            Intent::Weather => self.weather_reply(ctx, transcript, temporal).await,
             Intent::Timer => timer_reply(transcript, lang),
             // Clock queries answer from the wall clock (no tool, no network, no widget).
             // Always resolvable → always commit.
@@ -150,6 +155,8 @@ impl Pipeline {
             // The user signalled they are done: a brief ack that ends the follow-up chain
             // (a bare `audio-stop`, no `listen`), returning the device to IDLE. Always
             // resolvable (a fresh "goodbye" turn just ends cleanly).
+            Intent::RecipeStep => recipe_step_reply(transcript, &ctx.device_ctx),
+            Intent::RecipeIngredient => recipe_ingredient_reply(transcript, &ctx.device_ctx),
             Intent::EndSession => Some(FastReply::say(phrases::okay(lang)).ending_session()),
             Intent::StopDismiss => stop_dismiss_reply(&ctx.device_ctx, ctx.followup_depth, lang),
             // Route-only: the free-form place name needs the System-2 LLM.
@@ -159,10 +166,18 @@ impl Pipeline {
 
     /// The System-1 `weather` fast path: fetch the forecast for home, open the
     /// full-screen weather widget *before* speaking, then speak a short templated
-    /// summary and invite a follow-up. Returns `None` (defer) on a precondition that
-    /// fails before anything is emitted: no provider, no home location (from the turn
-    /// snapshot), or the fetch errors / exceeds [`SYSTEM1_WEATHER_BUDGET`].
-    async fn weather_reply(&self, ctx: &mut TurnCtx<'_>) -> Option<FastReply> {
+    /// summary and invite a follow-up. The day comes from the transcript
+    /// ([`weather_when`]): "tomorrow"/"Saturday" fetch that day's forecast. Returns `None`
+    /// (defer) on a precondition that fails before anything is emitted: a day the fast
+    /// path can't pin down, no provider, no home location (from the turn snapshot), or the
+    /// fetch errors / exceeds [`SYSTEM1_WEATHER_BUDGET`].
+    async fn weather_reply(
+        &self,
+        ctx: &mut TurnCtx<'_>,
+        transcript: &str,
+        temporal: Option<Temporal>,
+    ) -> Option<FastReply> {
+        let when = weather_when(transcript, temporal, chrono::Local::now().date_naive())?;
         let provider = self.weather.as_ref()?; // weather disabled → defer
         let household = &ctx.runtime.household;
         let location = household.address.weather_location().unwrap_or_default();
@@ -174,14 +189,14 @@ impl Pipeline {
         let t0 = Instant::now();
         let report = match tokio::time::timeout(
             SYSTEM1_WEATHER_BUDGET,
-            provider.fetch(&location, imperial, crate::weather::ForecastWhen::Now),
+            provider.fetch(&location, imperial, when),
         )
         .await
         {
             Ok(Ok(report)) => {
                 ctx.timing.fetch_ms = Some(t0.elapsed().as_millis() as u64);
                 log::info!(
-                    "system1 weather: fetch OK in {}ms (location {location:?})",
+                    "system1 weather: fetch OK in {}ms (location {location:?}, {when:?})",
                     t0.elapsed().as_millis(),
                 );
                 report
@@ -202,7 +217,10 @@ impl Pipeline {
             }
         };
         // Spoken in the turn's language; the widget (and its frame data) stays English.
-        let text = phrases::weather_summary(ctx.lang.lang, &report);
+        let text = match ctx.lang.lang {
+            Lang::En => weather_summary(&report),
+            other => phrases::weather_summary(other, &report),
+        };
         // Widget first, so the screen changes the instant the intent resolves.
         Some(FastReply::say(text).with_action(DeviceAction::ShowWeather(report)))
     }
@@ -211,19 +229,94 @@ impl Pipeline {
 /// The System-1 `timer` fast path: parse an unambiguous duration from the transcript
 /// and start the timer. `None` (defer) when no clear duration is present (e.g. "cancel
 /// my timer", or a free-form request) or it is out of range (0 or over
-/// [`MAX_TIMER_SECS`]), so the robust System-2 timer tool still handles those.
+/// [`MAX_TIMER_SECS`]), so the robust System-2 timer tool still handles those. A spoken
+/// name ("set a pasta timer for 10 minutes") rides along as the timer's label so the
+/// display shows it; phrasing whose name can't be read cleanly also defers, so the
+/// name is never silently dropped. Portuguese reads the duration in Portuguese; a named
+/// Portuguese timer ("timer de macarrão") defers to System-2, which labels it.
 fn timer_reply(transcript: &str, lang: Lang) -> Option<FastReply> {
+    use crate::system1::TimerName;
     let secs = crate::system1::parse_duration_in(lang, transcript)?; // unclear → defer
     if secs == 0 || secs > MAX_TIMER_SECS {
         log::debug!("system1 timer: duration {secs}s out of range; deferring to System-2");
         return None;
     }
-    Some(
-        FastReply::say(phrases::timer_set(lang, secs)).with_action(DeviceAction::StartTimer {
-            label: None,
-            duration_secs: secs,
-        }),
-    )
+    if lang != Lang::En {
+        if pt_timer_is_named(transcript) {
+            log::debug!("system1 timer: named {lang} timer; deferring to System-2");
+            return None;
+        }
+        return Some(FastReply::say(phrases::timer_set(lang, secs)).with_action(
+            DeviceAction::StartTimer {
+                label: None,
+                duration_secs: secs,
+            },
+        ));
+    }
+    let label = match crate::system1::parse_timer_name(transcript) {
+        TimerName::Unnamed => None,
+        TimerName::Named(name) => Some(name),
+        TimerName::Unclear => {
+            log::debug!("system1 timer: unclear timer name; deferring to System-2");
+            return None;
+        }
+    };
+    let text = match &label {
+        Some(name) => format!(
+            "{} timer set for {}.",
+            capitalize(name),
+            human_duration(secs)
+        ),
+        None => format!("Timer set for {}.", human_duration(secs)),
+    };
+    Some(FastReply::say(text).with_action(DeviceAction::StartTimer {
+        label,
+        duration_secs: secs,
+    }))
+}
+
+/// Whether a Portuguese timer request names its timer — "timer de/do/da/pro <word>"
+/// where the word isn't a number or time unit ("timer de macarrão" is named; "timer de
+/// dez minutos" is not). Such requests defer so the name is never dropped.
+fn pt_timer_is_named(transcript: &str) -> bool {
+    let lower = transcript.to_lowercase();
+    let toks: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let numeric = |t: &str| {
+        t.parse::<f64>().is_ok()
+            // A number word contributes a value ("dez minutos" = 600 s); a bare unit after
+            // a non-number reads as one minute, so 60 means "not a number".
+            || crate::system1::parse_duration_secs_pt(&format!("{t} minutos"))
+                .is_some_and(|secs| secs != 60)
+            || matches!(
+                t,
+                "um" | "uma"
+                    | "meia"
+                    | "meio"
+                    | "hora"
+                    | "horas"
+                    | "minuto"
+                    | "minutos"
+                    | "segundo"
+                    | "segundos"
+            )
+    };
+    toks.windows(3).any(|w| {
+        matches!(w[0], "timer" | "temporizador" | "cronômetro" | "cronometro")
+            && matches!(w[1], "de" | "do" | "da" | "pro" | "pra" | "para")
+            && !numeric(w[2])
+    })
+}
+
+/// Uppercase the first letter, for a name that opens a sentence ("pasta" → "Pasta").
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// The System-1 `timer_cancel` fast path: cancel all running timers and confirm.
@@ -301,6 +394,62 @@ fn screen_dismiss_reply(
     Some(FastReply::say(phrases::okay(lang)).with_action(action))
 }
 
+/// The System-1 `recipe_step` fast path: jump the recipe screen to a step — the device
+/// switches to the Steps tab, scrolls that step into view and highlights it — and
+/// **reads the step aloud** from the step lines the device reported.
+/// **Preconditions (ground truth):** a recipe is the foreground widget, and the
+/// transcript names a step that [`parse_recipe_step`](crate::system1::parse_recipe_step)
+/// can resolve against the device-reported highlighted step and step count; otherwise
+/// defer to System-2's `recipe_control` tool.
+fn recipe_step_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<FastReply> {
+    let Some(DisplayContext::Recipe(screen)) = device_ctx.widget.as_ref() else {
+        return None; // no recipe on screen → defer
+    };
+    let step =
+        crate::system1::parse_recipe_step(transcript, screen.highlighted_step, screen.step_count)?;
+    Some(
+        FastReply::say(recipe_step_speech(step, &screen.steps))
+            .with_action(DeviceAction::RecipeControl(RecipeNav::Step(step))),
+    )
+}
+
+/// What to say for a step jump: "Step 3. Chop the onion." — the step's own text when
+/// the device sent it, else (an older device, or a step past the Core-side line cap)
+/// the bare "Here's step 3."
+fn recipe_step_speech(step: u32, steps: &[String]) -> String {
+    let text = (step as usize)
+        .checked_sub(1)
+        .and_then(|i| steps.get(i))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    match text {
+        Some(text) if text.ends_with(['.', '!', '?']) => format!("Step {step}. {text}"),
+        Some(text) => format!("Step {step}. {text}."),
+        None => format!("Here's step {step}."),
+    }
+}
+
+/// The System-1 `recipe_ingredient` fast path — a **conditional lookup**: answer "how
+/// many tomatoes do I need?" straight from the ingredient lines the device reported for
+/// the recipe on screen. **Preconditions (ground truth):** a recipe is the foreground
+/// widget and [`match_recipe_ingredients`](crate::system1::match_recipe_ingredients)
+/// finds the asked-about line(s); otherwise defer to System-2, whose prompt carries the
+/// full ingredient list and steps (so substitutions, totals across steps, or an
+/// ingredient named differently still get answered).
+fn recipe_ingredient_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<FastReply> {
+    let Some(DisplayContext::Recipe(screen)) = device_ctx.widget.as_ref() else {
+        return None; // no recipe on screen → defer
+    };
+    let hits = crate::system1::match_recipe_ingredients(transcript, &screen.ingredients)?;
+    let list = match hits.as_slice() {
+        [one] => one.to_string(),
+        [init @ .., last] => format!("{}, and {last}", init.join(", ")),
+        [] => return None,
+    };
+    let list = list.trim_end_matches(['.', ' ']);
+    Some(FastReply::say(format!("The recipe calls for {list}.")))
+}
+
 /// The System-1 `stop_dismiss` fast path: a bare "stop"/"cancel"/"never mind" whose
 /// target is not named. The **deterministic priority ladder** picks the referent from
 /// live device state (ground truth) — the classifier never chooses it (§17). A rung
@@ -327,6 +476,9 @@ fn stop_dismiss_reply(
         // The music player has no System-1 dismiss intent — defer to the LLM, whose
         // `music_screen` / `spotify_control` tools cover close vs. stop-the-music.
         Some(DisplayContext::Music(_)) => None,
+        // The camera view is closed by the camera fast path (which runs before System-1);
+        // anything that reaches here defers to the LLM's `close_camera` tool.
+        Some(DisplayContext::Camera(_)) => None,
         // The diagnostics and enrollment screens are suppressing contexts that never
         // reach here (the turn short-circuits earlier), and have no voice dismiss.
         Some(DisplayContext::Diagnostics) | Some(DisplayContext::Enroll(_)) | None => None,
@@ -352,18 +504,67 @@ fn spoken_clock_reply(intent: Intent, lang: Lang) -> String {
     }
 }
 
-/// A speakable English duration, e.g. `600` → "10 minutes" — the timer phrasing every
-/// English confirmation now gets through [`phrases::duration`]. Kept as the test oracle's
-/// subject so the legacy-equality check below still pins English output exactly.
-#[cfg(test)]
+/// A speakable English duration, e.g. `600` → "10 minutes" (the shared
+/// [`phrases::duration`] timer phrasing; the legacy-equality test below pins it).
 fn human_duration(secs: u64) -> String {
     phrases::duration(Lang::En, secs)
+}
+
+/// Which forecast slice the System-1 weather fast path should fetch, or `None` to defer
+/// to System-2. The day comes from the transcript ([`crate::weather::spoken_day`]); the
+/// router's confident `temporal` only decides the ambiguous case: a forecast ask that
+/// names no day the fast path can read ("what's the forecast", "will it rain later")
+/// defers, so it is never answered with today's conditions.
+fn weather_when(
+    transcript: &str,
+    temporal: Option<Temporal>,
+    today: chrono::NaiveDate,
+) -> Option<ForecastWhen> {
+    let spoken = crate::weather::spoken_day(transcript, today);
+    let when = match (spoken, temporal) {
+        (SpokenDay::Unspecified, Some(Temporal::Future)) => None,
+        (s, _) => s.forecast_when(),
+    };
+    if when.is_none() {
+        log::info!(
+            "system1 weather: can't pin a single day ({spoken:?}, temporal {temporal:?}); \
+             deferring to System-2"
+        );
+    }
+    when
+}
+
+/// A short, speakable one-line summary of a forecast for the System-1 weather fast path
+/// (the full detail is on the widget). Metric/imperial follows the report's units. A
+/// future-day report (`when_label` set) speaks that day's summary, not "it's N° now".
+fn weather_summary(report: &crate::weather::WeatherReport) -> String {
+    if !report.when_label.is_empty() {
+        return crate::weather::render_confirmation(report, true);
+    }
+    let deg = if report.units == "imperial" {
+        "°F"
+    } else {
+        "°C"
+    };
+    let c = &report.current;
+    let lead = {
+        let d = c.description.trim();
+        if d.is_empty() {
+            String::new()
+        } else {
+            format!("{d}, ")
+        }
+    };
+    format!(
+        "{lead}it's {}{deg} in {}. Today's high is {}{deg}, low {}{deg}.",
+        c.temp, report.location_label, c.high, c.low
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wyoming::protocol::{PlaceScreen, TimerContext};
+    use crate::wyoming::protocol::{PlaceScreen, RecipeScreen, TimerContext};
 
     fn ctx_with(widget: Option<DisplayContext>, running: u32) -> DeviceContext {
         DeviceContext {
@@ -378,10 +579,99 @@ mod tests {
     }
 
     #[test]
+    fn weather_when_selects_the_spoken_day_or_defers() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap(); // a Wednesday
+        let day = |d| {
+            Some(ForecastWhen::Day(
+                chrono::NaiveDate::from_ymd_opt(2026, 10, d).unwrap(),
+            ))
+        };
+
+        // Present / no day named: current conditions, as before.
+        assert_eq!(
+            weather_when("what's the weather", None, today),
+            Some(ForecastWhen::Now)
+        );
+        assert_eq!(
+            weather_when("what's the weather", Some(Temporal::Present), today),
+            Some(ForecastWhen::Now)
+        );
+        assert_eq!(
+            weather_when("will it rain today", Some(Temporal::Future), today),
+            Some(ForecastWhen::Now)
+        );
+
+        // The bug: a named future day must fetch that day, whatever the temporal says.
+        for t in [None, Some(Temporal::Present), Some(Temporal::Future)] {
+            assert_eq!(
+                weather_when("what's the weather tomorrow", t, today),
+                day(22)
+            );
+            assert_eq!(weather_when("weather on Saturday", t, today), day(24));
+        }
+
+        // A confident forecast ask with no readable day defers rather than show today.
+        assert_eq!(
+            weather_when("what's the forecast", Some(Temporal::Future), today),
+            None
+        );
+        // Spans / multiple days always defer.
+        assert_eq!(weather_when("weather this weekend", None, today), None);
+        assert_eq!(
+            weather_when("weather today and tomorrow", None, today),
+            None
+        );
+    }
+
+    #[test]
+    fn weather_summary_speaks_the_requested_day() {
+        let mut report = crate::weather::WeatherReport {
+            location_label: "Austin, Texas".into(),
+            units: "imperial".into(),
+            current: crate::weather::CurrentConditions {
+                temp: 70,
+                high: 75,
+                low: 55,
+                description: "rain".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let now = weather_summary(&report);
+        assert!(
+            now.contains("it's 70°F") && now.contains("Today's high"),
+            "{now}"
+        );
+
+        report.when_label = "Thu, Oct 22".into();
+        let future = weather_summary(&report);
+        assert!(future.starts_with("Thu, Oct 22 will be rain"), "{future}");
+        assert!(!future.contains("Today"), "{future}");
+        assert!(future.contains("high of 75"), "{future}");
+    }
+
+    #[test]
     fn timer_reply_respects_the_shared_cap() {
         assert!(timer_reply("set a timer for 10 minutes", Lang::En).is_some());
         assert!(timer_reply("set a timer for 25 hours", Lang::En).is_none());
         assert!(timer_reply("set a timer", Lang::En).is_none());
+    }
+
+    #[test]
+    fn timer_reply_carries_the_spoken_name_as_the_label() {
+        let reply = timer_reply("set a pasta timer for 10 minutes", Lang::En).expect("resolves");
+        assert_eq!(reply.text, "Pasta timer set for 10 minutes.");
+        assert!(matches!(
+            reply.action.as_ref(),
+            Some(DeviceAction::StartTimer { label: Some(l), duration_secs: 600 }) if l == "pasta"
+        ));
+        let plain = timer_reply("set a timer for 10 minutes", Lang::En).expect("resolves");
+        assert!(matches!(
+            plain.action.as_ref(),
+            Some(DeviceAction::StartTimer { label: None, .. })
+        ));
+        // A name we can't read cleanly defers, so System-2 labels it instead of dropping it.
+        assert!(timer_reply("remind me in 10 minutes to check the oven", Lang::En).is_none());
     }
 
     #[test]
@@ -432,6 +722,66 @@ mod tests {
         assert!(matches!(r.action, Some(DeviceAction::DismissPlace)));
         // Nothing open → defer.
         assert!(screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(None, 0), Lang::En).is_none());
+    }
+
+    fn recipe_ctx(highlighted_step: u32) -> DeviceContext {
+        ctx_with(
+            Some(DisplayContext::Recipe(RecipeScreen {
+                title: "Salsa".to_string(),
+                step_count: 5,
+                highlighted_step,
+                ingredients: vec!["4 ripe tomatoes, chopped".into(), "1 onion".into()],
+                ..Default::default()
+            })),
+            0,
+        )
+    }
+
+    #[test]
+    fn recipe_step_jumps_and_highlights_only_with_a_recipe_up() {
+        let r = recipe_step_reply("go to step three", &recipe_ctx(0)).unwrap();
+        assert_eq!(r.text, "Here's step 3.");
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::RecipeControl(RecipeNav::Step(3)))
+        ));
+        let r = recipe_step_reply("next step", &recipe_ctx(3)).unwrap();
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::RecipeControl(RecipeNav::Step(4)))
+        ));
+        // Out of range, unparseable, or no recipe on screen → defer.
+        assert!(recipe_step_reply("go to step 9", &recipe_ctx(0)).is_none());
+        assert!(recipe_step_reply("scroll down", &recipe_ctx(0)).is_none());
+        assert!(recipe_step_reply("go to step 2", &ctx_with(None, 0)).is_none());
+    }
+
+    #[test]
+    fn recipe_step_reads_the_step_aloud_when_the_device_sent_it() {
+        let mut ctx = recipe_ctx(1);
+        if let Some(DisplayContext::Recipe(screen)) = ctx.widget.as_mut() {
+            screen.steps = vec![
+                "Chop the tomatoes.".into(),
+                "  Stir in the lime juice  ".into(),
+            ];
+        }
+        let r = recipe_step_reply("next step", &ctx).unwrap();
+        assert_eq!(r.text, "Step 2. Stir in the lime juice.");
+        let r = recipe_step_reply("go to step 1", &ctx).unwrap();
+        assert_eq!(r.text, "Step 1. Chop the tomatoes.");
+        // A step past the reported lines (an older device / the line cap) → bare jump.
+        let r = recipe_step_reply("go to step 4", &ctx).unwrap();
+        assert_eq!(r.text, "Here's step 4.");
+    }
+
+    #[test]
+    fn recipe_ingredient_answers_from_the_on_screen_lines() {
+        let r = recipe_ingredient_reply("how many tomatoes do I need", &recipe_ctx(0)).unwrap();
+        assert_eq!(r.text, "The recipe calls for 4 ripe tomatoes, chopped.");
+        assert!(r.action.is_none());
+        // Not in the recipe, or no recipe up → defer to System-2.
+        assert!(recipe_ingredient_reply("how much butter", &recipe_ctx(0)).is_none());
+        assert!(recipe_ingredient_reply("how many tomatoes", &ctx_with(None, 0)).is_none());
     }
 
     #[test]
@@ -491,6 +841,19 @@ mod tests {
         for s in secs {
             assert_eq!(human_duration(s), legacy_human_duration(s), "{s}s");
         }
+    }
+
+    #[test]
+    fn portuguese_named_timers_defer_so_the_name_is_kept() {
+        assert!(pt_timer_is_named(
+            "coloca um timer de macarrão de dez minutos"
+        ));
+        assert!(pt_timer_is_named("timer do frango de 20 minutos"));
+        assert!(!pt_timer_is_named("coloca um timer de dez minutos"));
+        assert!(!pt_timer_is_named("timer de 10 minutos"));
+        assert!(!pt_timer_is_named("timer de meia hora"));
+        assert!(timer_reply("coloca um timer de macarrão de dez minutos", Lang::PtBr).is_none());
+        assert!(timer_reply("coloca um timer de dez minutos", Lang::PtBr).is_some());
     }
 
     #[test]

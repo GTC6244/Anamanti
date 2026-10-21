@@ -61,7 +61,8 @@ struct Shared {
     sink: StreamSink<WakeWordEvent>,
     cache: Arc<EndpointCache>,
     /// True while a turn task is in flight (gates re-triggers + PCM forwarding).
-    active: AtomicBool,
+    /// Shared with the timer manager so a ringing alarm holds its repeats mid-turn.
+    active: Arc<AtomicBool>,
     /// Sender to the current turn's PCM channel, present only while active.
     pcm_tx: Mutex<Option<mpsc::Sender<Vec<i16>>>>,
     /// Barge-in signal to the current turn, present only while active.
@@ -124,6 +125,7 @@ impl Network {
         // Shared mDNS endpoint cache: used both by the turn path and by a fired
         // timer voicing its announcement through the orchestrator.
         let cache = Arc::new(EndpointCache::new());
+        let active = Arc::new(AtomicBool::new(false));
 
         // The timer manager shares the event sink + playback and spawns countdown
         // tasks on this runtime (so they outlive any single turn's socket). It also
@@ -136,14 +138,17 @@ impl Network {
             cache.clone(),
             discovery_timeout,
             orchestrator_key.clone(),
+            active.clone(),
         );
+        // Publish it so the display's "Cancel timer" button can turn a timer off.
+        crate::engine::timer::set_manager(Some(timers.clone()));
 
         Ok(Self {
             runtime,
             shared: Arc::new(Shared {
                 sink,
                 cache,
-                active: AtomicBool::new(false),
+                active,
                 pcm_tx: Mutex::new(None),
                 interrupt_tx: Mutex::new(None),
                 pending_restart: AtomicBool::new(false),
@@ -212,6 +217,7 @@ impl Network {
 
 impl Drop for Network {
     fn drop(&mut self) {
+        crate::engine::timer::set_manager(None);
         // Signal any in-flight turn to stop forwarding + restart, then let the
         // runtime drop abort outstanding tasks. `shutdown_background` (implicit on
         // `Runtime` drop) avoids blocking the engine thread on a parked socket read.
@@ -335,6 +341,9 @@ async fn run_turn_task(
     // resolve "increase/decrease font" only when there's something to resize. `None`
     // (no `font` block) until the UI first reports it.
     conn.set_font_context(crate::engine::font_context());
+    // Stamp this display's id so the Core knows which display is speaking (a play request
+    // shows full screen here; other displays keep the small bar).
+    conn.set_device_id(crate::engine::device_id());
 
     // Idle watchdog for this turn: a follow-up turn keeps the mic open for the listen
     // window; give the device a small margin past it so the orchestrator's no-speech
@@ -398,6 +407,10 @@ async fn run_turn_task(
                     log::info!("turn: recipe scroll {direction}");
                     WakeWordEvent::recipe_scroll(direction)
                 }
+                wyoming::protocol::RecipeCommand::Step(step) => {
+                    log::info!("turn: recipe go to step {step}");
+                    WakeWordEvent::recipe_step(step)
+                }
             },
             // A weather command on the voice-turn socket: surface it to the UI (which
             // owns the weather screen). `Show` opens the full screen; `Current` (also
@@ -428,6 +441,19 @@ async fn run_turn_task(
                 wyoming::protocol::PlaceCommand::Dismiss => {
                     log::info!("turn: dismiss place");
                     WakeWordEvent::dismiss_place()
+                }
+            },
+            // A camera-view command relayed on the voice socket. `Show` opens the live
+            // view of the named camera (the UI then fetches the stream URL itself);
+            // `Dismiss` closes it. The view is UI-owned and outlives the turn.
+            TurnUpdate::Camera(cmd) => match cmd {
+                wyoming::protocol::CameraCommand::Show(camera) => {
+                    log::info!("turn: show camera {camera:?}");
+                    WakeWordEvent::show_camera(camera)
+                }
+                wyoming::protocol::CameraCommand::Dismiss => {
+                    log::info!("turn: dismiss camera");
+                    WakeWordEvent::dismiss_camera()
                 }
             },
             TurnUpdate::Music(screen) => {

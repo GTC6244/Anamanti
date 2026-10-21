@@ -15,6 +15,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:anamanti_display/src/engine/night_schedule.dart';
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
@@ -396,6 +397,111 @@ void main() {
     await settle(tester);
     expect(h.last!.dimDelaySecs, 3600);
     expect(h.store.value.dimDelaySecs, 3600);
+  });
+
+  testWidgets(
+    'photo rotation presets show the current value and apply on tap',
+    (tester) async {
+      final h = _Harness();
+      await h.pump(tester, initial: const AppSettings(slideIntervalSecs: 30));
+
+      await open(tester, 'display', 'photos');
+      expect(
+        tester
+            .widget<ChoiceChip>(
+              find.byKey(const Key('settings-slide-interval-30')),
+            )
+            .selected,
+        isTrue,
+      );
+
+      await tester.ensureVisible(
+        find.byKey(const Key('settings-slide-interval-300')),
+      );
+      await tester.tap(find.byKey(const Key('settings-slide-interval-300')));
+      await settle(tester);
+      expect(h.last!.slideIntervalSecs, 300);
+      expect(h.store.value.slideIntervalSecs, 300);
+    },
+  );
+
+  testWidgets('an off-preset photo rotation shows the nearest preset', (
+    tester,
+  ) async {
+    final h = _Harness();
+    await h.pump(tester, initial: const AppSettings(slideIntervalSecs: 40));
+
+    await open(tester, 'display', 'photos');
+    expect(
+      tester
+          .widget<ChoiceChip>(
+            find.byKey(const Key('settings-slide-interval-30')),
+          )
+          .selected,
+      isTrue,
+    );
+  });
+
+  testWidgets('night dimming: toggle + darkness picker apply and persist', (
+    tester,
+  ) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    await open(tester, 'display', 'night');
+    expect(find.text('Dim at night'), findsOneWidget);
+    expect(find.text('Lights off means:'), findsOneWidget);
+
+    // Pick a less strict darkness threshold.
+    await tester.tap(find.byKey(const Key('settings-night-dark-20')));
+    await settle(tester);
+    expect(h.last!.nightDarkLux, 20.0);
+    expect(h.store.value.nightDarkLux, 20.0);
+
+    // Turn night dimming off: persisted, and the picker greys out.
+    await tester.tap(find.byKey(const Key('settings-night-dim')));
+    await settle(tester);
+    expect(h.last!.nightDimEnabled, isFalse);
+    expect(h.store.value.nightDimEnabled, isFalse);
+    final chip = tester.widget<ChoiceChip>(
+      find.byKey(const Key('settings-night-dark-8')),
+    );
+    expect(chip.onSelected, isNull);
+  });
+
+  testWidgets('covered camera: Clock mode by default, schedule enables hours', (
+    tester,
+  ) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    await open(tester, 'display', 'night');
+    expect(
+      tester
+          .widget<ChoiceChip>(find.byKey(const Key('settings-covered-clock')))
+          .selected,
+      isTrue,
+    );
+    // Night hours only matter for the schedule → disabled in Clock mode.
+    expect(
+      tester
+          .widget<TextButton>(find.byKey(const Key('settings-night-start')))
+          .onPressed,
+      isNull,
+    );
+    expect(find.text('21:00'), findsOneWidget);
+    expect(find.text('07:00'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('settings-covered-schedule')));
+    await settle(tester);
+    expect(h.last!.coveredCameraMode, CoveredCameraMode.schedule);
+    expect(h.store.value.coveredCameraMode, CoveredCameraMode.schedule);
+    expect(
+      tester
+          .widget<TextButton>(find.byKey(const Key('settings-night-start')))
+          .onPressed,
+      isNotNull,
+    );
   });
 
   testWidgets('an off-preset dim delay shows the nearest preset', (

@@ -15,6 +15,8 @@ import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/ambient_screen.dart';
 import 'package:anamanti_display/src/ui/listening_overlay.dart';
+import 'package:anamanti_display/src/ui/conversation_view.dart';
+import 'package:anamanti_display/src/ui/timers_overlay.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 
 WakeWordConfig _testConfig() => WakeWordConfig(
@@ -94,11 +96,15 @@ class _Harness {
     startEngine: (_) => controller.stream,
   );
 
-  Future<void> pump(WidgetTester tester) async {
+  Future<void> pump(WidgetTester tester, {VoidCallback? onOpenSettings}) async {
     assistant.start();
     await slideshow.start();
     await tester.pumpWidget(MaterialApp(
-      home: AmbientScreen(assistant: assistant, slideshow: slideshow),
+      home: AmbientScreen(
+        assistant: assistant,
+        slideshow: slideshow,
+        onOpenSettings: onOpenSettings,
+      ),
     ));
     await tester.pump();
   }
@@ -123,12 +129,121 @@ class _Harness {
 }
 
 void main() {
-  testWidgets('idle ambient screen shows the wake-word hint', (tester) async {
+  testWidgets('idle ambient screen has no wake-word hint', (tester) async {
     final h = _Harness();
     await h.pump(tester);
 
-    expect(find.text('Say the wake word to begin'), findsOneWidget);
+    expect(find.text('Say the wake word to begin'), findsNothing);
 
+    await h.dispose(tester);
+  });
+
+  testWidgets('settings gear appears only after a touch on the bare idle screen',
+      (tester) async {
+    final h = _Harness();
+    await h.pump(tester, onOpenSettings: () {});
+
+    double gearOpacity() => tester
+        .widget<AnimatedOpacity>(find.ancestor(
+          of: find.byKey(const Key('open-settings')),
+          matching: find.byType(AnimatedOpacity),
+        ).first)
+        .opacity;
+
+    // Hidden until the screen is touched.
+    expect(gearOpacity(), 0);
+
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump();
+    expect(gearOpacity(), greaterThan(0));
+
+    // Fades away again a few seconds after the last touch.
+    await tester.pump(const Duration(seconds: 6));
+    expect(gearOpacity(), 0);
+
+    // A running timer is a widget on screen → a touch does not reveal the gear.
+    h.add(_event(WakeWordEventKind.timerStarted,
+        timerId: 1, timerLabel: 'tea', timerRemainingSecs: 60));
+    await h.settle(tester);
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump();
+    expect(gearOpacity(), 0);
+
+    await tester.pump(const Duration(seconds: 6));
+    await h.dispose(tester);
+  });
+
+  testWidgets('setting a timer shows the big timers right away, mid-turn',
+      (tester) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    double opacityOf(Finder f) => tester
+        .widget<AnimatedOpacity>(
+            find.ancestor(of: f, matching: find.byType(AnimatedOpacity)).first)
+        .opacity;
+    final bigTimers =
+        find.byType(FullScreenTimersView);
+    final panel = find.byType(ConversationView);
+
+    h.add(_event(WakeWordEventKind.detected, model: 'test'));
+    h.add(_event(WakeWordEventKind.transcript,
+        transcript: 'set a pasta timer for ten minutes'));
+    await h.settle(tester);
+    expect(opacityOf(panel), 1); // the conversation owns the screen…
+
+    h.add(_event(WakeWordEventKind.timerStarted,
+        timerId: 1, timerLabel: 'pasta', timerRemainingSecs: 600));
+    h.add(_event(WakeWordEventKind.replyToken,
+        reply: 'Pasta timer set for 10 minutes.'));
+    await h.settle(tester);
+    // …until the timer starts: the big timers take over while the turn is still on.
+    expect(opacityOf(bigTimers), 1);
+    expect(opacityOf(panel), 0);
+    expect(find.text('pasta'), findsWidgets);
+
+    // Speaking again brings the conversation panel back.
+    h.add(_event(WakeWordEventKind.transcript, transcript: 'thanks'));
+    await h.settle(tester);
+    expect(opacityOf(panel), 1);
+    expect(opacityOf(bigTimers), 0);
+
+    await h.dispose(tester);
+  });
+
+  testWidgets('compact music bar does not block the settings gear',
+      (tester) async {
+    // The Echo Show 8's 1280x800 screen (the default 800x600 test surface is too
+    // narrow for the clock + music bar row).
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final h = _Harness();
+    var opened = 0;
+    await h.pump(tester, onOpenSettings: () => opened++);
+    // Someone present so the music bar is shown (not away mode).
+    h.add(_event(WakeWordEventKind.presence, present: true));
+    await h.settle(tester);
+    h.assistant.applyMusicPush(
+        '{"playing":true,"track_title":"Midnight City","artist":"M83",'
+        '"album":"","artwork_uri":"","position_secs":0,"duration_secs":241,'
+        '"volume_percent":40,"next_up":[]}');
+    await h.settle(tester);
+    expect(find.text('Midnight City'), findsOneWidget);
+
+    double gearOpacity() => tester
+        .widget<AnimatedOpacity>(find.ancestor(
+          of: find.byKey(const Key('open-settings')),
+          matching: find.byType(AnimatedOpacity),
+        ).first)
+        .opacity;
+
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump();
+    expect(gearOpacity(), greaterThan(0));
+    await tester.tap(find.byKey(const Key('open-settings')));
+    expect(opened, 1);
+
+    await tester.pump(const Duration(seconds: 6));
     await h.dispose(tester);
   });
 

@@ -487,6 +487,13 @@ What's covered:
   confident closed intent, defer on low confidence / needs-full / `other` / unknown / malformed.
 - **Duration parser** (`src/system1/mod.rs::parse_duration_secs`): digits + number words, `a`/`an`,
   `half`/`quarter`, compound ("1 hour 30 minutes"); defers on no-unit / cancel / empty.
+- **Timer-name parser** (`src/system1/mod.rs::parse_timer_name`, 2026-10-21): the `timer` fast
+  path keeps a spoken name as the `StartTimer` label ("set a **pasta** timer for 10 minutes",
+  "timer for the pasta", "timer called chicken wings") so the display shows it instead of
+  "Timer N". Conservative: every word must be filler, duration, or one contiguous name run
+  anchored by a trailing `timer` or a leading `for`/`called`/`named`; anything else (e.g.
+  "remind me in 10 minutes to check the oven") **defers** to the `set_timer` tool, so a name is
+  never silently dropped.
 - **NoDecision + MockDecider** behaviour.
 - **Pipeline fast paths** (`tests/pipeline.rs`): weather and timer each drive a full turn with a
   **panicking LLM** — proving System-2 is never called on a resolve — and assert the
@@ -587,6 +594,8 @@ text. So an intent is only **Resolve-able** (answer + skip System-2) when its ar
 | `date` | spoken, from clock | none | planned |
 | `weather_dismiss` | `DismissWeather` | none | planned; gate on `screen == weather` |
 | `recipe_dismiss` | `DismissRecipe` | none | planned; gate on `screen == recipe` (your `close_recipe`) |
+| `recipe_step` | `RecipeControl(Step(n))` | step via `parse_recipe_step` (number / ordinal / next / previous / last, relative to the device-reported `highlighted_step`) | ✅ shipped (2026-10-19). Gated on a recipe screen + a parseable in-range step; else defer to `recipe_control` |
+| `recipe_ingredient` | spoken, from the on-screen ingredient lines | ingredient via `match_recipe_ingredients` | ✅ shipped (2026-10-19). **Conditional lookup:** resolves only on a quantity question ("how many/how much/amount") whose words match 1–3 ingredient lines in the recipe screen context; otherwise defer — System-2's prompt carries the full recipe |
 | `end_session` | `audio_stop` **without** a `listen` frame | none | planned. Ends the follow-up chain → device returns to IDLE / wake-word (see §15.3) |
 | `stop_dismiss` | context ladder (§17) | none (referent from device state) | planned. Bare "stop"/"never mind"/"dismiss" |
 | `timer_query` | spoken, from timer context params | none | planned. Resolved **only when the device reports an active timer** (§17.1); the remaining time comes from the context parameters, so no Core-side timer state is needed |
@@ -612,6 +621,15 @@ wake-word-waiting. Optional sub-second ack ("okay") or a silent close. Safest re
 > `interpret` defers on a **confident `past`** (gated by `min_confidence`, so an unsure temporal never
 > over-defers a present query). present/future resolve unchanged. Unit-tested in `system1/http.rs`.
 > The question is optional on the wire — a checkpoint that doesn't answer it simply skips the gate.
+>
+> **Data selector ✅ IMPLEMENTED 2026-10-21.** Fixes "weather tomorrow shows today": the weather
+> handler was hard-wired to `ForecastWhen::Now`. Now a confident temporal rides on
+> `Resolution::temporal`. The weather handler reads the day from the transcript
+> (`weather::spoken_day`: tomorrow / day after tomorrow / a full weekday name → `ForecastWhen::Day`,
+> spoken via `render_confirmation`). It **defers** a span, a past day, multiple days, or a calendar
+> date ("this weekend", "yesterday", "the 25th"), and also defers a confident `future` that names
+> no readable day ("what's the forecast"). A confident `future` also defers `time`/`date` per the
+> matrix below (`Intent::defers_on_future`).
 
 A third question in the same one-shot forward pass (free):
 
@@ -734,6 +752,11 @@ knee where the ✗ set is ~100% deferred. These double as `mock`/golden-decision
 - ✓ close the weather · dismiss the forecast — *(weather screen up)*
 - ✓ close the recipe · I'm done cooking — *(recipe screen up)*
 - ✗ defer: close the recipe *when no recipe screen is up* · go back to the ingredients *(→ recipe_nav)*
+
+**`recipe_step` / `recipe_ingredient`** (gate on a recipe screen)
+- ✓ go to step four · next step · previous step · what's the third step · show me the last step
+- ✓ how many tomatoes do I need · how much flour · what amount of red onion
+- ✗ defer: step 12 of an 8-step recipe *(out of range)* · how long does it bake *(not a quantity — System-2 has the steps)* · how much butter *(not in the recipe)* · how much oil *(4+ matching lines — ambiguous)*
 
 **`end_session`** (safest when `followup_depth > 0`)
 - ✓ that's all · I'm done · nothing else · goodbye · go to sleep · you can go now · we're good · thank you · thanks · gracias · merci *(a bare standalone sign-off thanks, any language)*

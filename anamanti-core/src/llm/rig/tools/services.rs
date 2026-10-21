@@ -1,6 +1,6 @@
 //! Service tools that answer from (or act on) an external service through an
 //! injected provider: `calendar_lookup`, `directions_lookup`, `spotify_control`,
-//! `radio_control`, `shopping_list_add` and `send_phone_message`. None of them drives
+//! `radio_control`, `shopping_list_add`, `calendar_add` and `send_phone_message`. None of them drives
 //! the display directly (radio/Spotify reach it through the now-playing push).
 //!
 //! A failure past argument parsing is prefixed with the tool's "… failed" label
@@ -17,10 +17,12 @@ use serde_json::{json, Value};
 
 use super::{definition, parse_args, parse_args_or_default, ToolCtx, VoiceTool};
 use crate::appsaid::{OutgoingMessage, PhoneMessenger};
-use crate::cadora::{GroceryCommand, GroceryController};
+use crate::cadora::{resolve_event_times, CadoraCommand, CadoraController, NewEvent};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, LiveHomeLocation, TravelMode};
-use crate::music::{RadioPlayer, SearchKind, SpotifyCommand, SpotifyController};
+use crate::music::{
+    MusicDisplayRouter, PlayRequest, RadioPlayer, SearchKind, SpotifyCommand, SpotifyController,
+};
 
 /// Tool name: read the user's connected calendars.
 pub(super) const CALENDAR_LOOKUP: &str = "calendar_lookup";
@@ -32,6 +34,8 @@ pub(super) const SPOTIFY_CONTROL: &str = "spotify_control";
 pub(super) const RADIO_CONTROL: &str = "radio_control";
 /// Tool name: add an item to the shared shopping list.
 pub(super) const SHOPPING_LIST_ADD: &str = "shopping_list_add";
+/// Tool name: add a one-off event to the household's Cadora calendar.
+pub(super) const CALENDAR_ADD: &str = "calendar_add";
 /// Tool name: push a message to a family member's phone.
 pub(super) const SEND_PHONE_MESSAGE: &str = "send_phone_message";
 
@@ -286,9 +290,28 @@ impl VoiceTool for DirectionsLookup {
 // ---------------------------------------------------------------------------
 
 /// The `spotify_control` tool. The controller targets the librespot Connect device;
-/// audio never flows through here.
-pub(super) fn spotify_control(controller: Arc<dyn SpotifyController>) -> Arc<dyn VoiceTool> {
-    Arc::new(SpotifyControl { controller })
+/// audio never flows through here. `display` (when present) records which display a
+/// play request came from, so the music shows full screen there.
+pub(super) fn spotify_control(
+    controller: Arc<dyn SpotifyController>,
+    display: Option<Arc<MusicDisplayRouter>>,
+) -> Arc<dyn VoiceTool> {
+    Arc::new(SpotifyControl {
+        controller,
+        display,
+    })
+}
+
+/// Tell the per-display music style that `ctx`'s display asked for music (before the
+/// play is issued, so the first push of the new music already shows full screen there).
+fn note_play_request(
+    display: Option<&Arc<MusicDisplayRouter>>,
+    ctx: &ToolCtx<'_>,
+    kind: PlayRequest,
+) {
+    if let Some(display) = display {
+        display.play_requested(ctx.device_id, kind);
+    }
 }
 
 /// Typed arguments for `spotify_control`.
@@ -334,6 +357,7 @@ impl SpotifyArgs {
 
 struct SpotifyControl {
     controller: Arc<dyn SpotifyController>,
+    display: Option<Arc<MusicDisplayRouter>>,
 }
 
 #[async_trait]
@@ -390,11 +414,23 @@ impl VoiceTool for SpotifyControl {
         )
     }
 
-    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
         let args: SpotifyArgs = parse_args(args, SPOTIFY_CONTROL)?;
-        async { self.controller.command(args.into_command()?).await }
-            .await
-            .context("spotify control failed")
+        async {
+            let command = args.into_command()?;
+            match &command {
+                SpotifyCommand::Play { .. } => {
+                    note_play_request(self.display.as_ref(), ctx, PlayRequest::Play)
+                }
+                SpotifyCommand::Resume => {
+                    note_play_request(self.display.as_ref(), ctx, PlayRequest::Resume)
+                }
+                _ => {}
+            }
+            self.controller.command(command).await
+        }
+        .await
+        .context("spotify control failed")
     }
 }
 
@@ -403,12 +439,18 @@ impl VoiceTool for SpotifyControl {
 // ---------------------------------------------------------------------------
 
 /// The `radio_control` tool over the shared [`RadioPlayer`]. `spotify` (when linked) is
-/// paused as a station starts so the two sources never play at once.
+/// paused as a station starts so the two sources never play at once. `display` (when
+/// present) records which display asked for a station, so it shows full screen there.
 pub(super) fn radio_control(
     radio: Arc<RadioPlayer>,
     spotify: Option<Arc<dyn SpotifyController>>,
+    display: Option<Arc<MusicDisplayRouter>>,
 ) -> Arc<dyn VoiceTool> {
-    Arc::new(RadioControl { radio, spotify })
+    Arc::new(RadioControl {
+        radio,
+        spotify,
+        display,
+    })
 }
 
 /// Typed arguments for `radio_control`.
@@ -424,14 +466,16 @@ struct RadioArgs {
 struct RadioControl {
     radio: Arc<RadioPlayer>,
     spotify: Option<Arc<dyn SpotifyController>>,
+    display: Option<Arc<MusicDisplayRouter>>,
 }
 
 impl RadioControl {
-    async fn run(&self, args: RadioArgs) -> Result<String> {
+    async fn run(&self, args: RadioArgs, ctx: &ToolCtx<'_>) -> Result<String> {
         let station = args.station.as_deref().map(str::trim).unwrap_or_default();
         match args.action.trim().to_lowercase().as_str() {
             "play" | "start" | "tune" => {
                 anyhow::ensure!(!station.is_empty(), "which station should I play?");
+                note_play_request(self.display.as_ref(), ctx, PlayRequest::Play);
                 self.radio
                     .play_named(station, self.spotify.as_deref())
                     .await
@@ -508,9 +552,9 @@ impl VoiceTool for RadioControl {
         )
     }
 
-    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
         let args: RadioArgs = parse_args(args, RADIO_CONTROL)?;
-        self.run(args).await.context("radio control failed")
+        self.run(args, ctx).await.context("radio control failed")
     }
 }
 
@@ -520,7 +564,7 @@ impl VoiceTool for RadioControl {
 
 /// The `shopping_list_add` tool. The list lives on the Cadora server; this only
 /// issues the add and relays the server's spoken confirmation.
-pub(super) fn shopping_list_add(controller: Arc<dyn GroceryController>) -> Arc<dyn VoiceTool> {
+pub(super) fn shopping_list_add(controller: Arc<dyn CadoraController>) -> Arc<dyn VoiceTool> {
     Arc::new(ShoppingListAdd { controller })
 }
 
@@ -535,7 +579,7 @@ struct GroceryArgs {
 }
 
 struct ShoppingListAdd {
-    controller: Arc<dyn GroceryController>,
+    controller: Arc<dyn CadoraController>,
 }
 
 #[async_trait]
@@ -585,12 +629,133 @@ impl VoiceTool for ShoppingListAdd {
     async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
         let args: GroceryArgs = parse_args(args, SHOPPING_LIST_ADD)?;
         self.controller
-            .command(GroceryCommand::AddItem {
+            .command(CadoraCommand::AddItem {
                 item: args.item,
                 quantity: args.quantity,
             })
             .await
             .context("shopping list add failed")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Calendar add (Cadora household calendar via the voice API)
+// ---------------------------------------------------------------------------
+
+/// The `calendar_add` tool. The event lives on the Cadora server (the family's
+/// shared calendar); this resolves the spoken date/time in the Core's local zone,
+/// issues the add, and relays the server's spoken confirmation.
+pub(super) fn calendar_add(controller: Arc<dyn CadoraController>) -> Arc<dyn VoiceTool> {
+    Arc::new(CalendarAdd { controller })
+}
+
+/// Typed arguments for `calendar_add`.
+#[derive(Debug, Deserialize)]
+struct CalendarAddArgs {
+    /// What the event is ("Soccer practice", "Dentist — Riley").
+    title: String,
+    /// The day, `YYYY-MM-DD` (the model resolves "Thursday"/"tomorrow").
+    date: String,
+    /// 24-hour start `HH:MM`; omit for an all-day event.
+    #[serde(default)]
+    start_time: Option<String>,
+    /// 24-hour end `HH:MM`; only with a start time.
+    #[serde(default)]
+    end_time: Option<String>,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+struct CalendarAdd {
+    controller: Arc<dyn CadoraController>,
+}
+
+impl CalendarAdd {
+    async fn run(&self, args: CalendarAddArgs) -> Result<String> {
+        let times = resolve_event_times(
+            &Local,
+            &args.date,
+            args.start_time.as_deref(),
+            args.end_time.as_deref(),
+        )?;
+        self.controller
+            .command(CadoraCommand::AddEvent(NewEvent {
+                title: args.title,
+                starts_at: times.starts_at,
+                ends_at: times.ends_at,
+                all_day: times.all_day,
+                location: args.location,
+                notes: args.notes,
+            }))
+            .await
+    }
+}
+
+#[async_trait]
+impl VoiceTool for CalendarAdd {
+    fn name(&self) -> &'static str {
+        CALENDAR_ADD
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        definition(
+            CALENDAR_ADD,
+            "Add a one-off event to the household's shared family calendar (Cadora). Use \
+             this for ANY request to add, put, schedule, or book something on the calendar \
+             (\"put soccer on the calendar Thursday at 4\", \"add the dentist on the 3rd at \
+             9:30\", \"Friday is pizza day\"). Resolve relative days against the current \
+             date. Omit start_time for an all-day event. Returns a short spoken confirmation \
+             to relay.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "What the event is, e.g. \"Soccer practice\" or \"Dentist for Riley\"."
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "The day of the event as YYYY-MM-DD."
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": "24-hour local start time HH:MM (e.g. \"16:00\"). Omit for an all-day event."
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "24-hour local end time HH:MM, only when the user gives one."
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Where it is, only when the user says."
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Any extra detail the user gives (optional)."
+                    }
+                },
+                "required": ["title", "date"]
+            }),
+        )
+    }
+
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "You can add events to the household's shared family calendar with the \
+             `calendar_add` tool. Whenever the user asks to add, put, schedule, or book \
+             something on the calendar, you MUST call `calendar_add` with a short title and \
+             the date as YYYY-MM-DD — work out days like \"Thursday\" or \"tomorrow\" from \
+             the current date given above — plus a 24-hour start_time when they say a time \
+             (omit it for an all-day event). If they don't say which day, ask before \
+             calling. Relay the tool's spoken confirmation.",
+        )
+    }
+
+    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: CalendarAddArgs = parse_args(args, CALENDAR_ADD)?;
+        self.run(args).await.context("calendar add failed")
     }
 }
 
@@ -745,9 +910,9 @@ mod tests {
 
     #[tokio::test]
     async fn spotify_errors_carry_the_tool_prefix() {
-        let tool = spotify_control(Arc::new(StaticSpotify::default()));
+        let tool = spotify_control(Arc::new(StaticSpotify::default()), None);
         let err = tool
-            .invoke(&json!({ "action": "teleport" }), &ToolCtx { actions: None })
+            .invoke(&json!({ "action": "teleport" }), &ToolCtx::new(None))
             .await
             .unwrap_err();
         assert_eq!(
@@ -764,7 +929,7 @@ mod tests {
         let provider = Arc::new(StaticDirections::default());
         let home = home("Austin, TX");
         let tool = directions_lookup(provider.clone(), home.clone(), true);
-        let ctx = ToolCtx { actions: None };
+        let ctx = ToolCtx::new(None);
 
         tool.invoke(&json!({ "destination": "the airport" }), &ctx)
             .await
@@ -800,10 +965,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_voice_play_marks_the_speaking_display_as_the_one_that_asked() {
+        use crate::music::{MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle};
+        let router = Arc::new(MusicDisplayRouter::new());
+        let pins = MusicDisplayPins::new();
+        let ctx = |id| ToolCtx {
+            actions: None,
+            device_id: Some(id),
+        };
+        let spotify = spotify_control(Arc::new(StaticSpotify::default()), Some(router.clone()));
+        spotify
+            .invoke(
+                &json!({ "action": "play", "query": "Radiohead" }),
+                &ctx("kitchen"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            router.style_for("kitchen", &pins),
+            MusicDisplayStyle::Fullscreen
+        );
+        assert_eq!(router.style_for("den", &pins), MusicDisplayStyle::Compact);
+        // Transport from another display doesn't take the music over.
+        router.set_active(true);
+        spotify
+            .invoke(&json!({ "action": "pause" }), &ctx("den"))
+            .await
+            .unwrap();
+        spotify
+            .invoke(&json!({ "action": "resume" }), &ctx("den"))
+            .await
+            .unwrap();
+        assert_eq!(router.initiator().as_deref(), Some("kitchen"));
+
+        // A station asked for from the den moves full screen there.
+        let radio = radio_control(static_radio(), None, Some(router.clone()));
+        radio
+            .invoke(&json!({ "action": "play", "station": "dave" }), &ctx("den"))
+            .await
+            .unwrap();
+        assert_eq!(
+            router.style_for("den", &pins),
+            MusicDisplayStyle::Fullscreen
+        );
+        assert_eq!(
+            router.style_for("kitchen", &pins),
+            MusicDisplayStyle::Compact
+        );
+    }
+
+    #[tokio::test]
     async fn radio_control_plays_lists_and_stops() {
         let radio = static_radio();
-        let tool = radio_control(radio.clone(), None);
-        let ctx = ToolCtx { actions: None };
+        let tool = radio_control(radio.clone(), None, None);
+        let ctx = ToolCtx::new(None);
         assert!(tool
             .definition()
             .description
@@ -835,7 +1050,7 @@ mod tests {
     async fn calendar_accepts_null_args() {
         let tool = calendar_lookup(Arc::new(StaticCalendar(Vec::new())));
         let out = tool
-            .invoke(&Value::Null, &ToolCtx { actions: None })
+            .invoke(&Value::Null, &ToolCtx::new(None))
             .await
             .unwrap();
         assert!(!out.is_empty());

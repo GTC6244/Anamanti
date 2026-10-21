@@ -222,8 +222,8 @@ pub(super) fn cadora_save_json(settings: &SharedSettings, data: &Value) -> Strin
 /// pairing `code`** (the primary path — NextHaul → Settings → Voice & Integrations
 /// mints one via `/voice/links/pair`; we redeem it here via `/voice/links/redeem` for
 /// a durable token, exactly as the "speaker" is meant to), or a directly-pasted
-/// **`vl_…` token** as a fallback. On success the `shopping_list_add` tool activates
-/// immediately.
+/// **`vl_…` token** as a fallback (e.g. minted in the Cadora web app). On success the
+/// `shopping_list_add` + `calendar_add` tools activate immediately.
 pub(super) async fn cadora_link_json(settings: &SharedSettings, body: &[u8]) -> String {
     let data = match parse_json_body(body) {
         Ok(v) => v,
@@ -264,7 +264,7 @@ pub(super) async fn cadora_link_json(settings: &SharedSettings, body: &[u8]) -> 
     let now = settings.cadora();
     json!({
         "ok": true,
-        "message": "Shopping list linked — try \"add milk to the shopping list\".",
+        "message": "Cadora linked — try \"add milk to the shopping list\" or \"put soccer on the calendar Thursday at 4\".",
         "linked": now.linked(),
         "base_url": now.base_url_or_default(),
     })

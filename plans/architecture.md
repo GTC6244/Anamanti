@@ -92,6 +92,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
   (mean absolute luma delta) and emits a `Presence` event when someone approaches or
   the room goes quiet. No ML / no face recognition / no frames leave the device. The
   brightness *actuation* is presentation and lives in Flutter (§2.2), not here.
+  The same frames make the camera a **lux sensor**: each push also carries the
+  capture's exposure time / ISO / aperture (from the Camera2 `CaptureResult` — frame
+  brightness alone is useless because auto-exposure normalizes it), and
+  `camera::ambient` estimates illuminance (`E ≈ 2.5·N²/(t·S/100)` scaled by the frame's
+  distance from mid-grey), smooths it, and applies hysteresis (dark < `night_dark_lux`,
+  lit again > 3×) + dwell (10 s to go dark, 2 s to come back) before emitting an
+  `AmbientLight` event (`dark`, `lux`, `covered`) on a flip, plus a reading every 5 s.
+  `covered` is a separate debounced check for a **covered lens** (privacy shutter /
+  tape): frames with mean luma < 12 and stddev < 6 (0..255) held 10 s, cleared after
+  2 s of normal frames (a pitch-black room can read as covered too).
 
 ### 2.2 Flutter UI (Echo Show)
 
@@ -117,6 +127,21 @@ predictable memory use and no GC pauses under the 1 GB limit.
   delay** — how long the screen stays bright after the room goes quiet before it
   dims to the away-mode clock — is a device-local setting (`AppSettings.dimDelaySecs`
   → the proximity detector's release window; Settings → *Display*).
+  **Night dimming:** `AmbientLight` events fold into `AssistantState.roomDark` /
+  `ambientLux`; while the room is dark and `AppSettings.nightDimEnabled` is on, the
+  controller uses night levels (awake 0.15 / away 0.02 instead of 1.0 / 0.25). The
+  toggle applies live; the darkness threshold (`AppSettings.nightDarkLux` →
+  `WakeWordConfig.nightDarkLux`) restarts the engine. **Covered camera:**
+  `AppSettings.coveredCameraMode` picks what a covered lens means — `clock` (default:
+  take the blind camera's dark + absent reading) or `schedule` (awake by day, dark +
+  absent during `nightStartMinutes`→`nightEndMinutes`, default 21:00→07:00, kept current
+  by a once-a-minute tick in `AssistantController.updateCoveredCamera`). Resolved in
+  `AssistantState.effectivePresent` / `effectiveRoomDark`; applied live.
+- **Photo rotation time:** how long each idle background photo stays up before the
+  slideshow cross-fades to the next is a **per-device**, device-local setting
+  (`AppSettings.slideIntervalSecs`, default 10 s, 3 s…10 min; Settings → *Display →
+  Photos*), applied live to `SlideshowController.setInterval` — it never touches the
+  Core, so each display in the house can rotate at its own pace.
 
 ### 2.3 Mac Mini services
 
@@ -563,9 +588,14 @@ predictable memory use and no GC pauses under the 1 GB limit.
   disconnects. An `adjust` carries only the signed delta (the device holds the
   authoritative deadline), which the device applies to the running timer's remaining
   time (floored at 1s, capped at the 24h max) and re-emits `timerStarted` to re-anchor
-  the UI. When a timer fires it rings a
+  the UI. When a timer fires it rings a loud
   two-strike **bell** locally, then (if the Mac is reachable) requests the spoken
-  announcement over **`anamanti-speak`**; bell-only when offline. See §8.
+  announcement over **`anamanti-speak`**; bell-only when offline. The alarm then
+  **repeats every 5 s** (bell + the cached voice) until turned off — the display's
+  "Cancel timer" button (FRB `dismiss_timer(id)`) or a voice cancel (an unlabeled cancel
+  while one rings silences only the ringing timers). A ringing timer stays in the device's
+  timer registry (so it counts as running in the turn context), and a repeat is skipped
+  while a voice turn is in flight. See §8.
 - **`anamanti-speak`** (device → Anamanti Core): a project-local frame (`data.text`)
   asking the Anamanti Core to synthesize the text with Piper and stream the audio
   (`audio-start`/`audio-chunk`…/`audio-stop`) straight back on the same socket. A
@@ -617,6 +647,27 @@ predictable memory use and no GC pauses under the 1 GB limit.
   so without it the tool is not advertised. A place query is also a **route-only System-1
   `place` intent** (classified, then deferred to System-2 which owns the free-form
   place-name slot). See `PlacesPlan.md`.
+- **`anamanti-camera`** (Anamanti Core → device) + **`anamanti-get-camera-stream`** /
+  **`anamanti-camera-stream`** (device ⇄ Core control request): the **live NVR camera
+  view** (`CameraPlan.md`). `anamanti-camera` is a device-action frame on the per-turn
+  voice socket (`data.action` = `show`/`dismiss`; `show` carries only `data.camera`, the
+  camera's display name — **never a URL or credential**), emitted by the pre-System-1
+  **camera fast path** (`orchestrator/camera.rs`: "show the front door", "who's at the
+  door", and — while the view is open — "stop"/"close it") or the `show_camera` /
+  `close_camera` tools (`DeviceAction::{ShowCamera,DismissCamera}` → FRB
+  `WakeWordEvent::{show,dismiss}_camera`, the name on the `recipe_action` carrier). On show
+  the device asks the Core for the stream over the control socket; the reply carries the
+  NVR's **RTSP sub-stream URL with the credential embedded** (`REOLINK_PASSWORD`, env-only),
+  riding the LAN hop only and held **in memory only** on the device (never logged on either
+  side). The device dials the NVR directly and plays the H.264 sub-stream full screen
+  (`CameraView`) through a **vendored, patched `video_player_android`**
+  (`anamanti-display/third_party/video_player_android`: RTP-over-TCP + a 0.5 s start
+  buffer) in **platform-view** mode (the MTK decoder fails on Flutter's texture surface).
+  Video only (no audio path); auto-closes after 60 s. Display context while open:
+  `screen: {kind: "camera", camera: {name}}`. Because the frame goes down the speaking
+  display's own turn socket, the view opens **only on the display the user is talking to**.
+  No NVR polling/events (the automatic pop-up is deferred). Config is boot-time only
+  (`camera{nvr_host, rtsp_port, username, cameras[{name, channel}]}`).
 - **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
   `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's
@@ -638,10 +689,13 @@ predictable memory use and no GC pauses under the 1 GB limit.
   single-turn.
 - **`anamanti-recipe`** (Anamanti Core → device): a project-local **device-action** frame
   driving the guided-recipe screen (`data.action` = `show` + `recipe` object /
-  `dismiss` / `navigate` + `target` tab / `scroll` + `direction`). Emitted by the LLM
-  **tools** the model calls on the Mac — `recipe_lookup` (fetch + parse → `show`),
-  `close_recipe` (`dismiss`), and `recipe_control` (`navigate` to Overview/Ingredients/
-  Steps, or `scroll` up/down/top/bottom). The device owns the resulting screen state —
+  `dismiss` / `navigate` + `target` tab / `scroll` + `direction` / `step` + a 1-based
+  `step` number). Emitted by the LLM **tools** the model calls on the Mac —
+  `recipe_lookup` (fetch + parse → `show`), `close_recipe` (`dismiss`), and
+  `recipe_control` (`navigate` to Overview/Ingredients/Steps, `scroll`
+  up/down/top/bottom, or `go_to_step` → `step`, which shows + highlights that step; the spoken reply reads the
+  step's text from the device-reported `steps[]`) —
+  and by the System-1 `recipe_dismiss` / `recipe_step` fast paths. The device owns the resulting screen state —
   it persists across turns and idle while you cook — so, like timers, this is
   fire-and-forget from the Mac. See `plans/RecipePlan.md`.
 - **`anamanti-font`** (Anamanti Core → device): a project-local **device-action** frame
@@ -656,8 +710,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
   every turn's `audio-start`, discriminated by a `kind` string, with a per-kind payload.
   The kinds that ship today:
   - **recipe:** `{kind:"recipe", recipe:{title, tab, at_top, at_bottom,
-    ingredient_count, step_count}}` — the model can `recipe_control` (switch tab / scroll)
-    or `close_recipe`.
+    ingredient_count, step_count, highlighted_step, ingredients[], steps[]}}` — the model
+    can `recipe_control` (switch tab / scroll / go to a step) or `close_recipe`, and the
+    recipe's lines (capped Core-side at 80 lines × 600 chars) are listed in the prompt so
+    it answers recipe questions from what's on screen; System-1 `recipe_step` /
+    `recipe_ingredient` use the same fields (highlighted step, ingredient lines).
   - **weather:** `{kind:"weather", weather:{location, units, temp, description}}` — the
     model knows the forecast is up and for where, so it answers follow-ups in context
     ("what about tomorrow" → `weather_lookup` for the same place) and closes it on "close
@@ -747,7 +804,8 @@ mDNS + `instance_id` pin the voice path uses):
   `AssistantState.music`, rendering the compact control overlay + the `NowPlayingView` /
   `NextUpView` full screens. On-screen controls go the other way as a short-lived
   **`anamanti-music-control`** request/response (a control frame like the settings/memory
-  ones, handled by `control::music_control_response` → the `spotify_control` controller),
+  ones, handled by `control::music_control_response` → the `spotify_control` controller;
+  includes `skip_to` + an up-next index from a tapped `NextUpView` row),
   **not** on the persistent channel. Gated behind `music.enabled` + a linked Spotify; see
   `MusicPlan.md` (P6) and `DisplayUI.md` §4b.
 - All three persistent channels share one implementation per side: on the device,
@@ -762,15 +820,20 @@ mDNS + `instance_id` pin the voice path uses):
   `DeviceAction::MusicScreen` relayed as an `anamanti-music` `screen` frame on the per-turn
   socket (show now-playing / up-next / close). Playback transport stays on `spotify_control`.
 - **Music display style** ([`MusicDisplayStylePlan.md`](./MusicDisplayStylePlan.md)): which
-  widget shows while music plays (compact bar / full screen) is a Core-owned, persisted
-  preference (`SharedSettings::music_display_style`) stamped as `display_style` on every
-  `now_playing` push, so all displays follow it for Spotify and radio alike. It is set from
-  the config page or the display's expand/minimize button (`anamanti-music-control`
-  `display_fullscreen`/`display_compact` → `NowPlayingService::set_display_style`, which
-  persists and re-pushes at once), or by voice (`music_screen` `fullscreen`/`compact` →
-  `DeviceAction::MusicDisplayStyle`: persisted Core-side **and** relayed as a `screen`
-  frame). The device resolves what's on screen in `AssistantState.effectiveMusicScreen`
-  (Core mode > explicit view > style, the style only while someone is present).
+  widget shows while music plays (compact bar / full screen) is decided **per display** by
+  the Core and stamped as that display's `display_style` on its own `now_playing` push
+  (`NowPlayingService` records each music channel's `device_id` and pushes with
+  `ChannelRegistry::broadcast_with`). Resolution (`MusicDisplayRouter::style_for`): the
+  display's choice for the current music (its expand/minimize button → `anamanti-music-control`
+  `display_fullscreen`/`display_compact`; or voice to it → `music_screen`
+  `fullscreen`/`compact`, also relayed as a `screen` frame) → its persisted pin
+  (`SharedSettings::music_display_pins`, config page) → full screen on the session's
+  initiator (the display whose voice turn ran `spotify_control`/`radio_control` `play`),
+  compact elsewhere. To know who asked, the display stamps its `device_id` on every
+  `audio-start` (→ `DeviceContext.device_id` → `LlmTurn` → `ToolCtx`) and every
+  `anamanti-music-control`. Music stopping ends the session. The device resolves what's on
+  screen in `AssistantState.effectiveMusicScreen` (Core mode > explicit view > style, the
+  style only while someone is present).
 - **Internet radio** ([`RadioPlan.md`](./RadioPlan.md)) rides the same push. A curated
   station catalog (settings overlay `radio.stations`, edited on Music & Devices) is played
   by the existing mpv web player into the snapserver `Web` stream; the Core's
@@ -986,8 +1049,12 @@ phone) and `search.rs` (`internet_search`).
   & Integrations) mints a one-time **6-digit code** (`/voice/links/pair`); enter it on
   the config page (Household tab) and the Anamanti Core redeems it
   (`/voice/links/redeem`) for a durable voice-link token stored in the 0600 settings
-  file. It never touches Supabase directly — Cadora owns list creation, member
-  attribution, and dedupe. The **`send_phone_message`** tool has the same external
+  file. It only ever calls Cadora's API (`https://api.getcadora.com/cadora`, on
+  Cloudflare Workers) — Cadora owns list creation, member attribution, and dedupe.
+  The **`calendar_add`** tool shares that `Arc<dyn CadoraController>` and link: it
+  resolves the spoken day/time to RFC 3339 in the Core's local zone
+  (`cadora::resolve_event_times`) and sends Cadora's `add_event` voice action, relaying
+  the server's confirmation (one-off, household-visible events). The **`send_phone_message`** tool has the same external
   shape: it holds an injected `Arc<dyn PhoneMessenger>` (`anamanti-core/src/appsaid/`)
   and pushes a message — often a Google Maps link — to a named family member's phone
   via **AppSaid** (a self-hosted HTML-push worker), one `POST {worker_url}/v1/messages`

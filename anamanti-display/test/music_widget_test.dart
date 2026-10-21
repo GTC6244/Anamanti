@@ -376,6 +376,34 @@ void main() {
       expect(backed, isTrue);
     });
 
+    testWidgets('tapping a queued track selects it by index', (tester) async {
+      final music = MusicData.tryParse(_musicJson)!;
+      int? selected;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NextUpView(
+            music: music,
+            onClose: () {},
+            onSelect: (i) => selected = i,
+          ),
+        ),
+      );
+      await tester.tap(find.text('Reunion'));
+      expect(selected, 1);
+      await tester.tap(find.byKey(const Key('next-up-row-0')));
+      expect(selected, 0);
+    });
+
+    testWidgets('rows are not tappable without onSelect', (tester) async {
+      final music = MusicData.tryParse(_musicJson)!;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NextUpView(music: music, onClose: () {}),
+        ),
+      );
+      expect(find.byKey(const Key('next-up-row-0')), findsNothing);
+    });
+
     testWidgets('empty queue shows the empty state', (tester) async {
       final music = MusicData.tryParse(
         '{"track_title":"Solo","artwork_uri":""}',

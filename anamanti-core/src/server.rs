@@ -290,8 +290,9 @@ impl<'a> PushChannel<'a> {
         }
     }
 
-    /// Register the channel. Only notify channels record the device identity (for the
-    /// config page's connected-devices list).
+    /// Register the channel. Notify channels record the device identity for the config
+    /// page's connected-devices list; music channels record it so each display's push
+    /// carries its own music widget style.
     fn register(
         &self,
         device_id: &str,
@@ -303,7 +304,7 @@ impl<'a> PushChannel<'a> {
         match self {
             PushChannel::Notify(svc) => svc.register(device_id, name),
             PushChannel::Weather(svc) => svc.register(),
-            PushChannel::Music(svc) => svc.register(),
+            PushChannel::Music(svc) => svc.register(device_id, name),
         }
     }
 

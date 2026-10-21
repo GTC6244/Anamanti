@@ -186,7 +186,11 @@ who started playback — no extra work here.
    plays, a full `NowPlayingView` (artwork + transport + volume), and a `NextUpView`
    queue list — folded from `AssistantState.music`. On-screen controls go **device→Core**
    as a short-lived `anamanti-music-control` request/response (play/pause/next/previous/
-   volume) handled by `control::music_control_response`, which parses actions with the
+   volume, and `skip_to` — tapping an Up Next row sends its 0-based index; the Core
+   re-reads the queue to validate it and get the track URI, then, inside an album/playlist,
+   re-plays that context at the track in **one** call (`PUT /play` with `offset.uri`), else
+   — or if that fails, e.g. a user-queued track — issues `/me/player/next` `index + 1`
+   times, since the Web API has no "play queue item N"; refused while radio plays) handled by `control::music_control_response`, which parses actions with the
    same `SpotifyCommand::transport` as the `spotify_control` tool and reuses the
    `NowPlayingService`'s cached controller. See [`DisplayUI.md`](./DisplayUI.md) §4b.
    **Voice control (done):** the music screen is drivable by voice too — a new

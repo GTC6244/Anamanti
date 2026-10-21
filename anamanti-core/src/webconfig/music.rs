@@ -376,23 +376,81 @@ pub(super) async fn radio_stop_json(settings: &SharedSettings) -> String {
 // Display style (compact bar / full-screen now-playing)
 // ---------------------------------------------------------------------------
 
-/// `GET /music/display.json` — `{ ok, style }`: which music widget the displays show
-/// while Spotify or the radio plays (`"compact"` / `"fullscreen"`).
-pub(super) fn music_display_json(settings: &SharedSettings) -> String {
-    json!({ "ok": true, "style": settings.music_display_style().as_str() }).to_string()
+/// `GET /music/display.json` — which music widget each display shows while Spotify or the
+/// radio plays: `{ ok, displays: [{ device_id, name, connected, pin, style, chosen,
+/// initiator }] }`. `pin` is the config-page preference (`"auto"` / `"compact"` /
+/// `"fullscreen"`), `style` what the display is being sent now, `chosen` whether it picked
+/// a style itself for the current music (button / voice), `initiator` whether the current
+/// music was asked for from it. Lists every connected display plus any pinned one that is
+/// offline (so its pin can still be cleared).
+pub(super) fn music_display_json(
+    settings: &SharedSettings,
+    now_playing: &NowPlayingService,
+) -> String {
+    now_playing.sync_pins(settings.music_display_pins());
+    let pins = settings.music_display_pins();
+    let router = now_playing.display();
+    let initiator = router.initiator();
+    let row = |id: &str, name: &str, connected: bool, style: MusicDisplayStyle| {
+        json!({
+            "device_id": id,
+            "name": name,
+            "connected": connected,
+            "pin": pins.get(id).map_or("auto", |p| p.as_str()),
+            "style": style.as_str(),
+            "chosen": router.has_choice(id),
+            "initiator": initiator.as_deref() == Some(id),
+        })
+    };
+    let live = now_playing.display_styles();
+    let mut rows: Vec<Value> = live
+        .iter()
+        .map(|(dev, style)| row(&dev.device_id, &dev.name, true, *style))
+        .collect();
+    for id in pins.keys() {
+        if !live.iter().any(|(dev, _)| &dev.device_id == id) {
+            rows.push(row(id, "", false, now_playing.style_for(id)));
+        }
+    }
+    json!({ "ok": true, "displays": rows }).to_string()
 }
 
-/// `POST /music/display` — body `{ style }`: set the music-widget preference, persist it,
-/// and re-push now-playing so every connected display switches at once.
+/// `POST /music/display` — body `{ device_id, style }` with `style` = `"auto"` /
+/// `"compact"` / `"fullscreen"`: pin one display's music widget (or return it to
+/// automatic), persist it, and re-push now-playing so that display switches at once.
 pub(super) fn music_display_save_json(
     settings: &SharedSettings,
     now_playing: &NowPlayingService,
     data: &Value,
 ) -> String {
+    let device_id = data
+        .get("device_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if device_id.is_empty() {
+        return fail("missing device_id".to_string());
+    }
     let raw = data.get("style").and_then(Value::as_str).unwrap_or("");
-    let Some(style) = MusicDisplayStyle::parse(raw) else {
-        return fail(format!("unknown style {raw:?} (use compact or fullscreen)"));
+    let pin = match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" | "automatic" | "" => None,
+        other => match MusicDisplayStyle::parse(other) {
+            Some(style) => Some(style),
+            None => {
+                return fail(format!(
+                    "unknown style {raw:?} (use auto, compact or fullscreen)"
+                ))
+            }
+        },
     };
-    let pushed = now_playing.set_display_style(settings, style);
-    json!({ "ok": true, "style": style.as_str(), "pushed": pushed }).to_string()
+    settings.set_music_display_pin(device_id, pin);
+    let pushed = now_playing.repush(settings);
+    json!({
+        "ok": true,
+        "device_id": device_id,
+        "pin": pin.map_or("auto", MusicDisplayStyle::as_str),
+        "style": now_playing.style_for(device_id).as_str(),
+        "pushed": pushed,
+    })
+    .to_string()
 }

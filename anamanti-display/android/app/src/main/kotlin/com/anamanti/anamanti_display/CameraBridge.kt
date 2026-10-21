@@ -9,6 +9,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -29,6 +31,11 @@ import android.util.Size
  * only gets the pixels out of the [ImageReader]; the sensing lives in Rust, per the
  * repo's Rust/Flutter boundary (`agents.md`).
  *
+ * The same frames make the camera a **lux sensor** (`camera/ambient.rs`): auto-
+ * exposure normalizes frame brightness, so each push also carries the exposure
+ * time / ISO / aperture the AE chose (from the latest [CaptureResult]), from which
+ * Rust estimates room illuminance and tells the UI when the lights go off.
+ *
  * Lifecycle is driven from the Rust engine thread via JNI up-calls
  * ([startCamera]/[stopCamera]). Everything runs on a dedicated background thread so
  * the camera callbacks never touch the UI or audio threads.
@@ -46,8 +53,25 @@ object CameraBridge {
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
 
-    /** Push one packed luma (Y-plane) frame ([width]×[height] bytes) into the Rust ring. */
-    @JvmStatic external fun nativePushLuma(data: ByteArray, width: Int, height: Int)
+    // Latest auto-exposure metadata from the repeating request's capture results,
+    // read by [onFrame]. `0` = not (yet) reported by the HAL — Rust then falls back
+    // to judging light from frame brightness alone.
+    @Volatile private var exposureNs: Long = 0
+    @Volatile private var iso: Int = 0
+    @Volatile private var aperture: Float = 0f
+
+    /**
+     * Push one packed luma (Y-plane) frame ([width]×[height] bytes) into Rust, with
+     * the capture's [exposureNs] / [iso] / [aperture] (each `0` when unreported).
+     */
+    @JvmStatic external fun nativePushLuma(
+        data: ByteArray,
+        width: Int,
+        height: Int,
+        exposureNs: Long,
+        iso: Int,
+        aperture: Float,
+    )
 
     /**
      * Hand the Rust side this class (resolved via the app class loader) so the
@@ -153,6 +177,9 @@ object CameraBridge {
     @JvmStatic
     fun stopCamera() {
         running = false
+        exposureNs = 0
+        iso = 0
+        aperture = 0f
         try {
             session?.close()
         } catch (e: Exception) {
@@ -193,7 +220,7 @@ object CameraBridge {
                                 CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                                 Range(fps, fps),
                             )
-                            s.setRepeatingRequest(req.build(), null, hdl)
+                            s.setRepeatingRequest(req.build(), exposureCallback, hdl)
                             Log.i(TAG, "capture session streaming")
                         } catch (e: Exception) {
                             Log.e(TAG, "setRepeatingRequest failed", e)
@@ -208,6 +235,19 @@ object CameraBridge {
             )
         } catch (e: Exception) {
             Log.e(TAG, "createCaptureSession failed", e)
+        }
+    }
+
+    /** Records the AE's chosen exposure per frame for the Rust lux sensor. */
+    private val exposureCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            s: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult,
+        ) {
+            exposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+            iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0
+            aperture = result.get(CaptureResult.LENS_APERTURE) ?: 0f
         }
     }
 
@@ -253,7 +293,7 @@ object CameraBridge {
                     pos += w
                 }
             }
-            if (running) nativePushLuma(out, w, h)
+            if (running) nativePushLuma(out, w, h, exposureNs, iso, aperture)
         } catch (e: Exception) {
             Log.w(TAG, "frame extract failed", e)
         } finally {

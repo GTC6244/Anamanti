@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
+// These functions are ignored because they are not marked as `pub`: `ambient_light`, `base`, `camera_context`, `connecting`, `detected`, `disconnected`, `dismiss_camera`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `recipe_step`, `reply_token`, `show_camera`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChannelHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
@@ -63,6 +63,13 @@ void updateDiagnosticsTuning({
   activeThreshold: activeThreshold,
 );
 
+/// Turn off on-device timer `id` — the display's "Cancel timer" button. Silences a
+/// ringing alarm (which otherwise repeats every 5 s until turned off) or cancels a
+/// running countdown; the engine then emits `TimerCancelled` for it. A harmless no-op
+/// for an unknown id or when no engine is running.
+void dismissTimer({required int id}) =>
+    RustLib.instance.api.crateApiEngineDismissTimer(id: id);
+
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
 /// — so it resets the screen-dim countdown (and brightens the screen if it had
 /// already dimmed). Flutter calls this on each voice-turn transition and on screen
@@ -73,8 +80,10 @@ void noteUserActivity() =>
 
 /// Report the recipe screen's state as the device's **display context** so the next
 /// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know a
-/// recipe is up (and which tab / scroll position) so it can drive the screen by voice
-/// (switch tabs, scroll, close).
+/// recipe is up (and which tab / scroll position / highlighted step) so it can drive the
+/// screen by voice (switch tabs, scroll, go to a step, close) — plus the recipe's
+/// ingredient lines and steps, so recipe questions ("how many tomatoes?") are answered
+/// from what is on screen (the Core's System-1 lookup or its System-2 prompt).
 ///
 /// This is the recipe screen's setter for the general display-context mechanism (see
 /// [`crate::engine::set_display_context`]); other voice-controllable screens — music,
@@ -83,7 +92,8 @@ void noteUserActivity() =>
 ///
 /// Flutter calls this when recipe mode opens or closes and whenever the active tab or a
 /// pane's scroll position changes. `active == false` clears the context (idle screen);
-/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`.
+/// the other fields are ignored. `tab` is `"overview"` / `"ingredients"` / `"steps"`;
+/// `highlighted_step` is 1-based (`0` = none).
 void setRecipeContext({
   required bool active,
   required String title,
@@ -92,6 +102,9 @@ void setRecipeContext({
   required bool atBottom,
   required int ingredientCount,
   required int stepCount,
+  required int highlightedStep,
+  required List<String> ingredients,
+  required List<String> steps,
 }) => RustLib.instance.api.crateApiEngineSetRecipeContext(
   active: active,
   title: title,
@@ -100,6 +113,9 @@ void setRecipeContext({
   atBottom: atBottom,
   ingredientCount: ingredientCount,
   stepCount: stepCount,
+  highlightedStep: highlightedStep,
+  ingredients: ingredients,
+  steps: steps,
 );
 
 /// Report the weather screen's state as the device's **display context** so the next
@@ -142,6 +158,20 @@ void setPlaceContext({
   name: name,
   address: address,
 );
+
+/// Report the live camera view's state as the device's **display context** so the next
+/// voice turn's `audio-start` tells the orchestrator a camera view is up (and which
+/// camera), letting a bare "stop" / "close it" close it. The camera view's setter for the
+/// general display-context mechanism (see [`set_place_context`] /
+/// [`crate::engine::set_display_context`]). Carries only the camera's display name —
+/// never the stream URL.
+///
+/// Flutter calls this when the camera view opens or closes. `active == false` clears the
+/// context (idle screen); `name` is ignored then.
+void setCameraContext({required bool active, required String name}) => RustLib
+    .instance
+    .api
+    .crateApiEngineSetCameraContext(active: active, name: name);
 
 /// Push the music player's current state as this turn's display context (see
 /// [`set_place_context`]), so the next turn's `audio-start` tells the orchestrator a music
@@ -513,6 +543,12 @@ class WakeWordConfig {
   /// engine default (`presence::DEFAULT_RELEASE`).
   final int proximityReleaseSecs;
 
+  /// Camera-as-lux-sensor darkness threshold (estimated lux): the room counts as
+  /// "lights off" once it stays below this, and lit again above 3× it (hysteresis).
+  /// `0` uses the engine default (`ambient::DEFAULT_DARK_LUX`). Only meaningful with
+  /// `camera_proximity` — the lux sensor shares its frames. See `camera/ambient.rs`.
+  final double nightDarkLux;
+
   const WakeWordConfig({
     required this.melspecModelPath,
     required this.embeddingModelPath,
@@ -535,6 +571,7 @@ class WakeWordConfig {
     required this.cameraProximity,
     required this.proximityMotionThreshold,
     required this.proximityReleaseSecs,
+    this.nightDarkLux = 0.0,
   });
 
   @override
@@ -559,7 +596,8 @@ class WakeWordConfig {
       platformNs.hashCode ^
       cameraProximity.hashCode ^
       proximityMotionThreshold.hashCode ^
-      proximityReleaseSecs.hashCode;
+      proximityReleaseSecs.hashCode ^
+      nightDarkLux.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -586,7 +624,8 @@ class WakeWordConfig {
           platformNs == other.platformNs &&
           cameraProximity == other.cameraProximity &&
           proximityMotionThreshold == other.proximityMotionThreshold &&
-          proximityReleaseSecs == other.proximityReleaseSecs;
+          proximityReleaseSecs == other.proximityReleaseSecs &&
+          nightDarkLux == other.nightDarkLux;
 }
 
 /// A single event streamed from the Rust engine to the Flutter UI. Modeled as a
@@ -655,6 +694,18 @@ class WakeWordEvent {
   /// `false` = quiet long enough to dim. Neutral `false` for every other kind.
   final bool present;
 
+  /// Lux sensor (`AmbientLight`): whether the room's lights are off. Neutral
+  /// `false` for every other kind.
+  final bool dark;
+
+  /// Lux sensor (`AmbientLight`): smoothed estimated illuminance in lux. `0` for
+  /// every other kind.
+  final double lux;
+
+  /// Lux sensor (`AmbientLight`): whether the lens looks covered (near-black and
+  /// near-uniform frames — privacy shutter or tape). `false` for every other kind.
+  final bool covered;
+
   /// The parsed recipe as a JSON string (`ShowRecipe`); empty for every other kind.
   /// The UI decodes it into the recipe-mode tabs.
   final String recipeJson;
@@ -694,6 +745,9 @@ class WakeWordEvent {
     required this.timerLabel,
     required this.timerRemainingSecs,
     required this.present,
+    this.dark = false,
+    this.lux = 0.0,
+    this.covered = false,
     required this.recipeJson,
     required this.weatherJson,
     required this.placeJson,
@@ -720,6 +774,9 @@ class WakeWordEvent {
       timerLabel.hashCode ^
       timerRemainingSecs.hashCode ^
       present.hashCode ^
+      dark.hashCode ^
+      lux.hashCode ^
+      covered.hashCode ^
       recipeJson.hashCode ^
       weatherJson.hashCode ^
       placeJson.hashCode ^
@@ -748,6 +805,9 @@ class WakeWordEvent {
           timerLabel == other.timerLabel &&
           timerRemainingSecs == other.timerRemainingSecs &&
           present == other.present &&
+          dark == other.dark &&
+          lux == other.lux &&
+          covered == other.covered &&
           recipeJson == other.recipeJson &&
           weatherJson == other.weatherJson &&
           placeJson == other.placeJson &&
@@ -859,6 +919,15 @@ enum WakeWordEventKind {
   /// Place mode: dismiss the full-screen place card and return to idle/ambient.
   dismissPlace,
 
+  /// Camera mode (`plans/CameraPlan.md`): the orchestrator asked to open the live
+  /// camera view. The camera's display name (e.g. `"Front Door"`) rides the generic
+  /// `recipe_action` string carrier (as `FontAdjust` does). The frame never carries
+  /// the stream URL — the UI fetches it with `get_camera_stream`.
+  showCamera,
+
+  /// Camera mode: close the live camera view and return to idle/ambient.
+  dismissCamera,
+
   /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
   /// (`"overview"` / `"ingredients"` / `"steps"`).
   recipeNavigate,
@@ -866,6 +935,11 @@ enum WakeWordEventKind {
   /// Recipe mode: scroll the active pane by voice. `recipe_action` is the direction
   /// (`"up"` / `"down"` a page, or `"top"` / `"bottom"`).
   recipeScroll,
+
+  /// Recipe mode: jump to a step by voice — switch to the Steps tab, scroll that step
+  /// into view and highlight it. `recipe_action` is the 1-based step number as a
+  /// decimal string (the generic string carrier, as `RecipeScroll`).
+  recipeStep,
 
   /// Font scaling: the orchestrator resolved a voice "increase font" / "decrease font"
   /// command. The direction (`"increase"` / `"decrease"`) rides the generic
@@ -883,6 +957,14 @@ enum WakeWordEventKind {
   /// the room has been quiet long enough to dim again (Plan.MD §5). Emitted only on
   /// transitions, never per frame.
   presence,
+
+  /// The camera-as-lux-sensor's reading (`camera/ambient.rs`): `dark` is whether
+  /// the room's lights are judged off, `lux` the smoothed illuminance estimate.
+  /// Emitted when `dark` flips and every few seconds otherwise (a live readout for
+  /// Settings); the UI dims the screen to its night levels while `dark`. `covered`
+  /// reports a covered lens (privacy shutter / tape), which the UI resolves per the
+  /// user's "when the camera is covered" setting.
+  ambientLight,
 
   /// Voice enrollment (SpeakerEnrollmentPlan.md Phase 2): the orchestrator's reply to a
   /// guided capture (a training sample or the verify check). `enroll_json` carries the

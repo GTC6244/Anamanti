@@ -362,28 +362,53 @@ async fn music_status_reports_disabled_without_a_hub() {
 }
 
 #[test]
-fn music_display_style_reads_saves_and_rejects_unknown() {
+fn music_display_pins_one_display_lists_it_and_rejects_unknown() {
+    use crate::music::MusicDisplayStyle::Fullscreen;
     let s = settings();
     let (_st, _c, body) = route("GET", "/music/display.json", b"", &s);
     let v: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["style"], "compact");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["displays"], serde_json::json!([]));
 
-    let out = post(&s, "/music/display", br#"{"style":"fullscreen"}"#);
+    let out = post(
+        &s,
+        "/music/display",
+        br#"{"device_id":"kitchen","style":"fullscreen"}"#,
+    );
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], true);
+    assert_eq!(v["pin"], "fullscreen");
     assert_eq!(v["style"], "fullscreen");
+    assert_eq!(s.music_display_pins().get("kitchen"), Some(&Fullscreen));
+
+    // An offline pinned display is still listed so its pin can be cleared.
+    let (_st, _c, body) = route("GET", "/music/display.json", b"", &s);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["displays"][0]["device_id"], "kitchen");
+    assert_eq!(v["displays"][0]["connected"], false);
+    assert_eq!(v["displays"][0]["pin"], "fullscreen");
+
+    for bad in [
+        &br#"{"device_id":"kitchen","style":"sideways"}"#[..],
+        &br#"{"style":"compact"}"#[..],
+    ] {
+        let out = post(&s, "/music/display", bad);
+        assert!(out.contains("\"ok\":false"), "{out}");
+    }
     assert_eq!(
-        s.music_display_style(),
-        crate::music::MusicDisplayStyle::Fullscreen
+        s.music_display_pins().get("kitchen"),
+        Some(&Fullscreen),
+        "a bad request leaves the pin alone"
     );
 
-    let out = post(&s, "/music/display", br#"{"style":"sideways"}"#);
-    assert!(out.contains("\"ok\":false"), "{out}");
-    assert_eq!(
-        s.music_display_style(),
-        crate::music::MusicDisplayStyle::Fullscreen,
-        "a bad value leaves the preference alone"
+    let out = post(
+        &s,
+        "/music/display",
+        br#"{"device_id":"kitchen","style":"auto"}"#,
     );
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["pin"], "auto");
+    assert!(s.music_display_pins().is_empty());
 }
 
 #[test]
@@ -731,8 +756,8 @@ fn cadora_status_reports_unlinked_by_default() {
     let v: Value = serde_json::from_str(&cadora_status_json(&settings())).unwrap();
     assert_eq!(v["ok"], true);
     assert_eq!(v["linked"], false);
-    // Falls back to the built-in Cadora server URL when unset.
-    assert_eq!(v["base_url"], "https://cadora-server.fly.dev");
+    // Falls back to the built-in Cadora API URL when unset.
+    assert_eq!(v["base_url"], "https://api.getcadora.com/cadora");
 }
 
 #[test]
@@ -744,7 +769,13 @@ fn cadora_save_sets_base_url() {
     cadora_save_json(&s, br#"{"base_url":""}"#);
     assert_eq!(
         s.cadora().base_url_or_default(),
-        "https://cadora-server.fly.dev"
+        "https://api.getcadora.com/cadora"
+    );
+    // A stale retired-Fly URL resolves to the new default too.
+    cadora_save_json(&s, br#"{"base_url":"https://cadora-server.fly.dev"}"#);
+    assert_eq!(
+        s.cadora().base_url_or_default(),
+        "https://api.getcadora.com/cadora"
     );
 }
 
