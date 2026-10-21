@@ -88,6 +88,16 @@ pub enum SpotifyCommand {
     Resume,
     Next,
     Previous,
+    /// Jump to the up-next track at `index` (0-based into [`NowPlaying::next_up`]) — the
+    /// display's tappable Up Next list. The Web API has no "play queue item N", so when
+    /// an album/playlist is playing this is **one** call that re-plays that context at
+    /// the track (`offset.uri`), keeping the rest of the context after it; otherwise (an
+    /// artist/no context, or the track isn't in the context — e.g. user-queued) it falls
+    /// back to skipping forward `index + 1` times. Never a by-name search: playing a bare
+    /// track URI would drop the rest of the context.
+    SkipTo {
+        index: usize,
+    },
     /// Search for a track and add it to the up-next queue.
     Queue {
         query: String,
@@ -101,21 +111,28 @@ pub enum SpotifyCommand {
 impl SpotifyCommand {
     /// Parse a bare **transport** action — `pause`/`stop`, `resume`/`unpause`,
     /// `next`/`skip`/`forward`, `previous`/`prev`/`back`, `volume`/`set_volume` (which
-    /// needs `volume_percent`, clamped to 0–100). Case- and whitespace-insensitive.
+    /// needs `value` as the percent, clamped to 0–100), `skip_to` (which needs `value` as
+    /// the 0-based up-next index). Case- and whitespace-insensitive.
     /// `Ok(None)` when `action` is not a transport action (e.g. `play`/`queue`, which
-    /// need a search query); `Err` (speakable) for `volume` with no level. Shared by the
+    /// need a search query); `Err` (speakable) for `volume` with no level or `skip_to`
+    /// with no (or a negative) index. Shared by the
     /// `spotify_control` tool and the display's on-screen controls so both accept the
     /// same vocabulary.
-    pub fn transport(action: &str, volume_percent: Option<i64>) -> Result<Option<Self>> {
+    pub fn transport(action: &str, value: Option<i64>) -> Result<Option<Self>> {
         Ok(Some(match action.trim().to_lowercase().as_str() {
             "pause" | "stop" => SpotifyCommand::Pause,
             "resume" | "unpause" => SpotifyCommand::Resume,
             "next" | "skip" | "forward" => SpotifyCommand::Next,
             "previous" | "prev" | "back" => SpotifyCommand::Previous,
             "volume" | "set_volume" => SpotifyCommand::SetVolume {
-                percent: volume_percent
+                percent: value
                     .context("volume needs a level from 0 to 100")?
                     .clamp(0, 100) as u8,
+            },
+            "skip_to" => SpotifyCommand::SkipTo {
+                index: value
+                    .and_then(|i| usize::try_from(i).ok())
+                    .context("skip_to needs the position of an up-next track")?,
             },
             _ => return Ok(None),
         }))
@@ -130,6 +147,10 @@ pub struct QueueItem {
     pub artist: String,
     pub album: String,
     pub artwork_uri: String,
+    /// The track's Spotify URI (`spotify:track:…`), used Core-side to jump to it. Not
+    /// sent to the display (it addresses rows by index).
+    #[serde(skip)]
+    pub uri: String,
 }
 
 /// A snapshot of the current playback, pushed to the display's now-playing screen.
@@ -460,12 +481,32 @@ fn track_fields(item: &Value) -> QueueItem {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let uri = item
+        .get("uri")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     QueueItem {
         track_title: title,
         artist,
         album,
         artwork_uri,
+        uri,
     }
+}
+
+/// The playing context's URI when Spotify can start it at a given track — an album or
+/// playlist (`offset` is not supported for artist contexts). `None` otherwise.
+fn offsetable_context(state: &Value) -> Option<String> {
+    let ctx = state.get("context")?;
+    let kind = ctx.get("type").and_then(Value::as_str)?;
+    if !matches!(kind, "album" | "playlist") {
+        return None;
+    }
+    ctx.get("uri")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
 }
 
 /// Build a speakable label for a search hit ("Karma Police by Radiohead",
@@ -546,6 +587,64 @@ impl SpotifyController for SpotifyWebApi {
                 .await?;
                 Ok("Going back to the previous track.".to_string())
             }
+            SpotifyCommand::SkipTo { index } => {
+                // Re-read the queue (so a stale tap — the queue moved since the display's
+                // last push — can't over-skip, and to get the track's URI + name) and the
+                // playing context, concurrently.
+                let (queue, state) =
+                    tokio::join!(self.fetch_queue(&token), self.player_get(&token, ""));
+                let target = queue
+                    .get(index)
+                    .context("that track isn't in the up-next queue any more")?;
+                let jumped = match state.ok().flatten().as_ref().and_then(offsetable_context) {
+                    Some(context_uri) if !target.uri.is_empty() => {
+                        let body = serde_json::json!({
+                            "context_uri": context_uri,
+                            "offset": { "uri": target.uri },
+                        });
+                        match self
+                            .player_call(
+                                &token,
+                                reqwest::Method::PUT,
+                                "/play",
+                                &device,
+                                &[],
+                                Some(body),
+                            )
+                            .await
+                        {
+                            Ok(()) => true,
+                            // e.g. a user-queued track that isn't in the context.
+                            Err(e) => {
+                                log::debug!(
+                                    "spotify skip_to: offset play failed, skipping instead: {e:#}"
+                                );
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+                if !jumped {
+                    // Sequential, in order: each skip must land before the next is issued.
+                    for _ in 0..=index {
+                        self.player_call(
+                            &token,
+                            reqwest::Method::POST,
+                            "/next",
+                            &device,
+                            &[],
+                            None,
+                        )
+                        .await?;
+                    }
+                }
+                Ok(if target.artist.is_empty() {
+                    format!("Playing {}.", target.track_title)
+                } else {
+                    format!("Playing {} by {}.", target.track_title, target.artist)
+                })
+            }
             SpotifyCommand::Queue { query } => {
                 let hit = self.search(&token, &query, SearchKind::Track).await?;
                 self.player_call(
@@ -589,6 +688,7 @@ impl SpotifyController for SpotifyWebApi {
             artist,
             album,
             artwork_uri,
+            ..
         } = track_fields(item);
         let playing = state
             .get("is_playing")
@@ -659,6 +759,17 @@ mod tests {
     /// player endpoints, recording each request line (METHOD + path?query) so a
     /// test can assert what the client sent.
     async fn spawn_fake_spotify() -> (String, StdArc<TokioMutex<Vec<String>>>) {
+        spawn_fake_spotify_with(DEFAULT_PLAYER_STATE, false).await
+    }
+
+    const DEFAULT_PLAYER_STATE: &str = r#"{"is_playing":true,"progress_ms":73000,"device":{"volume_percent":65},"item":{"name":"Paranoid Android","duration_ms":383000,"artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/ok-computer.jpg"}]}}}"#;
+
+    /// [`spawn_fake_spotify`] with a custom `GET /v1/me/player` body, and (when
+    /// `fail_play`) a `PUT /v1/me/player/play` that answers 404.
+    async fn spawn_fake_spotify_with(
+        player_state: &'static str,
+        fail_play: bool,
+    ) -> (String, StdArc<TokioMutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen = StdArc::new(TokioMutex::new(Vec::<String>::new()));
@@ -683,19 +794,24 @@ mod tests {
                     } else if first.starts_with("GET /v1/me/player/devices") {
                         r#"{"devices":[{"id":"dev-1","name":"Ambient"},{"id":"other","name":"Phone"}]}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player/queue") {
-                        r#"{"queue":[{"name":"Let Down","artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/let-down.jpg"}]}}]}"#.to_string()
+                        r#"{"queue":[{"uri":"spotify:track:letdown","name":"Let Down","artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/let-down.jpg"}]}}]}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player ")
                         || first.starts_with("GET /v1/me/player?")
                     {
-                        r#"{"is_playing":true,"progress_ms":73000,"device":{"volume_percent":65},"item":{"name":"Paranoid Android","duration_ms":383000,"artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/ok-computer.jpg"}]}}}"#.to_string()
+                        player_state.to_string()
                     } else if first.starts_with("GET /v1/search") {
                         r#"{"tracks":{"items":[{"uri":"spotify:track:abc","name":"Karma Police","artists":[{"name":"Radiohead"}]}]}}"#.to_string()
                     } else {
                         // player control endpoints: 204-style, empty body
                         String::new()
                     };
+                    let status = if fail_play && first.starts_with("PUT /v1/me/player/play") {
+                        "404 Not Found"
+                    } else {
+                        "200 OK"
+                    };
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     );
@@ -773,6 +889,100 @@ mod tests {
             .filter(|c| c.starts_with("POST /api/token"))
             .count();
         assert_eq!(token_calls, 1, "token fetched once and reused");
+    }
+
+    #[test]
+    fn skip_to_parses_an_index_and_rejects_missing_or_negative() {
+        assert_eq!(
+            SpotifyCommand::transport("skip_to", Some(3)).unwrap(),
+            Some(SpotifyCommand::SkipTo { index: 3 })
+        );
+        assert!(SpotifyCommand::transport("skip_to", None).is_err());
+        assert!(SpotifyCommand::transport("skip_to", Some(-1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn skip_to_with_no_offsetable_context_skips_index_plus_one_times() {
+        let (base, seen) = spawn_fake_spotify().await;
+        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let msg = api
+            .command(SpotifyCommand::SkipTo { index: 0 })
+            .await
+            .unwrap();
+        assert_eq!(msg, "Playing Let Down by Radiohead.");
+        let calls = seen.lock().await;
+        let nexts = calls
+            .iter()
+            .filter(|c| c.starts_with("POST /v1/me/player/next?device_id=dev-1"))
+            .count();
+        assert_eq!(nexts, 1, "calls were {calls:?}");
+    }
+
+    const PLAYLIST_STATE: &str = r#"{"is_playing":true,"context":{"type":"playlist","uri":"spotify:playlist:p1"},"item":{"name":"Paranoid Android","artists":[{"name":"Radiohead"}]}}"#;
+
+    #[tokio::test]
+    async fn skip_to_in_a_playlist_jumps_with_one_offset_play() {
+        let (base, seen) = spawn_fake_spotify_with(PLAYLIST_STATE, false).await;
+        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let msg = api
+            .command(SpotifyCommand::SkipTo { index: 0 })
+            .await
+            .unwrap();
+        assert_eq!(msg, "Playing Let Down by Radiohead.");
+        let calls = seen.lock().await;
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("PUT /v1/me/player/play?device_id=dev-1")),
+            "calls were {calls:?}"
+        );
+        assert!(!calls
+            .iter()
+            .any(|c| c.starts_with("POST /v1/me/player/next")));
+    }
+
+    #[tokio::test]
+    async fn skip_to_falls_back_to_skipping_when_the_offset_play_fails() {
+        // e.g. a user-queued track that isn't part of the playlist.
+        let (base, seen) = spawn_fake_spotify_with(PLAYLIST_STATE, true).await;
+        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        api.command(SpotifyCommand::SkipTo { index: 0 })
+            .await
+            .unwrap();
+        let calls = seen.lock().await;
+        let nexts = calls
+            .iter()
+            .filter(|c| c.starts_with("POST /v1/me/player/next"))
+            .count();
+        assert_eq!(nexts, 1, "calls were {calls:?}");
+    }
+
+    #[test]
+    fn only_album_and_playlist_contexts_take_an_offset() {
+        let ctx = |t: &str| serde_json::json!({"context": {"type": t, "uri": "spotify:x:1"}});
+        assert_eq!(
+            offsetable_context(&ctx("playlist")).as_deref(),
+            Some("spotify:x:1")
+        );
+        assert!(offsetable_context(&ctx("album")).is_some());
+        assert!(offsetable_context(&ctx("artist")).is_none());
+        assert!(offsetable_context(&serde_json::json!({"context": null})).is_none());
+    }
+
+    #[tokio::test]
+    async fn skip_to_past_the_queue_end_errors_without_skipping() {
+        let (base, seen) = spawn_fake_spotify().await;
+        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        // The fake queue holds one track; a stale tap on a later row must not skip.
+        let err = api
+            .command(SpotifyCommand::SkipTo { index: 4 })
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("isn't in the up-next queue"));
+        let calls = seen.lock().await;
+        assert!(!calls
+            .iter()
+            .any(|c| c.starts_with("POST /v1/me/player/next")));
     }
 
     #[tokio::test]

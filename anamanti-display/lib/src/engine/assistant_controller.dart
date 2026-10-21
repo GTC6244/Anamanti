@@ -1712,6 +1712,18 @@ class AssistantController extends ChangeNotifier {
   /// Go back to the previous track.
   void previousTrack() => _musicControl?.call(action: 'previous');
 
+  /// Jump to the up-next track at [index] (0-based into [MusicData.nextUp]) — the user
+  /// tapped a row on the up-next list. The Core skips forward to it (`skip_to`), and this
+  /// display returns to the now-playing view so the new track is what's on screen. A
+  /// no-op for an out-of-range index or live radio (which has no queue).
+  void skipToQueueTrack(int index) {
+    final music = _state.music;
+    if (music == null || music.isRadio) return;
+    if (index < 0 || index >= music.nextUp.length) return;
+    _musicControl?.call(action: 'skip_to', value: index);
+    openNowPlaying();
+  }
+
   /// Set the music volume (0–100 percent).
   void setMusicVolume(int percent) =>
       _musicControl?.call(action: 'volume', value: percent.clamp(0, 100));

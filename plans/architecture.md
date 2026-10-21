@@ -799,7 +799,8 @@ mDNS + `instance_id` pin the voice path uses):
   `AssistantState.music`, rendering the compact control overlay + the `NowPlayingView` /
   `NextUpView` full screens. On-screen controls go the other way as a short-lived
   **`anamanti-music-control`** request/response (a control frame like the settings/memory
-  ones, handled by `control::music_control_response` → the `spotify_control` controller),
+  ones, handled by `control::music_control_response` → the `spotify_control` controller;
+  includes `skip_to` + an up-next index from a tapped `NextUpView` row),
   **not** on the persistent channel. Gated behind `music.enabled` + a linked Spotify; see
   `MusicPlan.md` (P6) and `DisplayUI.md` §4b.
 - All three persistent channels share one implementation per side: on the device,

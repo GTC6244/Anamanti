@@ -3,6 +3,7 @@
 // Lists the upcoming tracks pushed from the Core ([MusicData.nextUp]): a small
 // artwork thumbnail, the track title, and the artist per row. Reachable from the
 // now-playing card's "up next" button; left by the close control (or back).
+// Tapping a row jumps playback to that track ([onSelect]).
 
 import 'package:flutter/material.dart';
 
@@ -15,6 +16,7 @@ class NextUpView extends StatelessWidget {
     required this.music,
     required this.onClose,
     this.onBack,
+    this.onSelect,
   });
 
   final MusicData music;
@@ -23,6 +25,10 @@ class NextUpView extends StatelessWidget {
   /// Returns to the now-playing card. A leading back control shows only when
   /// this is non-null.
   final VoidCallback? onBack;
+
+  /// Jump playback to the tapped up-next track, by its 0-based index in
+  /// [MusicData.nextUp]. Rows are not tappable when this is null.
+  final ValueChanged<int>? onSelect;
 
   static const _bgTop = Color(0xFF101014);
   static const _bgBottom = Color(0xFF1C1A24);
@@ -111,10 +117,35 @@ class NextUpView extends StatelessWidget {
 
   Widget _list() {
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(28, 12, 28, 20),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
       itemCount: music.nextUp.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 12),
-      itemBuilder: (context, i) => _row(music.nextUp[i]),
+      separatorBuilder: (_, _) => const SizedBox(height: 4),
+      itemBuilder: (context, i) => _tappable(i, _row(music.nextUp[i])),
+    );
+  }
+
+  /// Wrap a row so a tap jumps to that track (with a touch ripple), when
+  /// [onSelect] is wired. The padding keeps the content where it was while
+  /// giving the whole row a generous touch target.
+  Widget _tappable(int index, Widget row) {
+    final padded = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: row,
+    );
+    final select = onSelect;
+    if (select == null) return padded;
+    // A transparent Material so the ripple paints above the gradient background
+    // (the root Material sits beneath the gradient Container).
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        key: Key('next-up-row-$index'),
+        borderRadius: BorderRadius.circular(12),
+        splashColor: Colors.white.withValues(alpha: 0.12),
+        highlightColor: Colors.white.withValues(alpha: 0.06),
+        onTap: () => select(index),
+        child: padded,
+      ),
     );
   }
 

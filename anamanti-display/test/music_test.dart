@@ -200,6 +200,33 @@ void main() {
       expect(calls.last, {'action': 'volume', 'value': 100});
     });
 
+    test('skip-to sends the queue index and returns to now-playing', () {
+      final calls = <Map<String, Object?>>[];
+      final controller = _controller(calls);
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_musicJson); // one queued track
+      controller.showMusicQueue();
+
+      controller.skipToQueueTrack(0);
+      expect(calls.last, {'action': 'skip_to', 'value': 0});
+      expect(controller.state.musicScreen, MusicScreen.nowPlaying);
+
+      // Out of range (a stale tap) or negative: nothing is sent.
+      final before = calls.length;
+      controller.skipToQueueTrack(1);
+      controller.skipToQueueTrack(-1);
+      expect(calls.length, before);
+    });
+
+    test('skip-to is a no-op for radio (no queue)', () {
+      final calls = <Map<String, Object?>>[];
+      final controller = _controller(calls);
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_radioJson);
+      controller.skipToQueueTrack(0);
+      expect(calls, isEmpty);
+    });
+
     test('transport is a no-op when no control sink is wired', () {
       final controller = AssistantController(config: _cfg());
       addTearDown(controller.dispose);

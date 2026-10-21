@@ -857,11 +857,11 @@ pub async fn link_speaker(
     ok_message(&resp, "linking failed")
 }
 
-/// Issue a music transport/volume command (`pause`/`resume`/`next`/`previous`/`volume`)
-/// from the display's on-screen controls. Returns the Core's short spoken confirmation;
-/// an in-band failure (Spotify not linked, device asleep, unknown action) is an `Err`
-/// carrying its reason. `value` is the 0–100 percent for `"volume"`. `device_id` (this
-/// display's id; blank = omitted) tells the Core which display pressed the button — the
+/// Issue a music transport/volume command (`pause`/`resume`/`next`/`previous`/`volume`/
+/// `skip_to`) from the display's on-screen controls. Returns the Core's short spoken
+/// confirmation; an in-band failure (Spotify not linked, device asleep, unknown action) is
+/// an `Err` carrying its reason. `value` is the 0–100 percent for `"volume"` and the
+/// 0-based up-next index for `"skip_to"`. `device_id` (this display's id; blank = omitted) tells the Core which display pressed the button — the
 /// `display_fullscreen` / `display_compact` toggle changes only that display.
 pub async fn music_control(
     cache: &EndpointCache,

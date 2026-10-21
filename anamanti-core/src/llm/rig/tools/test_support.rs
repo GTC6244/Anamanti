@@ -90,6 +90,7 @@ impl SpotifyController for StaticSpotify {
             SpotifyCommand::Pause => "Paused.".to_string(),
             SpotifyCommand::Next => "Skipping.".to_string(),
             SpotifyCommand::Previous => "Going back.".to_string(),
+            SpotifyCommand::SkipTo { index } => format!("Skipping to {index}."),
             SpotifyCommand::Queue { query } => format!("Queued {query}."),
             SpotifyCommand::SetVolume { percent } => format!("Volume {percent}."),
         };

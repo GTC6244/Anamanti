@@ -53,7 +53,7 @@ speaks the reply back through the Echo Show's speakers.
   house speakers (Snapcast + librespot on the Mac; no music audio passes through the
   Echo Show). While a track plays, a compact control bar rides the idle screen; tap it
   for a full now-playing screen (artwork, progress, transport, volume) and the up-next
-  queue — or just say "show me what's playing" / "what's up next" / "hide the music".
+  queue (tap a queued track to jump straight to it) — or just say "show me what's playing" / "what's up next" / "hide the music".
   The display you asked shows the music **full screen**; every other display shows the
   small bar. Each display can switch on its own — the expand / minimize button, or say
   "make the music full screen" / "use the small music player" to it — and Music & Devices

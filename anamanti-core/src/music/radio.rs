@@ -481,6 +481,11 @@ impl RadioPlayer {
             SpotifyCommand::Resume => Ok("The radio is already playing.".to_string()),
             SpotifyCommand::Next => self.step(1).await,
             SpotifyCommand::Previous => self.step(-1).await,
+            // Live radio has no up-next queue (the display hides it); never fall through
+            // to skipping a paused Spotify queue underneath the radio.
+            SpotifyCommand::SkipTo { .. } => {
+                Err(anyhow::anyhow!("the radio doesn't have an up-next queue"))
+            }
             SpotifyCommand::SetVolume { percent } => self
                 .output
                 .set_volume(*percent)
@@ -577,6 +582,7 @@ impl SpotifyController for RoutedSpotify {
                 | SpotifyCommand::Resume
                 | SpotifyCommand::Next
                 | SpotifyCommand::Previous
+                | SpotifyCommand::SkipTo { .. }
         ) {
             self.radio.release_for_spotify().await;
         }
@@ -874,6 +880,11 @@ mod tests {
         );
         routed.command(SpotifyCommand::Next).await.unwrap();
         assert_eq!(radio.current().unwrap().id, "CHYM");
+        // The radio has no queue: a skip-to is refused, never skipping Spotify underneath.
+        assert!(routed
+            .command(SpotifyCommand::SkipTo { index: 0 })
+            .await
+            .is_err());
         assert_eq!(inner.0.lock().unwrap().len(), 1); // still just the Resume
 
         // Playing a Spotify search stops the radio and routes back first.

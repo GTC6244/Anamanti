@@ -345,6 +345,7 @@ class AmbientScreen extends StatelessWidget {
                             music: state.music!,
                             onClose: assistant.closeMusicScreen,
                             onBack: assistant.backToNowPlaying,
+                            onSelect: assistant.skipToQueueTrack,
                           )
                         : const SizedBox.shrink(),
                   ),
