@@ -207,6 +207,128 @@ fn parse_weekday(s: &str) -> Option<Weekday> {
     }
 }
 
+/// The day a **spoken** weather request names, as read by [`spoken_day`] for the
+/// System-1 fast path. System-1 is a router, not a slot extractor, so the fast handler
+/// recovers the day from the transcript itself, and defers anything it can't pin down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpokenDay {
+    /// No day named ("what's the weather").
+    Unspecified,
+    /// Explicitly now/today ("today", "tonight", "right now", the current weekday).
+    Today,
+    /// One specific future day ("tomorrow", "Saturday", "day after tomorrow").
+    Day(NaiveDate),
+    /// A span, a past day, or more than one day ("this weekend", "next week",
+    /// "yesterday", "today and tomorrow"). The fast path can't show one day for these,
+    /// so it defers to System-2.
+    Unsupported,
+}
+
+impl SpokenDay {
+    /// The forecast slice for a resolvable day, or `None` for [`SpokenDay::Unsupported`].
+    pub fn forecast_when(self) -> Option<ForecastWhen> {
+        match self {
+            SpokenDay::Unspecified | SpokenDay::Today => Some(ForecastWhen::Now),
+            SpokenDay::Day(d) => Some(ForecastWhen::Day(d)),
+            SpokenDay::Unsupported => None,
+        }
+    }
+}
+
+/// Read the day named in a spoken weather request, relative to `today`. Whole-word
+/// matching only, so "sunny" never reads as Sunday. Short weekday forms ("sat", "sun",
+/// "wed") are not accepted here, unlike [`resolve_when`]: in speech they are ordinary
+/// words ("will there be sun"). A weekday names the next such day; the current weekday
+/// means today unless it follows "next" (then it's a week out).
+pub fn spoken_day(text: &str, today: NaiveDate) -> SpokenDay {
+    let lowered = text.to_lowercase();
+    let words: Vec<&str> = lowered
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let mut found: Vec<SpokenDay> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        let next = words.get(i + 1).copied();
+        let hit = match w {
+            "day" if next == Some("after") && words.get(i + 2) == Some(&"tomorrow") => {
+                i += 2; // consume "after tomorrow"
+                Some(SpokenDay::Day(today + Duration::days(2)))
+            }
+            "tomorrow" | "tomorrows" => Some(SpokenDay::Day(today + Duration::days(1))),
+            "overmorrow" => Some(SpokenDay::Day(today + Duration::days(2))),
+            "today" | "todays" | "tonight" | "tonights" | "now" | "currently" => {
+                Some(SpokenDay::Today)
+            }
+            // "this morning/afternoon/evening" is today; "this week/weekend" is a span.
+            "this" if matches!(next, Some("morning" | "afternoon" | "evening")) => {
+                Some(SpokenDay::Today)
+            }
+            // Spans and the past: one forecast day can't answer them.
+            "weekend" | "weekends" | "week" | "weeks" | "month" | "days" | "fortnight"
+            | "yesterday" | "yesterdays" | "last" => Some(SpokenDay::Unsupported),
+            // A calendar date ("the 25th", "October 3rd"): left to System-2's tool.
+            _ if is_ordinal(w) => Some(SpokenDay::Unsupported),
+            _ => full_weekday(w).map(|wd| {
+                let after_next = i > 0 && words[i - 1] == "next";
+                if wd == today.weekday() {
+                    if after_next {
+                        SpokenDay::Day(today + Duration::days(7))
+                    } else {
+                        SpokenDay::Today
+                    }
+                } else {
+                    let ahead = (7 + wd.num_days_from_monday() as i64
+                        - today.weekday().num_days_from_monday() as i64)
+                        % 7;
+                    SpokenDay::Day(today + Duration::days(ahead))
+                }
+            }),
+        };
+        if let Some(h) = hit {
+            if !found.contains(&h) {
+                found.push(h);
+            }
+        }
+        i += 1;
+    }
+
+    match found.as_slice() {
+        [] => SpokenDay::Unspecified,
+        [one] => *one,
+        // Two different days ("today or tomorrow"), or a day plus a span: System-2's job.
+        _ => SpokenDay::Unsupported,
+    }
+}
+
+/// A numeric ordinal token such as "25th", "1st", "3rd".
+fn is_ordinal(w: &str) -> bool {
+    ["st", "nd", "rd", "th"].iter().any(|suffix| {
+        w.strip_suffix(suffix)
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
+/// A full English weekday name (singular or plural/possessive, e.g. "saturdays").
+fn full_weekday(w: &str) -> Option<Weekday> {
+    let base = w
+        .strip_suffix('s')
+        .filter(|b| b.ends_with("day"))
+        .unwrap_or(w);
+    match base {
+        "monday" => Some(Weekday::Mon),
+        "tuesday" => Some(Weekday::Tue),
+        "wednesday" => Some(Weekday::Wed),
+        "thursday" => Some(Weekday::Thu),
+        "friday" => Some(Weekday::Fri),
+        "saturday" => Some(Weekday::Sat),
+        "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
 /// The instant the hourly window starts, given the request and the forecast's local
 /// "now": the current hour truncated for [`ForecastWhen::Now`], else 08:00 on the day.
 pub(crate) fn window_start(when: ForecastWhen, now_local: NaiveDateTime) -> NaiveDateTime {
@@ -420,6 +542,87 @@ mod tests {
             resolve_when(Some("banana"), now).unwrap(),
             ForecastWhen::Now
         );
+    }
+
+    #[test]
+    fn spoken_day_reads_the_requested_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 25).unwrap(); // a Friday
+        let d = |m, day| SpokenDay::Day(NaiveDate::from_ymd_opt(2026, m, day).unwrap());
+
+        // No day named → current conditions, as before.
+        assert_eq!(
+            spoken_day("what's the weather", today),
+            SpokenDay::Unspecified
+        );
+        assert_eq!(
+            spoken_day("is it going to rain", today),
+            SpokenDay::Unspecified
+        );
+
+        // Explicitly today.
+        for t in [
+            "what's the weather today",
+            "how cold is it tonight",
+            "what's it like right now",
+            "will it rain this afternoon",
+            "what's today's forecast",
+            "what's the weather on Friday", // the current weekday means today
+        ] {
+            assert_eq!(spoken_day(t, today), SpokenDay::Today, "{t}");
+        }
+
+        // One future day.
+        assert_eq!(spoken_day("what's the weather tomorrow", today), d(9, 26));
+        assert_eq!(spoken_day("Weather for tomorrow?", today), d(9, 26));
+        assert_eq!(spoken_day("what's tomorrow's forecast", today), d(9, 26));
+        assert_eq!(
+            spoken_day("what about the day after tomorrow", today),
+            d(9, 27)
+        );
+        assert_eq!(spoken_day("will it rain on Sunday", today), d(9, 27));
+        assert_eq!(spoken_day("what's Monday looking like", today), d(9, 28));
+        assert_eq!(spoken_day("weather Thursday", today), d(10, 1));
+        assert_eq!(spoken_day("next Friday's weather", today), d(10, 2));
+        assert_eq!(spoken_day("next Saturday", today), d(9, 26));
+
+        // Whole words only: "sunny"/"sun" are not Sunday, "sat" is not Saturday.
+        assert_eq!(
+            spoken_day("will it be sunny", today),
+            SpokenDay::Unspecified
+        );
+        assert_eq!(
+            spoken_day("will there be sun when we sat outside", today),
+            SpokenDay::Unspecified
+        );
+
+        // Spans, the past, and multiple days defer.
+        for t in [
+            "what's the weather this weekend",
+            "what's the forecast for next week",
+            "will it rain over the next few days",
+            "how hot was it yesterday",
+            "what was the weather last Tuesday",
+            "weather today and tomorrow",
+            "is Saturday or Sunday nicer",
+            "what's the forecast for the 25th",
+            "weather on October 3rd",
+        ] {
+            assert_eq!(spoken_day(t, today), SpokenDay::Unsupported, "{t}");
+        }
+
+        // The forecast slice each maps to.
+        assert_eq!(
+            SpokenDay::Unspecified.forecast_when(),
+            Some(ForecastWhen::Now)
+        );
+        assert_eq!(SpokenDay::Today.forecast_when(), Some(ForecastWhen::Now));
+        assert_eq!(
+            d(9, 26).forecast_when(),
+            Some(ForecastWhen::Day(
+                NaiveDate::from_ymd_opt(2026, 9, 26).unwrap()
+            ))
+        );
+        assert_eq!(SpokenDay::Unsupported.forecast_when(), None);
     }
 
     #[test]
