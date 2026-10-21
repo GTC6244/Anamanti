@@ -162,6 +162,14 @@ impl Intent {
     pub fn place_sensitive(self) -> bool {
         matches!(self, Intent::Weather | Intent::Time | Intent::Date)
     }
+
+    /// Whether a confidently **future** turn must defer to System-2 (§16.1): the clock
+    /// handlers only know *now*, so "what's the date next Friday" / "what time will it be
+    /// in three hours" is a calculation they can't answer. Weather is not here — its
+    /// handler selects a forecast day itself (or defers when it can't).
+    pub fn defers_on_future(self) -> bool {
+        matches!(self, Intent::Time | Intent::Date)
+    }
 }
 
 impl std::fmt::Display for Intent {
@@ -662,6 +670,32 @@ impl SpeakerSummary {
     }
 }
 
+/// The turn's time frame from the `temporal` routing question (plans/system1-fast-
+/// decisions.md §16): a **defer gate** (`Past` always defers) and a **data selector**
+/// (weather: `Present` = current conditions, `Future` = a forecast).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Temporal {
+    /// Already happened / historical.
+    Past,
+    /// Now, the current state, or not time-bound.
+    Present,
+    /// Upcoming, a forecast, or something scheduled.
+    Future,
+}
+
+impl std::str::FromStr for Temporal {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "past" => Ok(Temporal::Past),
+            "present" => Ok(Temporal::Present),
+            "future" => Ok(Temporal::Future),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A resolved fast intent: the routed label plus its calibrated confidence. The
 /// orchestrator parses `intent` into an [`Intent`] to pick a handler.
 #[derive(Debug, Clone, PartialEq)]
@@ -670,6 +704,10 @@ pub struct Resolution {
     pub intent: String,
     /// The engine's calibrated confidence in this resolution (`0.0..=1.0`).
     pub confidence: f64,
+    /// The turn's time frame, set only when the engine answered the `temporal` question
+    /// **confidently** (at or above its floor); `None` = unknown/unsure. Handlers use it
+    /// to pick their data (e.g. weather defers a vague future ask it can't pin to a day).
+    pub temporal: Option<Temporal>,
 }
 
 /// The outcome of a System-1 evaluation.

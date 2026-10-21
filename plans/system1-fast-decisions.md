@@ -614,6 +614,15 @@ wake-word-waiting. Optional sub-second ack ("okay") or a silent close. Safest re
 > `interpret` defers on a **confident `past`** (gated by `min_confidence`, so an unsure temporal never
 > over-defers a present query). present/future resolve unchanged. Unit-tested in `system1/http.rs`.
 > The question is optional on the wire — a checkpoint that doesn't answer it simply skips the gate.
+>
+> **Data selector ✅ IMPLEMENTED 2026-10-21.** Fixes "weather tomorrow shows today": the weather
+> handler was hard-wired to `ForecastWhen::Now`. Now a confident temporal rides on
+> `Resolution::temporal`. The weather handler reads the day from the transcript
+> (`weather::spoken_day`: tomorrow / day after tomorrow / a full weekday name → `ForecastWhen::Day`,
+> spoken via `render_confirmation`). It **defers** a span, a past day, multiple days, or a calendar
+> date ("this weekend", "yesterday", "the 25th"), and also defers a confident `future` that names
+> no readable day ("what's the forecast"). A confident `future` also defers `time`/`date` per the
+> matrix below (`Intent::defers_on_future`).
 
 A third question in the same one-shot forward pass (free):
 
