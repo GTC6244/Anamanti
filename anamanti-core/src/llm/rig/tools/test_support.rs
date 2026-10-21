@@ -206,6 +206,7 @@ pub(crate) fn fully_configured_deps() -> ToolDeps {
             }),
             None,
         )),
+        camera: Some(crate::camera::tests::hub()),
         music_display: Some(Arc::new(crate::music::MusicDisplayRouter::new())),
     }
 }

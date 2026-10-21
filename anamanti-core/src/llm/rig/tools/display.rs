@@ -653,10 +653,145 @@ impl VoiceTool for PlacesLookup {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Camera (plans/CameraPlan.md)
+// ---------------------------------------------------------------------------
+
+pub(super) const SHOW_CAMERA: &str = "show_camera";
+const CLOSE_CAMERA: &str = "close_camera";
+
+/// `show_camera` and `close_camera`, in advertised order. The LLM fallback for wordings
+/// the camera fast path (`orchestrator::camera`) doesn't catch.
+pub(super) fn camera_tools(hub: Arc<crate::camera::CameraHub>) -> Vec<Arc<dyn VoiceTool>> {
+    vec![
+        Arc::new(ShowCamera { hub }),
+        close_tool(
+            CLOSE_CAMERA,
+            "Close the live camera view on the display and return to the idle screen. \
+             Use when the user asks to close/dismiss/stop the camera.",
+            DeviceAction::DismissCamera,
+            "the camera",
+            "Okay.",
+        ),
+    ]
+}
+
+/// Typed arguments for `show_camera`.
+#[derive(Debug, Default, Deserialize)]
+struct ShowCameraArgs {
+    /// The camera's name; omitted/blank = the first configured camera.
+    #[serde(default)]
+    camera: Option<String>,
+}
+
+/// Opens the live view of a configured camera on the display the user is talking to
+/// ([`DeviceAction::ShowCamera`]). The frame names the camera only; the display fetches
+/// the stream itself.
+struct ShowCamera {
+    hub: Arc<crate::camera::CameraHub>,
+}
+
+impl ShowCamera {
+    fn names(&self) -> Vec<String> {
+        self.hub.cameras().iter().map(|c| c.name.clone()).collect()
+    }
+}
+
+#[async_trait]
+impl VoiceTool for ShowCamera {
+    fn name(&self) -> &'static str {
+        SHOW_CAMERA
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        let names = self.names().join(", ");
+        definition(
+            SHOW_CAMERA,
+            &format!(
+                "Show a live security-camera view on the display. Use when the user \
+                 asks to see a camera, who is at the door, or what is happening \
+                 outside. Available cameras: {names}. You cannot see the video \
+                 yourself — never describe what the camera shows."
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "camera": {
+                        "type": "string",
+                        "description": format!(
+                            "Which camera to show; one of: {names}. Omit for the first one."
+                        )
+                    }
+                }
+            }),
+        )
+    }
+
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: ShowCameraArgs = super::parse_args_or_default(args, SHOW_CAMERA)?;
+        let sink = ctx.require_sink("no display is connected to show the camera on right now")?;
+        let want = args.camera.unwrap_or_default();
+        let Some(cam) = self.hub.resolve(&want) else {
+            return Ok(format!(
+                "There's no camera called \"{}\". The cameras are: {}.",
+                want.trim(),
+                self.names().join(", ")
+            ));
+        };
+        emit(
+            Some(sink),
+            DeviceAction::ShowCamera {
+                name: cam.name.clone(),
+            },
+            "the camera could show",
+        )?;
+        Ok(format!("Here's the {}.", cam.name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{home, StaticWeather};
     use super::*;
+
+    #[tokio::test]
+    async fn show_camera_resolves_names_and_emits_only_the_name() {
+        let tools = camera_tools(crate::camera::tests::hub());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let said = tools[0]
+            .invoke(&json!({ "camera": "back yard" }), &ToolCtx::new(Some(&tx)))
+            .await
+            .unwrap();
+        assert_eq!(said, "Here's the Back yard.");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::ShowCamera {
+                name: "Back yard".into()
+            }
+        );
+        // Omitted → the first camera; null args are accepted.
+        tools[0]
+            .invoke(&Value::Null, &ToolCtx::new(Some(&tx)))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            DeviceAction::ShowCamera {
+                name: "Front Door".into()
+            }
+        );
+        // Unknown camera → a spoken list, nothing shown.
+        let said = tools[0]
+            .invoke(&json!({ "camera": "garage" }), &ToolCtx::new(Some(&tx)))
+            .await
+            .unwrap();
+        assert!(said.contains("Front Door, Back yard"), "{said}");
+        assert!(rx.try_recv().is_err());
+        // The advertised definition lists the cameras but never the password.
+        let def = serde_json::to_string(&tools[0].definition().parameters).unwrap()
+            + &tools[0].definition().description;
+        assert!(def.contains("Front Door") && !def.contains("p@ss"));
+    }
 
     fn weather_tool() -> Arc<dyn VoiceTool> {
         weather_tools(Arc::new(StaticWeather), home("Austin, TX"), true).remove(0)

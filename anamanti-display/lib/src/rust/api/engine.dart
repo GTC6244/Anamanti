@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `ambient_light`, `base`, `connecting`, `detected`, `disconnected`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `recipe_step`, `reply_token`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
+// These functions are ignored because they are not marked as `pub`: `ambient_light`, `base`, `camera_context`, `connecting`, `detected`, `disconnected`, `dismiss_camera`, `dismiss_place`, `dismiss_recipe`, `dismiss_weather`, `engine_target`, `enroll_result`, `error`, `font_adjust`, `level_diag`, `level`, `listening_followup`, `music_screen`, `presence`, `recipe_navigate`, `recipe_scroll`, `recipe_step`, `reply_token`, `show_camera`, `show_place`, `show_recipe`, `show_weather`, `speaking_done`, `speaking`, `start_channel`, `started`, `status`, `stop_channel`, `stopped`, `streaming`, `timer_cancelled`, `timer_finished`, `timer_started`, `transcript`, `weather_current`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChannelHandle`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
@@ -151,6 +151,20 @@ void setPlaceContext({
   name: name,
   address: address,
 );
+
+/// Report the live camera view's state as the device's **display context** so the next
+/// voice turn's `audio-start` tells the orchestrator a camera view is up (and which
+/// camera), letting a bare "stop" / "close it" close it. The camera view's setter for the
+/// general display-context mechanism (see [`set_place_context`] /
+/// [`crate::engine::set_display_context`]). Carries only the camera's display name —
+/// never the stream URL.
+///
+/// Flutter calls this when the camera view opens or closes. `active == false` clears the
+/// context (idle screen); `name` is ignored then.
+void setCameraContext({required bool active, required String name}) => RustLib
+    .instance
+    .api
+    .crateApiEngineSetCameraContext(active: active, name: name);
 
 /// Push the music player's current state as this turn's display context (see
 /// [`set_place_context`]), so the next turn's `audio-start` tells the orchestrator a music
@@ -897,6 +911,15 @@ enum WakeWordEventKind {
 
   /// Place mode: dismiss the full-screen place card and return to idle/ambient.
   dismissPlace,
+
+  /// Camera mode (`plans/CameraPlan.md`): the orchestrator asked to open the live
+  /// camera view. The camera's display name (e.g. `"Front Door"`) rides the generic
+  /// `recipe_action` string carrier (as `FontAdjust` does). The frame never carries
+  /// the stream URL — the UI fetches it with `get_camera_stream`.
+  showCamera,
+
+  /// Camera mode: close the live camera view and return to idle/ambient.
+  dismissCamera,
 
   /// Recipe mode: switch tab by voice. `recipe_action` is the target tab
   /// (`"overview"` / `"ingredients"` / `"steps"`).

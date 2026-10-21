@@ -322,6 +322,11 @@ pub enum TurnUpdate {
     /// card full-screen, or dismiss it. Handled by the UI (the place card outlives the
     /// turn's socket), so it does not change the turn's state machine.
     Place(protocol::PlaceCommand),
+    /// A device-action **camera** command relayed from the orchestrator: open the live
+    /// camera view of a named camera, or close it (`plans/CameraPlan.md`). Handled by
+    /// the UI (the camera view outlives the turn's socket), so it does not change the
+    /// turn's state machine. Carries only the camera's display name, never a URL.
+    Camera(protocol::CameraCommand),
     /// A device-action **music screen** command relayed from the orchestrator's
     /// `music_screen` tool: which music screen to show (`"now_playing"` / `"up_next"` /
     /// `"hidden"`). Handled by the UI (the music player outlives the turn's socket), so it
@@ -552,6 +557,13 @@ where
         types::PLACE => {
             if let Some(cmd) = event.place_command() {
                 on_update(TurnUpdate::Place(cmd));
+            }
+        }
+        // A device action (camera show/dismiss) relayed on the voice-turn socket. The
+        // camera view is owned by the UI and outlives the turn, so just surface it.
+        types::CAMERA => {
+            if let Some(cmd) = event.camera_command() {
+                on_update(TurnUpdate::Camera(cmd));
             }
         }
         // A voice `music_screen` command relayed on the voice-turn socket (show/hide the
@@ -916,6 +928,73 @@ mod tests {
             .unwrap();
         let finish_pos = updates.len() - 1;
         assert!(listen_pos < finish_pos, "listen must precede the turn end");
+    }
+
+    #[tokio::test]
+    async fn camera_frames_surface_as_turn_updates() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = tokio::io::split(client_io);
+        let mut conn =
+            WyomingConnection::from_halves(TokioBufReader::new(cr), cw, AudioFormat::default());
+
+        // Mock orchestrator: transcript, then a camera show + dismiss, then the TTS
+        // audio-start/stop that ends the turn.
+        let server = tokio::spawn(async move {
+            let (sr, sw) = tokio::io::split(server_io);
+            let mut reader = TokioBufReader::new(sr);
+            let mut writer = sw;
+
+            let _ = read_event(&mut reader).await.unwrap().unwrap(); // audio-start
+            protocol::write_event(
+                &mut writer,
+                &WyomingEvent::with_data(types::TRANSCRIPT, json!({ "text": "show the door" })),
+            )
+            .await
+            .unwrap();
+            let _ = read_event(&mut reader).await.unwrap().unwrap(); // device audio-stop
+            for ev in [
+                WyomingEvent::camera_show("Front Door"),
+                WyomingEvent::camera_dismiss(),
+                WyomingEvent::audio_start(TTS_22K, 0),
+                WyomingEvent::audio_stop(0),
+            ] {
+                protocol::write_event(&mut writer, &ev).await.unwrap();
+            }
+        });
+
+        let (_pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(8);
+        let (_int_tx, int_rx) = mpsc::channel::<()>(1);
+        let mut updates = Vec::new();
+        run_turn(
+            &mut conn,
+            pcm_rx,
+            |u| updates.push(u),
+            |_, _| {},
+            int_rx,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert!(
+            updates.contains(&TurnUpdate::Camera(protocol::CameraCommand::Show(
+                "Front Door".to_string()
+            )))
+        );
+        assert!(updates.contains(&TurnUpdate::Camera(protocol::CameraCommand::Dismiss)));
+        assert_eq!(updates.last(), Some(&TurnUpdate::Finished));
+    }
+
+    #[tokio::test]
+    async fn audio_start_stamps_the_camera_display_context() {
+        let (mut conn, server_io) = duplex_conn();
+        conn.set_display_context(Some(
+            json!({ "kind": "camera", "camera": { "name": "Front Door" } }),
+        ));
+        let start = audio_start_frame(conn, server_io).await;
+        assert_eq!(start.data["screen"]["kind"], json!("camera"));
+        assert_eq!(start.data["screen"]["camera"]["name"], json!("Front Door"));
     }
 
     #[tokio::test]

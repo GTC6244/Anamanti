@@ -173,6 +173,15 @@
     "exact_only": ["fireplace"],
     "dashboard_path": "lovelace/0"
   },
+  "camera": {
+    "enabled": true,
+    "nvr_host": "192.168.1.29",
+    "rtsp_port": 554,
+    "username": "anamanti",
+    "cameras": [
+      { "name": "Front Door", "channel": 5 }
+    ]
+  },
   "tool_cache": {
     "weather_lookup": 3600
   }

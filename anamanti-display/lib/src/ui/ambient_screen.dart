@@ -23,6 +23,7 @@ import 'package:anamanti_display/src/engine/notification_controller.dart';
 import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_data.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
+import 'package:anamanti_display/src/ui/camera_view.dart';
 import 'package:anamanti_display/src/ui/conversation_view.dart';
 import 'package:anamanti_display/src/ui/listening_overlay.dart';
 import 'package:anamanti_display/src/ui/music_control_overlay.dart';
@@ -52,6 +53,7 @@ class AmbientScreen extends StatelessWidget {
     this.ringAttack = 0.65,
     this.ringRelease = 0.08,
     this.ringDecay = 0.99,
+    this.cameraPlayerFactory = defaultCameraPlayer,
   });
 
   final AssistantController assistant;
@@ -65,6 +67,10 @@ class AmbientScreen extends StatelessWidget {
   final double ringAttack;
   final double ringRelease;
   final double ringDecay;
+
+  /// Builds the live camera view's video player. Injectable so widget tests never
+  /// need a platform video implementation; production uses [defaultCameraPlayer].
+  final CameraPlayerFactory cameraPlayerFactory;
 
   /// Proactive notifications pushed by the orchestrator (Approach A). When null (as
   /// in widget tests that only exercise the turn UI) no banner is shown.
@@ -99,9 +105,12 @@ class AmbientScreen extends StatelessWidget {
             // takes over the idle presentation but yields to an active voice turn.
             final weatherActive = state.weatherActive;
             final placeActive = state.placeActive;
-            // Core-pushed full-screen modes (recipe/weather/place). These win over the
-            // device-toggled music screen, which is suppressed while one is up.
-            final coreMode = recipeActive || weatherActive || placeActive;
+            // Live camera view (plans/CameraPlan.md), opened by voice via the Core.
+            final cameraActive = state.cameraActive;
+            // Core-pushed full-screen modes (recipe/weather/place/camera). These win over
+            // the device-toggled music screen, which is suppressed while one is up.
+            final coreMode =
+                recipeActive || weatherActive || placeActive || cameraActive;
             // Music: `musicActive` means a track is playing. Which widget shows follows the
             // display's style (`musicDisplayStyle`, chosen per display by the Core),
             // or a view the user explicitly opened (tap / voice); a Core-pushed mode always
@@ -136,21 +145,19 @@ class AmbientScreen extends StatelessWidget {
             // blue ring, which reacts to the live mic level. Suppressed when the user
             // has turned the ring off in settings.
             final listening = state.listening && listeningRingEnabled;
-            // The compact timer badge shows whenever timers are running and the big
-            // screen-filling presentation is NOT up — i.e. while a turn is active or any
-            // full-screen mode (recipe/weather/place/music) covers the idle screen — so a
-            // running timer stays glanceable instead of being hidden behind those views.
-            // It is the top-most layer in the Stack (see the end of `children`), so it
-            // always has z-order precedence over every other overlay and banner.
-            final compactTimersVisible =
-                state.timers.isNotEmpty && (active || modeActive) && !offMode;
+            // Timers: which of the two linked timer widgets shows is resolved in one
+            // place by `effectiveTimerDisplay` ([TimerDisplayStyle]) — full screen while
+            // idle, the compact chip row while a turn or any full-screen mode covers the
+            // idle screen, neither in away mode.
+            final timerDisplay = state.effectiveTimerDisplay;
+            final fullTimersVisible = timerDisplay == TimerDisplayStyle.fullscreen;
+            final compactTimersVisible = timerDisplay == TimerDisplayStyle.compact;
             // The settings gear shows only after a touch, and is blocked ONLY by a
             // full-screen widget: the turn's conversation panel, a full-screen mode
             // (recipe/weather/place/music now-playing/up-next), or the big
             // screen-filling idle timers — and not in away mode. Partial overlays
             // (the compact music bar, the listening ring, banners) never block it.
-            final fullScreenWidget =
-                active || modeActive || state.timers.isNotEmpty;
+            final fullScreenWidget = active || modeActive || fullTimersVisible;
             final showSettings = touched && !fullScreenWidget && !offMode;
             return Stack(
               fit: StackFit.expand,
@@ -175,16 +182,17 @@ class AmbientScreen extends StatelessWidget {
                   ),
                 ),
 
-                // Big, screen-filling timers — the idle presentation. Fades out while a
-                // turn is active (the conversation wins the screen) and in away mode
-                // (only the clock shows); survives as the compact badge below. Ignores
-                // pointers when hidden so it never steals taps meant for the conversation.
+                // Big, screen-filling timers — the idle presentation
+                // (`TimerDisplayStyle.fullscreen`). Fades out while a turn or full-screen
+                // mode is up (survives as the compact overlay below) and in away mode
+                // (only the clock shows). Ignores pointers when hidden so it never steals
+                // taps meant for the conversation.
                 AnimatedOpacity(
-                  opacity: (active || offMode || modeActive) ? 0 : 1,
+                  opacity: fullTimersVisible ? 1 : 0,
                   duration: const Duration(milliseconds: 300),
                   child: IgnorePointer(
-                    ignoring: active || offMode || modeActive,
-                    child: TimersOverlay(
+                    ignoring: !fullTimersVisible,
+                    child: FullScreenTimersView(
                       timers: state.timers,
                       onDismiss: assistant.dismissTimer,
                     ),
@@ -265,6 +273,27 @@ class AmbientScreen extends StatelessWidget {
                             key: ValueKey(state.place!.name),
                             place: state.place!,
                             onClose: assistant.dismissPlace,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+
+                // Camera mode: the full-screen live camera view (video only). Same
+                // precedence as the place card — above the idle presentation, below the
+                // conversation panel. Keyed on the open sequence so a new show (or a
+                // reopen) builds a fresh player, and the player is disposed as soon as the
+                // view closes. Dismissed by the ✕, voice "stop", or the 60 s auto-close.
+                AnimatedOpacity(
+                  opacity: cameraActive ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: IgnorePointer(
+                    ignoring: !cameraActive,
+                    child: cameraActive
+                        ? CameraView(
+                            key: ValueKey('camera:${state.camera!.seq}'),
+                            session: state.camera!,
+                            onClose: assistant.dismissCamera,
+                            playerFactory: cameraPlayerFactory,
                           )
                         : const SizedBox.shrink(),
                   ),
@@ -536,8 +565,7 @@ class AmbientScreen extends StatelessWidget {
                       ignoring: !compactTimersVisible,
                       child: Align(
                         alignment: Alignment.topCenter,
-                        child: TimersOverlay(
-                          compact: true,
+                        child: CompactTimersOverlay(
                           timers: state.timers,
                           onDismiss: assistant.dismissTimer,
                         ),

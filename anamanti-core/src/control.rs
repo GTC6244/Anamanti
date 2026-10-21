@@ -55,6 +55,7 @@ pub fn is_control_request(event_type: &str) -> bool {
             | types::LIST_MODELS
             | types::LIST_VOICES
             | types::GET_DRIVE_TOKEN
+            | types::GET_CAMERA_STREAM
             | types::MUSIC_CONTROL
             | types::GET_FUNCTIONS
             | types::PAIR_PHONE
@@ -389,6 +390,41 @@ pub fn drive_token_response(settings: &SharedSettings) -> WyomingEvent {
             "scope": d.scope.unwrap_or_default(),
         }),
     )
+}
+
+/// Build the `anamanti-camera-stream` response (`plans/CameraPlan.md`): the RTSP
+/// sub-stream URL — **credential embedded** — for the requested camera. Like the Drive
+/// bundle it rides the device↔Core LAN hop only; the device holds it in memory. Never
+/// log the URL. An unconfigured camera or an unknown name answers `ok: false` with a
+/// speakable `message`.
+pub fn camera_stream_response(
+    request: &WyomingEvent,
+    hub: Option<&crate::camera::CameraHub>,
+) -> WyomingEvent {
+    let fail = |message: &str| {
+        WyomingEvent::with_data(
+            types::CAMERA_STREAM,
+            json!({ "ok": false, "message": message }),
+        )
+    };
+    let Some(hub) = hub else {
+        return fail("The camera isn't set up on Anamanti Core.");
+    };
+    let want = request
+        .data
+        .get("camera")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match hub.resolve(want) {
+        Some(cam) => {
+            log::info!("camera stream: serving {:?} to a display", cam.name);
+            WyomingEvent::with_data(
+                types::CAMERA_STREAM,
+                json!({ "ok": true, "camera": cam.name, "url": hub.stream_url(cam) }),
+            )
+        }
+        None => fail(&format!("There's no camera called {}.", want.trim())),
+    }
 }
 
 /// One capability row in the `anamanti-functions` snapshot. `mode` is the device's
@@ -756,6 +792,7 @@ pub fn respond(
         types::LIST_SPEAKERS => speakers_response(speaker, settings),
         types::NAME_SPEAKER => name_speaker(request, speaker),
         types::GET_DRIVE_TOKEN => drive_token_response(settings),
+        types::GET_CAMERA_STREAM => camera_stream_response(request, settings.camera().as_deref()),
         types::DESCRIBE_SETTINGS => settings_response(settings, true, "current settings"),
         // The device path never accepts secrets (`allow_secrets = false`): provider keys
         // are entered only on the orchestrator's loopback config page, so cloud secrets
@@ -1327,6 +1364,7 @@ mod tests {
                 places_provider: "google".to_string(),
                 radio: None,
                 home_assistant: None,
+                camera: None,
                 music_display: Default::default(),
             },
             RuntimeSettings {
@@ -1403,6 +1441,43 @@ mod tests {
         assert_eq!(resp.data["refresh_token"], json!("1//refresh"));
         assert_eq!(resp.data["folder_ids"][0], json!("1AbC"));
         assert_eq!(resp.data["scope"], json!("scope-x"));
+    }
+
+    #[test]
+    fn get_camera_stream_serves_the_url_or_a_speakable_failure() {
+        assert!(is_control_request(types::GET_CAMERA_STREAM));
+        // Unconfigured Core (the default test settings): ok=false + message, no URL.
+        let s = settings();
+        let mem = MemoryStore::open_in_memory().unwrap();
+        let resp = respond(
+            &WyomingEvent::get_camera_stream("Front Door"),
+            &mem,
+            &s,
+            None,
+        );
+        assert_eq!(resp.event_type, types::CAMERA_STREAM);
+        assert_eq!(resp.data["ok"], json!(false));
+        assert!(resp.data.get("url").is_none());
+        assert!(resp.data["message"]
+            .as_str()
+            .unwrap()
+            .contains("isn't set up"));
+
+        let hub = crate::camera::tests::hub();
+        let ok = camera_stream_response(&WyomingEvent::get_camera_stream("front door"), Some(&hub));
+        assert_eq!(ok.data["ok"], json!(true));
+        assert_eq!(ok.data["camera"], json!("Front Door"));
+        assert_eq!(
+            ok.data["url"],
+            json!("rtsp://anamanti:p%40ss%3Aw%2Frd@192.168.1.29:554/h264Preview_05_sub")
+        );
+        // Blank → the first camera.
+        let first = camera_stream_response(&WyomingEvent::get_camera_stream(""), Some(&hub));
+        assert_eq!(first.data["camera"], json!("Front Door"));
+        let unknown =
+            camera_stream_response(&WyomingEvent::get_camera_stream("garage"), Some(&hub));
+        assert_eq!(unknown.data["ok"], json!(false));
+        assert!(unknown.data.get("url").is_none());
     }
 
     #[test]

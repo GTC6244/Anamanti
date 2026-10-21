@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
-use super::{Decision, DecisionEngine, DecisionRequest, Intent, Resolution};
+use super::{Decision, DecisionEngine, DecisionRequest, Intent, Resolution, Temporal};
 
 /// The `noul` question id used to detect turns that need System-2 reasoning.
 const NEEDS_FULL: &str = "needs_full_understanding";
@@ -49,14 +49,12 @@ const NAMES_PLACE: &str = "names_place";
 const NAMES_PLACE_THRESHOLD: f64 = 0.5;
 
 /// The `choice` question id that classifies the turn's time frame (past / present /
-/// future). Used as a **defer gate**: the Core has no fast historical-data path, so a
-/// turn the model is confident concerns the PAST routes to System-2. present/future
-/// proceed (weather resolves for both — the widget carries current + forecast). See
+/// future). A **defer gate** — the Core has no fast historical-data path, so a confident
+/// PAST routes to System-2, as does a confident FUTURE for the clock intents — and a
+/// **data selector**: the confident answer rides on [`Resolution::temporal`] so the
+/// weather handler can tell a forecast ask from a current-conditions one. See
 /// `plans/system1-fast-decisions.md` §16.
 const TEMPORAL: &str = "temporal";
-
-/// The temporal label that forces a defer.
-const TEMPORAL_PAST: &str = "past";
 
 /// An HTTP System-1 engine speaking `/v1/systemone`.
 pub struct HttpDecider {
@@ -327,15 +325,19 @@ pub fn interpret(resp: &Value, intents: &[String], min_confidence: f64) -> Decis
         return Decision::Defer; // needs System-2 (or the answer was missing)
     }
 
-    // Temporal defer-gate (§16): no fast historical-data path, so a turn the model is
-    // *confident* concerns the PAST goes to System-2. present/future proceed; an unsure
-    // temporal never over-defers a present query (preserves weather/timer recall). The
-    // question is optional — a checkpoint that doesn't answer it just skips this gate.
-    if let Some(t) = answers.get(TEMPORAL) {
-        let is_past = t.get("choice").and_then(Value::as_str) == Some(TEMPORAL_PAST);
-        if is_past && choice_confidence(Some(t)) >= min_confidence {
-            return Decision::Defer;
+    // Temporal (§16): only a *confident* answer counts — an unsure temporal never
+    // over-defers a present query (preserves weather/timer recall). The question is
+    // optional — a checkpoint that doesn't answer it just skips this gate.
+    let temporal = answers.get(TEMPORAL).and_then(|t| {
+        let label = t.get("choice").and_then(Value::as_str)?;
+        if choice_confidence(Some(t)) < min_confidence {
+            return None;
         }
+        label.parse::<Temporal>().ok()
+    });
+    // Defer gate: no fast historical-data path, so a confident PAST goes to System-2.
+    if temporal == Some(Temporal::Past) {
+        return Decision::Defer;
     }
 
     let intent_ans = match answers.get("intent") {
@@ -351,11 +353,20 @@ pub fn interpret(resp: &Value, intents: &[String], min_confidence: f64) -> Decis
     }
     let intent_conf = choice_confidence(Some(intent_ans));
 
+    // A confident FUTURE defers the clock intents (they only know *now*; §16.1). Weather
+    // receives the temporal and selects a forecast day itself.
+    if temporal == Some(Temporal::Future)
+        && label.parse::<Intent>().is_ok_and(Intent::defers_on_future)
+    {
+        return Decision::Defer;
+    }
+
     // Strict gate: the chosen intent must clear the floor.
     if intent_conf >= min_confidence {
         Decision::Resolve(Resolution {
             intent: label.to_string(),
             confidence: intent_conf,
+            temporal,
         })
     } else {
         Decision::Defer
@@ -540,6 +551,52 @@ mod tests {
                 matches!(interpret(&r, &intents(), 0.85), Decision::Resolve(_)),
                 "temporal={tense} should resolve"
             );
+        }
+    }
+
+    #[test]
+    fn interpret_carries_a_confident_temporal_on_the_resolution() {
+        // The weather handler needs to tell a forecast ask from a current one.
+        let future = with_temporal(resp("weather", 0.97, 0.02), "future", 0.95);
+        match interpret(&future, &intents(), 0.85) {
+            Decision::Resolve(r) => assert_eq!(r.temporal, Some(Temporal::Future)),
+            Decision::Defer => panic!("expected a Resolve"),
+        }
+        // An unsure temporal is dropped rather than trusted.
+        let unsure = with_temporal(resp("weather", 0.97, 0.02), "future", 0.60);
+        match interpret(&unsure, &intents(), 0.85) {
+            Decision::Resolve(r) => assert_eq!(r.temporal, None),
+            Decision::Defer => panic!("expected a Resolve"),
+        }
+        // No temporal answer at all (an older checkpoint) → None.
+        match interpret(&resp("weather", 0.97, 0.02), &intents(), 0.85) {
+            Decision::Resolve(r) => assert_eq!(r.temporal, None),
+            Decision::Defer => panic!("expected a Resolve"),
+        }
+    }
+
+    #[test]
+    fn interpret_defers_clock_intents_on_confident_future() {
+        // "what's the date next Friday" is a calculation the wall-clock handler can't do.
+        let clock = vec!["time".to_string(), "date".to_string()];
+        for intent in ["time", "date"] {
+            let future = with_temporal(resp(intent, 0.97, 0.02), "future", 0.95);
+            assert_eq!(
+                interpret(&future, &clock, 0.85),
+                Decision::Defer,
+                "{intent}+future should defer"
+            );
+            // Present (and an unsure future) still resolve from the clock.
+            let present = with_temporal(resp(intent, 0.97, 0.02), "present", 0.95);
+            assert!(matches!(
+                interpret(&present, &clock, 0.85),
+                Decision::Resolve(_)
+            ));
+            let unsure = with_temporal(resp(intent, 0.97, 0.02), "future", 0.60);
+            assert!(matches!(
+                interpret(&unsure, &clock, 0.85),
+                Decision::Resolve(_)
+            ));
         }
     }
 

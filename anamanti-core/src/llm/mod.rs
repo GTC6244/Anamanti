@@ -72,6 +72,12 @@ pub enum DeviceAction {
     ShowPlace(crate::places::PlaceReport),
     /// Dismiss the place card and return to the idle/ambient display.
     DismissPlace,
+    /// Open the live camera view of the named camera (`plans/CameraPlan.md`). Carries
+    /// only the display name — the device fetches the stream URL over the control
+    /// socket. Fire-and-forget: the device owns the view (and its auto-close).
+    ShowCamera { name: String },
+    /// Close the live camera view.
+    DismissCamera,
     /// Drive the already-open recipe screen by voice — switch tab or scroll a pane.
     /// Fire-and-forget: the device owns the screen state.
     RecipeControl(RecipeNav),

@@ -496,6 +496,18 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       `dart analyze` clean; FRB codegen clean. **Pending on-device QA** (§4 of the plan):
       release APK, set `GOOGLE_PLACES_API_KEY` + a `home_address`, ask "what are the hours
       for <cafe>" → card with photo + hours; confirm disambiguation and voice/touch close.
+- [x] **Live NVR camera view** (2026-10-20, see `CameraPlan.md`): "show the front door" →
+      the speaking display plays the Reolink RLN8-410's channel-5 RTSP sub-stream full
+      screen (`CameraView`, vendored+patched `video_player_android`, platform view). Core
+      fast path + `show_camera`/`close_camera`, `anamanti-camera` frame, stream URL via
+      `anamanti-get-camera-stream`. Suites green (Core lib 712, protocol 34, device-rust 122,
+      Flutter 282); Core verified end to end with a test copy. **Pending on-device QA:**
+      deploy Core (add the `camera` block + `REOLINK_PASSWORD` to prod) and the APK, then
+      "show me the front door" → video in ~2–4 s; "close it"; 60 s auto-close.
+- [ ] **Camera — follow-ups** (deferred, `CameraPlan.md` §6): touch entry (idle-screen icon +
+      `cameraEnabled` setting); config-page drawer (runtime-settable camera config +
+      password); Core snapshot fallback when RTSP fails; the automatic "someone's at the
+      door" pop-up (trigger TBD — no NVR polling); more cameras by voice (just config).
 - [x] **Directions / traffic (voice-only)** — shipped: the `directions_lookup` rig info
       tool returns real distance, travel time, and **live traffic** between two places
       (`driving`/`walking`/`cycling`). Lives in `anamanti-core/src/directions/` behind a

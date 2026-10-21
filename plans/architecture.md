@@ -642,6 +642,27 @@ predictable memory use and no GC pauses under the 1 GB limit.
   so without it the tool is not advertised. A place query is also a **route-only System-1
   `place` intent** (classified, then deferred to System-2 which owns the free-form
   place-name slot). See `PlacesPlan.md`.
+- **`anamanti-camera`** (Anamanti Core → device) + **`anamanti-get-camera-stream`** /
+  **`anamanti-camera-stream`** (device ⇄ Core control request): the **live NVR camera
+  view** (`CameraPlan.md`). `anamanti-camera` is a device-action frame on the per-turn
+  voice socket (`data.action` = `show`/`dismiss`; `show` carries only `data.camera`, the
+  camera's display name — **never a URL or credential**), emitted by the pre-System-1
+  **camera fast path** (`orchestrator/camera.rs`: "show the front door", "who's at the
+  door", and — while the view is open — "stop"/"close it") or the `show_camera` /
+  `close_camera` tools (`DeviceAction::{ShowCamera,DismissCamera}` → FRB
+  `WakeWordEvent::{show,dismiss}_camera`, the name on the `recipe_action` carrier). On show
+  the device asks the Core for the stream over the control socket; the reply carries the
+  NVR's **RTSP sub-stream URL with the credential embedded** (`REOLINK_PASSWORD`, env-only),
+  riding the LAN hop only and held **in memory only** on the device (never logged on either
+  side). The device dials the NVR directly and plays the H.264 sub-stream full screen
+  (`CameraView`) through a **vendored, patched `video_player_android`**
+  (`anamanti-display/third_party/video_player_android`: RTP-over-TCP + a 0.5 s start
+  buffer) in **platform-view** mode (the MTK decoder fails on Flutter's texture surface).
+  Video only (no audio path); auto-closes after 60 s. Display context while open:
+  `screen: {kind: "camera", camera: {name}}`. Because the frame goes down the speaking
+  display's own turn socket, the view opens **only on the display the user is talking to**.
+  No NVR polling/events (the automatic pop-up is deferred). Config is boot-time only
+  (`camera{nvr_host, rtsp_port, username, cameras[{name, channel}]}`).
 - **`anamanti-listen`** (Anamanti Core → device): a project-local **follow-up-listen**
   frame (`data.depth` + `data.wait_secs`). After **every** reply (gated by
   `follow_up.enabled`) the Anamanti Core sends this frame **just before** the turn's
