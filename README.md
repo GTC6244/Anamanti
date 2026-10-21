@@ -56,6 +56,14 @@ speaks the reply back through the Echo Show's speakers.
   say "play Dave Rocks" / "next station" / "stop the radio". It plays on the same
   speakers as Spotify (mpv → Snapcast; starting one stops the other), and the display's
   now-playing screen shows the station logo, a LIVE badge and the current song.
+- 🇧🇷 **Bilingual: English + Brazilian Portuguese** — turn it on under the config
+  page's **Voice → Languages** (or the `language` block in `anamanti.json`) and anyone
+  can speak either language on any turn: the assistant answers in the language that
+  turn was spoken in, with a Portuguese Piper voice for Portuguese
+  (`pt_BR-faber-medium`). Timers, the clock, "lembra que…", "esquece isso", "desliga a
+  luz do escritório" and "fala como um gângster" all work in Portuguese; English is
+  unchanged. The Display's own screens stay English (the live transcript and reply show
+  whatever was said). See [`plans/BilingualPlan.md`](plans/BilingualPlan.md).
 - 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
   heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
   tuning* — it changes only how replies sound, never what the assistant knows or does.
@@ -225,6 +233,25 @@ cargo run --manifest-path anamanti-core/Cargo.toml --release
   Core is a client to. STT can instead run **in-process** (whisper.cpp,
   `stt.engine=whisper-rs`) with no separate server — see
   `plans/python-to-rust-whisper.md`. See `anamanti-core/src/config.rs` for config.
+- **Bilingual (English + Brazilian Portuguese):** add to `anamanti.json` (or set it live
+  on the config page, Voice → Languages):
+
+  ```json
+  "language":   { "enabled": ["en", "pt-BR"], "default": "en" },
+  "tts_voices": { "pt-BR": "pt_BR-faber-medium" },
+  "tts_addrs":  { "pt-BR": "127.0.0.1:10201" }
+  ```
+
+  Install the `pt_BR` Piper voice where your Piper server keeps voices
+  (`pt_BR-faber-medium.onnx` + `.onnx.json` from `rhasspy/piper-voices`), and run a
+  **second Piper** for Portuguese on the `tts_addrs` port with the same `--data-dir` and
+  `--voice pt_BR-faber-medium`: wyoming-piper keeps one voice loaded, so a single shared
+  server reloads the model on every language switch (~0.5–1 s). `tts_addrs` is optional. The STT engine
+  stays whatever you use: ElevenLabs needs nothing more; whisper-rs needs a
+  multilingual model (`scripts/fetch-whisper-models.sh --multilingual`, then
+  `"stt": { "model": "small", "multilingual": true }`); a Wyoming faster-whisper server
+  must run with a multilingual model and no `--language`. Remove the `language` block to
+  go back to English-only. Design + measurements: `plans/BilingualPlan.md`.
 - **Multiple displays, one Anamanti Core:** N Echo Shows can share a single
   Anamanti Core — each connection is handled independently and every reply is
   routed back to the display that asked. Memory + settings are one shared

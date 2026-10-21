@@ -347,7 +347,18 @@ impl Pipeline {
         if text.trim().is_empty() {
             return Ok(true);
         }
-        let tts_conn = connector.connect_tts().await?;
+        // The voice's language picks its Piper server (one per language keeps each voice
+        // resident — wyoming-piper holds a single voice in memory). Single-language
+        // installs have no per-language servers, so this is `connect_tts`.
+        let voice_lang = if runtime.language.is_bilingual() {
+            runtime
+                .tts_voice
+                .as_deref()
+                .and_then(|v| crate::lang::Lang::ALL.into_iter().find(|l| l.owns_voice(v)))
+        } else {
+            None
+        };
+        let tts_conn = connector.connect_tts_for(voice_lang).await?;
         let mut tts = TtsSession::begin(tts_conn, &text, runtime.tts_voice.as_deref()).await?;
 
         // Piper announces its rate in each `audio-start`; track it so dumped TTS

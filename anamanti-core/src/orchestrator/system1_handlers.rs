@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
+use crate::lang::{phrases, Lang};
 use crate::llm::DeviceAction;
 use crate::system1::{Decision, DecisionRequest, Intent, Resolution};
 use crate::timer::MAX_TIMER_SECS;
@@ -90,7 +91,19 @@ impl Pipeline {
             r.intent,
             r.confidence,
         );
+        let lang = ctx.lang.lang;
         let reply = match r.intent.parse::<Intent>() {
+            // A turn in a language this intent isn't validated for defers to System-2,
+            // which answers in the spoken language (plans/BilingualPlan.md §2.7).
+            Ok(intent) if !crate::system1::ready_for(lang, intent) => {
+                ctx.timing.system1_outcome = Some("lang-not-ready".to_string());
+                log::info!(
+                    "system1 ({engine}) intent `{}` isn't enabled for {lang} turns yet; \
+                     deferring to System-2",
+                    r.intent
+                );
+                return None;
+            }
             Ok(intent) => self.fast_reply_for(intent, ctx, transcript).await,
             Err(_) => None, // a custom config label: routable, but no handler
         };
@@ -121,23 +134,24 @@ impl Pipeline {
         ctx: &mut TurnCtx<'_>,
         transcript: &str,
     ) -> Option<FastReply> {
+        let lang = ctx.lang.lang;
         match intent {
             Intent::Weather => self.weather_reply(ctx).await,
-            Intent::Timer => timer_reply(transcript),
+            Intent::Timer => timer_reply(transcript, lang),
             // Clock queries answer from the wall clock (no tool, no network, no widget).
             // Always resolvable → always commit.
-            Intent::Time | Intent::Date => Some(FastReply::say(spoken_clock_reply(intent))),
-            Intent::TimerCancel => timer_cancel_reply(&ctx.device_ctx),
-            Intent::TimerQuery => timer_query_reply(&ctx.device_ctx),
-            Intent::TimerAdjust => timer_adjust_reply(transcript, &ctx.device_ctx),
+            Intent::Time | Intent::Date => Some(FastReply::say(spoken_clock_reply(intent, lang))),
+            Intent::TimerCancel => timer_cancel_reply(&ctx.device_ctx, lang),
+            Intent::TimerQuery => timer_query_reply(&ctx.device_ctx, lang),
+            Intent::TimerAdjust => timer_adjust_reply(transcript, &ctx.device_ctx, lang),
             Intent::WeatherDismiss | Intent::RecipeDismiss | Intent::PlaceDismiss => {
-                screen_dismiss_reply(intent, &ctx.device_ctx)
+                screen_dismiss_reply(intent, &ctx.device_ctx, lang)
             }
             // The user signalled they are done: a brief ack that ends the follow-up chain
             // (a bare `audio-stop`, no `listen`), returning the device to IDLE. Always
             // resolvable (a fresh "goodbye" turn just ends cleanly).
-            Intent::EndSession => Some(FastReply::say("Okay.").ending_session()),
-            Intent::StopDismiss => stop_dismiss_reply(&ctx.device_ctx, ctx.followup_depth),
+            Intent::EndSession => Some(FastReply::say(phrases::okay(lang)).ending_session()),
+            Intent::StopDismiss => stop_dismiss_reply(&ctx.device_ctx, ctx.followup_depth, lang),
             // Route-only: the free-form place name needs the System-2 LLM.
             Intent::Place => None,
         }
@@ -187,7 +201,8 @@ impl Pipeline {
                 return None;
             }
         };
-        let text = weather_summary(&report);
+        // Spoken in the turn's language; the widget (and its frame data) stays English.
+        let text = phrases::weather_summary(ctx.lang.lang, &report);
         // Widget first, so the screen changes the instant the intent resolves.
         Some(FastReply::say(text).with_action(DeviceAction::ShowWeather(report)))
     }
@@ -197,19 +212,17 @@ impl Pipeline {
 /// and start the timer. `None` (defer) when no clear duration is present (e.g. "cancel
 /// my timer", or a free-form request) or it is out of range (0 or over
 /// [`MAX_TIMER_SECS`]), so the robust System-2 timer tool still handles those.
-fn timer_reply(transcript: &str) -> Option<FastReply> {
-    let secs = crate::system1::parse_duration_secs(transcript)?; // unclear → defer
+fn timer_reply(transcript: &str, lang: Lang) -> Option<FastReply> {
+    let secs = crate::system1::parse_duration_in(lang, transcript)?; // unclear → defer
     if secs == 0 || secs > MAX_TIMER_SECS {
         log::debug!("system1 timer: duration {secs}s out of range; deferring to System-2");
         return None;
     }
     Some(
-        FastReply::say(format!("Timer set for {}.", human_duration(secs))).with_action(
-            DeviceAction::StartTimer {
-                label: None,
-                duration_secs: secs,
-            },
-        ),
+        FastReply::say(phrases::timer_set(lang, secs)).with_action(DeviceAction::StartTimer {
+            label: None,
+            duration_secs: secs,
+        }),
     )
 }
 
@@ -218,31 +231,25 @@ fn timer_reply(transcript: &str) -> Option<FastReply> {
 /// is nothing to cancel, so defer to System-2 (which can tell the user there are no
 /// timers). Only unlabeled "cancel all" resolves here; a labeled cancel needs a
 /// free-form slot and stays on System-2.
-fn timer_cancel_reply(device_ctx: &DeviceContext) -> Option<FastReply> {
+fn timer_cancel_reply(device_ctx: &DeviceContext, lang: Lang) -> Option<FastReply> {
     if !device_ctx.timers.any_running() {
         return None; // nothing to cancel → defer
     }
-    let text = if device_ctx.timers.running > 1 {
-        "Okay, I've cancelled your timers."
-    } else {
-        "Okay, I've cancelled your timer."
-    };
+    let text = phrases::timers_cancelled(lang, device_ctx.timers.running > 1);
     Some(FastReply::say(text).with_action(DeviceAction::CancelTimer { label: None }))
 }
 
 /// The System-1 `timer_query` fast path: answer "how much time is left?" from the
 /// device-reported remaining time. **Precondition:** a timer must be running (else
 /// defer). Labeled queries need a free-form slot and stay on System-2.
-fn timer_query_reply(device_ctx: &DeviceContext) -> Option<FastReply> {
+fn timer_query_reply(device_ctx: &DeviceContext, lang: Lang) -> Option<FastReply> {
     if !device_ctx.timers.any_running() {
         return None; // no timer → defer
     }
-    Some(FastReply::say(
-        match device_ctx.timers.next_remaining_secs {
-            Some(secs) if secs > 0 => format!("You have {} left.", human_duration(secs)),
-            _ => "Your timer is just about up.".to_string(),
-        },
-    ))
+    Some(FastReply::say(phrases::timer_remaining(
+        lang,
+        device_ctx.timers.next_remaining_secs,
+    )))
 }
 
 /// The System-1 `timer_adjust` fast path: add or remove time on the running timer.
@@ -251,24 +258,25 @@ fn timer_query_reply(device_ctx: &DeviceContext) -> Option<FastReply> {
 /// request, defer to System-2's `adjust_timer` tool), and the transcript carries an
 /// unambiguous signed delta ([`parse_timer_adjust`]). The signed magnitude is clamped to
 /// the shared cap so the delta can't overflow the device's deadline math.
-fn timer_adjust_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<FastReply> {
+fn timer_adjust_reply(
+    transcript: &str,
+    device_ctx: &DeviceContext,
+    lang: Lang,
+) -> Option<FastReply> {
     if device_ctx.timers.running != 1 {
         return None; // nothing to adjust, or ambiguous which timer → defer
     }
-    let delta = crate::system1::parse_timer_adjust(transcript)?; // unclear → defer
+    let delta = crate::system1::parse_timer_adjust_in(lang, transcript)?; // unclear → defer
     let magnitude = delta.unsigned_abs().min(MAX_TIMER_SECS);
     if magnitude == 0 {
         return None;
     }
-    let (delta_secs, verb, preposition) = if delta < 0 {
-        (-(magnitude as i64), "Took", "off")
+    let delta_secs = if delta < 0 {
+        -(magnitude as i64)
     } else {
-        (magnitude as i64, "Added", "to")
+        magnitude as i64
     };
-    let text = format!(
-        "{verb} {} {preposition} your timer.",
-        human_duration(magnitude)
-    );
+    let text = phrases::timer_adjusted(lang, delta > 0, magnitude);
     Some(FastReply::say(text).with_action(DeviceAction::AdjustTimer {
         label: None,
         delta_secs,
@@ -279,14 +287,18 @@ fn timer_adjust_reply(transcript: &str, device_ctx: &DeviceContext) -> Option<Fa
 /// the named screen and give a brief ack. **Precondition:** that screen must actually be
 /// the foreground widget (ground truth from `device_ctx`), else defer — "close the
 /// recipe" with no recipe up is meaningless and better handled by System-2.
-fn screen_dismiss_reply(intent: Intent, device_ctx: &DeviceContext) -> Option<FastReply> {
+fn screen_dismiss_reply(
+    intent: Intent,
+    device_ctx: &DeviceContext,
+    lang: Lang,
+) -> Option<FastReply> {
     let action = match (intent, device_ctx.widget.as_ref()) {
         (Intent::WeatherDismiss, Some(DisplayContext::Weather(_))) => DeviceAction::DismissWeather,
         (Intent::RecipeDismiss, Some(DisplayContext::Recipe(_))) => DeviceAction::DismissRecipe,
         (Intent::PlaceDismiss, Some(DisplayContext::Place(_))) => DeviceAction::DismissPlace,
         _ => return None,
     };
-    Some(FastReply::say("Okay.").with_action(action))
+    Some(FastReply::say(phrases::okay(lang)).with_action(action))
 }
 
 /// The System-1 `stop_dismiss` fast path: a bare "stop"/"cancel"/"never mind" whose
@@ -298,10 +310,14 @@ fn screen_dismiss_reply(intent: Intent, device_ctx: &DeviceContext) -> Option<Fa
 /// Rung 1 (alarm *ringing*) and rung 3 (media *playing*) are parked until those
 /// signals are reported (§19.7); rung 2 (running timer), rung 4 (open screen), and
 /// rung 5 (end an active follow-up) are live.
-fn stop_dismiss_reply(device_ctx: &DeviceContext, followup_depth: u32) -> Option<FastReply> {
+fn stop_dismiss_reply(
+    device_ctx: &DeviceContext,
+    followup_depth: u32,
+    lang: Lang,
+) -> Option<FastReply> {
     // Rung 2: a running timer → cancel it.
     if device_ctx.timers.any_running() {
-        return timer_cancel_reply(device_ctx);
+        return timer_cancel_reply(device_ctx, lang);
     }
     // Rung 4: an open screen → dismiss it.
     let dismiss = match device_ctx.widget {
@@ -316,11 +332,11 @@ fn stop_dismiss_reply(device_ctx: &DeviceContext, followup_depth: u32) -> Option
         Some(DisplayContext::Diagnostics) | Some(DisplayContext::Enroll(_)) | None => None,
     };
     if let Some(intent) = dismiss {
-        return screen_dismiss_reply(intent, device_ctx);
+        return screen_dismiss_reply(intent, device_ctx, lang);
     }
     // Rung 5: mid-conversation with nothing active → end the follow-up chain.
     if followup_depth > 0 {
-        return Some(FastReply::say("Okay.").ending_session());
+        return Some(FastReply::say(phrases::okay(lang)).ending_session());
     }
     // Ground-truth veto: nothing to act on → defer to System-2.
     None
@@ -328,42 +344,20 @@ fn stop_dismiss_reply(device_ctx: &DeviceContext, followup_depth: u32) -> Option
 
 /// A short spoken reply for the System-1 `time` / `date` clock intents, formatted from
 /// the Mac's wall clock. `Time` → "It's 3:45 PM."; anything else → today's date.
-fn spoken_clock_reply(intent: Intent) -> String {
+fn spoken_clock_reply(intent: Intent, lang: Lang) -> String {
     let now = chrono::Local::now();
     match intent {
-        Intent::Time => format!("It's {}.", now.format("%-I:%M %p")),
-        _ => format!("Today is {}.", now.format("%A, %B %-d")),
+        Intent::Time => phrases::time_now(lang, &now),
+        _ => phrases::date_today(lang, &now),
     }
 }
 
-/// A speakable duration, e.g. `600` → "10 minutes", `5400` → "1 hour 30 minutes",
-/// `90` → "1 minute 30 seconds", `0` → "0 seconds". Used in the System-1 timer
-/// confirmations; the shared [`crate::speech::DurationStyle::Exact`] phrasing.
+/// A speakable English duration, e.g. `600` → "10 minutes" — the timer phrasing every
+/// English confirmation now gets through [`phrases::duration`]. Kept as the test oracle's
+/// subject so the legacy-equality check below still pins English output exactly.
+#[cfg(test)]
 fn human_duration(secs: u64) -> String {
-    crate::speech::duration(secs as f64, crate::speech::DurationStyle::Exact)
-}
-
-/// A short, speakable one-line summary of a forecast for the System-1 weather fast path
-/// (the full detail is on the widget). Metric/imperial follows the report's units.
-fn weather_summary(report: &crate::weather::WeatherReport) -> String {
-    let deg = if report.units == "imperial" {
-        "°F"
-    } else {
-        "°C"
-    };
-    let c = &report.current;
-    let lead = {
-        let d = c.description.trim();
-        if d.is_empty() {
-            String::new()
-        } else {
-            format!("{d}, ")
-        }
-    };
-    format!(
-        "{lead}it's {}{deg} in {}. Today's high is {}{deg}, low {}{deg}.",
-        c.temp, report.location_label, c.high, c.low
-    )
+    phrases::duration(Lang::En, secs)
 }
 
 #[cfg(test)]
@@ -385,15 +379,20 @@ mod tests {
 
     #[test]
     fn timer_reply_respects_the_shared_cap() {
-        assert!(timer_reply("set a timer for 10 minutes").is_some());
-        assert!(timer_reply("set a timer for 25 hours").is_none());
-        assert!(timer_reply("set a timer").is_none());
+        assert!(timer_reply("set a timer for 10 minutes", Lang::En).is_some());
+        assert!(timer_reply("set a timer for 25 hours", Lang::En).is_none());
+        assert!(timer_reply("set a timer", Lang::En).is_none());
     }
 
     #[test]
     fn timer_adjust_resolves_only_with_one_timer_and_a_clear_signed_delta() {
         // One running timer + a clear "add" → a positive delta and a spoken confirmation.
-        let r = timer_adjust_reply("add five minutes to the timer", &ctx_with(None, 1)).unwrap();
+        let r = timer_adjust_reply(
+            "add five minutes to the timer",
+            &ctx_with(None, 1),
+            Lang::En,
+        )
+        .unwrap();
         assert!(matches!(
             r.action,
             Some(DeviceAction::AdjustTimer {
@@ -403,7 +402,8 @@ mod tests {
         ));
         assert_eq!(r.text, "Added 5 minutes to your timer.");
         // "take a minute off" → a negative delta.
-        let r = timer_adjust_reply("take a minute off the timer", &ctx_with(None, 1)).unwrap();
+        let r = timer_adjust_reply("take a minute off the timer", &ctx_with(None, 1), Lang::En)
+            .unwrap();
         assert!(matches!(
             r.action,
             Some(DeviceAction::AdjustTimer {
@@ -413,37 +413,40 @@ mod tests {
         ));
         assert_eq!(r.text, "Took 1 minute off your timer.");
         // No timer running → defer.
-        assert!(timer_adjust_reply("add five minutes", &ctx_with(None, 0)).is_none());
+        assert!(timer_adjust_reply("add five minutes", &ctx_with(None, 0), Lang::En).is_none());
         // Several timers → ambiguous which one → defer.
-        assert!(timer_adjust_reply("add five minutes", &ctx_with(None, 2)).is_none());
+        assert!(timer_adjust_reply("add five minutes", &ctx_with(None, 2), Lang::En).is_none());
         // One timer but no clear direction (absolute "set to") → defer.
-        assert!(
-            timer_adjust_reply("change the timer to ten minutes", &ctx_with(None, 1)).is_none()
-        );
+        assert!(timer_adjust_reply(
+            "change the timer to ten minutes",
+            &ctx_with(None, 1),
+            Lang::En
+        )
+        .is_none());
     }
 
     #[test]
     fn place_dismiss_routes_directly_when_the_card_is_open() {
         let place = Some(DisplayContext::Place(PlaceScreen::default()));
-        let r = screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(place, 0)).unwrap();
+        let r = screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(place, 0), Lang::En).unwrap();
         assert!(matches!(r.action, Some(DeviceAction::DismissPlace)));
         // Nothing open → defer.
-        assert!(screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(None, 0)).is_none());
+        assert!(screen_dismiss_reply(Intent::PlaceDismiss, &ctx_with(None, 0), Lang::En).is_none());
     }
 
     #[test]
     fn stop_ladder_prefers_a_running_timer_then_a_screen_then_ending_the_chain() {
-        let r = stop_dismiss_reply(&ctx_with(None, 1), 0).unwrap();
+        let r = stop_dismiss_reply(&ctx_with(None, 1), 0, Lang::En).unwrap();
         assert!(matches!(
             r.action,
             Some(DeviceAction::CancelTimer { label: None })
         ));
         let place = Some(DisplayContext::Place(PlaceScreen::default()));
-        let r = stop_dismiss_reply(&ctx_with(place, 0), 0).unwrap();
+        let r = stop_dismiss_reply(&ctx_with(place, 0), 0, Lang::En).unwrap();
         assert!(matches!(r.action, Some(DeviceAction::DismissPlace)));
-        let r = stop_dismiss_reply(&ctx_with(None, 0), 2).unwrap();
+        let r = stop_dismiss_reply(&ctx_with(None, 0), 2, Lang::En).unwrap();
         assert!(r.end_session && r.action.is_none());
-        assert!(stop_dismiss_reply(&ctx_with(None, 0), 0).is_none());
+        assert!(stop_dismiss_reply(&ctx_with(None, 0), 0, Lang::En).is_none());
     }
 
     #[test]
@@ -488,5 +491,30 @@ mod tests {
         for s in secs {
             assert_eq!(human_duration(s), legacy_human_duration(s), "{s}s");
         }
+    }
+
+    #[test]
+    fn portuguese_turns_get_portuguese_fast_replies() {
+        let r = timer_reply("coloca um timer de dez minutos", Lang::PtBr).unwrap();
+        assert_eq!(r.text, "Timer de 10 minutos iniciado.");
+        assert!(matches!(
+            r.action,
+            Some(DeviceAction::StartTimer {
+                duration_secs: 600,
+                ..
+            })
+        ));
+        // An English phrasing on a pt turn has no pt duration → defer (System-2).
+        assert!(timer_reply("set a timer", Lang::PtBr).is_none());
+        let r =
+            timer_adjust_reply("tira um minuto do timer", &ctx_with(None, 1), Lang::PtBr).unwrap();
+        assert_eq!(r.text, "Tirei um minuto do timer.");
+        let r = timer_cancel_reply(&ctx_with(None, 2), Lang::PtBr).unwrap();
+        assert_eq!(r.text, "Tudo bem, cancelei os timers.");
+        let r = timer_query_reply(&ctx_with(None, 1), Lang::PtBr).unwrap();
+        assert_eq!(r.text, "Faltam um minuto e 30 segundos.");
+        let r = stop_dismiss_reply(&ctx_with(None, 0), 2, Lang::PtBr).unwrap();
+        assert_eq!(r.text, "Tudo bem.");
+        assert!(spoken_clock_reply(Intent::Date, Lang::PtBr).starts_with("Hoje é "));
     }
 }

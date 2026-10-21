@@ -21,6 +21,7 @@
 
 pub mod catalog;
 pub mod matcher;
+pub mod pt;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -478,8 +479,8 @@ impl HomeAssistant {
 
     /// Carry out a [`Plan`] and return the spoken confirmation (or [`UNREACHABLE`]).
     pub async fn execute(self: &Arc<Self>, plan: Plan) -> String {
-        match self.try_execute(&plan).await {
-            Ok(text) => text,
+        match self.perform(&plan).await {
+            Ok(done) => say_en(&done),
             Err(e) => {
                 log::warn!("home assistant: {plan:?} failed: {e:#}");
                 UNREACHABLE.to_string()
@@ -487,7 +488,55 @@ impl HomeAssistant {
         }
     }
 
-    async fn try_execute(self: &Arc<Self>, plan: &Plan) -> Result<String> {
+    /// The Brazilian-Portuguese fast path (`plans/BilingualPlan.md` §2.6): parse with
+    /// [`pt::parse`], try each English-shaped target candidate against the catalog, and
+    /// act only when exactly one distinct target resolves (several rooms matching
+    /// different devices is ambiguous → fall through, never guess). The reply is spoken
+    /// in Portuguese using the user's own target phrase.
+    pub async fn handle_utterance_pt(
+        self: &Arc<Self>,
+        transcript: &str,
+        room: Option<&str>,
+    ) -> Option<String> {
+        let cmd = pt::parse(transcript)?;
+        let catalog = self.catalog().await?;
+        let fallback = self.default_room();
+        let room = room
+            .filter(|r| !r.trim().is_empty())
+            .or(fallback.as_deref());
+        let mut chosen: Option<Plan> = None;
+        for target in &cmd.candidates {
+            let hc = HomeCommand {
+                verb: cmd.verb,
+                target: target.clone(),
+            };
+            let Some(found) = plan(&catalog, &hc, room, &self.exact_only) else {
+                continue;
+            };
+            match &chosen {
+                None => chosen = Some(found),
+                Some(prev) if plan_entities(prev) == plan_entities(&found) => {}
+                Some(_) => {
+                    log::info!(
+                        "home fast path (pt): {transcript:?} matches several targets; falling through"
+                    );
+                    return None;
+                }
+            }
+        }
+        let plan = chosen?;
+        Some(match self.perform(&plan).await {
+            Ok(done) => pt::say(&done, &cmd),
+            Err(e) => {
+                log::warn!("home assistant: {plan:?} failed: {e:#}");
+                pt::UNREACHABLE.to_string()
+            }
+        })
+    }
+
+    /// Run the service call(s) a [`Plan`] needs and report what happened (rendered into
+    /// words by [`say_en`] / [`pt::say`]).
+    async fn perform(self: &Arc<Self>, plan: &Plan) -> Result<Done> {
         let api = self.api().context("Home Assistant isn't configured")?;
         match plan {
             Plan::Switch { on, target } => {
@@ -500,20 +549,17 @@ impl HomeAssistant {
                 api.call_service("homeassistant", service, json!({ "entity_id": ids }))
                     .await?;
                 self.note_state(&ids, if *on { "on" } else { "off" });
-                Ok(format!(
-                    "{} {}.",
-                    target.label,
-                    if *on { "on" } else { "off" }
-                ))
+                Ok(Done::Switched {
+                    on: *on,
+                    target: target.clone(),
+                })
             }
             Plan::Activate { entity } => {
                 let domain = entity.domain();
                 api.call_service(domain, "turn_on", json!({ "entity_id": entity.entity_id }))
                     .await?;
-                Ok(if domain == "script" {
-                    format!("Running {}.", entity.name)
-                } else {
-                    format!("Okay, {}.", entity.name)
+                Ok(Done::Activated {
+                    entity: entity.clone(),
                 })
             }
             Plan::Brightness { pct, target } => {
@@ -529,7 +575,10 @@ impl HomeAssistant {
                 )
                 .await?;
                 self.note_state(&ids, if *pct == 0 { "off" } else { "on" });
-                Ok(format!("{} at {pct} percent.", target.label))
+                Ok(Done::Brightness {
+                    pct: *pct,
+                    target: target.clone(),
+                })
             }
             Plan::Status { target } => {
                 // A status answer must be current: refetch (bounded), else use the cache.
@@ -548,9 +597,14 @@ impl HomeAssistant {
                             .clone()
                     })
                     .collect();
-                Ok(status_sentence(target, &now))
+                Ok(Done::Status {
+                    target: target.clone(),
+                    now,
+                })
             }
-            Plan::Unavailable { target } => Ok(unavailable_sentence(target)),
+            Plan::Unavailable { target } => Ok(Done::Unavailable {
+                target: target.clone(),
+            }),
         }
     }
 
@@ -588,6 +642,52 @@ impl HomeAssistant {
             }
         }
         Some(lines.join("\n"))
+    }
+}
+
+/// What a performed [`Plan`] did — the input to the per-language reply renderers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Done {
+    Switched { on: bool, target: Target },
+    Activated { entity: Entity },
+    Brightness { pct: u8, target: Target },
+    Status { target: Target, now: Vec<Entity> },
+    Unavailable { target: Target },
+}
+
+/// The entity ids a plan touches (to tell two candidate targets apart).
+fn plan_entities(plan: &Plan) -> Vec<String> {
+    let mut ids: Vec<String> = match plan {
+        Plan::Switch { target, .. }
+        | Plan::Brightness { target, .. }
+        | Plan::Status { target }
+        | Plan::Unavailable { target } => target
+            .entities
+            .iter()
+            .map(|e| e.entity_id.clone())
+            .collect(),
+        Plan::Activate { entity } => vec![entity.entity_id.clone()],
+    };
+    ids.sort();
+    ids
+}
+
+/// The English confirmation for a performed plan (the pre-bilingual strings, verbatim).
+fn say_en(done: &Done) -> String {
+    match done {
+        Done::Switched { on, target } => {
+            format!("{} {}.", target.label, if *on { "on" } else { "off" })
+        }
+        Done::Activated { entity } => {
+            if entity.domain() == "script" {
+                format!("Running {}.", entity.name)
+            } else {
+                format!("Okay, {}.", entity.name)
+            }
+        }
+        Done::Brightness { pct, target } => format!("{} at {pct} percent.", target.label),
+        Done::Status { target, now } => status_sentence(target, now),
+        Done::Unavailable { target } => unavailable_sentence(target),
     }
 }
 

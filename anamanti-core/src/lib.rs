@@ -30,6 +30,7 @@ pub mod home_assistant;
 pub mod household;
 pub mod http;
 pub mod ids;
+pub mod lang;
 pub mod llm;
 pub mod memory;
 pub mod music;

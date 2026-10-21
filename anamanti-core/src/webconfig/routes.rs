@@ -21,6 +21,7 @@ use super::household::{
     cadora_status_json, household_save_json, household_status_json, personality_save_json,
     personality_status_json, pronunciations_save_json, pronunciations_status_json,
 };
+use super::language::{language_save_json, language_status_json};
 use super::memory::{embeddings_status_json, embeddings_switch_json};
 use super::music::{
     music_display_json, music_display_save_json, music_nowplaying_json, music_play_json,
@@ -222,6 +223,15 @@ pub(super) static ROUTES: &[Route] = &[
     get(
         "/pronunciations/status.json",
         Sync(|s, _| Reply::json(pronunciations_status_json(s.settings()))),
+    ),
+    // Voice → Languages (plans/BilingualPlan.md §2.11).
+    get(
+        "/language/status.json",
+        Sync(|s, _| Reply::json(language_status_json(s.settings()))),
+    ),
+    post(
+        "/language/save",
+        Sync(|s, r| with_json(r, |d| language_save_json(s.settings(), d))),
     ),
     post(
         "/pronunciations/save",

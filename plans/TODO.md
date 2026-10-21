@@ -607,3 +607,18 @@ Remaining:
 - [ ] Follow-up (security, shared with §3/§6a): the `latest.json`/APK ride plain HTTPS
       from an owner-controlled host, integrity-pinned by SHA-256 — fine today; revisit
       if the distribution host isn't trusted.
+
+## 9. Bilingual en + pt-BR (implemented 2026-10-20 on branch — `plans/BilingualPlan.md`)
+
+- [ ] **Owner decision:** cross-language memory recall on the kept nomic embedder is weak
+  (en question → pt fact recall@3 6/12, pt → en 2/12; same-language 12/12). Accept, or switch
+  the embedder (multilingual local model / `openai`)? `examples/bilingual_recall.rs` re-measures.
+- [ ] Production rollout (needs go-ahead): pt_BR Piper voice + a second Piper on its own port,
+  `language` / `tts_voices` / `tts_addrs` in prod `anamanti.json`, redeploy (BilingualPlan §9).
+- [ ] System-1 for pt `weather` / `weather_dismiss` / `place_dismiss`: re-run
+  `calibrate_portuguese` after a model update; enable each once nothing resolves into it wrongly.
+- [ ] Very short single words (< 250 ms voiced, e.g. a clipped "para") end the turn as silence
+  (VAD `MIN_SPEECH_ONSET`) — language-independent; revisit if it shows up with real voices.
+- [ ] Pre-existing on `main` (not bilingual): 4 `llm::rig` tests fail since the timer-adjust
+  merge added `adjust_timer` without updating the tool snapshot/count tests.
+

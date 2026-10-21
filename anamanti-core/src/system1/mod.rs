@@ -299,6 +299,201 @@ pub fn parse_timer_adjust(text: &str) -> Option<i64> {
     Some(sign * secs)
 }
 
+/// Whether System-1 may answer `intent` on a turn spoken in `lang`
+/// (`plans/BilingualPlan.md` §2.7). English: every intent, unchanged. Another language:
+/// only intents whose classification has been validated in that language — see
+/// [`PT_BR_READY`] — so an unvalidated intent defers to System-2 (which answers in the
+/// spoken language) instead of risking a wrong fast answer.
+pub fn ready_for(lang: crate::lang::Lang, intent: Intent) -> bool {
+    match lang {
+        crate::lang::Lang::En => true,
+        crate::lang::Lang::PtBr => PT_BR_READY.contains(&intent),
+    }
+}
+
+/// System-1 intents enabled for Brazilian-Portuguese turns. Each passed
+/// `tests/system1_calibration.rs::calibrate_portuguese` on the production `jev` backend
+/// (`typesafe/jev-1.13`, `min_confidence` 0.85, 2026-10-20): at least one pt case resolves
+/// correctly and **nothing** resolves into it wrongly (near-misses, must-defer anchors and
+/// other intents' utterances all clean). A missed resolve only costs latency — System-2
+/// answers it, in Portuguese.
+///
+/// Not yet enabled (stay on System-2 for pt): `weather` ("fecha a previsão do tempo" —
+/// close the forecast — was classified as a weather request), `weather_dismiss` and
+/// `place_dismiss` (no pt phrasing resolved), and the route-only `place`. Re-run the
+/// calibration after a model/backend change before extending this list.
+pub const PT_BR_READY: &[Intent] = &[
+    Intent::Timer,
+    Intent::Time,
+    Intent::Date,
+    Intent::TimerCancel,
+    Intent::TimerQuery,
+    Intent::TimerAdjust,
+    Intent::RecipeDismiss,
+    Intent::EndSession,
+    Intent::StopDismiss,
+];
+
+/// [`parse_duration_secs`] for the turn's language (`plans/BilingualPlan.md` §2.6).
+pub fn parse_duration_in(lang: crate::lang::Lang, text: &str) -> Option<u64> {
+    match lang {
+        crate::lang::Lang::En => parse_duration_secs(text),
+        crate::lang::Lang::PtBr => parse_duration_secs_pt(text),
+    }
+}
+
+/// [`parse_timer_adjust`] for the turn's language.
+pub fn parse_timer_adjust_in(lang: crate::lang::Lang, text: &str) -> Option<i64> {
+    match lang {
+        crate::lang::Lang::En => parse_timer_adjust(text),
+        crate::lang::Lang::PtBr => parse_timer_adjust_pt(text),
+    }
+}
+
+/// Brazilian-Portuguese [`parse_duration_secs`]: digits and number words with a unit
+/// ("dez minutos", "1 hora e 30 minutos", "vinte e cinco minutos"), `meia hora` (half an
+/// hour) and a trailing `e meia` / `e meio` (plus half of the previous unit — "uma hora
+/// e meia", "um minuto e meio"). Like the English parser it is conservative: no unit ⇒
+/// `None`. `um`/`uma` is also the indefinite article ("um timer de dez minutos"), so it
+/// counts as a number only when a unit follows it.
+pub fn parse_duration_secs_pt(text: &str) -> Option<u64> {
+    fn word_value(tok: &str) -> Option<f64> {
+        Some(match tok {
+            "dois" | "duas" => 2.0,
+            "três" | "tres" => 3.0,
+            "quatro" => 4.0,
+            "cinco" => 5.0,
+            "seis" => 6.0,
+            "sete" => 7.0,
+            "oito" => 8.0,
+            "nove" => 9.0,
+            "dez" => 10.0,
+            "onze" => 11.0,
+            "doze" => 12.0,
+            "treze" => 13.0,
+            "catorze" | "quatorze" => 14.0,
+            "quinze" => 15.0,
+            "dezesseis" => 16.0,
+            "dezessete" => 17.0,
+            "dezoito" => 18.0,
+            "dezenove" => 19.0,
+            "vinte" => 20.0,
+            "trinta" => 30.0,
+            "quarenta" => 40.0,
+            "cinquenta" | "cinqüenta" => 50.0,
+            "sessenta" => 60.0,
+            "setenta" => 70.0,
+            "oitenta" => 80.0,
+            "noventa" => 90.0,
+            "cem" => 100.0,
+            _ => return None,
+        })
+    }
+    fn unit_secs(tok: &str) -> Option<f64> {
+        Some(match tok {
+            "hora" | "horas" | "h" => 3600.0,
+            "minuto" | "minutos" | "min" => 60.0,
+            "segundo" | "segundos" | "seg" => 1.0,
+            _ => return None,
+        })
+    }
+
+    let normalized = text.to_lowercase().replace('-', " ");
+    let toks: Vec<&str> = normalized
+        .split_whitespace()
+        .map(|raw| raw.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut total = 0.0f64;
+    let mut current = 0.0f64;
+    let mut have_current = false;
+    let mut saw_unit = false;
+    let mut last_unit = 0.0f64;
+
+    for (i, tok) in toks.iter().enumerate() {
+        let next_is_unit = toks.get(i + 1).is_some_and(|n| unit_secs(n).is_some());
+        if let Ok(n) = tok.parse::<f64>() {
+            current += n;
+            have_current = true;
+        } else if matches!(*tok, "um" | "uma") {
+            if next_is_unit {
+                current += 1.0;
+                have_current = true;
+            }
+        } else if matches!(*tok, "meia" | "meio") {
+            if next_is_unit {
+                // "meia hora" — half of the following unit.
+                current += 0.5;
+                have_current = true;
+            } else if saw_unit && !have_current {
+                // "uma hora e meia" — half of the unit just said.
+                total += 0.5 * last_unit;
+            }
+        } else if let Some(v) = word_value(tok) {
+            current += v;
+            have_current = true;
+        } else if let Some(u) = unit_secs(tok) {
+            let n = if have_current { current } else { 1.0 };
+            total += n * u;
+            current = 0.0;
+            have_current = false;
+            saw_unit = true;
+            last_unit = u;
+        }
+        // Anything else ("coloca", "timer", "de", "e", "por", …) is ignored.
+    }
+
+    if !saw_unit {
+        return None;
+    }
+    let secs = total.round();
+    if secs < 1.0 {
+        None
+    } else {
+        Some(secs as u64)
+    }
+}
+
+/// Brazilian-Portuguese [`parse_timer_adjust`]: exactly one direction keyword ("mais",
+/// "adiciona", "acrescenta" / "tira", "menos", "diminui") plus a clear duration.
+pub fn parse_timer_adjust_pt(text: &str) -> Option<i64> {
+    let normalized = text.to_lowercase().replace('-', " ");
+    let has = |kw: &str| {
+        normalized
+            .split_whitespace()
+            .any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == kw)
+    };
+    const ADD: [&str; 14] = [
+        "adiciona",
+        "adicione",
+        "adicionar",
+        "acrescenta",
+        "acrescente",
+        "mais",
+        "aumenta",
+        "aumente",
+        "estende",
+        "estenda",
+        "prolonga",
+        "prolongue",
+        "soma",
+        "some",
+    ];
+    const REMOVE: [&str; 15] = [
+        "tira", "tire", "tirar", "remove", "remova", "diminui", "diminua", "menos", "reduz",
+        "reduza", "subtrai", "subtraia", "corta", "corte", "desconta",
+    ];
+    let adds = ADD.iter().any(|k| has(k));
+    let removes = REMOVE.iter().any(|k| has(k));
+    let sign = match (adds, removes) {
+        (true, false) => 1i64,
+        (false, true) => -1i64,
+        _ => return None,
+    };
+    let secs = parse_duration_secs_pt(&normalized)? as i64;
+    Some(sign * secs)
+}
+
 /// The turn state handed to a decision engine — **light context only** (no memory
 /// recall; that's exactly the cost System-1 exists to skip).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -542,5 +737,55 @@ mod tests {
         // Contradictory directions → defer rather than guess.
         assert_eq!(parse_timer_adjust("add five minutes, no less"), None);
         assert_eq!(parse_timer_adjust(""), None);
+    }
+
+    #[test]
+    fn parse_duration_pt_handles_common_phrasings() {
+        assert_eq!(
+            parse_duration_secs_pt("coloca um timer de dez minutos"),
+            Some(600)
+        );
+        assert_eq!(
+            parse_duration_secs_pt("Coloca um timer de 10 minutos."),
+            Some(600)
+        );
+        assert_eq!(
+            parse_duration_secs_pt("timer de uma hora e 30 minutos"),
+            Some(5400)
+        );
+        assert_eq!(parse_duration_secs_pt("uma hora e meia"), Some(5400));
+        assert_eq!(parse_duration_secs_pt("um minuto e meio"), Some(90));
+        assert_eq!(parse_duration_secs_pt("meia hora"), Some(1800));
+        assert_eq!(parse_duration_secs_pt("vinte e cinco minutos"), Some(1500));
+        assert_eq!(parse_duration_secs_pt("vinte e um minutos"), Some(1260));
+        assert_eq!(parse_duration_secs_pt("duas horas"), Some(7200));
+        assert_eq!(parse_duration_secs_pt("noventa segundos"), Some(90));
+        // No unit → defer.
+        assert_eq!(parse_duration_secs_pt("coloca um timer"), None);
+        assert_eq!(parse_duration_secs_pt("cancela o timer"), None);
+        assert_eq!(parse_duration_secs_pt(""), None);
+        // The dispatcher keeps English byte-for-byte.
+        use crate::lang::Lang;
+        assert_eq!(
+            parse_duration_in(Lang::En, "um, a timer for 10 minutes"),
+            Some(600)
+        );
+        assert_eq!(
+            parse_duration_in(Lang::PtBr, "timer de dez minutos"),
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn parse_timer_adjust_pt_signs_the_delta() {
+        assert_eq!(
+            parse_timer_adjust_pt("adiciona cinco minutos ao timer"),
+            Some(300)
+        );
+        assert_eq!(parse_timer_adjust_pt("me dá mais dois minutos"), Some(120));
+        assert_eq!(parse_timer_adjust_pt("tira um minuto do timer"), Some(-60));
+        assert_eq!(parse_timer_adjust_pt("diminui 30 segundos"), Some(-30));
+        assert_eq!(parse_timer_adjust_pt("muda o timer para dez minutos"), None);
+        assert_eq!(parse_timer_adjust_pt("tira mais um minuto"), None);
     }
 }

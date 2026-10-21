@@ -59,7 +59,7 @@ async fn decodes_wav_through_the_transcriber_seam() {
     stt.finish().await.expect("finish");
 
     let text = match stt.read_event().await.expect("read_event") {
-        Some(SttEvent::Transcript(t)) => t,
+        Some(SttEvent::Transcript(t)) => t.text,
         other => panic!("expected a transcript, got {other:?}"),
     };
     eprintln!("whisper transcript: {text:?}");
@@ -71,4 +71,100 @@ async fn decodes_wav_through_the_transcriber_seam() {
             "transcript {text:?} should contain {expect:?}"
         );
     }
+}
+
+/// Bilingual detect-then-pin (`plans/BilingualPlan.md` §2.3) with a **multilingual**
+/// model: every clip under `<dir>/en/*.wav` must come back tagged `en`, every clip
+/// under `<dir>/pt/*.wav` tagged `pt`. Skips without the assets:
+///
+/// ```bash
+/// export ANAMANTI_TEST_WHISPER_MULTI_MODEL=/path/to/ggml-small.bin
+/// export ANAMANTI_TEST_BILINGUAL_CLIPS=/path/to/clips   # en/*.wav + pt/*.wav, 16 kHz mono
+/// cargo test --features stt-whisper-metal --test whisper_local -- --nocapture
+/// ```
+#[tokio::test]
+async fn bilingual_decode_detects_among_the_enabled_languages() {
+    use anamanti_core::lang::{Lang, LanguageSettings};
+    use anamanti_core::stt::{SttEngine, WhisperSttEngine};
+    use anamanti_core::wyoming::protocol::AudioFormat;
+
+    let (Ok(model), Ok(dir)) = (
+        std::env::var("ANAMANTI_TEST_WHISPER_MULTI_MODEL"),
+        std::env::var("ANAMANTI_TEST_BILINGUAL_CLIPS"),
+    ) else {
+        eprintln!(
+            "skipping: set ANAMANTI_TEST_WHISPER_MULTI_MODEL and ANAMANTI_TEST_BILINGUAL_CLIPS"
+        );
+        return;
+    };
+    let engine = WhisperEngine::open(&model, Some("en".to_string()), 0).expect("load model");
+    assert!(
+        engine.is_multilingual(),
+        "needs a multilingual (non-.en) model"
+    );
+    let stt = WhisperSttEngine::new(engine);
+    let langs = LanguageSettings {
+        enabled: vec![Lang::En, Lang::PtBr],
+        default: Lang::En,
+        voices: Default::default(),
+    };
+    let mut failures = Vec::new();
+    for (sub, want) in [("en", "en"), ("pt", "pt")] {
+        let mut wavs: Vec<_> = std::fs::read_dir(format!("{dir}/{sub}"))
+            .expect("clip dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+            .collect();
+        wavs.sort();
+        for wav in wavs {
+            let mut t = stt
+                .begin_with(AudioFormat::PCM_16K_MONO, &langs)
+                .await
+                .unwrap();
+            // Like a live turn: the pump forwards the VAD's trailing silence too, so a
+            // short command ("para") still clears whisper.cpp's 1 s minimum input.
+            let mut pcm = wav_to_le_bytes(wav.to_str().unwrap());
+            pcm.extend(std::iter::repeat_n(0u8, 16_000 * 2 * 6 / 10));
+            for chunk in pcm.chunks(640) {
+                t.forward_pcm(chunk.to_vec()).await.unwrap();
+            }
+            let t0 = std::time::Instant::now();
+            t.finish().await.unwrap();
+            let Some(SttEvent::Transcript(tr)) = t.read_event().await.unwrap() else {
+                panic!("no transcript for {}", wav.display());
+            };
+            let bilingual_ms = t0.elapsed().as_millis();
+            // The same clip decoded the pre-bilingual way (pinned, no detection), for the
+            // latency comparison.
+            let mut single = stt
+                .begin_with(AudioFormat::PCM_16K_MONO, &LanguageSettings::default())
+                .await
+                .unwrap();
+            single.forward_pcm(pcm.clone()).await.unwrap();
+            let t1 = std::time::Instant::now();
+            single.finish().await.unwrap();
+            let _ = single.read_event().await.unwrap();
+            let single_ms = t1.elapsed().as_millis();
+            eprintln!(
+                "[{sub}] {} → {:?} lang={:?} ({bilingual_ms} ms bilingual vs {single_ms} ms single)",
+                wav.display(),
+                tr.text,
+                tr.lang
+            );
+            // One word carries too little audio for language ID (a lone "para" comes back
+            // labelled English); the pipeline resolves those with its short-phrase table
+            // (`lang::detect::short_phrase`), so only multi-word clips are asserted here.
+            let multi_word = tr.text.split_whitespace().count() >= 2;
+            if multi_word && tr.lang.as_deref() != Some(want) {
+                failures.push(format!("{}: got {:?}", wav.display(), tr.lang));
+            }
+            if !multi_word {
+                let resolved = anamanti_core::lang::detect::short_phrase(&tr.text, &langs.enabled)
+                    .map(|l| l.iso639_1());
+                eprintln!("      one word: short-phrase table resolves it to {resolved:?}");
+                assert_eq!(resolved, Some(want), "{}", wav.display());
+            }
+        }
+    }
+    assert!(failures.is_empty(), "wrong language: {failures:#?}");
 }

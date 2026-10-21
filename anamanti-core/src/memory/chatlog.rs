@@ -109,6 +109,18 @@ pub struct TurnTiming {
     /// Which path answered the turn: `"command"`, `"system1"`, or `"system2"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Bilingual mode only (`plans/BilingualPlan.md`): the language the turn was spoken
+    /// in (`en` / `pt-BR`) — and therefore answered in. Absent in single-language mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// How [`Self::lang`] was decided: `stt` / `text` / `phrase` / `sticky` / `speaker` /
+    /// `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang_source: Option<String>,
+    /// Bilingual mode: set when the LLM's reply came back in a different language than
+    /// the turn (e.g. "answer in English"), so the voice switched with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_lang: Option<String>,
     /// End-of-speech (VAD finalize) → STT transcript returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stt_ms: Option<u64>,

@@ -226,6 +226,292 @@ pub fn infer_memories(text: &str) -> Vec<(MemoryKind, String)> {
     out
 }
 
+// ------------------------------------------------------------------ Portuguese (pt-BR)
+//
+// `plans/BilingualPlan.md` §2.6: the same commands and inferred patterns in Brazilian
+// Portuguese. Matching mirrors the English rules (anchored at the start of the
+// utterance, original case preserved in the captured tail). Phrases are listed with
+// and without accents because STT output isn't always accented. Content is **stored as
+// spoken** (owner decision) — inferred facts use Portuguese templates.
+
+/// Parse an explicit memory command in any of `langs` (tried in order), returning the
+/// command and the language whose phrasing matched — which is, by definition, the
+/// language the user spoke. `[Lang::En]` is exactly [`parse_command`].
+pub fn parse_command_in(
+    text: &str,
+    langs: &[crate::lang::Lang],
+) -> Option<(MemoryCommand, crate::lang::Lang)> {
+    use crate::lang::Lang;
+    langs.iter().find_map(|&l| {
+        match l {
+            Lang::En => parse_command(text),
+            Lang::PtBr => parse_command_pt(text),
+        }
+        .map(|c| (c, l))
+    })
+}
+
+/// Inferred capture in the first of `langs` whose patterns match. `[Lang::En]` is
+/// exactly [`infer_memories`].
+pub fn infer_memories_in(text: &str, langs: &[crate::lang::Lang]) -> Vec<(MemoryKind, String)> {
+    use crate::lang::Lang;
+    for &l in langs {
+        let found = match l {
+            Lang::En => infer_memories(text),
+            Lang::PtBr => infer_memories_pt(text),
+        };
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    Vec::new()
+}
+
+/// Portuguese who-am-I questions (whole utterance, fillers stripped).
+const WHO_AM_I_PT: &[&str] = &[
+    "quem sou eu",
+    "quem é que eu sou",
+    "quem e que eu sou",
+    "qual é o meu nome",
+    "qual e o meu nome",
+    "qual o meu nome",
+    "qual meu nome",
+    "qual é meu nome",
+    "você sabe quem eu sou",
+    "voce sabe quem eu sou",
+    "sabe quem eu sou",
+    "você sabe o meu nome",
+    "voce sabe o meu nome",
+    "você sabe meu nome",
+    "voce sabe meu nome",
+    "quem está falando",
+    "quem esta falando",
+    "quem tá falando",
+    "quem ta falando",
+    "você me reconhece",
+    "voce me reconhece",
+    "você reconhece a minha voz",
+    "voce reconhece a minha voz",
+    "você reconhece minha voz",
+    "voce reconhece minha voz",
+    "quem você acha que eu sou",
+    "quem voce acha que eu sou",
+];
+
+fn is_who_am_i_pt(lead_clean: &str) -> bool {
+    let mut q = lead_clean.replace(',', "");
+    for filler in [
+        "ei ",
+        "oi ",
+        "ok ",
+        "olha ",
+        "jarvis ",
+        "me diz ",
+        "me diga ",
+        "por favor ",
+    ] {
+        while let Some(rest) = q.strip_prefix(filler) {
+            q = rest.trim_start().to_string();
+        }
+    }
+    let q = q
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .trim_end_matches(" jarvis")
+        .trim();
+    WHO_AM_I_PT.contains(&q)
+}
+
+/// Parse an explicit Portuguese memory command ("lembra que …", "esquece isso",
+/// "meu nome é …", "quem sou eu?").
+pub fn parse_command_pt(text: &str) -> Option<MemoryCommand> {
+    let lead = normalize_lead(text);
+    let lead_clean = clean(&lead);
+
+    if is_who_am_i_pt(lead_clean) {
+        return Some(MemoryCommand::WhoAmI);
+    }
+
+    // "esquece isso" (bare) → drop the last entry.
+    const FORGET_LAST: &[&str] = &[
+        "esquece isso",
+        "esqueça isso",
+        "esqueca isso",
+        "esquece aquilo",
+        "esqueça aquilo",
+        "esquece o último",
+        "esqueça o último",
+        "esquece o ultimo",
+        "esquece a última coisa",
+        "esqueça a última coisa",
+        "esquece o que eu disse",
+        "esqueça o que eu disse",
+    ];
+    if FORGET_LAST.contains(&lead_clean) {
+        return Some(MemoryCommand::ForgetLast);
+    }
+    for p in [
+        "esquece sobre ",
+        "esqueça sobre ",
+        "esquece que ",
+        "esqueça que ",
+        "esquece de ",
+        "esqueça de ",
+        "esquece ",
+        "esqueça ",
+        "esqueca ",
+    ] {
+        if let Some(rest) = lead.strip_prefix(p) {
+            let rest = clean(rest);
+            if !rest.is_empty() {
+                return Some(MemoryCommand::ForgetMatching(rest.to_string()));
+            }
+        }
+    }
+
+    // "meu nome é …" / "me chamo …" / "pode me chamar de …" → name the speaker.
+    for p in [
+        "meu nome é ",
+        "meu nome e ",
+        "me chamo ",
+        "pode me chamar de ",
+        "me chama de ",
+        "me chame de ",
+    ] {
+        if let Some(tail) = tail_after_prefix(text, &lead, p) {
+            if let Some(name) = first_name_token(tail) {
+                return Some(MemoryCommand::NameSpeaker(name));
+            }
+        }
+    }
+
+    // "lembra que …" → store, as spoken. Longest phrasings first.
+    for p in [
+        "lembre-se de que ",
+        "lembre se de que ",
+        "não esqueça que ",
+        "nao esqueça que ",
+        "não esquece que ",
+        "nao esquece que ",
+        "lembra de que ",
+        "lembre-se que ",
+        "lembre se que ",
+        "lembre-se de ",
+        "lembra que ",
+        "lembre que ",
+        "anota que ",
+        "anote que ",
+        "guarda que ",
+        "guarde que ",
+    ] {
+        if let Some(rest) = tail_after_prefix(text, &lead, p) {
+            let kind = kind_of_pt(&rest.to_lowercase());
+            return Some(MemoryCommand::Remember {
+                kind,
+                content: rest.to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// Classify a Portuguese snippet as a preference when it expresses liking/preferring.
+fn kind_of_pt(lower: &str) -> MemoryKind {
+    const PREF_HINTS: [&str; 10] = [
+        "eu gosto",
+        "gosto de",
+        "eu amo",
+        "adoro",
+        "prefiro",
+        "favorito",
+        "favorita",
+        "odeio",
+        "não gosto",
+        "nao gosto",
+    ];
+    if PREF_HINTS.iter().any(|h| lower.contains(h)) {
+        MemoryKind::Preference
+    } else {
+        MemoryKind::Fact
+    }
+}
+
+/// Portuguese inferred capture (stored as spoken, in Portuguese templates).
+pub fn infer_memories_pt(text: &str) -> Vec<(MemoryKind, String)> {
+    let lead = normalize_lead(text);
+    let mut out = Vec::new();
+    let rules: &[(&str, MemoryKind, &str)] = &[
+        ("meu nome é ", MemoryKind::Fact, "O nome do usuário é {}"),
+        ("eu moro em ", MemoryKind::Fact, "O usuário mora em {}"),
+        ("moro em ", MemoryKind::Fact, "O usuário mora em {}"),
+        ("eu sou de ", MemoryKind::Fact, "O usuário é de {}"),
+        ("sou de ", MemoryKind::Fact, "O usuário é de {}"),
+        (
+            "meu trabalho é ",
+            MemoryKind::Fact,
+            "O trabalho do usuário é {}",
+        ),
+        (
+            "eu trabalho como ",
+            MemoryKind::Fact,
+            "O usuário trabalha como {}",
+        ),
+        (
+            "trabalho como ",
+            MemoryKind::Fact,
+            "O usuário trabalha como {}",
+        ),
+        (
+            "eu não gosto de ",
+            MemoryKind::Preference,
+            "O usuário não gosta de {}",
+        ),
+        (
+            "não gosto de ",
+            MemoryKind::Preference,
+            "O usuário não gosta de {}",
+        ),
+        ("eu odeio ", MemoryKind::Preference, "O usuário odeia {}"),
+        ("odeio ", MemoryKind::Preference, "O usuário odeia {}"),
+        (
+            "eu gosto de ",
+            MemoryKind::Preference,
+            "O usuário gosta de {}",
+        ),
+        ("gosto de ", MemoryKind::Preference, "O usuário gosta de {}"),
+        ("eu amo ", MemoryKind::Preference, "O usuário ama {}"),
+        ("eu adoro ", MemoryKind::Preference, "O usuário adora {}"),
+        ("adoro ", MemoryKind::Preference, "O usuário adora {}"),
+        (
+            "eu prefiro ",
+            MemoryKind::Preference,
+            "O usuário prefere {}",
+        ),
+        ("prefiro ", MemoryKind::Preference, "O usuário prefere {}"),
+    ];
+    for (prefix, kind, template) in rules {
+        if let Some(tail) = tail_after_prefix(text, &lead, prefix) {
+            out.push((*kind, template.replace("{}", tail)));
+            return out; // one inference per utterance, like English
+        }
+    }
+    // "minha cor favorita é azul" / "meu time favorito é o Flamengo": the noun comes
+    // before "favorito", so keep the whole statement.
+    let lc = clean(&lead);
+    if (lc.starts_with("meu ") || lc.starts_with("minha "))
+        && (lc.contains(" favorito é ") || lc.contains(" favorita é "))
+    {
+        let original = clean(
+            text.trim()
+                .trim_start_matches(|c: char| !c.is_alphanumeric()),
+        );
+        out.push((
+            MemoryKind::Preference,
+            format!("Preferência do usuário: {original}"),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +621,91 @@ mod tests {
     fn questions_do_not_trigger_inference() {
         assert!(infer_memories("do I like jazz?").is_empty());
         assert!(infer_memories("what is the weather today").is_empty());
+    }
+
+    #[test]
+    fn portuguese_commands_parse_and_report_their_language() {
+        use crate::lang::Lang;
+        let both = [Lang::En, Lang::PtBr];
+        assert_eq!(
+            parse_command_in("Lembra que a minha cor favorita é azul.", &both),
+            Some((
+                MemoryCommand::Remember {
+                    kind: MemoryKind::Preference,
+                    content: "a minha cor favorita é azul".to_string()
+                },
+                Lang::PtBr
+            ))
+        );
+        assert_eq!(
+            parse_command_pt("Lembre-se de que o dentista é na terça"),
+            Some(MemoryCommand::Remember {
+                kind: MemoryKind::Fact,
+                content: "o dentista é na terça".to_string()
+            })
+        );
+        assert_eq!(
+            parse_command_pt("Esquece isso."),
+            Some(MemoryCommand::ForgetLast)
+        );
+        assert_eq!(
+            parse_command_pt("esqueça sobre o dentista"),
+            Some(MemoryCommand::ForgetMatching("o dentista".to_string()))
+        );
+        assert_eq!(
+            parse_command_pt("Meu nome é Paulo."),
+            Some(MemoryCommand::NameSpeaker("Paulo".to_string()))
+        );
+        assert_eq!(
+            parse_command_pt("Quem sou eu?"),
+            Some(MemoryCommand::WhoAmI)
+        );
+        assert_eq!(
+            parse_command_pt("Ei, você sabe quem eu sou?"),
+            Some(MemoryCommand::WhoAmI)
+        );
+        // Questions and ordinary speech don't match.
+        for s in [
+            "Você lembra o que eu disse?",
+            "não esquece de comprar leite",
+            "que horas são",
+            "qual é o nome daquele filme",
+        ] {
+            assert_eq!(parse_command_pt(s), None, "{s}");
+        }
+        // English-only (the default) never matches Portuguese, and vice versa.
+        assert_eq!(
+            parse_command_in("lembra que eu gosto de café", &[Lang::En]),
+            None
+        );
+        assert_eq!(parse_command_pt("remember that I like tea"), None);
+        assert_eq!(
+            parse_command_in("remember that I like tea", &both).map(|c| c.1),
+            Some(Lang::En)
+        );
+    }
+
+    #[test]
+    fn portuguese_inferred_capture_is_stored_as_spoken() {
+        assert_eq!(
+            infer_memories_pt("Eu moro em Campinas."),
+            vec![(MemoryKind::Fact, "O usuário mora em Campinas".to_string())]
+        );
+        assert_eq!(
+            infer_memories_pt("Gosto de pão de queijo"),
+            vec![(
+                MemoryKind::Preference,
+                "O usuário gosta de pão de queijo".to_string()
+            )]
+        );
+        assert_eq!(
+            infer_memories_pt("Minha cor favorita é azul."),
+            vec![(
+                MemoryKind::Preference,
+                "Preferência do usuário: Minha cor favorita é azul".to_string()
+            )]
+        );
+        assert!(infer_memories_pt("que horas são").is_empty());
+        assert!(infer_memories_pt("I live in Austin").is_empty());
     }
 }

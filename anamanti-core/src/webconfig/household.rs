@@ -25,6 +25,7 @@ pub(super) fn household_status_json(settings: &SharedSettings) -> String {
                 "phones": m.phones,
                 "appsaid": m.appsaid,
                 "relationship": m.relationship,
+                "language": m.language,
             })
         })
         .collect();
@@ -68,6 +69,7 @@ pub(super) fn household_save_json(settings: &SharedSettings, data: &Value) -> St
                     phones: str_list(m.get("phones")),
                     appsaid: str_field(m, "appsaid"),
                     relationship: str_field(m, "relationship"),
+                    language: str_field(m, "language"),
                 })
                 .collect::<Vec<_>>()
         })

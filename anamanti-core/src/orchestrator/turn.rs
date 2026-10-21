@@ -70,6 +70,13 @@ impl TurnStart {
 /// record that ends up in the chat log.
 pub(crate) struct TurnCtx<'a> {
     pub runtime: RuntimeSettings,
+    /// The language this turn was spoken in — and is answered in
+    /// (`plans/BilingualPlan.md` §2.2). The household default until resolved after STT;
+    /// always that default in single-language mode.
+    pub lang: crate::lang::TurnLang,
+    /// The global Piper voice from the snapshot, before any per-language override of
+    /// `runtime.tts_voice` (the fallback for a language with no voice of its own).
+    pub base_voice: Option<String>,
     pub device: &'a mut DynConnection,
     pub connector: &'a dyn ServiceConnector,
     pub device_ctx: DeviceContext,

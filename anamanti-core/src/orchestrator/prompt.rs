@@ -65,6 +65,14 @@ fn asserts_identity(snippet: &str) -> bool {
         "the user’s name is",
         "my name is",
         "call me ",
+        // pt-BR (plans/BilingualPlan.md §2.8): the same assertions stored as spoken.
+        "o nome do usuário é",
+        "o nome do usuario é",
+        "meu nome é",
+        "meu nome e ",
+        "me chamo ",
+        "me chama de ",
+        "me chame de ",
     ]
     .iter()
     .any(|p| l.contains(p))
@@ -522,6 +530,119 @@ pub fn detect_personality_switch(transcript: &str, p: &Personality) -> Option<St
     None
 }
 
+/// [`detect_personality_switch`] over the enabled languages (tried in order), returning
+/// the target and the language whose phrasing matched (`plans/BilingualPlan.md` §2.6).
+/// `[Lang::En]` is exactly the English detector.
+pub fn detect_personality_switch_in(
+    transcript: &str,
+    p: &Personality,
+    langs: &[crate::lang::Lang],
+) -> Option<(String, crate::lang::Lang)> {
+    use crate::lang::Lang;
+    langs.iter().find_map(|&l| {
+        match l {
+            Lang::En => detect_personality_switch(transcript, p),
+            Lang::PtBr => detect_personality_switch_pt(transcript, p),
+        }
+        .map(|t| (t, l))
+    })
+}
+
+/// Portuguese aliases for the built-in personality keys (the catalog labels are
+/// English). Only applied when that key is in the live catalog.
+const PERSONALITY_ALIASES_PT: &[(&str, &str)] = &[
+    ("entusiasmado", "enthusiastic"),
+    ("entusiasmada", "enthusiastic"),
+    ("empolgado", "enthusiastic"),
+    ("empolgada", "enthusiastic"),
+    ("animado", "enthusiastic"),
+    ("animada", "enthusiastic"),
+    ("sarcástico", "sarcastic"),
+    ("sarcastico", "sarcastic"),
+    ("sarcástica", "sarcastic"),
+    ("sarcasmo", "sarcastic"),
+    ("deprimido", "depressed"),
+    ("deprimida", "depressed"),
+    ("depressivo", "depressed"),
+    ("gângster", "gangster"),
+    ("gangster", "gangster"),
+    ("mafioso", "gangster"),
+    ("trump", "trump"),
+];
+
+/// The Brazilian-Portuguese personality switch ("fala como um gângster", "volta ao
+/// normal"): the same shape as the English detector — a switch trigger, then an off
+/// intent or a catalog name (its key/label, or a Portuguese alias of a built-in).
+pub fn detect_personality_switch_pt(transcript: &str, p: &Personality) -> Option<String> {
+    let t = transcript.to_lowercase();
+    const TRIGGERS: &[&str] = &[
+        // Imperative and infinitive forms: STT returns either ("volta ao normal" is
+        // often transcribed "Voltar ao normal.").
+        "personalidade",
+        "muda para",
+        "muda pra",
+        "mude para",
+        "mudar para",
+        "mudar pra",
+        "troca para",
+        "troca pra",
+        "troque para",
+        "trocar para",
+        "trocar pra",
+        "fala como",
+        "fale como",
+        "falar como",
+        "age como",
+        "aja como",
+        "agir como",
+        "finge que é",
+        "finja que é",
+        "fingir que é",
+        "finge ser",
+        "finja ser",
+        "fingir ser",
+        "volta ao",
+        "volte ao",
+        "voltar ao",
+        "volta pro",
+        "volte pro",
+        "voltar pro",
+        "volta para",
+        "volte para",
+        "voltar para",
+        "desliga",
+        "desligar",
+        "desativa",
+        "desativar",
+    ];
+    if !TRIGGERS.iter().any(|k| t.contains(k)) {
+        return None;
+    }
+    const OFF: &[&str] = &[
+        "normal",
+        "desliga",
+        "desativa",
+        "sem personalidade",
+        "para com isso",
+    ];
+    if OFF.iter().any(|k| t.contains(k)) {
+        return Some("normal".to_string());
+    }
+    let mut defs: Vec<&PersonalityDef> = p.definitions.iter().collect();
+    defs.sort_by_key(|d| std::cmp::Reverse(d.label.trim().len().max(d.key.trim().len())));
+    for d in &defs {
+        let key = d.key.trim().to_lowercase();
+        let label = d.label.trim().to_lowercase();
+        if (!key.is_empty() && t.contains(&key)) || (!label.is_empty() && t.contains(&label)) {
+            return Some(d.key.clone());
+        }
+    }
+    PERSONALITY_ALIASES_PT
+        .iter()
+        .find(|(alias, key)| t.contains(alias) && defs.iter().any(|d| d.key.trim() == *key))
+        .map(|(_, key)| key.to_string())
+}
+
 /// Assemble the per-turn personality prompt block: a line telling the model it can switch
 /// personalities by voice (with the available names + current state, so "talk like a
 /// gangster" / "go back to normal" maps to `set_personality`), plus — when a personality
@@ -594,6 +715,7 @@ mod household_tests {
             phones: phones.iter().map(|s| s.to_string()).collect(),
             appsaid: None,
             relationship: rel.map(str::to_string),
+            language: None,
         }
     }
 
@@ -767,7 +889,9 @@ mod household_tests {
 
 #[cfg(test)]
 mod personality_switch_tests {
-    use super::detect_personality_switch;
+    use super::{
+        detect_personality_switch, detect_personality_switch_in, detect_personality_switch_pt,
+    };
     use crate::settings::{Personality, PersonalityDef};
 
     fn catalog() -> Personality {
@@ -840,6 +964,54 @@ mod personality_switch_tests {
         // Plain speech.
         assert_eq!(
             detect_personality_switch("what's the weather today?", &p),
+            None
+        );
+    }
+
+    #[test]
+    fn recognizes_portuguese_switches() {
+        use crate::lang::Lang;
+        let p = catalog();
+        assert_eq!(
+            detect_personality_switch_pt("fala como um gângster", &p).as_deref(),
+            Some("gangster")
+        );
+        assert_eq!(
+            detect_personality_switch_pt("Muda para o modo entusiasmado", &p).as_deref(),
+            Some("enthusiastic")
+        );
+        assert_eq!(
+            detect_personality_switch_pt("finge que é o Donald Trump", &p).as_deref(),
+            Some("trump")
+        );
+        assert_eq!(
+            detect_personality_switch_pt("volta ao normal", &p).as_deref(),
+            Some("normal")
+        );
+        // The infinitive form ElevenLabs often returns.
+        assert_eq!(
+            detect_personality_switch_pt("Voltar ao normal.", &p).as_deref(),
+            Some("normal")
+        );
+        assert_eq!(
+            detect_personality_switch_pt("Falar como um gângster.", &p).as_deref(),
+            Some("gangster")
+        );
+        // An alias whose key isn't in the catalog doesn't match.
+        assert_eq!(
+            detect_personality_switch_pt("fala como um deprimido", &p),
+            None
+        );
+        // Ordinary speech never matches.
+        assert_eq!(detect_personality_switch_pt("que horas são", &p), None);
+        assert_eq!(detect_personality_switch_pt("isso não é normal", &p), None);
+        // The dispatcher reports which language matched; English-only ignores pt.
+        assert_eq!(
+            detect_personality_switch_in("fala como um gângster", &p, &[Lang::En, Lang::PtBr]),
+            Some(("gangster".to_string(), Lang::PtBr))
+        );
+        assert_eq!(
+            detect_personality_switch_in("fala como um gângster", &p, &[Lang::En]),
             None
         );
     }

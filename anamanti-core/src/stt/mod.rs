@@ -49,9 +49,39 @@ pub use elevenlabs::ElevenLabsEngine;
 #[derive(Debug, Clone)]
 pub enum SttEvent {
     /// The final transcript for the utterance.
-    Transcript(String),
+    Transcript(Transcript),
     /// Any other engine signal; ignored by the current pump loop.
     Other,
+}
+
+/// A final transcript plus the language the engine says it heard, when it reports one
+/// (ElevenLabs with language detection on, a Wyoming server that fills
+/// `transcript.data.language`, or whisper.cpp's detect pass). The raw engine code
+/// (`"pt"`, `"por"`, `"en"`, …) is kept as-is; `crate::lang::resolve` maps it onto an
+/// enabled language (`plans/BilingualPlan.md` §2.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Transcript {
+    pub text: String,
+    pub lang: Option<String>,
+}
+
+impl Transcript {
+    /// A transcript with no language report.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            lang: None,
+        }
+    }
+
+    /// Attach the engine's language report (blank codes are ignored).
+    pub fn with_lang(mut self, lang: Option<&str>) -> Self {
+        self.lang = lang
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
+        self
+    }
 }
 
 /// Produces a per-turn [`Transcriber`]. One engine instance is held by the pipeline
@@ -65,6 +95,18 @@ pub enum SttEvent {
 pub trait SttEngine: Send + Sync {
     /// Start a transcription session for one turn's PCM format.
     async fn begin(&self, format: AudioFormat) -> Result<Box<dyn Transcriber>>;
+
+    /// Start a session knowing the household's live languages
+    /// (`plans/BilingualPlan.md` §2.3). An engine loaded once at boot (whisper.cpp) uses
+    /// this to restrict language detection to the enabled set per turn; the default
+    /// ignores the languages, so every other engine is unchanged.
+    async fn begin_with(
+        &self,
+        format: AudioFormat,
+        _languages: &crate::lang::LanguageSettings,
+    ) -> Result<Box<dyn Transcriber>> {
+        self.begin(format).await
+    }
 }
 
 /// A single in-flight transcription request, created per turn. The VAD loop in
@@ -118,7 +160,12 @@ impl Transcriber for WyomingTranscriber {
     async fn read_event(&mut self) -> Result<Option<SttEvent>> {
         Ok(self.session.read_event().await?.map(|ev| {
             if ev.is_transcript() {
-                SttEvent::Transcript(ev.transcript_text().unwrap_or_default().to_string())
+                // Newer wyoming-faster-whisper servers report the decoded language in
+                // `data.language`; older ones omit it (text ID then decides).
+                let lang = ev.data.get("language").and_then(|l| l.as_str());
+                SttEvent::Transcript(
+                    Transcript::text(ev.transcript_text().unwrap_or_default()).with_lang(lang),
+                )
             } else {
                 SttEvent::Other
             }

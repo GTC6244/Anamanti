@@ -86,6 +86,25 @@
       <div id="ttsSends"></div>
     </section>
 
+    <!-- Languages (plans/BilingualPlan.md §2.11) -->
+    <section class="card" id="languages">
+      <div class="card-head">
+        <h2><i data-icon="text"></i>Languages</h2>
+        <div class="tools" id="langChips"></div>
+      </div>
+      <p class="desc">Replies follow the language each turn is spoken in, with that language's voice. One language = today's behaviour.</p>
+      <div class="field">
+        <label>Listen &amp; answer in</label>
+        <div id="langEnabled"></div>
+      </div>
+      <div class="field" id="langDefaultField">
+        <label for="lang_default">Default <span class="hint">tie-break when a turn is too short to tell</span></label>
+        <select id="lang_default"></select>
+      </div>
+      <div id="langVoices"></div>
+      <div id="langWarn"></div>
+    </section>
+
     <!-- Listening (read-only) -->
     <section class="card" id="listening">
       <div class="card-head">
@@ -100,7 +119,7 @@
 <script>
 ui.hydrate();
 
-let STT = {}, VIEW = {}, BOOT = {}, VOICES = [], OVERVIEW = null;
+let STT = {}, VIEW = {}, BOOT = {}, VOICES = [], OVERVIEW = null, LANG = {};
 let sttCards, vadCards, elKey, fixRowsTags = [];
 
 // ---------------------------------------------------------------- STT
@@ -205,6 +224,38 @@ function renderVoice(selected){
   $('ttsSends').innerHTML = ui.sendsFor('tts.piper', addr, tier);
 }
 
+// ---------------------------------------------------------------- Languages
+function langEnabled(){ return [...document.querySelectorAll('#langEnabled input:checked')].map(i => i.value); }
+function renderLangVoices(){
+  const enabled = langEnabled();
+  const def = $('lang_default').value;
+  // The default language speaks with the Voice picker above; each other language
+  // gets its own picker, filtered to that language's Piper voices.
+  $('langVoices').innerHTML = (LANG.supported || []).filter(l => enabled.includes(l.code) && l.code !== def).map(l => {
+    const mine = VOICES.filter(v => (v.name || '').startsWith(l.piper_locale));
+    const cur = (LANG.voices || {})[l.code] || '';
+    const opts = '<option value="">(same as the Voice above)</option>' + mine.map(v =>
+      '<option value="' + escAttr(v.name) + '"' + (v.name === cur ? ' selected' : '') + '>' + esc(v.label || v.name) + '</option>').join('')
+      + (cur && !mine.some(v => v.name === cur) ? '<option value="' + escAttr(cur) + '" selected>' + esc(cur) + ' (not installed)</option>' : '');
+    return '<div class="field"><label for="lv_' + escAttr(l.code) + '">' + esc(l.native) + ' voice <span class="hint">' + (mine.length ? mine.length + ' installed' : 'none installed') + '</span></label>'
+      + '<select id="lv_' + escAttr(l.code) + '" data-lang="' + escAttr(l.code) + '" class="lang-voice">' + opts + '</select></div>';
+  }).join('');
+  $('langDefaultField').hidden = enabled.length < 2;
+}
+function renderLanguages(){
+  const sup = LANG.supported || [];
+  $('langEnabled').innerHTML = sup.map(l =>
+    '<label class="switch" style="margin-bottom:.35rem"><span class="switch-text">' + esc(l.native) + '<span class="hint">' + esc(l.name) + '</span></span>'
+    + '<input type="checkbox" value="' + escAttr(l.code) + '"' + ((LANG.enabled || []).includes(l.code) ? ' checked' : '') + '></label>').join('');
+  $('lang_default').innerHTML = sup.map(l => '<option value="' + escAttr(l.code) + '">' + esc(l.native) + '</option>').join('');
+  $('lang_default').value = LANG.default || 'en';
+  renderLangVoices();
+  $('langChips').innerHTML = LANG.bilingual ? ui.status('ok', 'bilingual') : ui.status('off', 'one language');
+  $('langWarn').innerHTML = (LANG.warnings || []).map(w => '<div class="callout warn" style="margin-top:.5rem">' + ui.icon('alert') + '<div>' + esc(w) + '</div></div>').join('');
+  $('langEnabled').querySelectorAll('input').forEach(i => i.addEventListener('change', renderLangVoices));
+  $('lang_default').addEventListener('change', renderLangVoices);
+}
+
 // ---------------------------------------------------------------- Listening (read-only)
 function renderListening(){
   const f = BOOT.follow_up || {}, sp = BOOT.speaker || {};
@@ -225,11 +276,11 @@ function renderPipeStrip(){
 
 // ---------------------------------------------------------------- Load + save
 async function load(){
-  const [stt, view, voices, pr, sys] = await Promise.all([
+  const [stt, view, voices, pr, sys, lang] = await Promise.all([
     getJSON('/stt/status.json'), getJSON('/config'), getJSON('/voices').catch(() => ({})),
-    getJSON('/pronunciations/status.json'), getJSON('/system.json'),
+    getJSON('/pronunciations/status.json'), getJSON('/system.json'), getJSON('/language/status.json'),
   ]);
-  STT = stt; VIEW = view; VOICES = (voices && voices.voices) || []; BOOT = (sys && sys.config) || {};
+  STT = stt; VIEW = view; VOICES = (voices && voices.voices) || []; BOOT = (sys && sys.config) || {}; LANG = lang || {};
   sttCards = sttCards || ui.choices($('sttChoices'), { name: 'stt', cols: 3, options: [], onChange: renderSttDetail });
   sttCards.refresh(sttOptions(), STT.engine);
   renderSttDetail(STT.engine);
@@ -250,6 +301,7 @@ async function load(){
 
   renderFixes(pr.rules || []);
   renderVoice(VIEW.tts_voice || '');
+  renderLanguages();
   renderListening();
 }
 // Probe the downstream services once (slower), then repaint the chips that use it.
@@ -297,6 +349,14 @@ const bar = ui.savebar([
       try { rules = fixRules(); } catch (e) { return { ok: false, message: 'Not valid JSON: ' + e.message }; }
       const r = await postJSON('/pronunciations/save', { rules });
       return r.ok === false ? r : { ok: true, message: (r.rules || []).length + ' rule(s) saved' };
+  } },
+  { name: 'Languages', el: $('languages'), save: async () => {
+      const enabled = langEnabled();
+      if (!enabled.length) return { ok: false, message: 'pick at least one language' };
+      const voices = {};
+      document.querySelectorAll('#langVoices .lang-voice').forEach(s => { if (s.value) voices[s.dataset.lang] = s.value; });
+      const r = await postJSON('/language/save', { enabled, default: enabled.length > 1 ? $('lang_default').value : enabled[0], voices });
+      return r.ok === false ? r : { ok: true, message: r.bilingual ? 'bilingual from the next turn' : 'one language' };
   } },
   { name: 'Voice', el: $('tts'), save: async () => {
       const v = (VOICES.length ? $('tts_voice').value : $('tts_voice_text').value).trim();

@@ -1349,6 +1349,7 @@ mod tests {
                 system1: crate::settings::System1Runtime::default(),
                 personality: crate::settings::Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_style: Default::default(),
                 radio: Default::default(),
             },

@@ -72,16 +72,17 @@
     <div class="table-wrap" style="max-height:min(470px, calc(100vh - 420px))">
       <table class="edit hh-people">
         <thead><tr>
-          <th style="width:15%">Name</th>
-          <th style="width:13%">Relationship</th>
-          <th style="width:23%">Emails</th>
-          <th style="width:19%">Phones</th>
-          <th style="width:24%">AppSaid address</th>
+          <th style="width:14%">Name</th>
+          <th style="width:11%">Relationship</th>
+          <th style="width:9%" title="Only a tie-break: replies follow the language spoken. Used when a turn is too short to tell.">Language</th>
+          <th style="width:21%">Emails</th>
+          <th style="width:17%">Phones</th>
+          <th style="width:22%">AppSaid address</th>
           <th style="width:44px"></th>
         </tr></thead>
         <tbody id="memberRows">
-          <tr><td colspan="6"><div class="skeleton" style="width:90%"></div></td></tr>
-          <tr><td colspan="6"><div class="skeleton" style="width:70%"></div></td></tr>
+          <tr><td colspan="7"><div class="skeleton" style="width:90%"></div></td></tr>
+          <tr><td colspan="7"><div class="skeleton" style="width:70%"></div></td></tr>
         </tbody>
       </table>
       <div id="peopleEmpty" class="empty" hidden><i data-icon="users"></i><div>No one yet. Add the people who live here so the assistant knows who's who.</div></div>
@@ -115,12 +116,14 @@ function hhRow(m){
   tr.innerHTML =
     '<td><input type="text" class="m-name" placeholder="Name" autocomplete="off"></td>'
     + '<td><input type="text" class="m-rel" placeholder="e.g. parent" autocomplete="off"></td>'
+    + '<td><select class="m-lang" aria-label="Preferred language"><option value="">—</option><option value="en">English</option><option value="pt-BR">Português</option></select></td>'
     + '<td><div class="m-emails"></div></td>'
     + '<td><div class="m-phones"></div></td>'
     + '<td><div class="hh-as"><input type="text" class="m-appsaid mono" placeholder="(not linked)" autocomplete="off"><span class="m-linked"></span></div></td>'
     + '<td><button type="button" class="sm ghost danger-text m-del" aria-label="Remove person">' + ui.icon('trash') + '</button></td>';
   tr.querySelector('.m-name').value = m.name || '';
   tr.querySelector('.m-rel').value = m.relationship || '';
+  tr.querySelector('.m-lang').value = m.language || '';
   const as = tr.querySelector('.m-appsaid');
   as.value = m.appsaid || '';
   const paintLinked = () => { tr.querySelector('.m-linked').innerHTML = hhLinkedChip(as.value.trim()); };
@@ -138,6 +141,7 @@ function hhMembers(){
   return [...$('memberRows').children].map(tr => ({
     name: tr.querySelector('.m-name').value.trim(),
     relationship: tr.querySelector('.m-rel').value.trim() || null,
+    language: tr.querySelector('.m-lang').value || null,
     emails: tr._emails.get(),
     phones: tr._phones.get(),
     appsaid: tr.querySelector('.m-appsaid').value.trim() || null,

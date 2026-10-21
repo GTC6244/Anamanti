@@ -48,6 +48,7 @@ mod drive;
 mod general;
 mod home_assistant;
 mod household;
+mod language;
 mod memory;
 mod music;
 mod routes;

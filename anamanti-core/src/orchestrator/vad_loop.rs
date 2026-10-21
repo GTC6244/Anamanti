@@ -31,6 +31,9 @@ pub(crate) enum Listen {
     /// for speaker ID and the end-of-speech → transcript latency.
     Heard {
         transcript: String,
+        /// The language the STT engine reported for this utterance, if any (raw engine
+        /// code; see `crate::stt::Transcript`).
+        stt_lang: Option<String>,
         voiced_pcm: Vec<i16>,
         stt_latency: Duration,
     },
@@ -168,9 +171,14 @@ impl Pipeline {
                 sev = stt.read_event() => {
                     deadline = Instant::now() + self.turn_timeout;
                     match sev? {
-                        Some(SttEvent::Transcript(text)) => {
+                        Some(SttEvent::Transcript(heard)) => {
+                            let crate::stt::Transcript { text, lang: stt_lang } = heard;
                             log::info!(
-                                "STT transcript {text:?} (speech_started={speech_started})"
+                                "STT transcript {text:?} (speech_started={speech_started}{})",
+                                stt_lang
+                                    .as_deref()
+                                    .map(|l| format!(", lang={l}"))
+                                    .unwrap_or_default()
                             );
 
                             // Guard against STT hallucinations on silence. If the VAD
@@ -198,6 +206,7 @@ impl Pipeline {
                                 }
                                 return Ok(Listen::Heard {
                                     transcript: String::new(),
+                                    stt_lang: None,
                                     voiced_pcm: Vec::new(),
                                     stt_latency: Duration::ZERO,
                                 });
@@ -219,6 +228,7 @@ impl Pipeline {
                             ctx.device.send(&WyomingEvent::transcript(&text)).await.ok();
                             return Ok(Listen::Heard {
                                 transcript: text,
+                                stt_lang,
                                 voiced_pcm: std::mem::take(&mut voiced_pcm),
                                 stt_latency: finalized_at.map(|t| t.elapsed()).unwrap_or_default(),
                             });

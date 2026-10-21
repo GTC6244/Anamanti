@@ -14,6 +14,17 @@
 //! in-process whisper engine's "pending until finish, then yield once" contract, so it
 //! drops into the existing two-arm `select!` loop unchanged.
 //!
+//! **Bilingual mode** (`plans/BilingualPlan.md` §2.3): with more than one language
+//! enabled the session opens with the household default as `language_code`, the other
+//! enabled languages as `secondary_languages`, and `include_language_detection=true`.
+//! Measured against the live API (2026-10-20), that keeps English transcripts identical
+//! to a pinned `language_code=en` session while transcribing Portuguese correctly — full
+//! auto-detect (no `language_code`) was rejected because it already altered English
+//! output (a full-width `？`). With detection on, the server sends
+//! `committed_transcript_with_timestamps` (text + detected `language_code`) just before
+//! the plain `committed_transcript`; the first committed message ends the read and its
+//! language rides on the [`Transcript`], so one commit never yields two transcripts.
+//!
 //! [`forward_pcm`]: Transcriber::forward_pcm
 //! [`finish`]: Transcriber::finish
 //! [`read_event`]: Transcriber::read_event
@@ -33,7 +44,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use crate::wyoming::protocol::AudioFormat;
 use crate::wyoming::TimedOut;
 
-use super::{SttEngine, SttEvent, Transcriber};
+use super::{SttEngine, SttEvent, Transcriber, Transcript};
 
 /// The ElevenLabs realtime model id (the only one this endpoint accepts today).
 pub const DEFAULT_MODEL_ID: &str = "scribe_v2_realtime";
@@ -55,8 +66,14 @@ pub struct ElevenLabsEngine {
     base_url: String,
     api_key: String,
     model_id: String,
-    /// Decode language (ISO 639); `None` ⇒ let the model auto-detect.
+    /// Decode language (ISO 639); `None` ⇒ let the model auto-detect. In bilingual mode
+    /// this is the household default's primary language.
     language: Option<String>,
+    /// Bilingual mode: the other enabled languages (ISO 639-1), sent as
+    /// `secondary_languages`. Empty ⇒ single-language (today's request, unchanged).
+    secondary_languages: Vec<String>,
+    /// Bilingual mode: ask the server to report the detected language.
+    detect_language: bool,
     /// Connect + handshake budget ([`CONNECT_TIMEOUT`] by default).
     connect_timeout: Duration,
 }
@@ -73,24 +90,51 @@ impl ElevenLabsEngine {
             api_key: api_key.into(),
             model_id: model_id.into(),
             language,
+            secondary_languages: Vec::new(),
+            detect_language: false,
             connect_timeout: CONNECT_TIMEOUT,
         }
     }
 
+    /// Bilingual mode: `primary` becomes `language_code`, `secondary` the
+    /// `secondary_languages`, and language detection is turned on.
+    pub fn bilingual(mut self, primary: &str, secondary: Vec<String>) -> Self {
+        self.language = Some(primary.to_string());
+        self.secondary_languages = secondary;
+        self.detect_language = true;
+        self
+    }
+
     /// Build the engine for a turn from the live STT settings snapshot, or `None` when
     /// no (non-empty) ElevenLabs API key is set — the caller then falls back to the
-    /// Wyoming path.
-    pub fn from_settings(stt: &crate::settings::SttRuntime) -> Option<Self> {
+    /// Wyoming path. With more than one language enabled the session is bilingual (the
+    /// default language as primary, the rest secondary, detection on) and the pinned
+    /// `stt.language` is ignored; otherwise the request is exactly the pre-bilingual one.
+    pub fn from_settings(
+        stt: &crate::settings::SttRuntime,
+        languages: &crate::lang::LanguageSettings,
+    ) -> Option<Self> {
         let key = stt
             .elevenlabs_api_key
             .as_deref()
             .filter(|k| !k.is_empty())?;
-        Some(Self::new(
+        let engine = Self::new(
             stt.elevenlabs_base_url.clone(),
             key,
             stt.elevenlabs_model_id.clone(),
             stt.language.clone(),
-        ))
+        );
+        Some(if languages.is_bilingual() {
+            engine.bilingual(
+                languages.default.iso639_1(),
+                languages
+                    .secondary()
+                    .map(|l| l.iso639_1().to_string())
+                    .collect(),
+            )
+        } else {
+            engine
+        })
     }
 
     /// Override the connect + handshake budget (tests use a short one).
@@ -108,6 +152,8 @@ impl SttEngine for ElevenLabsEngine {
             &self.api_key,
             &self.model_id,
             self.language.as_deref(),
+            &self.secondary_languages,
+            self.detect_language,
             format.rate,
         );
         let session = tokio::time::timeout(self.connect_timeout, connect)
@@ -130,6 +176,21 @@ fn audio_format_param(rate: u32) -> &'static str {
         48_000 => "pcm_48000",
         _ => "pcm_16000",
     }
+}
+
+/// How long a plain `committed_transcript` waits for its late
+/// `committed_transcript_with_timestamps` twin (the language report) in bilingual mode.
+/// The live API sends the twin first, within the same millisecond; this only bounds the
+/// unexpected reverse order.
+pub const LANGUAGE_REPORT_GRACE: Duration = Duration::from_millis(300);
+
+/// The trimmed `text` of a committed-transcript message.
+fn committed_text(v: &serde_json::Value) -> String {
+    v.get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// Is this server `message_type` one of the error variants that should fail the turn?
@@ -158,6 +219,10 @@ fn is_error_message_type(mt: &str) -> bool {
 pub struct ElevenLabsTranscriber {
     ws: Ws,
     sample_rate: u32,
+    /// Bilingual mode: language detection was requested, so a plain
+    /// `committed_transcript` that arrives *before* its `…_with_timestamps` twin waits
+    /// briefly ([`LANGUAGE_REPORT_GRACE`]) for the language report.
+    detect_language: bool,
     /// Latched by the first `finish` so the commit is sent exactly once (idempotent).
     finished: bool,
 }
@@ -170,6 +235,8 @@ impl ElevenLabsTranscriber {
         api_key: &str,
         model_id: &str,
         language: Option<&str>,
+        secondary_languages: &[String],
+        detect_language: bool,
         sample_rate: u32,
     ) -> Result<Self> {
         let mut url = format!(
@@ -183,6 +250,13 @@ impl ElevenLabsTranscriber {
                 url.push_str("&language_code=");
                 url.push_str(l);
             }
+        }
+        for l in secondary_languages.iter().filter(|l| !l.is_empty()) {
+            url.push_str("&secondary_languages=");
+            url.push_str(l);
+        }
+        if detect_language {
+            url.push_str("&include_language_detection=true");
         }
 
         let mut request = url
@@ -226,8 +300,35 @@ impl ElevenLabsTranscriber {
         Ok(Self {
             ws,
             sample_rate,
+            detect_language,
             finished: false,
         })
+    }
+
+    /// Bilingual mode, after a plain `committed_transcript`: read up to
+    /// [`LANGUAGE_REPORT_GRACE`] for the `…_with_timestamps` twin and return its
+    /// `language_code`. Anything else (or the deadline) → `None`.
+    async fn await_language_report(&mut self) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + LANGUAGE_REPORT_GRACE;
+        loop {
+            let next = tokio::time::timeout_at(deadline, self.ws.next())
+                .await
+                .ok()??;
+            let Ok(Message::Text(t)) = next else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
+                continue;
+            };
+            if v.get("message_type").and_then(|m| m.as_str())
+                == Some("committed_transcript_with_timestamps")
+            {
+                return v
+                    .get("language_code")
+                    .and_then(|l| l.as_str())
+                    .map(str::to_string);
+            }
+        }
     }
 
     /// Send one `input_audio_chunk` frame.
@@ -268,20 +369,32 @@ impl Transcriber for ElevenLabsTranscriber {
                     let v: serde_json::Value =
                         serde_json::from_str(&t).context("parsing ElevenLabs STT frame")?;
                     match v.get("message_type").and_then(|m| m.as_str()) {
+                        // Bilingual mode: text + the detected language. Arrives just
+                        // before the plain `committed_transcript`; the first committed
+                        // message ends the read (so one commit is one transcript).
+                        Some("committed_transcript_with_timestamps") => {
+                            return Ok(Some(SttEvent::Transcript(
+                                Transcript::text(committed_text(&v))
+                                    .with_lang(v.get("language_code").and_then(|l| l.as_str())),
+                            )));
+                        }
                         Some("committed_transcript") => {
-                            let text = v
-                                .get("text")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or_default()
-                                .trim()
-                                .to_string();
-                            return Ok(Some(SttEvent::Transcript(text)));
+                            let text = committed_text(&v);
+                            if self.detect_language {
+                                // The language report normally comes first; if it is
+                                // late, give it a short grace before going without.
+                                let lang = self.await_language_report().await;
+                                return Ok(Some(SttEvent::Transcript(
+                                    Transcript::text(text).with_lang(lang.as_deref()),
+                                )));
+                            }
+                            return Ok(Some(SttEvent::Transcript(Transcript::text(text))));
                         }
                         // Not enough speech to transcribe after the commit → treat as
                         // an empty utterance, not a hard error. The orchestrator's
                         // no-speech guard already handles the empty transcript.
                         Some("insufficient_audio_activity") => {
-                            return Ok(Some(SttEvent::Transcript(String::new())));
+                            return Ok(Some(SttEvent::Transcript(Transcript::default())));
                         }
                         Some(mt) if is_error_message_type(mt) => {
                             let err = v.get("error").and_then(|e| e.as_str()).unwrap_or(mt);
@@ -354,11 +467,11 @@ mod tests {
     #[test]
     fn from_settings_requires_a_key() {
         let mut stt = crate::settings::SttRuntime::default();
-        assert!(ElevenLabsEngine::from_settings(&stt).is_none());
+        assert!(ElevenLabsEngine::from_settings(&stt, &Default::default()).is_none());
         stt.elevenlabs_api_key = Some(String::new());
-        assert!(ElevenLabsEngine::from_settings(&stt).is_none());
+        assert!(ElevenLabsEngine::from_settings(&stt, &Default::default()).is_none());
         stt.elevenlabs_api_key = Some("key".into());
-        assert!(ElevenLabsEngine::from_settings(&stt).is_some());
+        assert!(ElevenLabsEngine::from_settings(&stt, &Default::default()).is_some());
     }
 
     /// Drive the engine against a mock ElevenLabs realtime server over a plain `ws://`
@@ -440,7 +553,10 @@ mod tests {
         t.finish().await.unwrap();
 
         match t.read_event().await.unwrap() {
-            Some(SttEvent::Transcript(s)) => assert_eq!(s, "hello world"),
+            Some(SttEvent::Transcript(s)) => {
+                assert_eq!(s.text, "hello world");
+                assert_eq!(s.lang, None, "no language report without detection");
+            }
             other => panic!("expected a final transcript, got {other:?}"),
         }
 
@@ -460,5 +576,120 @@ mod tests {
         assert!(path.contains("audio_format=pcm_16000"), "path: {path}");
         assert!(path.contains("commit_strategy=manual"), "path: {path}");
         assert!(path.contains("language_code=en"), "path: {path}");
+        // Single-language request is exactly the pre-bilingual one.
+        assert!(!path.contains("secondary_languages"), "path: {path}");
+        assert!(!path.contains("include_language_detection"), "path: {path}");
+    }
+
+    /// Serve one bilingual session: accept, handshake, wait for the commit, then send
+    /// `replies` in order. Returns the request path the client dialed.
+    async fn serve_bilingual(listener: TcpListener, replies: Vec<&'static str>) -> String {
+        let (stream, _) = listener.accept().await.unwrap();
+        let path = Arc::new(Mutex::new(String::new()));
+        let p2 = path.clone();
+        let callback =
+            move |req: &HsRequest, resp: HsResponse| -> Result<HsResponse, ErrorResponse> {
+                *p2.lock().unwrap() = req.uri().to_string();
+                Ok(resp)
+            };
+        let mut ws = accept_hdr_async(stream, callback).await.unwrap();
+        ws.send(Message::Text(
+            r#"{"message_type":"session_started","session_id":"s1","config":{}}"#.into(),
+        ))
+        .await
+        .unwrap();
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Text(t) = msg {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                if v["commit"].as_bool().unwrap_or(false) {
+                    for r in &replies {
+                        ws.send(Message::Text((*r).into())).await.unwrap();
+                    }
+                    break;
+                }
+            }
+        }
+        // Keep the socket open briefly so the client reads at its own pace.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let p = path.lock().unwrap().clone();
+        p
+    }
+
+    fn bilingual_settings() -> (crate::settings::SttRuntime, crate::lang::LanguageSettings) {
+        let stt = crate::settings::SttRuntime {
+            elevenlabs_api_key: Some("k".into()),
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        let langs = crate::lang::LanguageSettings {
+            enabled: vec![crate::lang::Lang::En, crate::lang::Lang::PtBr],
+            default: crate::lang::Lang::En,
+            voices: Default::default(),
+        };
+        (stt, langs)
+    }
+
+    /// Bilingual mode: primary + secondary languages + detection in the request; the
+    /// `_with_timestamps` message (which the live API sends first) supplies text and
+    /// language, and the trailing plain `committed_transcript` is never a second turn.
+    #[tokio::test]
+    async fn bilingual_session_reports_the_detected_language() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_bilingual(
+            listener,
+            vec![
+                r#"{"message_type":"committed_transcript_with_timestamps","text":" Que horas são? ","language_code":"pt","words":[]}"#,
+                r#"{"message_type":"committed_transcript","text":"Que horas são?"}"#,
+            ],
+        ));
+        let (mut stt, langs) = bilingual_settings();
+        stt.elevenlabs_base_url = format!("ws://{addr}");
+        let engine = ElevenLabsEngine::from_settings(&stt, &langs).unwrap();
+        let mut t = engine.begin(AudioFormat::PCM_16K_MONO).await.unwrap();
+        t.forward_pcm(vec![0u8; 4]).await.unwrap();
+        t.finish().await.unwrap();
+        match t.read_event().await.unwrap() {
+            Some(SttEvent::Transcript(s)) => {
+                assert_eq!(s.text, "Que horas são?");
+                assert_eq!(s.lang.as_deref(), Some("pt"));
+            }
+            other => panic!("expected a transcript, got {other:?}"),
+        }
+        let path = server.await.unwrap();
+        assert!(path.contains("language_code=en"), "path: {path}");
+        assert!(path.contains("secondary_languages=pt"), "path: {path}");
+        assert!(
+            path.contains("include_language_detection=true"),
+            "path: {path}"
+        );
+    }
+
+    /// The reverse (unexpected) order: a plain `committed_transcript` first still picks
+    /// up the language from the late `_with_timestamps` twin within the grace window.
+    #[tokio::test]
+    async fn bilingual_session_waits_briefly_for_a_late_language_report() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_bilingual(
+            listener,
+            vec![
+                r#"{"message_type":"committed_transcript","text":"Turn off the office lights."}"#,
+                r#"{"message_type":"committed_transcript_with_timestamps","text":"Turn off the office lights.","language_code":"en"}"#,
+            ],
+        ));
+        let (mut stt, langs) = bilingual_settings();
+        stt.elevenlabs_base_url = format!("ws://{addr}");
+        let engine = ElevenLabsEngine::from_settings(&stt, &langs).unwrap();
+        let mut t = engine.begin(AudioFormat::PCM_16K_MONO).await.unwrap();
+        t.finish().await.unwrap();
+        match t.read_event().await.unwrap() {
+            Some(SttEvent::Transcript(s)) => {
+                assert_eq!(s.text, "Turn off the office lights.");
+                assert_eq!(s.lang.as_deref(), Some("en"));
+            }
+            other => panic!("expected a transcript, got {other:?}"),
+        }
+        server.await.unwrap();
     }
 }

@@ -7,6 +7,11 @@
   "tts_addr": "127.0.0.1:10200",
   "tts_voice": null,
   "tts_voices_dir": null,
+  "language": {
+    "enabled": ["en"],
+    "default": "en"
+  },
+  "tts_voices": {},
   "db_path": "anamanti_memory.sqlite",
   "chatlog_path": "anamanti_chatlog.jsonl",
   "promptlog_path": "anamanti_promptlog.jsonl",
@@ -65,6 +70,7 @@
   "stt": {
     "engine": "wyoming",
     "model": "base",
+    "multilingual": false,
     "model_dir": "models",
     "model_path": null,
     "language": "en",

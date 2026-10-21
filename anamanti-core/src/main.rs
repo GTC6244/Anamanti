@@ -115,6 +115,47 @@ async fn run() -> Result<()> {
         .shared_settings()
         .context("initializing LLM backend")?;
 
+    // Household languages (plans/BilingualPlan.md): log the live setup and anything it
+    // still needs (a missing per-language voice, STT engine setup).
+    {
+        let snap = settings.snapshot();
+        let lang = &snap.language;
+        if lang.is_bilingual() {
+            let voices: Vec<String> = lang
+                .enabled
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{l}={}",
+                        lang.voice_for(*l, snap.tts_voice.as_deref())
+                            .unwrap_or_else(|| "(server default)".to_string())
+                    )
+                })
+                .collect();
+            log::info!(
+                "bilingual mode: {} (default {}); voices {}",
+                lang.enabled
+                    .iter()
+                    .map(|l| l.code())
+                    .collect::<Vec<_>>()
+                    .join(" + "),
+                lang.default,
+                voices.join(", ")
+            );
+            if config.stt.language.is_some() {
+                log::info!(
+                    "bilingual mode: stt.language is ignored (the engine detects among the \
+                     enabled languages)"
+                );
+            }
+        }
+        for w in
+            anamanti_core::lang::setup_warnings(lang, snap.tts_voice.as_deref(), snap.stt.engine)
+        {
+            log::warn!("languages: {w}");
+        }
+    }
+
     // Selectable-model catalog for the settings dropdown (device + config page).
     // Live-fetched from the provider APIs (filtered to the last 12 months) with a
     // curated static fallback; shared by both front doors. Credentials are read live
@@ -313,7 +354,49 @@ async fn run() -> Result<()> {
     let connector: Arc<dyn orchestrator::ServiceConnector> = Arc::new(TcpConnector {
         stt_addr: config.stt_addr,
         tts_addr: config.tts_addr,
+        tts_addrs: config.tts_addrs.clone(),
     });
+    // Bilingual mode: load every language's voice now (one throwaway synthesis each), so
+    // the first turn in either language doesn't pay Piper's model load.
+    {
+        let snap = pipeline.settings().snapshot();
+        if snap.language.is_bilingual() {
+            let connector = connector.clone();
+            let lang = snap.language.clone();
+            let global = snap.tts_voice.clone();
+            tokio::spawn(async move {
+                // The default language last: with a single shared Piper (no `tts_addrs`)
+                // it is the voice left loaded.
+                let order: Vec<_> = lang
+                    .secondary()
+                    .chain(std::iter::once(lang.default))
+                    .collect();
+                for l in order {
+                    let voice = lang.voice_for(l, global.as_deref());
+                    let t0 = std::time::Instant::now();
+                    let warmed = async {
+                        let conn = connector.connect_tts_for(Some(l)).await?;
+                        let mut tts = anamanti_core::wyoming::tts::TtsSession::begin(
+                            conn,
+                            "Ok.",
+                            voice.as_deref(),
+                        )
+                        .await?;
+                        while tts.next_audio().await?.is_some() {}
+                        anyhow::Ok(())
+                    };
+                    match warmed.await {
+                        Ok(()) => log::info!(
+                            "languages: {l} voice {} warmed in {}ms",
+                            voice.as_deref().unwrap_or("(server default)"),
+                            t0.elapsed().as_millis()
+                        ),
+                        Err(e) => log::warn!("languages: couldn't warm the {l} voice: {e:#}"),
+                    }
+                }
+            });
+        }
+    }
 
     // Optional local HTTP config page (no auth; loopback by default). Serves the
     // same runtime-swappable settings the device controls over Wyoming, so you can
