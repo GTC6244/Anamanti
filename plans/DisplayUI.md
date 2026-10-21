@@ -29,7 +29,7 @@ events; nothing here touches audio buffers or sockets directly.
 | **Backgrounds / idle** | `SlideshowView`, `SlideshowController`, `PhotoSource` backends (local / Ambient / Drive) |
 | **Overlays (always-on)** | idle `_AmbientClock` + weather-beside-clock chip, `StatusIndicator`, settings gear |
 | **Overlays (listening cue)** | `ListeningOverlay` — big glowing blue ring (hollow) that reacts to mic level while listening |
-| **Overlays (timers)** | `TimersOverlay` — big (idle) + compact (in-turn) |
+| **Overlays (timers)** | `FullScreenTimersView` (idle) + `CompactTimersOverlay` (in-turn / over a mode) — linked by `TimerDisplayStyle` |
 | **Overlays (music)** | `MusicControlOverlay` — compact transport bar while a track plays (or `NowPlayingView` full screen, per this display's music display style) |
 | **Overlays (away/off)** | away-mode blackout + large centered `_AmbientClock`, backlight dim |
 | **Banners** | `NotificationBanner` (proactive push from Core), `UpdateBanner` (in-app updater, selfUpdate flavor) |
@@ -83,8 +83,9 @@ events; nothing here touches audio buffers or sockets directly.
 3. Dim scrim — `IgnorePointer` + `AnimatedContainer` (400 ms), alpha 0.55 during
    an active turn / 0.15 otherwise; pointer-transparent so idle swipes reach the
    slideshow.
-4. Big `TimersOverlay` (`compact: false`) — screen-filling idle timers; fades out
-   during a turn, in away mode, or in any full-screen mode.
+4. `FullScreenTimersView` — screen-filling idle timers, shown while
+   `effectiveTimerDisplay == TimerDisplayStyle.fullscreen`; fades out during a turn,
+   in away mode, or in any full-screen mode.
 5. `RecipeView` (recipeActive) — 250 ms fade.
 6. `WeatherView` **or** `SevenDayView` (weatherActive) — chosen by
    `state.weather!.isWeek`.
@@ -116,9 +117,9 @@ events; nothing here touches audio buffers or sockets directly.
     when no full-screen widget is displayed and not in away mode (see §2).
 14. `NotificationBanner` — shows even in away mode.
 15. `UpdateBanner` — in-app updater prompt/progress (selfUpdate flavor).
-16. Compact `TimersOverlay` (`compact: true`) — top-center chip row, the **top-most
+16. `CompactTimersOverlay` — top-center chip row, the **top-most
     layer** so a running timer always has z-order precedence over every other overlay
-    and banner. Shown (`compactTimersVisible`) whenever timers run and the big
+    and banner. Shown (`effectiveTimerDisplay == TimerDisplayStyle.compact`) whenever timers run and the big
     screen-filling presentation is hidden — i.e. while a turn is active **or** any
     full-screen mode (recipe/weather/place/music) is up — so the timer stays glanceable
     instead of hiding behind those views; suppressed in away mode.
@@ -251,18 +252,25 @@ Full-screen views are exempt (they hide the clock anyway).
 
 ## 4. Overlays — timers
 
-**`TimersOverlay` / `_TimersOverlayState`** — `lib/src/ui/timers_overlay.dart`
-- On-device countdown timers; repaints twice a second to interpolate remaining
-  time and ring fill (no per-second Rust events needed). Two presentations:
-  - **Big (`compact: false`)** — `_FullTimers`: idle, screen-filling. 1 fills the
+**`FullScreenTimersView` + `CompactTimersOverlay`** — `lib/src/ui/timers_overlay.dart`
+- On-device countdown timers as a **linked dual-form pair** (the `agents.md` dual-form
+  widget convention): two widgets linked by `TimerDisplayStyle { compact, fullscreen }`.
+  Which one shows is resolved only by `AssistantState.effectiveTimerDisplay`: `null`
+  with no timers or in away mode, `compact` while a turn/reply audio, a Core-pushed mode,
+  or a full music screen covers the idle screen, otherwise `AssistantState.timerDisplayStyle`.
+  That field defaults to `TimerDisplayStyle.defaultStyle` = **`fullscreen`** (the big
+  widget). Nothing changes it yet; it's the hook for a future setting or voice command. Both share
+  `_TickingTimersState`, which repaints twice a second to interpolate remaining time and
+  ring fill (no per-second Rust events needed).
+  - **`FullScreenTimersView`** (`fullscreen`) — `_FullTimers`: idle, screen-filling. 1 fills the
     screen; 2–3 side-by-side; 4+ in a `GridView`. Each `_TimerCard`: name, a
     draining circular ring (`_RingPainter`, sweeps clockwise from 12 o'clock,
     fill = remaining/total), and a centered `mm:ss` / `h:mm:ss` readout — or
     "Time's up" + "Tap to dismiss" when ringing.
-  - **Compact (`compact: true`)** — `_CompactTimers`: a horizontal scrolling row of
+  - **`CompactTimersOverlay`** (`compact`) — `_CompactTimers`: a horizontal scrolling row of
     `_TimerChip`s (icon + name + `m:ss`). Mounted as the **top-most** Stack layer in
     `ambient_screen.dart` (z-order precedence over every overlay/banner) and shown
-    (`compactTimersVisible`) whenever timers run and the big presentation is hidden (a
+    whenever timers run and the full-screen form is hidden (a
     turn is active or a full-screen mode is up), so it stays glanceable over the
     conversation, music, recipe, weather, or place views.
 - Fed by `AssistantState.timers` (Rust `timerStarted` / `timerFinished` /

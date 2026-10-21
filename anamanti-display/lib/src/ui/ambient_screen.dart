@@ -145,21 +145,19 @@ class AmbientScreen extends StatelessWidget {
             // blue ring, which reacts to the live mic level. Suppressed when the user
             // has turned the ring off in settings.
             final listening = state.listening && listeningRingEnabled;
-            // The compact timer badge shows whenever timers are running and the big
-            // screen-filling presentation is NOT up — i.e. while a turn is active or any
-            // full-screen mode (recipe/weather/place/music) covers the idle screen — so a
-            // running timer stays glanceable instead of being hidden behind those views.
-            // It is the top-most layer in the Stack (see the end of `children`), so it
-            // always has z-order precedence over every other overlay and banner.
-            final compactTimersVisible =
-                state.timers.isNotEmpty && (active || modeActive) && !offMode;
+            // Timers: which of the two linked timer widgets shows is resolved in one
+            // place by `effectiveTimerDisplay` ([TimerDisplayStyle]) — full screen while
+            // idle, the compact chip row while a turn or any full-screen mode covers the
+            // idle screen, neither in away mode.
+            final timerDisplay = state.effectiveTimerDisplay;
+            final fullTimersVisible = timerDisplay == TimerDisplayStyle.fullscreen;
+            final compactTimersVisible = timerDisplay == TimerDisplayStyle.compact;
             // The settings gear shows only after a touch, and is blocked ONLY by a
             // full-screen widget: the turn's conversation panel, a full-screen mode
             // (recipe/weather/place/music now-playing/up-next), or the big
             // screen-filling idle timers — and not in away mode. Partial overlays
             // (the compact music bar, the listening ring, banners) never block it.
-            final fullScreenWidget =
-                active || modeActive || state.timers.isNotEmpty;
+            final fullScreenWidget = active || modeActive || fullTimersVisible;
             final showSettings = touched && !fullScreenWidget && !offMode;
             return Stack(
               fit: StackFit.expand,
@@ -184,16 +182,17 @@ class AmbientScreen extends StatelessWidget {
                   ),
                 ),
 
-                // Big, screen-filling timers — the idle presentation. Fades out while a
-                // turn is active (the conversation wins the screen) and in away mode
-                // (only the clock shows); survives as the compact badge below. Ignores
-                // pointers when hidden so it never steals taps meant for the conversation.
+                // Big, screen-filling timers — the idle presentation
+                // (`TimerDisplayStyle.fullscreen`). Fades out while a turn or full-screen
+                // mode is up (survives as the compact overlay below) and in away mode
+                // (only the clock shows). Ignores pointers when hidden so it never steals
+                // taps meant for the conversation.
                 AnimatedOpacity(
-                  opacity: (active || offMode || modeActive) ? 0 : 1,
+                  opacity: fullTimersVisible ? 1 : 0,
                   duration: const Duration(milliseconds: 300),
                   child: IgnorePointer(
-                    ignoring: active || offMode || modeActive,
-                    child: TimersOverlay(
+                    ignoring: !fullTimersVisible,
+                    child: FullScreenTimersView(
                       timers: state.timers,
                       onDismiss: assistant.dismissTimer,
                     ),
@@ -566,8 +565,7 @@ class AmbientScreen extends StatelessWidget {
                       ignoring: !compactTimersVisible,
                       child: Align(
                         alignment: Alignment.topCenter,
-                        child: TimersOverlay(
-                          compact: true,
+                        child: CompactTimersOverlay(
                           timers: state.timers,
                           onDismiss: assistant.dismissTimer,
                         ),
