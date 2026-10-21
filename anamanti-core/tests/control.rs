@@ -98,6 +98,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
             system1: anamanti_core::settings::System1Runtime::default(),
             personality: anamanti_core::settings::Personality::default(),
             pronunciations: Vec::new(),
+            language: Default::default(),
             music_display_pins: Default::default(),
             radio: Default::default(),
         },
@@ -112,6 +113,7 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
     let connector: Arc<dyn ServiceConnector> = Arc::new(TcpConnector {
         stt_addr: "127.0.0.1:1".parse().unwrap(),
         tts_addr: "127.0.0.1:1".parse().unwrap(),
+        tts_addrs: Default::default(),
     });
 
     // No provider keys → the catalog serves its static fallback (no network).

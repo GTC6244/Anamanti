@@ -20,13 +20,14 @@
 
 mod camera;
 mod home;
+mod language;
 mod prompt;
 mod speech_out;
 mod system1_handlers;
 mod turn;
 mod vad_loop;
 
-pub use prompt::detect_personality_switch;
+pub use prompt::{detect_personality_switch, detect_personality_switch_in};
 pub use turn::TurnStart;
 
 use std::path::PathBuf;
@@ -40,11 +41,12 @@ use tokio::time::Instant;
 
 use crate::audio_dump::TurnAudioDump;
 use crate::config::FollowUpConfig;
+use crate::lang::{phrases, Lang, TurnLang};
 use crate::llm::{DeviceAction, LlmBackend, LlmTurn, ReplyStream};
 use crate::memory::chatlog::now_secs;
 use crate::memory::promptlog::PromptLogRecord;
 use crate::memory::{
-    classify_scope, infer_memories, parse_command, ChatLog, ChatLogRecord, FactScope,
+    classify_scope, infer_memories_in, parse_command_in, ChatLog, ChatLogRecord, FactScope,
     MemoryCommand, MemoryKind, MemoryScope, MemorySource, MemoryStore, PromptLog, Recall,
     SqliteRecall, WrittenMemory,
 };
@@ -113,6 +115,15 @@ pub enum TurnOutcome {
 pub trait ServiceConnector: Send + Sync {
     async fn connect_stt(&self) -> Result<DynConnection>;
     async fn connect_tts(&self) -> Result<DynConnection>;
+
+    /// The TTS server for a voice of `lang` (`plans/BilingualPlan.md` §2.5).
+    /// wyoming-piper keeps only the most recently used voice loaded, so a bilingual
+    /// household can run one Piper per language (`tts_addrs`) and each keeps its voice
+    /// resident. The default — and any language without its own server — is
+    /// [`Self::connect_tts`].
+    async fn connect_tts_for(&self, _lang: Option<crate::lang::Lang>) -> Result<DynConnection> {
+        self.connect_tts().await
+    }
 }
 
 /// Production connector: dials the configured Whisper and Piper TCP endpoints (each
@@ -120,6 +131,9 @@ pub trait ServiceConnector: Send + Sync {
 pub struct TcpConnector {
     pub stt_addr: std::net::SocketAddr,
     pub tts_addr: std::net::SocketAddr,
+    /// Optional per-language Piper servers (`tts_addrs` in `anamanti.json`); a language
+    /// not listed uses `tts_addr`. Empty for single-language installs.
+    pub tts_addrs: std::collections::BTreeMap<crate::lang::Lang, std::net::SocketAddr>,
 }
 
 #[async_trait]
@@ -133,6 +147,15 @@ impl ServiceConnector for TcpConnector {
         DynConnection::connect_tcp(self.tts_addr)
             .await
             .context("connecting to TTS (Piper) service")
+    }
+
+    async fn connect_tts_for(&self, lang: Option<crate::lang::Lang>) -> Result<DynConnection> {
+        match lang.and_then(|l| self.tts_addrs.get(&l)) {
+            Some(addr) => DynConnection::connect_tcp(*addr).await.with_context(|| {
+                format!("connecting to the {} TTS (Piper) service", lang.unwrap())
+            }),
+            None => self.connect_tts().await,
+        }
     }
 }
 
@@ -166,6 +189,10 @@ pub struct Pipeline {
     /// turn too short to identify on its own can inherit them as *tentative*
     /// (SpeakerScopedMemoryPlan.md §4.2). Shared across clones (one per Core).
     last_speaker: Arc<std::sync::Mutex<Option<(SpeakerContext, i64)>>>,
+    /// The last bilingual turn's language and when (unix secs) — the "previous turn"
+    /// tie-break for a too-short follow-up (`plans/BilingualPlan.md` §2.2). Shared across
+    /// clones; expires with the follow-up history window.
+    last_lang: Arc<std::sync::Mutex<Option<(Lang, i64)>>>,
     /// Debug-only per-turn audio capture directory. `None` disables capture
     /// entirely; set from the config file's `audio_dump_dir`.
     audio_dump_dir: Option<PathBuf>,
@@ -222,6 +249,7 @@ impl Pipeline {
             promptlog: None,
             speaker: None,
             last_speaker: Arc::new(std::sync::Mutex::new(None)),
+            last_lang: Arc::new(std::sync::Mutex::new(None)),
             audio_dump_dir: None,
             system_prompt: system_prompt.into(),
             turn_timeout,
@@ -389,8 +417,14 @@ impl Pipeline {
         } = start;
         // One settings snapshot for the whole turn so a concurrent control swap never
         // changes the backend/voice mid-reply.
+        let runtime = self.settings.snapshot();
+        // The turn's language starts as the household default; resolved after STT.
+        let lang = TurnLang::fixed(runtime.language.default);
+        let base_voice = runtime.tts_voice.clone();
         let mut ctx = TurnCtx {
-            runtime: self.settings.snapshot(),
+            runtime,
+            lang,
+            base_voice,
             device,
             connector,
             device_ctx,
@@ -422,12 +456,13 @@ impl Pipeline {
                 format.rate,
             )
             .await?;
-        let (transcript, voiced_pcm, stt_latency) = match listened {
+        let (transcript, stt_lang, voiced_pcm, stt_latency) = match listened {
             Listen::Heard {
                 transcript,
+                stt_lang,
                 voiced_pcm,
                 stt_latency,
-            } => (transcript, voiced_pcm, stt_latency),
+            } => (transcript, stt_lang, voiced_pcm, stt_latency),
             Listen::DeviceClosed => {
                 let _ = stt.finish().await;
                 return Ok(TurnOutcome::Disconnected);
@@ -505,6 +540,10 @@ impl Pipeline {
             if speaker.inherited { ", inherited" } else { "" },
         );
         (ctx.on_event)(TurnEvent::Speaker(speaker.clone()));
+
+        // 2b. The turn's language (plans/BilingualPlan.md §2.2): replies follow the
+        //     language spoken. Single-language mode leaves everything as it was.
+        self.resolve_turn_lang(&mut ctx, stt_lang.as_deref(), &transcript, &speaker);
 
         // 3 + 4. Fast paths, or memory + LLM → reply, spoken sentence by sentence.
         let reply = match self
@@ -597,7 +636,7 @@ impl Pipeline {
         match runtime.stt.engine {
             SttEngineKind::WhisperLocal => {
                 if let Some(engine) = self.whisper_engine.as_ref() {
-                    return engine.begin(format).await;
+                    return engine.begin_with(format, &runtime.language).await;
                 }
                 log::warn!(
                     "stt.engine=whisper-rs but no in-process engine is loaded (feature off \
@@ -605,7 +644,7 @@ impl Pipeline {
                 );
             }
             SttEngineKind::ElevenLabs => {
-                match crate::stt::ElevenLabsEngine::from_settings(&runtime.stt) {
+                match crate::stt::ElevenLabsEngine::from_settings(&runtime.stt, &runtime.language) {
                     Some(engine) => return engine.begin(format).await,
                     None => log::warn!(
                         "stt.engine=elevenlabs but no ELEVENLABS_API_KEY is set; falling back \
@@ -643,7 +682,10 @@ impl Pipeline {
         // Explicit command → apply, confirm, and speak the confirmation in one chunk,
         // skipping the LLM. Like every fast reply it closes on a bare `audio-stop` (no
         // follow-up listen) and is barge-in-interruptible.
-        if let Some(cmd) = parse_command(transcript) {
+        // Tried in every enabled language (the turn's first); the phrasing that matched
+        // is what was spoken, so it sets the reply language.
+        if let Some((cmd, lang)) = parse_command_in(transcript, &language::phrase_order(ctx)) {
+            self.phrase_matched(ctx, lang);
             ctx.timing.path = Some("command".to_string());
             let text = self.apply_command(
                 cmd,
@@ -652,6 +694,7 @@ impl Pipeline {
                 &ctx.turn_id,
                 &mut memories_written,
                 ctx.on_event,
+                lang,
             )?;
             let reply = FastReply::say(text).ending_session();
             let delivery = self.speak_fast_reply(ctx, &reply).await;
@@ -707,7 +750,7 @@ impl Pipeline {
 
         // Inferred capture from an ordinary turn — stored for whoever it is true for:
         // this person only when confidently identified (SpeakerScopedMemoryPlan.md §2).
-        for (kind, content) in infer_memories(transcript) {
+        for (kind, content) in infer_memories_in(transcript, &language::phrase_order(ctx)) {
             let written = self.store_memory(
                 kind,
                 &content,
@@ -766,7 +809,7 @@ impl Pipeline {
 
         // Prompt assembly (system prompt + grounding + recalled context), all from the
         // turn snapshot.
-        let system_prompt = prompt::build_system_prompt(
+        let mut system_prompt = prompt::build_system_prompt(
             &self.system_prompt,
             speaker,
             &ctx.runtime,
@@ -774,6 +817,9 @@ impl Pipeline {
             &memory,
             !history.is_empty(),
         );
+        // Bilingual mode: name the reply language (empty in single-language mode, so the
+        // prompt is unchanged there).
+        system_prompt.push_str(&crate::lang::prompt_block(&ctx.runtime.language, &ctx.lang));
         // Record the exact prompt the model is about to see (debug GUI). Best-effort.
         self.log_prompt(
             &ctx.turn_id,
@@ -796,15 +842,22 @@ impl Pipeline {
         // the live output personality in place (the same `set_active_personality` the
         // `set_personality` tool uses) and speaks a canned confirmation as a one-item
         // reply stream, skipping the model. The new style applies from the next turn.
-        let personality_confirm = detect_personality_switch(transcript, &ctx.runtime.personality)
-            .map(|target| {
-                log::info!("personality switch intent: → {target}");
-                match self.settings.set_active_personality(&target) {
-                    Ok(Some(label)) => format!("Okay, I'll talk in my {label} voice from now on."),
-                    Ok(None) => "Okay, back to my normal voice.".to_string(),
-                    Err(_) => "Sorry, I don't have a personality by that name.".to_string(),
-                }
-            });
+        let personality_switch = detect_personality_switch_in(
+            transcript,
+            &ctx.runtime.personality,
+            &language::phrase_order(ctx),
+        );
+        if let Some((_, lang)) = &personality_switch {
+            self.phrase_matched(ctx, *lang);
+        }
+        let personality_confirm = personality_switch.map(|(target, lang)| {
+            log::info!("personality switch intent: → {target}");
+            match self.settings.set_active_personality(&target) {
+                Ok(Some(label)) => phrases::personality_set(lang, Some(&label)),
+                Ok(None) => phrases::personality_set(lang, None),
+                Err(_) => phrases::personality_unknown(lang).to_string(),
+            }
+        });
 
         // Per-turn device-action channel: action tools (timers, recipe, weather, …)
         // push `DeviceAction`s here and the drive loop relays them to the device on the
@@ -828,6 +881,10 @@ impl Pipeline {
         // `audio-start` up front, relay only the chunks, and send one `audio-stop` at
         // the very end.
         let mut audio_started = false;
+        // Bilingual mode: the first reply sentence is checked once; if the model answered
+        // in the other language, the rest of the reply uses that language's voice.
+        let mut reply_lang_checked = false;
+        let mut reply_voice: Option<(Lang, RuntimeSettings)> = None;
 
         let outcome = {
             // Split the device socket so we can *concurrently* stream reply tokens + TTS
@@ -838,6 +895,8 @@ impl Pipeline {
             let connector = ctx.connector;
             let dump = ctx.dump.as_ref();
             let followup_depth = ctx.followup_depth;
+            let turn_lang = ctx.lang.lang;
+            let base_voice = ctx.base_voice.as_deref();
             let idle = self.llm_idle_timeout;
             // The first token gets the longer start budget (cold model + tool rounds).
             let first_budget = self.llm_first_token_timeout;
@@ -898,11 +957,17 @@ impl Pipeline {
                             on_event(TurnEvent::Speaking);
                             speaking = true;
                         }
+                        if !reply_lang_checked {
+                            reply_lang_checked = true;
+                            reply_voice = language::first_sentence_voice(
+                                turn_lang, runtime, base_voice, &sentence,
+                            );
+                        }
                         let tts_t0 = Instant::now();
                         let spoke = self
                             .speak_chunk(
                                 writer,
-                                runtime,
+                                reply_voice.as_ref().map_or(runtime, |(_, r)| r),
                                 connector,
                                 &sentence,
                                 &mut audio_started,
@@ -924,9 +989,21 @@ impl Pipeline {
                     if !speaking {
                         on_event(TurnEvent::Speaking);
                     }
+                    if !reply_lang_checked {
+                        reply_lang_checked = true;
+                        reply_voice =
+                            language::first_sentence_voice(turn_lang, runtime, base_voice, &rest);
+                    }
                     let tts_t0 = Instant::now();
                     let spoke = self
-                        .speak_chunk(writer, runtime, connector, &rest, &mut audio_started, dump)
+                        .speak_chunk(
+                            writer,
+                            reply_voice.as_ref().map_or(runtime, |(_, r)| r),
+                            connector,
+                            &rest,
+                            &mut audio_started,
+                            dump,
+                        )
                         .await?;
                     first_tts_ms.get_or_insert(tts_t0.elapsed().as_millis() as u64);
                     if !spoke {
@@ -967,6 +1044,10 @@ impl Pipeline {
         };
         ctx.timing.llm_ms = first_token_ms;
         ctx.timing.tts_ms = first_tts_ms;
+        if let Some((lang, _)) = reply_voice {
+            log::info!("reply came back in {lang}; spoke it with that language's voice");
+            ctx.timing.reply_lang = Some(lang.code().to_string());
+        }
 
         let reply = reply.trim().to_string();
         log::info!(
@@ -1095,6 +1176,7 @@ impl Pipeline {
 
     /// Apply an explicit memory command; returns the spoken confirmation. Anything it
     /// stores is appended to `written`.
+    #[allow(clippy::too_many_arguments)]
     fn apply_command(
         &self,
         cmd: MemoryCommand,
@@ -1103,6 +1185,7 @@ impl Pipeline {
         turn_id: &str,
         written: &mut Vec<WrittenMemory>,
         on_event: &mut (dyn FnMut(TurnEvent) + Send),
+        lang: Lang,
     ) -> Result<String> {
         Ok(match cmd {
             MemoryCommand::Remember { kind, content } => {
@@ -1114,7 +1197,7 @@ impl Pipeline {
                     turn_id,
                 )?);
                 on_event(TurnEvent::MemoryStored(content));
-                "Okay, I'll remember that.".to_string()
+                phrases::remembered(lang).to_string()
             }
             MemoryCommand::ForgetMatching(query) => {
                 // Only the asker's own memories — plus household ones when they
@@ -1124,19 +1207,19 @@ impl Pipeline {
                     .memory
                     .forget_matching_for(&query, speaker.forgetter(), household)?;
                 if n > 0 {
-                    "Okay, I've forgotten that.".to_string()
+                    phrases::forgotten(lang).to_string()
                 } else {
-                    "I didn't have anything about that.".to_string()
+                    phrases::nothing_matched(lang).to_string()
                 }
             }
             MemoryCommand::ForgetLast => match self.memory.forget_last_for(speaker.forgetter())? {
-                Some(_) => "Okay, I've forgotten that.".to_string(),
-                None => "There was nothing to forget.".to_string(),
+                Some(_) => phrases::forgotten(lang).to_string(),
+                None => phrases::nothing_to_forget(lang).to_string(),
             },
-            MemoryCommand::WhoAmI => who_am_i_reply(speaker, &runtime.household),
+            MemoryCommand::WhoAmI => who_am_i_reply(speaker, &runtime.household, lang),
             MemoryCommand::NameSpeaker(name) => {
                 let reply =
-                    self.name_speaker_by_voice(&name, speaker, runtime, turn_id, written)?;
+                    self.name_speaker_by_voice(&name, speaker, runtime, turn_id, written, lang)?;
                 if let Some(w) = written.last() {
                     on_event(TurnEvent::MemoryStored(w.content.clone()));
                 }
@@ -1158,18 +1241,19 @@ impl Pipeline {
         runtime: &RuntimeSettings,
         turn_id: &str,
         written: &mut Vec<WrittenMemory>,
+        lang: Lang,
     ) -> Result<String> {
+        use phrases::NameReply;
         let canonical = runtime
             .household
             .member_matching_spoken(spoken)
             .map(|m| m.name.trim().to_string());
         let display = canonical.clone().unwrap_or_else(|| spoken.to_string());
-        let fact = format!("The user's name is {display}");
+        // Stored as spoken (plans/BilingualPlan.md §2.8).
+        let fact = phrases::name_fact(lang, &display);
         let unattributed = MemoryScope::Unknown {
             candidate: speaker.best_guess().map(str::to_string),
         };
-        let enroll_hint = "On the display, go to Settings, People, Add a voice, and pick your \
-                           name so I'll recognise you.";
 
         let identified = speaker.resolution == SpeakerResolution::Identified;
         if !identified {
@@ -1181,8 +1265,9 @@ impl Pipeline {
                 speaker,
                 turn_id,
             )?);
-            return Ok(format!(
-                "Nice to meet you, {display}. I don't know your voice yet. {enroll_hint}"
+            return Ok(phrases::name_reply(
+                lang,
+                NameReply::UnknownVoice { display: &display },
             ));
         }
 
@@ -1192,12 +1277,18 @@ impl Pipeline {
                 || crate::household::spoken_name_distance(known, &display)
                     <= crate::household::spoken_name_tolerance(known);
             if same {
-                return Ok(format!("Yes, I know. Hi, {}!", known.trim()));
+                return Ok(phrases::name_reply(
+                    lang,
+                    NameReply::AlreadyKnown {
+                        known: known.trim(),
+                    },
+                ));
             }
-            return Ok(format!(
-                "I know your voice as {}. If that's wrong, you can rename it under Settings, \
-                 People on the display.",
-                known.trim()
+            return Ok(phrases::name_reply(
+                lang,
+                NameReply::KnownAsOther {
+                    known: known.trim(),
+                },
             ));
         }
 
@@ -1212,9 +1303,9 @@ impl Pipeline {
                 speaker,
                 turn_id,
             )?);
-            return Ok(format!(
-                "Nice to meet you, {display}. I couldn't find you in the household list. \
-                 {enroll_hint}"
+            return Ok(phrases::name_reply(
+                lang,
+                NameReply::NotInHousehold { display: &display },
             ));
         };
 
@@ -1235,10 +1326,9 @@ impl Pipeline {
                         speaker,
                         turn_id,
                     )?);
-                    return Ok(format!(
-                        "I already know a {name} with a different voice, so I won't change \
-                         anything yet. {name}, you can add more voice samples under Settings, \
-                         People on the display."
+                    return Ok(phrases::name_reply(
+                        lang,
+                        NameReply::NameTaken { name: &name },
                     ));
                 }
                 _ => {
@@ -1250,13 +1340,13 @@ impl Pipeline {
         }
         written.push(self.store_in(
             MemoryKind::Fact,
-            &format!("The user's name is {name}"),
+            &phrases::name_fact(lang, &name),
             MemorySource::Explicit,
             MemoryScope::Person(speaker.speaker_id.clone()),
             speaker,
             turn_id,
         )?);
-        Ok(format!("Nice to meet you, {name}!"))
+        Ok(phrases::name_reply(lang, NameReply::Named { name: &name }))
     }
 
     /// Recall memory entries relevant to the transcript for this speaker (their own
@@ -1489,7 +1579,11 @@ impl Pipeline {
 
 /// The deterministic answer to "who am I?" (SpeakerScopedMemoryPlan.md §5): from the
 /// voiceprint resolution, never from memory text, with the household roster's spelling.
-fn who_am_i_reply(speaker: &SpeakerContext, household: &crate::settings::Household) -> String {
+fn who_am_i_reply(
+    speaker: &SpeakerContext,
+    household: &crate::settings::Household,
+    lang: Lang,
+) -> String {
     let name = speaker
         .name
         .as_deref()
@@ -1500,20 +1594,5 @@ fn who_am_i_reply(speaker: &SpeakerContext, household: &crate::settings::Househo
                 .member_matching_spoken(n)
                 .map_or_else(|| n.to_string(), |m| m.name.trim().to_string())
         });
-    let enroll = "To teach me, go to Settings, People, Add a voice on the display.";
-    match (speaker.resolution, name) {
-        (SpeakerResolution::Identified, Some(n)) => format!("You're {n}."),
-        (SpeakerResolution::Tentative, Some(n)) => {
-            format!("I think you're {n}, but I'm not completely sure.")
-        }
-        (SpeakerResolution::Identified, None) => {
-            format!("I recognise your voice, but I don't know your name yet. {enroll}")
-        }
-        (SpeakerResolution::Tentative, None) => {
-            format!("I'm not sure who you are yet. {enroll}")
-        }
-        (SpeakerResolution::New | SpeakerResolution::Unknown, _) => {
-            format!("I don't recognise your voice yet. {enroll}")
-        }
-    }
+    phrases::who_am_i(lang, speaker.resolution, name.as_deref())
 }

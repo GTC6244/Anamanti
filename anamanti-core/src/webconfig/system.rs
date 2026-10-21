@@ -83,6 +83,9 @@ impl BootInfo {
                 "tts_addr": c.tts_addr.to_string(),
                 "tts_voice": c.tts_voice,
                 "tts_voices_dir": c.tts_voices_dir.as_deref().map(path),
+                "tts_addrs": c.tts_addrs.iter().map(|(l, a)| (l.code().to_string(), a.to_string())).collect::<std::collections::BTreeMap<_, _>>(),
+                // plans/BilingualPlan.md — the boot seed (Voice → Languages edits it live).
+                "languages": c.language,
                 "ollama_url": redact_url(&c.ollama_url),
             },
             "llm": {
@@ -102,6 +105,7 @@ impl BootInfo {
             "speech": {
                 "stt_engine": c.stt.engine.as_label(),
                 "whisper_model": c.stt.model,
+                "whisper_multilingual": c.stt.multilingual,
                 "whisper_model_dir": path(&c.stt.model_dir),
                 "whisper_model_path": c.stt.model_path.as_deref().map(path),
                 "language": c.stt.language,

@@ -1006,6 +1006,35 @@ fn pronunciations_save_round_trips_and_sanitizes_through_the_route() {
 }
 
 #[test]
+fn language_save_round_trips_through_the_route() {
+    let s = settings();
+    // Default: English only, no warnings.
+    let (_s, _c, g) = route("GET", "/language/status.json", b"", &s);
+    let gv: Value = serde_json::from_slice(&g).unwrap();
+    assert_eq!(gv["enabled"], serde_json::json!(["en"]));
+    assert_eq!(gv["bilingual"], Value::Bool(false));
+    assert_eq!(gv["supported"].as_array().unwrap().len(), 2);
+
+    let body =
+        br#"{"enabled":["en","pt-BR"],"default":"en","voices":{"pt-BR":"pt_BR-faber-medium"}}"#;
+    let (status, _c, out) = route("POST", "/language/save", body, &s);
+    assert_eq!(status, "200 OK");
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["ok"], Value::Bool(true));
+    assert_eq!(v["enabled"], serde_json::json!(["en", "pt-BR"]));
+    assert_eq!(v["voices"]["pt-BR"], "pt_BR-faber-medium");
+    assert_eq!(v["bilingual"], Value::Bool(true));
+    // The live per-turn snapshot sees it.
+    assert!(s.snapshot().language.is_bilingual());
+
+    // An unknown code is rejected and nothing changes.
+    let (_s, _c, bad) = route("POST", "/language/save", br#"{"enabled":["xx"]}"#, &s);
+    let bv: Value = serde_json::from_slice(&bad).unwrap();
+    assert_eq!(bv["ok"], Value::Bool(false));
+    assert!(s.snapshot().language.is_bilingual());
+}
+
+#[test]
 fn pronunciations_save_rejects_invalid_json() {
     let s = settings();
     let (status, _c, out) = route("POST", "/pronunciations/save", b"not json", &s);
@@ -1539,6 +1568,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/household/status.json", "", "200 OK", JSON),
     ("GET", "/personality/status.json", "", "200 OK", JSON),
     ("GET", "/pronunciations/status.json", "", "200 OK", JSON),
+    ("GET", "/language/status.json", "", "200 OK", JSON),
     ("GET", "/drive/status.json", "", "200 OK", JSON),
     ("GET", "/drive/folders.json", "", "200 OK", JSON),
     ("GET", "/tools/status.json", "", "200 OK", JSON),
@@ -1565,6 +1595,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/household/save", "{}", "200 OK", JSON),
     ("POST", "/personality/save", "{}", "200 OK", JSON),
     ("POST", "/pronunciations/save", "{}", "200 OK", JSON),
+    ("POST", "/language/save", "{}", "200 OK", JSON),
     ("POST", "/tools/save", "{}", "200 OK", JSON),
     ("POST", "/tools/weather/save", "{}", "200 OK", JSON),
     ("POST", "/tools/places/save", "{}", "200 OK", JSON),
@@ -1670,6 +1701,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/household/save", "not json", "200 OK", JSON),
     ("POST", "/personality/save", "not json", "200 OK", JSON),
     ("POST", "/pronunciations/save", "not json", "200 OK", JSON),
+    ("POST", "/language/save", "not json", "200 OK", JSON),
     ("POST", "/tools/save", "not json", "200 OK", JSON),
     ("POST", "/tools/weather/save", "not json", "200 OK", JSON),
     ("POST", "/tools/places/save", "not json", "200 OK", JSON),

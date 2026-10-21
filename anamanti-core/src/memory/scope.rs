@@ -160,6 +160,37 @@ pub fn classify_scope(content: &str) -> FactScope {
     if has(HOUSEHOLD) || lower.contains("wi-fi") {
         return FactScope::Household;
     }
+    // Brazilian Portuguese facts (stored as spoken; plans/BilingualPlan.md §2.8) — the
+    // same three rules, consulted only after every English cue has missed, so a fact
+    // with any English cue classifies exactly as before.
+    const EVERYONE_PT: &[&str] = &["todo mundo", "todos nós", "todos nos", "pra todos"];
+    if EVERYONE_PT.iter().any(|p| lower.contains(p)) {
+        return FactScope::Household;
+    }
+    const PERSONAL_PT: &[&str] = &[
+        "eu", "meu", "meus", "minha", "minhas", "mim", "comigo", "usuário", "usuario",
+    ];
+    if has(PERSONAL_PT) {
+        return FactScope::Personal;
+    }
+    const HOUSEHOLD_PT: &[&str] = &[
+        "nós",
+        "nosso",
+        "nossos",
+        "nossa",
+        "nossas",
+        "casa",
+        "família",
+        "familia",
+        "filhos",
+        "crianças",
+        "criancas",
+        "garagem",
+        "cozinha",
+    ];
+    if has(HOUSEHOLD_PT) || lower.contains("a gente") {
+        return FactScope::Household;
+    }
     FactScope::Personal
 }
 
@@ -186,6 +217,22 @@ mod tests {
             ("the dentist appointment is Tuesday", Personal), // ambiguous → personal
         ];
         for (text, want) in cases {
+            assert_eq!(classify_scope(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn classifies_portuguese_facts() {
+        use FactScope::*;
+        for (text, want) in [
+            ("meu aniversário é 3 de junho", Personal),
+            ("O usuário mora em Campinas", Personal),
+            ("a senha do wifi da nossa casa é FastNet", Household),
+            ("a gente mora em Campinas", Household),
+            ("nós vamos viajar em julho", Household),
+            ("todo mundo gosta de pizza aqui", Household),
+            ("o dentista é na terça", Personal),
+        ] {
             assert_eq!(classify_scope(text), want, "{text:?}");
         }
     }

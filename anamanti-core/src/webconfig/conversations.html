@@ -329,6 +329,8 @@ function renderDetail(){
     + (model ? '<span class="chip neutral mono">' + esc(model) + '</span>' : '')
     + loc
     + (path ? '<span class="chip">' + esc(path) + ' path</span>' : '')
+    // Bilingual mode (plans/BilingualPlan.md): the turn's language and how it was decided.
+    + (t && t.lang ? '<span class="chip neutral" title="Spoken (and answered) in ' + escAttr(t.lang) + ' — decided by ' + escAttr(t.lang_source || '?') + (t.reply_lang ? '; the reply came back in ' + escAttr(t.reply_lang) : '') + '">' + ui.icon('text') + esc(t.lang) + ' · ' + esc(t.lang_source || '?') + (t.reply_lang ? ' → ' + esc(t.reply_lang) : '') + '</span>' : '')
     + (t && t.total_ms != null ? '<span class="chip tnum ' + latClass(t.total_ms) + '">' + ui.icon('clock') + esc(ui.fmtMs(t.total_ms)) + '</span>' : '')
     + '</div>';
   h += '<div class="bubble-label">Heard</div><div class="bubble user">' + esc(r.transcript || '—') + '</div>';

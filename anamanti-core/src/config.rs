@@ -125,6 +125,11 @@ pub struct Config {
     pub stt_addr: SocketAddr,
     /// Downstream Wyoming TTS (Piper) address.
     pub tts_addr: SocketAddr,
+    /// Optional per-language Piper servers (`tts_addrs`, `plans/BilingualPlan.md` §2.5):
+    /// wyoming-piper keeps one voice loaded, so switching languages on one server reloads
+    /// the model (~1 s). A Piper per language keeps each voice resident. Unlisted
+    /// languages use `tts_addr`.
+    pub tts_addrs: std::collections::BTreeMap<crate::lang::Lang, SocketAddr>,
     /// Optional Piper voice name.
     pub tts_voice: Option<String>,
     /// Directory holding Piper voice models (`<name>.onnx`). When set (Piper is
@@ -132,6 +137,10 @@ pub struct Config {
     /// voices actually present here; when `None`, it lists Piper's full advertised
     /// catalog. Set via the config file's `tts_voices_dir`.
     pub tts_voices_dir: Option<PathBuf>,
+    /// The household's languages + per-language Piper voices (`plans/BilingualPlan.md`),
+    /// from the `language` and `tts_voices` blocks. Absent ⇒ English only, exactly the
+    /// pre-bilingual behaviour. Seeds the runtime settings (page-editable).
+    pub language: crate::lang::LanguageSettings,
     /// Selected LLM backend.
     pub llm: LlmChoice,
     /// SQLite memory database path.
@@ -335,6 +344,10 @@ pub struct SttConfig {
     /// Named model size for the in-process engine: `base` (default) or `small`,
     /// resolved to `<model_dir>/ggml-<model>.en.bin` unless `model_path` overrides.
     pub model: String,
+    /// Use the **multilingual** ggml file (`ggml-<model>.bin`, e.g. `small` or
+    /// `large-v3-turbo`) instead of the English-only `.en` one — required for bilingual
+    /// mode on the in-process engine (`plans/BilingualPlan.md` §2.3). Default `false`.
+    pub multilingual: bool,
     /// Directory holding the ggml model files (`ggml-base.en.bin`, …).
     pub model_dir: PathBuf,
     /// Explicit ggml model file; overrides `model`/`model_dir` when set.
@@ -372,9 +385,11 @@ impl SttConfig {
     /// The ggml model file for the in-process engine: `model_path` if set, else
     /// `<model_dir>/ggml-<model>.en.bin`.
     pub fn resolved_model_path(&self) -> PathBuf {
-        self.model_path
-            .clone()
-            .unwrap_or_else(|| self.model_dir.join(format!("ggml-{}.en.bin", self.model)))
+        self.model_path.clone().unwrap_or_else(|| {
+            let suffix = if self.multilingual { "" } else { ".en" };
+            self.model_dir
+                .join(format!("ggml-{}{suffix}.bin", self.model))
+        })
     }
 }
 
@@ -383,6 +398,7 @@ impl Default for SttConfig {
         Self {
             engine: SttEngineKind::Wyoming,
             model: "base".to_string(),
+            multilingual: false,
             model_dir: PathBuf::from("models"),
             model_path: None,
             language: Some("en".to_string()),
@@ -774,8 +790,10 @@ impl Default for Config {
             instance_id: "anamanti-core".to_string(),
             stt_addr: "127.0.0.1:10300".parse().unwrap(), // wyoming-faster-whisper default
             tts_addr: "127.0.0.1:10200".parse().unwrap(), // wyoming-piper default
+            tts_addrs: Default::default(),
             tts_voice: None,
             tts_voices_dir: None,
+            language: crate::lang::LanguageSettings::default(),
             llm: LlmChoice::Ollama {
                 url: "http://127.0.0.1:11434".to_string(),
                 model: "llama3.2".to_string(),
@@ -867,6 +885,68 @@ fn sanitize_id(name: &str) -> String {
 // JSON file configuration
 // ===========================================================================
 
+/// The `language` block of the config file (`plans/BilingualPlan.md` §2.1).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileLanguage {
+    /// Enabled language codes, in order (`en`, `pt-BR`). Empty/absent ⇒ just `default`.
+    #[serde(default)]
+    pub enabled: Vec<String>,
+    /// The household default (defaults to the first enabled language, else `en`).
+    pub default: Option<String>,
+}
+
+/// Build the household [`LanguageSettings`](crate::lang::LanguageSettings) from the
+/// config file's `language` + `tts_voices` blocks. An unknown language code is a hard
+/// error (like an unknown key): a typo must not silently turn bilingual mode off.
+fn resolve_language(
+    language: Option<FileLanguage>,
+    tts_voices: Option<std::collections::BTreeMap<String, Option<String>>>,
+) -> Result<crate::lang::LanguageSettings> {
+    use crate::lang::{Lang, LanguageSettings};
+    let parse = |code: &str, what: &str| {
+        Lang::parse(code).with_context(|| {
+            format!("unknown language `{code}` in {what} (supported: `en`, `pt-BR`)")
+        })
+    };
+    let fl = language.unwrap_or_default();
+    let mut enabled = Vec::new();
+    for code in &fl.enabled {
+        enabled.push(parse(code, "language.enabled")?);
+    }
+    let default = match fl.default.as_deref().filter(|d| !d.trim().is_empty()) {
+        Some(code) => parse(code, "language.default")?,
+        None => enabled.first().copied().unwrap_or(Lang::En),
+    };
+    let mut voices = std::collections::BTreeMap::new();
+    for (code, voice) in tts_voices.unwrap_or_default() {
+        let lang = parse(&code, "tts_voices")?;
+        if let Some(v) = voice.filter(|v| !v.trim().is_empty()) {
+            voices.insert(lang, v);
+        }
+    }
+    Ok(LanguageSettings {
+        enabled,
+        default,
+        voices,
+    }
+    .sanitized())
+}
+
+/// Parse the `tts_addrs` map's language keys (an unknown code is a hard error).
+fn resolve_tts_addrs(
+    raw: Option<std::collections::BTreeMap<String, SocketAddr>>,
+) -> Result<std::collections::BTreeMap<crate::lang::Lang, SocketAddr>> {
+    let mut out = std::collections::BTreeMap::new();
+    for (code, addr) in raw.unwrap_or_default() {
+        let lang = crate::lang::Lang::parse(&code).with_context(|| {
+            format!("unknown language `{code}` in tts_addrs (supported: `en`, `pt-BR`)")
+        })?;
+        out.insert(lang, addr);
+    }
+    Ok(out)
+}
+
 /// The deserialized JSON config file. Every field is optional; an absent field
 /// falls back to the built-in default (a 1:1 mirror of the historical env behavior),
 /// so a partial file works. Unknown keys are rejected (`deny_unknown_fields`) so a
@@ -881,8 +961,16 @@ pub struct FileConfig {
     pub instance_id: Option<String>,
     pub stt_addr: Option<SocketAddr>,
     pub tts_addr: Option<SocketAddr>,
+    /// Per-language Piper servers (`{ "pt-BR": "127.0.0.1:10201" }`).
+    pub tts_addrs: Option<std::collections::BTreeMap<String, SocketAddr>>,
     pub tts_voice: Option<String>,
     pub tts_voices_dir: Option<PathBuf>,
+    /// Household languages (`plans/BilingualPlan.md`): `{ "enabled": ["en", "pt-BR"],
+    /// "default": "en" }`. Absent ⇒ English only.
+    pub language: Option<FileLanguage>,
+    /// A Piper voice per language code (`{ "pt-BR": "pt_BR-faber-medium" }`); a `null`
+    /// or missing entry speaks that language with `tts_voice`.
+    pub tts_voices: Option<std::collections::BTreeMap<String, Option<String>>>,
     pub db_path: Option<PathBuf>,
     pub chatlog_path: Option<PathBuf>,
     pub promptlog_path: Option<PathBuf>,
@@ -1021,6 +1109,7 @@ pub struct FileSpeaker {
 pub struct FileStt {
     pub engine: Option<String>,
     pub model: Option<String>,
+    pub multilingual: Option<bool>,
     pub model_dir: Option<PathBuf>,
     pub model_path: Option<PathBuf>,
     pub language: Option<String>,
@@ -1434,6 +1523,7 @@ impl Config {
                 })?,
             },
             model: nonempty(fc.stt.model).unwrap_or(sttd.model),
+            multilingual: fc.stt.multilingual.unwrap_or(sttd.multilingual),
             model_dir: fc.stt.model_dir.unwrap_or(sttd.model_dir),
             model_path: fc.stt.model_path,
             // An explicit empty `language` means auto-detect (`None`); absent keeps
@@ -1703,6 +1793,8 @@ impl Config {
             instance_id,
             stt_addr: fc.stt_addr.unwrap_or(d.stt_addr),
             tts_addr: fc.tts_addr.unwrap_or(d.tts_addr),
+            tts_addrs: resolve_tts_addrs(fc.tts_addrs)?,
+            language: resolve_language(fc.language, fc.tts_voices)?,
             tts_voice: nonempty(fc.tts_voice),
             tts_voices_dir: fc.tts_voices_dir.or(d.tts_voices_dir),
             llm,
@@ -2282,6 +2374,7 @@ impl Config {
             // with no config-file seed.
             personality: Personality::default(),
             pronunciations: Vec::new(),
+            language: self.language.clone(),
             music_display_pins: Default::default(),
             radio: Default::default(),
         };

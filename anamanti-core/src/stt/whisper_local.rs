@@ -11,6 +11,14 @@
 //! audio. `read_event` stays pending until `finish` is called, then yields the
 //! transcript, mirroring the remote engine's "emit only after `audio-stop`" contract
 //! so it drops into the existing two-arm `select!` loop unchanged.
+//!
+//! **Bilingual mode** (`plans/BilingualPlan.md` §2.3): with more than one language
+//! enabled and a **multilingual** model (`ggml-small.bin`, `ggml-large-v3-turbo.bin`, …
+//! — an `.en` model cannot transcribe anything else), each decode first runs
+//! whisper.cpp's language detection on the utterance, picks the most probable language
+//! **among the enabled ones only** (so a short Portuguese command can't drift to
+//! Spanish or Galician), then decodes pinned to it and reports it on the [`Transcript`].
+//! Single-language mode decodes exactly as before.
 
 use std::sync::Arc;
 
@@ -21,7 +29,14 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use crate::wyoming::protocol::AudioFormat;
 
-use super::{SttEngine, SttEvent, Transcriber};
+use super::{SttEngine, SttEvent, Transcriber, Transcript};
+
+/// A decode's text and, in bilingual mode, the language it detected.
+type Decoded = (String, Option<String>);
+
+/// Logged once when bilingual mode meets an English-only (`.en`) model.
+static WARNED_NOT_MULTILINGUAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// A loaded Whisper model, shared across every turn. Construct once at startup and
 /// clone freely (the heavy model context sits behind an `Arc`); call
@@ -31,6 +46,8 @@ pub struct WhisperEngine {
     ctx: Arc<WhisperContext>,
     language: Option<String>,
     n_threads: i32,
+    /// Whether the loaded model is multilingual (not an `.en` model).
+    multilingual: bool,
 }
 
 impl WhisperEngine {
@@ -45,10 +62,12 @@ impl WhisperEngine {
         } else {
             default_threads()
         };
+        let multilingual = ctx.is_multilingual();
         let engine = Self {
             ctx: Arc::new(ctx),
             language,
             n_threads,
+            multilingual,
         };
         engine.warm_up();
         Ok(engine)
@@ -67,6 +86,7 @@ impl WhisperEngine {
             &self.ctx,
             &silence,
             self.language.as_deref(),
+            &[],
             self.n_threads,
         ) {
             Ok(_) => log::info!(
@@ -77,14 +97,51 @@ impl WhisperEngine {
         }
     }
 
-    /// Start a per-turn transcription session.
+    /// Whether the loaded model can transcribe languages other than English.
+    pub fn is_multilingual(&self) -> bool {
+        self.multilingual
+    }
+
+    /// Start a per-turn transcription session (single-language: the configured decode
+    /// language, exactly as before).
     pub fn begin(&self) -> WhisperLocal {
+        self.begin_detecting(Vec::new())
+    }
+
+    /// Start a session that detects among `candidates` (ISO 639-1 codes) before
+    /// decoding. Empty ⇒ [`Self::begin`].
+    pub fn begin_detecting(&self, candidates: Vec<String>) -> WhisperLocal {
         WhisperLocal {
             engine: self.clone(),
+            candidates,
             buffer: Vec::new(),
             decode: None,
             finished: false,
         }
+    }
+
+    /// The detection candidates for a turn: the enabled languages in bilingual mode with
+    /// a multilingual model; none otherwise (an `.en` model warns once and stays
+    /// English-only).
+    fn candidates_for(&self, languages: &crate::lang::LanguageSettings) -> Vec<String> {
+        if !languages.is_bilingual() {
+            return Vec::new();
+        }
+        if !self.multilingual {
+            if !WARNED_NOT_MULTILINGUAL.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!(
+                    "bilingual mode is on but the in-process Whisper model is English-only \
+                     (an `.en` model); it cannot transcribe Portuguese. Load a multilingual \
+                     model (stt.multilingual=true, see scripts/fetch-whisper-models.sh)."
+                );
+            }
+            return Vec::new();
+        }
+        // The household default first: it is decoded first (see `decode`).
+        std::iter::once(languages.default)
+            .chain(languages.secondary())
+            .map(|l| l.iso639_1().to_string())
+            .collect()
     }
 }
 
@@ -106,6 +163,15 @@ impl SttEngine for WhisperSttEngine {
         // announced format needs no negotiation here.
         Ok(Box::new(self.engine.begin()))
     }
+
+    async fn begin_with(
+        &self,
+        _format: AudioFormat,
+        languages: &crate::lang::LanguageSettings,
+    ) -> Result<Box<dyn Transcriber>> {
+        let candidates = self.engine.candidates_for(languages);
+        Ok(Box::new(self.engine.begin_detecting(candidates)))
+    }
 }
 
 /// A conservative default decode thread count: the host's parallelism, capped so a
@@ -122,10 +188,13 @@ fn default_threads() -> i32 {
 /// that decode is launched, then yields the transcript exactly once.
 pub struct WhisperLocal {
     engine: WhisperEngine,
+    /// Bilingual mode: detect among these (ISO 639-1) before decoding; empty ⇒ decode in
+    /// the configured language.
+    candidates: Vec<String>,
     /// Accumulated LE-i16 PCM samples for the whole utterance.
     buffer: Vec<i16>,
     /// The in-flight decode task, set by `finish`, awaited by `read_event`.
-    decode: Option<JoinHandle<Result<String>>>,
+    decode: Option<JoinHandle<Result<Decoded>>>,
     /// Latched by the first `finish` so subsequent calls are no-ops (idempotent).
     finished: bool,
 }
@@ -142,10 +211,12 @@ impl Transcriber for WhisperLocal {
 
     async fn read_event(&mut self) -> Result<Option<SttEvent>> {
         if let Some(handle) = self.decode.take() {
-            let text = handle
+            let (text, lang) = handle
                 .await
                 .context("whisper decode task failed to join")??;
-            return Ok(Some(SttEvent::Transcript(text)));
+            return Ok(Some(SttEvent::Transcript(
+                Transcript::text(text).with_lang(lang.as_deref()),
+            )));
         }
         // Not finalized yet (or the transcript was already delivered): never resolve,
         // so the pump loop's device-read arm keeps driving until the VAD calls
@@ -161,10 +232,11 @@ impl Transcriber for WhisperLocal {
         let samples = std::mem::take(&mut self.buffer);
         let ctx = self.engine.ctx.clone();
         let language = self.engine.language.clone();
+        let candidates = std::mem::take(&mut self.candidates);
         let n_threads = self.engine.n_threads;
         // CPU-bound decode → the blocking pool, off the async reactor.
         self.decode = Some(tokio::task::spawn_blocking(move || {
-            decode(&ctx, &samples, language.as_deref(), n_threads)
+            decode(&ctx, &samples, language.as_deref(), &candidates, n_threads)
         }));
         Ok(())
     }
@@ -176,10 +248,11 @@ fn decode(
     ctx: &WhisperContext,
     samples: &[i16],
     language: Option<&str>,
+    candidates: &[String],
     n_threads: i32,
-) -> Result<String> {
+) -> Result<Decoded> {
     if samples.is_empty() {
-        return Ok(String::new());
+        return Ok((String::new(), None));
     }
     // whisper.cpp wants f32 mono in [-1.0, 1.0] at 16 kHz.
     let audio: Vec<f32> = samples
@@ -194,6 +267,48 @@ fn decode(
     let decode_started = std::time::Instant::now();
 
     let mut state = ctx.create_state().context("creating whisper state")?;
+    // Bilingual mode (plans/BilingualPlan.md §2.3). The encoder output doesn't depend on
+    // the language, so: decode pinned to the household default (`candidates[0]`), then
+    // read the language distribution from ONE decoder step over the encoder state that
+    // decode left behind — no second encoder pass. Only when another enabled language
+    // wins is the utterance decoded again, pinned to it. A default-language (English)
+    // turn therefore costs one decoder step, not a full re-encode.
+    let first = candidates.first().map(String::as_str).or(language);
+    let mut text = full_decode(&mut state, &audio, first, n_threads)?;
+    let mut detected = None;
+    if let Some(primary) = candidates.first() {
+        let best = lang_from_encoder_state(ctx, &mut state, candidates, n_threads)?;
+        if best != *primary {
+            text = full_decode(&mut state, &audio, Some(&best), n_threads)?;
+        }
+        detected = Some(best);
+    }
+    let n = state.full_n_segments().unwrap_or(0);
+    let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+    let rtf = if audio_secs > 0.0 {
+        decode_ms / (audio_secs * 1000.0)
+    } else {
+        0.0
+    };
+    log::info!(
+        "whisper decode: {audio_secs:.2}s audio in {decode_ms:.0}ms (RTF {rtf:.3}, {n} \
+         segments{})",
+        detected
+            .as_deref()
+            .map(|l| format!(", detected {l}"))
+            .unwrap_or_default()
+    );
+    Ok((text.trim().to_string(), detected))
+}
+
+/// One `whisper_full` pass pinned to `language` (or auto when `None`), returning the
+/// trimmed text.
+fn full_decode(
+    state: &mut whisper_rs::WhisperState,
+    audio: &[f32],
+    language: Option<&str>,
+    n_threads: i32,
+) -> Result<String> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_n_threads(n_threads);
     if let Some(l) = language {
@@ -204,11 +319,9 @@ fn decode(
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
-
     state
-        .full(params, &audio)
+        .full(params, audio)
         .context("running whisper decode")?;
-
     let n = state
         .full_n_segments()
         .context("counting whisper segments")?;
@@ -220,14 +333,33 @@ fn decode(
                 .with_context(|| format!("reading whisper segment {i}"))?,
         );
     }
-    let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
-    let rtf = if audio_secs > 0.0 {
-        decode_ms / (audio_secs * 1000.0)
-    } else {
-        0.0
-    };
-    log::info!(
-        "whisper decode: {audio_secs:.2}s audio in {decode_ms:.0}ms (RTF {rtf:.3}, {n} segments)"
-    );
     Ok(text.trim().to_string())
+}
+
+/// The most probable **enabled** language for the utterance whose encoder output is in
+/// `state` (from the preceding [`full_decode`]): one decoder step on the
+/// start-of-transcript token, then compare the logits of each candidate's language
+/// token — the same quantity `whisper_lang_auto_detect` ranks, minus its encoder pass.
+fn lang_from_encoder_state(
+    ctx: &WhisperContext,
+    state: &mut whisper_rs::WhisperState,
+    candidates: &[String],
+    n_threads: i32,
+) -> Result<String> {
+    state
+        .decode(&[ctx.token_sot()], 0, n_threads.max(1) as usize)
+        .context("whisper language detection step")?;
+    let logits = state
+        .get_logits()
+        .context("whisper language detection logits")?;
+    let best = candidates
+        .iter()
+        .filter_map(|c| {
+            let token = ctx.token_lang(whisper_rs::get_lang_id(c)?);
+            Some((c, logits.get(token as usize).copied()?))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(c, _)| c.clone())
+        .unwrap_or_else(|| candidates[0].clone());
+    Ok(best)
 }

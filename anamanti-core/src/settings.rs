@@ -220,6 +220,11 @@ pub struct HouseholdMember {
     /// Optional relationship / role note (e.g. "parent", "kid", "roommate").
     #[serde(default)]
     pub relationship: Option<String>,
+    /// Preferred language code (`en` / `pt-BR`) — a **tie-break only**
+    /// (`plans/BilingualPlan.md` §2.2): replies follow the language spoken, and this is
+    /// consulted only when a turn is too short for the STT engine or text ID to tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// Canonical household + home information the orchestrator provides as context:
@@ -356,6 +361,12 @@ impl Household {
                     phones: clean_list(&m.phones),
                     appsaid: clean_opt(&m.appsaid),
                     relationship: clean_opt(&m.relationship),
+                    // Canonical code, or dropped when blank/unknown.
+                    language: m
+                        .language
+                        .as_deref()
+                        .and_then(crate::lang::Lang::parse)
+                        .map(|l| l.code().to_string()),
                 })
                 .filter(|m| !m.name.is_empty())
                 .collect(),
@@ -1056,6 +1067,11 @@ pub struct PersistedSettings {
     /// (empty) for older files.
     #[serde(default)]
     pub pronunciations: Vec<crate::stt::PronunciationRule>,
+    /// Household languages (`plans/BilingualPlan.md`). Written only once changed on the
+    /// config page (i.e. when the live value differs from the `anamanti.json` seed), so
+    /// an untouched install keeps following its config file; absent ⇒ the seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<crate::lang::LanguageSettings>,
     /// Internet-radio station catalog. Defaulted (empty) for older files.
     #[serde(default)]
     pub radio: RadioCatalog,
@@ -1660,6 +1676,12 @@ pub struct RuntimeSettings {
     /// stored, or sent to the LLM. Empty ⇒ no rewriting. GUI-editable; orthogonal to the
     /// LLM rebuild path (a change never rebuilds the backend).
     pub pronunciations: Vec<crate::stt::PronunciationRule>,
+    /// The household's languages (`plans/BilingualPlan.md`): which ones the assistant
+    /// listens/answers in, the default, and a Piper voice per language. Read per turn
+    /// from the snapshot. English-only by default (= the pre-bilingual behaviour).
+    /// Seeded from `anamanti.json` (`language` + `tts_voices`); editable on the config
+    /// page (Voice → Languages). Orthogonal to the LLM rebuild path.
+    pub language: crate::lang::LanguageSettings,
     /// The curated internet-radio station list (`plans/RadioPlan.md`). GUI-editable; a
     /// change refreshes the [`RadioPlayer`] catalog and rebuilds the LLM so the
     /// `radio_control` tool's station list stays current.
@@ -2191,6 +2213,10 @@ impl RuntimeSettings {
         self.personality = p.personality;
         self.pronunciations = p.pronunciations;
         self.radio = p.radio;
+        // Languages: only a page-edited value is persisted (see `PersistedSettings`).
+        if let Some(language) = p.language {
+            self.language = language.sanitized();
+        }
         self.music_display_pins = p.music_display_pins;
     }
 }
@@ -2274,6 +2300,12 @@ impl PersistedSettings {
             openrouter_api_key: sd(|p| &p.openrouter_api_key, &s.system1.openrouter_api_key),
             personality: s.personality.clone(),
             pronunciations: s.pronunciations.clone(),
+            // The boot seed (no `seed`) always records the language so later snapshots
+            // can compare; a live snapshot writes it only when it differs from the seed.
+            language: match seed {
+                Some(sd) if sd.language.as_ref() == Some(&s.language) => None,
+                _ => Some(s.language.clone()),
+            },
             radio: s.radio.clone(),
             music_display_pins: s.music_display_pins.clone(),
         }
@@ -2414,6 +2446,7 @@ impl SharedSettings {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -2628,6 +2661,25 @@ impl SharedSettings {
     /// effect on the next successful rebuild or restart.
     pub fn apply_household(&self, household: &Household) -> Household {
         self.mutate(Some("household"), |c| self.set_household(c, household))
+    }
+
+    /// The live household languages (`plans/BilingualPlan.md`). Read per turn from the
+    /// snapshot; this getter is for the config page.
+    pub fn language(&self) -> crate::lang::LanguageSettings {
+        self.inner.read().unwrap().language.clone()
+    }
+
+    /// Replace the household languages (enabled set, default, per-language voices) and
+    /// persist them (best-effort, 0600). The value is
+    /// [`sanitized`](crate::lang::LanguageSettings::sanitized) first. Takes effect from
+    /// the next turn; never rebuilds the LLM.
+    pub fn apply_language(
+        &self,
+        language: &crate::lang::LanguageSettings,
+    ) -> crate::lang::LanguageSettings {
+        let cleaned = language.clone().sanitized();
+        self.mutate(None, |c| c.language = cleaned.clone());
+        cleaned
     }
 
     /// A snapshot of the live output personality (on/off + selection + catalog). Read
@@ -3224,6 +3276,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -3486,6 +3539,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -3766,6 +3820,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -3839,6 +3894,7 @@ mod tests {
                     phones: vec!["+1 555 0001".into()],
                     appsaid: Some("  user_alice  ".into()),
                     relationship: Some(" parent ".into()),
+                    language: Some(" pt_br ".into()),
                 },
                 // No name → dropped entirely.
                 HouseholdMember {
@@ -3867,6 +3923,8 @@ mod tests {
         assert_eq!(clean.members[0].emails, vec!["alice@example.com"]);
         assert_eq!(clean.members[0].appsaid.as_deref(), Some("user_alice"));
         assert_eq!(clean.members[0].relationship.as_deref(), Some("parent"));
+        // A language preference is normalized to its canonical code.
+        assert_eq!(clean.members[0].language.as_deref(), Some("pt-BR"));
         assert!(!clean.is_empty());
         assert!(Household::default().is_empty());
     }
@@ -4096,6 +4154,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -4116,6 +4175,7 @@ mod tests {
                 phones: vec!["+1 555 0002".into()],
                 appsaid: None,
                 relationship: None,
+                language: None,
             }],
         });
         assert_eq!(stored.members.len(), 1);
@@ -4190,6 +4250,7 @@ mod tests {
                 stt: SttRuntime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -4305,6 +4366,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -4395,6 +4457,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },
@@ -4476,6 +4539,7 @@ mod tests {
                 system1: System1Runtime::default(),
                 personality: Personality::default(),
                 pronunciations: Vec::new(),
+                language: Default::default(),
                 music_display_pins: Default::default(),
                 radio: Default::default(),
             },

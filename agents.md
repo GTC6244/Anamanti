@@ -74,6 +74,14 @@ recalled for anyone; per-turn speaker resolution `identified|tentative|new|unkno
 fast path** — string-matched against a cached HA device catalog, one direct REST call, a fixed spoken
 confirmation, no model — plus the `home_control` rig tool as the LLM fallback; HA's Assist is
 deliberately not used. Part B, planned: an opt-in on-screen HA dashboard widget), and
+[`BilingualPlan.md`](./plans/BilingualPlan.md) (implemented 2026-10-20: a bilingual English + Brazilian
+Portuguese household, opt-in via the `language` block / Voice → Languages — replies follow the
+language spoken on each turn, via a per-turn `TurnLang` resolved
+after STT, with a per-language Piper voice and localized fast-path phrases/canned replies. It keeps the
+current STT engine and the current memory embedder, and English must not regress (every phase is gated
+on English non-regression + pt parity). Core-only: the Display is left as is (English chrome;
+streamed text may be pt), and the weather screen + ambient push stay English. System-1 handles pt
+after Phase 2 calibration), and
 [`CameraPlan.md`](./plans/CameraPlan.md) (live NVR camera view: a pre-System-1 camera fast
 path + `show_camera`/`close_camera` → the `anamanti-camera` frame on the speaking display;
 the device fetches the RTSP URL via `anamanti-get-camera-stream` and plays it through the
@@ -781,10 +789,18 @@ Android toolchain again.
   transcript + TTS audio. Frame types/constructors/decoders are defined **once**, in
   the shared `anamanti-protocol` crate — never copied into either side's `protocol.rs`.
 - **Turn order (fast paths first):** `respond_and_speak` tries, in order, the explicit
-  memory command (`parse_command`), the **Home Assistant fast path**
+  memory command (`parse_command_in`), the **Home Assistant fast path**
   (`orchestrator/home.rs`), **System-1**, then System-2 (recall + LLM). A new zero-model
   fast path belongs before System-1 and must reject non-matching turns with pure string
   code (no I/O) so ordinary turns pay nothing.
+- **Both languages must keep working (bilingual, `plans/BilingualPlan.md`):** every spoken
+  canned reply goes through `lang::phrases` (the `Lang::En` arm is the exact English
+  text — never a literal in a spoken path); a new fast path gets a Portuguese phrase table
+  and tries every enabled language (`orchestrator::language::phrase_order`), calling
+  `phrase_matched` with the language that matched; a new System-1 intent is English-only
+  until it passes `tests/system1_calibration.rs::calibrate_portuguese` and is added to
+  `system1::PT_BR_READY`. With no `language` block the pipeline must stay byte-identical
+  to English-only (`tests/bilingual.rs` pins this).
 - **Reuse the shared seams (DRY):** a new LLM tool is a `VoiceTool` registered in
   `Tools::build` (architecture.md §8); a new persistent push channel wraps
   `ChannelRegistry` (Core) and `push_channel::run` + `start_channel` (device); a new

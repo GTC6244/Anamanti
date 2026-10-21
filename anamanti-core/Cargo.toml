@@ -118,6 +118,11 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # directly only to install a default provider once at boot (see main.rs).
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Text language identification for the bilingual (en + pt-BR) turn language
+# (`plans/BilingualPlan.md` §2.2): pure Rust, trigram tables compiled in, no model
+# files or network. Used only as the fallback when the STT engine reports no language,
+# and for the first-reply-sentence voice check.
+whatlang = { version = "0.16", default-features = false }
 # Pure-Rust ONNX inference for the ECAPA-TDNN speaker embedder (always compiled;
 # gated at runtime by speaker.model_path). No external onnxruntime binary — compiles
 # offline.

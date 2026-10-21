@@ -1226,6 +1226,56 @@ so they are answered **before** System-1, memory recall and the LLM
 - **Room:** `DeviceContext.room` (from `audio-start` `data.room`), else
   `home_assistant.default_room`.
 
+### 8.6 Bilingual turns: English + Brazilian Portuguese (`plans/BilingualPlan.md`)
+
+**Replies follow the language spoken on each turn.** With `language.enabled = ["en",
+"pt-BR"]` (`anamanti.json`, or Voice → Languages on the config page) the Core resolves
+one `TurnLang` per turn right after STT (`orchestrator/language.rs` →
+`lang::resolve`) and everything downstream reads it:
+
+```
+STT (Transcript{text, lang?}) ─► lang::resolve ─► TurnCtx.lang ─┬─ runtime.tts_voice = voices[lang]
+   short phrase ▸ engine report (overruled by decisive function  ├─ prompt "# Language" block
+   words) ▸ text ID ▸ previous turn
+   ▸ speaker's preferred language ▸ household default            ├─ lang::phrases (canned replies)
+                                                                 └─ System-1 gate (system1::ready_for)
+```
+
+- **STT seam:** `SttEvent::Transcript(Transcript { text, lang })`. ElevenLabs opens the
+  session with `language_code=<default>` + `secondary_languages=<others>` +
+  `include_language_detection=true` and reads `language_code` from
+  `committed_transcript_with_timestamps` (measured to keep English output identical to a
+  pinned `en` session; auto-detect was rejected). whisper-rs (multilingual model) decodes
+  pinned to the default, reads the language from one decoder step over the existing
+  encoder state, and re-decodes only when another enabled language wins. Wyoming reads
+  `transcript.data.language` when the server sends it (wyoming-faster-whisper 3.8.1
+  doesn't — text ID decides there). `SttEngine::begin_with(format, languages)` carries
+  the live language set to engines loaded at boot.
+- **Fast paths try every enabled language** (turn language first) — memory commands
+  (`parse_command_in`), Home Assistant (`home_assistant::pt` maps Portuguese room/device
+  words onto English-shaped catalog candidates and acts only on one distinct target),
+  the personality switch (`detect_personality_switch_in`), inferred capture
+  (`infer_memories_in`) — and the language whose phrasing matched becomes the turn's
+  language (`LangSource::Phrase`). All still pure string code, no I/O.
+- **Canned replies** live in `lang::phrases`; the English arm is byte-for-byte the
+  pre-bilingual text (pinned by tests). Facts are stored as spoken.
+- **System-1** answers a Portuguese turn only for intents in `system1::PT_BR_READY`
+  (calibrated on `jev`, `tests/system1_calibration.rs::calibrate_portuguese`); others
+  defer to System-2, which replies in Portuguese.
+- **Voice:** `LanguageSettings::voice_for(lang, tts_voice)` — a language's own Piper
+  voice, else the global `tts_voice`. The first reply sentence is language-checked
+  (function words, then trigram ID); if the model answered in the other language ("answer
+  in English") the rest of the reply switches voice (`timing.reply_lang`). The voice's
+  language picks its Piper server via `ServiceConnector::connect_tts_for` (`tts_addrs`):
+  wyoming-piper keeps one voice loaded, so one Piper per language keeps each resident
+  (a switch on a shared server reloads the model, ~0.5–1 s). Boot warms each voice.
+- **Unchanged by decision:** the Display (English chrome; streamed text may be
+  Portuguese), the weather screen / ambient push (English), the wake word, VAD, speaker
+  ID, the memory embedder. No Wyoming wire change.
+- **Single-language mode** (no `language` block — the default) short-circuits every
+  step: `LangSource::Fixed`, no prompt block, no voice override, English-only phrase
+  tables — byte-identical to the pre-bilingual pipeline.
+
 ## 9. Cross-references
 
 - Delivery phases & open questions → [`Plan.MD`](./Plan.MD)
