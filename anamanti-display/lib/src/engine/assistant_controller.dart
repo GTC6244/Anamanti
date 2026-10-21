@@ -151,6 +151,25 @@ enum MusicScreen {
   nextUp,
 }
 
+/// Which of the two timer widgets is on screen — the link between the
+/// [FullScreenTimersView] (screen-filling, idle) and the [CompactTimersOverlay]
+/// (top-center chip row). Resolved in one place by [AssistantState.effectiveTimerDisplay];
+/// the ambient screen only reads it. Follows the dual-form widget convention in
+/// `agents.md` (same shape as [MusicDisplayStyle] / [AssistantState.effectiveMusicScreen]).
+enum TimerDisplayStyle {
+  /// The compact chip row, shown while a turn or any full-screen mode covers the idle
+  /// screen so a running timer stays glanceable.
+  compact,
+
+  /// The big screen-filling timers — the idle presentation.
+  fullscreen;
+
+  /// The form timers take while nothing covers the idle screen, unless
+  /// [AssistantState.timerDisplayStyle] says otherwise: the big screen-filling timers,
+  /// so a running timer is readable across the room.
+  static const defaultStyle = TimerDisplayStyle.fullscreen;
+}
+
 /// Where the current voice turn is, from the UI's point of view.
 enum TurnPhase {
   /// No active turn — the ambient/idle screen (slideshow) is showing.
@@ -255,7 +274,8 @@ class AssistantState {
     this.camera,
     this.music,
     this.musicScreen = MusicScreen.hidden,
-    this.musicDisplayStyle = MusicDisplayStyle.compact,
+    this.musicDisplayStyle = MusicDisplayStyle.defaultStyle,
+    this.timerDisplayStyle = TimerDisplayStyle.defaultStyle,
     this.recipeTab = 0,
     this.recipeScrollSeq = 0,
     this.recipeScrollDir = '',
@@ -508,6 +528,29 @@ class AssistantState {
   /// Whether a full-screen music view (now-playing or up-next) is currently on screen.
   bool get musicScreenActive => effectiveMusicScreen != MusicScreen.hidden;
 
+  /// The timer form preferred while nothing covers the idle screen. Starts at
+  /// [TimerDisplayStyle.defaultStyle] (the big timers). Nothing changes it yet; it's the
+  /// hook for a future setting or voice command. Read [effectiveTimerDisplay] for what
+  /// is actually on screen.
+  final TimerDisplayStyle timerDisplayStyle;
+
+  /// The timer widget actually on screen, or `null` for neither (no timers, or away
+  /// mode — only the clock shows). Compact whenever something covers the idle screen —
+  /// the conversation panel (a turn or its reply audio), a Core-pushed mode
+  /// (recipe/weather/place/camera), or a full music screen; otherwise this display's
+  /// [timerDisplayStyle] (full screen by default).
+  /// The single source of truth for which timer widget shows ([TimerDisplayStyle]).
+  TimerDisplayStyle? get effectiveTimerDisplay {
+    if (timers.isEmpty || !screenAwake) return null;
+    final covered = displayActive ||
+        recipeActive ||
+        weatherActive ||
+        placeActive ||
+        cameraActive ||
+        musicScreenActive;
+    return covered ? TimerDisplayStyle.compact : timerDisplayStyle;
+  }
+
   /// Whether a turn is currently in flight (anything but idle/error).
   bool get turnActive => phase != TurnPhase.idle && phase != TurnPhase.error;
 
@@ -583,6 +626,7 @@ class AssistantState {
     bool clearMusic = false,
     MusicScreen? musicScreen,
     MusicDisplayStyle? musicDisplayStyle,
+    TimerDisplayStyle? timerDisplayStyle,
     int? recipeTab,
     int? recipeScrollSeq,
     String? recipeScrollDir,
@@ -626,6 +670,7 @@ class AssistantState {
       music: clearMusic ? null : (music ?? this.music),
       musicScreen: musicScreen ?? this.musicScreen,
       musicDisplayStyle: musicDisplayStyle ?? this.musicDisplayStyle,
+      timerDisplayStyle: timerDisplayStyle ?? this.timerDisplayStyle,
       recipeTab: recipeTab ?? this.recipeTab,
       recipeScrollSeq: recipeScrollSeq ?? this.recipeScrollSeq,
       recipeScrollDir: recipeScrollDir ?? this.recipeScrollDir,

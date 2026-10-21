@@ -1,15 +1,17 @@
 // On-device countdown timers overlay (Plan.MD §3 device actions; Phase 2).
 //
-// Two presentations of the same live timers, driven by [compact]:
+// Two widgets over the same live timers, linked by [TimerDisplayStyle] (resolved by
+// `AssistantState.effectiveTimerDisplay` — the dual-form widget convention in
+// `agents.md`):
 //
-//  * Big (compact=false) — the idle presentation. Uses most of the screen so a
-//    running timer is readable across the room: one timer fills the screen, two or
-//    three sit side by side, four or more tile into a grid. Each timer shows its
-//    name, a large mm:ss readout, and a circular progress ring that drains from a
-//    full circle to empty as the time runs out.
-//  * Compact (compact=true) — a small row of chips shown top-center while a
-//    conversation is on screen, so the timers yield the screen to the live turn but
-//    stay glanceable.
+//  * [FullScreenTimersView] (`TimerDisplayStyle.fullscreen`) — the idle presentation.
+//    Uses most of the screen so a running timer is readable across the room: one
+//    timer fills the screen, two or three sit side by side, four or more tile into a
+//    grid. Each timer shows its name, a large mm:ss readout, and a circular progress
+//    ring that drains from a full circle to empty as the time runs out.
+//  * [CompactTimersOverlay] (`TimerDisplayStyle.compact`) — a small row of chips shown
+//    top-center while a conversation or full-screen mode is on screen, so the timers
+//    yield the screen but stay glanceable.
 //
 // The device owns the authoritative countdown + alarm; this widget just interpolates
 // the remaining time to each timer's deadline (and the ring's fill to its total) with
@@ -41,31 +43,81 @@ Map<int, String> resolveTimerNames(List<TimerModel> timers) {
   return names;
 }
 
-/// Live countdown timers. [compact] picks the small chip row (over a conversation)
-/// vs. the big screen-filling grid (idle).
-class TimersOverlay extends StatefulWidget {
-  const TimersOverlay({
+/// The big, screen-filling timers — the [TimerDisplayStyle.fullscreen] form, shown
+/// while the idle presentation is up. Its compact sibling is [CompactTimersOverlay].
+class FullScreenTimersView extends StatefulWidget {
+  const FullScreenTimersView({
     super.key,
     required this.timers,
     required this.onDismiss,
-    this.compact = false,
     this.clock,
   });
 
   final List<TimerModel> timers;
   final void Function(int id) onDismiss;
 
-  /// Small chip row (true) vs. big screen-filling layout (false, the default).
-  final bool compact;
+  /// Injectable clock for deterministic tests; defaults to [DateTime.now].
+  final DateTime Function()? clock;
+
+  @override
+  State<FullScreenTimersView> createState() => _FullScreenTimersViewState();
+}
+
+class _FullScreenTimersViewState extends _TickingTimersState<FullScreenTimersView> {
+  @override
+  Widget build(BuildContext context) {
+    if (widget.timers.isEmpty) return const SizedBox.shrink();
+    final now = (widget.clock ?? DateTime.now)();
+    // SafeArea so the screen-filling grid never hides under the system nav/status
+    // bars (the app runs without immersive mode); a no-op where there are no insets.
+    return SafeArea(
+      child: _FullTimers(
+        timers: widget.timers,
+        now: now,
+        names: resolveTimerNames(widget.timers),
+        onDismiss: widget.onDismiss,
+      ),
+    );
+  }
+}
+
+/// The compact top-center chip row — the [TimerDisplayStyle.compact] form, shown while
+/// a turn or any full-screen mode covers the idle screen. Its full-screen sibling is
+/// [FullScreenTimersView].
+class CompactTimersOverlay extends StatefulWidget {
+  const CompactTimersOverlay({
+    super.key,
+    required this.timers,
+    required this.onDismiss,
+    this.clock,
+  });
+
+  final List<TimerModel> timers;
+  final void Function(int id) onDismiss;
 
   /// Injectable clock for deterministic tests; defaults to [DateTime.now].
   final DateTime Function()? clock;
 
   @override
-  State<TimersOverlay> createState() => _TimersOverlayState();
+  State<CompactTimersOverlay> createState() => _CompactTimersOverlayState();
 }
 
-class _TimersOverlayState extends State<TimersOverlay> {
+class _CompactTimersOverlayState extends _TickingTimersState<CompactTimersOverlay> {
+  @override
+  Widget build(BuildContext context) {
+    if (widget.timers.isEmpty) return const SizedBox.shrink();
+    final now = (widget.clock ?? DateTime.now)();
+    return _CompactTimers(
+      timers: widget.timers,
+      now: now,
+      names: resolveTimerNames(widget.timers),
+      onDismiss: widget.onDismiss,
+    );
+  }
+}
+
+/// Shared ~half-second repaint ticker for both timer widgets.
+abstract class _TickingTimersState<T extends StatefulWidget> extends State<T> {
   Timer? _ticker;
 
   @override
@@ -82,21 +134,6 @@ class _TimersOverlayState extends State<TimersOverlay> {
   void dispose() {
     _ticker?.cancel();
     super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (widget.timers.isEmpty) return const SizedBox.shrink();
-    final now = (widget.clock ?? DateTime.now)();
-    final names = resolveTimerNames(widget.timers);
-    return widget.compact
-        ? _CompactTimers(timers: widget.timers, now: now, names: names, onDismiss: widget.onDismiss)
-        // SafeArea so the screen-filling grid never hides under the system nav/status
-        // bars (the app runs without immersive mode); a no-op where there are no insets.
-        : SafeArea(
-            child: _FullTimers(
-                timers: widget.timers, now: now, names: names, onDismiss: widget.onDismiss),
-          );
   }
 }
 
