@@ -588,9 +588,14 @@ predictable memory use and no GC pauses under the 1 GB limit.
   disconnects. An `adjust` carries only the signed delta (the device holds the
   authoritative deadline), which the device applies to the running timer's remaining
   time (floored at 1s, capped at the 24h max) and re-emits `timerStarted` to re-anchor
-  the UI. When a timer fires it rings a
+  the UI. When a timer fires it rings a loud
   two-strike **bell** locally, then (if the Mac is reachable) requests the spoken
-  announcement over **`anamanti-speak`**; bell-only when offline. See §8.
+  announcement over **`anamanti-speak`**; bell-only when offline. The alarm then
+  **repeats every 5 s** (bell + the cached voice) until turned off — the display's
+  "Cancel timer" button (FRB `dismiss_timer(id)`) or a voice cancel (an unlabeled cancel
+  while one rings silences only the ringing timers). A ringing timer stays in the device's
+  timer registry (so it counts as running in the turn context), and a repeat is skipped
+  while a voice turn is in flight. See §8.
 - **`anamanti-speak`** (device → Anamanti Core): a project-local frame (`data.text`)
   asking the Anamanti Core to synthesize the text with Piper and stream the audio
   (`audio-start`/`audio-chunk`…/`audio-stop`) straight back on the same socket. A

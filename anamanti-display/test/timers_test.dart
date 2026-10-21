@@ -106,6 +106,54 @@ void main() {
     expect(controller.state.timers, isEmpty);
   });
 
+  test('Cancel timer turns the alarm off in the engine, not just the UI', () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final dismissed = <int>[];
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+      dismissNativeTimer: dismissed.add,
+    )..start();
+    addTearDown(controller.dispose);
+
+    engine.add(_ev(WakeWordEventKind.timerStarted, timerId: 7, timerRemainingSecs: 60));
+    engine.add(_ev(WakeWordEventKind.timerFinished, timerId: 7));
+    await Future<void>.delayed(Duration.zero);
+    controller.dismissTimer(7);
+    expect(dismissed, [7]);
+    expect(controller.state.timers, isEmpty);
+  });
+
+  test('a newly set timer spotlights the big view until the user speaks again',
+      () async {
+    final engine = StreamController<WakeWordEvent>.broadcast();
+    final controller = AssistantController(
+      config: _cfg(),
+      startEngine: (_) => engine.stream,
+    )..start();
+    addTearDown(controller.dispose);
+
+    engine.add(_ev(WakeWordEventKind.detected));
+    engine.add(_ev(WakeWordEventKind.transcript));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isFalse);
+
+    // The turn sets a timer → the big timers take the screen right away.
+    engine.add(_ev(WakeWordEventKind.timerStarted, timerId: 1, timerRemainingSecs: 600));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isTrue);
+
+    // The user speaks again → the conversation panel comes back.
+    engine.add(_ev(WakeWordEventKind.transcript));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isFalse);
+
+    // An adjust re-emits the same id: not a new timer, so no spotlight.
+    engine.add(_ev(WakeWordEventKind.timerStarted, timerId: 1, timerRemainingSecs: 900));
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.timerSpotlight, isFalse);
+  });
+
   test('formatRemaining renders m:ss / h:mm:ss and clamps negatives', () {
     expect(formatRemaining(const Duration(seconds: 5)), '0:05');
     expect(formatRemaining(const Duration(minutes: 5)), '5:00');
@@ -207,6 +255,12 @@ void main() {
 
     // A running timer isn't dismissable; tapping the ringing one dismisses it.
     await tester.tap(find.text("Time's up"));
+    expect(dismissed, 2);
+
+    // The ringing timer (only) has a "Cancel timer" button that turns it off.
+    expect(find.text('Cancel timer'), findsOneWidget);
+    dismissed = null;
+    await tester.tap(find.byKey(const ValueKey('cancel-timer-2')));
     expect(dismissed, 2);
 
     // Unmount so the overlay's periodic ticker is cancelled before the test ends.

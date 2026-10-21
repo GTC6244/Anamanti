@@ -9,14 +9,19 @@
 //! `cpal`/`oboe` [`PlaybackSink`], no second audio path); Flutter renders the
 //! countdown from the `TimerStarted` event's deadline.
 //!
-//! When a timer fires it rings a two-strike bell locally, then — if the Mac is
+//! When a timer fires it rings a loud two-strike bell locally, then — if the Mac is
 //! reachable — asks the orchestrator (over a fresh Wyoming socket, same mDNS path a
-//! turn uses) to synthesize "Time's up for {name}" with Piper and streams that audio
-//! back into the same `PlaybackSink`, so the voice plays right after the bell. When
-//! the Mac is offline the timer is bell-only.
+//! turn uses) to synthesize "Time's up for {name}" with Piper and plays that audio
+//! through the same `PlaybackSink`, right after the bell. When the Mac is offline the
+//! timer is bell-only. The alarm then **repeats every [`ALARM_REPEAT`]** (bell + the
+//! cached voice, no further Mac round-trips) until the timer is turned off — by voice
+//! (a `cancel` command, e.g. "stop"), or by the display's "Cancel timer" button
+//! ([`dismiss_timer`]). A repeat is skipped while a voice turn is in flight so the
+//! alarm never talks over the user or the reply.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,6 +39,10 @@ use crate::wyoming::{resolve, EndpointCache};
 /// Defense-in-depth cap on a timer (24h); the Mac side already clamps.
 const MAX_TIMER_SECS: u64 = 24 * 60 * 60;
 
+/// How often a ringing timer re-sounds its alarm (start to start) until turned off.
+/// Stretched to the alarm's own length if that is longer, so repeats never pile up.
+const ALARM_REPEAT: Duration = Duration::from_secs(5);
+
 /// One running timer's cancellation handle + label (for label-scoped cancel) + the
 /// instant it will fire (so the manager can report time-remaining as turn context).
 struct TimerEntry {
@@ -42,6 +51,10 @@ struct TimerEntry {
     /// When this timer fires. Used only to compute remaining time for [`TimerManager::snapshot`];
     /// the countdown itself is driven by the spawned task's `sleep`.
     deadline: Instant,
+    /// Set once the timer has fired and its alarm is repeating. A ringing timer stays
+    /// registered (so it counts as running in the turn context, and "stop"/"cancel"
+    /// reach it) until it is cancelled or dismissed.
+    ringing: Arc<AtomicBool>,
 }
 
 /// A point-in-time summary of the running timers, stamped into each turn's `audio-start`
@@ -94,6 +107,9 @@ struct Inner {
     /// Pinned orchestrator selection key (`None` = Auto); a fired timer's Piper
     /// announcement resolves the same Mac the turns use.
     orchestrator_key: Option<String>,
+    /// True while a voice turn is in flight (the network bridge's flag); a ringing
+    /// alarm skips its repeat then, so it never talks over the user or the reply.
+    turn_active: Arc<AtomicBool>,
     next_id: AtomicU32,
     timers: Mutex<HashMap<u32, TimerEntry>>,
 }
@@ -112,6 +128,7 @@ impl TimerManager {
         cache: Arc<EndpointCache>,
         discovery_timeout: Duration,
         orchestrator_key: Option<String>,
+        turn_active: Arc<AtomicBool>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -121,6 +138,7 @@ impl TimerManager {
                 cache,
                 discovery_timeout,
                 orchestrator_key,
+                turn_active,
                 next_id: AtomicU32::new(1),
                 timers: Mutex::new(HashMap::new()),
             }),
@@ -153,35 +171,57 @@ impl TimerManager {
         let secs = duration_secs.clamp(1, MAX_TIMER_SECS);
         let inner = self.inner.clone();
         let task_label = label.clone();
+        let ringing = Arc::new(AtomicBool::new(false));
+        let task_ringing = ringing.clone();
         let task = self.inner.handle.spawn(async move {
             let label_str = task_label.as_deref().unwrap_or("");
             let _ = inner
                 .sink
                 .add(WakeWordEvent::timer_started(id, label_str, secs as u32));
             tokio::time::sleep(Duration::from_secs(secs)).await;
-            // Sound the alarm through the same cpal layer that plays TTS: ring the
-            // bell twice, then voice the announcement in the assistant's Piper voice.
-            if let Some(pb) = &inner.playback {
-                let (chime, rate) = alarm_pcm();
-                pb.submit_pcm(&chime, rate);
-                // The voice is appended to the same playback ring, so it plays right
-                // after the two bell rings. Ask the orchestrator to synthesize it;
-                // best-effort — if the Mac is unreachable the timer is bell-only.
-                let phrase = announce_phrase(task_label.as_deref());
-                if let Err(e) = speak_via_orchestrator(
-                    &inner.cache,
-                    inner.discovery_timeout,
-                    inner.orchestrator_key.as_deref(),
-                    pb,
-                    &phrase,
-                )
-                .await
-                {
-                    log::info!("timer voice announcement skipped ({phrase:?}): {e:#}");
-                }
-            }
+            // Fired: the entry stays registered (ringing) until cancelled/dismissed,
+            // which aborts this task and so stops the repeats.
+            task_ringing.store(true, Ordering::SeqCst);
             let _ = inner.sink.add(WakeWordEvent::timer_finished(id, label_str));
-            inner.timers.lock().unwrap().remove(&id);
+            let Some(pb) = inner.playback.clone() else {
+                return; // no speaker: the screen shows "Time's up" until dismissed
+            };
+            // Sound the alarm through the same cpal layer that plays TTS: the bell,
+            // then the announcement in the assistant's Piper voice (fetched once from
+            // the orchestrator and cached for the repeats; bell-only when offline).
+            let (bell, bell_rate) = alarm_pcm();
+            let phrase = announce_phrase(task_label.as_deref());
+            let mut voice: Option<(Vec<i16>, u32)> = None;
+            let mut first = true;
+            loop {
+                if !inner.turn_active.load(Ordering::SeqCst) {
+                    pb.submit_pcm(&bell, bell_rate);
+                    if first {
+                        first = false;
+                        match synthesize_via_orchestrator(
+                            &inner.cache,
+                            inner.discovery_timeout,
+                            inner.orchestrator_key.as_deref(),
+                            &phrase,
+                        )
+                        .await
+                        {
+                            Ok(v) => voice = Some(v),
+                            Err(e) => {
+                                log::info!("timer voice announcement skipped ({phrase:?}): {e:#}")
+                            }
+                        }
+                    }
+                    if let Some((pcm, rate)) = &voice {
+                        pb.submit_pcm(pcm, *rate);
+                    }
+                }
+                let played = pcm_duration(bell.len(), bell_rate)
+                    + voice
+                        .as_ref()
+                        .map_or(Duration::ZERO, |(pcm, rate)| pcm_duration(pcm.len(), *rate));
+                tokio::time::sleep(repeat_interval(played)).await;
+            }
         });
         self.inner.timers.lock().unwrap().insert(
             id,
@@ -189,6 +229,7 @@ impl TimerManager {
                 label,
                 abort: task.abort_handle(),
                 deadline: Instant::now() + Duration::from_secs(secs),
+                ringing,
             },
         );
     }
@@ -216,14 +257,34 @@ impl TimerManager {
         }
     }
 
+    /// Cancel timers matching `label` (every timer when `None`). **While any timer is
+    /// ringing, an unlabeled cancel ("stop", "cancel the timer") only silences the
+    /// ringing ones** — the user means "turn the alarm off", not "also throw away the
+    /// other countdowns"; a second unlabeled cancel then clears the rest.
     fn cancel(&self, label: Option<String>) {
         let mut timers = self.inner.timers.lock().unwrap();
-        let ids = ids_matching(timers.iter().map(|(id, e)| (*id, &e.label)), &label);
+        let ringing_only =
+            label.is_none() && timers.values().any(|e| e.ringing.load(Ordering::SeqCst));
+        let ids: Vec<u32> = ids_matching(timers.iter().map(|(id, e)| (*id, &e.label)), &label)
+            .into_iter()
+            .filter(|id| !ringing_only || timers[id].ringing.load(Ordering::SeqCst))
+            .collect();
         for id in ids {
             if let Some(entry) = timers.remove(&id) {
                 entry.abort.abort();
                 let _ = self.inner.sink.add(WakeWordEvent::timer_cancelled(id));
             }
+        }
+    }
+
+    /// Turn off one timer by id — the display's "Cancel timer" button. Stops a ringing
+    /// alarm's repeats (or cancels a running countdown) and emits `timer_cancelled`.
+    /// A no-op for an unknown id.
+    pub fn dismiss(&self, id: u32) {
+        let entry = self.inner.timers.lock().unwrap().remove(&id);
+        if let Some(entry) = entry {
+            entry.abort.abort();
+            let _ = self.inner.sink.add(WakeWordEvent::timer_cancelled(id));
         }
     }
 
@@ -240,7 +301,11 @@ impl TimerManager {
         // old tasks and removing their entries as we go; spawn outside the lock.
         let rearm: Vec<(u32, Option<String>, u64)> = {
             let mut timers = self.inner.timers.lock().unwrap();
-            let ids = ids_matching(timers.iter().map(|(id, e)| (*id, &e.label)), &label);
+            // A timer that already fired (ringing) isn't re-armed — only countdowns are.
+            let ids: Vec<u32> = ids_matching(timers.iter().map(|(id, e)| (*id, &e.label)), &label)
+                .into_iter()
+                .filter(|id| !timers[id].ringing.load(Ordering::SeqCst))
+                .collect();
             ids.into_iter()
                 .filter_map(|id| {
                     let entry = timers.remove(&id)?;
@@ -255,6 +320,40 @@ impl TimerManager {
             self.spawn_countdown(id, entry_label, new_secs);
         }
     }
+}
+
+/// The running engine's timer manager, published so the display's "Cancel timer"
+/// button ([`dismiss_timer`]) can reach it. Set by the network bridge on start and
+/// cleared on teardown.
+static MANAGER: OnceLock<Mutex<Option<TimerManager>>> = OnceLock::new();
+
+fn manager_slot() -> &'static Mutex<Option<TimerManager>> {
+    MANAGER.get_or_init(|| Mutex::new(None))
+}
+
+/// Publish (or, with `None`, withdraw) the running engine's timer manager.
+pub fn set_manager(manager: Option<TimerManager>) {
+    *manager_slot().lock().unwrap() = manager;
+}
+
+/// Turn off timer `id` on the running engine (a no-op when no engine is running).
+pub fn dismiss_timer(id: u32) {
+    let manager = manager_slot().lock().unwrap().clone();
+    if let Some(m) = manager {
+        m.dismiss(id);
+    }
+}
+
+/// How long a buffer of `samples` mono samples at `rate` Hz plays for.
+fn pcm_duration(samples: usize, rate: u32) -> Duration {
+    Duration::from_secs_f64(samples as f64 / rate.max(1) as f64)
+}
+
+/// The wait before the next alarm repeat, given how long one alarm (bell + voice)
+/// plays: every [`ALARM_REPEAT`], stretched so a long alarm still gets a short pause
+/// instead of queueing repeats back to back.
+fn repeat_interval(played: Duration) -> Duration {
+    ALARM_REPEAT.max(played + Duration::from_millis(750))
 }
 
 /// Ids of the timers a cancel targets: those whose label equals `label`, or *every*
@@ -280,6 +379,10 @@ fn ids_matching<'a>(
 /// timbre a pure sine lacks), each with an exponential decay — fast attack, long
 /// ring-out — so it reads as a bell being rung rather than a beep. The whole alarm is
 /// two such strikes separated by a short gap ("ring it twice").
+/// The alarm bell's peak level as a fraction of full scale (was ~0.35 before the
+/// louder alarm; ~0.95 is about +8.7 dB while leaving headroom against clipping).
+const ALARM_PEAK: f32 = 0.95;
+
 fn alarm_pcm() -> (Vec<i16>, u32) {
     const RATE: u32 = crate::audio::TARGET_SAMPLE_RATE;
     const STRIKES: u32 = 2;
@@ -298,9 +401,10 @@ fn alarm_pcm() -> (Vec<i16>, u32) {
     let strike_len = (RATE * STRIKE_MS / 1000) as usize;
     let gap_len = (RATE * GAP_MS / 1000) as usize;
     let attack = (RATE as f32 * 0.004).max(1.0) as usize; // ~4 ms, avoids an onset click
-    let mut out = Vec::with_capacity((strike_len + gap_len) * STRIKES as usize);
-    for _ in 0..STRIKES {
-        for n in 0..strike_len {
+                                                          // One strike, unscaled, then normalised so its loudest sample sits at
+                                                          // [`ALARM_PEAK`] of full scale — a loud alarm that still never clips.
+    let strike: Vec<f32> = (0..strike_len)
+        .map(|n| {
             let t = n as f32 / RATE as f32;
             let mut s = 0.0f32;
             for (mult, amp, decay) in PARTIALS {
@@ -308,10 +412,21 @@ fn alarm_pcm() -> (Vec<i16>, u32) {
                     * (2.0 * std::f32::consts::PI * BASE_FREQ * mult * t).sin()
                     * (-t * decay).exp();
             }
-            let atk = (n as f32 / attack as f32).clamp(0.0, 1.0); // soft attack
-            let s = (s * 0.22 * atk).clamp(-1.0, 1.0);
-            out.push((s * i16::MAX as f32) as i16);
-        }
+            s * (n as f32 / attack as f32).clamp(0.0, 1.0) // soft attack
+        })
+        .collect();
+    let peak = strike
+        .iter()
+        .fold(0.0f32, |m, s| m.max(s.abs()))
+        .max(f32::EPSILON);
+    let gain = ALARM_PEAK / peak;
+    let mut out = Vec::with_capacity((strike_len + gap_len) * STRIKES as usize);
+    for _ in 0..STRIKES {
+        out.extend(
+            strike
+                .iter()
+                .map(|s| ((s * gain).clamp(-1.0, 1.0) * i16::MAX as f32) as i16),
+        );
         out.extend(std::iter::repeat_n(0i16, gap_len));
     }
     (out, RATE)
@@ -326,18 +441,18 @@ fn announce_phrase(label: Option<&str>) -> String {
     }
 }
 
-/// Ask the orchestrator to synthesize `text` (Piper) and play the returned audio on
-/// `playback`. Opens a fresh Wyoming socket to the mDNS-resolved host, sends one
-/// `anamanti-speak` frame, then streams the `audio-start`/`audio-chunk`…/`audio-stop`
-/// reply into the same [`PlaybackSink`] the alarm uses. Errors (offline, no host,
-/// dropped socket) are returned so the caller can degrade to bell-only.
-async fn speak_via_orchestrator(
+/// Ask the orchestrator to synthesize `text` (Piper) and return the audio as mono
+/// `i16` PCM + its sample rate, so a ringing alarm can replay it on every repeat
+/// without another round-trip. Opens a fresh Wyoming socket to the mDNS-resolved host,
+/// sends one `anamanti-speak` frame, then collects the `audio-start`/`audio-chunk`…/
+/// `audio-stop` reply. Errors (offline, no host, dropped socket) are returned so the
+/// caller can degrade to bell-only.
+async fn synthesize_via_orchestrator(
     cache: &EndpointCache,
     discovery_timeout: Duration,
     preferred: Option<&str>,
-    playback: &PlaybackSink,
     text: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Vec<i16>, u32)> {
     let endpoint = resolve(cache, discovery_timeout, preferred).await?;
     let stream = TcpStream::connect(endpoint.socket_addr()).await?;
     stream.set_nodelay(true).ok();
@@ -347,6 +462,7 @@ async fn speak_via_orchestrator(
     protocol::write_event(&mut write_half, &WyomingEvent::speak(text)).await?;
 
     let mut rate = crate::audio::TARGET_SAMPLE_RATE;
+    let mut pcm = Vec::new();
     while let Some(ev) = protocol::read_event(&mut reader).await? {
         match ev.event_type.as_str() {
             types::AUDIO_START => {
@@ -356,17 +472,15 @@ async fn speak_via_orchestrator(
             }
             types::AUDIO_CHUNK => {
                 if let Some(payload) = &ev.payload {
-                    let pcm = decode_pcm_i16(payload);
-                    if !pcm.is_empty() {
-                        playback.submit_pcm(&pcm, rate);
-                    }
+                    pcm.extend(decode_pcm_i16(payload));
                 }
             }
             types::AUDIO_STOP => break,
             _ => {} // ignore any other frames on this out-of-band socket
         }
     }
-    Ok(())
+    anyhow::ensure!(!pcm.is_empty(), "orchestrator returned no audio");
+    Ok((pcm, rate))
 }
 
 /// Decode a little-endian `i16` PCM payload into samples (a trailing odd byte, never
@@ -442,6 +556,19 @@ mod tests {
     }
 
     #[test]
+    fn alarm_repeats_every_five_seconds_or_after_a_long_alarm() {
+        assert_eq!(
+            repeat_interval(Duration::from_secs(3)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            repeat_interval(Duration::from_secs(6)),
+            Duration::from_millis(6750)
+        );
+        assert_eq!(pcm_duration(32_000, 16_000), Duration::from_secs(2));
+    }
+
+    #[test]
     fn decode_pcm_i16_reads_le_pairs_and_ignores_odd_tail() {
         assert_eq!(decode_pcm_i16(&[1, 0, 0, 1]), vec![1, 256]);
         assert_eq!(decode_pcm_i16(&[1, 0, 9]), vec![1]); // trailing odd byte dropped
@@ -456,8 +583,10 @@ mod tests {
         let gap = (rate * 260 / 1000) as usize;
         // Two strikes, each followed by a gap.
         assert_eq!(pcm.len(), (strike + gap) * 2);
-        // Non-silent: the struck bell reaches a meaningful amplitude.
-        assert!(pcm.iter().any(|&s| s.abs() > i16::MAX / 8));
+        // Loud: the bell peaks near full scale (but never clips).
+        let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(peak as f32 > 0.9 * i16::MAX as f32, "peak {peak}");
+        assert!(peak < i16::MAX as u16);
         // Rung twice: the gap before the second strike is silent, and the second
         // strike then sounds — so there is audible energy in both halves.
         let half = pcm.len() / 2;

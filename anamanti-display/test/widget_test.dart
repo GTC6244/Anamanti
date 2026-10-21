@@ -15,6 +15,8 @@ import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 import 'package:anamanti_display/src/ui/ambient_screen.dart';
 import 'package:anamanti_display/src/ui/listening_overlay.dart';
+import 'package:anamanti_display/src/ui/conversation_view.dart';
+import 'package:anamanti_display/src/ui/timers_overlay.dart';
 import 'package:anamanti_display/src/rust/api/engine.dart';
 
 WakeWordConfig _testConfig() => WakeWordConfig(
@@ -168,6 +170,44 @@ void main() {
     expect(gearOpacity(), 0);
 
     await tester.pump(const Duration(seconds: 6));
+    await h.dispose(tester);
+  });
+
+  testWidgets('setting a timer shows the big timers right away, mid-turn',
+      (tester) async {
+    final h = _Harness();
+    await h.pump(tester);
+
+    double opacityOf(Finder f) => tester
+        .widget<AnimatedOpacity>(
+            find.ancestor(of: f, matching: find.byType(AnimatedOpacity)).first)
+        .opacity;
+    final bigTimers =
+        find.byType(FullScreenTimersView);
+    final panel = find.byType(ConversationView);
+
+    h.add(_event(WakeWordEventKind.detected, model: 'test'));
+    h.add(_event(WakeWordEventKind.transcript,
+        transcript: 'set a pasta timer for ten minutes'));
+    await h.settle(tester);
+    expect(opacityOf(panel), 1); // the conversation owns the screen…
+
+    h.add(_event(WakeWordEventKind.timerStarted,
+        timerId: 1, timerLabel: 'pasta', timerRemainingSecs: 600));
+    h.add(_event(WakeWordEventKind.replyToken,
+        reply: 'Pasta timer set for 10 minutes.'));
+    await h.settle(tester);
+    // …until the timer starts: the big timers take over while the turn is still on.
+    expect(opacityOf(bigTimers), 1);
+    expect(opacityOf(panel), 0);
+    expect(find.text('pasta'), findsWidgets);
+
+    // Speaking again brings the conversation panel back.
+    h.add(_event(WakeWordEventKind.transcript, transcript: 'thanks'));
+    await h.settle(tester);
+    expect(opacityOf(panel), 1);
+    expect(opacityOf(bigTimers), 0);
+
     await h.dispose(tester);
   });
 

@@ -720,6 +720,15 @@ pub fn update_diagnostics_tuning(gain_db: f32, threshold: f32, active_threshold:
     crate::engine::update_tuning(gain_db, threshold, active_threshold);
 }
 
+/// Turn off on-device timer `id` — the display's "Cancel timer" button. Silences a
+/// ringing alarm (which otherwise repeats every 5 s until turned off) or cancels a
+/// running countdown; the engine then emits `TimerCancelled` for it. A harmless no-op
+/// for an unknown id or when no engine is running.
+#[frb(sync)]
+pub fn dismiss_timer(id: u32) {
+    crate::engine::timer::dismiss_timer(id);
+}
+
 /// Register user activity that isn't camera motion — a voice turn or a screen touch
 /// — so it resets the screen-dim countdown (and brightens the screen if it had
 /// already dimmed). Flutter calls this on each voice-turn transition and on screen
