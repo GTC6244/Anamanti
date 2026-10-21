@@ -24,6 +24,10 @@
 #   NOTES="Bug fixes" \
 #   anamanti-display/scripts/release-r2.sh
 #
+# NOTES is free text shown in the device update banner; quotes, backslashes and
+# non-ASCII are fine — latest.json is serialized with python3's json module (never
+# string-pasted), and re-parsed before anything is uploaded.
+#
 # Bump `version:` in pubspec.yaml first (e.g. 1.2.0+12). The `+N` build number is
 # the Android versionCode and MUST increase every release.
 #
@@ -46,6 +50,9 @@ cd "$ROOT"
 : "${UPDATE_BASE_URL:?Set UPDATE_BASE_URL to your public R2 domain, e.g. https://dl.example.com}"
 NOTES="${NOTES:-Bug fixes and improvements}"
 WRANGLER="${WRANGLER:-npx wrangler}"
+# latest.json is written with python3's json module so NOTES is always escaped
+# correctly. Check for it now, before the multi-minute build, not after.
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 is required to write latest.json" >&2; exit 1; }
 UPDATE_BASE_URL="${UPDATE_BASE_URL%/}" # strip any trailing slash
 
 # Derive the R2 key prefix from any path component of UPDATE_BASE_URL. The bucket
@@ -119,15 +126,28 @@ fi
 OUT_DIR="build/r2"
 mkdir -p "$OUT_DIR"
 cp "$APK_SRC" "$OUT_DIR/$APK_NAME"
-cat > "$OUT_DIR/latest.json" <<JSON
-{
-  "versionCode": ${VERSION_CODE},
-  "versionName": "${VERSION_NAME}",
-  "apkUrl": "${UPDATE_BASE_URL}/${APK_NAME}",
-  "sha256": "${SHA256}",
-  "notes": "${NOTES}"
+# Serialize with a real JSON encoder, never by pasting values into a template: a
+# double quote in NOTES (e.g. NOTES='Say "stop"') once produced an invalid manifest
+# that devices could not parse, so they silently saw no update. Values are passed
+# through the environment (not interpolated into code), then the file is re-parsed
+# so a bad manifest can never be uploaded.
+VERSION_CODE="$VERSION_CODE" VERSION_NAME="$VERSION_NAME" \
+APK_URL="${UPDATE_BASE_URL}/${APK_NAME}" SHA256="$SHA256" NOTES="$NOTES" \
+python3 -I - "$OUT_DIR/latest.json" <<'PY'
+import json, os, sys
+manifest = {
+    "versionCode": int(os.environ["VERSION_CODE"]),
+    "versionName": os.environ["VERSION_NAME"],
+    "apkUrl": os.environ["APK_URL"],
+    "sha256": os.environ["SHA256"],
+    "notes": os.environ["NOTES"],
 }
-JSON
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+with open(sys.argv[1], encoding="utf-8") as f:
+    assert json.load(f) == manifest, "latest.json did not round-trip"
+PY
 echo "Wrote $OUT_DIR/latest.json:"
 cat "$OUT_DIR/latest.json"
 
