@@ -111,7 +111,7 @@
 
     <!-- Cadora -->
     <div class="drawer-panel" data-panel="cadora" hidden>
-      <p class="desc">Enables the <code>shopping_list_add</code> tool, so "add milk to the shopping list" writes to the household's shared Cadora list (used by NextHaul and the family apps).</p>
+      <p class="desc">Enables the <code>shopping_list_add</code> and <code>calendar_add</code> tools, so "add milk to the shopping list" writes to the household's shared list (used by NextHaul and Cadora) and "put soccer on the calendar Thursday at 4" adds a Cadora calendar event.</p>
       <div id="cadStatus"></div>
       <div class="field">
         <label for="cad_code">Pairing code</label>
@@ -123,7 +123,8 @@
       <ol class="int-steps">
         <li>In the <b>NextHaul</b> app, open <b>Settings → Voice &amp; Integrations</b>.</li>
         <li>Add a voice assistant to get a <b>6-digit code</b> and enter it above.</li>
-        <li>The code is single-use and expires in a few minutes; the tool turns on the moment it's redeemed.</li>
+        <li>The code is single-use and expires in a few minutes; the tools turn on the moment it's redeemed.</li>
+        <li>Or, in the <b>Cadora</b> web app, open <b>Settings → Voice assistants &amp; integrations</b>, add one (type <b>Other</b>), and paste the <code>vl_…</code> token under <b>Advanced</b> below.</li>
       </ol>
       <details class="fold" style="margin-top:.85rem">
         <summary>Advanced: paste a token or change the server</summary>
@@ -133,9 +134,9 @@
             <input id="cad_token" type="password" class="mono" placeholder="vl_…" autocomplete="off">
           </div>
           <div class="field">
-            <label for="cad_base">App-server URL <span class="hint">blank = default</span></label>
+            <label for="cad_base">API URL <span class="hint">blank = default</span></label>
             <div class="inline">
-              <input id="cad_base" type="text" class="mono" placeholder="https://cadora-server.fly.dev" autocomplete="off">
+              <input id="cad_base" type="text" class="mono" placeholder="https://api.getcadora.com/cadora" autocomplete="off">
               <button type="button" class="sm" data-action="save-cadora-url">Save URL</button>
             </div>
           </div>
@@ -285,7 +286,7 @@ ui.hydrate();
     places:     { icon: 'pin',      name: 'Places',              tool: 'places_lookup',      loc: 'places.google' },
     directions: { icon: 'route',    name: 'Directions',          tool: 'directions_lookup',  loc: 'directions.mapbox' },
     calendar:   { icon: 'calendar', name: 'Calendar',            tool: 'calendar_lookup',    loc: 'calendar.ics' },
-    cadora:     { icon: 'cart',     name: 'Shopping list',       tool: 'shopping_list_add',  loc: 'cadora' },
+    cadora:     { icon: 'cart',     name: 'Shopping & calendar', tool: 'shopping_list_add + calendar_add', loc: 'cadora' },
     appsaid:    { icon: 'phone',    name: 'Phone messages',      tool: 'send_phone_message', loc: 'appsaid' },
     home_assistant: { icon: 'home', name: 'Home Assistant',      tool: 'home_control',       loc: 'home_assistant' },
     spotify:    { icon: 'music',    name: 'Spotify',             tool: 'spotify_control',    loc: 'spotify' },
@@ -449,7 +450,7 @@ ui.hydrate();
   function renderCadora(){
     const c = ST.cadora;
     if (!c) { $('cadStatus').innerHTML = errBlock('Cadora'); return; }
-    $('cadStatus').innerHTML = line('Status', c.linked ? ui.status('ok', 'linked — tool active') : ui.status('off', 'not linked'))
+    $('cadStatus').innerHTML = line('Status', c.linked ? ui.status('ok', 'linked — tools active') : ui.status('off', 'not linked'))
       + line('Server', '<code>' + esc(c.base_url || 'default') + '</code>');
     $('cad_base').value = c.base_url || '';
     $('cadSends').innerHTML = ui.sendsFor('cadora');
@@ -636,7 +637,7 @@ ui.hydrate();
       const code = $('cad_code').value.trim(), token = $('cad_token').value.trim(), base = $('cad_base').value.trim();
       if (!code && !token) { ui.toast(false, 'Enter the 6-digit code from NextHaul (or paste a token under Advanced).'); $('cad_code').focus(); return; }
       const body = {}; if (code) body.code = code; if (token) body.token = token; if (base) body.base_url = base;
-      return act(b, () => postJSON('/cadora/link', body), (r) => r.message || 'Shopping list linked.').then(r => { if (r) { $('cad_code').value = ''; $('cad_token').value = ''; } });
+      return act(b, () => postJSON('/cadora/link', body), (r) => r.message || 'Cadora linked.').then(r => { if (r) { $('cad_code').value = ''; $('cad_token').value = ''; } });
     },
     'save-cadora-url': (b) => !ST.cadora ? ui.toast(false, 'Cadora status did not load — reload before saving.') : act(b, () => postJSON('/cadora/save', { base_url: $('cad_base').value.trim() }), 'Cadora server saved.'),
     'save-appsaid-token': (b) => {

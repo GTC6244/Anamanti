@@ -12,8 +12,9 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::llm::{DeviceAction, RecipeNav};
-use crate::system1::{Decision, DecisionRequest, Intent, Resolution};
+use crate::system1::{Decision, DecisionRequest, Intent, Resolution, Temporal};
 use crate::timer::MAX_TIMER_SECS;
+use crate::weather::{ForecastWhen, SpokenDay};
 use crate::wyoming::protocol::{DeviceContext, DisplayContext};
 
 use super::speech_out::{Delivery, FastReply};
@@ -91,7 +92,10 @@ impl Pipeline {
             r.confidence,
         );
         let reply = match r.intent.parse::<Intent>() {
-            Ok(intent) => self.fast_reply_for(intent, ctx, transcript).await,
+            Ok(intent) => {
+                self.fast_reply_for(intent, ctx, transcript, r.temporal)
+                    .await
+            }
             Err(_) => None, // a custom config label: routable, but no handler
         };
         let Some(reply) = reply else {
@@ -120,9 +124,10 @@ impl Pipeline {
         intent: Intent,
         ctx: &mut TurnCtx<'_>,
         transcript: &str,
+        temporal: Option<Temporal>,
     ) -> Option<FastReply> {
         match intent {
-            Intent::Weather => self.weather_reply(ctx).await,
+            Intent::Weather => self.weather_reply(ctx, transcript, temporal).await,
             Intent::Timer => timer_reply(transcript),
             // Clock queries answer from the wall clock (no tool, no network, no widget).
             // Always resolvable → always commit.
@@ -147,10 +152,18 @@ impl Pipeline {
 
     /// The System-1 `weather` fast path: fetch the forecast for home, open the
     /// full-screen weather widget *before* speaking, then speak a short templated
-    /// summary and invite a follow-up. Returns `None` (defer) on a precondition that
-    /// fails before anything is emitted: no provider, no home location (from the turn
-    /// snapshot), or the fetch errors / exceeds [`SYSTEM1_WEATHER_BUDGET`].
-    async fn weather_reply(&self, ctx: &mut TurnCtx<'_>) -> Option<FastReply> {
+    /// summary and invite a follow-up. The day comes from the transcript
+    /// ([`weather_when`]): "tomorrow"/"Saturday" fetch that day's forecast. Returns `None`
+    /// (defer) on a precondition that fails before anything is emitted: a day the fast
+    /// path can't pin down, no provider, no home location (from the turn snapshot), or the
+    /// fetch errors / exceeds [`SYSTEM1_WEATHER_BUDGET`].
+    async fn weather_reply(
+        &self,
+        ctx: &mut TurnCtx<'_>,
+        transcript: &str,
+        temporal: Option<Temporal>,
+    ) -> Option<FastReply> {
+        let when = weather_when(transcript, temporal, chrono::Local::now().date_naive())?;
         let provider = self.weather.as_ref()?; // weather disabled → defer
         let household = &ctx.runtime.household;
         let location = household.address.weather_location().unwrap_or_default();
@@ -162,14 +175,14 @@ impl Pipeline {
         let t0 = Instant::now();
         let report = match tokio::time::timeout(
             SYSTEM1_WEATHER_BUDGET,
-            provider.fetch(&location, imperial, crate::weather::ForecastWhen::Now),
+            provider.fetch(&location, imperial, when),
         )
         .await
         {
             Ok(Ok(report)) => {
                 ctx.timing.fetch_ms = Some(t0.elapsed().as_millis() as u64);
                 log::info!(
-                    "system1 weather: fetch OK in {}ms (location {location:?})",
+                    "system1 weather: fetch OK in {}ms (location {location:?}, {when:?})",
                     t0.elapsed().as_millis(),
                 );
                 report
@@ -429,9 +442,37 @@ fn human_duration(secs: u64) -> String {
     crate::speech::duration(secs as f64, crate::speech::DurationStyle::Exact)
 }
 
+/// Which forecast slice the System-1 weather fast path should fetch, or `None` to defer
+/// to System-2. The day comes from the transcript ([`crate::weather::spoken_day`]); the
+/// router's confident `temporal` only decides the ambiguous case: a forecast ask that
+/// names no day the fast path can read ("what's the forecast", "will it rain later")
+/// defers, so it is never answered with today's conditions.
+fn weather_when(
+    transcript: &str,
+    temporal: Option<Temporal>,
+    today: chrono::NaiveDate,
+) -> Option<ForecastWhen> {
+    let spoken = crate::weather::spoken_day(transcript, today);
+    let when = match (spoken, temporal) {
+        (SpokenDay::Unspecified, Some(Temporal::Future)) => None,
+        (s, _) => s.forecast_when(),
+    };
+    if when.is_none() {
+        log::info!(
+            "system1 weather: can't pin a single day ({spoken:?}, temporal {temporal:?}); \
+             deferring to System-2"
+        );
+    }
+    when
+}
+
 /// A short, speakable one-line summary of a forecast for the System-1 weather fast path
-/// (the full detail is on the widget). Metric/imperial follows the report's units.
+/// (the full detail is on the widget). Metric/imperial follows the report's units. A
+/// future-day report (`when_label` set) speaks that day's summary, not "it's N° now".
 fn weather_summary(report: &crate::weather::WeatherReport) -> String {
+    if !report.when_label.is_empty() {
+        return crate::weather::render_confirmation(report, true);
+    }
     let deg = if report.units == "imperial" {
         "°F"
     } else {
@@ -467,6 +508,78 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn weather_when_selects_the_spoken_day_or_defers() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap(); // a Wednesday
+        let day = |d| {
+            Some(ForecastWhen::Day(
+                chrono::NaiveDate::from_ymd_opt(2026, 10, d).unwrap(),
+            ))
+        };
+
+        // Present / no day named: current conditions, as before.
+        assert_eq!(
+            weather_when("what's the weather", None, today),
+            Some(ForecastWhen::Now)
+        );
+        assert_eq!(
+            weather_when("what's the weather", Some(Temporal::Present), today),
+            Some(ForecastWhen::Now)
+        );
+        assert_eq!(
+            weather_when("will it rain today", Some(Temporal::Future), today),
+            Some(ForecastWhen::Now)
+        );
+
+        // The bug: a named future day must fetch that day, whatever the temporal says.
+        for t in [None, Some(Temporal::Present), Some(Temporal::Future)] {
+            assert_eq!(
+                weather_when("what's the weather tomorrow", t, today),
+                day(22)
+            );
+            assert_eq!(weather_when("weather on Saturday", t, today), day(24));
+        }
+
+        // A confident forecast ask with no readable day defers rather than show today.
+        assert_eq!(
+            weather_when("what's the forecast", Some(Temporal::Future), today),
+            None
+        );
+        // Spans / multiple days always defer.
+        assert_eq!(weather_when("weather this weekend", None, today), None);
+        assert_eq!(
+            weather_when("weather today and tomorrow", None, today),
+            None
+        );
+    }
+
+    #[test]
+    fn weather_summary_speaks_the_requested_day() {
+        let mut report = crate::weather::WeatherReport {
+            location_label: "Austin, Texas".into(),
+            units: "imperial".into(),
+            current: crate::weather::CurrentConditions {
+                temp: 70,
+                high: 75,
+                low: 55,
+                description: "rain".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let now = weather_summary(&report);
+        assert!(
+            now.contains("it's 70°F") && now.contains("Today's high"),
+            "{now}"
+        );
+
+        report.when_label = "Thu, Oct 22".into();
+        let future = weather_summary(&report);
+        assert!(future.starts_with("Thu, Oct 22 will be rain"), "{future}");
+        assert!(!future.contains("Today"), "{future}");
+        assert!(future.contains("high of 75"), "{future}");
     }
 
     #[test]

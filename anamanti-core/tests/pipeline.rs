@@ -1527,6 +1527,104 @@ async fn system1_weather_resolve_shows_widget_and_skips_the_llm() {
     assert_eq!(kinds.last().map(String::as_str), Some(types::AUDIO_STOP));
 }
 
+/// System-1 fast path, future day: "what's the weather tomorrow" must fetch *tomorrow's*
+/// forecast (not today's) and speak that day — the regression where every System-1
+/// weather turn was hard-wired to `ForecastWhen::Now`. A vague future ask with no
+/// readable day ("this weekend") defers to System-2 instead of showing today.
+#[tokio::test]
+async fn system1_weather_tomorrow_fetches_tomorrows_forecast() {
+    use anamanti_core::settings::Household;
+    use anamanti_core::system1::{mock::MockDecider, Temporal};
+    use anamanti_core::weather::{CurrentConditions, ForecastWhen, WeatherProvider, WeatherReport};
+
+    /// Records every `when` it was asked for; labels a future-day report like the
+    /// real providers do.
+    #[derive(Default)]
+    struct RecordingWeather {
+        asked: std::sync::Mutex<Vec<ForecastWhen>>,
+    }
+    #[async_trait]
+    impl WeatherProvider for RecordingWeather {
+        async fn fetch(
+            &self,
+            location: &str,
+            _imperial: bool,
+            when: ForecastWhen,
+        ) -> Result<WeatherReport> {
+            self.asked.lock().unwrap().push(when);
+            Ok(WeatherReport {
+                location_label: location.to_string(),
+                units: "imperial".into(),
+                when_label: match when {
+                    ForecastWhen::Now => String::new(),
+                    ForecastWhen::Day(d) => d.format("%a, %b %-d").to_string(),
+                },
+                current: CurrentConditions {
+                    high: 64,
+                    low: 48,
+                    description: "light rain".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }
+    }
+
+    let hh = Household {
+        address: anamanti_core::household::HomeAddress {
+            city: Some("Austin".to_string()),
+            state: Some("Texas".to_string()),
+            ..Default::default()
+        },
+        location: None,
+        weather_units: Some("imperial".to_string()),
+        members: Vec::new(),
+    };
+    let build = |weather: Arc<RecordingWeather>| {
+        let p = Pipeline::new(
+            Arc::new(MockLlm::new("You said: {msg}")),
+            Arc::new(MemoryStore::open_in_memory().unwrap()),
+            "test persona",
+            None,
+            Duration::from_secs(5),
+        )
+        .with_system1(Arc::new(MockDecider::resolve_with_temporal(
+            "weather",
+            0.99,
+            Temporal::Future,
+        )))
+        .with_weather(Some(weather));
+        p.settings().apply_household(&hh);
+        p
+    };
+
+    // "tomorrow" → one fetch for tomorrow's date, and the reply names that day.
+    let weather = Arc::new(RecordingWeather::default());
+    let pipeline = build(weather.clone());
+    let connector = MockConnector::new("what's the weather tomorrow");
+    let ((_, reply, kinds), _) = run_one_turn(&pipeline, &connector).await;
+    let tomorrow = chrono::Local::now().date_naive() + chrono::Duration::days(1);
+    assert_eq!(
+        *weather.asked.lock().unwrap(),
+        vec![ForecastWhen::Day(tomorrow)]
+    );
+    assert!(kinds.iter().any(|k| k == types::WEATHER), "{kinds:?}");
+    let label = tomorrow.format("%a, %b %-d").to_string();
+    assert!(reply.starts_with(&label), "reply was: {reply:?}");
+    assert!(!reply.contains("Today"), "reply was: {reply:?}");
+
+    // "this weekend" → no fast-path fetch at all; System-2 (the mock LLM) answers.
+    let weather = Arc::new(RecordingWeather::default());
+    let pipeline = build(weather.clone());
+    let connector = MockConnector::new("what's the weather this weekend");
+    let ((_, reply, _), _) = run_one_turn(&pipeline, &connector).await;
+    assert!(weather.asked.lock().unwrap().is_empty());
+    assert!(
+        reply.contains("You said"),
+        "expected a System-2 reply, got {reply:?}"
+    );
+}
+
 /// System-1 fast path: a clear "set a timer for N" resolves on-device (a timer frame +
 /// spoken confirmation) without the LLM; an unclear timer request would defer. A
 /// panicking LLM proves System-2 is skipped. (plans/system1-fast-decisions.md, M3)

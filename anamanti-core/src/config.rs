@@ -1170,7 +1170,8 @@ pub struct FileSpotify {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileCadora {
-    /// Cadora app-server base URL (default `https://cadora-server.fly.dev`).
+    /// Cadora API base URL, including the `/cadora` route prefix (default
+    /// `https://api.getcadora.com/cadora`; the retired `cadora-server.fly.dev` maps to it).
     pub base_url: Option<String>,
     /// A `vl_…` voice-link token, if seeded directly (normally minted via the
     /// config-page pairing flow instead).

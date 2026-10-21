@@ -1,5 +1,5 @@
 // Phase 2 on-device timers: the controller folds timer events into `AssistantState`
-// and the TimersOverlay renders a live countdown with tap-to-dismiss.
+// and the timer widgets render a live countdown with tap-to-dismiss.
 
 import 'dart:async';
 
@@ -177,6 +177,51 @@ void main() {
     );
   });
 
+  test('effectiveTimerDisplay links the two timer widgets', () {
+    final t = [
+      TimerModel(
+        id: 1,
+        label: 'pasta',
+        deadline: DateTime(2026, 1, 1, 12, 5),
+        total: const Duration(minutes: 5),
+      ),
+    ];
+    // No timers: neither widget.
+    expect(const AssistantState().effectiveTimerDisplay, isNull);
+    // Idle and someone present: the full-screen timers.
+    expect(AssistantState(timers: t).effectiveTimerDisplay, TimerDisplayStyle.fullscreen);
+    // A turn (or its reply audio) covers the idle screen: the compact overlay.
+    expect(
+      AssistantState(timers: t, phase: TurnPhase.listening).effectiveTimerDisplay,
+      TimerDisplayStyle.compact,
+    );
+    expect(
+      AssistantState(timers: t, audioPlaying: true).effectiveTimerDisplay,
+      TimerDisplayStyle.compact,
+    );
+    // Away mode (nobody there, nothing up): only the clock shows.
+    expect(AssistantState(timers: t, userPresent: false).effectiveTimerDisplay, isNull);
+  });
+
+  test('timers default to the big full-screen widget', () {
+    expect(TimerDisplayStyle.defaultStyle, TimerDisplayStyle.fullscreen);
+    expect(const AssistantState().timerDisplayStyle, TimerDisplayStyle.fullscreen);
+    final t = [
+      TimerModel(
+        id: 1,
+        label: '',
+        deadline: DateTime(2026, 1, 1, 12, 5),
+        total: const Duration(minutes: 5),
+      ),
+    ];
+    // A compact preference shows the chip row while idle too.
+    expect(
+      AssistantState(timers: t, timerDisplayStyle: TimerDisplayStyle.compact)
+          .effectiveTimerDisplay,
+      TimerDisplayStyle.compact,
+    );
+  });
+
   testWidgets('big display shows name, countdown, and dismisses a ringing timer',
       (tester) async {
     final now = DateTime(2026, 1, 1, 12, 0, 0);
@@ -193,7 +238,7 @@ void main() {
 
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: TimersOverlay(
+        body: FullScreenTimersView(
           timers: timers,
           clock: () => now,
           onDismiss: (id) => dismissed = id,
@@ -236,8 +281,7 @@ void main() {
 
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: TimersOverlay(
-          compact: true,
+        body: CompactTimersOverlay(
           timers: timers,
           clock: () => now,
           onDismiss: (_) {},

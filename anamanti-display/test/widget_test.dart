@@ -183,7 +183,7 @@ void main() {
             find.ancestor(of: f, matching: find.byType(AnimatedOpacity)).first)
         .opacity;
     final bigTimers =
-        find.byWidgetPredicate((w) => w is TimersOverlay && !w.compact);
+        find.byType(FullScreenTimersView);
     final panel = find.byType(ConversationView);
 
     h.add(_event(WakeWordEventKind.detected, model: 'test'));

@@ -437,9 +437,10 @@ anamanti-core/scripts/build-webui-css.sh
 #     tool; Premium; easiest setup is config page → Integrations → Spotify → "Connect Spotify". redirect_url
 #     is the OAuth callback the consent flow binds + registers, default
 #     http://127.0.0.1:8888/callback)
-#   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
-#     shopping list; NextHaul + Cadora share one Supabase backend; base_url default
-#     https://cadora-server.fly.dev. Link: mint a 6-digit code in NextHaul → Settings →
+#   cadora{base_url,link_token} (shopping_list_add + calendar_add tools → the shared
+#     household shopping list and Cadora family calendar, via Cadora's voice API — NextHaul + Cadora share one API on
+#     Cloudflare Workers, no direct database access; base_url default
+#     https://api.getcadora.com/cadora (the retired cadora-server.fly.dev maps to it). Link: mint a 6-digit code in NextHaul → Settings →
 #     Voice & Integrations, enter it on the config page → Integrations → "Shopping list
 #     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
 #     A pasted vl_ token is also accepted)
@@ -750,6 +751,29 @@ Android toolchain again.
   lint with `cargo clippy`.
 - **Dart/Flutter:** stream-driven widgets (no polling); landscape-first layout for
   the 8-inch screen; `flutter format` / `dart analyze`.
+- **Dual-form display widgets (compact + full screen):** any on-screen feature that has
+  both a small form (a bar, chip row, or badge riding the ambient screen) and a
+  full-screen form is built as **two separate widgets linked by a state enum**, never as
+  one widget with a `compact: bool` flag. Concretely:
+  1. An enum named `<Feature>DisplayStyle { compact, fullscreen }` names the two forms.
+     Its doc comment names both widgets so either one can be found from the other.
+  2. **Every such enum declares a default**: `static const defaultStyle = …`, with a doc
+     comment saying why that form is the default. The state has a
+     `<feature>DisplayStyle` field that starts at that default; it's the one place a
+     user, voice, or Core preference later changes the form. Never hard-code the
+     default form anywhere else.
+  3. **One** resolver getter on `AssistantState` decides which form is on screen (or
+     neither). It combines the `<feature>DisplayStyle` field with the screen context:
+     turn, Core-pushed modes, away mode. `AmbientScreen` only reads that getter and maps
+     it to each widget's opacity/`IgnorePointer`. Visibility rules are never re-derived
+     inline from raw flags.
+  Reference implementations: **music** (`MusicDisplayStyle`, default `compact` until the
+  Core stamps a per-display style → `effectiveMusicScreen`; `MusicControlOverlay` /
+  `NowPlayingView`) and **timers** (`TimerDisplayStyle`, default `fullscreen`, the big
+  widget → `effectiveTimerDisplay`; `FullScreenTimersView` / `CompactTimersOverlay`;
+  forced to compact whenever a turn or full-screen mode covers the idle screen, except that a
+  just-set timer (`timerSpotlight`) keeps the big form over the conversation panel). New dual-form widgets (e.g. the planned HA dashboard
+  widget) follow the same shape, and are listed as a linked pair in `DisplayUI.md`.
 - **FRB:** change Rust signatures, then regenerate — never hand-edit generated
   bindings.
 - **Wyoming:** newline-delimited (`\n`) JSON control frames; raw PCM immediately
