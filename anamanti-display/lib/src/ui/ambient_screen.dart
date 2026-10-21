@@ -131,6 +131,13 @@ class AmbientScreen extends StatelessWidget {
             // brightness always agree (equivalent to `!userPresent && !active &&
             // !modeActive`).
             final offMode = !state.screenAwake;
+            // A timer was just set: the big timers take the screen over the
+            // conversation panel right away, rather than after the turn ends. Full-screen
+            // modes (recipe/weather/place/camera/music) still win over the timers.
+            final timerSpotlight =
+                state.timerSpotlight && state.timers.isNotEmpty && !modeActive;
+            // Whether the conversation panel (and its dim scrim) owns the screen.
+            final panelActive = active && !timerSpotlight;
             // The compact music control overlay rides the ambient screen when a track is
             // playing, no full music screen is up, no Core mode is up, no turn is active,
             // and someone is present.
@@ -152,7 +159,7 @@ class AmbientScreen extends StatelessWidget {
             // It is the top-most layer in the Stack (see the end of `children`), so it
             // always has z-order precedence over every other overlay and banner.
             final compactTimersVisible =
-                state.timers.isNotEmpty && (active || modeActive) && !offMode;
+                state.timers.isNotEmpty && (panelActive || modeActive) && !offMode;
             // The settings gear shows only after a touch, and is blocked ONLY by a
             // full-screen widget: the turn's conversation panel, a full-screen mode
             // (recipe/weather/place/music now-playing/up-next), or the big
@@ -180,19 +187,20 @@ class AmbientScreen extends StatelessWidget {
                 IgnorePointer(
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 400),
-                    color: Colors.black.withValues(alpha: active ? 0.55 : 0.15),
+                    color: Colors.black.withValues(alpha: panelActive ? 0.55 : 0.15),
                   ),
                 ),
 
-                // Big, screen-filling timers — the idle presentation. Fades out while a
-                // turn is active (the conversation wins the screen) and in away mode
-                // (only the clock shows); survives as the compact badge below. Ignores
+                // Big, screen-filling timers — the idle presentation, and also shown
+                // mid-turn the moment a new timer is set ([timerSpotlight]). Otherwise
+                // fades out while the conversation panel is up, under a full-screen
+                // mode, and in away mode; survives as the compact badge below. Ignores
                 // pointers when hidden so it never steals taps meant for the conversation.
                 AnimatedOpacity(
-                  opacity: (active || offMode || modeActive) ? 0 : 1,
+                  opacity: (panelActive || offMode || modeActive) ? 0 : 1,
                   duration: const Duration(milliseconds: 300),
                   child: IgnorePointer(
-                    ignoring: active || offMode || modeActive,
+                    ignoring: panelActive || offMode || modeActive,
                     child: TimersOverlay(
                       timers: state.timers,
                       onDismiss: assistant.dismissTimer,
@@ -353,10 +361,10 @@ class AmbientScreen extends StatelessWidget {
 
                 // The live conversation panel fades in for the duration of a turn.
                 AnimatedOpacity(
-                  opacity: active ? 1 : 0,
+                  opacity: panelActive ? 1 : 0,
                   duration: const Duration(milliseconds: 300),
                   child: IgnorePointer(
-                    ignoring: !active,
+                    ignoring: !panelActive,
                     child: Padding(
                       padding: const EdgeInsets.all(28),
                       child: ConversationView(state: state),

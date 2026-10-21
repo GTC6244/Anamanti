@@ -13,8 +13,9 @@
 //
 // The device owns the authoritative countdown + alarm; this widget just interpolates
 // the remaining time to each timer's deadline (and the ring's fill to its total) with
-// its own ~half-second ticker, so it needs no per-second events from Rust. Tapping a
-// finished (ringing) timer dismisses it via [onDismiss].
+// its own ~half-second ticker, so it needs no per-second events from Rust. A finished
+// (ringing) timer shows a "Cancel timer" button (the whole card/chip is tappable too)
+// that turns its repeating alarm off via [onDismiss].
 
 import 'dart:async';
 import 'dart:math' as math;
@@ -289,18 +290,6 @@ class _TimerCard extends StatelessWidget {
                                       height: 1.0,
                                     ),
                                   ),
-                                  if (ringing)
-                                    Padding(
-                                      padding: EdgeInsets.only(top: diameter * 0.03),
-                                      child: Text(
-                                        'Tap to dismiss',
-                                        style: TextStyle(
-                                          color: accent.withValues(alpha: 0.75),
-                                          fontSize: diameter * 0.06,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ),
                                 ],
                               ),
                             ),
@@ -312,6 +301,28 @@ class _TimerCard extends StatelessWidget {
                 ),
               ),
             ),
+            // The alarm repeats until turned off: a big, obvious button to do so.
+            if (ringing) ...[
+              SizedBox(height: side * 0.04),
+              FilledButton.icon(
+                key: ValueKey('cancel-timer-${timer.id}'),
+                onPressed: onDismiss,
+                icon: Icon(Icons.alarm_off, size: (side * 0.08).clamp(18.0, 36.0)),
+                label: Text('Cancel timer'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: accent,
+                  foregroundColor: Colors.black,
+                  textStyle: TextStyle(
+                    fontSize: (side * 0.07).clamp(16.0, 32.0),
+                    fontWeight: FontWeight.w700,
+                  ),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: (side * 0.08).clamp(16.0, 40.0),
+                    vertical: (side * 0.03).clamp(10.0, 20.0),
+                  ),
+                ),
+              ),
+            ],
           ],
         );
       },

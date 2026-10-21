@@ -198,21 +198,46 @@ impl Pipeline {
 /// The System-1 `timer` fast path: parse an unambiguous duration from the transcript
 /// and start the timer. `None` (defer) when no clear duration is present (e.g. "cancel
 /// my timer", or a free-form request) or it is out of range (0 or over
-/// [`MAX_TIMER_SECS`]), so the robust System-2 timer tool still handles those.
+/// [`MAX_TIMER_SECS`]), so the robust System-2 timer tool still handles those. A spoken
+/// name ("set a pasta timer for 10 minutes") rides along as the timer's label so the
+/// display shows it; phrasing whose name can't be read cleanly also defers, so the
+/// name is never silently dropped.
 fn timer_reply(transcript: &str) -> Option<FastReply> {
+    use crate::system1::TimerName;
     let secs = crate::system1::parse_duration_secs(transcript)?; // unclear → defer
     if secs == 0 || secs > MAX_TIMER_SECS {
         log::debug!("system1 timer: duration {secs}s out of range; deferring to System-2");
         return None;
     }
-    Some(
-        FastReply::say(format!("Timer set for {}.", human_duration(secs))).with_action(
-            DeviceAction::StartTimer {
-                label: None,
-                duration_secs: secs,
-            },
+    let label = match crate::system1::parse_timer_name(transcript) {
+        TimerName::Unnamed => None,
+        TimerName::Named(name) => Some(name),
+        TimerName::Unclear => {
+            log::debug!("system1 timer: unclear timer name; deferring to System-2");
+            return None;
+        }
+    };
+    let text = match &label {
+        Some(name) => format!(
+            "{} timer set for {}.",
+            capitalize(name),
+            human_duration(secs)
         ),
-    )
+        None => format!("Timer set for {}.", human_duration(secs)),
+    };
+    Some(FastReply::say(text).with_action(DeviceAction::StartTimer {
+        label,
+        duration_secs: secs,
+    }))
+}
+
+/// Uppercase the first letter, for a name that opens a sentence ("pasta" → "Pasta").
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// The System-1 `timer_cancel` fast path: cancel all running timers and confirm.
@@ -449,6 +474,23 @@ mod tests {
         assert!(timer_reply("set a timer for 10 minutes").is_some());
         assert!(timer_reply("set a timer for 25 hours").is_none());
         assert!(timer_reply("set a timer").is_none());
+    }
+
+    #[test]
+    fn timer_reply_carries_the_spoken_name_as_the_label() {
+        let reply = timer_reply("set a pasta timer for 10 minutes").expect("resolves");
+        assert_eq!(reply.text, "Pasta timer set for 10 minutes.");
+        assert!(matches!(
+            reply.action.as_ref(),
+            Some(DeviceAction::StartTimer { label: Some(l), duration_secs: 600 }) if l == "pasta"
+        ));
+        let plain = timer_reply("set a timer for 10 minutes").expect("resolves");
+        assert!(matches!(
+            plain.action.as_ref(),
+            Some(DeviceAction::StartTimer { label: None, .. })
+        ));
+        // A name we can't read cleanly defers, so System-2 labels it instead of dropping it.
+        assert!(timer_reply("remind me in 10 minutes to check the oven").is_none());
     }
 
     #[test]

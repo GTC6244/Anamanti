@@ -240,6 +240,7 @@ class AssistantState {
     this.lastDetectionScore = 0.0,
     this.captureReady = false,
     this.timers = const [],
+    this.timerSpotlight = false,
     this.audioPlaying = false,
     this.userPresent = true,
     this.roomDark = false,
@@ -328,6 +329,14 @@ class AssistantState {
   /// Active on-device timers (Phase 2), in start order. Independent of [phase] —
   /// they run and display during idle and during a turn alike.
   final List<TimerModel> timers;
+
+  /// Whether a timer was just started in the current exchange, so the big
+  /// screen-filling timers should take the screen over the conversation panel right
+  /// away (instead of waiting for the turn to end). Set when a **new** timer id starts
+  /// (an `adjust_timer` re-emit of an existing id doesn't count); cleared when the
+  /// user speaks again (a wake word or a new transcript), so the next exchange gets
+  /// the conversation panel back. Full-screen modes (recipe/weather/music…) still win.
+  final bool timerSpotlight;
 
   /// Whether the reply's TTS audio is still playing out of the speaker. Set when
   /// SPEAKING begins and stays true past the turn's return to idle — because the
@@ -562,6 +571,7 @@ class AssistantState {
     double? lastDetectionScore,
     bool? captureReady,
     List<TimerModel>? timers,
+    bool? timerSpotlight,
     bool? audioPlaying,
     bool? userPresent,
     bool? roomDark,
@@ -610,6 +620,7 @@ class AssistantState {
       lastDetectionScore: lastDetectionScore ?? this.lastDetectionScore,
       captureReady: captureReady ?? this.captureReady,
       timers: timers ?? this.timers,
+      timerSpotlight: timerSpotlight ?? this.timerSpotlight,
       audioPlaying: audioPlaying ?? this.audioPlaying,
       userPresent: userPresent ?? this.userPresent,
       roomDark: roomDark ?? this.roomDark,
@@ -662,6 +673,7 @@ class AssistantController extends ChangeNotifier {
     MusicControlSink? musicControl,
     MusicContextSink? setMusicContext,
     FontContextSink? setFontContext,
+    void Function(int id)? dismissNativeTimer,
     void Function(String direction)? onFontAdjust,
     double fontScale = 1.0,
   }) : _config = config,
@@ -677,6 +689,7 @@ class AssistantController extends ChangeNotifier {
        _musicControl = musicControl,
        _setMusicContext = setMusicContext,
        _setFontContext = setFontContext,
+       _dismissNativeTimer = dismissNativeTimer,
        _onFontAdjust = onFontAdjust,
        _fontScale = fontScale,
        // `startWakeWordEngine` takes a named `config:`; adapt it to the positional
@@ -815,6 +828,10 @@ class AssistantController extends ChangeNotifier {
   /// Sink for pushing font-scaling context to the native engine (see [FontContextSink]);
   /// null disables it (tests with no native library).
   final FontContextSink? _setFontContext;
+
+  /// Turns a timer off in the native engine (stopping a ringing alarm's repeats).
+  /// Production wires the native `dismissTimer`; null (tests) only clears the UI.
+  final void Function(int id)? _dismissNativeTimer;
 
   /// Called when a voice "increase font" / "decrease font" command arrives, with the
   /// direction `'increase'` / `'decrease'`. The app shell applies + persists the new
@@ -974,6 +991,7 @@ class AssistantController extends ChangeNotifier {
             reply: '',
             audioPlaying: false,
             followUp: false,
+            timerSpotlight: false,
             // Record the fire for the diagnostics screen's flash + history.
             detectionSeq: _state.detectionSeq + 1,
             lastDetectionScore: e.score,
@@ -996,6 +1014,8 @@ class AssistantController extends ChangeNotifier {
             phase: TurnPhase.thinking,
             online: true,
             transcript: e.transcript,
+            // The user said something new: give the conversation panel back.
+            timerSpotlight: false,
           ),
         );
       case WakeWordEventKind.replyToken:
@@ -1049,8 +1069,12 @@ class AssistantController extends ChangeNotifier {
         // no per-second events from Rust. Replace any existing timer with this id.
         final total = Duration(seconds: e.timerRemainingSecs);
         final deadline = _clock().add(total);
+        // A brand-new timer takes the screen right away (see [timerSpotlight]); an
+        // adjust re-emits the same id and leaves the current view alone.
+        final isNew = !_state.timers.any((t) => t.id == e.timerId);
         _emit(
           _state.copyWith(
+            timerSpotlight: isNew ? true : null,
             timers: [
               ..._state.timers.where((t) => t.id != e.timerId),
               TimerModel(
@@ -1818,10 +1842,12 @@ class AssistantController extends ChangeNotifier {
     );
   }
 
-  /// Dismiss a timer from the UI (e.g. the user taps a finished/ringing chip).
-  /// Device-side the timer has already fired or been cancelled; this only clears the
-  /// chip.
+  /// Turn a timer off from the UI — the ringing timer's "Cancel timer" button (or a
+  /// tap on its chip). Tells the engine to stop the alarm (which otherwise repeats
+  /// every 5 s) and clears it from the screen right away; the engine's
+  /// `timerCancelled` that follows is then a no-op.
   void dismissTimer(int id) {
+    _dismissNativeTimer?.call(id);
     if (_state.timers.any((t) => t.id == id)) {
       _emit(
         _state.copyWith(

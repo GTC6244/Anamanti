@@ -265,10 +265,19 @@ Full-screen views are exempt (they hide the clock anyway).
     (`compactTimersVisible`) whenever timers run and the big presentation is hidden (a
     turn is active or a full-screen mode is up), so it stays glanceable over the
     conversation, music, recipe, weather, or place views.
+- **Shown full screen as soon as a timer is set (2026-10-21):** a `timerStarted` for a
+  **new** id sets `AssistantState.timerSpotlight`, so the big presentation replaces the
+  conversation panel immediately, mid-turn (the listening ring still overlays it); the
+  user speaking again (wake word / new transcript) clears it and brings the panel back.
+  Full-screen modes (recipe/weather/place/camera/music) still win. An adjust re-emit of
+  an existing id does not spotlight.
 - Fed by `AssistantState.timers` (Rust `timerStarted` / `timerFinished` /
-  `timerCancelled`). Only **ringing** timers are tappable → `onDismiss(id)` →
-  `AssistantController.dismissTimer`; running timers are not dismissible.
-  `resolveTimerNames` labels unnamed timers "Timer" / "Timer N".
+  `timerCancelled`). A **ringing** card shows a big **"Cancel timer"** button (key
+  `cancel-timer-<id>`; the card/chip is tappable too) → `onDismiss(id)` →
+  `AssistantController.dismissTimer`, which calls the native `dismiss_timer(id)` to stop
+  the engine's repeating alarm; running timers are not dismissible.
+  `resolveTimerNames` shows the spoken label (from either the Core's System-1 timer
+  fast path or the `set_timer` tool) and labels only unnamed timers "Timer" / "Timer N".
 - **Add/remove time:** the Core's `adjust_timer` tool sends an `anamanti-timer`
   `adjust` frame carrying a signed `delta_secs`; the device applies it to the running
   timer's own deadline (floored at 1s, capped at 24h) and re-emits `timerStarted` for

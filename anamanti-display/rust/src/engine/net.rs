@@ -61,7 +61,8 @@ struct Shared {
     sink: StreamSink<WakeWordEvent>,
     cache: Arc<EndpointCache>,
     /// True while a turn task is in flight (gates re-triggers + PCM forwarding).
-    active: AtomicBool,
+    /// Shared with the timer manager so a ringing alarm holds its repeats mid-turn.
+    active: Arc<AtomicBool>,
     /// Sender to the current turn's PCM channel, present only while active.
     pcm_tx: Mutex<Option<mpsc::Sender<Vec<i16>>>>,
     /// Barge-in signal to the current turn, present only while active.
@@ -124,6 +125,7 @@ impl Network {
         // Shared mDNS endpoint cache: used both by the turn path and by a fired
         // timer voicing its announcement through the orchestrator.
         let cache = Arc::new(EndpointCache::new());
+        let active = Arc::new(AtomicBool::new(false));
 
         // The timer manager shares the event sink + playback and spawns countdown
         // tasks on this runtime (so they outlive any single turn's socket). It also
@@ -136,14 +138,17 @@ impl Network {
             cache.clone(),
             discovery_timeout,
             orchestrator_key.clone(),
+            active.clone(),
         );
+        // Publish it so the display's "Cancel timer" button can turn a timer off.
+        crate::engine::timer::set_manager(Some(timers.clone()));
 
         Ok(Self {
             runtime,
             shared: Arc::new(Shared {
                 sink,
                 cache,
-                active: AtomicBool::new(false),
+                active,
                 pcm_tx: Mutex::new(None),
                 interrupt_tx: Mutex::new(None),
                 pending_restart: AtomicBool::new(false),
@@ -212,6 +217,7 @@ impl Network {
 
 impl Drop for Network {
     fn drop(&mut self) {
+        crate::engine::timer::set_manager(None);
         // Signal any in-flight turn to stop forwarding + restart, then let the
         // runtime drop abort outstanding tasks. `shutdown_background` (implicit on
         // `Runtime` drop) avoids blocking the engine thread on a parked socket read.
