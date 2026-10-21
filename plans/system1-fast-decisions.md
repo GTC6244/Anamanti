@@ -487,6 +487,13 @@ What's covered:
   confident closed intent, defer on low confidence / needs-full / `other` / unknown / malformed.
 - **Duration parser** (`src/system1/mod.rs::parse_duration_secs`): digits + number words, `a`/`an`,
   `half`/`quarter`, compound ("1 hour 30 minutes"); defers on no-unit / cancel / empty.
+- **Timer-name parser** (`src/system1/mod.rs::parse_timer_name`, 2026-10-21): the `timer` fast
+  path keeps a spoken name as the `StartTimer` label ("set a **pasta** timer for 10 minutes",
+  "timer for the pasta", "timer called chicken wings") so the display shows it instead of
+  "Timer N". Conservative: every word must be filler, duration, or one contiguous name run
+  anchored by a trailing `timer` or a leading `for`/`called`/`named`; anything else (e.g.
+  "remind me in 10 minutes to check the oven") **defers** to the `set_timer` tool, so a name is
+  never silently dropped.
 - **NoDecision + MockDecider** behaviour.
 - **Pipeline fast paths** (`tests/pipeline.rs`): weather and timer each drive a full turn with a
   **panicking LLM** — proving System-2 is never called on a resolve — and assert the

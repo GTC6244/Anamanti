@@ -771,7 +771,8 @@ Android toolchain again.
   Core stamps a per-display style → `effectiveMusicScreen`; `MusicControlOverlay` /
   `NowPlayingView`) and **timers** (`TimerDisplayStyle`, default `fullscreen`, the big
   widget → `effectiveTimerDisplay`; `FullScreenTimersView` / `CompactTimersOverlay`;
-  forced to compact whenever a turn or full-screen mode covers the idle screen). New dual-form widgets (e.g. the planned HA dashboard
+  forced to compact whenever a turn or full-screen mode covers the idle screen, except that a
+  just-set timer (`timerSpotlight`) keeps the big form over the conversation panel). New dual-form widgets (e.g. the planned HA dashboard
   widget) follow the same shape, and are listed as a linked pair in `DisplayUI.md`.
 - **FRB:** change Rust signatures, then regenerate — never hand-edit generated
   bindings.

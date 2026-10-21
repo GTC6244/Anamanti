@@ -39,6 +39,7 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         NotifyConfig,
         WeatherConfig,
         deviceHardwareId,
+        dismissTimer,
         noteUserActivity,
         setCameraContext,
         setFontContext,
@@ -375,6 +376,9 @@ class _AmbientHomeState extends State<AmbientHome> {
       // Voice "increase font" / "decrease font": tell the orchestrator the current
       // global scale each turn, and apply + persist a requested adjustment here.
       setFontContext: setFontContext,
+      // The timer "Cancel timer" button: turn the timer off in the engine, which
+      // stops a ringing alarm's 5-second repeats.
+      dismissNativeTimer: (id) => dismissTimer(id: id),
       onFontAdjust: _onFontAdjust,
       fontScale: _settings.fontScale,
       // Local end-of-speech cue tuning (device-local, A/B-adjustable in settings):

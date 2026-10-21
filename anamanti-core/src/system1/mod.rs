@@ -216,43 +216,6 @@ pub fn default_intents() -> Vec<String> {
 /// "1 hour 30 minutes"). Supports digits and common number words; `a`/`an` = 1,
 /// `half` = 0.5, `quarter` = 0.25 of the following unit.
 pub fn parse_duration_secs(text: &str) -> Option<u64> {
-    fn word_value(tok: &str) -> Option<f64> {
-        Some(match tok {
-            "one" => 1.0,
-            "two" => 2.0,
-            "three" => 3.0,
-            "four" => 4.0,
-            "five" => 5.0,
-            "six" => 6.0,
-            "seven" => 7.0,
-            "eight" => 8.0,
-            "nine" => 9.0,
-            "ten" => 10.0,
-            "eleven" => 11.0,
-            "twelve" => 12.0,
-            "thirteen" => 13.0,
-            "fourteen" => 14.0,
-            "fifteen" => 15.0,
-            "twenty" => 20.0,
-            "thirty" => 30.0,
-            "forty" => 40.0,
-            "fifty" => 50.0,
-            "sixty" => 60.0,
-            "ninety" => 90.0,
-            "half" => 0.5,
-            "quarter" => 0.25,
-            _ => return None,
-        })
-    }
-    fn unit_secs(tok: &str) -> Option<f64> {
-        Some(match tok {
-            "hour" | "hours" | "hr" | "hrs" => 3600.0,
-            "minute" | "minutes" | "min" | "mins" => 60.0,
-            "second" | "seconds" | "sec" | "secs" => 1.0,
-            _ => return None,
-        })
-    }
-
     let normalized = text.to_lowercase().replace('-', " ");
     let mut total = 0.0f64;
     let mut current = 0.0f64;
@@ -267,10 +230,10 @@ pub fn parse_duration_secs(text: &str) -> Option<u64> {
         if let Ok(n) = tok.parse::<f64>() {
             current += n;
             have_current = true;
-        } else if let Some(v) = word_value(tok) {
+        } else if let Some(v) = duration_word_value(tok) {
             current += v;
             have_current = true;
-        } else if let Some(u) = unit_secs(tok) {
+        } else if let Some(u) = duration_unit_secs(tok) {
             // A unit with no explicit number means one ("a minute", "an hour", "half an
             // hour" → the `half` is the number, `an` is ignored, `hour` defaults nothing).
             let n = if have_current { current } else { 1.0 };
@@ -291,6 +254,173 @@ pub fn parse_duration_secs(text: &str) -> Option<u64> {
         None
     } else {
         Some(secs as u64)
+    }
+}
+
+/// A spoken number word usable in a duration ("five", "twenty", "half"), as a value.
+fn duration_word_value(tok: &str) -> Option<f64> {
+    Some(match tok {
+        "one" => 1.0,
+        "two" => 2.0,
+        "three" => 3.0,
+        "four" => 4.0,
+        "five" => 5.0,
+        "six" => 6.0,
+        "seven" => 7.0,
+        "eight" => 8.0,
+        "nine" => 9.0,
+        "ten" => 10.0,
+        "eleven" => 11.0,
+        "twelve" => 12.0,
+        "thirteen" => 13.0,
+        "fourteen" => 14.0,
+        "fifteen" => 15.0,
+        "twenty" => 20.0,
+        "thirty" => 30.0,
+        "forty" => 40.0,
+        "fifty" => 50.0,
+        "sixty" => 60.0,
+        "ninety" => 90.0,
+        "half" => 0.5,
+        "quarter" => 0.25,
+        _ => return None,
+    })
+}
+
+/// A duration unit word ("minutes", "hr"), as its length in seconds.
+fn duration_unit_secs(tok: &str) -> Option<f64> {
+    Some(match tok {
+        "hour" | "hours" | "hr" | "hrs" => 3600.0,
+        "minute" | "minutes" | "min" | "mins" => 60.0,
+        "second" | "seconds" | "sec" | "secs" => 1.0,
+        _ => return None,
+    })
+}
+
+/// What a "start a timer" transcript says about the timer's name — see
+/// [`parse_timer_name`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimerName {
+    /// Only filler + duration words: a plain, unnamed timer ("set a timer for 10 minutes").
+    Unnamed,
+    /// A name in a recognised position ("pasta timer", "timer for the pasta", "timer
+    /// called chicken wings"), lowercased as spoken.
+    Named(String),
+    /// Leftover words that don't fit a recognised naming pattern ("remind me in 10
+    /// minutes to check the oven") — defer to System-2, whose `set_timer` tool picks a
+    /// label from free-form phrasing.
+    Unclear,
+}
+
+/// Read the timer's spoken name out of a "start a timer" transcript, so the System-1
+/// fast path keeps the name the user gave instead of dropping it. Deliberately
+/// conservative, like [`parse_duration_secs`]: every word must be timer filler, part of
+/// the duration, or a single contiguous run of "name" words anchored by `timer` right
+/// after it ("a pasta timer") or by `for`/`called`/`named`/`labeled` right before it
+/// (skipping `the`/`my`/`our`). Anything else is [`TimerName::Unclear`].
+pub fn parse_timer_name(text: &str) -> TimerName {
+    /// Words that carry no name: request scaffolding, articles, politeness, the word
+    /// "timer" itself, and the naming keywords.
+    const FILLER: &[&str] = &[
+        "set",
+        "start",
+        "make",
+        "create",
+        "put",
+        "begin",
+        "run",
+        "give",
+        "remind",
+        "please",
+        "can",
+        "could",
+        "would",
+        "will",
+        "you",
+        "me",
+        "i",
+        "a",
+        "an",
+        "the",
+        "my",
+        "our",
+        "for",
+        "in",
+        "on",
+        "up",
+        "to",
+        "of",
+        "and",
+        "new",
+        "another",
+        "more",
+        "also",
+        "too",
+        "again",
+        "timer",
+        "alarm",
+        "countdown",
+        "called",
+        "named",
+        "labeled",
+        "labelled",
+        "label",
+        "it",
+        "just",
+        "um",
+        "uh",
+        "hey",
+        "ok",
+        "okay",
+        "now",
+    ];
+    /// Words that may sit between an anchor and the name ("for the pasta").
+    const DETERMINERS: &[&str] = &["the", "my", "our"];
+    /// Words that, right before the name, mark it as the name.
+    const LEAD_ANCHORS: &[&str] = &["for", "called", "named", "labeled", "labelled"];
+
+    let normalized = text.to_lowercase().replace('-', " ");
+    let toks: Vec<&str> = normalized
+        .split_whitespace()
+        .map(|raw| raw.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let is_name_word = |t: &str| {
+        !FILLER.contains(&t)
+            && t.parse::<f64>().is_err()
+            && duration_word_value(t).is_none()
+            && duration_unit_secs(t).is_none()
+    };
+
+    // The name words must form exactly one contiguous run.
+    let mut run: Option<(usize, usize)> = None; // [start, end)
+    for (i, t) in toks.iter().enumerate() {
+        if !is_name_word(t) {
+            continue;
+        }
+        match run {
+            None => run = Some((i, i + 1)),
+            Some((s, e)) if e == i => run = Some((s, i + 1)),
+            Some(_) => return TimerName::Unclear, // two separate runs → ambiguous
+        }
+    }
+    let Some((start, end)) = run else {
+        return TimerName::Unnamed;
+    };
+
+    // Anchored by "timer" right after ("a pasta timer", "an egg timer")…
+    let trailing = toks.get(end) == Some(&"timer");
+    // …or by for/called/named right before, skipping a determiner ("for the pasta").
+    let mut before = start;
+    while before > 0 && DETERMINERS.contains(&toks[before - 1]) {
+        before -= 1;
+    }
+    let leading = before > 0 && LEAD_ANCHORS.contains(&toks[before - 1]);
+
+    if trailing || leading {
+        TimerName::Named(toks[start..end].join(" "))
+    } else {
+        TimerName::Unclear
     }
 }
 
@@ -872,6 +1002,61 @@ mod tests {
         assert_eq!(parse_duration_secs("cancel my timer"), None);
         assert_eq!(parse_duration_secs("what's the weather"), None);
         assert_eq!(parse_duration_secs(""), None);
+    }
+
+    #[test]
+    fn parse_timer_name_reads_the_spoken_name() {
+        let named = |s: &str| TimerName::Named(s.to_string());
+        assert_eq!(
+            parse_timer_name("set a pasta timer for 10 minutes"),
+            named("pasta")
+        );
+        assert_eq!(parse_timer_name("start a 5-minute egg timer"), named("egg"));
+        assert_eq!(
+            parse_timer_name("set a timer for the pasta for 10 minutes"),
+            named("pasta")
+        );
+        assert_eq!(
+            parse_timer_name("set a 10 minute timer for my eggs"),
+            named("eggs")
+        );
+        assert_eq!(
+            parse_timer_name("set a timer for 10 minutes called chicken wings"),
+            named("chicken wings")
+        );
+        assert_eq!(
+            parse_timer_name("Set a timer named Garlic Bread, 8 minutes."),
+            named("garlic bread")
+        );
+    }
+
+    #[test]
+    fn parse_timer_name_unnamed_and_unclear() {
+        assert_eq!(
+            parse_timer_name("set a timer for 10 minutes"),
+            TimerName::Unnamed
+        );
+        assert_eq!(
+            parse_timer_name("10 minute timer please"),
+            TimerName::Unnamed
+        );
+        assert_eq!(
+            parse_timer_name("set another timer for 5 minutes"),
+            TimerName::Unnamed
+        );
+        assert_eq!(
+            parse_timer_name("set an alarm for half an hour"),
+            TimerName::Unnamed
+        );
+        // Leftover words that aren't clearly a name → defer to the LLM's timer tool.
+        assert_eq!(
+            parse_timer_name("remind me in 10 minutes to check the oven"),
+            TimerName::Unclear
+        );
+        assert_eq!(
+            parse_timer_name("pasta 10 minutes sauce timer"),
+            TimerName::Unclear
+        );
     }
 
     #[test]
