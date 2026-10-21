@@ -337,8 +337,11 @@ Automatic / Small bar / Full screen.
   `close_fullscreen` icon) returns to the overlay and, with the full-screen style set,
   switches it to compact (**never stops playback**).
 - **`NextUpView`** — `lib/src/ui/next_up_view.dart`. Full-screen up-next queue list
-  (`music.nextUp`), reached from the now-playing view's "Up next" control. Keys:
-  `next-up-close`, `next-up-back`. Empty queue shows "Nothing queued".
+  (`music.nextUp`), reached from the now-playing view's "Up next" control. **Tapping a
+  row jumps to that track** (`onSelect` → `AssistantController.skipToQueueTrack(i)` →
+  `anamanti-music-control` `skip_to` with the row's 0-based index; the Core jumps there —
+  one offset play within an album/playlist, else skipping forward `i + 1` tracks) and returns to the now-playing view. Keys: `next-up-close`,
+  `next-up-back`, `next-up-row-<i>`. Empty queue shows "Nothing queued".
 - **`AlbumArt`** — `lib/src/ui/album_art.dart`. The shared artwork tile all three surfaces
   use (overlay 40 px, up-next rows 56 px, now-playing 280 px): a rounded network image
   with a music-note fallback while loading, on error, or when there's no artwork URL.
