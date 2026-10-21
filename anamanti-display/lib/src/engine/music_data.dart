@@ -13,6 +13,11 @@ enum MusicDisplayStyle {
   /// The full-screen now-playing view.
   fullscreen;
 
+  /// This display's style before the Core has stamped one on a now-playing push (or
+  /// with an older Core that sends none). The Core then picks per display: full screen
+  /// where the play request came from, compact elsewhere.
+  static const defaultStyle = MusicDisplayStyle.compact;
+
   /// Parse the wire label; `null` for anything else (an older Core sends none).
   static MusicDisplayStyle? tryParse(Object? v) => switch (v) {
     'compact' => MusicDisplayStyle.compact,
