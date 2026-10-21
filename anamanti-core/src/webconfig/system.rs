@@ -716,7 +716,7 @@ pub(super) fn integrations_summary(s: &AppServices) -> Vec<Value> {
             "readonly": true,
         }),
         json!({
-            "key": "cadora", "name": "Shopping list", "tool": "shopping_list_add", "tier": "cloud",
+            "key": "cadora", "name": "Shopping & calendar", "tool": "shopping_list_add + calendar_add", "tier": "cloud",
             "status": if b(&cadora, "linked") { "active" } else { "inactive" },
             "detail": if b(&cadora, "linked") { "Cadora linked" } else { "not linked" },
         }),
@@ -942,11 +942,11 @@ pub(super) fn keys_json(s: &AppServices) -> String {
         ),
         key(
             "cadora",
-            "Cadora shopping list",
+            "Cadora shopping list & calendar",
             "link",
             b(&cadora, "linked"),
             "",
-            "Shopping list",
+            "Shopping & calendar",
             "/integrations#cadora",
             Value::Null,
         ),

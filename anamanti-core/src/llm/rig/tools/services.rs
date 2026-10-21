@@ -1,6 +1,6 @@
 //! Service tools that answer from (or act on) an external service through an
 //! injected provider: `calendar_lookup`, `directions_lookup`, `spotify_control`,
-//! `radio_control`, `shopping_list_add` and `send_phone_message`. None of them drives
+//! `radio_control`, `shopping_list_add`, `calendar_add` and `send_phone_message`. None of them drives
 //! the display directly (radio/Spotify reach it through the now-playing push).
 //!
 //! A failure past argument parsing is prefixed with the tool's "… failed" label
@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::{definition, parse_args, parse_args_or_default, ToolCtx, VoiceTool};
 use crate::appsaid::{OutgoingMessage, PhoneMessenger};
-use crate::cadora::{GroceryCommand, GroceryController};
+use crate::cadora::{resolve_event_times, CadoraCommand, CadoraController, NewEvent};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, LiveHomeLocation, TravelMode};
 use crate::music::{
@@ -34,6 +34,8 @@ pub(super) const SPOTIFY_CONTROL: &str = "spotify_control";
 pub(super) const RADIO_CONTROL: &str = "radio_control";
 /// Tool name: add an item to the shared shopping list.
 pub(super) const SHOPPING_LIST_ADD: &str = "shopping_list_add";
+/// Tool name: add a one-off event to the household's Cadora calendar.
+pub(super) const CALENDAR_ADD: &str = "calendar_add";
 /// Tool name: push a message to a family member's phone.
 pub(super) const SEND_PHONE_MESSAGE: &str = "send_phone_message";
 
@@ -562,7 +564,7 @@ impl VoiceTool for RadioControl {
 
 /// The `shopping_list_add` tool. The list lives on the Cadora server; this only
 /// issues the add and relays the server's spoken confirmation.
-pub(super) fn shopping_list_add(controller: Arc<dyn GroceryController>) -> Arc<dyn VoiceTool> {
+pub(super) fn shopping_list_add(controller: Arc<dyn CadoraController>) -> Arc<dyn VoiceTool> {
     Arc::new(ShoppingListAdd { controller })
 }
 
@@ -577,7 +579,7 @@ struct GroceryArgs {
 }
 
 struct ShoppingListAdd {
-    controller: Arc<dyn GroceryController>,
+    controller: Arc<dyn CadoraController>,
 }
 
 #[async_trait]
@@ -627,12 +629,133 @@ impl VoiceTool for ShoppingListAdd {
     async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
         let args: GroceryArgs = parse_args(args, SHOPPING_LIST_ADD)?;
         self.controller
-            .command(GroceryCommand::AddItem {
+            .command(CadoraCommand::AddItem {
                 item: args.item,
                 quantity: args.quantity,
             })
             .await
             .context("shopping list add failed")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Calendar add (Cadora household calendar via the voice API)
+// ---------------------------------------------------------------------------
+
+/// The `calendar_add` tool. The event lives on the Cadora server (the family's
+/// shared calendar); this resolves the spoken date/time in the Core's local zone,
+/// issues the add, and relays the server's spoken confirmation.
+pub(super) fn calendar_add(controller: Arc<dyn CadoraController>) -> Arc<dyn VoiceTool> {
+    Arc::new(CalendarAdd { controller })
+}
+
+/// Typed arguments for `calendar_add`.
+#[derive(Debug, Deserialize)]
+struct CalendarAddArgs {
+    /// What the event is ("Soccer practice", "Dentist — Riley").
+    title: String,
+    /// The day, `YYYY-MM-DD` (the model resolves "Thursday"/"tomorrow").
+    date: String,
+    /// 24-hour start `HH:MM`; omit for an all-day event.
+    #[serde(default)]
+    start_time: Option<String>,
+    /// 24-hour end `HH:MM`; only with a start time.
+    #[serde(default)]
+    end_time: Option<String>,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+struct CalendarAdd {
+    controller: Arc<dyn CadoraController>,
+}
+
+impl CalendarAdd {
+    async fn run(&self, args: CalendarAddArgs) -> Result<String> {
+        let times = resolve_event_times(
+            &Local,
+            &args.date,
+            args.start_time.as_deref(),
+            args.end_time.as_deref(),
+        )?;
+        self.controller
+            .command(CadoraCommand::AddEvent(NewEvent {
+                title: args.title,
+                starts_at: times.starts_at,
+                ends_at: times.ends_at,
+                all_day: times.all_day,
+                location: args.location,
+                notes: args.notes,
+            }))
+            .await
+    }
+}
+
+#[async_trait]
+impl VoiceTool for CalendarAdd {
+    fn name(&self) -> &'static str {
+        CALENDAR_ADD
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        definition(
+            CALENDAR_ADD,
+            "Add a one-off event to the household's shared family calendar (Cadora). Use \
+             this for ANY request to add, put, schedule, or book something on the calendar \
+             (\"put soccer on the calendar Thursday at 4\", \"add the dentist on the 3rd at \
+             9:30\", \"Friday is pizza day\"). Resolve relative days against the current \
+             date. Omit start_time for an all-day event. Returns a short spoken confirmation \
+             to relay.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "What the event is, e.g. \"Soccer practice\" or \"Dentist for Riley\"."
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "The day of the event as YYYY-MM-DD."
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": "24-hour local start time HH:MM (e.g. \"16:00\"). Omit for an all-day event."
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "24-hour local end time HH:MM, only when the user gives one."
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Where it is, only when the user says."
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Any extra detail the user gives (optional)."
+                    }
+                },
+                "required": ["title", "date"]
+            }),
+        )
+    }
+
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "You can add events to the household's shared family calendar with the \
+             `calendar_add` tool. Whenever the user asks to add, put, schedule, or book \
+             something on the calendar, you MUST call `calendar_add` with a short title and \
+             the date as YYYY-MM-DD — work out days like \"Thursday\" or \"tomorrow\" from \
+             the current date given above — plus a 24-hour start_time when they say a time \
+             (omit it for an all-day event). If they don't say which day, ask before \
+             calling. Relay the tool's spoken confirmation.",
+        )
+    }
+
+    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: CalendarAddArgs = parse_args(args, CALENDAR_ADD)?;
+        self.run(args).await.context("calendar add failed")
     }
 }
 

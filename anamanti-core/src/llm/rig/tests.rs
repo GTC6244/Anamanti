@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::tools::test_support::*;
 use super::*;
-use crate::cadora::GroceryCommand;
+use crate::cadora::CadoraCommand;
 use crate::llm::{collect_reply, DeviceAction};
 use crate::music::{SearchKind, SpotifyCommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -269,9 +269,9 @@ async fn rig_ollama_runs_spotify_tool_then_answers() {
 
 #[tokio::test]
 async fn rig_ollama_runs_shopping_tool_then_answers() {
-    let controller = Arc::new(StaticGrocery::default());
+    let controller = Arc::new(StaticCadora::default());
     let deps = ToolDeps {
-        grocery: Some(controller.clone()),
+        cadora: Some(controller.clone()),
         ..Default::default()
     };
     let reply = ollama_turn(
@@ -289,11 +289,42 @@ async fn rig_ollama_runs_shopping_tool_then_answers() {
     assert_eq!(reply, "Done — 2 milk are on the list.");
     assert_eq!(
         controller.last.lock().unwrap().clone(),
-        Some(GroceryCommand::AddItem {
+        Some(CadoraCommand::AddItem {
             item: "milk".into(),
             quantity: Some(2),
         })
     );
+}
+
+#[tokio::test]
+async fn rig_ollama_runs_calendar_add_then_answers() {
+    let controller = Arc::new(StaticCadora::default());
+    let deps = ToolDeps {
+        cadora: Some(controller.clone()),
+        ..Default::default()
+    };
+    let reply = ollama_turn(
+        deps,
+        vec![
+            ollama_tool_call(
+                "calendar_add",
+                serde_json::json!({"title": "Pizza day", "date": "2026-10-23"}),
+            ),
+            ollama_text("Pizza day is on the calendar."),
+        ],
+        LlmTurn::new("sys", "friday is pizza day, put it on the calendar"),
+    )
+    .await;
+    assert_eq!(reply, "Pizza day is on the calendar.");
+    let last = controller.last.lock().unwrap().clone();
+    match last {
+        Some(CadoraCommand::AddEvent(event)) => {
+            assert_eq!(event.title, "Pizza day");
+            assert_eq!(event.starts_at, "2026-10-23");
+            assert!(event.all_day);
+        }
+        other => panic!("expected an AddEvent, got {other:?}"),
+    }
 }
 
 /// The fake Ollama asks for `set_timer`; the pipeline's action sink receives the

@@ -36,7 +36,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::appsaid::PhoneMessenger;
-use crate::cadora::GroceryController;
+use crate::cadora::CadoraController;
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, LiveHomeLocation};
 use crate::llm::{ActionSink, DeviceAction};
@@ -65,8 +65,8 @@ pub struct ToolDeps {
     pub directions: Option<(Arc<dyn DirectionsProvider>, bool)>,
     /// Spotify controller for `spotify_control`.
     pub spotify: Option<Arc<dyn SpotifyController>>,
-    /// Cadora controller for `shopping_list_add`.
-    pub grocery: Option<Arc<dyn GroceryController>>,
+    /// Cadora controller for `shopping_list_add` + `calendar_add`.
+    pub cadora: Option<Arc<dyn CadoraController>>,
     /// AppSaid messenger for `send_phone_message`.
     pub appsaid: Option<Arc<dyn PhoneMessenger>>,
     /// Forecast provider for `weather_lookup` / `close_weather`.
@@ -300,8 +300,9 @@ impl Tools {
         }) {
             tools.push(display::music_screen(deps.music_display.clone()));
         }
-        if let Some(controller) = deps.grocery {
-            tools.push(services::shopping_list_add(controller));
+        if let Some(controller) = deps.cadora {
+            tools.push(services::shopping_list_add(controller.clone()));
+            tools.push(services::calendar_add(controller));
         }
         if let Some(messenger) = deps.appsaid {
             tools.push(services::send_phone_message(messenger));

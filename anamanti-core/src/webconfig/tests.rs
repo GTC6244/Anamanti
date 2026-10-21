@@ -756,8 +756,8 @@ fn cadora_status_reports_unlinked_by_default() {
     let v: Value = serde_json::from_str(&cadora_status_json(&settings())).unwrap();
     assert_eq!(v["ok"], true);
     assert_eq!(v["linked"], false);
-    // Falls back to the built-in Cadora server URL when unset.
-    assert_eq!(v["base_url"], "https://cadora-server.fly.dev");
+    // Falls back to the built-in Cadora API URL when unset.
+    assert_eq!(v["base_url"], "https://api.getcadora.com/cadora");
 }
 
 #[test]
@@ -769,7 +769,13 @@ fn cadora_save_sets_base_url() {
     cadora_save_json(&s, br#"{"base_url":""}"#);
     assert_eq!(
         s.cadora().base_url_or_default(),
-        "https://cadora-server.fly.dev"
+        "https://api.getcadora.com/cadora"
+    );
+    // A stale retired-Fly URL resolves to the new default too.
+    cadora_save_json(&s, br#"{"base_url":"https://cadora-server.fly.dev"}"#);
+    assert_eq!(
+        s.cadora().base_url_or_default(),
+        "https://api.getcadora.com/cadora"
     );
 }
 
