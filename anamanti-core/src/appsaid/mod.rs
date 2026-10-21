@@ -17,7 +17,7 @@
 //!
 //! The [`PhoneMessenger`] trait is the seam the rig tool depends on, so the tool is
 //! unit-testable without hitting the network — mirroring how the `shopping_list_add`
-//! tool holds a [`crate::cadora::GroceryController`].
+//! tool holds a [`crate::cadora::CadoraController`].
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;

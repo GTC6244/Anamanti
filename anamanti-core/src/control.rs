@@ -624,12 +624,12 @@ pub fn functions_response(settings: &SharedSettings, embed: Option<&EmbedStatus>
         }),
     ));
 
-    // ---- Tools: shopping list (Cadora) ----
+    // ---- Tools: shopping list + calendar add (Cadora) ----
     let cadora = settings.cadora();
     let cadora_linked = cadora.linked();
     fns.push(func_entry(
         "Tools",
-        "Shopping list",
+        "Shopping & calendar",
         if cadora_linked { "cloud" } else { "off" },
         Some("Cadora"),
         None,

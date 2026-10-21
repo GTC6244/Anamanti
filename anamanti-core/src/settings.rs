@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::appsaid::{AppSaidClient, PhoneMessenger};
-use crate::cadora::{normalize_base_url, CadoraVoiceApi, GroceryController};
+use crate::cadora::{normalize_base_url, CadoraController, CadoraVoiceApi};
 use crate::calendar::CalendarSource;
 use crate::directions::DirectionsProvider;
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
@@ -522,7 +522,7 @@ impl CadoraConfig {
 
     /// Build the live controller when linked, else `None` (so the `shopping_list_add`
     /// tool simply isn't advertised).
-    pub fn controller(&self) -> Option<Arc<dyn GroceryController>> {
+    pub fn controller(&self) -> Option<Arc<dyn CadoraController>> {
         if !self.linked() {
             return None;
         }
@@ -1246,7 +1246,7 @@ pub struct LlmFactory {
     /// The live Cadora controller for the `shopping_list_add` tool, or `None` when the
     /// shopping list isn't linked. Set from the current [`CadoraConfig`] on every
     /// (re)build so the tool reflects the latest linkage.
-    pub cadora: Option<Arc<dyn GroceryController>>,
+    pub cadora: Option<Arc<dyn CadoraController>>,
     /// The live AppSaid messenger for the `send_phone_message` tool, or `None` when it
     /// isn't fully configured. Set from the current [`AppSaidConfig`] on every
     /// (re)build so the tool reflects the latest linkage.
@@ -1392,7 +1392,7 @@ impl LlmFactory {
             calendar: self.calendar.clone(),
             directions: self.directions.clone(),
             spotify: self.spotify.clone(),
-            grocery: self.cadora.clone(),
+            cadora: self.cadora.clone(),
             appsaid: self.appsaid.clone(),
             weather: self.weather.clone(),
             weather_imperial: self.weather_imperial,

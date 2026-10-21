@@ -541,20 +541,27 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       `/voice/command` answers `ok:true` even on a server-side failure — its apology
       `speech` is relayed verbatim.
 - [ ] **Re-pair production with Cadora**: the old `vl_` token was minted against the
-      retired backend. Deploy the Core, then mint a new code and link on Integrations →
-      Shopping list. Blocked externally until NextHaul's Voice & Integrations screen
-      targets `api.getcadora.com/cadora` (its `AppServerConfig` still defaults to Fly).
-      Then verify a voice add shows up in the NextHaul app.
-- [ ] **Cadora calendar add (phase 2)**: a `calendar_add` rig tool so "put soccer on
-      the calendar Thursday at 4" creates a Cadora event. Needs a Cadora API change first:
-      an `add_event` action on `POST /cadora/voice/command` (title, RFC 3339 `starts_at`,
-      optional `ends_at`/`all_day`/`location`/`notes`; household-visible; attributed to the
-      link's member; spoken confirmation) so it reuses the voice-link token — the Core does
-      **not** sign in as a user to use `/cadora/sync/push`. Core side: generalize
-      `GroceryController` into a `CadoraController` (`AddItem` | `AddEvent`), register the
-      tool in `Tools::build` (advertised only when linked), and have the model resolve the
-      time against the Core's clock/timezone. Reads can come from Cadora's ICS feed
-      (`/cadora/calendar`) via the existing `calendar.subscriptions`.
+      retired backend. Deploy the Core, then link on Integrations → Shopping & calendar:
+      either a 6-digit code from NextHaul (blocked until NextHaul's Voice & Integrations
+      screen targets `api.getcadora.com/cadora` — its `AppServerConfig` still defaults to
+      Fly), or a `vl_…` token minted in the **Cadora web app → Settings → Voice assistants
+      & integrations** (type *Other*), pasted under *Advanced*. Then verify a voice add
+      shows up in the NextHaul app.
+- [x] **Cadora calendar add (phase 2, Core done 2026-10-20)**: the `calendar_add` rig
+      tool ("put soccer on the calendar Thursday at 4") over Cadora's `add_event` voice
+      action (Cadora #231, live in production) — same `vl_…` link token, no user sign-in.
+      The seam is now `CadoraController` (`CadoraCommand::AddItem | AddEvent`); both tools
+      are advertised from one link. The model passes `date` (YYYY-MM-DD) + optional 24-h
+      `start_time`/`end_time`; `cadora::resolve_event_times` turns that into RFC 3339 with
+      the Core's local offset for that date (DST-correct, independent of Cadora's household
+      timezone), a bare date for all-day, and an end ≤ start crosses midnight. One-off events
+      only (no recurrence); household-visible, attributed to the link's member.
+- [ ] **Verify calendar add on hardware**: after re-pairing, say "put soccer on the
+      calendar Thursday at 4", "Friday is pizza day", "dentist on the 3rd from 9:30 to
+      10:15" — confirm the spoken confirmation names the right day/time and the events
+      appear in the Cadora app. Optional follow-ups: recurring events (needs an rrule on
+      Cadora's side), and reading Cadora's ICS feed (`/cadora/calendar`) via
+      `calendar.subscriptions` so `calendar_lookup` sees added events.
 - [ ] **Reminders** (deferred): pick a backend — macOS EventKit (local, no OAuth),
       Google Tasks/Calendar (OAuth), or generic CalDAV.
 - [x] **Recipe voice navigation + screen context (2026-09-25)** — the guided-recipe

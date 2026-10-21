@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use super::search::SearchProvider;
 use super::{ToolDeps, Tools};
 use crate::appsaid::{OutgoingMessage, PhoneMessenger};
-use crate::cadora::{GroceryCommand, GroceryController};
+use crate::cadora::{CadoraCommand, CadoraController};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, HomeAddress, LiveHomeLocation, TravelMode};
 use crate::music::{SpotifyCommand, SpotifyController};
@@ -98,24 +98,25 @@ impl SpotifyController for StaticSpotify {
     }
 }
 
-/// A canned grocery controller that records the last command.
+/// A canned Cadora controller that records the last command.
 #[derive(Default)]
-pub(crate) struct StaticGrocery {
-    pub(crate) last: Mutex<Option<GroceryCommand>>,
+pub(crate) struct StaticCadora {
+    pub(crate) last: Mutex<Option<CadoraCommand>>,
 }
 
 #[async_trait]
-impl GroceryController for StaticGrocery {
-    async fn command(&self, cmd: GroceryCommand) -> Result<String> {
+impl CadoraController for StaticCadora {
+    async fn command(&self, cmd: CadoraCommand) -> Result<String> {
         let reply = match &cmd {
-            GroceryCommand::AddItem {
+            CadoraCommand::AddItem {
                 item,
                 quantity: Some(q),
             } => format!("Added {q} {item} to your shopping list."),
-            GroceryCommand::AddItem {
+            CadoraCommand::AddItem {
                 item,
                 quantity: None,
             } => format!("Added {item} to your shopping list."),
+            CadoraCommand::AddEvent(event) => format!("Added {} to the calendar.", event.title),
         };
         *self.last.lock().unwrap() = Some(cmd);
         Ok(reply)
@@ -192,7 +193,7 @@ pub(crate) fn fully_configured_deps() -> ToolDeps {
         calendar: Some(Arc::new(StaticCalendar(Vec::new()))),
         directions: Some((Arc::new(StaticDirections::default()), true)),
         spotify: Some(Arc::new(StaticSpotify::default())),
-        grocery: Some(Arc::new(StaticGrocery::default())),
+        cadora: Some(Arc::new(StaticCadora::default())),
         appsaid: Some(Arc::new(StaticPhone::default())),
         weather: Some(Arc::new(StaticWeather)),
         weather_imperial: true,

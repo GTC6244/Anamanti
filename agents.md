@@ -430,8 +430,8 @@ anamanti-core/scripts/build-webui-css.sh
 #     tool; Premium; easiest setup is config page → Integrations → Spotify → "Connect Spotify". redirect_url
 #     is the OAuth callback the consent flow binds + registers, default
 #     http://127.0.0.1:8888/callback)
-#   cadora{base_url,link_token} (shopping_list_add tool → the shared Cadora household
-#     shopping list, via Cadora's voice API — NextHaul + Cadora share one API on
+#   cadora{base_url,link_token} (shopping_list_add + calendar_add tools → the shared
+#     household shopping list and Cadora family calendar, via Cadora's voice API — NextHaul + Cadora share one API on
 #     Cloudflare Workers, no direct database access; base_url default
 #     https://api.getcadora.com/cadora (the retired cadora-server.fly.dev maps to it). Link: mint a 6-digit code in NextHaul → Settings →
 #     Voice & Integrations, enter it on the config page → Integrations → "Shopping list
