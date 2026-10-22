@@ -1135,6 +1135,8 @@ pub fn start_notify_channel(
                 device_id,
                 device_name,
                 running,
+                // Keep the Core's view of this display's timers current.
+                Some(crate::engine::timer::report_outbound()),
                 move |note| {
                     sink.add(NotifyEvent {
                         id: note.id,

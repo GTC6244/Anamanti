@@ -143,6 +143,7 @@ ui.hydrate();
       + row('Instance id', mono(id.instance_id))
       + row('Device port', mono(id.bind_addr))
       + row('Console', mono(id.config_addr))
+      + row('Companion API', id.companion_addr ? mono(id.companion_addr) : '<span class="muted">off</span>')
       + row('Config file', SYS.config_file ? '<code>' + esc(SYS.config_file) + '</code>' : '<span class="muted">built-in defaults</span>')
       + row('Memory backend', cell(SYS.memory_backend))
       + addrRow('Speech-to-text', sv.stt_addr)

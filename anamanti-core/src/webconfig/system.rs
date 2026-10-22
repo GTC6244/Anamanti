@@ -77,6 +77,7 @@ impl BootInfo {
                 "instance_id": c.instance_id,
                 "bind_addr": c.bind_addr.to_string(),
                 "config_addr": c.config_addr.map(|a| a.to_string()),
+                "companion_addr": c.companion_addr.map(|a| a.to_string()),
             },
             "services": {
                 "stt_addr": c.stt_addr.to_string(),

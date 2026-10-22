@@ -20,6 +20,7 @@ use crate::orchestrator::{Pipeline, ServiceConnector};
 use crate::server::Ducker;
 use crate::settings::SharedSettings;
 use crate::speaker::SpeakerService;
+use crate::timer::DisplayTimers;
 use crate::weather::WeatherService;
 use crate::webconfig::DebugSources;
 
@@ -57,6 +58,9 @@ pub struct AppServices {
     pub music: Option<MusicHub>,
     /// Read-only sources for the config page's debug views.
     pub debug: DebugSources,
+    /// Every display's last-reported timer list (`anamanti-timers` on the notify
+    /// channel), served to the Companion app at `/timers.json`.
+    pub display_timers: Arc<DisplayTimers>,
 }
 
 impl AppServices {
@@ -78,6 +82,7 @@ impl AppServices {
             ducker: None,
             music: None,
             debug: DebugSources::default(),
+            display_timers: Arc::new(DisplayTimers::new()),
         }
     }
 

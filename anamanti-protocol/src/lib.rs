@@ -247,6 +247,15 @@ pub mod types {
     /// `cancel`: optional `label`, where an absent/null label cancels all timers).
     pub const TIMER: &str = "anamanti-timer";
 
+    /// device → orchestrator, on the persistent `role=notify` channel: the device's
+    /// **full** current timer list (data: `timers` = array of
+    /// `{id, label, duration_secs, remaining_secs, ringing}`; an empty array = no
+    /// timers). Sent right after the channel's `anamanti-hello` and again whenever the
+    /// set changes, so the Core can show every display's timers (the Companion app's
+    /// Timers screen). Purely informational — the device still owns its timers. See
+    /// [`ReportedTimer`](crate::ReportedTimer).
+    pub const TIMERS: &str = "anamanti-timers";
+
     /// device → orchestrator: synthesize `text` with Piper and stream the audio
     /// back on the same socket (data: `text`). Lets a fired on-device timer speak its
     /// "Time's up …" announcement in the real assistant voice when the Mac is
@@ -492,6 +501,28 @@ pub enum MusicCommand {
     Screen(String),
 }
 
+/// One on-device timer as reported in an `anamanti-timers` frame (device →
+/// orchestrator). Remaining time is relative (`remaining_secs`, at send time) rather
+/// than a wall-clock deadline so a skewed device clock can't misplace it; the Core
+/// anchors it to its own clock on receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedTimer {
+    /// The device-assigned id (stable for the timer's life on that device).
+    pub id: u32,
+    /// Spoken label ("pasta"), empty when unlabeled.
+    #[serde(default)]
+    pub label: String,
+    /// Full duration in seconds (after any adjust).
+    #[serde(default)]
+    pub duration_secs: u64,
+    /// Whole seconds left when the report was sent (0 once due/ringing).
+    #[serde(default)]
+    pub remaining_secs: u64,
+    /// True while the alarm is sounding (fired, not yet dismissed).
+    #[serde(default)]
+    pub ringing: bool,
+}
+
 // ---------------------------------------------------------------------------
 // The event
 // ---------------------------------------------------------------------------
@@ -703,6 +734,34 @@ impl WyomingEvent {
         } else {
             None
         }
+    }
+
+    // ---- timer report (device → orchestrator, notify channel) ----
+
+    /// An `anamanti-timers` frame carrying the device's full current timer list
+    /// (an empty slice = "no timers").
+    pub fn timers_report(timers: &[ReportedTimer]) -> Self {
+        Self::with_data(types::TIMERS, json!({ "timers": timers }))
+    }
+
+    /// The timer list from an `anamanti-timers` frame, or `None` for any other frame.
+    /// Malformed entries are skipped; a missing/invalid `timers` array reads as empty.
+    pub fn reported_timers(&self) -> Option<Vec<ReportedTimer>> {
+        if self.event_type != types::TIMERS {
+            return None;
+        }
+        let entries = self
+            .data
+            .get("timers")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(entries)
     }
 
     // ---- persistent channels (notify / weather) ----

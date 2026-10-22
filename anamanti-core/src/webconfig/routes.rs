@@ -176,6 +176,17 @@ pub(super) static ROUTES: &[Route] = &[
         }),
     ),
     get("/keys.json", Sync(|s, _| Reply::json(keys_json(s)))),
+    // Every display's reported timers (also on the Companion API).
+    get(
+        "/timers.json",
+        Sync(|s, _| {
+            Reply::json(
+                s.display_timers
+                    .to_json(crate::clock::now_millis() as u64)
+                    .to_string(),
+            )
+        }),
+    ),
     get(
         "/system.json",
         Sync(|s, _| Reply::json(system_json(&s.debug))),

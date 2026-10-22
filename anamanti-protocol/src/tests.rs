@@ -135,6 +135,7 @@ fn type_constants_are_stable() {
         (types::REPLY_TOKEN, "reply-token"),
         (types::INTERRUPT, "anamanti-interrupt"),
         (types::TIMER, "anamanti-timer"),
+        (types::TIMERS, "anamanti-timers"),
         (types::SPEAK, "anamanti-speak"),
         (types::LISTEN, "anamanti-listen"),
         (types::ANAMANTI_HELLO, "anamanti-hello"),
@@ -660,4 +661,37 @@ async fn payload_at_the_cap_is_accepted() {
     };
     let back = roundtrip(&ev).await;
     assert_eq!(back.payload.map(|p| p.len()), Some(MAX_PAYLOAD_BYTES));
+}
+
+#[test]
+fn timers_report_round_trips_and_tolerates_bad_entries() {
+    let t = ReportedTimer {
+        id: 3,
+        label: "pasta".into(),
+        duration_secs: 600,
+        remaining_secs: 125,
+        ringing: false,
+    };
+    let ev = WyomingEvent::timers_report(std::slice::from_ref(&t));
+    assert_eq!(ev.event_type, "anamanti-timers");
+    assert_eq!(
+        ev.data,
+        json!({ "timers": [{ "id": 3, "label": "pasta", "duration_secs": 600,
+                             "remaining_secs": 125, "ringing": false }] })
+    );
+    assert_eq!(ev.reported_timers(), Some(vec![t]));
+
+    // Empty list = "no timers"; a different frame = None.
+    assert_eq!(WyomingEvent::timers_report(&[]).reported_timers(), Some(vec![]));
+    assert_eq!(WyomingEvent::new(types::TIMER).reported_timers(), None);
+
+    // Missing optional fields default; an entry without an id is skipped.
+    let loose = WyomingEvent::with_data(
+        types::TIMERS,
+        json!({ "timers": [{ "id": 1 }, { "label": "no id" }] }),
+    );
+    let got = loose.reported_timers().unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].id, 1);
+    assert!(got[0].label.is_empty() && !got[0].ringing);
 }

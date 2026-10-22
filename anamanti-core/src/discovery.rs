@@ -33,17 +33,59 @@
 /// `_wyoming._tcp` and supplies the `.local.` domain itself.)
 pub const WYOMING_SERVICE_TYPE: &str = "_wyoming._tcp.local.";
 
+/// The Companion API's bound port, advertised as the `companion_port` TXT record when
+/// set. Set once at boot by [`set_companion_port`], before the advertiser starts; a
+/// process-global (rather than another `advertise` argument) so both backends — incl.
+/// the fallback's re-advertising IP watcher — pick it up without threading it through.
+static COMPANION_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+/// Record the Companion API's port for the mDNS TXT record. Call before
+/// [`MdnsAdvertiser::advertise`]; later calls are ignored.
+pub fn set_companion_port(port: u16) {
+    let _ = COMPANION_PORT.set(port);
+}
+
 /// The TXT records advertised for this Core, used by the device to (a) filter
 /// Cores from raw Whisper/Piper Wyoming servers (`role=core`), (b) show a friendly
-/// label (`name`), and (c) pin a stable selection key (`instance_id`). Shared by
-/// both backends so the advertised record is byte-for-byte identical.
-fn txt_records<'a>(instance_name: &'a str, instance_id: &'a str) -> [(&'a str, &'a str); 4] {
-    [
-        ("version", "1"),
-        ("role", "core"),
-        ("name", instance_name),
-        ("instance_id", instance_id),
-    ]
+/// label (`name`), and (c) pin a stable selection key (`instance_id`); plus, when the
+/// Companion API is on, (d) its HTTP port (`companion_port`) for the phone app. Shared
+/// by both backends so the advertised record is byte-for-byte identical.
+fn txt_records(instance_name: &str, instance_id: &str) -> Vec<(&'static str, String)> {
+    txt_records_with(instance_name, instance_id, COMPANION_PORT.get().copied())
+}
+
+fn txt_records_with(
+    instance_name: &str,
+    instance_id: &str,
+    companion_port: Option<u16>,
+) -> Vec<(&'static str, String)> {
+    let mut txt = vec![
+        ("version", "1".to_string()),
+        ("role", "core".to_string()),
+        ("name", instance_name.to_string()),
+        ("instance_id", instance_id.to_string()),
+    ];
+    if let Some(port) = companion_port {
+        txt.push(("companion_port", port.to_string()));
+    }
+    txt
+}
+
+#[cfg(test)]
+mod txt_tests {
+    use super::txt_records_with;
+
+    #[test]
+    fn companion_port_is_advertised_only_when_set() {
+        let has =
+            |txt: &[(&str, String)], k: &str, v: &str| txt.iter().any(|(a, b)| *a == k && b == v);
+        let without = txt_records_with("Test Mac", "test-mac", None);
+        assert!(has(&without, "role", "core"));
+        assert!(!without.iter().any(|(k, _)| *k == "companion_port"));
+        let with = txt_records_with("Test Mac", "test-mac", Some(8740));
+        assert!(has(&with, "companion_port", "8740"));
+        assert!(has(&with, "instance_id", "test-mac"));
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -90,7 +132,7 @@ mod macos {
         pub fn advertise(instance_name: &str, instance_id: &str, port: u16) -> Result<Self> {
             let txt: HashMap<String, String> = txt_records(instance_name, instance_id)
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), v))
                 .collect();
 
             let service = DNSServiceBuilder::new(REGTYPE, port)
@@ -117,10 +159,10 @@ mod macos {
         #[test]
         fn txt_records_carry_core_role_and_identity() {
             let txt = txt_records("Test Mac", "test-mac");
-            assert!(txt.contains(&("role", "core")));
-            assert!(txt.contains(&("name", "Test Mac")));
-            assert!(txt.contains(&("instance_id", "test-mac")));
-            assert!(txt.contains(&("version", "1")));
+            assert!(txt.contains(&("role", "core".to_string())));
+            assert!(txt.contains(&("name", "Test Mac".to_string())));
+            assert!(txt.contains(&("instance_id", "test-mac".to_string())));
+            assert!(txt.contains(&("version", "1".to_string())));
         }
 
         #[test]

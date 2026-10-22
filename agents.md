@@ -225,12 +225,23 @@ anamanti-core/      Anamanti Core — everything that runs on the Mac (crate
                     `anamanti_core`) — Wyoming server to the device + Wyoming
                     client to Whisper/Piper, pluggable LLM, HelixDB/SQLite memory,
                     mDNS.
+anamanti-companion/ Anamanti Companion — the Android + iOS phone app (Dart package
+                    `anamanti_companion`, FRB crate `rust_lib_anamanti_companion`,
+                    Android id `com.anamanti.anamanti_companion`). A scaled-back
+                    display: no audio or wake word. It connects to the Core for
+                    admin tasks, the pipeline view, and on-screen state such as
+                    timers. Same Flutter + Rust/FRB split and the same rules
+                    (mDNS only, protocol from anamanti-protocol, generated
+                    bindings). Reads the Core's read-only LAN **Companion API**
+                    (see "Environment & build") and uses the Wyoming memory
+                    frames. Details in `anamanti-companion/README.md`.
 anamanti-protocol/  Shared Wyoming protocol crate (`anamanti_protocol`): the frame
                     types, constructors/predicates and the size-capped framing
-                    reader. A path dependency of BOTH anamanti-core and
+                    reader. A path dependency of anamanti-core,
                     anamanti-display/rust (each re-exports it as
-                    `crate::wyoming::protocol`) — a wire change is made once, here,
-                    and both sides must be redeployed together.
+                    `crate::wyoming::protocol`) and anamanti-companion/rust — a wire
+                    change is made once, here, and every side must be redeployed
+                    together.
 plans/              Design + planning docs: architecture.md (design, source of
                     truth), Plan.MD (phases + decision table), TODO.md,
                     DisplayUI.md (the Display's on-screen UI catalog), the
@@ -317,6 +328,16 @@ anamanti-core/scripts/build-webui-css.sh
 # Routes live in ONE table (anamanti-core/src/webconfig/routes.rs); the checks run once,
 # before routing. Binding config_addr to a LAN address therefore does NOT expose it.
 #
+# The COMPANION API (the phone app, anamanti-companion/) is a SEPARATE LAN listener,
+# companion_addr (default 0.0.0.0:8740, "off"/"none" disables), its port advertised in
+# the mDNS TXT record as `companion_port`. It reuses the same route table but answers
+# ONLY webconfig::COMPANION_ROUTES (/overview.json, /music/nowplaying.json, /timers.json),
+# GET only (else 405), and refuses any request with an Origin header (403). No auth by
+# owner decision (2026-10-22): it is read-only. Add pairing BEFORE giving it any write.
+# Memory list/delete for the phone go over the existing Wyoming memory frames, as the
+# Display does. /timers.json mirrors what each display reports (`anamanti-timers` up its
+# notify channel; crate::timer::DisplayTimers) — displays still own their timers.
+#
 # Information architecture (plans/CoreWebUIPlan.md, 2026-10-14): ten pages tuned to fit
 # one 1920x1080 screen each — Overview `/` (live pipeline with a Local/LAN/Cloud chip
 # per stage, displays, latency, "what leaves the house"), Voice `/voice` (STT, VAD,
@@ -378,11 +399,11 @@ anamanti-core/scripts/build-webui-css.sh
 #     process start, so it has no config-page control)
 #
 # The JSON file holds everything else. Key fields (defaults in anamanti.example.json):
-#   bind_addr / config_addr / stt_addr / tts_addr / service_name / instance_id
+#   bind_addr / config_addr / companion_addr / stt_addr / tts_addr / service_name / instance_id
 #     (instance_id resolution: the JSON value → the working dir's git BRANCH CODE → the
 #     sanitized service_name; must be stable across restarts. config_addr "off"/"none"
 #     disables the loopback config+debug pages. A second/test Anamanti Core on the same
-#     Mac needs distinct bind_addr + config_addr + service_name; sharing prod's data
+#     Mac needs distinct bind_addr + config_addr + companion_addr (or "off") + service_name; sharing prod's data
 #     files means memory_backend="sqlite" — two processes can't share an embedded Helix graph.)
 #   db_path / chatlog_path / promptlog_path / helix_path / settings_path / audio_dump_dir
 #     (settings_path is the runtime OVERLAY file — see below; "off"/"none" disables persistence)

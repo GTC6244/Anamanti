@@ -18,6 +18,12 @@
 //! (a `cancel` command, e.g. "stop"), or by the display's "Cancel timer" button
 //! ([`dismiss_timer`]). A repeat is skipped while a voice turn is in flight so the
 //! alarm never talks over the user or the reply.
+//!
+//! The device also reports its **full** timer list to the Core (`anamanti-timers`, up
+//! the persistent notify channel) so the Core can show every display's timers: every
+//! mutation (start, adjust, cancel, fire, dismiss) signals a process-wide `watch`
+//! ([`report_outbound`]), and the channel rebuilds the list ([`current_report`]) at send
+//! time so `remaining_secs` is fresh.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -28,12 +34,14 @@ use std::time::{Duration, Instant};
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
 use crate::api::engine::WakeWordEvent;
 use crate::audio::playback::PlaybackSink;
 use crate::frb_generated::StreamSink;
-use crate::wyoming::protocol::{self, types, TimerCommand, WyomingEvent};
+use crate::wyoming::protocol::{self, types, ReportedTimer, TimerCommand, WyomingEvent};
+use crate::wyoming::push_channel::Outbound;
 use crate::wyoming::{resolve, EndpointCache};
 
 /// Defense-in-depth cap on a timer (24h); the Mac side already clamps.
@@ -48,6 +56,9 @@ const ALARM_REPEAT: Duration = Duration::from_secs(5);
 struct TimerEntry {
     label: Option<String>,
     abort: AbortHandle,
+    /// Full duration in seconds (after any adjust: time already elapsed + the re-armed
+    /// remaining), reported to the Core.
+    duration_secs: u64,
     /// When this timer fires. Used only to compute remaining time for [`TimerManager::snapshot`];
     /// the countdown itself is driven by the spawned task's `sleep`.
     deadline: Instant,
@@ -159,15 +170,24 @@ impl TimerManager {
 
     fn start(&self, label: Option<String>, duration_secs: u64) {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        self.spawn_countdown(id, label, duration_secs);
+        self.spawn_countdown(id, label, duration_secs, 0);
+        publish_change();
     }
 
     /// Spawn the countdown task for timer `id` and register its [`TimerEntry`], clamping
     /// `duration_secs` to the valid range. Shared by [`start`](Self::start) (a fresh id)
     /// and [`adjust`](Self::adjust) (re-arming an existing id with new remaining time).
     /// Emits `timer_started(id, …, remaining)` so Flutter (re-)anchors the countdown and
-    /// progress ring to the new deadline.
-    fn spawn_countdown(&self, id: u32, label: Option<String>, duration_secs: u64) {
+    /// progress ring to the new deadline. `elapsed_secs` (0 for a fresh timer) is the
+    /// time already counted down before a re-arm, so the reported full duration stays
+    /// `elapsed + remaining`. The caller publishes the change.
+    fn spawn_countdown(
+        &self,
+        id: u32,
+        label: Option<String>,
+        duration_secs: u64,
+        elapsed_secs: u64,
+    ) {
         let secs = duration_secs.clamp(1, MAX_TIMER_SECS);
         let inner = self.inner.clone();
         let task_label = label.clone();
@@ -182,6 +202,7 @@ impl TimerManager {
             // Fired: the entry stays registered (ringing) until cancelled/dismissed,
             // which aborts this task and so stops the repeats.
             task_ringing.store(true, Ordering::SeqCst);
+            publish_change();
             let _ = inner.sink.add(WakeWordEvent::timer_finished(id, label_str));
             let Some(pb) = inner.playback.clone() else {
                 return; // no speaker: the screen shows "Time's up" until dismissed
@@ -228,6 +249,7 @@ impl TimerManager {
             TimerEntry {
                 label,
                 abort: task.abort_handle(),
+                duration_secs: elapsed_secs.saturating_add(secs),
                 deadline: Instant::now() + Duration::from_secs(secs),
                 ringing,
             },
@@ -257,11 +279,42 @@ impl TimerManager {
         }
     }
 
+    /// The full timer list for an `anamanti-timers` report, ordered by id. Takes the
+    /// registry lock only while copying the entries out.
+    pub fn report(&self) -> Vec<ReportedTimer> {
+        let now = Instant::now();
+        let timers = self.inner.timers.lock().unwrap();
+        let mut list: Vec<ReportedTimer> = timers
+            .iter()
+            .map(|(id, e)| {
+                reported_timer(
+                    *id,
+                    e.label.as_deref(),
+                    e.duration_secs,
+                    e.deadline,
+                    e.ringing.load(Ordering::SeqCst),
+                    now,
+                )
+            })
+            .collect();
+        drop(timers);
+        list.sort_unstable_by_key(|t| t.id);
+        list
+    }
+
     /// Cancel timers matching `label` (every timer when `None`). **While any timer is
     /// ringing, an unlabeled cancel ("stop", "cancel the timer") only silences the
     /// ringing ones** — the user means "turn the alarm off", not "also throw away the
     /// other countdowns"; a second unlabeled cancel then clears the rest.
     fn cancel(&self, label: Option<String>) {
+        if self.cancel_locked(label) {
+            publish_change();
+        }
+    }
+
+    /// [`cancel`](Self::cancel)'s registry work; returns whether any timer was removed
+    /// (so the report is published after the lock is released).
+    fn cancel_locked(&self, label: Option<String>) -> bool {
         let mut timers = self.inner.timers.lock().unwrap();
         let ringing_only =
             label.is_none() && timers.values().any(|e| e.ringing.load(Ordering::SeqCst));
@@ -269,12 +322,15 @@ impl TimerManager {
             .into_iter()
             .filter(|id| !ringing_only || timers[id].ringing.load(Ordering::SeqCst))
             .collect();
+        let mut removed = false;
         for id in ids {
             if let Some(entry) = timers.remove(&id) {
                 entry.abort.abort();
                 let _ = self.inner.sink.add(WakeWordEvent::timer_cancelled(id));
+                removed = true;
             }
         }
+        removed
     }
 
     /// Turn off one timer by id — the display's "Cancel timer" button. Stops a ringing
@@ -285,6 +341,7 @@ impl TimerManager {
         if let Some(entry) = entry {
             entry.abort.abort();
             let _ = self.inner.sink.add(WakeWordEvent::timer_cancelled(id));
+            publish_change();
         }
     }
 
@@ -299,7 +356,7 @@ impl TimerManager {
         let now = Instant::now();
         // Collect the re-arm plan under the lock (id, label, new remaining), aborting the
         // old tasks and removing their entries as we go; spawn outside the lock.
-        let rearm: Vec<(u32, Option<String>, u64)> = {
+        let rearm: Vec<(u32, Option<String>, u64, u64)> = {
             let mut timers = self.inner.timers.lock().unwrap();
             // A timer that already fired (ringing) isn't re-armed — only countdowns are.
             let ids: Vec<u32> = ids_matching(timers.iter().map(|(id, e)| (*id, &e.label)), &label)
@@ -310,14 +367,19 @@ impl TimerManager {
                 .filter_map(|id| {
                     let entry = timers.remove(&id)?;
                     entry.abort.abort();
-                    let remaining = entry.deadline.saturating_duration_since(now).as_secs() as i64;
-                    let new_secs = remaining.saturating_add(delta_secs).max(1) as u64;
-                    Some((id, entry.label, new_secs))
+                    let remaining = entry.deadline.saturating_duration_since(now).as_secs();
+                    let new_secs = (remaining as i64).saturating_add(delta_secs).max(1) as u64;
+                    let elapsed = entry.duration_secs.saturating_sub(remaining);
+                    Some((id, entry.label, new_secs, elapsed))
                 })
                 .collect()
         };
-        for (id, entry_label, new_secs) in rearm {
-            self.spawn_countdown(id, entry_label, new_secs);
+        let changed = !rearm.is_empty();
+        for (id, entry_label, new_secs, elapsed) in rearm {
+            self.spawn_countdown(id, entry_label, new_secs, elapsed);
+        }
+        if changed {
+            publish_change();
         }
     }
 }
@@ -331,9 +393,68 @@ fn manager_slot() -> &'static Mutex<Option<TimerManager>> {
     MANAGER.get_or_init(|| Mutex::new(None))
 }
 
-/// Publish (or, with `None`, withdraw) the running engine's timer manager.
+/// Publish (or, with `None`, withdraw) the running engine's timer manager. The timer
+/// set changes either way (a torn-down engine's timers die with its runtime), so the
+/// report is republished.
 pub fn set_manager(manager: Option<TimerManager>) {
     *manager_slot().lock().unwrap() = manager;
+    publish_change();
+}
+
+/// Process-wide "the timer list changed" signal behind the `anamanti-timers` report.
+/// The value is just a tick; the frame is rebuilt at send time ([`current_report`]).
+static REPORT_CHANGES: OnceLock<watch::Sender<()>> = OnceLock::new();
+
+fn report_changes() -> &'static watch::Sender<()> {
+    REPORT_CHANGES.get_or_init(|| watch::channel(()).0)
+}
+
+/// Signal that the timer set changed. Never blocks and never touches the timers lock.
+fn publish_change() {
+    // `send_replace` notifies even when no channel is subscribed yet.
+    report_changes().send_replace(());
+}
+
+/// The `anamanti-timers` frame for the running engine's timers right now (an empty
+/// list when no engine is running).
+pub fn current_report() -> WyomingEvent {
+    // Clone the manager out so the slot lock isn't held while reading the timers.
+    let manager = manager_slot().lock().unwrap().clone();
+    let timers = manager.map(|m| m.report()).unwrap_or_default();
+    WyomingEvent::timers_report(&timers)
+}
+
+/// The notify channel's outbound timer report: resent on every timer change.
+pub fn report_outbound() -> Outbound {
+    Outbound {
+        changes: report_changes().subscribe(),
+        frame: Box::new(current_report),
+    }
+}
+
+/// One timer's report entry. A ringing timer reports 0 remaining; a counting one
+/// reports whole seconds left rounded **up** (a just-started 5 min timer reads 300).
+fn reported_timer(
+    id: u32,
+    label: Option<&str>,
+    duration_secs: u64,
+    deadline: Instant,
+    ringing: bool,
+    now: Instant,
+) -> ReportedTimer {
+    let remaining_secs = if ringing {
+        0
+    } else {
+        let left = deadline.saturating_duration_since(now);
+        left.as_secs() + u64::from(left.subsec_nanos() > 0)
+    };
+    ReportedTimer {
+        id,
+        label: label.unwrap_or_default().to_string(),
+        duration_secs,
+        remaining_secs,
+        ringing,
+    }
 }
 
 /// Turn off timer `id` on the running engine (a no-op when no engine is running).
@@ -545,6 +666,53 @@ mod tests {
             labels: vec![],
         };
         assert_eq!(unlabeled.to_json(), serde_json::json!({ "running": 1 }));
+    }
+
+    #[test]
+    fn reported_timer_rounds_remaining_up_and_zeroes_when_ringing() {
+        let now = Instant::now();
+        // Just started: a partial second left rounds up to the full duration.
+        let t = reported_timer(
+            3,
+            Some("pasta"),
+            300,
+            now + Duration::from_millis(299_400),
+            false,
+            now,
+        );
+        assert_eq!(
+            t,
+            ReportedTimer {
+                id: 3,
+                label: "pasta".into(),
+                duration_secs: 300,
+                remaining_secs: 300,
+                ringing: false,
+            }
+        );
+        // Exact whole seconds stay as-is; an unlabeled timer reports "".
+        let t = reported_timer(4, None, 60, now + Duration::from_secs(42), false, now);
+        assert_eq!((t.label.as_str(), t.remaining_secs), ("", 42));
+        // Due but not yet marked ringing: clamped at 0.
+        let t = reported_timer(5, None, 60, now, false, now);
+        assert_eq!(t.remaining_secs, 0);
+        // Ringing: always 0 remaining, flagged.
+        let t = reported_timer(6, None, 60, now + Duration::from_secs(9), true, now);
+        assert_eq!((t.remaining_secs, t.ringing), (0, true));
+    }
+
+    #[test]
+    fn timer_report_frame_round_trips_and_change_signal_notifies() {
+        // No engine running in unit tests: the report is the empty list.
+        let ev = current_report();
+        assert_eq!(ev.event_type, types::TIMERS);
+        assert_eq!(ev.reported_timers(), Some(vec![]));
+
+        let mut out = report_outbound();
+        out.changes.borrow_and_update();
+        publish_change();
+        assert!(out.changes.has_changed().unwrap());
+        assert_eq!((out.frame)().event_type, types::TIMERS);
     }
 
     #[test]
