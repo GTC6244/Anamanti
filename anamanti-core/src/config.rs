@@ -109,6 +109,12 @@ pub struct Config {
     /// Address the local HTTP **config page** binds to, or `None` to disable it.
     /// Defaults to loopback (`127.0.0.1:8730`) since the page has no auth.
     pub config_addr: Option<SocketAddr>,
+    /// Address the **Companion API** (the phone app's LAN, read-only, GET-only HTTP
+    /// listener) binds to, or `None` to disable it. Defaults to `0.0.0.0:8740`; its port
+    /// is advertised in the mDNS TXT record as `companion_port`. Unlike the admin
+    /// console it is reachable from the LAN, so it serves only a fixed allowlist of
+    /// read-only JSON routes (see `webconfig::serve_companion`).
+    pub companion_addr: Option<SocketAddr>,
     /// Human-readable mDNS instance name (the friendly label shown in the
     /// device's orchestrator dropdown).
     pub service_name: String,
@@ -786,6 +792,8 @@ impl Default for Config {
             // Config page on loopback only by default (no auth); override or
             // disable with config_addr in the config file.
             config_addr: Some("127.0.0.1:8730".parse().unwrap()),
+            // Companion API on the LAN by default (read-only, no auth — see field doc).
+            companion_addr: Some("0.0.0.0:8740".parse().unwrap()),
             service_name: "Anamanti Core".to_string(),
             instance_id: "anamanti-core".to_string(),
             stt_addr: "127.0.0.1:10300".parse().unwrap(), // wyoming-faster-whisper default
@@ -957,6 +965,8 @@ pub struct FileConfig {
     pub bind_addr: Option<SocketAddr>,
     /// Loopback config page `host:port`, or the disable sentinel `off`/`none`/(empty).
     pub config_addr: Option<String>,
+    /// Companion API (phone app) `host:port`, or the disable sentinel `off`/`none`/(empty).
+    pub companion_addr: Option<String>,
     pub service_name: Option<String>,
     pub instance_id: Option<String>,
     pub stt_addr: Option<SocketAddr>,
@@ -1656,6 +1666,18 @@ impl Config {
             },
         };
 
+        // The Companion API listener: same sentinel rules as config_addr.
+        let companion_addr = match fc.companion_addr {
+            None => d.companion_addr,
+            Some(v) => match disable_sentinel(&v) {
+                None => None,
+                Some(s) => Some(
+                    s.parse()
+                        .with_context(|| format!("parsing companion_addr=`{s}` as host:port"))?,
+                ),
+            },
+        };
+
         let settings_path = match fc.settings_path {
             None => d.settings_path.clone(),
             Some(v) => disable_sentinel(&v).map(PathBuf::from),
@@ -1789,6 +1811,7 @@ impl Config {
         Ok(Self {
             bind_addr: fc.bind_addr.unwrap_or(d.bind_addr),
             config_addr,
+            companion_addr,
             service_name,
             instance_id,
             stt_addr: fc.stt_addr.unwrap_or(d.stt_addr),
@@ -2873,12 +2896,25 @@ mod tests {
     }
 
     #[test]
+    fn companion_addr_defaults_to_the_lan_and_is_overridable() {
+        let d = Config::from_file(parse(r#"{ "settings_path": "none" }"#)).unwrap();
+        assert_eq!(d.companion_addr, Some("0.0.0.0:8740".parse().unwrap()));
+        let c = Config::from_file(parse(
+            r#"{ "companion_addr": "0.0.0.0:8741", "settings_path": "none" }"#,
+        ))
+        .unwrap();
+        assert_eq!(c.companion_addr, Some("0.0.0.0:8741".parse().unwrap()));
+        assert!(Config::from_file(parse(r#"{ "companion_addr": "nope" }"#)).is_err());
+    }
+
+    #[test]
     fn disable_sentinels_turn_features_off() {
         let c = Config::from_file(parse(
-            r#"{ "config_addr": "off", "settings_path": "none", "music": { "web_ipc": "" } }"#,
+            r#"{ "config_addr": "off", "companion_addr": "off", "settings_path": "none", "music": { "web_ipc": "" } }"#,
         ))
         .unwrap();
         assert!(c.config_addr.is_none());
+        assert!(c.companion_addr.is_none());
         assert!(c.settings_path.is_none());
         assert!(c.music.mpv_ipc.is_none());
     }

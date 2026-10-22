@@ -43,6 +43,7 @@ pub async fn run<F>(
     let channel = Channel {
         label: "music",
         hello: WyomingEvent::hello_music(device_id, "", device_name),
+        outbound: None,
     };
     push_channel::run(
         cache,

@@ -307,12 +307,53 @@ fn view_json(settings: &SharedSettings, ok: bool, message: Option<&str>) -> Stri
 /// the listener itself fails.
 pub async fn serve(listener: TcpListener, services: Arc<AppServices>) -> Result<()> {
     system::mark_started();
+    accept_loop(listener, services, Listener::Admin).await
+}
+
+/// The **Companion API**: the phone app's LAN listener (`companion_addr`). It shares
+/// this module's HTTP plumbing and route table but answers only
+/// [`COMPANION_ROUTES`] — read-only JSON, `GET` only — and refuses any request that
+/// carries an `Origin` header (a browser page, e.g. via DNS rebinding; the app never
+/// sends one). There is no auth by owner decision (2026-10-22): it can't change
+/// anything, and the data is status the household already sees on the displays.
+pub async fn serve_companion(listener: TcpListener, services: Arc<AppServices>) -> Result<()> {
+    accept_loop(listener, services, Listener::Companion).await
+}
+
+/// The read-only routes the Companion listener serves; everything else is `404`.
+pub const COMPANION_ROUTES: &[&str] = &["/overview.json", "/music/nowplaying.json", "/timers.json"];
+
+/// Which front door a connection came in on; selects the request guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Listener {
+    /// The loopback admin console (every route; loopback Host/Origin guard).
+    Admin,
+    /// The LAN Companion API ([`COMPANION_ROUTES`] only; GET only; no Origin).
+    Companion,
+}
+
+impl Listener {
+    fn label(self) -> &'static str {
+        match self {
+            Listener::Admin => "config page",
+            Listener::Companion => "companion api",
+        }
+    }
+}
+
+/// Accept connections forever, one task per connection. Returns only if the listener
+/// itself fails.
+async fn accept_loop(
+    listener: TcpListener,
+    services: Arc<AppServices>,
+    which: Listener,
+) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let services = services.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, &services).await {
-                log::debug!("config page connection {peer} ended: {e:#}");
+            if let Err(e) = handle(stream, &services, which).await {
+                log::debug!("{} connection {peer} ended: {e:#}", which.label());
             }
         });
     }
@@ -320,7 +361,7 @@ pub async fn serve(listener: TcpListener, services: Arc<AppServices>) -> Result<
 
 /// Read one HTTP request, check it, route it, write one response, close. One request
 /// per connection (`Connection: close`) — ample for a settings page.
-async fn handle(mut stream: TcpStream, services: &AppServices) -> Result<()> {
+async fn handle(mut stream: TcpStream, services: &AppServices, which: Listener) -> Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
 
@@ -358,8 +399,13 @@ async fn handle(mut stream: TcpStream, services: &AppServices) -> Result<()> {
     // the body or touching any handler, so a hostile page / rebinding DNS name can
     // neither read nor mutate.
     let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
-    if let Err((status, why)) = check_request(&method, &headers, port) {
-        log::warn!("config page: rejected {method} {target}: {why}");
+    let path = target.split(['?', '#']).next().unwrap_or(&target);
+    let checked = match which {
+        Listener::Admin => check_request(&method, &headers, port),
+        Listener::Companion => check_companion_request(&method, &headers, path),
+    };
+    if let Err((status, why)) = checked {
+        log::warn!("{}: rejected {method} {target}: {why}", which.label());
         return write_reply(&mut stream, &Reply::text(status, why)).await;
     }
 
@@ -447,6 +493,33 @@ fn check_request(
     Ok(())
 }
 
+/// The Companion API request guard: `GET` only (`405`), no `Origin` header (`403` —
+/// only a browser sends one, and no page should read this API), and the path must be
+/// one of [`COMPANION_ROUTES`] (`404`). Unlike [`check_request`] the `Host` is not
+/// checked: this listener is meant to be reached over the LAN by address.
+fn check_companion_request(
+    method: &str,
+    headers: &[(String, String)],
+    path: &str,
+) -> std::result::Result<(), (&'static str, &'static str)> {
+    if !method.eq_ignore_ascii_case("GET") {
+        return Err((
+            "405 Method Not Allowed",
+            "the companion API is read-only (GET)",
+        ));
+    }
+    if header(headers, "origin").is_some() {
+        return Err((
+            "403 Forbidden",
+            "forbidden: browser requests are not served",
+        ));
+    }
+    if !COMPANION_ROUTES.contains(&path) {
+        return Err(("404 Not Found", "not found"));
+    }
+    Ok(())
+}
+
 /// Write a minimal HTTP/1.1 response and close the connection.
 async fn write_reply(stream: &mut TcpStream, reply: &Reply) -> Result<()> {
     let location = reply
@@ -468,7 +541,7 @@ async fn write_reply(stream: &mut TcpStream, reply: &Reply) -> Result<()> {
     stream
         .write_all(header.as_bytes())
         .await
-        .context("writing config response header")?;
+        .context("writing response header")?;
     stream
         .write_all(&reply.body)
         .await

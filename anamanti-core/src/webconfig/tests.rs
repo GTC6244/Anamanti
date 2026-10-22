@@ -260,7 +260,12 @@ async fn redirects_carry_a_location_header_on_the_wire() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let _ = handle(stream, &services_with(settings(), None, debug())).await;
+        let _ = handle(
+            stream,
+            &services_with(settings(), None, debug()),
+            Listener::Admin,
+        )
+        .await;
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     let req = format!(
@@ -1075,7 +1080,7 @@ async fn serves_a_proxied_absolute_form_post() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        handle(stream, &services_with(s, None, debug()))
+        handle(stream, &services_with(s, None, debug()), Listener::Admin)
             .await
             .unwrap();
     });
@@ -1188,7 +1193,7 @@ async fn serves_a_post_over_a_real_socket() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        handle(stream, &services_with(s, None, debug()))
+        handle(stream, &services_with(s, None, debug()), Listener::Admin)
             .await
             .unwrap();
     });
@@ -1221,7 +1226,7 @@ async fn serves_the_model_catalog() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        handle(stream, &services_with(s, None, debug()))
+        handle(stream, &services_with(s, None, debug()), Listener::Admin)
             .await
             .unwrap();
     });
@@ -1266,9 +1271,13 @@ async fn serves_the_voice_catalog_filtered_to_installed() {
     let dir_for_task = dir.clone();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        handle(stream, &services_with(s, Some(dir_for_task), debug()))
-            .await
-            .unwrap();
+        handle(
+            stream,
+            &services_with(s, Some(dir_for_task), debug()),
+            Listener::Admin,
+        )
+        .await
+        .unwrap();
     });
 
     let mut client = TcpStream::connect(addr).await.unwrap();
@@ -1302,7 +1311,12 @@ async fn one_request(build: impl FnOnce(u16) -> String) -> (String, Arc<SharedSe
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let _ = handle(stream, &services_with(server_settings, None, debug())).await;
+        let _ = handle(
+            stream,
+            &services_with(server_settings, None, debug()),
+            Listener::Admin,
+        )
+        .await;
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
     client
@@ -1558,6 +1572,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/overview.json", "", "200 OK", JSON),
     ("GET", "/overview.json?probe=0", "", "200 OK", JSON),
     ("GET", "/keys.json", "", "200 OK", JSON),
+    ("GET", "/timers.json", "", "200 OK", JSON),
     ("GET", "/system.json", "", "200 OK", JSON),
     ("GET", "/extraction/status.json", "", "200 OK", JSON),
     ("GET", "/about.json", "", "200 OK", JSON),
@@ -1756,7 +1771,12 @@ async fn serve_raw(method: &str, path: &str, body: &str) -> (String, String, Vec
         let mut dbg = debug();
         dbg.chatlog_path = std::env::temp_dir().join("wc_inventory_missing_chatlog.jsonl");
         dbg.promptlog_path = std::env::temp_dir().join("wc_inventory_missing_prompts.jsonl");
-        let _ = handle(stream, &services_with(settings(), None, dbg)).await;
+        let _ = handle(
+            stream,
+            &services_with(settings(), None, dbg),
+            Listener::Admin,
+        )
+        .await;
     });
     let ctype = if method.eq_ignore_ascii_case("POST") {
         "Content-Type: application/json\r\n"
@@ -2350,7 +2370,7 @@ mod speaker_tagging {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let _ = handle(stream, &s).await;
+            let _ = handle(stream, &s, Listener::Admin).await;
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         client.write_all(req(addr.port()).as_bytes()).await.unwrap();
@@ -2496,4 +2516,118 @@ mod speaker_tagging {
         assert_eq!(nodes["User"][2]["$speaker"]["kind"], "unknown");
         assert!(nodes["Entity"][0].get("$speaker").is_none());
     }
+}
+
+// ---- Companion API (the phone app's LAN listener) ----
+
+/// Serve one raw request through the **Companion** listener against `services`.
+async fn companion_request(services: AppServices, raw: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = handle(stream, &services, Listener::Companion).await;
+    });
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client.write_all(raw.as_bytes()).await.unwrap();
+    let mut resp = String::new();
+    client.read_to_string(&mut resp).await.unwrap();
+    resp
+}
+
+fn companion_services() -> AppServices {
+    services_with(settings(), None, debug())
+}
+
+#[tokio::test]
+async fn companion_serves_timers_to_a_lan_host() {
+    let services = companion_services();
+    services.display_timers.report(
+        1,
+        "dev-k",
+        "Kitchen",
+        vec![crate::wyoming::protocol::ReportedTimer {
+            id: 4,
+            label: "pasta".into(),
+            duration_secs: 600,
+            remaining_secs: 300,
+            ringing: false,
+        }],
+        crate::clock::now_millis() as u64,
+    );
+    // A LAN Host (which the admin console would refuse) is fine here.
+    let resp = companion_request(
+        services,
+        "GET /timers.json HTTP/1.1\r\nHost: 192.168.1.20:8740\r\n\r\n",
+    )
+    .await;
+    assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap();
+    let v: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["displays"][0]["name"], "Kitchen");
+    assert_eq!(v["displays"][0]["timers"][0]["label"], "pasta");
+}
+
+#[tokio::test]
+async fn companion_refuses_writes_browsers_and_other_routes() {
+    let post = companion_request(
+        companion_services(),
+        "POST /config HTTP/1.1\r\nHost: 192.168.1.20:8740\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+    )
+    .await;
+    assert!(post.starts_with("HTTP/1.1 405"), "resp: {post}");
+
+    let browser = companion_request(
+        companion_services(),
+        "GET /timers.json HTTP/1.1\r\nHost: 192.168.1.20:8740\r\nOrigin: http://evil.example\r\n\r\n",
+    )
+    .await;
+    assert!(browser.starts_with("HTTP/1.1 403"), "resp: {browser}");
+
+    for path in ["/config", "/keys.json", "/sqlite.json", "/", "/memory"] {
+        let resp = companion_request(
+            companion_services(),
+            &format!("GET {path} HTTP/1.1\r\nHost: 192.168.1.20:8740\r\n\r\n"),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 404"), "{path} resp: {resp}");
+    }
+}
+
+#[test]
+fn every_companion_route_is_a_get_route_in_the_table() {
+    for path in COMPANION_ROUTES {
+        assert!(
+            routes::lookup("GET", path).is_some(),
+            "{path} is not a GET route"
+        );
+    }
+}
+
+#[test]
+fn companion_guard_rules() {
+    let none: Vec<(String, String)> = vec![];
+    assert!(check_companion_request("GET", &none, "/overview.json").is_ok());
+    assert!(check_companion_request("get", &none, "/music/nowplaying.json").is_ok());
+    assert_eq!(
+        check_companion_request("HEAD", &none, "/timers.json")
+            .unwrap_err()
+            .0,
+        "405 Method Not Allowed"
+    );
+    let origin = vec![("origin".to_string(), "http://192.168.1.20:8740".to_string())];
+    assert_eq!(
+        check_companion_request("GET", &origin, "/timers.json")
+            .unwrap_err()
+            .0,
+        "403 Forbidden"
+    );
+    assert_eq!(
+        check_companion_request("GET", &none, "/keys.json")
+            .unwrap_err()
+            .0,
+        "404 Not Found"
+    );
 }

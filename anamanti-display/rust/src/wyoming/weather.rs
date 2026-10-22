@@ -41,6 +41,7 @@ pub async fn run<F>(
     let channel = Channel {
         label: "weather",
         hello: WyomingEvent::hello_weather(device_id, "", device_name),
+        outbound: None,
     };
     push_channel::run(
         cache,

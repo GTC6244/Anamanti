@@ -3,6 +3,10 @@
 //! display unprompted. The connection, registration and reconnect logic is the shared
 //! [`super::push_channel`] driver (see there for the transport details); this module
 //! only decodes each frame into a [`Notification`].
+//!
+//! The same socket also carries the device's timer list *up* to the orchestrator: the
+//! caller passes an [`Outbound`] (the engine's `anamanti-timers` report), which the
+//! driver sends after the hello and again on every timer change.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -10,7 +14,7 @@ use std::time::Duration;
 
 use super::discovery::EndpointCache;
 use super::protocol::{types, WyomingEvent};
-use super::push_channel::{self, Channel};
+use super::push_channel::{self, Channel, Outbound};
 
 /// A proactive notification decoded from an `anamanti-notify` frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +58,9 @@ impl Notification {
 
 /// Run the persistent notify channel until `running` is cleared or the consumer goes
 /// away (see [`push_channel::run`]). Each decoded notification is handed to
-/// `on_notification`.
+/// `on_notification`. `report`, when given, is kept current up the same socket (see
+/// [`Outbound`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn run<F>(
     cache: &EndpointCache,
     discovery_timeout: Duration,
@@ -62,6 +68,7 @@ pub async fn run<F>(
     device_id: String,
     device_name: String,
     running: Arc<AtomicBool>,
+    report: Option<Outbound>,
     on_notification: F,
 ) where
     F: FnMut(Notification) -> bool,
@@ -71,6 +78,7 @@ pub async fn run<F>(
     let channel = Channel {
         label: "notify",
         hello: WyomingEvent::hello(device_id, "", device_name),
+        outbound: report,
     };
     push_channel::run(
         cache,

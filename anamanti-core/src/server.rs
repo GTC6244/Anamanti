@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -225,18 +226,40 @@ async fn handle_connection(stream: TcpStream, services: &AppServices) -> Result<
                 );
                 let (conn_id, mut rx) = channel.register(&device_id, &device_name);
                 let (reader, writer) = device.split_mut();
-                // Pump enqueued pushes out to the device while watching the read half
-                // for the device closing the socket. In this visual-only phase the
-                // device sends no frames on this channel, so the read side only ever
-                // resolves to EOF/close; a future ack phase that expects inbound
-                // frames must move the write pump to a spawned task, because
-                // `read_event` is not cancellation-safe mid-frame.
+                let is_notify = matches!(channel, PushChannel::Notify(_));
+                // Pump enqueued pushes out to the device while reading what the device
+                // sends up the channel: today only the notify channel's
+                // `anamanti-timers` report (every display's timers, for the Companion
+                // app); anything else is ignored. `read_event` is not cancellation-safe
+                // mid-frame, so the reads run inside a stream whose in-flight read
+                // survives the `select!` picking the write branch (`StreamExt::next` is
+                // cancellation-safe; the unfold state keeps the partial read).
+                let inbound = futures_util::stream::unfold(reader, |r| async move {
+                    match protocol::read_event(&mut *r).await {
+                        Ok(Some(ev)) => Some((ev, r)),
+                        Ok(None) | Err(_) => None, // device closed / errored
+                    }
+                });
+                tokio::pin!(inbound);
                 loop {
                     tokio::select! {
-                        incoming = protocol::read_event(&mut *reader) => {
-                            match incoming {
-                                Ok(Some(_)) => {} // no acks handled yet — ignore
-                                Ok(None) | Err(_) => break, // device closed / errored
+                        incoming = inbound.next() => {
+                            let Some(ev) = incoming else { break };
+                            if is_notify {
+                                if let Some(timers) = ev.reported_timers() {
+                                    log::debug!(
+                                        "[{}] {device_id:?} reported {} timer(s)",
+                                        peer_str(peer.as_ref()),
+                                        timers.len()
+                                    );
+                                    services.display_timers.report(
+                                        conn_id,
+                                        &device_id,
+                                        &device_name,
+                                        timers,
+                                        crate::clock::now_millis() as u64,
+                                    );
+                                }
                             }
                         }
                         outgoing = rx.recv() => {
@@ -250,6 +273,9 @@ async fn handle_connection(stream: TcpStream, services: &AppServices) -> Result<
                             }
                         }
                     }
+                }
+                if is_notify {
+                    services.display_timers.connection_closed(conn_id);
                 }
                 channel.deregister(conn_id);
                 log::info!(

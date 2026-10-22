@@ -442,6 +442,16 @@ predictable memory use and no GC pauses under the 1 GB limit.
   TTS first chunk, and the end-of-speech→reply total) onto the `ChatLogRecord`, and the
   row expands to show the stages that actually ran. Optional + `skip_serializing_if`, so
   pre-feature log lines parse fine and render "no timing recorded".
+- **Companion API** (`webconfig::serve_companion`, a *second* listener on `companion_addr`,
+  default `0.0.0.0:8740`): the LAN door for the Anamanti Companion phone app. Same HTTP
+  plumbing and route table as the console, but a different guard: only
+  `COMPANION_ROUTES` (`/overview.json`, `/music/nowplaying.json`, `/timers.json`), `GET`
+  only, and any request with an `Origin` header is refused (no browser page can read it).
+  No auth (read-only, owner decision 2026-10-22). Its port is advertised in the mDNS TXT
+  record as `companion_port`. `/timers.json` is the Core's mirror of every display's
+  `anamanti-timers` report (`timer::DisplayTimers`, keyed by `device_id`, dropped when that
+  display's notify channel closes; `remaining_secs` recomputed per request). The phone
+  lists/deletes memories over the Wyoming memory frames, exactly as the Display does.
 - **Household / home context** (`settings::Household`, editable at `GET /household`
   on the config page): a persisted record of the home **location + units** and a
   **roster of people** (name, emails, phones, relationship). Location/units seed from
@@ -788,6 +798,12 @@ mDNS + `instance_id` pin the voice path uses):
 - **`anamanti-notify-ack`** (device → Anamanti Core): reserved for a later
   delivery-tracking phase (store-and-forward across reconnects); the constructor exists
   in the shared `anamanti-protocol` crate but nothing sends it yet.
+- **`anamanti-timers`** (device → Anamanti Core, up this same notify socket): the device's
+  **full** timer list (`data.timers[]` = `ReportedTimer {id, label, duration_secs,
+  remaining_secs, ringing}`; empty = none), sent right after the hello on every (re)connect
+  and again on each start/adjust/cancel/fire/dismiss, so the Core can show every display's
+  timers. `engine/timer.rs` signals a `watch` on each mutation and the push driver's optional
+  `Outbound` rebuilds the frame at send time; weather/music channels send nothing up.
 - The **ambient weather push** reuses this same persistent-channel design: the device
   opens a *third* long-lived connection (`rust/src/wyoming/weather.rs`, started by
   `start_weather_channel`) with an `anamanti-hello` carrying `data.role="weather"`, which

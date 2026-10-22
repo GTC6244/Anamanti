@@ -510,6 +510,30 @@ async fn run() -> Result<()> {
         }
     }
 
+    // The Companion API (the phone app's read-only LAN listener). Its port goes into
+    // the mDNS TXT record, so bind it before advertising.
+    if let Some(companion_addr) = config.companion_addr {
+        match TcpListener::bind(companion_addr).await {
+            Ok(listener) => {
+                let local = listener.local_addr().unwrap_or(companion_addr);
+                anamanti_core::discovery::set_companion_port(local.port());
+                log::info!(
+                    "companion API on http://{local}/ (read-only: {} — LAN, no auth)",
+                    webconfig::COMPANION_ROUTES.join(", ")
+                );
+                let services = services.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = webconfig::serve_companion(listener, services).await {
+                        log::error!("companion API stopped: {e:#}");
+                    }
+                });
+            }
+            Err(e) => {
+                log::warn!("companion API disabled: could not bind {companion_addr}: {e:#}")
+            }
+        }
+    }
+
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("binding device-facing server to {}", config.bind_addr))?;
