@@ -1,12 +1,12 @@
-name: Deploy marketing site
+name: Deploy website
 
-# Deploys the static marketing site (marketing/index.html) to Cloudflare Workers
+# Deploys the static website (website/) to Cloudflare Workers
 # as the `anamanti` assets-only Worker (see wrangler.jsonc).
 #
 # This replaces Cloudflare's Git-integration "Workers Builds", which ran on every
-# push to every branch and failed on PRs that never touched the marketing site.
-# The `paths:` filter below is the gate: this job only runs when the marketing
-# site (or its deploy config) actually changes, so app/core PRs don't trigger it.
+# push to every branch and failed on PRs that never touched the website.
+# The `paths:` filter below is the gate: this job only runs when the website
+# (or its deploy config) actually changes, so app/core PRs don't trigger it.
 #
 # One-time setup:
 #   1. Create a scoped Cloudflare API token (My Profile -> API Tokens ->
@@ -25,16 +25,16 @@ on:
   push:
     branches: [main]
     paths:
-      - "marketing/**"
+      - "website/**"
       - "wrangler.jsonc"
-      - ".github/workflows/deploy-marketing.yml"
+      - ".github/workflows/deploy-website.yml"
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
 concurrency:
-  group: deploy-marketing
+  group: deploy-website
   cancel-in-progress: true
 
 jobs:

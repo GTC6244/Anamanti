@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Technology: graph memory, linked AI systems and System-1 speed</title>
+<meta name="description" content="How Anamanti works inside: an embedded HelixDB knowledge graph for memory, a team of specialised models per turn, a System-1 classifier and zero-model fast paths that answer before the big model is needed, and streaming throughout." />
+<meta property="og:title" content="Technology: graph memory, linked AI systems and System-1 speed" />
+<meta property="og:description" content="How Anamanti works inside: an embedded HelixDB knowledge graph for memory, a team of specialised models per turn, a System-1 classifier and zero-model fast paths that answer before the big model is needed, and streaming throughout." />
+<meta property="og:image" content="assets/img/core-conversations.jpg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/site.css" />
+<style>
+.models { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+@media (max-width: 980px) { .models { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .models { grid-template-columns: 1fr; } }
+.model { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+.model .role { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 600; margin: 0 0 6px; }
+.model h4 { margin: 0 0 6px; }
+.model p { margin: 0 0 10px; color: var(--faint); font-size: .86rem; }
+.graph-svg { width: 100%; height: auto; background: radial-gradient(circle at 50% 45%, rgba(109,176,166,.08), transparent 70%); border: 1px solid var(--border); border-radius: var(--radius); }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav-inner">
+    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="nav-links" id="site-nav" aria-label="Main">
+      <a href="index.html">Overview</a>
+      <a href="core.html">The Core</a>
+      <a href="display.html">The Display</a>
+      <a href="hardware.html">Echo Show</a>
+      <a href="integrations.html">Integrations</a>
+      <a href="technology.html" aria-current="page">Technology</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="page-hero">
+  <div class="wrap">
+    <p class="eyebrow">Technology</p>
+    <h1>Fast thinking, slow thinking,<br />and a memory that knows who's who.</h1>
+    <p class="lede">An assistant in the kitchen has to feel instant and still be smart. Anamanti gets there with a team of specialised models
+      instead of one big one, a knowledge graph instead of a chat history, and a strict rule: the cheapest way to answer a request is the one that answers it.</p>
+  </div>
+</section>
+
+<!-- SYSTEM 1 -->
+<section class="band" id="system1">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Responsiveness</p>
+      <h2>System 1 answers first. System 2 only when it's needed.</h2>
+      <p>Psychology describes two modes of thought: fast and intuitive, and slow and deliberate. Most of what people say to a kitchen assistant is the fast kind,
+        such as “set a timer for ten minutes”, “what's the weather?” or “I'm done, thanks”, so Anamanti tries the fast routes first, in order, and stops as soon as one can answer.</p>
+    </div>
+    <div class="ladder">
+      <div class="rung"><h4>Memory commands</h4><p>“Remember that…”, “forget that”, “who am I?” Matched in plain code. “Who am I” is answered from your voiceprint, not a guess.</p><div class="cost"><b>No model</b>string match</div></div>
+      <div class="rung"><h4>Home Assistant</h4><p>“Turn off the kitchen lights.” Matched against a cached device list, then one direct call. It refuses to guess.</p><div class="cost"><b>No model</b>~25 ms call</div></div>
+      <div class="rung"><h4>Camera</h4><p>“Show me the front door.” The display that asked opens the live stream.</p><div class="cost"><b>No model</b>string match</div></div>
+      <div class="rung"><h4>System-1</h4><p>A <b>typed classifier</b>: it doesn't write text, it labels the request in a single pass with a confidence score. It handles timers, weather, time and date, closing screens and ending the conversation. Below a confidence of 0.85 it defers to System 2.</p><div class="cost"><b>Small classifier</b>156–363 ms</div></div>
+      <div class="rung s2"><h4>System 2</h4><p>Memory recall from the graph, then the full language model with tools, streamed sentence by sentence into speech.</p><div class="cost"><b>Full model</b>seconds</div></div>
+    </div>
+    <div class="split top" style="margin-top:40px">
+      <div class="prose">
+        <h3>Precision over recall</h3>
+        <p>A fast answer that's wrong is worse than a slow one that's right, so System-1 is tuned to <b>defer whenever it's unsure</b>. It hands past-tense questions (“what was the weather yesterday?”),
+          questions about specific places and anything open-ended to System 2.</p>
+        <p>On the calibration set it scored <b>22 of 22 at a 0.85 threshold, with zero wrong resolutions</b>. One global threshold was enough; no per-intent tuning was needed.</p>
+        <p>System-1 can run <b>locally</b> through Laya-Decision, a non-autoregressive ModernBERT classifier in Rust, or as a <b>hosted</b> classifier (Jev, on OpenRouter). Both use the same contract, so you can swap them from the console.</p>
+      </div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / conversations</span></div><img class="zoom" src="assets/img/core-conversations.jpg" alt="A turn answered by System-1 in 461 ms" loading="lazy" /></div>
+        <figcaption><b>A real System-1 turn.</b> “I'm all done, thank you” → <i>end_session</i>. Speech-to-text took 126 ms, the System-1 decision 203 ms and the first audio 60 ms: <b>461 ms</b> from the end of speech to the reply, with no call to the large model.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<!-- STREAMING -->
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Streaming everywhere</p>
+      <h2>Never wait for a whole answer.</h2>
+      <p>Even when the large model is needed, nothing waits for anything else to finish.</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="n">~2<small> s</small></div><p>to the first spoken word, instead of about 8 s when the whole reply is synthesised first. Each sentence goes to Piper as soon as it's complete.</p></div>
+      <div class="stat"><div class="n">&lt;1<small> ms</small></div><p>per audio frame for the Silero end-of-speech model on an M4 Mac.</p></div>
+      <div class="stat"><div class="n">~169<small> ms</small></div><p>to transcribe a turn with whisper.cpp's base model running inside the Core with Metal.</p></div>
+      <div class="stat"><div class="n">0<small> ms</small></div><p>added to a turn by memory ingestion. Indexing happens in the background, after the turn.</p></div>
+    </div>
+    <p style="color:var(--faint);font-size:.9rem;margin-top:20px">Every turn logs a per-stage timeline (speech-to-text, System-1, fetch, recall, prompt, first token, first audio), shown as a waterfall in the console, so a slowdown is visible the day it appears.</p>
+  </div>
+</section>
+
+<!-- LINKED AI -->
+<section class="band" id="linked">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Linked AI systems</p>
+      <h2>Not one model. A team of them.</h2>
+      <p>A single turn can involve up to eight models, each small and good at one job. Each can be swapped without touching the others, and the console labels where each one runs.</p>
+    </div>
+    <div class="models">
+      <div class="model"><p class="role">Hear the wake word</p><h4>openWakeWord</h4><p>An ONNX model running in Rust on the display.</p><span class="loc device">Display</span></div>
+      <div class="model"><p class="role">Detect end of speech</p><h4>Silero VAD</h4><p>A small neural speech detector.</p><span class="loc local">Mac</span></div>
+      <div class="model"><p class="role">Recognise the speaker</p><h4>ECAPA-TDNN</h4><p>192-dimension voiceprints, in pure Rust.</p><span class="loc local">Mac</span></div>
+      <div class="model"><p class="role">Transcribe</p><h4>Whisper / Scribe</h4><p>Local whisper.cpp or faster-whisper, or ElevenLabs.</p><span class="loc local">Mac</span> <span class="loc cloud">or cloud</span></div>
+      <div class="model"><p class="role">Route</p><h4>System-1 classifier</h4><p>Laya-Decision (ModernBERT) or Jev.</p><span class="loc local">Mac</span> <span class="loc cloud">or cloud</span></div>
+      <div class="model"><p class="role">Remember</p><h4>nomic-embed-text</h4><p>768-dimension embeddings via onnxruntime.</p><span class="loc local">Mac</span></div>
+      <div class="model"><p class="role">Reason &amp; act</p><h4>Language model</h4><p>Ollama, Claude or OpenAI, with tools.</p><span class="loc local">Mac</span> <span class="loc cloud">or cloud</span></div>
+      <div class="model"><p class="role">Speak</p><h4>Piper</h4><p>Fast neural text-to-speech; 174 voices here.</p><span class="loc local">Mac</span></div>
+    </div>
+    <p class="note" style="margin-top:24px">A ninth model works in the background, after the turn: <b>entity extraction</b> (Claude Haiku) reads each finished turn and adds people, places and topics to the memory graph.
+      It's the one memory step that uses a cloud model even when everything else is local, so the console says so and it has an off switch.</p>
+  </div>
+</section>
+
+<!-- MEMORY -->
+<section id="memory">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Graph memory</p>
+      <h2>A memory shaped like a household.</h2>
+      <p>A chat history can only find text that looks similar to what you just said. A household is people, places and relationships, so Anamanti's memory is a graph.</p>
+    </div>
+    <div class="split top">
+      <div class="prose">
+        <p><b>HelixDB, embedded.</b> A graph and vector database running inside the Core process, with no server and no Docker. Its nodes are people, turns, memories and entities, and recall is
+          a <b>vector search followed by a hop across the graph</b>, so “what did Sam say about the cabin?” can follow Sam → the cabin → what was said, rather than matching keywords.</p>
+        <p><b>Lossless by design.</b> Every turn is appended to a plain chat log, which is the source of truth. A background process embeds it into the graph about every 30 seconds.
+          Durable facts live in <b>SQLite</b>. If the embedder ever fails, recall falls back to SQLite full-text search, so a turn always gets some memories.</p>
+        <p><b>Local embeddings, swappable live.</b> nomic-embed-text runs on the Mac with no key and no network. Switch to OpenAI embeddings and back from the console:
+          each backend keeps its own index, so switching re-embeds nothing and loses nothing.</p>
+        <p><b>Scoped to the speaker.</b> Each memory belongs to a <b>person</b>, the <b>household</b>, or an <b>unknown</b> voice. Things an unknown voice says are kept
+          but never recalled for anyone until you review them, so a guest can't plant facts about you.</p>
+      </div>
+      <div>
+        <svg class="graph-svg" viewBox="0 0 520 380" role="img" aria-label="Illustration: a person node linked to turns, memories and entities">
+          <g stroke="rgba(255,255,255,.18)" stroke-width="1.4">
+            <line x1="260" y1="190" x2="120" y2="90"/><line x1="260" y1="190" x2="400" y2="80"/><line x1="260" y1="190" x2="110" y2="290"/>
+            <line x1="260" y1="190" x2="410" y2="300"/><line x1="400" y1="80" x2="470" y2="190"/><line x1="410" y1="300" x2="470" y2="190"/>
+            <line x1="120" y1="90" x2="250" y2="40"/><line x1="400" y1="80" x2="250" y2="40"/><line x1="110" y1="290" x2="250" y2="345"/><line x1="410" y1="300" x2="250" y2="345"/>
+          </g>
+          <g font-family="Inter, sans-serif" font-size="12" text-anchor="middle">
+            <circle cx="260" cy="190" r="34" fill="rgba(232,163,92,.18)" stroke="#e8a35c"/><text x="260" y="186" fill="#eef0f4" font-weight="600">Maya</text><text x="260" y="201" fill="#a3a9b8" font-size="10">person</text>
+            <circle cx="120" cy="90" r="26" fill="rgba(109,176,166,.14)" stroke="#6db0a6"/><text x="120" y="94" fill="#eef0f4">turn</text>
+            <circle cx="400" cy="80" r="26" fill="rgba(109,176,166,.14)" stroke="#6db0a6"/><text x="400" y="84" fill="#eef0f4">turn</text>
+            <circle cx="110" cy="290" r="28" fill="rgba(127,168,232,.14)" stroke="#7fa8e8"/><text x="110" y="287" fill="#eef0f4">memory</text><text x="110" y="301" fill="#a3a9b8" font-size="10">likes it spicy</text>
+            <circle cx="410" cy="300" r="28" fill="rgba(127,168,232,.14)" stroke="#7fa8e8"/><text x="410" y="297" fill="#eef0f4">memory</text><text x="410" y="311" fill="#a3a9b8" font-size="10">cabin trip</text>
+            <circle cx="470" cy="190" r="26" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.4)"/><text x="470" y="187" fill="#eef0f4">cabin</text><text x="470" y="200" fill="#a3a9b8" font-size="10">place</text>
+            <circle cx="250" cy="40" r="24" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.4)"/><text x="250" y="37" fill="#eef0f4">tacos</text><text x="250" y="50" fill="#a3a9b8" font-size="10">topic</text>
+            <circle cx="250" cy="345" r="24" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.4)"/><text x="250" y="342" fill="#eef0f4">Sam</text><text x="250" y="355" fill="#a3a9b8" font-size="10">person</text>
+          </g>
+        </svg>
+        <p style="color:var(--faint);font-size:.85rem;margin-top:10px">Illustration. Recall starts from the turns most similar to what you just said, then follows the graph to the people, places and topics around them.</p>
+      </div>
+    </div>
+    <div class="gallery two" style="margin-top:44px">
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory</span></div><img class="zoom" src="assets/img/core-memory.jpg" alt="Memory settings: local embeddings, entity extraction, stores" loading="lazy" /></div>
+        <figcaption><b>Recall settings.</b> A live graph of 1,722 nodes, local 768-dimension embeddings, and cloud entity extraction labelled as such.</figcaption></figure>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory#graph</span></div><img class="zoom" src="assets/img/core-memory-graph.jpg" alt="Graph browser listing extracted entities" loading="lazy" /></div>
+        <figcaption><b>The graph, browsable.</b> Extracted places, topics and things. Rename an entity and it changes everywhere.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<!-- STACK -->
+<section class="band">
+  <div class="wrap split top">
+    <div class="prose">
+      <p class="eyebrow">The stack</p>
+      <h3>Rust almost everywhere.</h3>
+      <p>The Core, the display's audio engine, the phone app's networking and the shared protocol are all <b>Rust</b>. That gives predictable latency on the Mac, and no garbage-collector
+        pauses on a 32-bit device with about 1 GB of RAM. Flutter draws the screens; Rust does everything time-critical.</p>
+      <p>Devices and the Core use <b>Wyoming</b>, the open voice protocol from the Home Assistant ecosystem, with Anamanti's own frames for screens, music, memory and push. They find each other over <b>mDNS</b>.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Layer</th><th>Technology</th></tr>
+        <tr><td>Core</td><td>Rust · tokio · rig agent framework</td></tr>
+        <tr><td>Display</td><td>Flutter + Rust via flutter_rust_bridge v2</td></tr>
+        <tr><td>Wake word</td><td>openWakeWord on tract-onnx</td></tr>
+        <tr><td>On-Mac inference</td><td>onnxruntime · whisper.cpp (Metal) · candle</td></tr>
+        <tr><td>Memory</td><td>HelixDB (embedded graph + vector) · SQLite</td></tr>
+        <tr><td>Transport</td><td>Wyoming over TCP · mDNS discovery</td></tr>
+        <tr><td>Audio</td><td>cpal / AAudio on device · Snapcast in the house</td></tr>
+        <tr><td>Console</td><td>Static HTML + Tailwind, compiled into the binary</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="next">
+  <div class="wrap"><div class="next-box">
+    <p class="eyebrow">Back to the start</p>
+    <h2>The soul of your home, given a voice.</h2>
+    <p>Private, fast, and built from hardware you can find in a drawer.</p>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="index.html">Overview</a><a class="btn btn-ghost" href="core.html">The Core</a></div>
+  </div></div>
+</section>
+</main>
+
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
+        <p>Pronounced <b>AN-um un TEE</b>.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul>
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="core.html">Anamanti Core</a></li>
+          <li><a href="display.html">Anamanti Display</a></li>
+          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Under the hood</h4>
+        <ul>
+          <li><a href="integrations.html">Integrations</a></li>
+          <li><a href="technology.html">Technology</a></li>
+          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
+          <li><a href="technology.html#memory">Graph memory</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="foot-base">
+      <span>© Anamanti. Screenshots are from a live installation.</span>
+      <span>Echo Show is a trademark of Amazon. Anamanti is not affiliated with Amazon.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js" defer></script>
+</body>
+</html>

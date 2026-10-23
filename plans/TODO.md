@@ -677,3 +677,48 @@ Remaining:
 - [ ] Very short single words (< 250 ms voiced, e.g. a clipped "para") end the turn as silence
   (VAD `MIN_SPEECH_ONSET`) — language-independent; revisit if it shows up with real voices.
 
+
+## 10. Website (`website/`, multi-page redesign 2026-10-23)
+
+Six static pages (overview, core, display, hardware, integrations, technology) with a shared
+header/footer and screenshots from the live install. Pushed as-is; remaining work:
+
+**Privacy pass (before the site is public)**
+- [ ] Review/blank household details in Core screenshots: memory graph (`core-memory-graph.jpg`
+  — local shops, "Kitchener"), Voice transcript fixes (`core-voice.jpg` — Zehrs, Kitchener,
+  Weber), real transcripts + speaker names (`core-conversations.jpg`, `core-overview.jpg` "Last
+  turns"), Mac file paths (`core-memory.jpg` Store card).
+- [ ] Decide whether the festival street photo (distant crowd) is OK in `display-idle.jpg`,
+  `display-notification.jpg`, `display-listening.jpg`.
+- [ ] Confirm the Integrations/Overview shots don't reveal anything else you'd rather not show
+  (the default room "Kitchen", recipient counts, the Tavily/OpenRouter choices).
+
+**Missing screenshots (need a spoken turn on a display)**
+- [ ] Conversation panel (transcript + streaming reply bubbles).
+- [ ] Timers: full-screen card(s) and the compact chip row.
+- [ ] Weather full screen and the 7-day view.
+- [ ] Place card.
+- [ ] Live camera view (decide if the front-door feed is OK to publish).
+- [ ] Full-screen now-playing + Up Next, with neutral album art (or a radio station).
+- [ ] People / "Add a voice" enrolment flow; away-mode dim clock.
+- [ ] Then replace the text-only "Full-screen moments" cards on `display.html` with these.
+
+**Content**
+- [ ] Real calls to action: there is no repo/docs/contact link yet (license is TBD). Decide
+  whether to link GitHub, a waitlist, or nothing.
+- [ ] Re-word "rolling out" / "in testing" when bilingual mode and the Companion app ship.
+- [ ] Add Companion phone app screenshots once it's been tried against a live Core.
+- [ ] An Echo Show setup guide (LineageOS flash, AEC shim, installing the APK), or a link to one.
+- [ ] Product photo of a real Echo Show on a counter (the site only uses CSS bezels).
+- [ ] Reconcile doc nits found while writing: slideshow interval 5 s (README) vs 3 s
+  (DisplayUI.md); memory_plan.md header still says SQLite is the default recall backend.
+
+**Site plumbing**
+- [ ] Favicon + social share image (og:image is a relative path; make it absolute once the
+  domain is fixed).
+- [ ] Self-host the Google Fonts (privacy-consistent with the product's pitch).
+- [ ] Image weight: 4.6 MB of JPEGs. Add WebP/AVIF + `srcset`, or downscale the console shots.
+- [ ] Header/footer are duplicated across six pages (no build step). If pages grow, add a tiny
+  include step to `deploy-website.yml`.
+- [ ] First deploy: confirm the renamed workflow (`deploy-website.yml`) runs on merge and that
+  Cloudflare serves clean URLs (`/core` → `core.html`).

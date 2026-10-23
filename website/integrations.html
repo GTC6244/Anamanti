@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Integrations: what Anamanti connects to</title>
+<meta name="description" content="Home Assistant, Spotify with multiroom Snapcast audio, internet radio, a Reolink camera, Google Photos and Drive, Google Places, Mapbox, weather, web search, calendars, a shared shopping list and family phones, each labelled with where it runs." />
+<meta property="og:title" content="Integrations: what Anamanti connects to" />
+<meta property="og:description" content="Home Assistant, Spotify with multiroom Snapcast audio, internet radio, a Reolink camera, Google Photos and Drive, Google Places, Mapbox, weather, web search, calendars, a shared shopping list and family phones, each labelled with where it runs." />
+<meta property="og:image" content="assets/img/core-integrations.jpg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/site.css" />
+<style>
+.spot { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+@media (max-width: 900px) { .spot { grid-template-columns: 1fr; } }
+.spot .card h3 { font-family: 'Fraunces', serif; font-weight: 500; font-size: 1.5rem; }
+.spot .card .say { color: var(--text); font-style: italic; margin: 12px 0 0; font-size: .95rem; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav-inner">
+    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="nav-links" id="site-nav" aria-label="Main">
+      <a href="index.html">Overview</a>
+      <a href="core.html">The Core</a>
+      <a href="display.html">The Display</a>
+      <a href="hardware.html">Echo Show</a>
+      <a href="integrations.html" aria-current="page">Integrations</a>
+      <a href="technology.html">Technology</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="page-hero">
+  <div class="wrap">
+    <p class="eyebrow">Integrations</p>
+    <h1>It works with the things you already have.</h1>
+    <p class="lede">Each integration is a voice tool the assistant can use, set up from the Core's console with nothing to restart. Each one carries a label for
+      where it runs and a plain-English note on what it sends. Tools you haven't set up are never offered to the model.</p>
+    <p style="margin-top:18px"><span class="loc local">On this Mac</span> <span class="loc lan">Your network</span> <span class="loc cloud">Cloud</span></p>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <figure>
+      <div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / integrations</span></div>
+        <img class="zoom" src="assets/img/core-integrations.jpg" alt="The Integrations page in the Core console" /></div>
+      <figcaption><b>Integrations in the console.</b> Each tile shows the tool it powers, where it runs, and whether it's active, and opens a panel that says exactly what it sends.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Highlights</p>
+      <h2>Three integrations that change the feel of the house.</h2>
+    </div>
+    <div class="spot">
+      <div class="card">
+        <p class="tag">Home Assistant · <span class="loc lan">Your network</span></p>
+        <h3>Lights without the wait</h3>
+        <p>Common commands never reach a language model. The Core keeps a cached list of your Home Assistant devices, matches the request in plain code,
+          and makes one direct call, which takes about 25 ms, then confirms with a fixed phrase. It knows which room you're in, so “turn off the lights” means this room. If it isn't sure, it hands the request to the model instead of guessing.</p>
+        <p class="say">“Turn off the kitchen lights.” “Turn on the fireplace.”</p>
+      </div>
+      <div class="card">
+        <p class="tag">Spotify + Snapcast · <span class="loc local">Mac</span> <span class="loc cloud">Spotify</span></p>
+        <h3>Music in every room, in sync</h3>
+        <p>librespot makes the Mac a Spotify Connect speaker, and Snapcast plays it in sync on every speaker in the house. Music ducks while the assistant
+          talks, and the audio never passes through the Core. Internet radio plays through the same speakers, with station logos from Radio Browser.</p>
+        <p class="say">“Play some Jessie Reyez.” “Next station.” “Make the music full screen.”</p>
+      </div>
+      <div class="card">
+        <p class="tag">Reolink NVR · <span class="loc lan">Your network</span></p>
+        <h3>Who's at the door?</h3>
+        <p>A fast path recognises the request and the display that asked opens the camera's live stream straight from the NVR. The video never touches
+          the cloud or the Mac, and the NVR password stays on the Mac. The view closes after a minute.</p>
+        <p class="say">“Show me the front door.” “Close the camera.”</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">The full list</p>
+      <h2>Every service, and where it runs.</h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Service</th><th>What it's used for</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr><td class="group" colspan="3">Home</td></tr>
+          <tr><td>Home Assistant</td><td>Lights, switches, scenes and TV, through a no-model fast path with the model as fallback</td><td><span class="loc lan">Network</span></td></tr>
+          <tr><td>Reolink NVR</td><td>Live camera view on the display that asked</td><td><span class="loc lan">Network</span></td></tr>
+          <tr><td>Google Drive / Google Photos</td><td>The idle photo slideshow; the display fetches the photos directly</td><td><span class="loc cloud">Cloud</span></td></tr>
+
+          <tr><td class="group" colspan="3">Music</td></tr>
+          <tr><td>Spotify (Premium)</td><td>Search, play, queue and transport by voice; librespot as the Connect speaker</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>Snapcast · librespot · mpv</td><td>Synchronised multiroom playback, ducked while the assistant speaks</td><td><span class="loc local">Mac</span></td></tr>
+          <tr><td>Internet radio + Radio Browser</td><td>Your station list, with names and logos looked up automatically</td><td><span class="loc cloud">Cloud</span></td></tr>
+
+          <tr><td class="group" colspan="3">Family</td></tr>
+          <tr><td>Cadora / NextHaul</td><td>Add to the shared shopping list and the family calendar</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>AppSaid</td><td>Send a message or a map link to a family member's phone</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>Calendars (.ics / webcal)</td><td>Read-only “what's on?”, with recurring events expanded</td><td><span class="loc cloud">Cloud</span></td></tr>
+
+          <tr><td class="group" colspan="3">Out and about</td></tr>
+          <tr><td>Visual Crossing / Open-Meteo</td><td>Forecasts, the full-screen weather view and the weather beside the clock (Open-Meteo needs no key)</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>Google Places</td><td>Place cards: hours, open now, rating, phone, photo</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>Mapbox</td><td>Directions, distance and travel time with live traffic</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>Tavily / DuckDuckGo</td><td>Web search, and finding recipes (DuckDuckGo needs no key)</td><td><span class="loc cloud">Cloud</span></td></tr>
+
+          <tr><td class="group" colspan="3">The AI itself</td></tr>
+          <tr><td>Ollama</td><td>Open-weights language models on your own hardware</td><td><span class="loc local">Mac</span> <span class="loc lan">Network</span></td></tr>
+          <tr><td>Anthropic Claude</td><td>The language model (API key or Claude subscription) and optional memory entity extraction</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>OpenAI</td><td>The language model, or optional cloud embeddings</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>OpenRouter (Jev)</td><td>A hosted System-1 fast-decision classifier</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>Laya-Decision</td><td>A local System-1 classifier running alongside the Core</td><td><span class="loc local">Mac</span></td></tr>
+          <tr><td>Whisper (faster-whisper / whisper.cpp)</td><td>Speech-to-text</td><td><span class="loc local">Mac</span></td></tr>
+          <tr><td>ElevenLabs Scribe</td><td>Real-time cloud speech-to-text</td><td><span class="loc cloud">Cloud</span></td></tr>
+          <tr><td>Piper</td><td>Text-to-speech, with 174 voices installed here</td><td><span class="loc local">Mac</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="margin-top:22px">Keys and tokens are stored on the Mac in owner-only files, entered only in the Mac's console, and never shown back. The display app contains no credentials: for Google Drive, you sign in once on the Mac, and each display collects its photo access from the Core over the local network.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <div class="prose">
+      <p class="eyebrow">Music &amp; devices</p>
+      <h3>One page for the house's speakers and screens.</h3>
+      <p>See every connected display and choose how each one shows music: <b>automatic</b> (full screen on the display that asked, a small bar everywhere else), always small, or always full screen.
+        Start and stop the multiroom audio processes, adjust Snapcast groups, and play a stream URL through the whole house.</p>
+    </div>
+    <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / devices</span></div><img class="zoom" src="assets/img/core-devices.jpg" alt="Music and devices page" loading="lazy" /></div>
+      <figcaption><b>Music &amp; Devices.</b> Displays, the music style on each one, Snapcast and now playing.</figcaption></figure>
+  </div>
+</section>
+
+<section class="next">
+  <div class="wrap"><div class="next-box">
+    <p class="eyebrow">Next</p>
+    <h2>How it stays this fast.</h2>
+    <p>Graph memory, linked AI systems and a System-1 that answers before the big model wakes up.</p>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="technology.html">Technology →</a></div>
+  </div></div>
+</section>
+</main>
+
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
+        <p>Pronounced <b>AN-um un TEE</b>.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul>
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="core.html">Anamanti Core</a></li>
+          <li><a href="display.html">Anamanti Display</a></li>
+          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Under the hood</h4>
+        <ul>
+          <li><a href="integrations.html">Integrations</a></li>
+          <li><a href="technology.html">Technology</a></li>
+          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
+          <li><a href="technology.html#memory">Graph memory</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="foot-base">
+      <span>© Anamanti. Screenshots are from a live installation.</span>
+      <span>Echo Show is a trademark of Amazon. Anamanti is not affiliated with Amazon.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js" defer></script>
+</body>
+</html>
