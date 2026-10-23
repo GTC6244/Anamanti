@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Anamanti: the soul of your home, given a voice</title>
+<meta name="description" content="Anamanti is a private, always-on voice assistant for the home. Repurposed Echo Show displays as the ears and screen, your own Mac as the brain, and you decide what ever leaves the house." />
+<meta property="og:title" content="Anamanti: the soul of your home, given a voice" />
+<meta property="og:description" content="A private, always-on home voice assistant that runs on hardware you own." />
+<meta property="og:image" content="assets/img/display-listening.jpg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/site.css" />
+<style>
+  .hero-grid { display: grid; grid-template-columns: 0.95fr 1.05fr; gap: 56px; align-items: center; }
+  @media (max-width: 960px) { .hero-grid { grid-template-columns: 1fr; } }
+  .hero-grid h1 { font-size: clamp(2.6rem, 5.6vw, 4.4rem); }
+  .pron { font-size: 0.9rem; color: var(--faint); letter-spacing: 0.14em; text-transform: uppercase; margin: 0 0 22px; }
+  .pron b { color: var(--accent-2); font-weight: 600; }
+  .origin { color: var(--faint); font-size: 0.98rem; max-width: 560px; }
+  .origin i { color: var(--accent-2); }
+  .parts .card { padding: 0; overflow: hidden; }
+  .parts .card .shot { border-bottom: 1px solid var(--border); background: #0b0c0f; aspect-ratio: 16/10; overflow: hidden; }
+  .parts .card .shot img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+  .parts .card .body { padding: 22px 24px 24px; }
+  .moments { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+  @media (max-width: 980px) { .moments { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .moments { grid-template-columns: 1fr; } }
+  .moments .device { padding: 9px; border-radius: 14px; }
+  .moments .device::after { display: none; }
+  .moments figcaption { font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav-inner">
+    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="nav-links" id="site-nav" aria-label="Main">
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="core.html">The Core</a>
+      <a href="display.html">The Display</a>
+      <a href="hardware.html">Echo Show</a>
+      <a href="integrations.html">Integrations</a>
+      <a href="technology.html">Technology</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="page-hero">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="pill"><span class="dot"></span> Private · Always on · Runs on hardware you own</span>
+        <h1>The <span class="accent">soul</span> of your home, given a voice.</h1>
+        <p class="pron">Anamanti · <b>AN-um&nbsp;un&nbsp;TEE</b></p>
+        <p class="lede">Say the wake word and just talk. Anamanti hears you in every room, thinks on a Mac in
+          your house, shows its answer on screen as it forms, and speaks it back a sentence at a time.</p>
+        <p class="origin">From the Irish <i>anam an tí</i>, “the soul of the home.” Every stage can run on
+          your Mac, elsewhere on your network, or in the cloud. You choose, and it shows you exactly what leaves the house.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="core.html">How it works</a>
+          <a class="btn btn-ghost" href="hardware.html">Why an Echo Show?</a>
+        </div>
+      </div>
+      <figure>
+        <div class="device lg"><img class="zoom" src="assets/img/display-listening.jpg" alt="An Anamanti display listening: a glowing blue ring over the photo slideshow" /></div>
+        <div class="device-stand"></div>
+        <figcaption><b>Listening.</b> After the wake word, a ring that reacts to your voice glows over whatever is on screen.
+          Shown on a repurposed Echo Show 8. (The ring is drawn onto a real screenshot so that nobody had to speak to take it.)</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- QUICK FACTS -->
+  <section class="band">
+    <div class="wrap">
+      <div class="stats">
+        <div class="stat"><div class="n">~2<small> s</small></div><p>to the first spoken word. Replies are voiced one sentence at a time, not after the whole answer is written.</p></div>
+        <div class="stat"><div class="n">0<small> model calls</small></div><p>for “turn off the kitchen lights”, “show me the front door” or “remember that…”. Pure-code fast paths handle them before any AI runs.</p></div>
+        <div class="stat"><div class="n">24</div><p>voice tools: timers, weather, recipes, places, music, radio, the camera, Home Assistant and more.</p></div>
+        <div class="stat"><div class="n">1<small> Core</small></div><p>serves every display in the house and replies on the screen that asked.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- THREE PARTS -->
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">What it is</p>
+        <h2>A screen in every room, one brain in the house.</h2>
+        <p>Anamanti has three parts. They find each other on your network automatically, so there are no IP addresses to type and no vendor account to create.</p>
+      </div>
+      <div class="grid-3 parts">
+        <a class="card" href="core.html">
+          <div class="shot"><img src="assets/img/core-overview.jpg" alt="The Anamanti Core admin console overview" loading="lazy" /></div>
+          <div class="body">
+            <p class="tag">The brain · runs on a Mac</p>
+            <h3>Anamanti Core</h3>
+            <p>Hears, thinks and speaks. It handles end-of-speech detection, transcription, memory, the language model, tools and the voice, plus a console that shows every stage and where it runs.</p>
+            <span class="more">Inside the Core →</span>
+          </div>
+        </a>
+        <a class="card" href="display.html">
+          <div class="shot"><img src="assets/img/display-idle.jpg" alt="The Anamanti Display idle screen with photos, clock, weather and music" loading="lazy" /></div>
+          <div class="body">
+            <p class="tag">The face · in each room</p>
+            <h3>Anamanti Display</h3>
+            <p>Your photos, the clock and the weather when idle. When you talk, it shows the live conversation, then recipes, timers, music, places and the front-door camera.</p>
+            <span class="more">See the Display →</span>
+          </div>
+        </a>
+        <a class="card" href="hardware.html">
+          <div class="shot"><img src="assets/img/display-settings-audio.jpg" alt="Audio diagnostics on the display: mic level and wake-word score" loading="lazy" /></div>
+          <div class="body">
+            <p class="tag">The ears · secondhand hardware</p>
+            <h3>Repurposed Echo Show 8</h3>
+            <p>A far-field microphone array, a good speaker and an 8-inch screen, reflashed with LineageOS. It's our favourite front end, but the Core works with any client that speaks its protocol.</p>
+            <span class="more">Hardware &amp; your own UI →</span>
+          </div>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- MOMENTS -->
+  <section class="band">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Day to day</p>
+        <h2>It doesn't just answer. It shows you.</h2>
+        <p>Ask for a recipe and the steps stay on the counter. Music gets a transport bar. Reminders from the Core slide in over your photos. These are all real screenshots from a running house.</p>
+      </div>
+      <div class="moments">
+        <figure><div class="device"><img class="zoom" src="assets/img/display-idle.jpg" alt="Idle screen with clock, weather and a compact music bar" loading="lazy" /></div><figcaption><b>Idle.</b> Photos, clock, weather and what's playing.</figcaption></figure>
+        <figure><div class="device"><img class="zoom" src="assets/img/display-recipe-steps.jpg" alt="Recipe steps screen" loading="lazy" /></div><figcaption><b>Recipe mode.</b> “Next step”, “how much lemon?”, hands-free.</figcaption></figure>
+        <figure><div class="device"><img class="zoom" src="assets/img/display-notification.jpg" alt="A notification banner over the slideshow" loading="lazy" /></div><figcaption><b>Notifications.</b> Pushed from the Core, with no wake word.</figcaption></figure>
+        <figure><div class="device"><img class="zoom" src="assets/img/display-recipe-overview.jpg" alt="Recipe overview with a large photo" loading="lazy" /></div><figcaption><b>Full-screen cards.</b> Recipes, weather, places and the camera.</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- PILLARS -->
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">What sets it apart</p>
+        <h2>Built like a household member, not a gadget.</h2>
+      </div>
+      <div class="grid-3">
+        <div class="card">
+          <p class="tag">Conversation</p>
+          <h3>A real back-and-forth</h3>
+          <ul class="ticks">
+            <li><b>Follow-ups need no wake word.</b> The mic reopens after each reply and stays open while you keep talking.</li>
+            <li><b>Barge in any time.</b> Say the wake word mid-answer and it stops at once.</li>
+            <li><b>Bilingual.</b> It replies in English or Brazilian Portuguese, matching each turn.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <p class="tag">Memory</p>
+          <h3>It knows who's talking</h3>
+          <ul class="ticks">
+            <li><b>Voiceprints</b> tell household members apart on every turn, on your Mac.</li>
+            <li><b>Per-person memory.</b> What you tell it is recalled for you, not for a guest.</li>
+            <li><b>A knowledge graph</b> of people, places and topics that you can browse, rename and delete.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <p class="tag">Speed</p>
+          <h3>Fast where it counts</h3>
+          <ul class="ticks">
+            <li><b>Fast paths</b> handle lights and the camera with no model at all.</li>
+            <li><b>A System-1 classifier</b> answers timers and weather without the big model.</li>
+            <li><b>Streaming throughout:</b> text appears as it's written and speech starts at the first sentence.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRIVACY -->
+  <section class="band">
+    <div class="wrap split wide-right">
+      <div class="prose">
+        <p class="eyebrow">Private by design, honest by default</p>
+        <h2 style="font-size:clamp(1.9rem,3.6vw,2.6rem);margin:0 0 18px">You decide what leaves the house.</h2>
+        <p>The wake word is detected on the display itself, so no audio leaves the room until you call it. After that,
+          <b>each stage is your choice</b>: Whisper on your Mac or a cloud transcriber, Ollama or Claude, local embeddings or OpenAI.</p>
+        <p>The Core's overview page labels each stage as running <span class="loc local">On this Mac</span>,
+          <span class="loc lan">Your network</span> or <span class="loc cloud">Cloud</span>, and lists
+          <b>exactly what is sent where</b>. Keys stay in owner-only files on the Mac and are never shown back.</p>
+        <p>There's no vendor account, no hard-coded server and no always-open microphone to someone else's data centre.</p>
+      </div>
+      <figure>
+        <div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / overview</span></div>
+          <img class="zoom" src="assets/img/core-overview.jpg" alt="Core overview: voice pipeline with Local and Cloud labels, displays, latency and what leaves the house" loading="lazy" /></div>
+        <figcaption><b>The Core's overview.</b> The live pipeline with a locality label on each stage, connected displays, recent latency split by stage, and a “What leaves the house” panel.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- EXPLORE -->
+  <section>
+    <div class="wrap">
+      <div class="section-head center">
+        <p class="eyebrow">Explore</p>
+        <h2>Go deeper.</h2>
+      </div>
+      <div class="grid-3">
+        <a class="card" href="core.html"><p class="tag">The Core</p><h3>The engine and how a turn works</h3><p>From the wake word to the spoken reply: speech detection, three speech-to-text engines, fast paths, tools, personalities and the admin console.</p><span class="more">Read →</span></a>
+        <a class="card" href="display.html"><p class="tag">The Display</p><h3>The app in every room</h3><p>The idle slideshow, live conversation, timers, recipes, music, notifications, voice enrolment and settings, built in Flutter on a Rust audio engine.</p><span class="more">Read →</span></a>
+        <a class="card" href="hardware.html"><p class="tag">Hardware</p><h3>Echo Show, or anything else</h3><p>Why a secondhand Echo Show 8 makes a great front end, and how you can bring your own screen instead.</p><span class="more">Read →</span></a>
+        <a class="card" href="integrations.html"><p class="tag">Integrations</p><h3>What it connects to</h3><p>Home Assistant, Spotify and multiroom audio, a Reolink camera, Google Photos, Places, Mapbox, calendars, shopping lists and family phones.</p><span class="more">Read →</span></a>
+        <a class="card" href="technology.html"><p class="tag">Technology</p><h3>Graphs, System-1 and speed</h3><p>An embedded graph database for memory, a fast/slow dual-process design, zero-model fast paths and Rust nearly everywhere.</p><span class="more">Read →</span></a>
+        <div class="card"><p class="tag">Status</p><h3>A working build, not a concept</h3><p>Every screenshot on this site comes from a running house with three displays. Some features (bilingual mode, the phone companion) are built but still being rolled out.</p></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
+        <p>Pronounced <b>AN-um un TEE</b>.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul>
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="core.html">Anamanti Core</a></li>
+          <li><a href="display.html">Anamanti Display</a></li>
+          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Under the hood</h4>
+        <ul>
+          <li><a href="integrations.html">Integrations</a></li>
+          <li><a href="technology.html">Technology</a></li>
+          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
+          <li><a href="technology.html#memory">Graph memory</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="foot-base">
+      <span>© Anamanti. Screenshots are from a live installation.</span>
+      <span>Echo Show is a trademark of Amazon. Anamanti is not affiliated with Amazon.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js" defer></script>
+</body>
+</html>

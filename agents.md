@@ -242,6 +242,13 @@ anamanti-protocol/  Shared Wyoming protocol crate (`anamanti_protocol`): the fra
                     `crate::wyoming::protocol`) and anamanti-companion/rust — a wire
                     change is made once, here, and every side must be redeployed
                     together.
+website/           The public website (static HTML, no build step): index.html
+                    (overview) + core / display / hardware / integrations /
+                    technology pages, shared assets/site.css + site.js, and
+                    screenshots in assets/img/. Every page repeats the same
+                    header + footer markup; change it on all six. Deployed to
+                    Cloudflare by .github/workflows/deploy-website.yml (see
+                    wrangler.jsonc).
 plans/              Design + planning docs: architecture.md (design, source of
                     truth), Plan.MD (phases + decision table), TODO.md,
                     DisplayUI.md (the Display's on-screen UI catalog), the

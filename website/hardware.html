@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hardware: repurposed Echo Show 8, or any screen you like</title>
+<meta name="description" content="Why Anamanti runs on secondhand Echo Show 8 displays with far-field microphones and real echo cancellation, and how to bring your own front end instead." />
+<meta property="og:title" content="Hardware: repurposed Echo Show 8, or any screen you like" />
+<meta property="og:description" content="Why Anamanti runs on secondhand Echo Show 8 displays with far-field microphones and real echo cancellation, and how to bring your own front end instead." />
+<meta property="og:image" content="assets/img/display-settings-audio.jpg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/site.css" />
+<style>
+.spec td:first-child { width: 34%; }
+.byo { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+@media (max-width: 980px) { .byo { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .byo { grid-template-columns: 1fr; } }
+.frames { font-family: ui-monospace, Menlo, monospace; font-size: 0.84rem; color: var(--muted); background: #0b0c0f; border: 1px solid var(--border);
+  border-radius: 14px; padding: 18px 20px; line-height: 1.9; overflow-x: auto; white-space: pre; }
+.frames b { color: var(--accent-2); font-weight: 500; }
+.frames i { color: var(--faint); font-style: normal; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav-inner">
+    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="nav-links" id="site-nav" aria-label="Main">
+      <a href="index.html">Overview</a>
+      <a href="core.html">The Core</a>
+      <a href="display.html">The Display</a>
+      <a href="hardware.html" aria-current="page">Echo Show</a>
+      <a href="integrations.html">Integrations</a>
+      <a href="technology.html">Technology</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="page-hero">
+  <div class="wrap split">
+    <div>
+      <p class="eyebrow">Hardware</p>
+      <h1>The best ears in the house are already in a drawer somewhere.</h1>
+      <p class="lede">Smart displays were built around one hard problem: hearing you from across a noisy room while they play music. The first-generation
+        Echo Show 8 solves it with a far-field microphone array, a good speaker and an 8-inch screen, and it's easy to find secondhand for not much money.</p>
+      <p class="lede">We reflash it with LineageOS and run the Anamanti Display app on it. No Amazon account and no Amazon cloud.</p>
+    </div>
+    <figure>
+      <div class="device lg"><img class="zoom" src="assets/img/display-settings-audio.jpg" alt="Audio diagnostics on an Echo Show 8 running Anamanti" /></div>
+      <div class="device-stand"></div>
+      <figcaption><b>Audio diagnostics</b> on a reflashed Echo Show 8: live mic level, wake-word score and capture details, all on the device.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap split wide-left top">
+    <div class="prose">
+      <p class="eyebrow">Why an Echo Show 8</p>
+      <h3>Microphones are the hard part. Amazon already solved them.</h3>
+      <p>A tablet's microphone is designed for someone holding it. A smart display's is designed for someone talking from the sink with the tap running.
+        The Echo Show 8 has <b>four microphones</b> aimed at the room, plus a <b>hardware loopback</b> of what its own speaker is playing, delivered
+        sample-aligned in the same capture stream.</p>
+      <p>That loopback is what makes <b>barge-in</b> work. A small audio-driver shim runs echo cancellation against the speaker's output before
+        any app hears the mic, removing about <b>16 dB</b> of the assistant's own voice while keeping yours. So when you interrupt mid-answer, it hears you clearly, not itself.</p>
+      <p>Then there's everything else a kitchen needs: a speaker that's good enough for music, a bright 1280×800 screen, a camera with a
+        <b>physical shutter</b> (used only to sense whether anyone is in the room and whether the lights are on), and a stand that's already the right shape.</p>
+    </div>
+    <div>
+      <div class="table-wrap spec">
+        <table>
+          <tr><th colspan="2">Echo Show 8 (1st gen) as we run it</th></tr>
+          <tr><td>Codename</td><td>“crown”</td></tr>
+          <tr><td>OS</td><td>LineageOS (Android 11), community build</td></tr>
+          <tr><td>CPU target</td><td>32-bit ARM (armeabi-v7a)</td></tr>
+          <tr><td>Memory</td><td>About 1 GB, which is why the audio engine is Rust</td></tr>
+          <tr><td>Screen</td><td>8″, 1280×800, landscape</td></tr>
+          <tr><td>Microphones</td><td>4-mic far-field array + DAC loopback, 16 kHz</td></tr>
+          <tr><td>Echo cancellation</td><td>SpeexDSP audio-driver shim, about 16 dB (reversible)</td></tr>
+          <tr><td>Camera</td><td>Presence and light only; nothing stored or sent</td></tr>
+          <tr><td>Updates</td><td>The app updates itself (signed and checksum-verified)</td></tr>
+        </table>
+      </div>
+      <p style="color:var(--faint);font-size:.85rem;margin-top:14px">Reflashing is done by the community LineageOS port for this device, and it replaces Amazon's software entirely. Anamanti isn't affiliated with Amazon.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split">
+    <figure class="order-first-m">
+      <div class="device"><img class="zoom" src="assets/img/display-settings-listening.jpg" alt="Listening settings with separate idle and while-speaking sensitivity" loading="lazy" /></div>
+      <figcaption><b>Listening settings.</b> The wake word needs a clearer “Hey Jarvis” while the assistant is talking (0.70 vs 0.50), which works together with echo cancellation to stop it waking itself.</figcaption>
+    </figure>
+    <div class="prose">
+      <p class="eyebrow">Tuned per room</p>
+      <h3>One device, very different rooms.</h3>
+      <p>A front hall and a kitchen sound nothing alike. Each display has its own capture gain, wake-word sensitivity (one for idle and a stricter one
+        while it's speaking), smoothing, and a live diagnostics view that shows exactly what the mic hears.</p>
+      <p>The display never decides when you've finished talking. That's done on the Mac by a neural speech detector, so a cheap, memory-tight device
+        isn't being asked to do the hard part.</p>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="your-ui">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Bring your own screen</p>
+      <h2>Use whatever you want for the UI.</h2>
+      <p>The Echo Show is our favourite front end, but it isn't required. All the intelligence is in the Core, and the Core speaks an open, documented protocol.
+        A front end only has to capture audio, play audio and draw what it's told to.</p>
+    </div>
+    <div class="byo">
+      <div class="card"><p class="tag">Built</p><h3>Echo Show 8</h3><p>The full experience: far-field mics, echo cancellation, every screen on the <a href="display.html">Display page</a>.</p></div>
+      <div class="card"><p class="tag">Built · in testing</p><h3>Your phone</h3><p>The Companion app for Android and iOS shows status, now playing, timers and memories, from anywhere on the home network. It has no microphone.</p></div>
+      <div class="card"><p class="tag">Studied</p><h3>Android tablets &amp; TV</h3><p>The Display app is standard Flutter and Android. A TV port is mostly mechanical. The real limit is the microphone: few screens can hear across a room.</p></div>
+      <div class="card"><p class="tag">Open</p><h3>Your own client</h3><p>A Raspberry Pi with a mic HAT, a wall-mounted panel, a web page: anything that speaks Wyoming over TCP can be a room.</p></div>
+    </div>
+    <div class="split top" style="margin-top:44px">
+      <div class="prose">
+        <h3>How a client talks to the Core</h3>
+        <p><b>Discovery:</b> the Core advertises <code>_wyoming._tcp</code> over mDNS with a TXT record of <code>role=core</code>, so clients find it without any IP addresses. They can pin a specific Core by its stable <code>instance_id</code>.</p>
+        <p><b>Turns:</b> one socket per turn carries your audio up and the transcript, reply text and spoken audio back, as newline-delimited JSON frames with raw PCM.</p>
+        <p><b>Push:</b> a second, long-lived socket that the client opens lets the Core send notifications, weather, music and camera requests at any time.</p>
+        <p>The frame definitions live in one shared Rust crate, so the Display, the Companion and the Core can't disagree about the protocol.</p>
+      </div>
+      <div class="frames"><i># one turn, as the client sees it</i>
+<b>→ audio-start</b>     device_id, room
+<b>→ audio-chunk</b> …   16 kHz mono PCM
+<b>← transcript</b>      "is the pharmacy open?"
+<b>← anamanti-place</b>  a card to draw full screen
+<b>← audio-chunk</b> …   the spoken reply, sentence by sentence
+<b>← anamanti-listen</b> wait_secs: 10   <i># reopen the mic</i>
+
+<i># the push channel, held open</i>
+<b>→ anamanti-hello</b>   role=notify
+<b>← anamanti-notify</b>  "Laundry is done"</div>
+    </div>
+  </div>
+</section>
+
+<section class="next">
+  <div class="wrap"><div class="next-box">
+    <p class="eyebrow">Next</p>
+    <h2>What it plugs into.</h2>
+    <p>Home Assistant, Spotify, a Reolink camera, Google Photos and the rest of the household's tools.</p>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="integrations.html">Integrations →</a></div>
+  </div></div>
+</section>
+</main>
+
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
+        <p>Pronounced <b>AN-um un TEE</b>.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul>
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="core.html">Anamanti Core</a></li>
+          <li><a href="display.html">Anamanti Display</a></li>
+          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Under the hood</h4>
+        <ul>
+          <li><a href="integrations.html">Integrations</a></li>
+          <li><a href="technology.html">Technology</a></li>
+          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
+          <li><a href="technology.html#memory">Graph memory</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="foot-base">
+      <span>© Anamanti. Screenshots are from a live installation.</span>
+      <span>Echo Show is a trademark of Amazon. Anamanti is not affiliated with Amazon.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js" defer></script>
+</body>
+</html>
