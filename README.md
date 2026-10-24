@@ -279,8 +279,8 @@ cargo run --manifest-path anamanti-core/Cargo.toml --release
   it's unreachable rather than silently connecting to another.
   - **Local production** is a copied release binary installed at
     `/Volumes/External/DeveloperSupport/Anamanti Core/`. It runs outside any
-    git checkout and pins its identity via `ANAMANTI_INSTANCE_ID` (set in
-    `~/.zshenv`), using the default ports (10700 / config 8730) and the shared
+    git checkout and pins its identity via `instance_id` (`anamanti-core`) in
+    that folder's `anamanti.json` (provider API keys come from `~/.zshrc`), using the default ports (10700 / config 8730) and the shared
     runtime data under `.../anamanti-core/`.
   - **Test copies** run straight from a git branch/worktree. `ANAMANTI_INSTANCE_ID`
     is resolved from that env → the working dir's **git branch code** → the

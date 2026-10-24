@@ -114,7 +114,8 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   production" Anamanti Core is installed at
   `/Volumes/External/DeveloperSupport/Anamanti Core/` (a copied release
   binary, run outside any git checkout) and pins its identity via `instance_id` in
-  that folder's `anamanti.json`; its provider keys still come from `~/.zshenv`. Test
+  that folder's `anamanti.json` (`instance_id="anamanti-core"`); its provider keys come from the
+  shell environment — on this Mac they are exported in `~/.zshrc`. Test
   copies run from their git branch/worktree, where `instance_id` is left unset so it
   defaults to the branch code; give each a distinct `bind_addr` + `config_addr` (and
   `service_name`) in its own `anamanti.json` to run alongside production.
@@ -564,9 +565,13 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 "Local production" is a **copied release binary** at
 `/Volumes/External/DeveloperSupport/Anamanti Core/anamanti-core`,
 run **outside any git checkout**. Its identity, data paths, and ports (10700 /
-config 8730) come from `anamanti.json` in that folder (`instance_id="Paul Family"`
-etc.; `chmod 0600` it — it may hold OAuth client secrets). Only the provider API
-keys/tokens still come from `~/.zshenv` (they're secrets). To push the current
+config 8730) come from `anamanti.json` in that folder (`service_name="Anamanti Core"`,
+`instance_id="anamanti-core"` — the Echo Shows pin this id, so never change it casually;
+`chmod 0600` the file — it may hold OAuth client secrets). Only the provider API
+keys/tokens come from the environment (they're secrets). **On this Mac they are exported
+in `~/.zshrc`, not `~/.zshenv`** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`,
+`OPENROUTER_API_KEY`, …) — a restart that sources only `~/.zshenv` boots with no LLM key
+(2026-10-24: the Anthropic backend came up keyless until restarted with `~/.zshrc`). To push the current
 branch's Anamanti Core to production, follow this runbook exactly (it does **not**
 touch any test copy running from a worktree):
 
@@ -609,18 +614,28 @@ if [ -n "$PROD_PID" ]; then
 fi
 while lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1; do sleep 0.3; done
 
-# 3. Copy the freshly built binary into the production folder (overwrites).
+# 3. Copy the freshly built binary into the production folder (overwrites). Keep the
+#    previous binary as a dated backup first so a bad deploy is one `cp` to roll back.
+#    (Do this before step 2 if you prefer; it only reads the old file.)
+cp "$PROD/anamanti-core" "$PROD/anamanti-core.bak-$(date +%Y%m%d-%H%M%S)"
 cp "$CARGO_TARGET_DIR/release/anamanti-core" "$PROD/anamanti-core"
 chmod +x "$PROD/anamanti-core"
 
-# 4. Restart from the production folder, sourcing ~/.zshenv for the provider API
-#    keys (secrets). Identity/ports/paths come from "$PROD/anamanti.json" (cwd is $PROD,
-#    so its convention anamanti.json is picked up). Detached, logging to the folder.
-( source ~/.zshenv 2>/dev/null; cd "$PROD"; \
+# 4. Restart from the production folder with the provider API keys (secrets) in the
+#    environment: source BOTH ~/.zshenv and ~/.zshrc — the keys live in ~/.zshrc. (Sourcing
+#    ~/.zshrc non-interactively is fine; its output is discarded.) Identity/ports/paths come
+#    from "$PROD/anamanti.json" (cwd is $PROD, so its convention anamanti.json is picked up).
+#    Detached, logging to the folder (the log is overwritten on each start).
+( source ~/.zshenv >/dev/null 2>&1; source ~/.zshrc >/dev/null 2>&1; cd "$PROD"; \
   ./anamanti-core > "$PROD/anamanti-core.log" 2>&1 & )
 
-# 5. Verify: bound on :10700 and advertising instance_id=`Paul Family`.
-sleep 2; tail -5 "$PROD/anamanti-core.log"
+# 5. Verify. Startup takes ~10–20 s (models load before mDNS advertising), so wait for
+#    the advertise line rather than a fixed sleep. Expect instance_id=`anamanti-core`,
+#    the displays' music channels re-opening, and NO "API key absent/unset" warning for
+#    the configured LLM backend (if there is one, step 4 missed ~/.zshrc — redo it).
+for _ in $(seq 1 90); do grep -q "advertising" "$PROD/anamanti-core.log" && break; sleep 0.5; done
+grep -v slatedb "$PROD/anamanti-core.log" \
+  | grep -E "advertising|channel opened|API_KEY (absent|is unset)|ERROR" | head -10
 ```
 
 Notes:
