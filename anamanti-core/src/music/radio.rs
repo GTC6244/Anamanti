@@ -241,11 +241,11 @@ impl RadioOutput for SnapMpvOutput {
     }
     async fn volume(&self) -> Result<u8> {
         let v = self.mpv.get_property("volume").await?;
-        Ok(v.as_f64().unwrap_or(100.0).round().clamp(0.0, 100.0) as u8)
+        Ok(super::mpv_volume_to_percent(v.as_f64().unwrap_or(100.0)))
     }
     async fn set_volume(&self, percent: u8) -> Result<()> {
         self.mpv
-            .set_property("volume", json!(percent.min(100)))
+            .set_property("volume", json!(super::percent_to_mpv_volume(percent)))
             .await
     }
     async fn route(&self, stream_id: &str) -> Result<()> {

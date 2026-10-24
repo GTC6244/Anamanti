@@ -50,6 +50,47 @@ async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = Result<T>
         .map_err(|_| anyhow::anyhow!("{what} timed out after {CONTROL_TIMEOUT:?}"))?
 }
 
+/// The dB range of the music volume curve. librespot's default (`--volume-ctrl log
+/// --volume-range 60`): `percent` → `60·(percent/100 − 1)` dB, with a linear roll-off to
+/// silence below 10%. Spotify volume is that curve (librespot applies it); radio maps its
+/// percent onto the **same** curve via [`percent_to_mpv_volume`], so "40%" is equally
+/// loud on both sources. Keep in sync with the librespot args in `config.rs` and
+/// `deploy/snapcast/snapserver.conf` (which relies on librespot's defaults).
+pub const MUSIC_VOLUME_RANGE_DB: f64 = 60.0;
+
+/// Linear amplitude gain (0..=1) for a music volume `percent` — librespot's `log`
+/// mapping ([`MUSIC_VOLUME_RANGE_DB`]).
+pub fn music_volume_gain(percent: f64) -> f64 {
+    let v = (percent / 100.0).clamp(0.0, 1.0);
+    let mut gain = 10f64.powf(MUSIC_VOLUME_RANGE_DB * (v - 1.0) / 20.0);
+    if v < 0.1 {
+        gain *= v * 10.0; // librespot's roll-off, so 0% is true silence
+    }
+    gain
+}
+
+/// The mpv `volume` property that makes radio as loud as Spotify at `percent`. mpv's
+/// software volume is cubic (`gain = (volume/100)³`), unlike librespot's log curve, so
+/// sending the raw percent made radio far louder at the same setting (50% ≈ −18 dB on
+/// mpv vs −30 dB on Spotify). Rounded to 0.01.
+pub fn percent_to_mpv_volume(percent: u8) -> f64 {
+    let vol = 100.0 * music_volume_gain(f64::from(percent.min(100))).cbrt();
+    (vol * 100.0).round() / 100.0
+}
+
+/// Inverse of [`percent_to_mpv_volume`]: the music volume percent mpv's `volume` is at
+/// (nearest whole percent; a level set outside the Core snaps to the closest one).
+pub fn mpv_volume_to_percent(mpv_volume: f64) -> u8 {
+    let target = mpv_volume.clamp(0.0, 100.0);
+    (0..=100u8)
+        .min_by(|a, b| {
+            let da = (percent_to_mpv_volume(*a) - target).abs();
+            let db = (percent_to_mpv_volume(*b) - target).abs();
+            da.total_cmp(&db)
+        })
+        .unwrap_or(100)
+}
+
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -696,6 +737,35 @@ mod tests {
             "g1"
         );
         assert!(select_group(&status, &GroupSelector::StreamId("Nope".into())).is_none());
+    }
+
+    #[test]
+    fn radio_volume_follows_spotifys_curve() {
+        // mpv is cubic, so the same loudness as librespot's 60 dB log curve needs
+        // mpv volume = 100·cbrt(gain). Ends are exact.
+        assert_eq!(percent_to_mpv_volume(100), 100.0);
+        assert_eq!(percent_to_mpv_volume(0), 0.0);
+        for pct in [10u8, 25, 50, 80] {
+            // Effective mpv gain in dB equals librespot's: 60·(p/100 − 1).
+            let mpv_db = 20.0 * (percent_to_mpv_volume(pct) / 100.0).powi(3).log10();
+            let spotify_db = 60.0 * (f64::from(pct) / 100.0 - 1.0);
+            assert!(
+                (mpv_db - spotify_db).abs() < 0.05,
+                "{pct}%: {mpv_db} vs {spotify_db}"
+            );
+        }
+        // 50% is -30 dB on both (it used to be -18 dB on radio).
+        assert!((percent_to_mpv_volume(50) - 31.62).abs() < 0.01);
+        // Monotonic, and the read-back inverts it exactly.
+        for pct in 0..=100u8 {
+            assert_eq!(mpv_volume_to_percent(percent_to_mpv_volume(pct)), pct);
+            if pct > 0 {
+                assert!(percent_to_mpv_volume(pct) > percent_to_mpv_volume(pct - 1));
+            }
+        }
+        // mpv's own default (100) reads back as 100%.
+        assert_eq!(mpv_volume_to_percent(100.0), 100);
+        assert_eq!(mpv_volume_to_percent(130.0), 100);
     }
 
     #[tokio::test]

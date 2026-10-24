@@ -353,23 +353,21 @@ class _AmbientHomeState extends State<AmbientHome> {
         camera: camera,
       ),
       // On-screen music transport/volume → a short-lived control round-trip to the
-      // pinned Core (fire-and-forget; errors are logged, never surfaced to the UI).
-      musicControl: ({required String action, int? value}) {
-        unawaited(
-          musicControl(
-            orchestratorKey: _settings.orchestratorKey,
-            action: action,
-            value: value,
-            discoveryTimeoutSecs: BigInt.zero,
-          ).then(
-            (msg) {
-              if (msg.isNotEmpty) debugPrint('music control: $msg');
-            },
-            onError: (Object e, StackTrace _) =>
-                debugPrint('music control error: $e'),
-          ),
-        );
-      },
+      // pinned Core (errors are logged, never surfaced to the UI). The returned future
+      // completes with the round-trip so volume changes can coalesce; other callers
+      // ignore it.
+      musicControl: ({required String action, int? value}) => musicControl(
+        orchestratorKey: _settings.orchestratorKey,
+        action: action,
+        value: value,
+        discoveryTimeoutSecs: BigInt.zero,
+      ).then(
+        (msg) {
+          if (msg.isNotEmpty) debugPrint('music control: $msg');
+        },
+        onError: (Object e, StackTrace _) =>
+            debugPrint('music control error: $e'),
+      ),
       // Tell the orchestrator what the music screen is showing (track + which view) so it
       // can drive it by voice (`music_screen`) and answer "what's this song?".
       setMusicContext: setMusicContext,

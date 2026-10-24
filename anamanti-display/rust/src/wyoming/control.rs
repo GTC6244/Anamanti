@@ -871,8 +871,33 @@ pub async fn music_control(
     value: Option<i64>,
     device_id: &str,
 ) -> Result<String> {
-    let endpoint = resolve(cache, timeout, preferred).await?;
     let request = WyomingEvent::music_control(action, value).with_device_id(device_id);
+    // Fast path: the on-screen controls fire in bursts (a volume drag, repeated +/-), so
+    // reuse the Core this cache last resolved instead of a fresh mDNS browse per tap
+    // (a browse is a new mDNS daemon + up to the discovery timeout, and fails outright
+    // when multicast is flaky). Strict pinning holds: a cached endpoint is used only
+    // when its key matches the pin. If it no longer answers, forget it; re-send via a
+    // fresh resolve only when the connect itself failed (the Core never saw the
+    // request), so a slow reply can't double-apply a `next`.
+    if let Some(cached) = cache
+        .get()
+        .filter(|c| preferred.is_none_or(|key| c.key == key))
+    {
+        match round_trip(&cached, request.clone()).await {
+            Ok(resp) => return ok_message(&resp, "music control failed"),
+            Err(e) => {
+                cache.clear();
+                let never_sent = format!("{e:#}").contains("connecting to orchestrator");
+                if !never_sent {
+                    return Err(e);
+                }
+                log::debug!(
+                    "music control: cached orchestrator {cached} unreachable ({e:#}); re-resolving"
+                );
+            }
+        }
+    }
+    let endpoint = resolve(cache, timeout, preferred).await?;
     let resp = round_trip(&endpoint, request).await?;
     ok_message(&resp, "music control failed")
 }
@@ -1763,6 +1788,46 @@ mod tests {
         assert_eq!(request.event_type, types::NAME_SPEAKER);
         assert_eq!(request.data["id"], json!("spk-2"));
         assert_eq!(request.data["name"], json!("Dana"));
+    }
+
+    #[tokio::test]
+    async fn music_control_reuses_the_cached_core_without_browsing() {
+        // A long discovery timeout: if the call browsed mDNS first it would stall here,
+        // so a fast answer proves the cached endpoint was dialed directly.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_once(listener, WyomingEvent::music_result(true, "ok")).await;
+        let cache = cache_for_keyed(addr, "mac-a");
+        let started = std::time::Instant::now();
+        let msg = music_control(
+            &cache,
+            Duration::from_secs(30),
+            Some("mac-a"),
+            "volume",
+            Some(55),
+            "",
+        )
+        .await
+        .unwrap();
+        assert_eq!(msg, "ok");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(server.await.unwrap().data["value"], json!(55));
+        assert!(cache.get().is_some(), "a working endpoint stays cached");
+    }
+
+    #[tokio::test]
+    async fn music_control_drops_an_unreachable_cached_core() {
+        // Bind then drop: nothing listens on that port any more.
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let cache = cache_for(addr);
+        let err = music_control(&cache, Duration::from_millis(0), None, "pause", None, "")
+            .await
+            .unwrap_err();
+        assert!(cache.get().is_none(), "stale endpoint forgotten: {err:#}");
     }
 
     #[tokio::test]

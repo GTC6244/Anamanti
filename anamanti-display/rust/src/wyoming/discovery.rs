@@ -256,8 +256,10 @@ pub struct EndpointCache {
 
 impl EndpointCache {
     /// An empty cache.
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
     }
 
     /// The currently cached endpoint, if any.

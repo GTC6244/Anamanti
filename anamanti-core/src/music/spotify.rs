@@ -233,7 +233,15 @@ pub struct SpotifyWebApi {
     api_base: String,
     /// Cached (access_token, expires_at).
     token: Mutex<Option<(String, Instant)>>,
+    /// Cached (Connect device id, resolved_at) for [`Self::device_name`], so a burst of
+    /// commands (a volume drag) doesn't spend a `GET /devices` cloud round trip on every
+    /// one. librespot's id is stable for a given name; a command that fails against a
+    /// cached id drops it and retries once against a fresh lookup.
+    device: Mutex<Option<(String, Instant)>>,
 }
+
+/// How long a resolved Connect device id is reused before it is looked up again.
+const DEVICE_ID_TTL: Duration = Duration::from_secs(300);
 
 impl SpotifyWebApi {
     pub fn new(
@@ -269,7 +277,21 @@ impl SpotifyWebApi {
             accounts_base: accounts_base.into().trim_end_matches('/').to_string(),
             api_base: api_base.into().trim_end_matches('/').to_string(),
             token: Mutex::new(None),
+            device: Mutex::new(None),
         }
+    }
+
+    /// The target device id from the cache when fresh (`true` = it came from the
+    /// cache), else from a live lookup that refreshes the cache.
+    async fn cached_device_id(&self, token: &str) -> Result<(String, bool)> {
+        if let Some((id, at)) = self.device.lock().await.as_ref() {
+            if at.elapsed() < DEVICE_ID_TTL {
+                return Ok((id.clone(), true));
+            }
+        }
+        let id = self.device_id(token).await?;
+        *self.device.lock().await = Some((id.clone(), Instant::now()));
+        Ok((id, false))
     }
 
     /// A valid bearer token, refreshing (and caching) when the cache is empty or
@@ -529,11 +551,11 @@ fn describe_hit(item: &Value, kind: SearchKind) -> String {
     }
 }
 
-#[async_trait]
-impl SpotifyController for SpotifyWebApi {
-    async fn command(&self, cmd: SpotifyCommand) -> Result<String> {
-        let token = self.access_token().await?;
-        let device = self.device_id(&token).await?;
+impl SpotifyWebApi {
+    /// Run one command against an already-resolved Connect `device`.
+    async fn command_on(&self, token: &str, device: &str, cmd: SpotifyCommand) -> Result<String> {
+        let token = token.to_string();
+        let device = device.to_string();
         match cmd {
             SpotifyCommand::Play { query, kind } => match query {
                 Some(q) => {
@@ -672,6 +694,27 @@ impl SpotifyController for SpotifyWebApi {
                 .await?;
                 Ok(format!("Set the volume to {pct} percent."))
             }
+        }
+    }
+}
+
+#[async_trait]
+impl SpotifyController for SpotifyWebApi {
+    async fn command(&self, cmd: SpotifyCommand) -> Result<String> {
+        let token = self.access_token().await?;
+        let (device, cached) = self.cached_device_id(&token).await?;
+        match self.command_on(&token, &device, cmd.clone()).await {
+            // A 404 against a *cached* id = the device went away (librespot restarted
+            // under a new id, or is down). Nothing was applied, so drop the cache and
+            // retry once against a fresh lookup (which yields the speakable "isn't
+            // available" error if it's really gone).
+            Err(e) if cached && format!("{e:#}").contains("404") => {
+                log::debug!("spotify: cached device id rejected ({e:#}); re-resolving");
+                *self.device.lock().await = None;
+                let (device, _) = self.cached_device_id(&token).await?;
+                self.command_on(&token, &device, cmd).await
+            }
+            res => res,
         }
     }
 
@@ -874,6 +917,30 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.contains("/v1/me/player/volume?device_id=dev-1&volume_percent=100")));
+    }
+
+    #[tokio::test]
+    async fn device_id_is_cached_across_commands() {
+        // A volume drag is a burst of commands: only the first looks the device up.
+        let (base, seen) = spawn_fake_spotify().await;
+        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        for pct in [10, 20, 30] {
+            api.command(SpotifyCommand::SetVolume { percent: pct })
+                .await
+                .unwrap();
+        }
+        let calls = seen.lock().await;
+        let lookups = calls
+            .iter()
+            .filter(|c| c.starts_with("GET /v1/me/player/devices"))
+            .count();
+        assert_eq!(
+            lookups, 1,
+            "device resolved once and reused; calls were {calls:?}"
+        );
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("volume?device_id=dev-1&volume_percent=30")));
     }
 
     #[tokio::test]

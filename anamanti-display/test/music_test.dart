@@ -200,6 +200,46 @@ void main() {
       expect(calls.last, {'action': 'volume', 'value': 100});
     });
 
+    test('a volume drag shows at once and coalesces to one request in flight', () async {
+      final calls = <int?>[];
+      final inFlight = <Completer<void>>[];
+      final controller = AssistantController(
+        config: _cfg(),
+        musicControl: ({required String action, int? value}) {
+          calls.add(value);
+          final c = Completer<void>();
+          inFlight.add(c);
+          return c.future;
+        },
+      );
+      addTearDown(controller.dispose);
+      controller.applyMusicPush(_musicJson);
+
+      // A drag: many onChanged events while the first request is still out.
+      for (final v in [41, 42, 43, 44, 45]) {
+        controller.setMusicVolume(v);
+      }
+      // The slider follows the finger immediately…
+      expect(controller.state.music!.volumePercent, 45);
+      // …but only the first level went out; the rest wait.
+      expect(calls, [41]);
+
+      // A stale periodic push (the old level) mid-drag doesn't yank the slider back.
+      controller.applyMusicPush(_musicJson);
+      expect(controller.state.music!.volumePercent, 45);
+
+      // When it lands, only the latest wanted level is sent — not 42, 43, 44.
+      inFlight.last.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(calls, [41, 45]);
+      inFlight.last.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(calls, [41, 45], reason: 'nothing left to send');
+
+      // A `+` step builds on the shown level, not the stale pushed one.
+      expect(controller.state.music!.volumePercent, 45);
+    });
+
     test('skip-to sends the queue index and returns to now-playing', () {
       final calls = <Map<String, Object?>>[];
       final controller = _controller(calls);

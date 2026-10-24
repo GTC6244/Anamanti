@@ -246,15 +246,42 @@ impl NowPlayingService {
     ) -> anyhow::Result<String> {
         let cmd = SpotifyCommand::transport(action, value)?
             .ok_or_else(|| anyhow::anyhow!("unknown music action `{action}`"))?;
-        if let Some(radio) = &self.radio {
-            if let Some(res) = radio.transport(&cmd).await {
-                return res;
+        let volume = match &cmd {
+            SpotifyCommand::SetVolume { percent } => Some((*percent).min(100)),
+            _ => None,
+        };
+        let result = match self.radio.as_ref() {
+            Some(radio) => radio.transport(&cmd).await,
+            None => None,
+        };
+        let result = match result {
+            Some(res) => res,
+            None => {
+                let controller = self
+                    .controller(settings)
+                    .ok_or_else(|| anyhow::anyhow!("Spotify isn't linked on the Anamanti Core"))?;
+                controller.command(cmd).await
+            }
+        };
+        if let (Ok(_), Some(percent)) = (&result, volume) {
+            self.apply_volume(settings, percent);
+        }
+        result
+    }
+
+    /// Reflect a volume change that was just applied in the cached snapshot and re-push
+    /// it right away, so every display's slider/stepper agrees now — not on the next
+    /// periodic tick (up to `nowplaying_refresh_secs` later, and for Spotify possibly
+    /// still reporting the old level). No player call. Returns the delivery count.
+    pub fn apply_volume(&self, settings: &SharedSettings, percent: u8) -> usize {
+        {
+            let mut last = self.last.lock().unwrap();
+            match last.as_mut() {
+                Some(np) if np.volume_percent != percent => np.volume_percent = percent,
+                _ => return 0,
             }
         }
-        let controller = self
-            .controller(settings)
-            .ok_or_else(|| anyhow::anyhow!("Spotify isn't linked on the Anamanti Core"))?;
-        controller.command(cmd).await
+        self.repush(settings)
     }
 
     /// What is audible right now, read on demand (no hand-off side effects, unlike the
@@ -526,5 +553,30 @@ mod tests {
         let got = rx.try_recv().expect("live channel received the dismiss");
         assert_eq!(got.event_type, types::MUSIC);
         assert_eq!(got.data["action"], serde_json::json!("dismiss"));
+    }
+
+    #[test]
+    fn a_volume_change_is_re_pushed_at_once_from_the_cache() {
+        let settings = settings();
+        let svc = NowPlayingService::new();
+        let (_id, mut rx) = svc.register("dev", "");
+        svc.broadcast(Some(snapshot())); // volume 65
+        rx.try_recv().unwrap();
+
+        // The new level reaches the display now, not on the next tick.
+        assert_eq!(svc.apply_volume(&settings, 30), 1);
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got.data["music"]["volume_percent"], serde_json::json!(30));
+        assert_eq!(
+            got.data["music"]["track_title"],
+            serde_json::json!("Paranoid Android")
+        );
+
+        // Same level again, or nothing playing: no extra push.
+        assert_eq!(svc.apply_volume(&settings, 30), 0);
+        svc.broadcast(None);
+        rx.try_recv().unwrap();
+        assert_eq!(svc.apply_volume(&settings, 50), 0);
+        assert!(rx.try_recv().is_err());
     }
 }

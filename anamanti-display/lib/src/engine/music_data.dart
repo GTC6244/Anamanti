@@ -125,6 +125,24 @@ class MusicData {
   /// Live radio: no seek bar, no queue; pause stops, next/previous change station.
   bool get isRadio => source == 'radio';
 
+  /// This snapshot at a different [volumePercent] — the on-screen controls show a
+  /// requested level at once, before the Core's confirming push arrives.
+  MusicData withVolume(int percent) => MusicData(
+    playing: playing,
+    trackTitle: trackTitle,
+    artist: artist,
+    album: album,
+    artworkUri: artworkUri,
+    positionSecs: positionSecs,
+    durationSecs: durationSecs,
+    volumePercent: percent,
+    nextUp: nextUp,
+    source: source,
+    stationId: stationId,
+    stationName: stationName,
+    displayStyle: displayStyle,
+  );
+
   /// Decode from the Core's music JSON. Returns `null` when the string is empty,
   /// malformed, not a JSON object, or carries an empty `track_title`, so a bad
   /// payload never crashes the UI. Malformed `next_up` items are skipped.

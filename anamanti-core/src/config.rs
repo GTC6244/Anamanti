@@ -1950,6 +1950,13 @@ impl Config {
                     "320".into(),
                     "--initial-volume".into(),
                     "100".into(),
+                    // Pin the volume curve the radio is matched to
+                    // (`music::MUSIC_VOLUME_RANGE_DB`) rather than trusting librespot's
+                    // defaults, so Spotify and radio stay equally loud per percent.
+                    "--volume-ctrl".into(),
+                    "log".into(),
+                    "--volume-range".into(),
+                    crate::music::MUSIC_VOLUME_RANGE_DB.to_string(),
                     // Persist the Spotify account session across restarts: the
                     // one-time Connect hand-off authenticates this device, and the
                     // cached credentials let it re-authenticate on every respawn so
