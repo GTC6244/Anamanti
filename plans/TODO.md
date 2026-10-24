@@ -694,14 +694,15 @@ header/footer and screenshots from the live install. Pushed as-is; remaining wor
   (the default room "Kitchen", recipient counts, the Tavily/OpenRouter choices).
 
 **Missing screenshots (need a spoken turn on a display)**
-- [ ] Conversation panel (transcript + streaming reply bubbles).
-- [ ] Timers: full-screen card(s) and the compact chip row.
-- [ ] Weather full screen and the 7-day view.
-- [ ] Place card.
-- [ ] Live camera view (decide if the front-door feed is OK to publish).
-- [ ] Full-screen now-playing + Up Next, with neutral album art (or a radio station).
+- [x] Conversation panel (transcript + streaming reply bubbles). (captured 2026-10-23 on Office)
+- [x] Timers: full-screen card(s) and the compact chip row. (captured 2026-10-23 on Office)
+- [x] Weather full screen and the 7-day view. (captured 2026-10-23 on Office)
+- [x] Place card. (captured 2026-10-23 on Office)
+- [x] Live camera view (decide if the front-door feed is OK to publish). (captured 2026-10-23 on Office)
+  - [ ] Confirm the front-door frame (`display-camera.jpg`: porch, driveway, a parked car) is OK public.
+- [x] Full-screen radio player (captured). Still open: Spotify now-playing + Up Next with neutral album art.
 - [ ] People / "Add a voice" enrolment flow; away-mode dim clock.
-- [ ] Then replace the text-only "Full-screen moments" cards on `display.html` with these.
+- [x] Then replace the text-only "Full-screen moments" cards on `display.html` with these.
 
 **Content**
 - [ ] Real calls to action: there is no repo/docs/contact link yet (license is TBD). Decide
