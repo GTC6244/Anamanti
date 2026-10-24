@@ -2,6 +2,12 @@
    Brand: warm "hearth" amber on near-black, Irish sea-green as the second accent.
    Display type is Fraunces, UI/body is Inter. No build step: plain CSS. */
 
+/* Self-hosted fonts (SIL OFL 1.1, licenses in assets/fonts/). Latin subset, variable weight. */
+@font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 400 600; font-display: swap;
+  src: url(fonts/fraunces.woff2) format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 400 700; font-display: swap;
+  src: url(fonts/inter.woff2) format('woff2'); }
+
 :root {
   --bg:        #0e0f13;
   --bg-soft:   #14161c;
@@ -250,8 +256,9 @@ td.group { background: rgba(255,255,255,0.025); color: var(--accent); font-size:
 
 /* ---------- FOOTER (shared) ---------- */
 .site-footer { border-top: 1px solid var(--border); padding: 54px 0 40px; color: var(--faint); background: #0b0c0f; }
-.foot-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 40px; }
-@media (max-width: 760px) { .foot-grid { grid-template-columns: 1fr; gap: 28px; } }
+.foot-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 36px; }
+@media (max-width: 900px) { .foot-grid { grid-template-columns: 1fr 1fr; gap: 28px; } }
+@media (max-width: 560px) { .foot-grid { grid-template-columns: 1fr; } }
 .site-footer .brand { font-size: 1.15rem; color: var(--text); margin-bottom: 12px; }
 .site-footer p { margin: 0 0 8px; font-size: 0.9rem; max-width: 360px; }
 .site-footer p i { color: var(--accent-2); }
@@ -271,3 +278,51 @@ td.group { background: rgba(255,255,255,0.025); color: var(--accent); font-size:
 .bubble { padding: 11px 15px; border-radius: 16px; margin-bottom: 10px; font-size: 0.96rem; max-width: 86%; }
 .bubble.user { background: #2A3350; margin-left: auto; border-bottom-right-radius: 5px; }
 .bubble.ai { background: #EAF2FF; color: #10162A; border-bottom-left-radius: 5px; }
+
+/* ---------- HEADER CTA ---------- */
+.nav-links a.nav-cta { margin-left: 8px; background: var(--accent); color: #0e0f13; font-weight: 600; }
+.nav-links a.nav-cta:hover { background: #f0b273; color: #0e0f13; }
+.nav-links a.nav-cta[aria-current="page"] { box-shadow: none; }
+@media (max-width: 1100px) { .nav-links a { padding: 7px 9px; } }
+
+/* ---------- FORMS ---------- */
+.form-card { background: var(--panel); border: 1px solid var(--border-2); border-radius: 22px; padding: 30px; }
+.form-card h2 { font-size: 1.9rem; margin: 0 0 8px; }
+.form-card > p { color: var(--muted); margin: 0 0 22px; }
+.field { display: block; margin-bottom: 16px; }
+.field span { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+.field span i { color: var(--faint); font-style: normal; font-weight: 400; }
+.field input, .field textarea, .field select {
+  width: 100%; font: inherit; color: var(--text); background: #12141a; border: 1px solid var(--border-2);
+  border-radius: 12px; padding: 12px 14px; transition: border-color .15s, box-shadow .15s; }
+.field textarea { min-height: 140px; resize: vertical; }
+.field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(232,163,92,0.18); }
+.hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+.form-card button { font: inherit; cursor: pointer; border: none; }
+.form-status { margin: 14px 0 0; font-size: 0.93rem; min-height: 1.4em; }
+.form-status.ok { color: var(--accent-2); }
+.form-status.err { color: #f08a7a; }
+.fine { color: var(--faint); font-size: 0.82rem; margin-top: 14px; }
+
+/* ---------- GUIDE ---------- */
+.steps { counter-reset: gstep; list-style: none; padding: 0; margin: 0; }
+.steps > li { counter-increment: gstep; position: relative; padding: 0 0 30px 64px; }
+.steps > li::before { content: counter(gstep); position: absolute; left: 0; top: 0; width: 42px; height: 42px; border-radius: 50%;
+  display: grid; place-items: center; border: 1px solid var(--border-2); background: var(--panel); color: var(--accent);
+  font-family: 'Fraunces', serif; font-size: 1.15rem; }
+.steps > li::after { content: ""; position: absolute; left: 21px; top: 48px; bottom: 6px; width: 1px; background: var(--border); }
+.steps > li:last-child::after { display: none; }
+.steps h3 { font-family: 'Inter', sans-serif; font-weight: 600; font-size: 1.15rem; letter-spacing: 0; margin: 8px 0 8px; }
+.steps p, .steps li li { color: var(--muted); font-size: 0.97rem; }
+.steps ul { margin: 6px 0 10px; padding-left: 20px; }
+.steps .src { font-size: 0.85rem; color: var(--faint); }
+.steps .src a { color: var(--accent); }
+pre.cmd { background: #0b0c0f; border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; overflow-x: auto;
+  font-family: ui-monospace, Menlo, monospace; font-size: 0.84rem; color: #d9dce4; line-height: 1.7; }
+.warn { border: 1px solid rgba(240,138,122,0.45); background: rgba(240,138,122,0.07); border-radius: 14px; padding: 16px 20px; color: var(--muted); }
+.warn b { color: #f5b1a6; }
+.photo-credit { color: var(--faint); font-size: 0.78rem; margin-top: 8px; }
+.photo-credit a { color: var(--muted); text-decoration: underline; }
+
+.site-footer li a { color: var(--muted); }
+.site-footer li a:hover { color: var(--text); text-decoration: none; }

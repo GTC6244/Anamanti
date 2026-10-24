@@ -242,13 +242,20 @@ anamanti-protocol/  Shared Wyoming protocol crate (`anamanti_protocol`): the fra
                     `crate::wyoming::protocol`) and anamanti-companion/rust — a wire
                     change is made once, here, and every side must be redeployed
                     together.
-website/           The public website (static HTML, no build step): index.html
-                    (overview) + core / display / hardware / integrations /
-                    technology pages, shared assets/site.css + site.js, and
-                    screenshots in assets/img/. Every page repeats the same
-                    header + footer markup; change it on all six. Deployed to
-                    Cloudflare by .github/workflows/deploy-website.yml (see
-                    wrangler.jsonc).
+website/           The public website, https://www.anamanti.com (static HTML,
+                    GENERATED — do not hand-edit the pages). Sources live in
+                    website-src/: pages/<name>.html (front matter + page CSS + the
+                    <main> body) and partials/ (the one shared <head>, header and
+                    footer). Run `python3 website-src/build.py` and commit both the
+                    sources and the regenerated website/*.html + sitemap.xml.
+                    Shared assets (site.css, site.js, fonts/, icons/, img/*.webp)
+                    are edited in place under website/assets/.
+website-worker/    The Cloudflare Worker in front of the site: apex -> www
+                    redirect, POST /api/waitlist + /api/contact into the D1
+                    database "anamanti-site" (migrations/ applied by hand with
+                    `npx wrangler d1 migrations apply anamanti-site --remote`).
+                    Deployed with the site by .github/workflows/deploy-website.yml
+                    (see wrangler.jsonc).
 plans/              Design + planning docs: architecture.md (design, source of
                     truth), Plan.MD (phases + decision table), TODO.md,
                     DisplayUI.md (the Display's on-screen UI catalog), the

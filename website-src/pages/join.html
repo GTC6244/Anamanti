@@ -1,0 +1,64 @@
+title: Join the Anamanti waitlist, or get in touch
+description: Join the Anamanti waitlist to hear when it's ready for more homes, or send us a message.
+og: assets/img/og-card.png
+---
+.join-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; align-items: start; }
+@media (max-width: 900px) { .join-grid { grid-template-columns: 1fr; } }
+---
+<section class="page-hero">
+  <div class="wrap">
+    <p class="eyebrow">Get involved</p>
+    <h1>Bring Anamanti home.</h1>
+    <p class="lede">Anamanti runs every day in our own house, and we're getting it ready for more. Join the waitlist to hear when it is, or send us a note:
+      questions, hardware you'd like supported, or ideas for what a home assistant should do.</p>
+  </div>
+</section>
+
+<section class="band" style="padding-top:56px">
+  <div class="wrap join-grid">
+
+    <form class="form-card" id="waitlist" data-endpoint="/api/waitlist" novalidate>
+      <p class="eyebrow">Waitlist</p>
+      <h2>Join the waitlist</h2>
+      <p>One email when there's something you can install, and the occasional progress update. No spam, and we never share your address.</p>
+      <label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" required maxlength="254" /></label>
+      <label class="field"><span>Name <i>(optional)</i></span><input type="text" name="name" autocomplete="name" maxlength="120" /></label>
+      <label class="field"><span>What would you run it on? <i>(optional)</i></span>
+        <select name="interest">
+          <option value="">Choose one</option>
+          <option>Echo Show 8 (1st gen)</option>
+          <option>Another Echo Show or smart display</option>
+          <option>An Android tablet</option>
+          <option>A TV</option>
+          <option>Something I'd build myself</option>
+          <option>Not sure yet</option>
+        </select></label>
+      <label class="hp" aria-hidden="true">Company<input type="text" name="company" tabindex="-1" autocomplete="off" /></label>
+      <input type="hidden" name="source" value="join" />
+      <button class="btn btn-primary" type="submit">Join the waitlist</button>
+      <p class="form-status" role="status" aria-live="polite"></p>
+    </form>
+
+    <form class="form-card" id="contact" data-endpoint="/api/contact" novalidate>
+      <p class="eyebrow">Contact</p>
+      <h2>Get in touch</h2>
+      <p>We read everything. Leave an email address so we can reply.</p>
+      <label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" required maxlength="254" /></label>
+      <label class="field"><span>Name <i>(optional)</i></span><input type="text" name="name" autocomplete="name" maxlength="120" /></label>
+      <label class="field"><span>About</span>
+        <select name="topic">
+          <option>General question</option>
+          <option>Hardware support</option>
+          <option>Installing on an Echo Show</option>
+          <option>Press</option>
+          <option>Partnership</option>
+        </select></label>
+      <label class="field"><span>Message</span><textarea name="message" required maxlength="5000"></textarea></label>
+      <label class="hp" aria-hidden="true">Company<input type="text" name="company" tabindex="-1" autocomplete="off" /></label>
+      <button class="btn btn-primary" type="submit">Send message</button>
+      <p class="form-status" role="status" aria-live="polite"></p>
+    </form>
+
+  </div>
+  <div class="wrap"><p class="fine">We store what you send in a database on Cloudflare, used only to reply to you and to email the waitlist. Your IP address is never stored; we keep a one-way hash of it for a short while to stop spam. Ask us any time to delete your details.</p></div>
+</section>

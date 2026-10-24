@@ -1,0 +1,168 @@
+title: Anamanti Display: the app in every room
+description: Anamanti Display turns a screen in each room into a calm photo frame that becomes a live, voice-driven assistant: conversation, recipes, timers, music, weather, places, the camera and notifications.
+og: assets/img/og-card.png
+---
+.feature-row { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 52px; align-items: center; padding: 30px 0; border-bottom: 1px solid var(--border); }
+.feature-row:last-child { border-bottom: none; }
+.feature-row.flip { grid-template-columns: 0.9fr 1.1fr; }
+.feature-row.flip > figure { order: 2; }
+@media (max-width: 900px) { .feature-row, .feature-row.flip { grid-template-columns: 1fr; gap: 24px; } .feature-row.flip > figure { order: 0; } }
+.feature-row h3 { font-size: 1.8rem; margin: 0 0 12px; }
+.feature-row p { color: var(--muted); margin: 0 0 14px; }
+.tabs3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.tabs3 .device { padding: 7px; border-radius: 12px; }
+.tabs3 .device::after { display: none; }
+@media (max-width: 640px) { .tabs3 { grid-template-columns: 1fr; } }
+.small-device .device { padding: 9px; border-radius: 14px; }
+.small-device .device::after { display: none; }
+---
+<section class="page-hero">
+  <div class="wrap split">
+    <div>
+      <p class="eyebrow">Anamanti Display</p>
+      <h1>A photo frame that listens.</h1>
+      <p class="lede">Most of the time it's a calm screen with your photos, the time, the weather and what's playing. Say the
+        wake word and it becomes a live view of the conversation, then a recipe, a timer, a forecast or the front door, whatever the answer needs.</p>
+      <p style="color:var(--faint)">Built in Flutter on a Rust real-time engine, tuned for a memory-tight 8-inch screen in landscape.</p>
+    </div>
+    <figure>
+      <div class="device lg"><img class="zoom" src="/assets/img/display-idle.webp" alt="Display idle screen with a street-festival photo, clock, weather and music bar" /></div>
+      <div class="device-stand"></div>
+      <figcaption><b>Idle.</b> A photo slideshow from Google Drive or Google Photos, the clock, the weather from the Core, and a compact music bar while something plays. Swipe to change the photo.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+
+    <div class="feature-row">
+      <div>
+        <p class="eyebrow">Listening</p>
+        <h3>A ring that moves with your voice.</h3>
+        <p>When the wake word fires, the screen dims and a glowing blue ring appears. It swells with each syllable,
+          so you can see the assistant is hearing you from across the room.</p>
+        <p>When you stop speaking, your words appear on screen and the reply streams in word by word while it's being spoken. The phase (listening, thinking, speaking) sits quietly in the corner.</p>
+      </div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-listening-live.webp" alt="The listening ring glowing over the weather screen during a follow-up question" loading="lazy" /></div>
+        <figcaption><b>Listening, mid-conversation.</b> A follow-up question over the weather screen: no wake word needed, and the ring swells while you speak.</figcaption></figure>
+    </div>
+
+    <div class="feature-row flip">
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-conversation.webp" alt="Conversation panel: the assistant asks which Home Depot location" loading="lazy" /></div>
+        <figcaption><b>A real exchange.</b> “How is the nearest Home Depot to me open?” It finds three nearby and asks which one, rather than guessing.</figcaption></figure>
+      <div>
+        <p class="eyebrow">Conversation</p>
+        <h3>It asks when it should.</h3>
+        <p>Your words and its reply float over whatever is on screen, so the forecast you just asked for stays in view while you keep talking.</p>
+        <p>Because the mic reopens after every reply, a clarifying question costs nothing: you answer “the one on Gateway Park Drive” and the place card opens.</p>
+      </div>
+    </div>
+
+    <div class="feature-row flip">
+      <figure>
+        <div class="tabs3">
+          <div class="device"><img class="zoom" src="/assets/img/display-recipe-overview.webp" alt="Recipe overview tab" loading="lazy" /></div>
+          <div class="device"><img class="zoom" src="/assets/img/display-recipe-ingredients.webp" alt="Recipe ingredients tab" loading="lazy" /></div>
+          <div class="device"><img class="zoom" src="/assets/img/display-recipe-steps.webp" alt="Recipe steps tab" loading="lazy" /></div>
+        </div>
+        <figcaption><b>Recipe mode.</b> Overview, Ingredients and Steps tabs, all voice-driven.</figcaption>
+      </figure>
+      <div>
+        <p class="eyebrow">In the kitchen</p>
+        <h3>Recipes you never have to touch.</h3>
+        <p>“Find me a recipe for roasted Brussels sprouts.” The recipe opens full screen with three tabs.
+          Say “ingredients”, “next step” or “go to step three” and the current step is highlighted.</p>
+        <p>Ask “how much lemon?” and it answers from the recipe on screen. Timers you set while cooking appear as big cards with a draining ring, and they live on the display, so they keep running even if the Mac goes down.</p>
+      </div>
+    </div>
+
+    <div class="feature-row">
+      <div>
+        <p class="eyebrow">Without a word</p>
+        <h3>Notifications from the house.</h3>
+        <p>Each display keeps a channel open to the Core, so the Core can put things on screen without anyone speaking: banners marked
+          info, reminder or alert, the ambient weather, and the current track. Banners close on their own after a short while or with a tap.</p>
+      </div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-notification.webp" alt="A reminder banner over the slideshow" loading="lazy" /></div>
+        <figcaption><b>A reminder banner</b> pushed from the Core, over the slideshow and the music bar.</figcaption></figure>
+    </div>
+
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Full-screen moments</p>
+      <h2>The answer takes the shape it needs.</h2>
+      <p>Spoken answers are short. When the answer is something you'll want to look at, the display opens a dedicated screen, and it closes by voice, by tap, or on its own.</p>
+    </div>
+    <div class="gallery small-device">
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-weather-today.webp" alt="Full-screen weather: current conditions and a 10-hour row" loading="lazy" /></div>
+        <figcaption><b>Weather.</b> Today's conditions with a 10-hour row. It closes itself after a minute.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-weather-week.webp" alt="Seven-day forecast" loading="lazy" /></div>
+        <figcaption><b>The week.</b> “What's the weather this week?” opens the 7-day view.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-place.webp" alt="Place card for The Home Depot with hours and Open now" loading="lazy" /></div>
+        <figcaption><b>Place cards.</b> Photo, category, open now, rating, address, phone and hours.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-timers.webp" alt="Three full-screen timers labelled toast, eggs and bacon" loading="lazy" /></div>
+        <figcaption><b>Timers.</b> Toast, eggs and bacon, side by side with draining rings. They shrink to a chip row while you talk.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-radio.webp" alt="Full-screen live radio player" loading="lazy" /></div>
+        <figcaption><b>Radio.</b> Your stations, with the logo and a LIVE badge.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-camera.webp" alt="Live front-door camera view" loading="lazy" /></div>
+        <figcaption><b>Live camera.</b> “Show me the front door.” Straight from the NVR, about 1–3 s behind real time.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-spotify.webp" alt="Full-screen Spotify now-playing" loading="lazy" /></div>
+        <figcaption><b>Now playing.</b> Spotify full screen, with artwork, progress, volume and a tappable Up Next queue.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-music-compact.webp" alt="Compact music bar beside the clock" loading="lazy" /></div>
+        <figcaption><b>Compact bar.</b> The same track as a small bar beside the clock, which is what the other rooms show.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-away.webp" alt="Away mode: a dim clock on black" loading="lazy" /></div>
+        <figcaption><b>Away mode.</b> Nobody in the room? Just a dim clock. The camera senses motion only; nothing is stored or sent.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Settings on the device</p>
+      <h2>Tune it from the couch.</h2>
+      <p>Six sections, each designed to fit the 8-inch screen without scrolling. Changes apply immediately, with no Save button. Anything sensitive, such as keys, lives only in the Core's console on the Mac.</p>
+    </div>
+    <div class="gallery two small-device">
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-assistant.webp" alt="Assistant settings: language model and voice" loading="lazy" /></div><figcaption><b>Assistant.</b> Pick the language model and voice, and see which capabilities are switched on.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-listening.webp" alt="Listening settings: wake word and sensitivity" loading="lazy" /></div><figcaption><b>Listening.</b> Wake word, idle and while-speaking sensitivity, capture gain and detection tuning.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-audio.webp" alt="Audio diagnostics: mic level and wake word score" loading="lazy" /></div><figcaption><b>Audio diagnostics.</b> Live mic level and wake-word score, so you can tune a room in seconds.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-household.webp" alt="Household settings: people, link a phone, memory" loading="lazy" /></div><figcaption><b>Household.</b> Enrol voices, pair family phones for messages, and browse or delete what the assistant remembers.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap split top">
+    <div class="prose">
+      <p class="eyebrow">How it's built</p>
+      <h3>Flutter for the face, Rust for the ears.</h3>
+      <p>The Echo Show has about <b>1 GB of RAM</b> and a 32-bit processor. All the time-critical work (audio capture and playback, the ring buffer,
+        wake-word inference, the network protocol and discovery) runs in <b>Rust</b>, with pre-allocated buffers and no garbage-collector pauses on the audio path.</p>
+      <p><b>Flutter</b> handles only presentation. It receives transcript, reply and state streams through flutter_rust_bridge and never touches an audio buffer or a socket.</p>
+    </div>
+    <div>
+      <ul class="ticks">
+        <li><b>Finds the Core by itself</b> using mDNS, and reconnects with backoff. A subtle indicator shows when it's disconnected.</li>
+        <li><b>Updates itself.</b> It downloads a signed APK, checks its SHA-256 and installs it. A build without the updater is available too.</li>
+        <li><b>Bigger text by voice:</b> “increase font” scales everything from 85% to 160%.</li>
+        <li><b>Voice enrolment</b> on the People screen: a guided “Add a voice” flow, and review of voices it couldn't identify.</li>
+        <li><b>Companion phone app</b> (Android and iOS): status, now playing, timers and memories on your phone while you're on the home network. <span style="color:var(--faint)">(New; in testing.)</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="next">
+  <div class="wrap"><div class="next-box">
+    <p class="eyebrow">Next</p>
+    <h2>Run it on any screen you like.</h2>
+    <p>We built a path for repurposing secondhand Echo Shows, but a phone, tablet, TV or your own client works too.</p>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="/hardware">UI/UX →</a></div>
+  </div></div>
+</section>

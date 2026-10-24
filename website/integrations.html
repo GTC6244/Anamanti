@@ -5,13 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Integrations: what Anamanti connects to</title>
 <meta name="description" content="Home Assistant, Spotify with multiroom Snapcast audio, internet radio, a Reolink camera, Google Photos and Drive, Google Places, Mapbox, weather, web search, calendars, a shared shopping list and family phones, each labelled with where it runs." />
+<link rel="canonical" href="https://www.anamanti.com/integrations" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Anamanti" />
 <meta property="og:title" content="Integrations: what Anamanti connects to" />
 <meta property="og:description" content="Home Assistant, Spotify with multiroom Snapcast audio, internet radio, a Reolink camera, Google Photos and Drive, Google Places, Mapbox, weather, web search, calendars, a shared shopping list and family phones, each labelled with where it runs." />
-<meta property="og:image" content="assets/img/core-integrations.jpg" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="assets/site.css" />
+<meta property="og:url" content="https://www.anamanti.com/integrations" />
+<meta property="og:image" content="https://www.anamanti.com/assets/img/og-card.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/assets/icons/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#0e0f13" />
+<link rel="preload" href="/assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/assets/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="stylesheet" href="/assets/site.css" />
 <style>
 .spot { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
 @media (max-width: 900px) { .spot { grid-template-columns: 1fr; } }
@@ -24,15 +33,16 @@
 
 <header class="site-header">
   <div class="wrap nav-inner">
-    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
     <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav class="nav-links" id="site-nav" aria-label="Main">
-      <a href="index.html">Overview</a>
-      <a href="core.html">The Core</a>
-      <a href="display.html">The Display</a>
-      <a href="hardware.html">UI/UX</a>
-      <a href="integrations.html" aria-current="page">Integrations</a>
-      <a href="technology.html">Technology</a>
+      <a href="/">Overview</a>
+      <a href="/core">The Core</a>
+      <a href="/display">The Display</a>
+      <a href="/hardware">UI/UX</a>
+      <a href="/integrations" aria-current="page">Integrations</a>
+      <a href="/technology">Technology</a>
+      <a class="nav-cta" href="/join">Join the waitlist</a>
     </nav>
   </div>
 </header>
@@ -52,7 +62,7 @@
   <div class="wrap">
     <figure>
       <div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / integrations</span></div>
-        <img class="zoom" src="assets/img/core-integrations.jpg" alt="The Integrations page in the Core console" /></div>
+        <img class="zoom" src="/assets/img/core-integrations.webp" alt="The Integrations page in the Core console" /></div>
       <figcaption><b>Integrations in the console.</b> Each tile shows the tool it powers, where it runs, and whether it's active, and opens a panel that says exactly what it sends.</figcaption>
     </figure>
   </div>
@@ -88,9 +98,9 @@
       </div>
     </div>
     <div class="gallery" style="margin-top:28px">
-      <figure><div class="device" style="padding:9px;border-radius:14px"><img class="zoom" src="assets/img/display-place.jpg" alt="Google Places card on the display" loading="lazy" /></div><figcaption><b>Google Places</b> → a place card.</figcaption></figure>
-      <figure><div class="device" style="padding:9px;border-radius:14px"><img class="zoom" src="assets/img/display-radio.jpg" alt="Internet radio playing full screen" loading="lazy" /></div><figcaption><b>Internet radio</b>, with the logo from Radio Browser.</figcaption></figure>
-      <figure><div class="device" style="padding:9px;border-radius:14px"><img class="zoom" src="assets/img/display-camera.jpg" alt="Reolink front-door camera on the display" loading="lazy" /></div><figcaption><b>Reolink NVR</b> → live front-door view.</figcaption></figure>
+      <figure><div class="device" style="padding:9px;border-radius:14px"><img class="zoom" src="/assets/img/display-place.webp" alt="Google Places card on the display" loading="lazy" /></div><figcaption><b>Google Places</b> → a place card.</figcaption></figure>
+      <figure><div class="device" style="padding:9px;border-radius:14px"><img class="zoom" src="/assets/img/display-radio.webp" alt="Internet radio playing full screen" loading="lazy" /></div><figcaption><b>Internet radio</b>, with the logo from Radio Browser.</figcaption></figure>
+      <figure><div class="device" style="padding:9px;border-radius:14px"><img class="zoom" src="/assets/img/display-camera.webp" alt="Reolink front-door camera on the display" loading="lazy" /></div><figcaption><b>Reolink NVR</b> → live front-door view.</figcaption></figure>
     </div>
   </div>
 </section>
@@ -150,7 +160,7 @@
       <p>See every connected display and choose how each one shows music: <b>automatic</b> (full screen on the display that asked, a small bar everywhere else), always small, or always full screen.
         Start and stop the multiroom audio processes, adjust Snapcast groups, and play a stream URL through the whole house.</p>
     </div>
-    <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / devices</span></div><img class="zoom" src="assets/img/core-devices.jpg" alt="Music and devices page" loading="lazy" /></div>
+    <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / devices</span></div><img class="zoom" src="/assets/img/core-devices.webp" alt="Music and devices page" loading="lazy" /></div>
       <figcaption><b>Music &amp; Devices.</b> Displays, the music style on each one, Snapcast and now playing.</figcaption></figure>
   </div>
 </section>
@@ -160,36 +170,43 @@
     <p class="eyebrow">Next</p>
     <h2>How it stays this fast.</h2>
     <p>Graph memory, linked AI systems and a System-1 that answers before the big model wakes up.</p>
-    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="technology.html">Technology →</a></div>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="/technology">Technology →</a></div>
   </div></div>
 </section>
 </main>
-
 
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
         <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
         <p>Pronounced <b>AN-um un TEE</b>.</p>
       </div>
       <div>
         <h4>Product</h4>
         <ul>
-          <li><a href="index.html">Overview</a></li>
-          <li><a href="core.html">Anamanti Core</a></li>
-          <li><a href="display.html">Anamanti Display</a></li>
-          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+          <li><a href="/">Overview</a></li>
+          <li><a href="/core">Anamanti Core</a></li>
+          <li><a href="/display">Anamanti Display</a></li>
+          <li><a href="/hardware">Echo Show &amp; your own UI</a></li>
         </ul>
       </div>
       <div>
         <h4>Under the hood</h4>
         <ul>
-          <li><a href="integrations.html">Integrations</a></li>
-          <li><a href="technology.html">Technology</a></li>
-          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
-          <li><a href="technology.html#memory">Graph memory</a></li>
+          <li><a href="/integrations">Integrations</a></li>
+          <li><a href="/technology">Technology</a></li>
+          <li><a href="/technology#system1">System-1 fast decisions</a></li>
+          <li><a href="/technology#memory">Graph memory</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Get involved</h4>
+        <ul>
+          <li><a href="/join">Join the waitlist</a></li>
+          <li><a href="/join#contact">Contact us</a></li>
+          <li><a href="/install">Echo Show install guide</a></li>
         </ul>
       </div>
     </div>
@@ -200,6 +217,6 @@
   </div>
 </footer>
 
-<script src="assets/site.js" defer></script>
+<script src="/assets/site.js" defer></script>
 </body>
 </html>

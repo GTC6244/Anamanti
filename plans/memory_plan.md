@@ -1,8 +1,10 @@
 # Memory Plan — GraphRAG Memory for Anamanti
 
-Status: **IMPLEMENTED (v1)** — all four goals built and tested behind the
-`helix` cargo feature (on by default). SQLite remains the default runtime
-backend; HelixDB GraphRAG is opt-in via `ANAMANTI_MEMORY_BACKEND=helix`. This
+Status: **IMPLEMENTED (v1)** — all four goals built and tested. **Update:** HelixDB
+GraphRAG is now the **default** recall backend and is always compiled in (no `helix`
+feature gate); SQLite stays the store of record for facts and the full-text-search
+fallback, and `memory_backend: "sqlite"` in `anamanti.json` opts out (see agents.md
+"Memory" and architecture.md). The history below describes the original rollout. This
 plan layers a HelixDB-backed GraphRAG memory + chat-log pipeline onto the
 existing Mac-side Rust brain (`anamanti_core`, `/mac`).
 

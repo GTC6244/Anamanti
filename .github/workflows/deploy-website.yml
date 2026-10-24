@@ -26,6 +26,7 @@ on:
     branches: [main]
     paths:
       - "website/**"
+      - "website-worker/**"
       - "wrangler.jsonc"
       - ".github/workflows/deploy-website.yml"
   workflow_dispatch: {}

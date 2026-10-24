@@ -705,21 +705,34 @@ header/footer and screenshots from the live install. Pushed as-is; remaining wor
 - [x] Then replace the text-only "Full-screen moments" cards on `display.html` with these.
 
 **Content**
-- [ ] Real calls to action: there is no repo/docs/contact link yet (license is TBD). Decide
+- [x] (2026-10-23: waitlist + contact forms on /join, stored in D1 `anamanti-site`.) Real calls to action: there is no repo/docs/contact link yet (license is TBD). Decide
   whether to link GitHub, a waitlist, or nothing.
 - [ ] Re-word "in testing" when multilingual mode (en + pt-BR cross-language voiceprint + memory testing) and the Companion app ship; add languages as they pass.
 - [ ] Add Companion phone app screenshots once it's been tried against a live Core.
-- [ ] An Echo Show setup guide (LineageOS flash, AEC shim, installing the APK), or a link to one.
-- [ ] Product photo of a real Echo Show on a counter (the site only uses CSS bezels).
-- [ ] Reconcile doc nits found while writing: slideshow interval 5 s (README) vs 3 s
+- [x] An Echo Show setup guide (LineageOS flash, AEC shim, installing the APK), or a link to one.
+- [x] (2026-10-23: CC BY-SA photo by Fitzyraz with an Anamanti screen composited, credited on /hardware.) Product photo of a real Echo Show on a counter (the site only uses CSS bezels).
+- [x] Reconcile doc nits found while writing: slideshow interval 5 s (README) vs 3 s
   (DisplayUI.md); memory_plan.md header still says SQLite is the default recall backend.
 
 **Site plumbing**
-- [ ] Favicon + social share image (og:image is a relative path; make it absolute once the
+- [x] Favicon + social share image (og:image is a relative path; make it absolute once the
   domain is fixed).
-- [ ] Self-host the Google Fonts (privacy-consistent with the product's pitch).
-- [ ] Image weight: 4.6 MB of JPEGs. Add WebP/AVIF + `srcset`, or downscale the console shots.
-- [ ] Header/footer are duplicated across six pages (no build step). If pages grow, add a tiny
+- [x] Self-host the Google Fonts (privacy-consistent with the product's pitch).
+- [x] Image weight: 4.6 MB of JPEGs. Add WebP/AVIF + `srcset`, or downscale the console shots.
+- [x] (2026-10-23: website-src/build.py + partials.) Header/footer are duplicated across six pages (no build step). If pages grow, add a tiny
   include step to `deploy-website.yml`.
-- [ ] First deploy: confirm the renamed workflow (`deploy-website.yml`) runs on merge and that
+- [x] First deploy: confirm the renamed workflow (`deploy-website.yml`) runs on merge and that
   Cloudflare serves clean URLs (`/core` → `core.html`).
+
+**Added 2026-10-23 (domain, waitlist, guide)**
+- [ ] Screenshots still to capture: People / "Add a voice" enrollment flow; the music Up Next list.
+- [ ] Waitlist/contact notifications: nothing emails you when a form is submitted yet. Read them with
+  `npx wrangler d1 execute anamanti-site --remote --command "SELECT * FROM contact WHERE handled = 0"`,
+  or add an email/Slack hook in website-worker/index.js.
+- [ ] Spam: honeypot + 5/hour/IP rate limit only. Add Cloudflare Turnstile if spam shows up.
+- [x] (set 2026-10-23) Set an `IP_SALT` Worker secret (`npx wrangler secret put IP_SALT`) so IP hashes aren't
+  derivable from the default salt.
+- [ ] Install guide: re-check firmware ranges against the XDA first posts (they blocked automated
+  access); decide whether the Display APK link goes public or stays waitlist-only.
+- [ ] Confirm the CI token (`CLOUDFLARE_API_TOKEN`) has D1 + Workers Routes permissions, or keep
+  deploying routes/D1 changes locally with `npx wrangler deploy`.

@@ -1,11 +1,17 @@
 {
-  // Cloudflare Workers config for the Anamanti website.
+  // Cloudflare Workers config for the Anamanti website (https://www.anamanti.com).
   //
-  // The only Cloudflare-deployed content in this repo is the static website in
-  // `website/` (index.html plus one page per section, shared assets/). This is an
-  // "assets-only" Worker: it has no server code, it just serves that directory as
-  // static files. Clean URLs (/core -> core.html) come from Workers' default
-  // html_handling ("auto-trailing-slash").
+  // The static site lives in `website/` (index.html plus one page per section,
+  // shared assets/). A small Worker (`website-worker/index.js`) runs first on every
+  // request: it redirects the apex anamanti.com -> www.anamanti.com, handles the
+  // two form endpoints (POST /api/waitlist, POST /api/contact) backed by the D1
+  // database "anamanti-site", and hands everything else to the static assets.
+  // Clean URLs (/core -> core.html) come from the assets' default html_handling;
+  // unknown paths get website/404.html.
+  //
+  // D1 schema changes: add a file to website-worker/migrations/ and apply it with
+  //   npx wrangler d1 migrations apply anamanti-site --remote
+  // (CI does not run migrations.)
   //
   // Deployment is driven by GitHub Actions, not Cloudflare's Git integration:
   // see .github/workflows/deploy-website.yml, which runs `wrangler deploy`
@@ -13,8 +19,27 @@
   // "Workers Builds" Git integration (which ran on every push and failed on
   // PRs that never touched website/) should be disabled in the dashboard.
   "name": "anamanti",
+  "main": "website-worker/index.js",
   "compatibility_date": "2025-10-01",
   "assets": {
-    "directory": "./website"
-  }
+    "directory": "./website",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "404-page"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "anamanti-site",
+      "database_id": "9ba6b938-b9bd-43c9-a63f-a633994b445a",
+      "migrations_dir": "website-worker/migrations"
+    }
+  ],
+  // Zone routes on the existing proxied DNS records (no DNS changes needed).
+  "routes": [
+    { "pattern": "www.anamanti.com/*", "zone_name": "anamanti.com" },
+    { "pattern": "anamanti.com/*", "zone_name": "anamanti.com" }
+  ],
+  "workers_dev": true,
+  "observability": { "enabled": true }
 }

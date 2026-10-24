@@ -5,13 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Technology: graph memory, linked AI systems and System-1 speed</title>
 <meta name="description" content="How Anamanti works inside: an embedded HelixDB knowledge graph for memory, a team of specialised models per turn, a System-1 classifier and zero-model fast paths that answer before the big model is needed, and streaming throughout." />
+<link rel="canonical" href="https://www.anamanti.com/technology" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Anamanti" />
 <meta property="og:title" content="Technology: graph memory, linked AI systems and System-1 speed" />
 <meta property="og:description" content="How Anamanti works inside: an embedded HelixDB knowledge graph for memory, a team of specialised models per turn, a System-1 classifier and zero-model fast paths that answer before the big model is needed, and streaming throughout." />
-<meta property="og:image" content="assets/img/core-conversations.jpg" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="assets/site.css" />
+<meta property="og:url" content="https://www.anamanti.com/technology" />
+<meta property="og:image" content="https://www.anamanti.com/assets/img/og-card.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/assets/icons/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#0e0f13" />
+<link rel="preload" href="/assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/assets/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="stylesheet" href="/assets/site.css" />
 <style>
 .models { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 @media (max-width: 980px) { .models { grid-template-columns: repeat(2, 1fr); } }
@@ -28,15 +37,16 @@
 
 <header class="site-header">
   <div class="wrap nav-inner">
-    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
     <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav class="nav-links" id="site-nav" aria-label="Main">
-      <a href="index.html">Overview</a>
-      <a href="core.html">The Core</a>
-      <a href="display.html">The Display</a>
-      <a href="hardware.html">UI/UX</a>
-      <a href="integrations.html">Integrations</a>
-      <a href="technology.html" aria-current="page">Technology</a>
+      <a href="/">Overview</a>
+      <a href="/core">The Core</a>
+      <a href="/display">The Display</a>
+      <a href="/hardware">UI/UX</a>
+      <a href="/integrations">Integrations</a>
+      <a href="/technology" aria-current="page">Technology</a>
+      <a class="nav-cta" href="/join">Join the waitlist</a>
     </nav>
   </div>
 </header>
@@ -75,7 +85,7 @@
         <p>On the calibration set it scored <b>22 of 22 at a 0.85 threshold, with zero wrong resolutions</b>. One global threshold was enough; no per-intent tuning was needed.</p>
         <p>System-1 can run <b>locally</b> through Laya-Decision, a non-autoregressive ModernBERT classifier in Rust, or as a <b>hosted</b> classifier (Jev, on OpenRouter). Both use the same contract, so you can swap them from the console.</p>
       </div>
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / conversations</span></div><img class="zoom" src="assets/img/core-conversations.jpg" alt="A turn answered by System-1 in 461 ms" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / conversations</span></div><img class="zoom" src="/assets/img/core-conversations.webp" alt="A turn answered by System-1 in 461 ms" loading="lazy" /></div>
         <figcaption><b>A real System-1 turn.</b> “I'm all done, thank you” → <i>end_session</i>. Speech-to-text took 126 ms, the System-1 decision 203 ms and the first audio 60 ms: <b>461 ms</b> from the end of speech to the reply, with no call to the large model.</figcaption></figure>
     </div>
   </div>
@@ -164,9 +174,9 @@
       </div>
     </div>
     <div class="gallery two" style="margin-top:44px">
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory</span></div><img class="zoom" src="assets/img/core-memory.jpg" alt="Memory settings: local embeddings, entity extraction, stores" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory</span></div><img class="zoom" src="/assets/img/core-memory.webp" alt="Memory settings: local embeddings, entity extraction, stores" loading="lazy" /></div>
         <figcaption><b>Recall settings.</b> A live graph of 1,722 nodes, local 768-dimension embeddings, and cloud entity extraction labelled as such.</figcaption></figure>
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory#graph</span></div><img class="zoom" src="assets/img/core-memory-graph.jpg" alt="Graph browser listing extracted entities" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory#graph</span></div><img class="zoom" src="/assets/img/core-memory-graph.webp" alt="Graph browser listing extracted entities" loading="lazy" /></div>
         <figcaption><b>The graph, browsable.</b> Extracted places, topics and things. Rename an entity and it changes everywhere.</figcaption></figure>
     </div>
   </div>
@@ -200,39 +210,46 @@
 
 <section class="next">
   <div class="wrap"><div class="next-box">
-    <p class="eyebrow">Back to the start</p>
+    <p class="eyebrow">Get involved</p>
     <h2>The soul of your home, given a voice.</h2>
     <p>Private, fast, and built from hardware you can find in a drawer.</p>
-    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="index.html">Overview</a><a class="btn btn-ghost" href="core.html">The Core</a></div>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="/join">Join the waitlist</a><a class="btn btn-ghost" href="/">Overview</a></div>
   </div></div>
 </section>
 </main>
-
 
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
         <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
         <p>Pronounced <b>AN-um un TEE</b>.</p>
       </div>
       <div>
         <h4>Product</h4>
         <ul>
-          <li><a href="index.html">Overview</a></li>
-          <li><a href="core.html">Anamanti Core</a></li>
-          <li><a href="display.html">Anamanti Display</a></li>
-          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+          <li><a href="/">Overview</a></li>
+          <li><a href="/core">Anamanti Core</a></li>
+          <li><a href="/display">Anamanti Display</a></li>
+          <li><a href="/hardware">Echo Show &amp; your own UI</a></li>
         </ul>
       </div>
       <div>
         <h4>Under the hood</h4>
         <ul>
-          <li><a href="integrations.html">Integrations</a></li>
-          <li><a href="technology.html">Technology</a></li>
-          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
-          <li><a href="technology.html#memory">Graph memory</a></li>
+          <li><a href="/integrations">Integrations</a></li>
+          <li><a href="/technology">Technology</a></li>
+          <li><a href="/technology#system1">System-1 fast decisions</a></li>
+          <li><a href="/technology#memory">Graph memory</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Get involved</h4>
+        <ul>
+          <li><a href="/join">Join the waitlist</a></li>
+          <li><a href="/join#contact">Contact us</a></li>
+          <li><a href="/install">Echo Show install guide</a></li>
         </ul>
       </div>
     </div>
@@ -243,6 +260,6 @@
   </div>
 </footer>
 
-<script src="assets/site.js" defer></script>
+<script src="/assets/site.js" defer></script>
 </body>
 </html>
