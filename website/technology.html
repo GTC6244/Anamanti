@@ -138,6 +138,7 @@
           Durable facts live in <b>SQLite</b>. If the embedder ever fails, recall falls back to SQLite full-text search, so a turn always gets some memories.</p>
         <p><b>Local embeddings, swappable live.</b> nomic-embed-text runs on the Mac with no key and no network. Switch to OpenAI embeddings and back from the console:
           each backend keeps its own index, so switching re-embeds nothing and loses nothing.</p>
+        <p><b>Across languages.</b> A voiceprint describes how you sound, not which language you're speaking, so the same person should be recognised in English or Portuguese, and something said in one language should be recalled when asked in the other. We're testing exactly that with English and Brazilian Portuguese now, before adding more languages.</p>
         <p><b>Scoped to the speaker.</b> Each memory belongs to a <b>person</b>, the <b>household</b>, or an <b>unknown</b> voice. Things an unknown voice says are kept
           but never recalled for anyone until you review them, so a guest can't plant facts about you.</p>
       </div>
