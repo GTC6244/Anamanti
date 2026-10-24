@@ -700,8 +700,8 @@ header/footer and screenshots from the live install. Pushed as-is; remaining wor
 - [x] Place card. (captured 2026-10-23 on Office)
 - [x] Live camera view (decide if the front-door feed is OK to publish). (captured 2026-10-23 on Office)
   - [x] Confirm the front-door frame (`display-camera.jpg`: porch, driveway, a parked car) is OK public. (owner OK, 2026-10-23)
-- [x] Full-screen radio player (captured). Still open: Spotify now-playing + Up Next with neutral album art.
-- [ ] People / "Add a voice" enrolment flow; away-mode dim clock.
+- [x] Full-screen radio + Spotify now-playing and the compact bar (captured 2026-10-23). Up Next list not yet captured.
+- [ ] People / "Add a voice" enrolment flow. (Away-mode dim clock captured 2026-10-23.)
 - [x] Then replace the text-only "Full-screen moments" cards on `display.html` with these.
 
 **Content**
