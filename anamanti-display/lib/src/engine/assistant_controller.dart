@@ -117,8 +117,11 @@ typedef OrchestratorProbe = Future<bool> Function();
 /// Sends a music transport/volume command from the on-screen controls to the Core.
 /// `action` ∈ `pause`/`resume`/`next`/`previous`/`volume`; `value` is the 0–100 percent
 /// for `volume`. Production wires the native [musicControl] (a short-lived control
-/// round-trip); null (the default, for tests) disables it so taps are no-ops.
-typedef MusicControlSink = void Function({required String action, int? value});
+/// round-trip); null (the default, for tests) disables it so taps are no-ops. The
+/// returned future (if any) completes when the round-trip does — volume changes use it
+/// to keep a single request in flight (see [AssistantController.setMusicVolume]).
+typedef MusicControlSink =
+    FutureOr<void> Function({required String action, int? value});
 
 /// Pushes the current music-screen state down to the native engine, so the next voice
 /// turn's `audio-start` tells the orchestrator a music screen is up (what's playing + which
@@ -1561,8 +1564,9 @@ class AssistantController extends ChangeNotifier {
       }
       return;
     }
-    final music = MusicData.tryParse(nowPlayingJson);
-    if (music != null) {
+    final parsed = MusicData.tryParse(nowPlayingJson);
+    if (parsed != null) {
+      final music = _withPendingVolume(parsed);
       // Radio has no queue: a station starting while the up-next list is open falls
       // back to the now-playing view.
       var screen = music.isRadio && _state.musicScreen == MusicScreen.nextUp
@@ -1751,8 +1755,72 @@ class AssistantController extends ChangeNotifier {
   }
 
   /// Set the music volume (0–100 percent).
-  void setMusicVolume(int percent) =>
-      _musicControl?.call(action: 'volume', value: percent.clamp(0, 100));
+  ///
+  /// The new level shows at once (the slider/stepper move under the finger instead of
+  /// waiting for the Core's next push), and the requests are **coalesced**: at most one
+  /// is in flight, and when it lands only the latest wanted level is sent next. A slider
+  /// drag fires dozens of `onChanged` events; sending each as its own round-trip queued
+  /// them up behind one another, so the audio crawled to the final level long after
+  /// the finger lifted (and a `+` tap stepped from the stale pushed level).
+  void setMusicVolume(int percent) {
+    final sink = _musicControl;
+    if (sink == null) return;
+    final level = percent.clamp(0, 100);
+    _pendingVolume = level;
+    _pendingVolumeAt = DateTime.now();
+    final music = _state.music;
+    if (music != null && music.volumePercent != level) {
+      _emit(_state.copyWith(music: music.withVolume(level)));
+    }
+    if (!_volumeInFlight) unawaited(_sendVolume(sink));
+  }
+
+  /// Send the latest [_pendingVolume] until the Core has been sent the newest one.
+  Future<void> _sendVolume(MusicControlSink sink) async {
+    _volumeInFlight = true;
+    int? sent;
+    try {
+      while (_pendingVolume != null && _pendingVolume != sent) {
+        sent = _pendingVolume;
+        try {
+          final pending = sink(action: 'volume', value: sent);
+          if (pending is Future) await pending;
+        } catch (e) {
+          debugPrint('music volume: $e');
+        }
+      }
+    } finally {
+      _volumeInFlight = false;
+    }
+  }
+
+  /// The level this display last asked for and when — so a push read *before* the Core
+  /// applied it (the periodic tick, or Spotify still reporting the old level) can't
+  /// yank the slider back. Cleared once a push agrees, or after [_pendingVolumeWindow].
+  int? _pendingVolume;
+  DateTime? _pendingVolumeAt;
+  bool _volumeInFlight = false;
+  static const _pendingVolumeWindow = Duration(seconds: 4);
+
+  /// The volume to show for a pushed [music] snapshot: the pushed level, unless a
+  /// local change is still in flight or very recent (then the requested one).
+  MusicData _withPendingVolume(MusicData music) {
+    final pending = _pendingVolume;
+    final at = _pendingVolumeAt;
+    if (pending == null || at == null) return music;
+    // While a send is in flight the pending level must survive (the sender loop reads
+    // it), even if a stale push happens to match it.
+    if (_volumeInFlight) {
+      return music.volumePercent == pending ? music : music.withVolume(pending);
+    }
+    final fresh = DateTime.now().difference(at) < _pendingVolumeWindow;
+    if (music.volumePercent == pending || !fresh) {
+      _pendingVolume = null;
+      _pendingVolumeAt = null;
+      return music;
+    }
+    return music.withVolume(pending);
+  }
 
   /// Mirror the latest global font scale (from [AppSettings.fontScale]) after the app
   /// shell applies a voice adjustment, and re-push the font context so the next turn

@@ -490,6 +490,11 @@ pub fn clear_memories(orchestrator_key: String, discovery_timeout_secs: u64) -> 
     })
 }
 
+/// The Core the on-screen music controls last reached, kept for the life of the process
+/// so a burst of taps (a volume drag) skips the per-call mDNS browse. See
+/// [`control::music_control`] for how a stale entry is dropped.
+static MUSIC_CONTROL_CACHE: EndpointCache = EndpointCache::new();
+
 /// Issue a music transport/volume command from the display's on-screen controls
 /// (`action` = `pause`/`resume`/`next`/`previous`/`volume`). Returns the orchestrator's
 /// short confirmation; an in-band failure (Spotify not linked, device asleep, unknown
@@ -502,9 +507,8 @@ pub fn music_control(
     discovery_timeout_secs: u64,
 ) -> Result<String> {
     block_on(async move {
-        let cache = EndpointCache::new();
         control::music_control(
-            &cache,
+            &MUSIC_CONTROL_CACHE,
             timeout(discovery_timeout_secs),
             preferred(&orchestrator_key),
             &action,
