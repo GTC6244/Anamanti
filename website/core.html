@@ -5,13 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Anamanti Core: the engine and how a turn works</title>
 <meta name="description" content="Anamanti Core is the brain of the house: a Rust service on your Mac that hears, decides, remembers, acts and speaks, with a console that shows every stage and where it runs." />
+<link rel="canonical" href="https://www.anamanti.com/core" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Anamanti" />
 <meta property="og:title" content="Anamanti Core: the engine and how a turn works" />
 <meta property="og:description" content="Anamanti Core is the brain of the house: a Rust service on your Mac that hears, decides, remembers, acts and speaks, with a console that shows every stage and where it runs." />
-<meta property="og:image" content="assets/img/core-overview.jpg" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="assets/site.css" />
+<meta property="og:url" content="https://www.anamanti.com/core" />
+<meta property="og:image" content="https://www.anamanti.com/assets/img/og-card.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/assets/icons/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#0e0f13" />
+<link rel="preload" href="/assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/assets/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="stylesheet" href="/assets/site.css" />
 <style>
 .tools-list { columns: 3; column-gap: 28px; }
 @media (max-width: 900px) { .tools-list { columns: 2; } }
@@ -27,15 +36,16 @@
 
 <header class="site-header">
   <div class="wrap nav-inner">
-    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
     <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav class="nav-links" id="site-nav" aria-label="Main">
-      <a href="index.html">Overview</a>
-      <a href="core.html" aria-current="page">The Core</a>
-      <a href="display.html">The Display</a>
-      <a href="hardware.html">UI/UX</a>
-      <a href="integrations.html">Integrations</a>
-      <a href="technology.html">Technology</a>
+      <a href="/">Overview</a>
+      <a href="/core" aria-current="page">The Core</a>
+      <a href="/display">The Display</a>
+      <a href="/hardware">UI/UX</a>
+      <a href="/integrations">Integrations</a>
+      <a href="/technology">Technology</a>
+      <a class="nav-cta" href="/join">Join the waitlist</a>
     </nav>
   </div>
 </header>
@@ -52,7 +62,7 @@
     </div>
     <figure>
       <div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / overview</span></div>
-        <img class="zoom" src="assets/img/core-overview.jpg" alt="Anamanti Core overview page" /></div>
+        <img class="zoom" src="/assets/img/core-overview.webp" alt="Anamanti Core overview page" /></div>
       <figcaption><b>Overview.</b> Each pipeline stage with its health and a Local, Your network or Cloud label, the three connected displays, per-stage latency, and the last few turns tagged with who spoke.</figcaption>
     </figure>
   </div>
@@ -73,7 +83,7 @@
       <div class="stage"><h4>Remember &amp; act</h4><p>Recall from the memory graph, then up to four rounds of tool calls: lights, timers, music, recipes, search.</p><span class="loc local">Mac</span> <span class="loc lan">+ services</span></div>
       <div class="stage"><h4>Speak</h4><p>Piper voices each sentence the moment it's complete, so you hear the answer while the rest is still being written.</p><span class="loc local">On this Mac</span></div>
     </div>
-    <p style="color:var(--faint);font-size:.9rem;margin-top:22px">Want the details on how “Decide” stays fast? See <a class="link" href="technology.html#system1">System-1 and the fast paths</a>.</p>
+    <p style="color:var(--faint);font-size:.9rem;margin-top:22px">Want the details on how “Decide” stays fast? See <a class="link" href="/technology#system1">System-1 and the fast paths</a>.</p>
   </div>
 </section>
 
@@ -102,7 +112,7 @@
     <div class="section-head">
       <p class="eyebrow">Voice tools</p>
       <h2>24 things it can do, not just say.</h2>
-      <p>Tools are offered to the model only when they're configured, so the assistant never claims an ability it doesn't have. See <a href="integrations.html">Integrations</a> for the services behind them.</p>
+      <p>Tools are offered to the model only when they're configured, so the assistant never claims an ability it doesn't have. See <a href="/integrations">Integrations</a> for the services behind them.</p>
     </div>
     <div class="tools-list">
       <div><h4>Kitchen</h4><p>Set, adjust and cancel timers. Find a recipe and walk through it step by step on screen.</p></div>
@@ -125,17 +135,17 @@
       <p>The Core serves an admin console that only the Mac itself can open. Each page is designed to fit one screen. Changes apply live, and every option that touches the internet says exactly what it sends.</p>
     </div>
     <div class="gallery two">
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / conversations</span></div><img class="zoom" src="assets/img/core-conversations.jpg" alt="Conversations page with per-turn latency waterfall" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / conversations</span></div><img class="zoom" src="/assets/img/core-conversations.webp" alt="Conversations page with per-turn latency waterfall" loading="lazy" /></div>
         <figcaption><b>Conversations.</b> Every turn: what was heard, what was said, who said it, which path answered it, and a latency waterfall. This one was answered by System-1 in 461 ms from end of speech, with no call to the big model.</figcaption></figure>
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / intelligence</span></div><img class="zoom" src="assets/img/core-intelligence.jpg" alt="Intelligence page with language model and System-1 settings" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / intelligence</span></div><img class="zoom" src="/assets/img/core-intelligence.webp" alt="Intelligence page with language model and System-1 settings" loading="lazy" /></div>
         <figcaption><b>Intelligence.</b> The language model, engine and authentication; the System-1 fast path and its confidence threshold; web search; and the system prompt.</figcaption></figure>
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / voice</span></div><img class="zoom" src="assets/img/core-voice.jpg" alt="Voice page with speech-to-text engines, end-of-speech and text-to-speech" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / voice</span></div><img class="zoom" src="/assets/img/core-voice.webp" alt="Voice page with speech-to-text engines, end-of-speech and text-to-speech" loading="lazy" /></div>
         <figcaption><b>Voice.</b> Three speech-to-text engines, the end-of-speech detector, transcript fixes, 174 Piper voices and the household's languages.</figcaption></figure>
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / personality</span></div><img class="zoom" src="assets/img/core-personality.jpg" alt="Personality editor" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / personality</span></div><img class="zoom" src="/assets/img/core-personality.webp" alt="Personality editor" loading="lazy" /></div>
         <figcaption><b>Personality.</b> An editable catalog of speaking styles. They affect how replies sound only, never facts, memory or tools.</figcaption></figure>
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / devices</span></div><img class="zoom" src="assets/img/core-devices.jpg" alt="Music and devices page" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / devices</span></div><img class="zoom" src="/assets/img/core-devices.webp" alt="Music and devices page" loading="lazy" /></div>
         <figcaption><b>Music &amp; Devices.</b> Connected displays, the music style on each one, multiroom audio processes and a test notification.</figcaption></figure>
-      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory</span></div><img class="zoom" src="assets/img/core-memory.jpg" alt="Memory page with embeddings and entity extraction" loading="lazy" /></div>
+      <figure><div class="browser"><div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8730 / memory</span></div><img class="zoom" src="/assets/img/core-memory.webp" alt="Memory page with embeddings and entity extraction" loading="lazy" /></div>
         <figcaption><b>Memory.</b> The embedding backend (switchable live with nothing lost), cloud entity extraction with an off switch, and where everything is stored.</figcaption></figure>
     </div>
   </div>
@@ -146,36 +156,43 @@
     <p class="eyebrow">Next</p>
     <h2>Meet the face of the house.</h2>
     <p>The Core is the brain. The Display is what the family sees and talks to every day.</p>
-    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="display.html">The Display →</a><a class="btn btn-ghost" href="technology.html">The technology</a></div>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="/display">The Display →</a><a class="btn btn-ghost" href="/technology">The technology</a></div>
   </div></div>
 </section>
 </main>
-
 
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
         <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
         <p>Pronounced <b>AN-um un TEE</b>.</p>
       </div>
       <div>
         <h4>Product</h4>
         <ul>
-          <li><a href="index.html">Overview</a></li>
-          <li><a href="core.html">Anamanti Core</a></li>
-          <li><a href="display.html">Anamanti Display</a></li>
-          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+          <li><a href="/">Overview</a></li>
+          <li><a href="/core">Anamanti Core</a></li>
+          <li><a href="/display">Anamanti Display</a></li>
+          <li><a href="/hardware">Echo Show &amp; your own UI</a></li>
         </ul>
       </div>
       <div>
         <h4>Under the hood</h4>
         <ul>
-          <li><a href="integrations.html">Integrations</a></li>
-          <li><a href="technology.html">Technology</a></li>
-          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
-          <li><a href="technology.html#memory">Graph memory</a></li>
+          <li><a href="/integrations">Integrations</a></li>
+          <li><a href="/technology">Technology</a></li>
+          <li><a href="/technology#system1">System-1 fast decisions</a></li>
+          <li><a href="/technology#memory">Graph memory</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Get involved</h4>
+        <ul>
+          <li><a href="/join">Join the waitlist</a></li>
+          <li><a href="/join#contact">Contact us</a></li>
+          <li><a href="/install">Echo Show install guide</a></li>
         </ul>
       </div>
     </div>
@@ -186,6 +203,6 @@
   </div>
 </footer>
 
-<script src="assets/site.js" defer></script>
+<script src="/assets/site.js" defer></script>
 </body>
 </html>

@@ -5,13 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Anamanti Display: the app in every room</title>
 <meta name="description" content="Anamanti Display turns a screen in each room into a calm photo frame that becomes a live, voice-driven assistant: conversation, recipes, timers, music, weather, places, the camera and notifications." />
+<link rel="canonical" href="https://www.anamanti.com/display" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Anamanti" />
 <meta property="og:title" content="Anamanti Display: the app in every room" />
 <meta property="og:description" content="Anamanti Display turns a screen in each room into a calm photo frame that becomes a live, voice-driven assistant: conversation, recipes, timers, music, weather, places, the camera and notifications." />
-<meta property="og:image" content="assets/img/display-idle.jpg" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="assets/site.css" />
+<meta property="og:url" content="https://www.anamanti.com/display" />
+<meta property="og:image" content="https://www.anamanti.com/assets/img/og-card.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/assets/icons/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#0e0f13" />
+<link rel="preload" href="/assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/assets/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="stylesheet" href="/assets/site.css" />
 <style>
 .feature-row { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 52px; align-items: center; padding: 30px 0; border-bottom: 1px solid var(--border); }
 .feature-row:last-child { border-bottom: none; }
@@ -33,15 +42,16 @@
 
 <header class="site-header">
   <div class="wrap nav-inner">
-    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
     <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav class="nav-links" id="site-nav" aria-label="Main">
-      <a href="index.html">Overview</a>
-      <a href="core.html">The Core</a>
-      <a href="display.html" aria-current="page">The Display</a>
-      <a href="hardware.html">UI/UX</a>
-      <a href="integrations.html">Integrations</a>
-      <a href="technology.html">Technology</a>
+      <a href="/">Overview</a>
+      <a href="/core">The Core</a>
+      <a href="/display" aria-current="page">The Display</a>
+      <a href="/hardware">UI/UX</a>
+      <a href="/integrations">Integrations</a>
+      <a href="/technology">Technology</a>
+      <a class="nav-cta" href="/join">Join the waitlist</a>
     </nav>
   </div>
 </header>
@@ -57,7 +67,7 @@
       <p style="color:var(--faint)">Built in Flutter on a Rust real-time engine, tuned for a memory-tight 8-inch screen in landscape.</p>
     </div>
     <figure>
-      <div class="device lg"><img class="zoom" src="assets/img/display-idle.jpg" alt="Display idle screen with a street-festival photo, clock, weather and music bar" /></div>
+      <div class="device lg"><img class="zoom" src="/assets/img/display-idle.webp" alt="Display idle screen with a street-festival photo, clock, weather and music bar" /></div>
       <div class="device-stand"></div>
       <figcaption><b>Idle.</b> A photo slideshow from Google Drive or Google Photos, the clock, the weather from the Core, and a compact music bar while something plays. Swipe to change the photo.</figcaption>
     </figure>
@@ -75,12 +85,12 @@
           so you can see the assistant is hearing you from across the room.</p>
         <p>When you stop speaking, your words appear on screen and the reply streams in word by word while it's being spoken. The phase (listening, thinking, speaking) sits quietly in the corner.</p>
       </div>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-listening-live.jpg" alt="The listening ring glowing over the weather screen during a follow-up question" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-listening-live.webp" alt="The listening ring glowing over the weather screen during a follow-up question" loading="lazy" /></div>
         <figcaption><b>Listening, mid-conversation.</b> A follow-up question over the weather screen: no wake word needed, and the ring swells while you speak.</figcaption></figure>
     </div>
 
     <div class="feature-row flip">
-      <figure><div class="device"><img class="zoom" src="assets/img/display-conversation.jpg" alt="Conversation panel: the assistant asks which Home Depot location" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-conversation.webp" alt="Conversation panel: the assistant asks which Home Depot location" loading="lazy" /></div>
         <figcaption><b>A real exchange.</b> “How is the nearest Home Depot to me open?” It finds three nearby and asks which one, rather than guessing.</figcaption></figure>
       <div>
         <p class="eyebrow">Conversation</p>
@@ -93,9 +103,9 @@
     <div class="feature-row flip">
       <figure>
         <div class="tabs3">
-          <div class="device"><img class="zoom" src="assets/img/display-recipe-overview.jpg" alt="Recipe overview tab" loading="lazy" /></div>
-          <div class="device"><img class="zoom" src="assets/img/display-recipe-ingredients.jpg" alt="Recipe ingredients tab" loading="lazy" /></div>
-          <div class="device"><img class="zoom" src="assets/img/display-recipe-steps.jpg" alt="Recipe steps tab" loading="lazy" /></div>
+          <div class="device"><img class="zoom" src="/assets/img/display-recipe-overview.webp" alt="Recipe overview tab" loading="lazy" /></div>
+          <div class="device"><img class="zoom" src="/assets/img/display-recipe-ingredients.webp" alt="Recipe ingredients tab" loading="lazy" /></div>
+          <div class="device"><img class="zoom" src="/assets/img/display-recipe-steps.webp" alt="Recipe steps tab" loading="lazy" /></div>
         </div>
         <figcaption><b>Recipe mode.</b> Overview, Ingredients and Steps tabs, all voice-driven.</figcaption>
       </figure>
@@ -115,7 +125,7 @@
         <p>Each display keeps a channel open to the Core, so the Core can put things on screen without anyone speaking: banners marked
           info, reminder or alert, the ambient weather, and the current track. Banners close on their own after a short while or with a tap.</p>
       </div>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-notification.jpg" alt="A reminder banner over the slideshow" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-notification.webp" alt="A reminder banner over the slideshow" loading="lazy" /></div>
         <figcaption><b>A reminder banner</b> pushed from the Core, over the slideshow and the music bar.</figcaption></figure>
     </div>
 
@@ -130,23 +140,23 @@
       <p>Spoken answers are short. When the answer is something you'll want to look at, the display opens a dedicated screen, and it closes by voice, by tap, or on its own.</p>
     </div>
     <div class="gallery small-device">
-      <figure><div class="device"><img class="zoom" src="assets/img/display-weather-today.jpg" alt="Full-screen weather: current conditions and a 10-hour row" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-weather-today.webp" alt="Full-screen weather: current conditions and a 10-hour row" loading="lazy" /></div>
         <figcaption><b>Weather.</b> Today's conditions with a 10-hour row. It closes itself after a minute.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-weather-week.jpg" alt="Seven-day forecast" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-weather-week.webp" alt="Seven-day forecast" loading="lazy" /></div>
         <figcaption><b>The week.</b> “What's the weather this week?” opens the 7-day view.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-place.jpg" alt="Place card for The Home Depot with hours and Open now" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-place.webp" alt="Place card for The Home Depot with hours and Open now" loading="lazy" /></div>
         <figcaption><b>Place cards.</b> Photo, category, open now, rating, address, phone and hours.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-timers.jpg" alt="Three full-screen timers labelled toast, eggs and bacon" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-timers.webp" alt="Three full-screen timers labelled toast, eggs and bacon" loading="lazy" /></div>
         <figcaption><b>Timers.</b> Toast, eggs and bacon, side by side with draining rings. They shrink to a chip row while you talk.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-radio.jpg" alt="Full-screen live radio player" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-radio.webp" alt="Full-screen live radio player" loading="lazy" /></div>
         <figcaption><b>Radio.</b> Your stations, with the logo and a LIVE badge.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-camera.jpg" alt="Live front-door camera view" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-camera.webp" alt="Live front-door camera view" loading="lazy" /></div>
         <figcaption><b>Live camera.</b> “Show me the front door.” Straight from the NVR, about 1–3 s behind real time.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-spotify.jpg" alt="Full-screen Spotify now-playing" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-spotify.webp" alt="Full-screen Spotify now-playing" loading="lazy" /></div>
         <figcaption><b>Now playing.</b> Spotify full screen, with artwork, progress, volume and a tappable Up Next queue.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-music-compact.jpg" alt="Compact music bar beside the clock" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-music-compact.webp" alt="Compact music bar beside the clock" loading="lazy" /></div>
         <figcaption><b>Compact bar.</b> The same track as a small bar beside the clock, which is what the other rooms show.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-away.jpg" alt="Away mode: a dim clock on black" loading="lazy" /></div>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-away.webp" alt="Away mode: a dim clock on black" loading="lazy" /></div>
         <figcaption><b>Away mode.</b> Nobody in the room? Just a dim clock. The camera senses motion only; nothing is stored or sent.</figcaption></figure>
     </div>
   </div>
@@ -160,10 +170,10 @@
       <p>Six sections, each designed to fit the 8-inch screen without scrolling. Changes apply immediately, with no Save button. Anything sensitive, such as keys, lives only in the Core's console on the Mac.</p>
     </div>
     <div class="gallery two small-device">
-      <figure><div class="device"><img class="zoom" src="assets/img/display-settings-assistant.jpg" alt="Assistant settings: language model and voice" loading="lazy" /></div><figcaption><b>Assistant.</b> Pick the language model and voice, and see which capabilities are switched on.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-settings-listening.jpg" alt="Listening settings: wake word and sensitivity" loading="lazy" /></div><figcaption><b>Listening.</b> Wake word, idle and while-speaking sensitivity, capture gain and detection tuning.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-settings-audio.jpg" alt="Audio diagnostics: mic level and wake word score" loading="lazy" /></div><figcaption><b>Audio diagnostics.</b> Live mic level and wake-word score, so you can tune a room in seconds.</figcaption></figure>
-      <figure><div class="device"><img class="zoom" src="assets/img/display-settings-household.jpg" alt="Household settings: people, link a phone, memory" loading="lazy" /></div><figcaption><b>Household.</b> Enrol voices, pair family phones for messages, and browse or delete what the assistant remembers.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-assistant.webp" alt="Assistant settings: language model and voice" loading="lazy" /></div><figcaption><b>Assistant.</b> Pick the language model and voice, and see which capabilities are switched on.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-listening.webp" alt="Listening settings: wake word and sensitivity" loading="lazy" /></div><figcaption><b>Listening.</b> Wake word, idle and while-speaking sensitivity, capture gain and detection tuning.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-audio.webp" alt="Audio diagnostics: mic level and wake word score" loading="lazy" /></div><figcaption><b>Audio diagnostics.</b> Live mic level and wake-word score, so you can tune a room in seconds.</figcaption></figure>
+      <figure><div class="device"><img class="zoom" src="/assets/img/display-settings-household.webp" alt="Household settings: people, link a phone, memory" loading="lazy" /></div><figcaption><b>Household.</b> Enrol voices, pair family phones for messages, and browse or delete what the assistant remembers.</figcaption></figure>
     </div>
   </div>
 </section>
@@ -194,36 +204,43 @@
     <p class="eyebrow">Next</p>
     <h2>Run it on any screen you like.</h2>
     <p>We built a path for repurposing secondhand Echo Shows, but a phone, tablet, TV or your own client works too.</p>
-    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="hardware.html">UI/UX →</a></div>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="/hardware">UI/UX →</a></div>
   </div></div>
 </section>
 </main>
-
 
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
         <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
         <p>Pronounced <b>AN-um un TEE</b>.</p>
       </div>
       <div>
         <h4>Product</h4>
         <ul>
-          <li><a href="index.html">Overview</a></li>
-          <li><a href="core.html">Anamanti Core</a></li>
-          <li><a href="display.html">Anamanti Display</a></li>
-          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+          <li><a href="/">Overview</a></li>
+          <li><a href="/core">Anamanti Core</a></li>
+          <li><a href="/display">Anamanti Display</a></li>
+          <li><a href="/hardware">Echo Show &amp; your own UI</a></li>
         </ul>
       </div>
       <div>
         <h4>Under the hood</h4>
         <ul>
-          <li><a href="integrations.html">Integrations</a></li>
-          <li><a href="technology.html">Technology</a></li>
-          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
-          <li><a href="technology.html#memory">Graph memory</a></li>
+          <li><a href="/integrations">Integrations</a></li>
+          <li><a href="/technology">Technology</a></li>
+          <li><a href="/technology#system1">System-1 fast decisions</a></li>
+          <li><a href="/technology#memory">Graph memory</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Get involved</h4>
+        <ul>
+          <li><a href="/join">Join the waitlist</a></li>
+          <li><a href="/join#contact">Contact us</a></li>
+          <li><a href="/install">Echo Show install guide</a></li>
         </ul>
       </div>
     </div>
@@ -234,6 +251,6 @@
   </div>
 </footer>
 
-<script src="assets/site.js" defer></script>
+<script src="/assets/site.js" defer></script>
 </body>
 </html>

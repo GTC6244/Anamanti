@@ -5,13 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Hardware: repurposed Echo Show 8, or any screen you like</title>
 <meta name="description" content="Why Anamanti runs on secondhand Echo Show 8 displays with far-field microphones and real echo cancellation, and how to bring your own front end instead." />
+<link rel="canonical" href="https://www.anamanti.com/hardware" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Anamanti" />
 <meta property="og:title" content="Hardware: repurposed Echo Show 8, or any screen you like" />
 <meta property="og:description" content="Why Anamanti runs on secondhand Echo Show 8 displays with far-field microphones and real echo cancellation, and how to bring your own front end instead." />
-<meta property="og:image" content="assets/img/display-settings-audio.jpg" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="assets/site.css" />
+<meta property="og:url" content="https://www.anamanti.com/hardware" />
+<meta property="og:image" content="https://www.anamanti.com/assets/img/og-card.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/assets/icons/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#0e0f13" />
+<link rel="preload" href="/assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/assets/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="stylesheet" href="/assets/site.css" />
 <style>
 .spec td:first-child { width: 34%; }
 .byo { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
@@ -28,15 +37,16 @@
 
 <header class="site-header">
   <div class="wrap nav-inner">
-    <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+    <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
     <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
     <nav class="nav-links" id="site-nav" aria-label="Main">
-      <a href="index.html">Overview</a>
-      <a href="core.html">The Core</a>
-      <a href="display.html">The Display</a>
-      <a href="hardware.html" aria-current="page">UI/UX</a>
-      <a href="integrations.html">Integrations</a>
-      <a href="technology.html">Technology</a>
+      <a href="/">Overview</a>
+      <a href="/core">The Core</a>
+      <a href="/display">The Display</a>
+      <a href="/hardware" aria-current="page">UI/UX</a>
+      <a href="/integrations">Integrations</a>
+      <a href="/technology">Technology</a>
+      <a class="nav-cta" href="/join">Join the waitlist</a>
     </nav>
   </div>
 </header>
@@ -49,13 +59,13 @@
       <h1>The best ears in the house are already in a drawer somewhere.</h1>
       <p class="lede">Smart displays were built around one hard problem: hearing you from across a noisy room while they play music. The first-generation
         Echo Show 8 solves it with a far-field microphone array, a good speaker and an 8-inch screen, and it's easy to find secondhand for not much money.</p>
-      <p class="lede">So we've built a pathway to repurpose it: reflash it with LineageOS, add echo cancellation, and run the Anamanti Display app. No Amazon account and no Amazon cloud.</p>
+      <p class="lede">So we've built a pathway to repurpose it: reflash it with LineageOS, add echo cancellation, and run the Anamanti Display app. No Amazon account and no Amazon cloud. <a class="link" href="/install">Read the install guide.</a></p>
       <p style="color:var(--faint)">It's one option, not a requirement. The Core speaks an open protocol, so you can use whatever you want for the UI: a phone, a tablet, a TV, a Raspberry Pi or something you build yourself. <a href="#your-ui">See the options below.</a></p>
     </div>
     <figure>
-      <div class="device lg"><img class="zoom" src="assets/img/display-settings-audio.jpg" alt="Audio diagnostics on an Echo Show 8 running Anamanti" /></div>
-      <div class="device-stand"></div>
-      <figcaption><b>Audio diagnostics</b> on a reflashed Echo Show 8: live mic level, wake-word score and capture details, all on the device.</figcaption>
+      <img class="zoom" style="border-radius:18px;box-shadow:0 30px 80px rgba(0,0,0,.55)" src="/assets/img/echo-show-photo.webp" alt="A first-generation Echo Show 8 showing the Anamanti idle screen" />
+      <figcaption><b>A first-gen Echo Show 8</b> with the Anamanti idle screen. <a class="link" href="/install">See the install guide.</a></figcaption>
+      <p class="photo-credit">Photo: <a href="https://commons.wikimedia.org/wiki/File:104.9_Imagine_FM_Playing_on_Alexa_Echo_Show.jpg" rel="noopener">Fitzyraz</a>, <a href="https://creativecommons.org/licenses/by-sa/4.0/" rel="noopener">CC BY-SA 4.0</a>, via Wikimedia Commons; cropped, with an Anamanti screenshot composited onto the screen. This image is shared under the same licence.</p>
     </figure>
   </div>
 </section>
@@ -88,7 +98,7 @@
           <tr><td>Updates</td><td>The app updates itself (signed and checksum-verified)</td></tr>
         </table>
       </div>
-      <p style="color:var(--faint);font-size:.85rem;margin-top:14px">Reflashing is done by the community LineageOS port for this device, and it replaces Amazon's software entirely. Anamanti isn't affiliated with Amazon.</p>
+      <p style="color:var(--faint);font-size:.85rem;margin-top:14px">Reflashing is done by the community LineageOS port for this device, and it replaces Amazon's software entirely. <a class="link" href="/install">Step-by-step install guide, with sources →</a> Anamanti isn't affiliated with Amazon.</p>
     </div>
   </div>
 </section>
@@ -96,7 +106,7 @@
 <section>
   <div class="wrap split">
     <figure class="order-first-m">
-      <div class="device"><img class="zoom" src="assets/img/display-settings-listening.jpg" alt="Listening settings with separate idle and while-speaking sensitivity" loading="lazy" /></div>
+      <div class="device"><img class="zoom" src="/assets/img/display-settings-listening.webp" alt="Listening settings with separate idle and while-speaking sensitivity" loading="lazy" /></div>
       <figcaption><b>Listening settings.</b> The wake word needs a clearer “Hey Jarvis” while the assistant is talking (0.70 vs 0.50), which works together with echo cancellation to stop it waking itself.</figcaption>
     </figure>
     <div class="prose">
@@ -119,7 +129,7 @@
         A front end only has to capture audio, play audio and draw what it's told to.</p>
     </div>
     <div class="byo">
-      <div class="card"><p class="tag">Built</p><h3>Echo Show 8</h3><p>The full experience: far-field mics, echo cancellation, every screen on the <a href="display.html">Display page</a>.</p></div>
+      <div class="card"><p class="tag">Built</p><h3>Echo Show 8</h3><p>The full experience: far-field mics, echo cancellation, every screen on the <a href="/display">Display page</a>.</p></div>
       <div class="card"><p class="tag">Built · in testing</p><h3>Your phone</h3><p>The Companion app for Android and iOS shows status, now playing, timers and memories, from anywhere on the home network. It has no microphone.</p></div>
       <div class="card"><p class="tag">Studied</p><h3>Android tablets &amp; TV</h3><p>The Display app is standard Flutter and Android. A TV port is mostly mechanical. The real limit is the microphone: few screens can hear across a room.</p></div>
       <div class="card"><p class="tag">Open</p><h3>Your own client</h3><p>A Raspberry Pi with a mic HAT, a wall-mounted panel, a web page: anything that speaks Wyoming over TCP can be a room.</p></div>
@@ -152,36 +162,43 @@
     <p class="eyebrow">Next</p>
     <h2>What it plugs into.</h2>
     <p>Home Assistant, Spotify, a Reolink camera, Google Photos and the rest of the household's tools.</p>
-    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="integrations.html">Integrations →</a></div>
+    <div class="cta-row" style="justify-content:center"><a class="btn btn-primary" href="/integrations">Integrations →</a></div>
   </div></div>
 </section>
 </main>
-
 
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html"><span class="mark"><span></span></span> Anamanti</a>
+        <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
         <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
         <p>Pronounced <b>AN-um un TEE</b>.</p>
       </div>
       <div>
         <h4>Product</h4>
         <ul>
-          <li><a href="index.html">Overview</a></li>
-          <li><a href="core.html">Anamanti Core</a></li>
-          <li><a href="display.html">Anamanti Display</a></li>
-          <li><a href="hardware.html">Echo Show &amp; your own UI</a></li>
+          <li><a href="/">Overview</a></li>
+          <li><a href="/core">Anamanti Core</a></li>
+          <li><a href="/display">Anamanti Display</a></li>
+          <li><a href="/hardware">Echo Show &amp; your own UI</a></li>
         </ul>
       </div>
       <div>
         <h4>Under the hood</h4>
         <ul>
-          <li><a href="integrations.html">Integrations</a></li>
-          <li><a href="technology.html">Technology</a></li>
-          <li><a href="technology.html#system1">System-1 fast decisions</a></li>
-          <li><a href="technology.html#memory">Graph memory</a></li>
+          <li><a href="/integrations">Integrations</a></li>
+          <li><a href="/technology">Technology</a></li>
+          <li><a href="/technology#system1">System-1 fast decisions</a></li>
+          <li><a href="/technology#memory">Graph memory</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Get involved</h4>
+        <ul>
+          <li><a href="/join">Join the waitlist</a></li>
+          <li><a href="/join#contact">Contact us</a></li>
+          <li><a href="/install">Echo Show install guide</a></li>
         </ul>
       </div>
     </div>
@@ -192,6 +209,6 @@
   </div>
 </footer>
 
-<script src="assets/site.js" defer></script>
+<script src="/assets/site.js" defer></script>
 </body>
 </html>

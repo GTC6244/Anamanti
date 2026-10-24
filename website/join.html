@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Join the Anamanti waitlist, or get in touch</title>
+<meta name="description" content="Join the Anamanti waitlist to hear when it's ready for more homes, or send us a message." />
+<link rel="canonical" href="https://www.anamanti.com/join" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Anamanti" />
+<meta property="og:title" content="Join the Anamanti waitlist, or get in touch" />
+<meta property="og:description" content="Join the Anamanti waitlist to hear when it's ready for more homes, or send us a message." />
+<meta property="og:url" content="https://www.anamanti.com/join" />
+<meta property="og:image" content="https://www.anamanti.com/assets/img/og-card.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/assets/icons/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/assets/icons/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#0e0f13" />
+<link rel="preload" href="/assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/assets/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="stylesheet" href="/assets/site.css" />
+<style>
+.join-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; align-items: start; }
+@media (max-width: 900px) { .join-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav-inner">
+    <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="nav-links" id="site-nav" aria-label="Main">
+      <a href="/">Overview</a>
+      <a href="/core">The Core</a>
+      <a href="/display">The Display</a>
+      <a href="/hardware">UI/UX</a>
+      <a href="/integrations">Integrations</a>
+      <a href="/technology">Technology</a>
+      <a class="nav-cta" href="/join" aria-current="page">Join the waitlist</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="page-hero">
+  <div class="wrap">
+    <p class="eyebrow">Get involved</p>
+    <h1>Bring Anamanti home.</h1>
+    <p class="lede">Anamanti runs every day in our own house, and we're getting it ready for more. Join the waitlist to hear when it is, or send us a note:
+      questions, hardware you'd like supported, or ideas for what a home assistant should do.</p>
+  </div>
+</section>
+
+<section class="band" style="padding-top:56px">
+  <div class="wrap join-grid">
+
+    <form class="form-card" id="waitlist" data-endpoint="/api/waitlist" novalidate>
+      <p class="eyebrow">Waitlist</p>
+      <h2>Join the waitlist</h2>
+      <p>One email when there's something you can install, and the occasional progress update. No spam, and we never share your address.</p>
+      <label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" required maxlength="254" /></label>
+      <label class="field"><span>Name <i>(optional)</i></span><input type="text" name="name" autocomplete="name" maxlength="120" /></label>
+      <label class="field"><span>What would you run it on? <i>(optional)</i></span>
+        <select name="interest">
+          <option value="">Choose one</option>
+          <option>Echo Show 8 (1st gen)</option>
+          <option>Another Echo Show or smart display</option>
+          <option>An Android tablet</option>
+          <option>A TV</option>
+          <option>Something I'd build myself</option>
+          <option>Not sure yet</option>
+        </select></label>
+      <label class="hp" aria-hidden="true">Company<input type="text" name="company" tabindex="-1" autocomplete="off" /></label>
+      <input type="hidden" name="source" value="join" />
+      <button class="btn btn-primary" type="submit">Join the waitlist</button>
+      <p class="form-status" role="status" aria-live="polite"></p>
+    </form>
+
+    <form class="form-card" id="contact" data-endpoint="/api/contact" novalidate>
+      <p class="eyebrow">Contact</p>
+      <h2>Get in touch</h2>
+      <p>We read everything. Leave an email address so we can reply.</p>
+      <label class="field"><span>Email</span><input type="email" name="email" autocomplete="email" required maxlength="254" /></label>
+      <label class="field"><span>Name <i>(optional)</i></span><input type="text" name="name" autocomplete="name" maxlength="120" /></label>
+      <label class="field"><span>About</span>
+        <select name="topic">
+          <option>General question</option>
+          <option>Hardware support</option>
+          <option>Installing on an Echo Show</option>
+          <option>Press</option>
+          <option>Partnership</option>
+        </select></label>
+      <label class="field"><span>Message</span><textarea name="message" required maxlength="5000"></textarea></label>
+      <label class="hp" aria-hidden="true">Company<input type="text" name="company" tabindex="-1" autocomplete="off" /></label>
+      <button class="btn btn-primary" type="submit">Send message</button>
+      <p class="form-status" role="status" aria-live="polite"></p>
+    </form>
+
+  </div>
+  <div class="wrap"><p class="fine">We store what you send in a database on Cloudflare, used only to reply to you and to email the waitlist. Your IP address is never stored; we keep a one-way hash of it for a short while to stop spam. Ask us any time to delete your details.</p></div>
+</section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="/"><span class="mark"><span></span></span> Anamanti</a>
+        <p><i>Anam an tí</i>, the soul of the home. A private, always-on voice assistant that runs on hardware you own.</p>
+        <p>Pronounced <b>AN-um un TEE</b>.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul>
+          <li><a href="/">Overview</a></li>
+          <li><a href="/core">Anamanti Core</a></li>
+          <li><a href="/display">Anamanti Display</a></li>
+          <li><a href="/hardware">Echo Show &amp; your own UI</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Under the hood</h4>
+        <ul>
+          <li><a href="/integrations">Integrations</a></li>
+          <li><a href="/technology">Technology</a></li>
+          <li><a href="/technology#system1">System-1 fast decisions</a></li>
+          <li><a href="/technology#memory">Graph memory</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Get involved</h4>
+        <ul>
+          <li><a href="/join">Join the waitlist</a></li>
+          <li><a href="/join#contact">Contact us</a></li>
+          <li><a href="/install">Echo Show install guide</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="foot-base">
+      <span>© Anamanti. Screenshots are from a live installation.</span>
+      <span>Echo Show is a trademark of Amazon. Anamanti is not affiliated with Amazon.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="/assets/site.js" defer></script>
+</body>
+</html>

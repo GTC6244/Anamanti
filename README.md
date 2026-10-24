@@ -40,7 +40,7 @@ speaks the reply back through the Echo Show's speakers.
   display under Settings → People → Add a voice.
 - 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
   with an idle photo slideshow from a Google Photos/Drive folder (how often the
-  photo changes is set per display, 5 s to 10 min). The front camera doubles as a
+  photo changes is set per display, 3 s to 10 min, default 10 s). The front camera doubles as a
   presence sensor (brightens when you walk up, dims when the room is empty) and as a
   **light sensor**: when the lights go off at night the screen dims right down so it
   doesn't light up a dark room (Settings → Display → Night). Close the privacy shutter

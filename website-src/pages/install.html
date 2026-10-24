@@ -1,0 +1,136 @@
+title: Echo Show 8 install guide: LineageOS, echo cancellation and Anamanti
+description: How to turn a first-generation Amazon Echo Show 8 into an Anamanti display: unlock it, install LineageOS, add echo cancellation and enable ADB, with links to every community source.
+og: assets/img/og-card.png
+---
+.toc { position: sticky; top: 92px; }
+.toc a { display: block; color: var(--muted); padding: 5px 0; font-size: .92rem; }
+.toc a:hover { color: var(--accent); }
+.guide-grid { display: grid; grid-template-columns: 220px 1fr; gap: 48px; align-items: start; }
+@media (max-width: 900px) { .guide-grid { grid-template-columns: 1fr; } .toc { position: static; } }
+.src-list li { margin-bottom: 8px; color: var(--muted); }
+.src-list a { color: var(--accent); }
+---
+<section class="page-hero">
+  <div class="wrap">
+    <p class="eyebrow">Install guide</p>
+    <h1>Turn an Echo Show 8 into an Anamanti display.</h1>
+    <p class="lede">The first-generation Echo Show 8 (2019) can be unlocked over USB, without opening the case, and run a community build of LineageOS.
+      This guide pulls the steps together and links to the people who did the hard work. Follow their instructions where they differ from ours.</p>
+    <p style="color:var(--faint)">You don't need an Echo Show to use Anamanti. See <a class="link" href="/hardware#your-ui">other ways to build the UI</a>.</p>
+  </div>
+</section>
+
+<section class="band" style="padding-top:48px">
+  <div class="wrap guide-grid">
+    <nav class="toc" aria-label="On this page">
+      <a href="#before">Before you start</a>
+      <a href="#unlock">1–4 · Unlock &amp; TWRP</a>
+      <a href="#lineage">5–7 · LineageOS</a>
+      <a href="#adb">8 · ADB</a>
+      <a href="#aec">9 · Echo cancellation</a>
+      <a href="#anamanti">10 · Anamanti Display</a>
+      <a href="#sources">Sources &amp; credits</a>
+    </nav>
+
+    <div>
+      <div class="warn" id="before" style="margin-bottom:28px">
+        <b>Read this first.</b> This replaces Amazon's software entirely: Alexa and Fire OS are gone afterwards, and there's no documented way back to stock firmware.
+        It almost certainly voids the warranty. A mistake during the unlock or a wrong wipe can <b>brick the device</b>. The LineageOS build is unofficial and still maturing.
+        Amazon can patch the exploit in a future update, so check the XDA threads below before you buy a device or start.
+      </div>
+
+      <h2 style="font-size:1.8rem;margin:0 0 14px">Before you start</h2>
+      <ul class="ticks" style="margin-bottom:34px">
+        <li><b>The right device:</b> Echo Show 8 <b>1st gen (2019)</b>, model C7H6N3 / product code AEOCW, codename “crown”. The 2nd and 3rd gen Show 8 are <b>not</b> supported. Check secondhand listings carefully, and avoid units still registered to someone else's Amazon account.</li>
+        <li><b>Supported firmware:</b> community reports say Fire OS 6.5.7.1–6.5.7.4. Update to a supported version, then <b>turn Wi-Fi off</b> so a newer, patched update can't install.</li>
+        <li><b>A micro-USB data cable</b> (not charge-only) and the device's power adapter.</li>
+        <li><b>A computer:</b> Windows is the documented path. Linux scripts also exist. macOS isn't documented for the unlock step.</li>
+        <li><b>Android platform-tools</b> (adb and fastboot), and on Windows the Amazon USB driver. Links are in <a class="link" href="#sources">Sources</a>.</li>
+      </ul>
+
+      <ol class="steps">
+        <li id="unlock">
+          <h3>Download the crown unlock package</h3>
+          <p>Get <code>amonet-crown</code> from the XDA unlock thread and unzip it. amonet combines a MediaTek bootrom exploit with a bootloader exploit, and needs no case opening or test-point shorting.</p>
+          <p class="src">Sources: <a href="https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-8-1st-gen-2019-crown.4766687/" rel="noopener">XDA unlock thread</a> · <a href="https://github.com/R0rt1z2/amonet/tree/mt8163-crown" rel="noopener">amonet, mt8163-crown branch</a></p>
+        </li>
+        <li>
+          <h3>Put the Show into fastboot</h3>
+          <p>Unplug the device. Hold <b>all three top buttons</b> and plug in power until <b>FASTBOOT</b> appears at the lower left, then connect USB to your computer.</p>
+          <p class="src">Source: <a href="https://www.derekseaman.com/2025/11/home-assistant-hacking-your-echo-show-5-and-8.html" rel="noopener">Derek Seaman's walkthrough</a></p>
+        </li>
+        <li>
+          <h3>Run the unlock</h3>
+          <p>On Windows, run <code>fastbrick.bat</code> from an administrator prompt and type <code>YES</code>. On Linux, use the repo's <code>bootrom-step.sh</code> then <code>fastboot-step.sh</code> (disable ModemManager first). The device reboots into <b>TWRP</b> recovery.</p>
+          <p class="src">Sources: <a href="https://www.derekseaman.com/2025/11/home-assistant-hacking-your-echo-show-5-and-8.html" rel="noopener">Seaman</a> · <a href="https://github.com/R0rt1z2/amonet/tree/mt8163-crown" rel="noopener">amonet scripts</a> · <a href="https://github.com/R0rt1z2/twrp_device_amazon_crown" rel="noopener">TWRP for crown</a></p>
+        </li>
+        <li>
+          <h3>Learn the boot combinations</h3>
+          <ul>
+            <li><b>Volume Up</b> while powering on: TWRP recovery.</li>
+            <li><b>Mute</b>: “hacked” fastboot.</li>
+            <li><b>All three buttons</b>: stock fastboot.</li>
+          </ul>
+          <p class="src">Source: <a href="https://www.derekseaman.com/2025/11/home-assistant-hacking-your-echo-show-5-and-8.html" rel="noopener">Seaman</a></p>
+        </li>
+        <li id="lineage">
+          <h3>Download LineageOS for crown</h3>
+          <p>Get the latest <b>lineage-18.1 … UNOFFICIAL-crown.zip</b> from the amazon-oss releases and check its SHA-256 against the release page.</p>
+          <p class="src">Sources: <a href="https://github.com/amazon-oss/releases/releases" rel="noopener">amazon-oss releases</a> · <a href="https://xdaforums.com/t/rom-unofficial-11-crown-lineageos-18-1-for-the-amazon-echo-show-8-2019.4766709/" rel="noopener">XDA LineageOS thread</a> · <a href="https://github.com/amazon-oss/android_device_amazon_crown" rel="noopener">device tree</a></p>
+        </li>
+        <li>
+          <h3>Wipe, carefully</h3>
+          <p>Boot into TWRP (Volume Up). Go to Wipe → Advanced Wipe and select <b>only System, Data and Cache</b>. Wiping other partitions can brick the device.</p>
+          <pre class="cmd">adb push lineage-18.1-*-UNOFFICIAL-crown.zip /sdcard/</pre>
+          <p class="src">Source: <a href="https://www.derekseaman.com/2025/11/home-assistant-hacking-your-echo-show-5-and-8.html" rel="noopener">Seaman</a></p>
+        </li>
+        <li>
+          <h3>Install LineageOS and root</h3>
+          <p>In TWRP, Install the LineageOS zip and reboot into setup. Google apps are optional, and Anamanti doesn't need them. Anamanti's echo-cancellation add-on <b>does need root</b>, so also flash Magisk from TWRP (rename the <code>.apk</code> to <code>.zip</code>).</p>
+          <p class="src">Sources: <a href="https://www.derekseaman.com/2025/11/home-assistant-hacking-your-echo-show-5-and-8.html" rel="noopener">Seaman</a> · <a href="https://aftermath.site/amazon-echo-show-jailbreak-lineageos/" rel="noopener">Aftermath</a> · <a href="https://github.com/topjohnwu/Magisk/releases" rel="noopener">Magisk releases</a></p>
+        </li>
+        <li id="adb">
+          <h3>Turn on ADB (and ADB over Wi-Fi)</h3>
+          <p>Settings → About tablet → tap <b>Build number</b> seven times, then Developer options → <b>USB debugging</b>. With the device on Wi-Fi and still plugged in:</p>
+          <pre class="cmd">adb devices
+adb tcpip 5555
+adb connect &lt;device-ip&gt;:5555</pre>
+          <p class="src">Source: <a href="https://developer.android.com/tools/adb#wireless" rel="noopener">Android developer docs</a></p>
+        </li>
+        <li id="aec">
+          <h3>Add echo cancellation (required for Anamanti)</h3>
+          <p>Anamanti's audio add-on hooks the Echo Show's audio service and runs echo cancellation against the speaker's own hardware loopback, about 16 dB, so you can interrupt the assistant mid-sentence.
+            It's a separate, reversible project:</p>
+          <pre class="cmd">git clone https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim
+cd EchoShow8gen1-aec-shim
+./scripts/install.sh --so prebuilt/libamznaec_shim.so   # pushes the shim, edits the audio service, reboots
+adb logcat -d | grep amznaec                            # confirm it loaded
+./scripts/uninstall.sh                                  # to undo: restores the originals and reboots</pre>
+          <p>Its README warns that a bad install can wedge the device's fragile audio path. Read it before running anything.</p>
+          <p class="src">Source: <a href="https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim" rel="noopener">EchoShow8gen1-aec-shim</a></p>
+        </li>
+        <li id="anamanti">
+          <h3>Install Anamanti Display</h3>
+          <p>The Display app is a single APK. Install it once over ADB and it keeps itself up to date (signed, checksum-verified updates). It finds your Anamanti Core on the network by itself, with no IP addresses to enter.</p>
+          <pre class="cmd">adb install anamanti-display.apk</pre>
+          <p>We're sending download links to people on the waitlist as we're ready to support them. <a class="link" href="/join">Join the waitlist</a>.</p>
+        </li>
+      </ol>
+
+      <h2 id="sources" style="font-size:1.8rem;margin:20px 0 14px">Sources &amp; credits</h2>
+      <p style="color:var(--muted)">All of the unlock and LineageOS work is by the Echo Show community. Thank them, and follow their threads for the authoritative, current instructions.</p>
+      <ul class="src-list">
+        <li><b>amonet</b> (bootrom + bootloader exploit) by Roger Ortiz (R0rt1z2) and k4y0z: <a href="https://github.com/R0rt1z2/amonet/tree/mt8163-crown" rel="noopener">github.com/R0rt1z2/amonet (mt8163-crown)</a></li>
+        <li><b>XDA: Unlock / root / TWRP / unbrick</b>, Echo Show 8 1st gen: <a href="https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-show-8-1st-gen-2019-crown.4766687/" rel="noopener">xdaforums.com thread 4766687</a></li>
+        <li><b>XDA: LineageOS 18.1 for crown</b>: <a href="https://xdaforums.com/t/rom-unofficial-11-crown-lineageos-18-1-for-the-amazon-echo-show-8-2019.4766709/" rel="noopener">xdaforums.com thread 4766709</a></li>
+        <li><b>LineageOS builds and device tree</b> (amazon-oss): <a href="https://github.com/amazon-oss/releases/releases" rel="noopener">releases</a> · <a href="https://github.com/amazon-oss/android_device_amazon_crown" rel="noopener">android_device_amazon_crown</a></li>
+        <li><b>TWRP for crown</b>: <a href="https://github.com/R0rt1z2/twrp_device_amazon_crown" rel="noopener">github.com/R0rt1z2/twrp_device_amazon_crown</a></li>
+        <li><b>Walkthrough</b>, Derek Seaman, “Home Assistant: Hacking your Echo Show 5 and 8”: <a href="https://www.derekseaman.com/2025/11/home-assistant-hacking-your-echo-show-5-and-8.html" rel="noopener">derekseaman.com</a></li>
+        <li><b>Background</b>, Aftermath: <a href="https://aftermath.site/amazon-echo-show-jailbreak-lineageos/" rel="noopener">aftermath.site</a> · Liliputing: <a href="https://liliputing.com/amazon-echo-hacks-you-can-unlock-the-bootloader-and-install-custom-roms-on-some-older-models/" rel="noopener">liliputing.com</a></li>
+        <li><b>Tools</b>: <a href="https://developer.android.com/tools/releases/platform-tools" rel="noopener">Android platform-tools</a> · <a href="https://developer.amazon.com/docs/fire-tablets/connecting-adb-to-device.html" rel="noopener">Amazon USB driver</a> · <a href="https://github.com/topjohnwu/Magisk/releases" rel="noopener">Magisk</a></li>
+        <li><b>Echo cancellation add-on</b>: <a href="https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim" rel="noopener">EchoShow8gen1-aec-shim</a></li>
+      </ul>
+      <p class="fine">Firmware version ranges and button combinations come from the walkthroughs above. We couldn't independently confirm every detail against the XDA first posts, which are the authoritative source. Echo Show is a trademark of Amazon; Anamanti isn't affiliated with Amazon.</p>
+    </div>
+  </div>
+</section>
