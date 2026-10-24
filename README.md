@@ -26,7 +26,8 @@ speaks the reply back through the Echo Show's speakers.
   a cloud API (Claude / OpenAI) behind one interface.
 - 🔊 **Streaming spoken replies** — Piper (Wyoming TTS) synthesizes the answer
   sentence-by-sentence *as the LLM generates it*, so the Echo Show starts speaking
-  after the first sentence (~2 s on-device) instead of waiting for the whole reply.
+  after the first sentence instead of waiting for the whole reply (end of speech → spoken reply:
+  ~0.5 s median when System-1 answers, ~2 s median when the full LLM does; live install, 2026-10).
 - 💬 **Barge-in + memory** — say the wake word again mid-reply to interrupt: playback
   stops instantly and a fresh turn begins (the Anamanti Core also aborts the in-flight
   LLM + TTS via an `anamanti-interrupt` frame). The assistant remembers

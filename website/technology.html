@@ -34,7 +34,7 @@
       <a href="index.html">Overview</a>
       <a href="core.html">The Core</a>
       <a href="display.html">The Display</a>
-      <a href="hardware.html">Echo Show</a>
+      <a href="hardware.html">UI/UX</a>
       <a href="integrations.html">Integrations</a>
       <a href="technology.html" aria-current="page">Technology</a>
     </nav>
@@ -62,10 +62,10 @@
     </div>
     <div class="ladder">
       <div class="rung"><h4>Memory commands</h4><p>“Remember that…”, “forget that”, “who am I?” Matched in plain code. “Who am I” is answered from your voiceprint, not a guess.</p><div class="cost"><b>No model</b>string match</div></div>
-      <div class="rung"><h4>Home Assistant</h4><p>“Turn off the kitchen lights.” Matched against a cached device list, then one direct call. It refuses to guess.</p><div class="cost"><b>No model</b>~25 ms call</div></div>
+      <div class="rung"><h4>Home Assistant</h4><p>“Turn off the kitchen lights.” Matched against a cached device list, then one direct call. It refuses to guess.</p><div class="cost"><b>No model</b>one direct call</div></div>
       <div class="rung"><h4>Camera</h4><p>“Show me the front door.” The display that asked opens the live stream.</p><div class="cost"><b>No model</b>string match</div></div>
-      <div class="rung"><h4>System-1</h4><p>A <b>typed classifier</b>: it doesn't write text, it labels the request in a single pass with a confidence score. It handles timers, weather, time and date, closing screens and ending the conversation. Below a confidence of 0.85 it defers to System 2.</p><div class="cost"><b>Small classifier</b>156–363 ms</div></div>
-      <div class="rung s2"><h4>System 2</h4><p>Memory recall from the graph, then the full language model with tools, streamed sentence by sentence into speech.</p><div class="cost"><b>Full model</b>seconds</div></div>
+      <div class="rung"><h4>System-1</h4><p>A <b>typed classifier</b>: it doesn't write text, it labels the request in a single pass with a confidence score. It handles timers, weather, time and date, closing screens and ending the conversation. Below a confidence of 0.85 it defers to System 2.</p><div class="cost"><b>Small classifier</b>~0.5 s whole turn</div></div>
+      <div class="rung s2"><h4>System 2</h4><p>Memory recall from the graph, then the full language model with tools, streamed sentence by sentence into speech.</p><div class="cost"><b>Full model</b>~2 s whole turn</div></div>
     </div>
     <div class="split top" style="margin-top:40px">
       <div class="prose">
@@ -90,12 +90,12 @@
       <p>Even when the large model is needed, nothing waits for anything else to finish.</p>
     </div>
     <div class="stats">
-      <div class="stat"><div class="n">~2<small> s</small></div><p>to the first spoken word, instead of about 8 s when the whole reply is synthesised first. Each sentence goes to Piper as soon as it's complete.</p></div>
-      <div class="stat"><div class="n">&lt;1<small> ms</small></div><p>per audio frame for the Silero end-of-speech model on an M4 Mac.</p></div>
-      <div class="stat"><div class="n">~169<small> ms</small></div><p>to transcribe a turn with whisper.cpp's base model running inside the Core with Metal.</p></div>
+      <div class="stat"><div class="n">511<small> ms</small></div><p>median from the end of speech to the spoken reply when System-1 answers (fastest 417 ms).</p></div>
+      <div class="stat"><div class="n">~2<small> s</small></div><p>median when the full model answers. Each sentence goes to Piper as soon as it's complete, so speech starts long before the reply is finished.</p></div>
+      <div class="stat"><div class="n">~140<small> ms</small></div><p>median speech-to-text time per turn, after you stop talking.</p></div>
       <div class="stat"><div class="n">0<small> ms</small></div><p>added to a turn by memory ingestion. Indexing happens in the background, after the turn.</p></div>
     </div>
-    <p style="color:var(--faint);font-size:.9rem;margin-top:20px">Every turn logs a per-stage timeline (speech-to-text, System-1, fetch, recall, prompt, first token, first audio), shown as a waterfall in the console, so a slowdown is visible the day it appears.</p>
+    <p style="color:var(--faint);font-size:.9rem;margin-top:20px">Medians are from the last 100 turns on the live install (October 2026). Every turn logs a per-stage timeline (speech-to-text, System-1, fetch, recall, prompt, first token, first audio), shown as a waterfall in the console, so a slowdown is visible the day it appears.</p>
   </div>
 </section>
 
