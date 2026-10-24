@@ -921,7 +921,8 @@ design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
   `_wyoming._tcp` — are never resolved or connected to.
 - **Deployment layout**: the "local production" Anamanti Core is a copied release
   binary at `/Volumes/External/DeveloperSupport/Anamanti Core/`, run outside
-  any git checkout with `ANAMANTI_INSTANCE_ID` set in `~/.zshenv`; test copies run
+  any git checkout with `instance_id` (`anamanti-core`) pinned in its `anamanti.json` and
+  provider keys from `~/.zshrc`; test copies run
   from their git worktree and fall through to the branch-code default.
 - **Multiple displays → one Anamanti Core**: the Anamanti Core's accept loop already
   spawns a task per connection and every reply is written back on that
