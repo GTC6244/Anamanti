@@ -699,7 +699,7 @@ header/footer and screenshots from the live install. Pushed as-is; remaining wor
 - [x] Weather full screen and the 7-day view. (captured 2026-10-23 on Office)
 - [x] Place card. (captured 2026-10-23 on Office)
 - [x] Live camera view (decide if the front-door feed is OK to publish). (captured 2026-10-23 on Office)
-  - [ ] Confirm the front-door frame (`display-camera.jpg`: porch, driveway, a parked car) is OK public.
+  - [x] Confirm the front-door frame (`display-camera.jpg`: porch, driveway, a parked car) is OK public. (owner OK, 2026-10-23)
 - [x] Full-screen radio player (captured). Still open: Spotify now-playing + Up Next with neutral album art.
 - [ ] People / "Add a voice" enrolment flow; away-mode dim clock.
 - [x] Then replace the text-only "Full-screen moments" cards on `display.html` with these.
@@ -707,7 +707,7 @@ header/footer and screenshots from the live install. Pushed as-is; remaining wor
 **Content**
 - [ ] Real calls to action: there is no repo/docs/contact link yet (license is TBD). Decide
   whether to link GitHub, a waitlist, or nothing.
-- [ ] Re-word "rolling out" / "in testing" when bilingual mode and the Companion app ship.
+- [ ] Re-word "in testing" when multilingual mode (en + pt-BR cross-language voiceprint + memory testing) and the Companion app ship; add languages as they pass.
 - [ ] Add Companion phone app screenshots once it's been tried against a live Core.
 - [ ] An Echo Show setup guide (LineageOS flash, AEC shim, installing the APK), or a link to one.
 - [ ] Product photo of a real Echo Show on a counter (the site only uses CSS bezels).
