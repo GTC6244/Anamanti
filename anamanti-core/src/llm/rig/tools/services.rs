@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::{definition, parse_args, parse_args_or_default, ToolCtx, VoiceTool};
 use crate::appsaid::{OutgoingMessage, PhoneMessenger};
-use crate::cadora::{resolve_event_times, CadoraCommand, CadoraController, NewEvent};
+use crate::cadora::{resolve_event_times, CadoraCommand, CadoraController, NewEvent, ShoppingList};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, LiveHomeLocation, TravelMode};
 use crate::music::{
@@ -559,13 +559,14 @@ impl VoiceTool for RadioControl {
 }
 
 // ---------------------------------------------------------------------------
-// Shopping list (Cadora shared household via the voice API)
+// Shopping list (the household's NextHaul or Cadora list)
 // ---------------------------------------------------------------------------
 
-/// The `shopping_list_add` tool. The list lives on the Cadora server; this only
-/// issues the add and relays the server's spoken confirmation.
-pub(super) fn shopping_list_add(controller: Arc<dyn CadoraController>) -> Arc<dyn VoiceTool> {
-    Arc::new(ShoppingListAdd { controller })
+/// The `shopping_list_add` tool. The list lives in NextHaul (signed-in sync) or Cadora
+/// (voice API), chosen by the settings layer; this only issues the add and relays the
+/// spoken confirmation.
+pub(super) fn shopping_list_add(list: Arc<dyn ShoppingList>) -> Arc<dyn VoiceTool> {
+    Arc::new(ShoppingListAdd { list })
 }
 
 /// Typed arguments for `shopping_list_add`.
@@ -579,7 +580,7 @@ struct GroceryArgs {
 }
 
 struct ShoppingListAdd {
-    controller: Arc<dyn CadoraController>,
+    list: Arc<dyn ShoppingList>,
 }
 
 #[async_trait]
@@ -628,11 +629,8 @@ impl VoiceTool for ShoppingListAdd {
 
     async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
         let args: GroceryArgs = parse_args(args, SHOPPING_LIST_ADD)?;
-        self.controller
-            .command(CadoraCommand::AddItem {
-                item: args.item,
-                quantity: args.quantity,
-            })
+        self.list
+            .add(&args.item, args.quantity)
             .await
             .context("shopping list add failed")
     }

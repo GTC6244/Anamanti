@@ -124,6 +124,93 @@ impl CadoraController for StaticCadora {
     }
 }
 
+/// A canned saved-recipe source: one NextHaul household recipe ("Grandma's Lasagna",
+/// id `nexthaul:r1`) and one Cadora community recipe ("Pad Thai", `cadora:g1`).
+pub(crate) struct StaticSavedRecipes;
+
+impl StaticSavedRecipes {
+    fn all() -> Vec<crate::cadora::SavedRecipe> {
+        use crate::cadora::{HouseholdApp, RecipeHit, RecipeTier, SavedRecipe};
+        vec![
+            SavedRecipe {
+                hit: RecipeHit {
+                    id: "nexthaul:r1".into(),
+                    title: "Grandma's Lasagna".into(),
+                    app: HouseholdApp::NextHaul,
+                    tier: RecipeTier::Household,
+                    item_count: Some(2),
+                },
+                recipe: crate::recipe::Recipe {
+                    title: "Grandma's Lasagna".into(),
+                    summary: "Sunday dinner.".into(),
+                    servings: "6 servings".into(),
+                    ingredients: vec!["12 lasagna noodles".into(), "1 lb ground beef".into()],
+                    steps: vec!["Make the sauce.".into(), "Bake.".into()],
+                    ..Default::default()
+                },
+                shopping_items: vec!["lasagna noodles".into(), "ground beef".into()],
+            },
+            SavedRecipe {
+                hit: RecipeHit {
+                    id: "cadora:g1".into(),
+                    title: "Pad Thai".into(),
+                    app: HouseholdApp::Cadora,
+                    tier: RecipeTier::Community,
+                    item_count: Some(1),
+                },
+                recipe: crate::recipe::Recipe {
+                    title: "Pad Thai".into(),
+                    ingredients: vec!["8 oz rice noodles".into()],
+                    ..Default::default()
+                },
+                shopping_items: vec!["rice noodles".into()],
+            },
+        ]
+    }
+}
+
+#[async_trait]
+impl crate::cadora::HouseholdRecipes for StaticSavedRecipes {
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<crate::cadora::RecipeHit>> {
+        let q = query.to_lowercase();
+        Ok(Self::all()
+            .into_iter()
+            .filter(|r| r.hit.title.to_lowercase().contains(&q))
+            .map(|r| r.hit)
+            .take(limit)
+            .collect())
+    }
+
+    async fn recipe(&self, reference: &str) -> Result<Option<crate::cadora::SavedRecipe>> {
+        let r = reference.to_lowercase();
+        Ok(Self::all()
+            .into_iter()
+            .find(|s| s.hit.id == reference || s.hit.title.to_lowercase().contains(&r)))
+    }
+
+    fn sources(&self) -> String {
+        "NextHaul and Cadora".into()
+    }
+}
+
+/// A shopping list that records what it was asked to add.
+#[derive(Default)]
+pub(crate) struct RecordingShopping {
+    pub(crate) many: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl crate::cadora::ShoppingList for RecordingShopping {
+    async fn add(&self, item: &str, _quantity: Option<u32>) -> Result<String> {
+        Ok(format!("added {item}"))
+    }
+
+    async fn add_many(&self, items: &[String]) -> Result<String> {
+        self.many.lock().unwrap().extend(items.iter().cloned());
+        Ok(format!("added {}", items.len()))
+    }
+}
+
 /// A canned phone messenger that records the last message.
 #[derive(Default)]
 pub(crate) struct StaticPhone {
@@ -195,6 +282,8 @@ pub(crate) fn fully_configured_deps() -> ToolDeps {
         directions: Some((Arc::new(StaticDirections::default()), true)),
         spotify: Some(Arc::new(StaticSpotify::default())),
         cadora: Some(Arc::new(StaticCadora::default())),
+        shopping: None,
+        household_recipes: Some(Arc::new(StaticSavedRecipes)),
         appsaid: Some(Arc::new(StaticPhone::default())),
         weather: Some(Arc::new(StaticWeather)),
         weather_imperial: true,

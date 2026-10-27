@@ -1,10 +1,11 @@
-//! The Household tab (home address, units, roster, plus the Cadora shopping list and
-//! AppSaid phone-push links), the Personality tab and the Pronunciation tab. The
+//! The Household tab (home address, units, roster, plus the Cadora / NextHaul links
+//! and the AppSaid phone-push link), the Personality tab and the Pronunciation tab. The
 //! household, personality and pronunciation saves replace the whole record.
 
 use serde_json::{json, Value};
 
 use super::{fail, keep_or_set, parse_json_body, set_or_clear, str_field};
+use crate::cadora::HouseholdApp;
 use crate::settings::{
     AppSaidUpdate, CadoraUpdate, Household, HouseholdMember, Personality, PersonalityDef,
     SharedSettings,
@@ -195,15 +196,29 @@ pub(super) fn pronunciations_save_json(settings: &SharedSettings, data: &Value) 
     pronunciations_status_json(settings)
 }
 
-/// `GET /cadora/status.json` — the Cadora shopping-list linkage state for the
-/// `/household` page. Reports only booleans + the base URL; the voice-link token is
-/// never included.
+/// `GET /cadora/status.json` — the Cadora / NextHaul linkage state for the
+/// Integrations drawer: the voice link (`linked`), each app's signed-in household link,
+/// and which list `shopping_list_add` writes to. Never includes a token.
 pub(super) fn cadora_status_json(settings: &SharedSettings) -> String {
     let c = settings.cadora();
+    let app = |a: HouseholdApp| {
+        let h = c.household(a);
+        json!({
+            "linked": h.is_some(),
+            "household": h.map(|h| h.name.clone()).unwrap_or_default(),
+        })
+    };
+    let nexthaul = c.household(HouseholdApp::NextHaul).is_some();
+    let cadora = c.household(HouseholdApp::Cadora).is_some();
     json!({
         "ok": true,
         "linked": c.linked(),
         "base_url": c.base_url_or_default(),
+        "apps": { "nexthaul": app(HouseholdApp::NextHaul), "cadora": app(HouseholdApp::Cadora) },
+        "recipes_active": nexthaul || cadora,
+        "shopping_app": c.shopping_app_label(),
+        "shopping_target": c.shopping_target().map(|a| a.slug()).unwrap_or(""),
+        "any_linked": c.linked() || nexthaul || cadora,
     })
     .to_string()
 }
@@ -211,10 +226,107 @@ pub(super) fn cadora_status_json(settings: &SharedSettings) -> String {
 /// `POST /cadora/save` — set the Cadora app-server base URL (a blank value resets it
 /// to the default). Does not link. Applying rebuilds the LLM so the tool tracks state.
 pub(super) fn cadora_save_json(settings: &SharedSettings, data: &Value) -> String {
+    let shopping_app = match str_field(data, "shopping_app") {
+        None => None,
+        Some(v) if v == "auto" || v.is_empty() => Some(None),
+        Some(v) => match HouseholdApp::parse(&v) {
+            Some(a) => Some(Some(a.slug().to_string())),
+            None => return fail(format!("unknown shopping list app `{v}`")),
+        },
+    };
     settings.apply_cadora(&CadoraUpdate {
-        base_url: set_or_clear(data, "base_url"),
+        base_url: if data.get("base_url").is_some() {
+            set_or_clear(data, "base_url")
+        } else {
+            None
+        },
+        shopping_app,
         ..Default::default()
     });
+    cadora_status_json(settings)
+}
+
+/// `POST /cadora/apps/link` `{app: "nexthaul"|"cadora", code}` — link an app's
+/// household with its 6-digit family invite code (the app's Settings → "Invite with
+/// a code"). The Core signs in (once), joins the household as "Anamanti", and for
+/// Cadora also mints its voice link, so `saved_recipes`, `shopping_list_add` and (for
+/// Cadora) `calendar_add` activate immediately.
+pub(super) async fn cadora_app_link_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data = match parse_json_body(body) {
+        Ok(v) => v,
+        Err(invalid) => return invalid,
+    };
+    let Some(app) = str_field(&data, "app").and_then(|a| HouseholdApp::parse(&a)) else {
+        return fail("say which app to link: nexthaul or cadora");
+    };
+    let code = str_field(&data, "code").unwrap_or_default();
+    let Some(hub) = settings.household_apps() else {
+        return fail("household app linking isn't available in this build");
+    };
+    let out = match hub.link(app, &code).await {
+        Ok(o) => o,
+        Err(e) => return fail(format!("{e:#}")),
+    };
+    let mut update = CadoraUpdate::default();
+    match app {
+        HouseholdApp::NextHaul => update.nexthaul_household = Some(Some(out.household.clone())),
+        HouseholdApp::Cadora => {
+            update.cadora_household = Some(Some(out.household.clone()));
+            if let Some(t) = out.voice_token.clone() {
+                update.link_token = Some(Some(t));
+            }
+        }
+    }
+    settings.apply_cadora(&update);
+    let mut message = format!(
+        "{} linked to \"{}\" — try \"what recipes do we have?\" or \"add milk to the \
+         shopping list\".",
+        app.label(),
+        out.household.name
+    );
+    if app == HouseholdApp::Cadora && out.voice_token.is_none() {
+        message.push_str(
+            " (The Cadora calendar couldn't be linked — enter a voice pairing code under \
+             Advanced to add calendar events.)",
+        );
+    }
+    let mut status: Value = serde_json::from_str(&cadora_status_json(settings)).unwrap_or_default();
+    status["message"] = json!(message);
+    status.to_string()
+}
+
+/// `POST /cadora/apps/unlink` `{app}` — forget an app's household link: leave the
+/// household (best-effort, so "Anamanti" disappears from the member list), drop the
+/// link, and for Cadora the voice link too. With no household left the Core's
+/// sign-in is forgotten as well.
+pub(super) async fn cadora_app_unlink_json(settings: &SharedSettings, body: &[u8]) -> String {
+    let data = match parse_json_body(body) {
+        Ok(v) => v,
+        Err(invalid) => return invalid,
+    };
+    let Some(app) = str_field(&data, "app").and_then(|a| HouseholdApp::parse(&a)) else {
+        return fail("say which app to unlink: nexthaul or cadora");
+    };
+    let c = settings.cadora();
+    if let (Some(hub), Some(hh)) = (settings.household_apps(), c.household(app)) {
+        hub.leave(hh).await;
+    }
+    let other = match app {
+        HouseholdApp::NextHaul => HouseholdApp::Cadora,
+        HouseholdApp::Cadora => HouseholdApp::NextHaul,
+    };
+    let mut update = CadoraUpdate::default();
+    match app {
+        HouseholdApp::NextHaul => update.nexthaul_household = Some(None),
+        HouseholdApp::Cadora => {
+            update.cadora_household = Some(None);
+            update.link_token = Some(None);
+        }
+    }
+    if c.household(other).is_none() {
+        update.identity = Some(None);
+    }
+    settings.apply_cadora(&update);
     cadora_status_json(settings)
 }
 

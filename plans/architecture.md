@@ -1071,7 +1071,26 @@ phone) and `search.rs` (`internet_search`).
   The **`calendar_add`** tool shares that `Arc<dyn CadoraController>` and link: it
   resolves the spoken day/time to RFC 3339 in the Core's local zone
   (`cadora::resolve_event_times`) and sends Cadora's `add_event` voice action, relaying
-  the server's confirmation (one-off, household-visible events). The **`send_phone_message`** tool has the same external
+  the server's confirmation (one-off, household-visible events). The **`saved_recipes`** tool (2026-10-27) reads the family's **saved recipes** from
+  Cadora and/or NextHaul and fills the same 3-tab recipe screen (`DeviceAction::ShowRecipe`)
+  as `recipe_lookup`. Those reads need a **user bearer token**, not the voice link, so the
+  Core holds its **own identity-api user** (`anamanti-core/src/cadora/apps.rs`,
+  `HouseholdApps`): linking an app on Integrations → Cadora / NextHaul signs in
+  anonymously once (`POST /identity/auth/anonymous`) and redeems the household's 6-digit
+  **family invite code** (`POST /identity/households/join`), so the Core becomes a
+  household member named "Anamanti". Linking Cadora also mints the Core's own voice link
+  (`POST /cadora/voice/links`), so one code covers recipes, shopping and the calendar. The
+  15-minute access token is refreshed through `/identity/auth/refresh`; refresh tokens are
+  single-use, so **one hub per process** (built at boot, shared by every LLM rebuild like
+  the Home Assistant hub) serializes refreshes and persists each rotation to the 0600
+  settings file via an identity sink (no LLM rebuild). Recipes come from each app's
+  offline-first sync (`GET /{cadora|nexthaul}/sync/pull`, an incremental in-memory cache of
+  `recipes`/`recipe_items`/`list`/`list_item`), plus Cadora's community/global tiers
+  (`GET /cadora/recipes/discover`) and full Cadora detail (`GET /cadora/recipes/detail`).
+  `shopping_list_add` now holds an `Arc<dyn ShoppingList>`: the NextHaul list
+  (`POST /nexthaul/sync/push`, the app's oldest list, bumping a live duplicate's quantity)
+  or the Cadora list (voice API), per the `cadora.shopping_app` preference (auto =
+  NextHaul when linked); `saved_recipes add_ingredients_to_list` uses the same list. The **`send_phone_message`** tool has the same external
   shape: it holds an injected `Arc<dyn PhoneMessenger>` (`anamanti-core/src/appsaid/`)
   and pushes a message — often a Google Maps link — to a named family member's phone
   via **AppSaid** (a self-hosted HTML-push worker), one `POST {worker_url}/v1/messages`

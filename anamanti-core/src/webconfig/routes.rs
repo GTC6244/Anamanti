@@ -17,9 +17,10 @@ use super::general::{
 };
 use super::home_assistant::{ha_save_json, ha_status_json, ha_test_json, ha_token_json};
 use super::household::{
-    appsaid_save_json, appsaid_status_json, appsaid_token_json, cadora_link_json, cadora_save_json,
-    cadora_status_json, household_save_json, household_status_json, personality_save_json,
-    personality_status_json, pronunciations_save_json, pronunciations_status_json,
+    appsaid_save_json, appsaid_status_json, appsaid_token_json, cadora_app_link_json,
+    cadora_app_unlink_json, cadora_link_json, cadora_save_json, cadora_status_json,
+    household_save_json, household_status_json, personality_save_json, personality_status_json,
+    pronunciations_save_json, pronunciations_status_json,
 };
 use super::language::{language_save_json, language_status_json};
 use super::memory::{embeddings_status_json, embeddings_switch_json};
@@ -261,6 +262,20 @@ pub(super) static ROUTES: &[Route] = &[
         "/cadora/link",
         Async(|s, r| {
             Box::pin(async move { Reply::json(cadora_link_json(s.settings(), r.body).await) })
+        }),
+    ),
+    // Signs in + joins a Cadora / NextHaul household with a family invite code (network).
+    post(
+        "/cadora/apps/link",
+        Async(|s, r| {
+            Box::pin(async move { Reply::json(cadora_app_link_json(s.settings(), r.body).await) })
+        }),
+    ),
+    // Leaves the household (network, best-effort) and forgets the link.
+    post(
+        "/cadora/apps/unlink",
+        Async(|s, r| {
+            Box::pin(async move { Reply::json(cadora_app_unlink_json(s.settings(), r.body).await) })
         }),
     ),
     get(

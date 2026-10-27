@@ -180,6 +180,32 @@ locally (no round-trip).
 
 ---
 
+## 3a. Saved recipes from Cadora / NextHaul (`saved_recipes`, 2026-10-27)
+
+A second recipe source, alongside the web lookup: the recipes the family has saved in
+its **NextHaul** and/or **Cadora** apps. Same screen, same `DeviceAction::ShowRecipe`
+payload — the Display is unchanged.
+
+- **Tool:** `saved_recipes` (`anamanti-core/src/llm/rig/tools/display.rs`) with an
+  `action` enum: `search` (title / category / description / ingredient words; an empty
+  query lists recent ones; results carry `nexthaul:<id>` / `cadora:<id>` references),
+  `show` (fills the recipe screen), `ingredients` (reads the list back without showing
+  it), and `add_ingredients_to_list` (the parsed ingredient names — or the model's
+  `items` subset — onto the household shopping list in one call).
+- **Source:** `HouseholdRecipes` trait, implemented by `crate::cadora::HouseholdApps`
+  (`anamanti-core/src/cadora/apps.rs`) over each linked app's sync pull plus Cadora's
+  community/global discovery and recipe detail. Mapping: `title`, `description` →
+  summary, `servings` → "N servings", `recipe_items.raw_text` (by `position`) →
+  ingredients, `instructions` → steps; `total_time` is empty (the apps don't store it).
+- **Routing between sources:** when both are advertised, `recipe_lookup`'s guidance
+  defers to `saved_recipes` (check saved first, fall back to the web on "no saved
+  recipe matches"). `recipe_control` / `close_recipe` are registered whenever *either*
+  source exists, and the screen guidance rides whichever recipe tool owns it.
+- **Linking:** Integrations → Cadora / NextHaul → each app's 6-digit family invite code
+  (see `plans/Plan.MD`, "Cadora / NextHaul saved recipes + signed-in link").
+
+---
+
 ## 4. Wire format & device plumbing
 
 Follow the **`anamanti-timer` template** end to end (it is the existing

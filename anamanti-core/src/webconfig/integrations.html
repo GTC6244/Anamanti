@@ -109,28 +109,58 @@
       <div id="calSends"></div>
     </div>
 
-    <!-- Cadora -->
+    <!-- Cadora / NextHaul -->
     <div class="drawer-panel" data-panel="cadora" hidden>
-      <p class="desc">Enables the <code>shopping_list_add</code> and <code>calendar_add</code> tools, so "add milk to the shopping list" writes to the household's shared list (used by NextHaul and Cadora) and "put soccer on the calendar Thursday at 4" adds a Cadora calendar event.</p>
+      <p class="desc">Links the family's <b>NextHaul</b> and/or <b>Cadora</b> household. Enables <code>saved_recipes</code> ("what recipes do we have?", "show grandma's lasagna", "add the lasagna ingredients to the shopping list" — saved recipes fill the display's recipe screen), <code>shopping_list_add</code> ("add milk to the shopping list") and, for Cadora, <code>calendar_add</code> ("put soccer on the calendar Thursday at 4"). Link whichever apps the family uses — one, or both.</p>
       <div id="cadStatus"></div>
+      <div class="section-label">NextHaul</div>
+      <div id="cadNhStatus"></div>
       <div class="field">
-        <label for="cad_code">Pairing code</label>
+        <label for="cad_nh_code">Family invite code</label>
         <div class="inline">
-          <input id="cad_code" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="off" class="mono">
-          <button type="button" class="primary" data-action="link-cadora"><i data-icon="link"></i>Link</button>
+          <input id="cad_nh_code" type="text" inputmode="numeric" maxlength="7" placeholder="6-digit code" autocomplete="off" class="mono">
+          <button type="button" class="primary" data-action="link-app" data-app="nexthaul" data-input="cad_nh_code"><i data-icon="link"></i>Link</button>
+          <button type="button" class="sm" id="cad_nh_unlink" hidden>Unlink</button>
+        </div>
+      </div>
+      <div class="section-label">Cadora</div>
+      <div id="cadCdStatus"></div>
+      <div class="field">
+        <label for="cad_cd_code">Family invite code</label>
+        <div class="inline">
+          <input id="cad_cd_code" type="text" inputmode="numeric" maxlength="7" placeholder="6-digit code" autocomplete="off" class="mono">
+          <button type="button" class="primary" data-action="link-app" data-app="cadora" data-input="cad_cd_code"><i data-icon="link"></i>Link</button>
+          <button type="button" class="sm" id="cad_cd_unlink" hidden>Unlink</button>
         </div>
       </div>
       <ol class="int-steps">
-        <li>In the <b>NextHaul</b> app, open <b>Settings → Voice &amp; Integrations</b>.</li>
-        <li>Add a voice assistant to get a <b>6-digit code</b> and enter it above.</li>
-        <li>The code is single-use and expires in a few minutes; the tools turn on the moment it's redeemed.</li>
-        <li>Or, in the <b>Cadora</b> web app, open <b>Settings → Voice assistants &amp; integrations</b>, add one (type <b>Other</b>), and paste the <code>vl_…</code> token under <b>Advanced</b> below.</li>
+        <li>In the app, open <b>Settings → Invite with a code</b> to get a one-time <b>6-digit family code</b> (valid 24 h), and enter it above for that app.</li>
+        <li>The Core joins the household as a member named <b>Anamanti</b> (shown in the app's member list; remove it there or press Unlink to disconnect).</li>
+        <li>Linking Cadora also connects the Cadora calendar and shopping list — no separate voice pairing code needed.</li>
       </ol>
+      <div class="field" style="margin-top:.85rem">
+        <label for="cad_shop">Shopping list <span class="hint">used when both apps are linked</span></label>
+        <div class="inline">
+          <select id="cad_shop">
+            <option value="auto">Automatic (NextHaul when linked)</option>
+            <option value="nexthaul">NextHaul</option>
+            <option value="cadora">Cadora</option>
+          </select>
+          <button type="button" class="sm" data-action="save-cadora-shop">Save</button>
+        </div>
+      </div>
       <details class="fold" style="margin-top:.85rem">
-        <summary>Advanced: paste a token or change the server</summary>
+        <summary>Advanced: voice pairing code, token, or server</summary>
         <div class="fold-body">
           <div class="field">
-            <label for="cad_token">Token <span class="hint">used by Link when no code is entered</span></label>
+            <label for="cad_code">Cadora voice pairing code <span class="hint">calendar + Cadora shopping list only, no recipes</span></label>
+            <div class="inline">
+              <input id="cad_code" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="off" class="mono">
+              <button type="button" class="sm" data-action="link-cadora"><i data-icon="link"></i>Link voice only</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="cad_token">Token <span class="hint">used by "Link voice only" when no code is entered</span></label>
             <input id="cad_token" type="password" class="mono" placeholder="vl_…" autocomplete="off">
           </div>
           <div class="field">
@@ -286,7 +316,7 @@ ui.hydrate();
     places:     { icon: 'pin',      name: 'Places',              tool: 'places_lookup',      loc: 'places.google' },
     directions: { icon: 'route',    name: 'Directions',          tool: 'directions_lookup',  loc: 'directions.mapbox' },
     calendar:   { icon: 'calendar', name: 'Calendar',            tool: 'calendar_lookup',    loc: 'calendar.ics' },
-    cadora:     { icon: 'cart',     name: 'Shopping & calendar', tool: 'shopping_list_add + calendar_add', loc: 'cadora' },
+    cadora:     { icon: 'cart',     name: 'Cadora / NextHaul', tool: 'saved_recipes + shopping_list_add + calendar_add', loc: 'cadora' },
     appsaid:    { icon: 'phone',    name: 'Phone messages',      tool: 'send_phone_message', loc: 'appsaid' },
     home_assistant: { icon: 'home', name: 'Home Assistant',      tool: 'home_control',       loc: 'home_assistant' },
     spotify:    { icon: 'music',    name: 'Spotify',             tool: 'spotify_control',    loc: 'spotify' },
@@ -449,9 +479,19 @@ ui.hydrate();
 
   function renderCadora(){
     const c = ST.cadora;
-    if (!c) { $('cadStatus').innerHTML = errBlock('Cadora'); return; }
-    $('cadStatus').innerHTML = line('Status', c.linked ? ui.status('ok', 'linked — tools active') : ui.status('off', 'not linked'))
+    if (!c) { $('cadStatus').innerHTML = errBlock('Cadora / NextHaul'); return; }
+    const apps = c.apps || {};
+    const appLine = (a) => a && a.linked ? ui.status('ok', 'linked to "' + esc(a.household || 'household') + '"') : ui.status('off', 'not linked');
+    const target = { nexthaul: 'NextHaul', cadora: 'Cadora' }[c.shopping_target] || '';
+    $('cadStatus').innerHTML = line('Recipes', c.recipes_active ? ui.status('ok', 'saved_recipes active') : ui.status('off', 'link an app to search saved recipes'))
+      + line('Shopping list', target ? ui.status('ok', target) : ui.status('off', 'not linked'))
+      + line('Calendar', c.linked ? ui.status('ok', 'Cadora calendar_add active') : ui.status('off', 'needs Cadora'))
       + line('Server', '<code>' + esc(c.base_url || 'default') + '</code>');
+    $('cadNhStatus').innerHTML = line('Status', appLine(apps.nexthaul));
+    $('cadCdStatus').innerHTML = line('Status', appLine(apps.cadora) + (!(apps.cadora && apps.cadora.linked) && c.linked ? ' <span class="muted">(voice link only — calendar + shopping)</span>' : ''));
+    $('cad_nh_unlink').hidden = !(apps.nexthaul && apps.nexthaul.linked);
+    $('cad_cd_unlink').hidden = !((apps.cadora && apps.cadora.linked) || c.linked);
+    $('cad_shop').value = c.shopping_app || 'auto';
     $('cad_base').value = c.base_url || '';
     $('cadSends').innerHTML = ui.sendsFor('cadora');
   }
@@ -639,6 +679,12 @@ ui.hydrate();
       const body = {}; if (code) body.code = code; if (token) body.token = token; if (base) body.base_url = base;
       return act(b, () => postJSON('/cadora/link', body), (r) => r.message || 'Cadora linked.').then(r => { if (r) { $('cad_code').value = ''; $('cad_token').value = ''; } });
     },
+    'link-app': (b) => {
+      const app = b.dataset.app, input = $(b.dataset.input), code = input.value.replace(/\s+/g, '');
+      if (!code) { ui.toast(false, 'Enter the 6-digit family invite code from the app (Settings → Invite with a code).'); input.focus(); return; }
+      return act(b, () => postJSON('/cadora/apps/link', { app, code }), (r) => r.message || 'Linked.').then(r => { if (r) input.value = ''; });
+    },
+    'save-cadora-shop': (b) => !ST.cadora ? ui.toast(false, 'Status did not load — reload before saving.') : act(b, () => postJSON('/cadora/save', { shopping_app: $('cad_shop').value }), 'Shopping list saved.'),
     'save-cadora-url': (b) => !ST.cadora ? ui.toast(false, 'Cadora status did not load — reload before saving.') : act(b, () => postJSON('/cadora/save', { base_url: $('cad_base').value.trim() }), 'Cadora server saved.'),
     'save-appsaid-token': (b) => {
       const k = asKey.value();
@@ -693,6 +739,12 @@ ui.hydrate();
   $('cad_code').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); ACTIONS['link-cadora']($('intDrawer').querySelector('[data-action="link-cadora"]')); }
   });
+  // Unlink (two-step inline confirm): the Core leaves the household and that app's tools turn off.
+  [['cad_nh_unlink', 'nexthaul', 'NextHaul'], ['cad_cd_unlink', 'cadora', 'Cadora']].forEach(([id, app, name]) =>
+    ui.confirm($(id), () => act($(id), () => postJSON('/cadora/apps/unlink', { app }), name + ' unlinked.'), 'Unlink ' + name + '?'));
+  ['cad_nh_code', 'cad_cd_code'].forEach(id => $(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); ACTIONS['link-app']($('intDrawer').querySelector('[data-input="' + id + '"]')); }
+  }));
   $('fpFilter').addEventListener('input', (e) => renderFolderList(e.target.value));
   $('dr_folders').addEventListener('input', updateNames);
   $('tiles').addEventListener('click', (e) => {

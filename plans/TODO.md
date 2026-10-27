@@ -552,6 +552,28 @@ Adding a capability = one `VoiceTool` registered in `Tools::build`
       tolerate a non-JSON error body, and a `429` redeem says to wait. Note
       `/voice/command` answers `ok:true` even on a server-side failure — its apology
       `speech` is relayed verbatim.
+- [x] **Cadora / NextHaul saved recipes + signed-in link (Core done 2026-10-27)**: the
+      `saved_recipes` tool (search / show on the recipe screen / ingredients / add
+      ingredients to the shopping list) over the Core's own identity-api session
+      (`cadora/apps.rs`, `HouseholdApps`), linked per app with a 6-digit family invite code
+      (Integrations → Cadora / NextHaul). `shopping_list_add` now writes to NextHaul
+      (sync push) when linked, else Cadora (voice API); `cadora.shopping_app` picks when
+      both are. Cadora linking also mints the Core's voice link (calendar).
+- [ ] **Link production to NextHaul / Cadora with family invite codes**: deploy the Core,
+      then Integrations → Cadora / NextHaul → enter a code from each app's Settings →
+      "Invite with a code". Verify on hardware: "what recipes do we have?", "show
+      [a saved recipe]" fills the recipe screen, "add the [recipe] ingredients to the
+      shopping list" and "add milk" land in the NextHaul app; "put X on the calendar" lands
+      in Cadora. The Core shows up as member "Anamanti" in each household.
+- [ ] **Cadora server follow-ups found while integrating (cadora repo, not this one)**:
+      (1) `/cadora/voice/command` `add_shopping_item` still writes `public.list_item`, but
+      NextHaul reads `nexthaul.list_item` since the Slice 7b cutover — voice adds from a
+      NextHaul-minted voice link (Alexa / Google / old Anamanti links) no longer reach the
+      NextHaul app. (2) No server-side recipe search: the Core pulls the whole sync stream
+      and searches locally; a `GET /nexthaul/recipes/search` would be cheaper. (3) Cadora's
+      sync pull returns raw `select *` rows (array/numeric columns as Postgres literals),
+      unlike NextHaul's `to_json` — the Core reads Cadora recipe detail from
+      `/cadora/recipes/detail` to avoid that.
 - [ ] **Re-pair production with Cadora**: the old `vl_` token was minted against the
       retired backend. Deploy the Core, then link on Integrations → Shopping & calendar:
       either a 6-digit code from NextHaul (blocked until NextHaul's Voice & Integrations
