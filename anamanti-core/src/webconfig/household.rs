@@ -265,7 +265,10 @@ pub(super) async fn cadora_app_link_json(settings: &SharedSettings, body: &[u8])
     };
     let out = match hub.link(app, &code).await {
         Ok(o) => o,
-        Err(e) => return fail(format!("{e:#}")),
+        Err(e) => {
+            log::warn!("cadora: linking {} failed: {e:#}", app.label());
+            return fail(format!("{e:#}"));
+        }
     };
     let mut update = CadoraUpdate::default();
     match app {

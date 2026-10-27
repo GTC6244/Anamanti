@@ -506,7 +506,7 @@ impl SavedRecipes {
                         saved.recipe.title
                     );
                 }
-                shopping.add_many(&items).await.with_context(|| {
+                shopping.add_many(&items, None).await.with_context(|| {
                     format!("adding the {} ingredients failed", saved.recipe.title)
                 })
             }

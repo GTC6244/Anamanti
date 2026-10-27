@@ -34,6 +34,8 @@ pub(super) const SPOTIFY_CONTROL: &str = "spotify_control";
 pub(super) const RADIO_CONTROL: &str = "radio_control";
 /// Tool name: add an item to the shared shopping list.
 pub(super) const SHOPPING_LIST_ADD: &str = "shopping_list_add";
+/// Tool name: read what's on the shared shopping list.
+pub(super) const SHOPPING_LIST_READ: &str = "shopping_list_read";
 /// Tool name: add a one-off event to the household's Cadora calendar.
 pub(super) const CALENDAR_ADD: &str = "calendar_add";
 /// Tool name: push a message to a family member's phone.
@@ -577,6 +579,9 @@ struct GroceryArgs {
     /// How many, when the user says a number (1–99). Omit for a plain add.
     #[serde(default)]
     quantity: Option<u32>,
+    /// A list name ("Costco"), only when the user names one.
+    #[serde(default)]
+    list: Option<String>,
 }
 
 struct ShoppingListAdd {
@@ -609,6 +614,12 @@ impl VoiceTool for ShoppingListAdd {
                         "minimum": 1,
                         "maximum": 99,
                         "description": "How many, when the user states a number. Omit otherwise."
+                    },
+                    "list": {
+                        "type": "string",
+                        "description": "The list's name, ONLY when the user names a specific list \
+                                        (\"add chips to the Costco list\"). Omit for the plain \
+                                        shopping/grocery list."
                     }
                 },
                 "required": ["item"]
@@ -630,9 +641,69 @@ impl VoiceTool for ShoppingListAdd {
     async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
         let args: GroceryArgs = parse_args(args, SHOPPING_LIST_ADD)?;
         self.list
-            .add(&args.item, args.quantity)
+            .add(&args.item, args.quantity, args.list.as_deref())
             .await
             .context("shopping list add failed")
+    }
+}
+
+/// The `shopping_list_read` tool: what's on the household's list (NextHaul, or Cadora
+/// when it is linked with a family code). Same backing list as `shopping_list_add`.
+pub(super) fn shopping_list_read(list: Arc<dyn ShoppingList>) -> Arc<dyn VoiceTool> {
+    Arc::new(ShoppingListRead { list })
+}
+
+/// Typed arguments for `shopping_list_read`.
+#[derive(Debug, Default, Deserialize)]
+struct GroceryReadArgs {
+    #[serde(default)]
+    list: Option<String>,
+}
+
+struct ShoppingListRead {
+    list: Arc<dyn ShoppingList>,
+}
+
+#[async_trait]
+impl VoiceTool for ShoppingListRead {
+    fn name(&self) -> &'static str {
+        SHOPPING_LIST_READ
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        definition(
+            SHOPPING_LIST_READ,
+            "Read what's on the household's shared shopping/grocery list. Use for \"what's on \
+             the shopping list?\", \"read me the grocery list\", \"do we need eggs?\" or \"is milk \
+             on the list?\". Returns the unchecked items (and the names of any other lists).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "list": {
+                        "type": "string",
+                        "description": "The list's name, ONLY when the user names a specific list \
+                                        (\"what's on the Costco list?\"). Omit otherwise."
+                    }
+                }
+            }),
+        )
+    }
+
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "You can read the household's shopping list with `shopping_list_read` — use it \
+             whenever the user asks what's on the shopping/grocery list or whether something \
+             is on it, then answer briefly from the result (read a long list as a short \
+             natural sentence, not a numbered list). Never say you can't read the list.",
+        )
+    }
+
+    async fn invoke(&self, args: &Value, _ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: GroceryReadArgs = super::parse_args_or_default(args, SHOPPING_LIST_READ)?;
+        self.list
+            .read(args.list.as_deref())
+            .await
+            .context("reading the shopping list failed")
     }
 }
 

@@ -199,26 +199,48 @@ pub trait HouseholdRecipes: Send + Sync {
 /// A shopping list the `shopping_list_add` tool (and recipe ingredient adds) write to.
 #[async_trait]
 pub trait ShoppingList: Send + Sync {
-    /// Add one item; returns a speakable confirmation.
-    async fn add(&self, item: &str, quantity: Option<u32>) -> Result<String>;
+    /// Add one item to `list` (a list name; `None` = the default list); returns a
+    /// speakable confirmation.
+    async fn add(&self, item: &str, quantity: Option<u32>, list: Option<&str>) -> Result<String>;
     /// Add several items (e.g. a recipe's ingredients); returns a speakable summary.
-    async fn add_many(&self, items: &[String]) -> Result<String>;
+    async fn add_many(&self, items: &[String], list: Option<&str>) -> Result<String>;
+    /// What's on `list` (`None` = the default list), as a speakable summary.
+    async fn read(&self, list: Option<&str>) -> Result<String>;
 }
 
 /// The Cadora shopping list over the voice API (the `vl_…` link).
 pub struct VoiceShoppingList {
     controller: Arc<dyn CadoraController>,
+    /// The signed-in hub, when Cadora is linked with a family code: reads the list
+    /// (the voice API can only add).
+    reader: Option<Arc<HouseholdApps>>,
 }
 
 impl VoiceShoppingList {
     pub fn wrap(controller: Arc<dyn CadoraController>) -> Arc<dyn ShoppingList> {
-        Arc::new(Self { controller })
+        Arc::new(Self {
+            controller,
+            reader: None,
+        })
+    }
+
+    /// [`Self::wrap`], reading the list through `hub` when Cadora is signed in.
+    pub fn wrap_with_reader(
+        controller: Arc<dyn CadoraController>,
+        hub: Option<Arc<HouseholdApps>>,
+    ) -> Arc<dyn ShoppingList> {
+        Arc::new(Self {
+            controller,
+            reader: hub.filter(|h| h.linked(HouseholdApp::Cadora)),
+        })
     }
 }
 
 #[async_trait]
 impl ShoppingList for VoiceShoppingList {
-    async fn add(&self, item: &str, quantity: Option<u32>) -> Result<String> {
+    // The voice API always adds to the household's default list; a list name is
+    // ignored.
+    async fn add(&self, item: &str, quantity: Option<u32>, _list: Option<&str>) -> Result<String> {
         self.controller
             .command(CadoraCommand::AddItem {
                 item: item.to_string(),
@@ -227,7 +249,7 @@ impl ShoppingList for VoiceShoppingList {
             .await
     }
 
-    async fn add_many(&self, items: &[String]) -> Result<String> {
+    async fn add_many(&self, items: &[String], _list: Option<&str>) -> Result<String> {
         let items = dedupe_items(items);
         if items.is_empty() {
             bail!("there were no ingredients to add");
@@ -235,7 +257,7 @@ impl ShoppingList for VoiceShoppingList {
         let mut added = Vec::new();
         let mut first_err = None;
         for item in &items {
-            match self.add(item, None).await {
+            match self.add(item, None, None).await {
                 Ok(_) => added.push(item.clone()),
                 Err(e) => {
                     log::warn!("cadora: adding {item:?} failed: {e:#}");
@@ -246,7 +268,7 @@ impl ShoppingList for VoiceShoppingList {
         if added.is_empty() {
             return Err(first_err.unwrap_or_else(|| anyhow!("nothing was added")));
         }
-        let mut speech = added_summary(&added, &[], "Cadora");
+        let mut speech = added_summary(&added, &[], "Cadora shopping list");
         if added.len() < items.len() {
             speech.push_str(&format!(
                 " {} couldn't be added.",
@@ -254,6 +276,16 @@ impl ShoppingList for VoiceShoppingList {
             ));
         }
         Ok(speech)
+    }
+
+    async fn read(&self, list: Option<&str>) -> Result<String> {
+        match &self.reader {
+            Some(hub) => hub.read_list(HouseholdApp::Cadora, list).await,
+            None => bail!(
+                "I can't read the Cadora list over the voice link — link Cadora with a family \
+                 invite code on the config page to read it"
+            ),
+        }
     }
 }
 
@@ -270,33 +302,54 @@ impl NextHaulShoppingList {
 
 #[async_trait]
 impl ShoppingList for NextHaulShoppingList {
-    async fn add(&self, item: &str, quantity: Option<u32>) -> Result<String> {
+    async fn add(&self, item: &str, quantity: Option<u32>, list: Option<&str>) -> Result<String> {
         let item = item.trim();
         if item.is_empty() {
             bail!("no item to add — say what to put on the shopping list");
         }
         let qty = quantity.filter(|q| *q >= 1).unwrap_or(1).min(99);
-        let out = self.hub.nexthaul_add(&[(item.to_string(), qty)]).await?;
+        let out = self
+            .hub
+            .nexthaul_add(&[(item.to_string(), qty)], list)
+            .await?;
+        let where_ = list_phrase(&out.list_name);
         Ok(if !out.bumped.is_empty() {
             format!(
-                "{} was already on the NextHaul shopping list, so I bumped the quantity.",
+                "{} was already on {where_}, so I bumped the quantity.",
                 capitalize(item)
             )
         } else if qty > 1 {
-            format!("Added {qty} {item} to the NextHaul shopping list.")
+            format!("Added {qty} {item} to {where_}.")
         } else {
-            format!("Added {item} to the NextHaul shopping list.")
+            format!("Added {item} to {where_}.")
         })
     }
 
-    async fn add_many(&self, items: &[String]) -> Result<String> {
+    async fn add_many(&self, items: &[String], list: Option<&str>) -> Result<String> {
         let items = dedupe_items(items);
         if items.is_empty() {
             bail!("there were no ingredients to add");
         }
         let pairs: Vec<(String, u32)> = items.iter().map(|i| (i.clone(), 1)).collect();
-        let out = self.hub.nexthaul_add(&pairs).await?;
-        Ok(added_summary(&out.added, &out.bumped, "NextHaul"))
+        let out = self.hub.nexthaul_add(&pairs, list).await?;
+        Ok(added_summary(
+            &out.added,
+            &out.bumped,
+            &format!("NextHaul {} list", out.list_name),
+        ))
+    }
+
+    async fn read(&self, list: Option<&str>) -> Result<String> {
+        self.hub.read_list(HouseholdApp::NextHaul, list).await
+    }
+}
+
+/// "the NextHaul Groceries list" (names the list, so it's clear where an item went).
+fn list_phrase(list_name: &str) -> String {
+    if list_name.is_empty() {
+        "the NextHaul shopping list".to_string()
+    } else {
+        format!("the NextHaul {list_name} list")
     }
 }
 
@@ -336,7 +389,7 @@ fn added_summary(added: &[String], bumped: &[String], app: &str) -> String {
             names.push(format!("{} more", added.len() - NAMED));
         }
         parts.push(format!(
-            "Added {} to the {app} shopping list: {}.",
+            "Added {} to the {app}: {}.",
             count_phrase(added.len(), "item"),
             join_list(&names)
         ));
@@ -376,6 +429,8 @@ pub fn normalize_name(s: &str) -> String {
 /// What [`HouseholdApps::nexthaul_add`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AddOutcome {
+    /// The list the items went to ("Groceries").
+    pub list_name: String,
     /// Items inserted as new rows.
     pub added: Vec<String>,
     /// Items already on the list whose quantity was bumped.
@@ -1420,22 +1475,21 @@ impl HouseholdApps {
     /// Add `(item, quantity)` pairs to the NextHaul household's default (oldest)
     /// shopping list via sync push, bumping the quantity of a live unchecked row with
     /// the same normalized name instead of duplicating it.
-    pub async fn nexthaul_add(&self, items: &[(String, u32)]) -> Result<AddOutcome> {
+    pub async fn nexthaul_add(
+        &self,
+        items: &[(String, u32)],
+        list: Option<&str>,
+    ) -> Result<AddOutcome> {
         let app = HouseholdApp::NextHaul;
         let hh = self.household(app)?;
         // Fresh state for list resolution + dedupe.
-        let (list_id, existing) = self
+        let (picked, existing) = self
             .with_cache(app, true, |c| {
-                let mut lists: Vec<&Value> = c
-                    .rows("list")
-                    .filter(|l| matches!(str_field(l, "type"), "" | "shopping"))
-                    .collect();
-                lists.sort_by(|a, b| {
-                    str_field(a, "created_at")
-                        .cmp(str_field(b, "created_at"))
-                        .then(str_field(a, "name").cmp(str_field(b, "name")))
-                });
-                let list_id = lists.first().map(|l| str_field(l, "id").to_string());
+                let picked = pick_list(c, list);
+                let list_id = picked
+                    .as_ref()
+                    .ok()
+                    .and_then(|p| p.as_ref().map(|(id, _)| id.clone()));
                 let existing: HashMap<String, (String, i64)> = match &list_id {
                     Some(lid) => c
                         .rows("list_item")
@@ -1456,23 +1510,27 @@ impl HouseholdApps {
                         .collect(),
                     None => HashMap::new(),
                 };
-                (list_id, existing)
+                (picked, existing)
             })
             .await?;
 
         let mut mutations = Vec::new();
-        let list_id = match list_id {
-            Some(id) => id,
+        let mut out = AddOutcome::default();
+        let list_id = match picked.map_err(|e| anyhow!(e))? {
+            Some((id, name)) => {
+                out.list_name = name;
+                id
+            }
             None => {
                 let id = new_uuid();
                 mutations.push(json!({
                     "mutation_id": new_uuid(), "op": "insert", "table": "list", "id": id,
                     "fields": { "name": "Shopping", "type": "shopping" }
                 }));
+                out.list_name = "Shopping".to_string();
                 id
             }
         };
-        let mut out = AddOutcome::default();
         let mut bumps: HashMap<String, (String, i64)> = HashMap::new();
         let mut inserted: HashSet<String> = HashSet::new();
         for (text, qty) in items {
@@ -1521,6 +1579,73 @@ impl HouseholdApps {
             c.pulled_at = None;
         }
         Ok(out)
+    }
+
+    /// What's on one of `app`'s shopping lists (`list` = a name; default = the
+    /// oldest list), as a speakable summary: unchecked items first, then how many are
+    /// already checked off, plus the names of the other lists.
+    pub async fn read_list(&self, app: HouseholdApp, list: Option<&str>) -> Result<String> {
+        let label = app.label();
+        self.with_cache(app, true, |c| {
+            let (id, name) = match pick_list(c, list).map_err(|e| anyhow!(e))? {
+                Some(p) => p,
+                None => return Ok(format!("The {label} household has no shopping list yet.")),
+            };
+            let mut open: Vec<(String, String)> = Vec::new();
+            let mut done = 0usize;
+            for it in c.rows("list_item").filter(|it| {
+                str_field(it, "list_id") == id
+                    && !bool_field(it, "deleted")
+                    && !bool_field(it, "archived")
+            }) {
+                if bool_field(it, "checked") {
+                    done += 1;
+                    continue;
+                }
+                let text = str_field(it, "text").trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let q = num_field(it, "quantity").unwrap_or(1.0) as i64;
+                let label = if q > 1 {
+                    format!("{q} {text}")
+                } else {
+                    text.to_string()
+                };
+                open.push((str_field(it, "category").to_string(), label));
+            }
+            // Store order: grouped by category, then by name.
+            open.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then(a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+            });
+            let names: Vec<String> = open.into_iter().map(|(_, l)| l).collect();
+            let mut out = if names.is_empty() {
+                format!("The {label} {name} list is empty.")
+            } else {
+                format!(
+                    "The {label} {name} list has {}: {}.",
+                    count_phrase(names.len(), "item"),
+                    join_list(&names)
+                )
+            };
+            if done > 0 {
+                out.push_str(&format!(
+                    " {} already checked off.",
+                    count_phrase(done, "item")
+                ));
+            }
+            let others: Vec<String> = shopping_lists(c)
+                .into_iter()
+                .map(|l| str_field(l, "name").to_string())
+                .filter(|n| *n != name)
+                .collect();
+            if !others.is_empty() {
+                out.push_str(&format!(" Other lists: {}.", join_list(&others)));
+            }
+            Ok(out)
+        })
+        .await?
     }
 
     /// `POST /{app}/sync/push` in batches; any rejected mutation fails the add.
@@ -1577,6 +1702,77 @@ impl HouseholdApps {
         }
         Ok(())
     }
+}
+
+/// A household's shopping lists, oldest first (the apps' default-list rule).
+fn shopping_lists(c: &SyncCache) -> Vec<&Value> {
+    let mut lists: Vec<&Value> = c
+        .rows("list")
+        .filter(|l| matches!(str_field(l, "type"), "" | "shopping"))
+        .collect();
+    lists.sort_by(|a, b| {
+        str_field(a, "created_at")
+            .cmp(str_field(b, "created_at"))
+            .then(str_field(a, "name").cmp(str_field(b, "name")))
+    });
+    lists
+}
+
+/// The list `name` asks for (exact, then word match; "list"/"shopping" ignored), or
+/// the default (oldest) list when `name` is empty. `Ok(None)` = the household has no
+/// list yet; `Err` = no list by that name (the message names the lists there are).
+fn pick_list(c: &SyncCache, name: Option<&str>) -> Result<Option<(String, String)>, String> {
+    let lists = shopping_lists(c);
+    let pair = |l: &Value| {
+        (
+            str_field(l, "id").to_string(),
+            str_field(l, "name").to_string(),
+        )
+    };
+    let wanted: Vec<String> = words(name.unwrap_or(""))
+        .into_iter()
+        .filter(|w| {
+            !matches!(
+                w.as_str(),
+                "list" | "shopping" | "grocery" | "the" | "my" | "our"
+            )
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(lists.first().map(|l| pair(l)));
+    }
+    let wanted_joined = wanted.join(" ");
+    if let Some(l) = lists
+        .iter()
+        .find(|l| normalize_name(str_field(l, "name")) == wanted_joined)
+    {
+        return Ok(Some(pair(l)));
+    }
+    if let Some(l) = lists.iter().find(|l| {
+        let have = words(str_field(l, "name"));
+        wanted.iter().all(|w| {
+            have.iter()
+                .any(|h| h.trim_end_matches('s') == w.trim_end_matches('s'))
+        })
+    }) {
+        return Ok(Some(pair(l)));
+    }
+    // "groceries" / "grocery list" mean the default list when no list is called that.
+    if wanted
+        .iter()
+        .all(|w| matches!(w.as_str(), "groceries" | "food"))
+    {
+        return Ok(lists.first().map(|l| pair(l)));
+    }
+    let names: Vec<String> = lists
+        .iter()
+        .map(|l| str_field(l, "name").to_string())
+        .collect();
+    Err(format!(
+        "there's no list called \"{}\" — the lists are {}",
+        name.unwrap_or("").trim(),
+        join_list(&names)
+    ))
 }
 
 /// A display [`crate::recipe::Recipe`] (+ shopping item names) from a recipe row and
@@ -1846,7 +2042,7 @@ mod tests {
                 "butter".into(),
             ],
             &["vanilla".into()],
-            "NextHaul",
+            "NextHaul shopping list",
         );
         assert_eq!(
             s,
@@ -2169,15 +2365,19 @@ mod tests {
         let api = FakeApi::start(nexthaul_api()).await;
         let hub = nexthaul_hub(&api).await;
         let out = hub
-            .nexthaul_add(&[
-                ("Milk".into(), 1),
-                ("eggs".into(), 2),
-                ("lasagna noodles".into(), 1),
-                ("minced beef".into(), 1),
-                ("Lasagna Noodles".into(), 1),
-            ])
+            .nexthaul_add(
+                &[
+                    ("Milk".into(), 1),
+                    ("eggs".into(), 2),
+                    ("lasagna noodles".into(), 1),
+                    ("minced beef".into(), 1),
+                    ("Lasagna Noodles".into(), 1),
+                ],
+                None,
+            )
             .await
             .unwrap();
+        assert_eq!(out.list_name, "Groceries");
         assert_eq!(out.bumped, vec!["Milk"]);
         assert_eq!(out.added, vec!["eggs", "lasagna noodles", "minced beef"]);
 
@@ -2216,6 +2416,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn named_lists_are_targeted_and_read_back() {
+        let api = FakeApi::start(nexthaul_api()).await;
+        let hub = nexthaul_hub(&api).await;
+        let list = NextHaulShoppingList::wrap(hub.clone());
+
+        // Reading the default (oldest) list: unchecked items, the checked count and
+        // the other lists.
+        let said = list.read(None).await.unwrap();
+        assert_eq!(
+            said,
+            "The NextHaul Groceries list has 1 item: Milk. 1 item already checked off. \
+             Other lists: Costco."
+        );
+        assert_eq!(list.read(Some("the grocery list")).await.unwrap(), said);
+        assert!(list
+            .read(Some("costco list"))
+            .await
+            .unwrap()
+            .starts_with("The NextHaul Costco list is empty."));
+        let err = list.read(Some("hardware")).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "there's no list called \"hardware\" — the lists are Groceries and Costco"
+        );
+
+        // A named add goes to that list and says so.
+        let said = list
+            .add("paper towels", None, Some("Costco"))
+            .await
+            .unwrap();
+        assert_eq!(said, "Added paper towels to the NextHaul Costco list.");
+        let push = api
+            .calls()
+            .into_iter()
+            .find(|c| c.1 == "/nexthaul/sync/push")
+            .unwrap();
+        assert_eq!(push.2["mutations"][0]["fields"]["list_id"], "L2");
+    }
+
+    #[tokio::test]
     async fn nexthaul_add_creates_a_list_when_the_household_has_none() {
         let api = FakeApi::start(Arc::new(|m, p, b| {
             let path = p.split('?').next().unwrap();
@@ -2234,8 +2474,8 @@ mod tests {
         .await;
         let hub = nexthaul_hub(&api).await;
         let list = NextHaulShoppingList::wrap(hub);
-        let speech = list.add("bread", None).await.unwrap();
-        assert_eq!(speech, "Added bread to the NextHaul shopping list.");
+        let speech = list.add("bread", None, None).await.unwrap();
+        assert_eq!(speech, "Added bread to the NextHaul Shopping list.");
     }
 
     #[tokio::test]
@@ -2251,7 +2491,10 @@ mod tests {
         }))
         .await;
         let hub = nexthaul_hub(&api).await;
-        let err = hub.nexthaul_add(&[("bread".into(), 1)]).await.unwrap_err();
+        let err = hub
+            .nexthaul_add(&[("bread".into(), 1)], None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("forbidden"), "{err}");
     }
 
@@ -2339,12 +2582,15 @@ mod tests {
         let rec = Arc::new(Rec(StdMutex::new(Vec::new())));
         let list = VoiceShoppingList::wrap(rec.clone());
         let speech = list
-            .add_many(&[
-                "rice".into(),
-                "saffron".into(),
-                "Rice".into(),
-                "peas".into(),
-            ])
+            .add_many(
+                &[
+                    "rice".into(),
+                    "saffron".into(),
+                    "Rice".into(),
+                    "peas".into(),
+                ],
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(*rec.0.lock().unwrap(), vec!["rice", "peas"]);

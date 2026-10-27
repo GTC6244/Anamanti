@@ -1090,7 +1090,8 @@ phone) and `search.rs` (`internet_search`).
   `shopping_list_add` now holds an `Arc<dyn ShoppingList>`: the NextHaul list
   (`POST /nexthaul/sync/push`, the app's oldest list, bumping a live duplicate's quantity)
   or the Cadora list (voice API), per the `cadora.shopping_app` preference (auto =
-  NextHaul when linked); `saved_recipes add_ingredients_to_list` uses the same list. The **`send_phone_message`** tool has the same external
+  NextHaul when linked); `saved_recipes add_ingredients_to_list` uses the same list, and
+  **`shopping_list_read`** reads it back (oldest list by default, or a named list). The **`send_phone_message`** tool has the same external
   shape: it holds an injected `Arc<dyn PhoneMessenger>` (`anamanti-core/src/appsaid/`)
   and pushes a message — often a Google Maps link — to a named family member's phone
   via **AppSaid** (a self-hosted HTML-push worker), one `POST {worker_url}/v1/messages`

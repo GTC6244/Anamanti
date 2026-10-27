@@ -641,6 +641,11 @@ more tool in `Tools`.
   app; `anamanti-core/src/cadora/apps.rs`). With both linked, `shopping_list_add` goes to
   NextHaul unless `cadora.shopping_app` says `cadora`. The recipe screen's
   `recipe_control` / `close_recipe` are now advertised whenever *either* recipe source is.
+  **`shopping_list_read`** reads the list back (NextHaul, or Cadora when linked with a
+  family code — the voice link can only add), and both shopping tools take an optional
+  `list` name ("add chips to the Costco list"); with no name they use the household's
+  oldest list, the apps' default. Confirmations name the list ("…to the NextHaul
+  Groceries list") so it's clear where an item went.
 - **Phone messages (AppSaid) — `send_phone_message`:** pushes a message — often a
   Google Maps link — to a named family member's phone via **AppSaid**, a self-hosted
   HTML-push service (`anamanti-core/src/appsaid/`, `PhoneMessenger` trait, mirroring

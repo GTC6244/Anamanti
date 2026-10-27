@@ -1431,7 +1431,10 @@ impl LlmFactory {
                 .clone()
                 .map(NextHaulShoppingList::wrap)
                 .or_else(|| f.cadora.clone().map(VoiceShoppingList::wrap)),
-            Some(HouseholdApp::Cadora) => f.cadora.clone().map(VoiceShoppingList::wrap),
+            Some(HouseholdApp::Cadora) => f
+                .cadora
+                .clone()
+                .map(|c| VoiceShoppingList::wrap_with_reader(c, f.household_apps.clone())),
             None => None,
         };
         f.appsaid = s.appsaid.messenger();

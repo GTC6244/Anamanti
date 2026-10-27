@@ -250,6 +250,7 @@ const GUIDANCE_ORDER: &[&str] = &[
     display::WEATHER_LOOKUP,
     display::PLACES_LOOKUP,
     services::SHOPPING_LIST_ADD,
+    services::SHOPPING_LIST_READ,
     services::SEND_PHONE_MESSAGE,
 ];
 
@@ -312,7 +313,8 @@ impl Tools {
             .clone()
             .or_else(|| deps.cadora.clone().map(VoiceShoppingList::wrap));
         if let Some(list) = shopping.clone() {
-            tools.push(services::shopping_list_add(list));
+            tools.push(services::shopping_list_add(list.clone()));
+            tools.push(services::shopping_list_read(list));
         }
         if let Some(controller) = deps.cadora {
             tools.push(services::calendar_add(controller));
@@ -649,6 +651,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, "added milk");
+        let out = tools
+            .dispatch(
+                "shopping_list_add",
+                &json!({"item": "chips", "list": "Costco"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, "added chips to Costco");
+        // shopping_list_read rides the same list; no arguments (or null) = the default.
+        assert_eq!(
+            tools
+                .dispatch("shopping_list_read", &Value::Null, None)
+                .await
+                .unwrap(),
+            "read default"
+        );
+        assert_eq!(
+            tools
+                .dispatch("shopping_list_read", &json!({"list": "Costco"}), None)
+                .await
+                .unwrap(),
+            "read Costco"
+        );
     }
 
     #[tokio::test]

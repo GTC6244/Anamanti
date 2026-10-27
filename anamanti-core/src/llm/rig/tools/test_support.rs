@@ -201,13 +201,20 @@ pub(crate) struct RecordingShopping {
 
 #[async_trait]
 impl crate::cadora::ShoppingList for RecordingShopping {
-    async fn add(&self, item: &str, _quantity: Option<u32>) -> Result<String> {
-        Ok(format!("added {item}"))
+    async fn add(&self, item: &str, _quantity: Option<u32>, list: Option<&str>) -> Result<String> {
+        Ok(match list {
+            Some(l) => format!("added {item} to {l}"),
+            None => format!("added {item}"),
+        })
     }
 
-    async fn add_many(&self, items: &[String]) -> Result<String> {
+    async fn add_many(&self, items: &[String], _list: Option<&str>) -> Result<String> {
         self.many.lock().unwrap().extend(items.iter().cloned());
         Ok(format!("added {}", items.len()))
+    }
+
+    async fn read(&self, list: Option<&str>) -> Result<String> {
+        Ok(format!("read {}", list.unwrap_or("default")))
     }
 }
 
