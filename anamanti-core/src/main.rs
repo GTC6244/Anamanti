@@ -231,6 +231,12 @@ async fn run() -> Result<()> {
         ),
     }
 
+    // The resolved Anthropic key (env seed overlaid by the settings JSON / config page),
+    // captured before `settings` is moved into the pipeline. GraphRAG entity extraction
+    // is built outside the LLM factory, so it is seeded from this rather than reading the
+    // environment directly — honoring a key stored only in the settings file.
+    let graphrag_anthropic_key = settings.current_anthropic_api_key();
+
     let mut pipeline = Pipeline::with_settings(
         settings,
         memory,
@@ -256,7 +262,13 @@ async fn run() -> Result<()> {
 
     // Memory retrieval backend: SQLite FTS (default) or embedded HelixDB GraphRAG.
     if config.memory_backend == MemoryBackendChoice::Helix {
-        match anamanti_core::memory::GraphRagController::start(&config, &chatlog).await {
+        match anamanti_core::memory::GraphRagController::start(
+            &config,
+            &chatlog,
+            graphrag_anthropic_key,
+        )
+        .await
+        {
             Ok(ctrl) => {
                 log::info!("memory backend: HelixDB GraphRAG (embedded, in-process)");
                 // The orchestrator and the debug GUI hold swappable proxies, so a

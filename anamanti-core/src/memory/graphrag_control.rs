@@ -250,11 +250,15 @@ impl GraphRagController {
     /// `active_backend` marker), else `config.graphrag.embed_backend`. If the chosen
     /// backend can't be built (e.g. missing model or key) it falls back to the config
     /// default; if that also fails the error propagates (caller → SQLite FTS).
-    pub async fn start(config: &Config, chatlog: &Arc<ChatLog>) -> Result<Arc<Self>> {
+    pub async fn start(
+        config: &Config,
+        chatlog: &Arc<ChatLog>,
+        anthropic_key: Option<String>,
+    ) -> Result<Arc<Self>> {
         let cfg = config.graphrag.clone();
         let helix_base = config.helix_path.clone();
         let chatlog_path = chatlog.path().to_path_buf();
-        let (inner, extract_key_present) = build_extractor(&cfg);
+        let (inner, extract_key_present) = build_extractor(&cfg, anthropic_key);
         // An explicit `graphrag.extract: "off"` in anamanti.json always wins (a privacy
         // opt-out must not be undone by an older console choice); otherwise the
         // persisted console choice wins over the `auto` default.
@@ -476,9 +480,19 @@ fn offset_path(chatlog_path: &Path, sig: &str) -> PathBuf {
 }
 
 /// The extractor to gate, plus whether it is the real (cloud) one.
-fn build_extractor(cfg: &GraphRagConfig) -> (Arc<dyn EntityExtractor>, bool) {
-    match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => (
+/// `anthropic_key` is the resolved key (the env seed overlaid by the settings JSON /
+/// config page); it falls back to the raw `ANTHROPIC_API_KEY` env var for env-only
+/// setups. Absent entirely ⇒ extraction is disabled (recall is pure vector KNN).
+fn build_extractor(
+    cfg: &GraphRagConfig,
+    anthropic_key: Option<String>,
+) -> (Arc<dyn EntityExtractor>, bool) {
+    let key = anthropic_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+        .filter(|k| !k.is_empty());
+    match key {
+        Some(key) => (
             Arc::new(AnthropicEntityExtractor::new(
                 cfg.anthropic_base_url.clone(),
                 key,
@@ -486,9 +500,10 @@ fn build_extractor(cfg: &GraphRagConfig) -> (Arc<dyn EntityExtractor>, bool) {
             )),
             true,
         ),
-        _ => {
+        None => {
             log::warn!(
-                "ANTHROPIC_API_KEY absent; entity extraction disabled (recall is pure vector KNN)"
+                "no Anthropic API key (settings JSON or ANTHROPIC_API_KEY); entity \
+                 extraction disabled (recall is pure vector KNN)"
             );
             (Arc::new(NoopEntityExtractor), false)
         }
@@ -992,7 +1007,7 @@ mod tests {
         };
         let chatlog = Arc::new(ChatLog::open(tmp.join("chatlog.jsonl")).unwrap());
 
-        let ctrl = GraphRagController::start(&config, &chatlog)
+        let ctrl = GraphRagController::start(&config, &chatlog, None)
             .await
             .expect("controller should start on the local backend");
 
