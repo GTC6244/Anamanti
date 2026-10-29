@@ -688,6 +688,44 @@ Notes:
   changed, so a new Core will not interoperate with an old Display build (or vice
   versa) — rebuild and reflash both.
 
+### LAN speech services (Piper TTS + faster-whisper STT)
+
+The Core does **not** synthesize or transcribe itself — it dials off-the-shelf
+[Wyoming](https://github.com/rhasspy/wyoming) servers by host:port (from `anamanti.json`),
+so this environment can live anywhere and is **not in git**:
+
+| Port  | Server                        | Voice / model                         |
+| ----- | ----------------------------- | ------------------------------------- |
+| 10200 | `wyoming-piper` TTS (English) | `en_US-lessac-medium`                 |
+| 10201 | `wyoming-piper` TTS (pt-BR)   | `pt_BR-faber-medium`                  |
+| 10300 | `wyoming-faster-whisper` STT  | `base-int8` (`--language en`)         |
+
+They live in **`/Volumes/External/DeveloperSupport/anamanti-services/`** (a Python 3.12
+venv + `models/`, which auto-download on first start), with a launcher at
+`anamanti-services/start.sh` (`./start.sh` starts any server not already up;
+`./start.sh restart` recycles the ports). The Core connects per turn, so restarting
+these servers needs **no** Core restart. (For multilingual STT input, use a `small`
+`--multilingual` whisper and drop `--language en`; see `plans/BilingualPlan.md`.)
+
+⚠️ **Do not delete this folder.** If it is trashed/removed while the servers are running,
+they keep executing off the now-unlinked files and TTS audio **clips ~0.5s into every
+reply** (Piper reads its voice/espeak data per synthesis and then fails); STT limps on
+because faster-whisper loaded its model into memory at boot. Symptom seen 2026-10-29. The
+folder was `ambient-services` before the Anamanti rename.
+
+Rebuild from scratch:
+
+```bash
+SVC=/Volumes/External/DeveloperSupport/anamanti-services
+/opt/homebrew/bin/python3.12 -m venv "$SVC/venv"
+"$SVC/venv/bin/pip" install wyoming-piper wyoming-faster-whisper piper-tts
+"$SVC/start.sh" restart        # launches 10200 (en) / 10201 (pt-BR) / 10300 (STT)
+```
+
+Verify by synthesizing a long sentence and checking the audio runs its full length and
+ends with `audio-stop` (not truncated). These servers also don't survive a reboot —
+running them under launchd is the same open item as the Core (`TODO.md §4`).
+
 ### Deploying / updating Anamanti Display (device OTA) — publish from the Mac
 
 This is how you ship an app update to the Echo Show fleet. Read this whole section
