@@ -115,7 +115,7 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   (`ANTHROPIC_API_KEY`, …) only *seeds* a key on first boot when the settings file has
   no value for it; a stored value always wins (`overlay_seeded`). The "local
   production" Anamanti Core is installed at
-  `/Volumes/External/DeveloperSupport/Anamanti Core/` (a copied release
+  `/Volumes/External/Anamanti Core/` (a copied release
   binary, run outside any git checkout) and pins its identity via `instance_id` in
   that folder's `anamanti.json` (`instance_id="anamanti-core"`); its provider keys live
   in that folder's `anamanti_settings.json`, so it needs no keys in the environment. Test
@@ -567,7 +567,7 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 ### Deploying / updating the local production Anamanti Core
 
 "Local production" is a **copied release binary** at
-`/Volumes/External/DeveloperSupport/Anamanti Core/anamanti-core`,
+`/Volumes/External/Anamanti Core/anamanti-core`,
 run **outside any git checkout**. Its identity, data paths, and ports (10700 /
 config 8730) come from `anamanti.json` in that folder (`service_name="Anamanti Core"`,
 `instance_id="anamanti-core"` — the Echo Shows pin this id, so never change it casually;
@@ -581,7 +581,7 @@ branch's Anamanti Core to production, follow this runbook exactly (it does **not
 touch any test copy running from a worktree):
 
 ```bash
-PROD="/Volumes/External/DeveloperSupport/Anamanti Core"
+PROD="/Volumes/External/Anamanti Core"
 
 # 1. Build the release binary from the branch you want to ship.
 #    VAD: `vad-silero` is a DEFAULT feature (2026-09-30), so this build compiles in
@@ -624,6 +624,9 @@ while lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1; do sleep 0.3; done
 cp "$PROD/anamanti-core" "$PROD/anamanti-core.bak-$(date +%Y%m%d-%H%M%S)"
 cp anamanti-core/target/release/anamanti-core "$PROD/anamanti-core"
 chmod +x "$PROD/anamanti-core"
+#    Retention: keep only the last week of rollback copies — prune older backups on each
+#    deploy (a clean deploy makes week-old binaries dead weight).
+find "$PROD" -maxdepth 1 -name 'anamanti-core.bak-*' -mtime +7 -delete
 
 # 4. Restart from the production folder. Provider keys/tokens load from the settings
 #    JSON ("$PROD/anamanti_settings.json", plaintext 0600), which wins over the
@@ -700,9 +703,9 @@ so this environment can live anywhere and is **not in git**:
 | 10201 | `wyoming-piper` TTS (pt-BR)   | `pt_BR-faber-medium`                  |
 | 10300 | `wyoming-faster-whisper` STT  | `base-int8` (`--language en`)         |
 
-They live in **`/Volumes/External/DeveloperSupport/anamanti-services/`** (a Python 3.12
-venv + `models/`, which auto-download on first start), with a launcher at
-`anamanti-services/start.sh` (`./start.sh` starts any server not already up;
+They live in **`/Volumes/External/Anamanti Core/services/`** (a Python 3.12 venv +
+`models/`, which auto-download on first start), with a launcher at
+`services/start.sh` (`./start.sh` starts any server not already up;
 `./start.sh restart` recycles the ports). The Core connects per turn, so restarting
 these servers needs **no** Core restart. (For multilingual STT input, use a `small`
 `--multilingual` whisper and drop `--language en`; see `plans/BilingualPlan.md`.)
@@ -711,12 +714,13 @@ these servers needs **no** Core restart. (For multilingual STT input, use a `sma
 they keep executing off the now-unlinked files and TTS audio **clips ~0.5s into every
 reply** (Piper reads its voice/espeak data per synthesis and then fails); STT limps on
 because faster-whisper loaded its model into memory at boot. Symptom seen 2026-10-29. The
-folder was `ambient-services` before the Anamanti rename.
+folder was `DeveloperSupport/ambient-services` before the Anamanti rename and the move
+under the Core folder.
 
 Rebuild from scratch:
 
 ```bash
-SVC=/Volumes/External/DeveloperSupport/anamanti-services
+SVC="/Volumes/External/Anamanti Core/services"
 /opt/homebrew/bin/python3.12 -m venv "$SVC/venv"
 "$SVC/venv/bin/pip" install wyoming-piper wyoming-faster-whisper piper-tts
 "$SVC/start.sh" restart        # launches 10200 (en) / 10201 (pt-BR) / 10300 (STT)

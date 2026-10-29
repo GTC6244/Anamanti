@@ -278,9 +278,9 @@ cargo run --manifest-path anamanti-core/Cargo.toml --release
   The pick is **strict** — a display pinned to one Anamanti Core stays offline if
   it's unreachable rather than silently connecting to another.
   - **Local production** is a copied release binary installed at
-    `/Volumes/External/DeveloperSupport/Anamanti Core/`. It runs outside any
+    `/Volumes/External/Anamanti Core/`. It runs outside any
     git checkout and pins its identity via `instance_id` (`anamanti-core`) in
-    that folder's `anamanti.json` (provider API keys come from `~/.zshrc`), using the default ports (10700 / config 8730) and the shared
+    that folder's `anamanti.json` (provider API keys are persisted in that folder's `anamanti_settings.json`, not the environment), using the default ports (10700 / config 8730) and the shared
     runtime data under `.../anamanti-core/`.
   - **Test copies** run straight from a git branch/worktree. `ANAMANTI_INSTANCE_ID`
     is resolved from that env → the working dir's **git branch code** → the

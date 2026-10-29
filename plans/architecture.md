@@ -920,9 +920,9 @@ design + release runbook: [`UpdaterPlan.md`](./UpdaterPlan.md).
   off-the-shelf Whisper (STT) and Piper (TTS) servers — which also advertise
   `_wyoming._tcp` — are never resolved or connected to.
 - **Deployment layout**: the "local production" Anamanti Core is a copied release
-  binary at `/Volumes/External/DeveloperSupport/Anamanti Core/`, run outside
+  binary at `/Volumes/External/Anamanti Core/`, run outside
   any git checkout with `instance_id` (`anamanti-core`) pinned in its `anamanti.json` and
-  provider keys from `~/.zshrc`; test copies run
+  provider keys persisted in its `anamanti_settings.json` (not the environment); test copies run
   from their git worktree and fall through to the branch-code default.
 - **Multiple displays → one Anamanti Core**: the Anamanti Core's accept loop already
   spawns a task per connection and every reply is written back on that
