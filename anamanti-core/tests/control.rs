@@ -38,6 +38,8 @@ async fn start_server() -> (std::net::SocketAddr, Arc<MemoryStore>, Arc<SharedSe
         home_location: anamanti_core::household::LiveHomeLocation::default(),
         spotify: None,
         cadora: None,
+        household_apps: None,
+        shopping: None,
         appsaid: None,
         calendar: None,
         directions: None,

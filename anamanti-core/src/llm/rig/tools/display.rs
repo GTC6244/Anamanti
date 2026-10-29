@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{close_tool, definition, emit, parse_args, ToolCtx, VoiceTool};
+use crate::cadora::{HouseholdRecipes, RecipeHit, RecipeTier, SavedRecipe, ShoppingList};
 use crate::directions::LiveHomeLocation;
 use crate::llm::{ActionSink, DeviceAction, MusicNav, RecipeNav};
 use crate::music::{MusicDisplayRouter, MusicDisplayStyle};
@@ -26,6 +27,8 @@ pub(super) const RECIPE_LOOKUP: &str = "recipe_lookup";
 const CLOSE_RECIPE: &str = "close_recipe";
 /// Tool name: navigate the already-open recipe screen (switch tab / scroll).
 const RECIPE_CONTROL: &str = "recipe_control";
+/// Tool name: the household's saved recipes (Cadora / NextHaul).
+pub(super) const SAVED_RECIPES: &str = "saved_recipes";
 /// Tool name: show the weather forecast on the display.
 pub(super) const WEATHER_LOOKUP: &str = "weather_lookup";
 /// Tool name: dismiss the weather screen.
@@ -41,10 +44,15 @@ pub(super) const MUSIC_SCREEN: &str = "music_screen";
 // Recipe
 // ---------------------------------------------------------------------------
 
-/// `recipe_lookup`, `close_recipe` and `recipe_control`, in advertised order.
-pub(super) fn recipe_tools(provider: Arc<dyn RecipeProvider>) -> Vec<Arc<dyn VoiceTool>> {
+/// `recipe_lookup` (web recipes). `saved` = the household's saved recipes are also
+/// available, which changes its guidance (saved recipes are checked first).
+pub(super) fn recipe_lookup(provider: Arc<dyn RecipeProvider>, saved: bool) -> Arc<dyn VoiceTool> {
+    Arc::new(RecipeLookup { provider, saved })
+}
+
+/// `close_recipe` and `recipe_control`: present whenever any recipe source is.
+pub(super) fn recipe_screen_tools() -> Vec<Arc<dyn VoiceTool>> {
     vec![
-        Arc::new(RecipeLookup { provider }),
         close_tool(
             CLOSE_RECIPE,
             "Close the recipe screen on the display and return to the idle screen. \
@@ -57,6 +65,44 @@ pub(super) fn recipe_tools(provider: Arc<dyn RecipeProvider>) -> Vec<Arc<dyn Voi
         Arc::new(RecipeControl),
     ]
 }
+
+/// The recipe-screen half of the recipe guidance (navigation, questions, close),
+/// shared by whichever recipe tool carries the guidance.
+macro_rules! recipe_screen_guidance {
+    () => {
+        "When a recipe is already on screen (the turn \
+         context will tell you, including which tab, scroll position and highlighted \
+         step, plus the full ingredient list and steps), use `recipe_control` to \
+         navigate it — switching to the Overview / Ingredients / Steps tab or scrolling \
+         the current tab whenever the user says things like \"show the ingredients\", \
+         \"go to the steps\", \"scroll down\", \"scroll back up\", or \"start over\". \
+         For a specific step (\"go to step 4\", \"next step\", \"previous step\", \
+         \"what's step 3\") ALWAYS use `recipe_control` `go_to_step` with the step \
+         number — never scroll to find a step. Answer questions about the recipe on \
+         screen (\"how many tomatoes do I need?\", \"how long does it bake?\") directly \
+         from the ingredients and steps in the turn context — do not look the recipe \
+         up again. After a `go_to_step`, read that step to the user word for word from \
+         the numbered steps in the turn context (\"Step 4. Simmer for ten minutes.\"). \
+         Use `close_recipe` when they say they're done cooking or ask to close the \
+         recipe. Relay each tool's short spoken confirmation."
+    };
+}
+
+/// `recipe_lookup`'s guidance when it is the only recipe source.
+const RECIPE_GUIDANCE_WEB_ONLY: &str = concat!(
+    "You can pull up cooking recipes on the display with the `recipe_lookup` tool. \
+     Whenever the user asks for a recipe, how to make or cook a dish, or to show a \
+     recipe for something, you MUST call `recipe_lookup` with the dish name — never \
+     recite a full recipe as prose. ",
+    recipe_screen_guidance!()
+);
+
+/// `recipe_lookup`'s guidance when the household's saved recipes come first (the
+/// screen guidance then rides `saved_recipes`).
+const RECIPE_GUIDANCE_WITH_SAVED: &str =
+    "Use `recipe_lookup` to find a recipe online and show it on the display — but only \
+     after `saved_recipes` found no saved recipe for the dish, or when the user asks for \
+     a new or online recipe.";
 
 /// Typed arguments for `recipe_lookup`.
 #[derive(Debug, Deserialize)]
@@ -73,6 +119,8 @@ struct RecipeArgs {
 /// display ([`DeviceAction::ShowRecipe`]).
 struct RecipeLookup {
     provider: Arc<dyn RecipeProvider>,
+    /// `saved_recipes` is also advertised (check saved recipes first).
+    saved: bool,
 }
 
 #[async_trait]
@@ -109,26 +157,11 @@ impl VoiceTool for RecipeLookup {
 
     /// Covers the whole recipe screen (lookup, navigation, close).
     fn guidance(&self) -> Option<&'static str> {
-        Some(
-            "You can pull up cooking recipes on the display with the `recipe_lookup` tool. \
-             Whenever the user asks for a recipe, how to make or cook a dish, or to show a \
-             recipe for something, you MUST call `recipe_lookup` with the dish name — never \
-             recite a full recipe as prose. When a recipe is already on screen (the turn \
-             context will tell you, including which tab, scroll position and highlighted \
-             step, plus the full ingredient list and steps), use `recipe_control` to \
-             navigate it — switching to the Overview / Ingredients / Steps tab or scrolling \
-             the current tab whenever the user says things like \"show the ingredients\", \
-             \"go to the steps\", \"scroll down\", \"scroll back up\", or \"start over\". \
-             For a specific step (\"go to step 4\", \"next step\", \"previous step\", \
-             \"what's step 3\") ALWAYS use `recipe_control` `go_to_step` with the step \
-             number — never scroll to find a step. Answer questions about the recipe on \
-             screen (\"how many tomatoes do I need?\", \"how long does it bake?\") directly \
-             from the ingredients and steps in the turn context — do not look the recipe \
-             up again. After a `go_to_step`, read that step to the user word for word from \
-             the numbered steps in the turn context (\"Step 4. Simmer for ten minutes.\"). \
-             Use `close_recipe` when they say they're done cooking or ask to close the \
-             recipe. Relay each tool's short spoken confirmation.",
-        )
+        Some(if self.saved {
+            RECIPE_GUIDANCE_WITH_SAVED
+        } else {
+            RECIPE_GUIDANCE_WEB_ONLY
+        })
     }
 
     async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
@@ -244,6 +277,313 @@ impl VoiceTool for RecipeControl {
             "the recipe could update",
         )?;
         Ok(confirmation)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Saved recipes (the household's Cadora / NextHaul recipes)
+// ---------------------------------------------------------------------------
+
+/// The opening of the `saved_recipes` guidance, by (web recipes present, shopping
+/// list present). Each variant ends with the recipe-screen guidance, which this tool
+/// carries whenever it is advertised.
+macro_rules! saved_recipes_guidance {
+    ($first:expr, $shopping:expr) => {
+        concat!(
+            "The household's own saved recipes (from their NextHaul / Cadora apps) are \
+             available through the `saved_recipes` tool. ",
+            $first,
+            " Use `search` when the user asks which recipes they have saved or to find \
+             saved recipes (\"what chicken recipes do we have?\"), and `ingredients` to read \
+             out what a saved recipe needs without showing it. ",
+            $shopping,
+            "Never recite a full recipe as prose. ",
+            recipe_screen_guidance!()
+        )
+    };
+}
+
+macro_rules! saved_first_then_web {
+    () => {
+        "Whenever the user asks for a recipe, how to make or \
+     cook a dish, or to show a recipe, FIRST call `saved_recipes` with action `show` and the \
+     dish as `recipe`; only if it reports that no saved recipe matches (or they ask for a new \
+     or online recipe) call `recipe_lookup`."
+    };
+}
+macro_rules! saved_only {
+    () => {
+        "Whenever the user asks for a recipe, how to make or cook a dish, \
+     or to show a recipe, call `saved_recipes` with action `show` and the dish as `recipe`; \
+     if it reports that no saved recipe matches, say so and offer to search their saved \
+     recipes."
+    };
+}
+macro_rules! saved_shopping {
+    () => {
+        "To put a recipe's ingredients on the shopping list use \
+     `add_ingredients_to_list` with the recipe (pass `items` to add only some of them) — \
+     never call `shopping_list_add` once per ingredient. "
+    };
+}
+
+/// `saved_recipes`. `shopping` enables `add_ingredients_to_list`; `web` = `recipe_lookup`
+/// is the fallback for dishes the household hasn't saved.
+pub(super) fn saved_recipes(
+    recipes: Arc<dyn HouseholdRecipes>,
+    shopping: Option<Arc<dyn ShoppingList>>,
+    web: bool,
+) -> Arc<dyn VoiceTool> {
+    Arc::new(SavedRecipes {
+        recipes,
+        shopping,
+        web,
+    })
+}
+
+/// How many hits `search` reports.
+const SAVED_SEARCH_LIMIT: usize = 8;
+
+/// Typed arguments for `saved_recipes`.
+#[derive(Debug, Deserialize)]
+struct SavedRecipesArgs {
+    action: String,
+    /// Words to search saved recipes for (`search`).
+    #[serde(default)]
+    query: Option<String>,
+    /// A recipe id from `search`, or a dish name / title.
+    #[serde(default)]
+    recipe: Option<String>,
+    /// `add_ingredients_to_list`: only these ingredients (default: all).
+    #[serde(default)]
+    items: Option<Vec<String>>,
+}
+
+struct SavedRecipes {
+    recipes: Arc<dyn HouseholdRecipes>,
+    shopping: Option<Arc<dyn ShoppingList>>,
+    web: bool,
+}
+
+/// "from NextHaul" / "from Cadora's community recipes".
+fn recipe_source(hit: &RecipeHit) -> String {
+    match hit.tier {
+        RecipeTier::Household => format!("from {}", hit.app.label()),
+        RecipeTier::Community => format!("from {}'s community recipes", hit.app.label()),
+        RecipeTier::Global => format!("from {}'s recipe collection", hit.app.label()),
+    }
+}
+
+impl SavedRecipes {
+    /// The recipe the args name (`recipe`, else `query`), or a "no match" error the
+    /// model relays (and, with web recipes, falls back on).
+    async fn resolve(&self, args: &SavedRecipesArgs) -> Result<SavedRecipe> {
+        let reference = args
+            .recipe
+            .as_deref()
+            .or(args.query.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .context("say which recipe (a dish name or a recipe id from search)")?;
+        match self.recipes.recipe(reference).await? {
+            Some(r) => Ok(r),
+            None if self.web => anyhow::bail!(
+                "No saved recipe matches \"{reference}\" in {}. Use recipe_lookup to find one \
+                 online.",
+                self.recipes.sources()
+            ),
+            None => anyhow::bail!(
+                "No saved recipe matches \"{reference}\" in {}.",
+                self.recipes.sources()
+            ),
+        }
+    }
+
+    async fn run(&self, args: SavedRecipesArgs, ctx: &ToolCtx<'_>) -> Result<String> {
+        match args.action.as_str() {
+            "search" => {
+                let query = args
+                    .query
+                    .as_deref()
+                    .or(args.recipe.as_deref())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let hits = self.recipes.search(&query, SAVED_SEARCH_LIMIT).await?;
+                if hits.is_empty() {
+                    return Ok(if query.is_empty() {
+                        format!(
+                            "There are no saved recipes in {} yet.",
+                            self.recipes.sources()
+                        )
+                    } else {
+                        format!(
+                            "No saved recipes match \"{query}\" in {}.",
+                            self.recipes.sources()
+                        )
+                    });
+                }
+                let lines: Vec<String> = hits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| {
+                        let count = h
+                            .item_count
+                            .filter(|n| *n > 0)
+                            .map(|n| format!(", {n} ingredients"))
+                            .unwrap_or_default();
+                        format!(
+                            "{}. {} ({}{count}) [id {}]",
+                            i + 1,
+                            h.title,
+                            recipe_source(h),
+                            h.id
+                        )
+                    })
+                    .collect();
+                Ok(format!(
+                    "Saved recipes{}: {} — Tell the user the titles (not the ids); pass an id \
+                     as `recipe` to show one.",
+                    if query.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" matching \"{query}\"")
+                    },
+                    lines.join("; ")
+                ))
+            }
+            "show" => {
+                let sink =
+                    ctx.require_sink("no display is connected to show a recipe on right now")?;
+                let saved = self.resolve(&args).await?;
+                let mut confirmation = format!(
+                    "Here's the saved recipe for {} {}",
+                    saved.recipe.title,
+                    recipe_source(&saved.hit)
+                );
+                if !saved.recipe.servings.is_empty() {
+                    confirmation.push_str(&format!(" — {}", saved.recipe.servings));
+                }
+                confirmation.push_str(". It's on the screen now.");
+                if saved.recipe.steps.is_empty() {
+                    confirmation.push_str(" It has no written steps, just the ingredients.");
+                }
+                emit(
+                    Some(sink),
+                    DeviceAction::ShowRecipe(saved.recipe),
+                    "the recipe could show",
+                )?;
+                Ok(confirmation)
+            }
+            "ingredients" => {
+                let saved = self.resolve(&args).await?;
+                if saved.recipe.ingredients.is_empty() {
+                    return Ok(format!(
+                        "The saved recipe for {} has no ingredient list.",
+                        saved.recipe.title
+                    ));
+                }
+                Ok(format!(
+                    "{} ({}) needs: {}.",
+                    saved.recipe.title,
+                    recipe_source(&saved.hit),
+                    saved.recipe.ingredients.join("; ")
+                ))
+            }
+            "add_ingredients_to_list" => {
+                let shopping = self
+                    .shopping
+                    .as_ref()
+                    .context("no shopping list is linked")?;
+                let saved = self.resolve(&args).await?;
+                let items: Vec<String> = match args.items.filter(|v| !v.is_empty()) {
+                    Some(only) => only,
+                    None => saved.shopping_items.clone(),
+                };
+                if items.is_empty() {
+                    anyhow::bail!(
+                        "the saved recipe for {} has no ingredients to add",
+                        saved.recipe.title
+                    );
+                }
+                shopping.add_many(&items, None).await.with_context(|| {
+                    format!("adding the {} ingredients failed", saved.recipe.title)
+                })
+            }
+            other => anyhow::bail!("unknown saved_recipes action `{other}`"),
+        }
+    }
+}
+
+#[async_trait]
+impl VoiceTool for SavedRecipes {
+    fn name(&self) -> &'static str {
+        SAVED_RECIPES
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        let mut actions = vec!["search", "show", "ingredients"];
+        if self.shopping.is_some() {
+            actions.push("add_ingredients_to_list");
+        }
+        let mut description = String::from(
+            "The household's saved recipes from their NextHaul / Cadora apps. `search` finds \
+             saved recipes by words in the title or ingredients (an empty query lists recent \
+             ones); `show` puts a saved recipe on the display's recipe screen (Overview / \
+             Ingredients / Steps); `ingredients` returns a saved recipe's ingredient list to \
+             read out",
+        );
+        if self.shopping.is_some() {
+            description.push_str(
+                "; `add_ingredients_to_list` puts a saved recipe's ingredients (or just the \
+                 named `items`) on the household shopping list",
+            );
+        }
+        description.push_str(". Returns a short result to relay.");
+        definition(
+            SAVED_RECIPES,
+            &description,
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": actions,
+                        "description": "What to do."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "For search: words to look for, e.g. \"chicken\" or \"lasagna\"."
+                    },
+                    "recipe": {
+                        "type": "string",
+                        "description": "For show / ingredients / add_ingredients_to_list: a recipe id \
+                                        from a search result, or the dish name, e.g. \"lasagna\"."
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "For add_ingredients_to_list: only these ingredients (omit to \
+                                        add them all)."
+                    }
+                },
+                "required": ["action"]
+            }),
+        )
+    }
+
+    fn guidance(&self) -> Option<&'static str> {
+        Some(match (self.web, self.shopping.is_some()) {
+            (true, true) => saved_recipes_guidance!(saved_first_then_web!(), saved_shopping!()),
+            (true, false) => saved_recipes_guidance!(saved_first_then_web!(), ""),
+            (false, true) => saved_recipes_guidance!(saved_only!(), saved_shopping!()),
+            (false, false) => saved_recipes_guidance!(saved_only!(), ""),
+        })
+    }
+
+    async fn invoke(&self, args: &Value, ctx: &ToolCtx<'_>) -> Result<String> {
+        let args: SavedRecipesArgs = parse_args(args, SAVED_RECIPES)?;
+        self.run(args, ctx).await
     }
 }
 

@@ -484,7 +484,8 @@ mode; a live turn's `ConversationView` always draws above them.
   `Column`, a `GlobalKey` per step) so any step can be scrolled to; the highlighted
   step is drawn as an amber **bubble** (tinted rounded card + accent outline + filled
   number circle, key `recipe-step-highlighted`).
-- Triggered by `WakeWordEventKind.showRecipe` (Core `recipe_lookup`) →
+- Triggered by `WakeWordEventKind.showRecipe` (Core `recipe_lookup`, or `saved_recipes`
+  `show` for a recipe saved in Cadora / NextHaul — same payload, no Display change) →
   `AssistantState.recipe`; persists across turns while cooking. Tabs switch by
   touch **or** voice (`recipeNavigate`); voice scroll (`recipeScroll`) animates
   the active pane; voice "go to step N" / "next step" (`recipeStep` →

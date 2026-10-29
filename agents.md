@@ -484,13 +484,19 @@ anamanti-core/scripts/build-webui-css.sh
 #     tool; Premium; easiest setup is config page → Integrations → Spotify → "Connect Spotify". redirect_url
 #     is the OAuth callback the consent flow binds + registers, default
 #     http://127.0.0.1:8888/callback)
-#   cadora{base_url,link_token} (shopping_list_add + calendar_add tools → the shared
-#     household shopping list and Cadora family calendar, via Cadora's voice API — NextHaul + Cadora share one API on
-#     Cloudflare Workers, no direct database access; base_url default
-#     https://api.getcadora.com/cadora (the retired cadora-server.fly.dev maps to it). Link: mint a 6-digit code in NextHaul → Settings →
-#     Voice & Integrations, enter it on the config page → Integrations → "Shopping list
-#     (Cadora)"; the Anamanti Core redeems it for a vl_ token, stored 0600, never seeded.
-#     A pasted vl_ token is also accepted)
+#   cadora{base_url,link_token} (saved_recipes + shopping_list_add + calendar_add tools →
+#     the family's saved recipes, the NextHaul or Cadora shopping list and the Cadora family
+#     calendar — NextHaul + Cadora share one API on Cloudflare Workers, no direct database
+#     access; base_url default https://api.getcadora.com/cadora (the retired
+#     cadora-server.fly.dev maps to it). Link (config page → Integrations → Cadora / NextHaul):
+#     enter each app's 6-digit FAMILY INVITE CODE (app Settings → "Invite with a code"); the
+#     Core signs in with its own identity-api user and joins the household as member
+#     "Anamanti" (src/cadora/apps.rs, one HouseholdApps hub per process — refresh tokens are
+#     single-use and rotate into the 0600 settings file). Linking Cadora also mints the
+#     Core's vl_ voice link (calendar_add). The old voice pairing code / pasted vl_ token
+#     stay under Advanced (calendar + Cadora list only, no recipes). Link state, the
+#     identity and cadora.shopping_app (auto|nexthaul|cadora — which list
+#     shopping_list_add uses when both are linked) are runtime-only, never seeded)
 #   appsaid{worker_url,recipients{name:user_key},default_recipient} (send_phone_message
 #     tool → push a message / Google Maps link to a family member's phone via AppSaid.
 #     The sender app token is a SECRET (env APPSAID_APP_TOKEN or config page → Household

@@ -1726,6 +1726,8 @@ impl Config {
         let cadora = CadoraConfig {
             base_url: nonempty(fc.cadora.base_url),
             link_token: nonempty(fc.cadora.link_token),
+            // The signed-in household links are runtime-only (config page), never seeded.
+            ..Default::default()
         };
 
         let appsaid = AppSaidConfig {
@@ -2089,6 +2091,12 @@ impl Config {
             // Seeded per-build from the resolved Cadora config in `shared_settings`
             // (and refreshed by `apply`/`apply_cadora`).
             cadora: None,
+            // The one Cadora / NextHaul signed-in hub (identity session + household sync
+            // caches), built once here and shared by every rebuilt backend; it starts
+            // unlinked and `LlmFactory::for_settings` points it at the live links.
+            household_apps: Some(crate::cadora::HouseholdApps::new()),
+            // Rebuilt per-build from the live Cadora config (NextHaul or Cadora list).
+            shopping: None,
             // Seeded per-build from the resolved AppSaid config in `shared_settings`
             // (and refreshed by `apply`/`apply_appsaid`).
             appsaid: None,

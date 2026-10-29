@@ -28,6 +28,18 @@
 //! The [`CadoraController`] trait is the seam the rig tools depend on, so they are
 //! unit-testable without hitting the network — mirroring how the `spotify_control`
 //! tool holds a [`crate::music::SpotifyController`].
+//!
+//! **Signed-in access** (saved recipes from Cadora and NextHaul, and the NextHaul
+//! shopping list) needs a user bearer token, not the voice link: see [`apps`]. Linking
+//! there with a household's family invite code also mints this voice link for Cadora,
+//! so one code per app covers everything.
+
+pub mod apps;
+
+pub use apps::{
+    CoreIdentity, HouseholdApp, HouseholdApps, HouseholdRecipes, LinkedHousehold,
+    NextHaulShoppingList, RecipeHit, RecipeTier, SavedRecipe, ShoppingList, VoiceShoppingList,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -73,7 +85,7 @@ fn host_of(url: &str) -> Option<&str> {
 
 /// The server's human-readable error, if any: the Workers API's `message`, else the
 /// legacy `error` field.
-fn server_message(body: &Value) -> Option<&str> {
+pub(crate) fn server_message(body: &Value) -> Option<&str> {
     body.get("message")
         .or_else(|| body.get("error"))
         .and_then(Value::as_str)
@@ -84,7 +96,10 @@ fn server_message(body: &Value) -> Option<&str> {
 /// Read a response body as JSON, tolerating an empty or non-JSON body (an edge error
 /// page, say) as `Null` when the status is already an error, so the status-based
 /// message still reaches the user. A non-JSON *success* body is an error.
-async fn read_body(resp: reqwest::Response, what: &str) -> Result<(reqwest::StatusCode, Value)> {
+pub(crate) async fn read_body(
+    resp: reqwest::Response,
+    what: &str,
+) -> Result<(reqwest::StatusCode, Value)> {
     let status = resp.status();
     let text = resp
         .text()

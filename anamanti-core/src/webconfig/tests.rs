@@ -784,6 +784,73 @@ fn cadora_save_sets_base_url() {
     );
 }
 
+#[test]
+fn cadora_status_reports_each_app_and_the_shopping_choice() {
+    let s = settings();
+    let v: Value = serde_json::from_str(&cadora_status_json(&s)).unwrap();
+    assert_eq!(v["apps"]["nexthaul"]["linked"], false);
+    assert_eq!(v["apps"]["cadora"]["linked"], false);
+    assert_eq!(v["recipes_active"], false);
+    assert_eq!(v["shopping_app"], "auto");
+    assert_eq!(v["shopping_target"], "");
+
+    s.apply_cadora(&crate::settings::CadoraUpdate {
+        identity: Some(Some(crate::cadora::CoreIdentity {
+            user_id: "u".into(),
+            refresh_token: "rt-secret".into(),
+        })),
+        nexthaul_household: Some(Some(crate::cadora::LinkedHousehold {
+            id: "h".into(),
+            name: "The Smiths".into(),
+            member_id: None,
+        })),
+        ..Default::default()
+    });
+    let out = cadora_save_json(&s, br#"{"shopping_app":"nexthaul"}"#);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["apps"]["nexthaul"]["household"], "The Smiths");
+    assert_eq!(v["recipes_active"], true);
+    assert_eq!(v["shopping_app"], "nexthaul");
+    assert_eq!(v["shopping_target"], "nexthaul");
+    assert!(!out.contains("rt-secret"), "never echoes the refresh token");
+    // A shopping-only save leaves the server URL alone; an unknown app is refused.
+    assert_eq!(
+        s.cadora().base_url_or_default(),
+        "https://api.getcadora.com/cadora"
+    );
+    let v: Value =
+        serde_json::from_str(&cadora_save_json(&s, br#"{"shopping_app":"bogus"}"#)).unwrap();
+    assert_eq!(v["ok"], false);
+}
+
+#[tokio::test]
+async fn cadora_app_link_needs_an_app_and_unlink_forgets_the_identity() {
+    let s = settings();
+    let v: Value =
+        serde_json::from_str(&cadora_app_link_json(&s, br#"{"code":"123456"}"#).await).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(v["message"]
+        .as_str()
+        .unwrap()
+        .contains("nexthaul or cadora"));
+
+    s.apply_cadora(&crate::settings::CadoraUpdate {
+        link_token: Some(Some("vl_x".into())),
+        identity: Some(Some(crate::cadora::CoreIdentity::default())),
+        cadora_household: Some(Some(crate::cadora::LinkedHousehold::default())),
+        ..Default::default()
+    });
+    let v: Value =
+        serde_json::from_str(&cadora_app_unlink_json(&s, br#"{"app":"cadora"}"#).await).unwrap();
+    assert_eq!(v["linked"], false, "the Cadora voice link goes too");
+    let c = s.cadora();
+    assert!(c.cadora_household.is_none());
+    assert!(
+        c.identity.is_none(),
+        "no household left → sign-in forgotten"
+    );
+}
+
 #[tokio::test]
 async fn cadora_link_without_input_is_a_clear_error() {
     let s = settings();
@@ -1689,6 +1756,8 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/radio/stop", "{}", "200 OK", JSON),
     ("POST", "/cadora/save", "{}", "200 OK", JSON),
     ("POST", "/cadora/link", "{}", "200 OK", JSON),
+    ("POST", "/cadora/apps/link", "{}", "200 OK", JSON),
+    ("POST", "/cadora/apps/unlink", "{}", "200 OK", JSON),
     ("POST", "/appsaid/save", "{}", "200 OK", JSON),
     ("POST", "/appsaid/token", "{}", "200 OK", JSON),
     ("POST", "/home-assistant/save", "{}", "200 OK", JSON),

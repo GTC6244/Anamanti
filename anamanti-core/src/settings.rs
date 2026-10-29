@@ -20,7 +20,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::appsaid::{AppSaidClient, PhoneMessenger};
-use crate::cadora::{normalize_base_url, CadoraController, CadoraVoiceApi};
+use crate::cadora::{
+    normalize_base_url, CadoraController, CadoraVoiceApi, CoreIdentity, HouseholdApp,
+    HouseholdApps, LinkedHousehold, NextHaulShoppingList, ShoppingList, VoiceShoppingList,
+};
 use crate::calendar::CalendarSource;
 use crate::directions::DirectionsProvider;
 use crate::llm::anthropic_auth::{AnthropicAuth, AnthropicTokenProvider};
@@ -507,7 +510,13 @@ impl SpotifyConfig {
 /// tab). Like Spotify, this is used by the LLM tool set, so a change rebuilds the
 /// backend so the tool is advertised/withdrawn live.
 ///
-/// Plaintext token (0600 settings file); keep on a trusted machine.
+/// Since 2026-10-27 it also holds the Core's **signed-in** link to the family's Cadora
+/// and NextHaul households (`crate::cadora::apps`): its own identity-api user (a
+/// rotating refresh token) and the household joined in each app with a family invite
+/// code. That powers the `saved_recipes` tool and NextHaul shopping adds; linking
+/// Cadora that way also mints the `vl_…` token above.
+///
+/// Plaintext tokens (0600 settings file); keep on a trusted machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CadoraConfig {
     /// Cadora app-server base URL. `None`/empty ⇒ the built-in default.
@@ -516,6 +525,20 @@ pub struct CadoraConfig {
     /// Long-lived `vl_…` voice-link token from the pairing redeem. `None` = not linked.
     #[serde(default)]
     pub link_token: Option<String>,
+    /// The Core's identity-api user + newest refresh token. Runtime-only (never
+    /// seeded from `anamanti.json`); rewritten on every token rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<CoreIdentity>,
+    /// The Cadora household the Core joined (signed-in link). `None` = not linked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cadora_household: Option<LinkedHousehold>,
+    /// The NextHaul household the Core joined. `None` = not linked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nexthaul_household: Option<LinkedHousehold>,
+    /// Which app's list `shopping_list_add` writes to when both are linked:
+    /// `auto` (default: NextHaul when linked, else Cadora), `nexthaul`, or `cadora`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shopping_app: Option<String>,
 }
 
 impl CadoraConfig {
@@ -542,6 +565,39 @@ impl CadoraConfig {
             self.link_token.clone().unwrap_or_default(),
         )))
     }
+
+    /// The household joined in `app`, when signed in.
+    pub fn household(&self, app: HouseholdApp) -> Option<&LinkedHousehold> {
+        self.identity.as_ref()?;
+        match app {
+            HouseholdApp::Cadora => self.cadora_household.as_ref(),
+            HouseholdApp::NextHaul => self.nexthaul_household.as_ref(),
+        }
+    }
+
+    /// The `shopping_app` preference, normalized (`auto` / `nexthaul` / `cadora`).
+    pub fn shopping_app_label(&self) -> &'static str {
+        match self.shopping_app.as_deref().and_then(HouseholdApp::parse) {
+            Some(HouseholdApp::NextHaul) => "nexthaul",
+            Some(HouseholdApp::Cadora) => "cadora",
+            None => "auto",
+        }
+    }
+
+    /// The app `shopping_list_add` writes to: the preferred one when it is usable,
+    /// else whichever is (NextHaul needs the signed-in link; Cadora the voice link).
+    pub fn shopping_target(&self) -> Option<HouseholdApp> {
+        let nexthaul = self.household(HouseholdApp::NextHaul).is_some();
+        let cadora = self.linked();
+        let preferred = match self.shopping_app_label() {
+            "cadora" => [HouseholdApp::Cadora, HouseholdApp::NextHaul],
+            _ => [HouseholdApp::NextHaul, HouseholdApp::Cadora],
+        };
+        preferred.into_iter().find(|a| match a {
+            HouseholdApp::NextHaul => nexthaul,
+            HouseholdApp::Cadora => cadora,
+        })
+    }
 }
 
 /// A requested change to the Spotify config (tri-state per field, like `DriveUpdate`).
@@ -562,6 +618,10 @@ pub struct SpotifyUpdate {
 pub struct CadoraUpdate {
     pub base_url: Option<Option<String>>,
     pub link_token: Option<Option<String>>,
+    pub identity: Option<Option<CoreIdentity>>,
+    pub cadora_household: Option<Option<LinkedHousehold>>,
+    pub nexthaul_household: Option<Option<LinkedHousehold>>,
+    pub shopping_app: Option<Option<String>>,
 }
 
 /// AppSaid phone-push linkage, owned by the orchestrator.
@@ -1263,6 +1323,15 @@ pub struct LlmFactory {
     /// shopping list isn't linked. Set from the current [`CadoraConfig`] on every
     /// (re)build so the tool reflects the latest linkage.
     pub cadora: Option<Arc<dyn CadoraController>>,
+    /// The one Cadora / NextHaul signed-in hub (`crate::cadora::apps`): the Core's
+    /// identity session + the households' sync caches. Built once at boot and shared
+    /// by every rebuilt backend (like `home_assistant`) — a refresh token is
+    /// single-use, so two hub instances must never exist. `for_settings` points it at
+    /// the live links; `None` only in tests / fixed holders.
+    pub household_apps: Option<Arc<HouseholdApps>>,
+    /// The live shopping list for `shopping_list_add`: NextHaul (signed-in) or Cadora
+    /// (voice link), per [`CadoraConfig::shopping_target`]. Rebuilt every (re)build.
+    pub shopping: Option<Arc<dyn ShoppingList>>,
     /// The live AppSaid messenger for the `send_phone_message` tool, or `None` when it
     /// isn't fully configured. Set from the current [`AppSaidConfig`] on every
     /// (re)build so the tool reflects the latest linkage.
@@ -1346,6 +1415,28 @@ impl LlmFactory {
             None => c,
         });
         f.cadora = s.cadora.controller();
+        // The household hub is shared, so it is pointed at the live links in place.
+        if let Some(hub) = &f.household_apps {
+            let c = &s.cadora;
+            hub.configure(
+                c.base_url.as_deref(),
+                c.identity.as_ref(),
+                c.cadora_household.as_ref(),
+                c.nexthaul_household.as_ref(),
+            );
+        }
+        f.shopping = match s.cadora.shopping_target() {
+            Some(HouseholdApp::NextHaul) => f
+                .household_apps
+                .clone()
+                .map(NextHaulShoppingList::wrap)
+                .or_else(|| f.cadora.clone().map(VoiceShoppingList::wrap)),
+            Some(HouseholdApp::Cadora) => f
+                .cadora
+                .clone()
+                .map(|c| VoiceShoppingList::wrap_with_reader(c, f.household_apps.clone())),
+            None => None,
+        };
         f.appsaid = s.appsaid.messenger();
         // The Home Assistant hub is shared (pipeline fast path + tool), so it is
         // reconfigured in place rather than rebuilt; unchanged settings are a no-op.
@@ -1413,6 +1504,13 @@ impl LlmFactory {
             directions: self.directions.clone(),
             spotify: self.spotify.clone(),
             cadora: self.cadora.clone(),
+            shopping: self.shopping.clone(),
+            // Advertised only with at least one signed-in household link.
+            household_recipes: self
+                .household_apps
+                .clone()
+                .filter(|h| !h.linked_apps().is_empty())
+                .map(|h| h as Arc<dyn crate::cadora::HouseholdRecipes>),
             appsaid: self.appsaid.clone(),
             weather: self.weather.clone(),
             weather_imperial: self.weather_imperial,
@@ -2182,6 +2280,11 @@ impl RuntimeSettings {
         let c = &mut self.cadora;
         c.base_url = overlay_seeded(c.base_url.take(), p.cadora.base_url);
         c.link_token = overlay_seeded(c.link_token.take(), p.cadora.link_token);
+        // Runtime-only (never seeded): the persisted values are the truth.
+        c.identity = p.cadora.identity;
+        c.cadora_household = p.cadora.cadora_household;
+        c.nexthaul_household = p.cadora.nexthaul_household;
+        c.shopping_app = p.cadora.shopping_app;
 
         let a = &mut self.appsaid;
         a.worker_url = overlay_seeded(a.worker_url.take(), p.appsaid.worker_url);
@@ -2271,6 +2374,10 @@ impl PersistedSettings {
             cadora: CadoraConfig {
                 base_url: sd(|p| &p.cadora.base_url, &s.cadora.base_url),
                 link_token: sd(|p| &p.cadora.link_token, &s.cadora.link_token),
+                identity: s.cadora.identity.clone(),
+                cadora_household: s.cadora.cadora_household.clone(),
+                nexthaul_household: s.cadora.nexthaul_household.clone(),
+                shopping_app: s.cadora.shopping_app.clone(),
             },
             appsaid: AppSaidConfig {
                 worker_url: sd(|p| &p.appsaid.worker_url, &s.appsaid.worker_url),
@@ -2366,7 +2473,7 @@ impl SharedSettings {
         persist_path: Option<PathBuf>,
         seed: Option<PersistedSettings>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let shared = Arc::new(Self {
             inner: RwLock::new(initial),
             mutation: Mutex::new(()),
             factory,
@@ -2374,7 +2481,18 @@ impl SharedSettings {
             seed,
             #[cfg(test)]
             last_build: Mutex::new(None),
-        })
+        });
+        // Persist every Cadora refresh-token rotation (a weak handle: the hub lives
+        // inside these settings, so a strong one would be a cycle).
+        if let Some(hub) = &shared.factory.household_apps {
+            let weak = Arc::downgrade(&shared);
+            hub.set_identity_sink(Arc::new(move |identity| {
+                if let Some(s) = weak.upgrade() {
+                    s.store_cadora_identity(identity);
+                }
+            }));
+        }
+        shared
     }
 
     /// A fixed holder around an already-built backend whose LLM cannot be swapped
@@ -2397,6 +2515,8 @@ impl SharedSettings {
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
             cadora: None,
+            household_apps: None,
+            shopping: None,
             appsaid: None,
             calendar: None,
             directions: None,
@@ -2956,8 +3076,30 @@ impl SharedSettings {
         self.mutate(Some("cadora"), |c| {
             apply_tristate(&mut c.cadora.base_url, &update.base_url);
             apply_tristate(&mut c.cadora.link_token, &update.link_token);
+            apply_tristate(&mut c.cadora.shopping_app, &update.shopping_app);
+            if let Some(v) = &update.identity {
+                c.cadora.identity = v.clone();
+            }
+            if let Some(v) = &update.cadora_household {
+                c.cadora.cadora_household = v.clone();
+            }
+            if let Some(v) = &update.nexthaul_household {
+                c.cadora.nexthaul_household = v.clone();
+            }
             c.cadora.clone()
         })
+    }
+
+    /// Record a rotated Cadora identity (refresh token) **without** rebuilding the LLM
+    /// — the shared [`HouseholdApps`] hub already holds it in memory; this only makes
+    /// it survive a restart. Called by the hub's identity sink on every rotation.
+    pub fn store_cadora_identity(&self, identity: CoreIdentity) {
+        self.mutate(None, |c| c.cadora.identity = Some(identity));
+    }
+
+    /// The shared Cadora / NextHaul hub (signed-in household access), when built.
+    pub fn household_apps(&self) -> Option<Arc<HouseholdApps>> {
+        self.factory.household_apps.clone()
     }
 
     /// A snapshot of the live AppSaid config (worker URL + recipients + default; never
@@ -3217,6 +3359,8 @@ mod tests {
             home_location: crate::directions::LiveHomeLocation::default(),
             spotify: None,
             cadora: None,
+            household_apps: None,
+            shopping: None,
             appsaid: None,
             calendar: None,
             directions: None,
@@ -4661,6 +4805,84 @@ mod tests {
             last_build(s).appsaid.is_some(),
             "send_phone_message is live"
         );
+    }
+
+    #[test]
+    fn cadora_household_links_pick_the_shopping_list_and_persist() {
+        use crate::cadora::{CoreIdentity, HouseholdApp, HouseholdApps, LinkedHousehold};
+        let hub = HouseholdApps::new();
+        let mut factory = tool_factory();
+        factory.household_apps = Some(hub.clone());
+        let s = shared(factory);
+        let hh = |id: &str| LinkedHousehold {
+            id: id.into(),
+            name: "Home".into(),
+            member_id: Some("m1".into()),
+        };
+        let id = CoreIdentity {
+            user_id: "u1".into(),
+            refresh_token: "rt1".into(),
+        };
+
+        // Legacy voice link only: Cadora is the list, no saved recipes.
+        s.apply_cadora(&CadoraUpdate {
+            link_token: Some(Some("vl_x".into())),
+            ..Default::default()
+        });
+        assert_eq!(s.cadora().shopping_target(), Some(HouseholdApp::Cadora));
+        assert!(last_build(&s).shopping.is_some());
+        assert!(hub.linked_apps().is_empty());
+
+        // Link NextHaul (signed in): auto prefers it, and the hub is pointed at it.
+        s.apply_cadora(&CadoraUpdate {
+            identity: Some(Some(id.clone())),
+            nexthaul_household: Some(Some(hh("h-nh"))),
+            ..Default::default()
+        });
+        assert_eq!(s.cadora().shopping_target(), Some(HouseholdApp::NextHaul));
+        assert_eq!(hub.linked_apps(), vec![HouseholdApp::NextHaul]);
+        // An explicit Cadora preference wins while Cadora is linked…
+        s.apply_cadora(&CadoraUpdate {
+            shopping_app: Some(Some("cadora".into())),
+            ..Default::default()
+        });
+        assert_eq!(s.cadora().shopping_target(), Some(HouseholdApp::Cadora));
+        // …and falls back to NextHaul when it isn't.
+        s.apply_cadora(&CadoraUpdate {
+            link_token: Some(None),
+            ..Default::default()
+        });
+        assert_eq!(s.cadora().shopping_target(), Some(HouseholdApp::NextHaul));
+
+        // A rotated refresh token is stored without touching the links.
+        s.store_cadora_identity(CoreIdentity {
+            user_id: "u1".into(),
+            refresh_token: "rt2".into(),
+        });
+        let c = s.cadora();
+        assert_eq!(c.identity.as_ref().unwrap().refresh_token, "rt2");
+        assert_eq!(c.nexthaul_household.as_ref().unwrap().id, "h-nh");
+
+        // The runtime-only fields survive the persisted round trip.
+        let persisted = PersistedSettings::from_runtime(&s.snapshot(), None);
+        let json = serde_json::to_string(&persisted).unwrap();
+        let back: PersistedSettings = serde_json::from_str(&json).unwrap();
+        let mut fresh = s.snapshot();
+        fresh.cadora = CadoraConfig::default();
+        fresh.overlay_persisted(back);
+        assert_eq!(fresh.cadora.identity.as_ref().unwrap().refresh_token, "rt2");
+        assert_eq!(fresh.cadora.nexthaul_household.as_ref().unwrap().id, "h-nh");
+        assert_eq!(fresh.cadora.shopping_app.as_deref(), Some("cadora"));
+
+        // Unlinking everything withdraws the list and clears the hub.
+        s.apply_cadora(&CadoraUpdate {
+            identity: Some(None),
+            nexthaul_household: Some(None),
+            ..Default::default()
+        });
+        assert_eq!(s.cadora().shopping_target(), None);
+        assert!(last_build(&s).shopping.is_none());
+        assert!(hub.linked_apps().is_empty());
     }
 
     fn unique_dir(tag: &str) -> PathBuf {

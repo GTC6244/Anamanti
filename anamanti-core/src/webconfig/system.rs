@@ -670,6 +670,25 @@ fn percentile(sorted: &[u64], p: usize) -> Option<u64> {
     sorted.get(idx).copied()
 }
 
+/// The Cadora / NextHaul tile's detail line ("NextHaul + Cadora linked").
+fn cadora_detail(status: &Value) -> String {
+    let linked = |k: &str| status["apps"][k]["linked"].as_bool().unwrap_or(false);
+    let mut apps = Vec::new();
+    if linked("nexthaul") {
+        apps.push("NextHaul");
+    }
+    if linked("cadora") {
+        apps.push("Cadora");
+    } else if status["linked"].as_bool().unwrap_or(false) {
+        apps.push("Cadora (voice only)");
+    }
+    if apps.is_empty() {
+        "not linked".to_string()
+    } else {
+        format!("{} linked", apps.join(" + "))
+    }
+}
+
 /// One row per integration tile: `{key, name, tool, tier, keyless?, status, detail}`.
 /// `status` is `active` / `attention` / `inactive` / `disabled`.
 pub(super) fn integrations_summary(s: &AppServices) -> Vec<Value> {
@@ -721,9 +740,9 @@ pub(super) fn integrations_summary(s: &AppServices) -> Vec<Value> {
             "readonly": true,
         }),
         json!({
-            "key": "cadora", "name": "Shopping & calendar", "tool": "shopping_list_add + calendar_add", "tier": "cloud",
-            "status": if b(&cadora, "linked") { "active" } else { "inactive" },
-            "detail": if b(&cadora, "linked") { "Cadora linked" } else { "not linked" },
+            "key": "cadora", "name": "Cadora / NextHaul", "tool": "shopping_list_add + calendar_add + saved_recipes", "tier": "cloud",
+            "status": if b(&cadora, "any_linked") { "active" } else { "inactive" },
+            "detail": cadora_detail(&cadora),
         }),
         json!({
             "key": "appsaid", "name": "Phone messages", "tool": "send_phone_message", "tier": "cloud",
@@ -947,11 +966,11 @@ pub(super) fn keys_json(s: &AppServices) -> String {
         ),
         key(
             "cadora",
-            "Cadora shopping list & calendar",
+            "Cadora / NextHaul (recipes, shopping list & calendar)",
             "link",
-            b(&cadora, "linked"),
+            b(&cadora, "any_linked"),
             "",
-            "Shopping & calendar",
+            "Recipes, shopping & calendar",
             "/integrations#cadora",
             Value::Null,
         ),

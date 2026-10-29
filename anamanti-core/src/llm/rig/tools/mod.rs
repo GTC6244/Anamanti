@@ -36,7 +36,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::appsaid::PhoneMessenger;
-use crate::cadora::CadoraController;
+use crate::cadora::{CadoraController, HouseholdRecipes, ShoppingList, VoiceShoppingList};
 use crate::calendar::CalendarSource;
 use crate::directions::{DirectionsProvider, LiveHomeLocation};
 use crate::llm::{ActionSink, DeviceAction};
@@ -65,8 +65,14 @@ pub struct ToolDeps {
     pub directions: Option<(Arc<dyn DirectionsProvider>, bool)>,
     /// Spotify controller for `spotify_control`.
     pub spotify: Option<Arc<dyn SpotifyController>>,
-    /// Cadora controller for `shopping_list_add` + `calendar_add`.
+    /// Cadora voice-API controller for `calendar_add` (and `shopping_list_add` when
+    /// `shopping` is unset).
     pub cadora: Option<Arc<dyn CadoraController>>,
+    /// The shopping list `shopping_list_add` (and saved-recipe ingredient adds) write
+    /// to: NextHaul or Cadora. `None` falls back to the Cadora voice API in `cadora`.
+    pub shopping: Option<Arc<dyn ShoppingList>>,
+    /// The household's saved recipes (Cadora / NextHaul) for `saved_recipes`.
+    pub household_recipes: Option<Arc<dyn HouseholdRecipes>>,
     /// AppSaid messenger for `send_phone_message`.
     pub appsaid: Option<Arc<dyn PhoneMessenger>>,
     /// Forecast provider for `weather_lookup` / `close_weather`.
@@ -240,9 +246,11 @@ const GUIDANCE_ORDER: &[&str] = &[
     services::RADIO_CONTROL,
     display::MUSIC_SCREEN,
     display::RECIPE_LOOKUP,
+    display::SAVED_RECIPES,
     display::WEATHER_LOOKUP,
     display::PLACES_LOOKUP,
     services::SHOPPING_LIST_ADD,
+    services::SHOPPING_LIST_READ,
     services::SEND_PHONE_MESSAGE,
 ];
 
@@ -300,8 +308,15 @@ impl Tools {
         }) {
             tools.push(display::music_screen(deps.music_display.clone()));
         }
+        let shopping = deps
+            .shopping
+            .clone()
+            .or_else(|| deps.cadora.clone().map(VoiceShoppingList::wrap));
+        if let Some(list) = shopping.clone() {
+            tools.push(services::shopping_list_add(list.clone()));
+            tools.push(services::shopping_list_read(list));
+        }
         if let Some(controller) = deps.cadora {
-            tools.push(services::shopping_list_add(controller.clone()));
             tools.push(services::calendar_add(controller));
         }
         if let Some(messenger) = deps.appsaid {
@@ -310,8 +325,22 @@ impl Tools {
         // The recipe tool finds its source page through Tavily, so it rides the same
         // key as web search (regardless of the web_search toggle); no Tavily key →
         // not advertised.
-        if let Some(provider) = crate::recipe::from_search(&deps.search_provider, search_key) {
-            tools.extend(display::recipe_tools(provider));
+        // Recipes come from the web (Tavily) and/or the household's saved recipes
+        // (Cadora / NextHaul); either one brings the recipe screen's navigation tools.
+        let web_recipes = crate::recipe::from_search(&deps.search_provider, search_key);
+        let saved_recipes = deps.household_recipes.clone();
+        if let Some(provider) = web_recipes.clone() {
+            tools.push(display::recipe_lookup(provider, saved_recipes.is_some()));
+        }
+        if let Some(recipes) = saved_recipes.clone() {
+            tools.push(display::saved_recipes(
+                recipes,
+                shopping,
+                web_recipes.is_some(),
+            ));
+        }
+        if web_recipes.is_some() || saved_recipes.is_some() {
+            tools.extend(display::recipe_screen_tools());
         }
         if let Some(provider) = deps.weather {
             tools.extend(display::weather_tools(
@@ -502,14 +531,150 @@ mod tests {
         let tools = Tools::build(deps);
         assert!(!names(&tools).contains(&"internet_search"));
         assert!(names(&tools).contains(&"recipe_lookup"));
-        // DuckDuckGo (no key) → no recipe tool.
+        // DuckDuckGo (no key) → no web recipe tool, but saved recipes keep the screen.
         let mut deps = fully_configured_deps();
         deps.search_provider = "duckduckgo".into();
         deps.search_api_key = None;
-        let tools = Tools::build(deps);
+        let tools = Tools::build(deps.clone());
         assert!(names(&tools).contains(&"internet_search"));
         assert!(!names(&tools).contains(&"recipe_lookup"));
+        assert!(names(&tools).contains(&"saved_recipes"));
+        assert!(names(&tools).contains(&"close_recipe"));
+        assert!(names(&tools).contains(&"recipe_control"));
+        // The screen guidance then rides saved_recipes, with no web fallback.
+        let preamble = tools.preamble("");
+        assert!(preamble.contains("go_to_step"));
+        assert!(!preamble.contains("call `recipe_lookup`"));
+        // …and with neither source there is no recipe screen at all.
+        deps.household_recipes = None;
+        let tools = Tools::build(deps);
+        assert!(!names(&tools).contains(&"saved_recipes"));
         assert!(!names(&tools).contains(&"close_recipe"));
+        assert!(!names(&tools).contains(&"recipe_control"));
+        // No Cadora voice link: no calendar_add, but a NextHaul list keeps shopping.
+        let mut deps = fully_configured_deps();
+        deps.cadora = None;
+        deps.shopping = Some(Arc::new(RecordingShopping::default()));
+        let tools = Tools::build(deps);
+        assert!(!names(&tools).contains(&"calendar_add"));
+        assert!(names(&tools).contains(&"shopping_list_add"));
+    }
+
+    #[tokio::test]
+    async fn saved_recipes_show_search_and_add_ingredients() {
+        let shopping = Arc::new(RecordingShopping::default());
+        let mut deps = fully_configured_deps();
+        deps.shopping = Some(shopping.clone());
+        let tools = Tools::build(deps);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let out = tools
+            .dispatch(
+                "saved_recipes",
+                &json!({"action": "show", "recipe": "lasagna"}),
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            "Here's the saved recipe for Grandma's Lasagna from NextHaul — 6 servings. \
+             It's on the screen now."
+        );
+        match rx.try_recv().unwrap() {
+            DeviceAction::ShowRecipe(r) => {
+                assert_eq!(r.title, "Grandma's Lasagna");
+                assert_eq!(r.ingredients.len(), 2);
+            }
+            other => panic!("unexpected action {other:?}"),
+        }
+
+        let out = tools
+            .dispatch(
+                "saved_recipes",
+                &json!({"action": "search", "query": "pad"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.contains(
+                "Pad Thai (from Cadora's community recipes, 1 ingredients) [id cadora:g1]"
+            ),
+            "{out}"
+        );
+
+        let out = tools
+            .dispatch(
+                "saved_recipes",
+                &json!({"action": "ingredients", "recipe": "nexthaul:r1"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            "Grandma's Lasagna (from NextHaul) needs: 12 lasagna noodles; 1 lb ground beef."
+        );
+
+        let out = tools
+            .dispatch(
+                "saved_recipes",
+                &json!({"action": "add_ingredients_to_list", "recipe": "lasagna"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, "added 2");
+        assert_eq!(
+            shopping.many.lock().unwrap().clone(),
+            vec!["lasagna noodles".to_string(), "ground beef".to_string()]
+        );
+
+        // A miss says so and points at the web fallback.
+        let err = tools
+            .dispatch(
+                "saved_recipes",
+                &json!({"action": "show", "recipe": "sushi"}),
+                Some(&tx),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "No saved recipe matches \"sushi\" in NextHaul and Cadora. Use recipe_lookup to \
+             find one online."
+        );
+        // shopping_list_add uses the configured list, not the Cadora voice API.
+        let out = tools
+            .dispatch("shopping_list_add", &json!({"item": "milk"}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, "added milk");
+        let out = tools
+            .dispatch(
+                "shopping_list_add",
+                &json!({"item": "chips", "list": "Costco"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, "added chips to Costco");
+        // shopping_list_read rides the same list; no arguments (or null) = the default.
+        assert_eq!(
+            tools
+                .dispatch("shopping_list_read", &Value::Null, None)
+                .await
+                .unwrap(),
+            "read default"
+        );
+        assert_eq!(
+            tools
+                .dispatch("shopping_list_read", &json!({"list": "Costco"}), None)
+                .await
+                .unwrap(),
+            "read Costco"
+        );
     }
 
     #[tokio::test]

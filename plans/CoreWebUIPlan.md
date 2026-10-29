@@ -215,7 +215,7 @@ provider, embedding backend, and weather provider.
 | Places | Google Places (New) | Cloud | key | query + home address | tool hidden |
 | Directions | Mapbox | Cloud | token | full home address | tool hidden |
 | Calendar | .ics feeds | Cloud (per URL) | feed URLs | — (read-only fetch) | — |
-| Shopping list | Cadora | Cloud | link code | item text | tool hidden |
+| Recipes, shopping list & calendar | Cadora / NextHaul | Cloud | family invite code (per app) | recipe searches, item + event text | tools hidden |
 | Phone messages | AppSaid | Cloud | app token + recipients | message text | tool hidden |
 | Music | snapserver / librespot / mpv | Local | binaries | — | — |
 | Music | Spotify control | Cloud | Premium + OAuth | playback commands | tool hidden |

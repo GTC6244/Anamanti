@@ -1351,6 +1351,8 @@ mod tests {
                 home_location: crate::household::LiveHomeLocation::default(),
                 spotify: None,
                 cadora: None,
+                household_apps: None,
+                shopping: None,
                 appsaid: None,
                 calendar: None,
                 directions: None,
