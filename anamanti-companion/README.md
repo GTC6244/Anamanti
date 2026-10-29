@@ -121,11 +121,11 @@ has `NSLocalNetworkUsageDescription`, `NSBonjourServices` (`_wyoming._tcp`), and
 
 ## Build
 
-Route build output to the external drive, as with the other projects (see `agents.md`):
+Do not set `CARGO_TARGET_DIR` — build reuse is handled by the shared build cache
+(see `agents.md`). Still redirect the APK scratch dir and the Flutter `./build`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
 export TMPDIR=/Volumes/External/DeveloperSupport/ambient-build/tmp
 cd anamanti-companion
 ln -sfn /Volumes/External/DeveloperSupport/ambient-companion-build/build build   # git-ignored

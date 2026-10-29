@@ -109,13 +109,16 @@ is Flutter (UI) + Rust (audio, wake word, networking) bridged by
   offline rather than switching Macs; `"Auto"` = first responder).
   **Deployment:** the Anamanti Core is configured by a **per-instance JSON file**
   (`anamanti.json` in the working directory by default; `--config <path>` overrides).
-  Only provider API keys/tokens remain environment variables (secrets); everything
-  else — identity, endpoints, feature toggles — lives in the JSON file. The "local
+  Provider API keys/tokens (secrets) are persisted in the settings file
+  (`settings_path`, plaintext 0600) and loaded from there on boot; everything else —
+  identity, endpoints, feature toggles — lives in `anamanti.json`. An env var
+  (`ANTHROPIC_API_KEY`, …) only *seeds* a key on first boot when the settings file has
+  no value for it; a stored value always wins (`overlay_seeded`). The "local
   production" Anamanti Core is installed at
   `/Volumes/External/DeveloperSupport/Anamanti Core/` (a copied release
   binary, run outside any git checkout) and pins its identity via `instance_id` in
-  that folder's `anamanti.json` (`instance_id="anamanti-core"`); its provider keys come from the
-  shell environment — on this Mac they are exported in `~/.zshrc`. Test
+  that folder's `anamanti.json` (`instance_id="anamanti-core"`); its provider keys live
+  in that folder's `anamanti_settings.json`, so it needs no keys in the environment. Test
   copies run from their git branch/worktree, where `instance_id` is left unset so it
   defaults to the branch code; give each a distinct `bind_addr` + `config_addr` (and
   `service_name`) in its own `anamanti.json` to run alongside production.
@@ -534,19 +537,20 @@ anamanti-core/scripts/build-webui-css.sh
   not cross into Gradle 9 / AGP 9 — revisit only when cargokit ships AGP-9 support.
   NDK: `28.2.13676358`.
 
-### Build output goes on the external drive (disk is tight)
+### Build output and build reuse
 
-The main volume runs near-full (often <1 GiB free), which is not enough for Rust
-target dirs, a release APK, and Gradle caches. **Route all build output to the
-external drive** at `/Volumes/External/DeveloperSupport`, which has plenty of
-space. Set these for every Cargo / Flutter / Gradle build in this repo:
+The repo itself lives on the external drive at `/Volumes/External/immmediacy`, so
+Cargo's default `./target` and the usual caches already land on a volume with plenty
+of space. **Do not set `CARGO_TARGET_DIR` or `GRADLE_USER_HOME`** — cross-worktree
+build reuse is handled by the project's shared build cache (`$IMMEDIACY_BUILD_CACHE`,
+inside the repo's `.git` folder, which Cargo/Gradle/Turbo/Nx already use); for
+Gradle/Android pass `--build-cache`.
+
+Two things still need redirecting onto the external drive for a build (the main
+volume runs near-full, often <1 GiB free):
 
 ```bash
-# Host-side Cargo builds/tests (both anamanti-display/rust host tests and Anamanti Core):
-export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
-
-# Gradle caches + a scratch TMPDIR for the APK build:
-export GRADLE_USER_HOME=/Volumes/External/DeveloperSupport/mac-caches/gradle
+# A scratch TMPDIR for the APK build:
 export TMPDIR=/Volumes/External/DeveloperSupport/ambient-build/tmp
 
 # Flutter/cargokit write to ./build — symlink it onto the external drive:
@@ -567,16 +571,16 @@ ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 run **outside any git checkout**. Its identity, data paths, and ports (10700 /
 config 8730) come from `anamanti.json` in that folder (`service_name="Anamanti Core"`,
 `instance_id="anamanti-core"` — the Echo Shows pin this id, so never change it casually;
-`chmod 0600` the file — it may hold OAuth client secrets). Only the provider API
-keys/tokens come from the environment (they're secrets). **On this Mac they are exported
-in `~/.zshrc`, not `~/.zshenv`** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`,
-`OPENROUTER_API_KEY`, …) — a restart that sources only `~/.zshenv` boots with no LLM key
-(2026-10-24: the Anthropic backend came up keyless until restarted with `~/.zshrc`). To push the current
+`chmod 0600` the file — it may hold OAuth client secrets). The provider API keys/tokens
+(secrets) are persisted in the settings file next to it (`anamanti_settings.json`,
+plaintext 0600) and loaded from there on boot — a stored value wins over any env var
+(`overlay_seeded`), so **production needs no keys in the environment and must not depend
+on `~/.zshrc`**. (Env vars like `ANTHROPIC_API_KEY` only seed a key on first boot when
+the settings file has none.) To push the current
 branch's Anamanti Core to production, follow this runbook exactly (it does **not**
 touch any test copy running from a worktree):
 
 ```bash
-export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
 PROD="/Volumes/External/DeveloperSupport/Anamanti Core"
 
 # 1. Build the release binary from the branch you want to ship.
@@ -618,21 +622,21 @@ while lsof -nP -iTCP:10700 -sTCP:LISTEN -t >/dev/null 2>&1; do sleep 0.3; done
 #    previous binary as a dated backup first so a bad deploy is one `cp` to roll back.
 #    (Do this before step 2 if you prefer; it only reads the old file.)
 cp "$PROD/anamanti-core" "$PROD/anamanti-core.bak-$(date +%Y%m%d-%H%M%S)"
-cp "$CARGO_TARGET_DIR/release/anamanti-core" "$PROD/anamanti-core"
+cp anamanti-core/target/release/anamanti-core "$PROD/anamanti-core"
 chmod +x "$PROD/anamanti-core"
 
-# 4. Restart from the production folder with the provider API keys (secrets) in the
-#    environment: source BOTH ~/.zshenv and ~/.zshrc — the keys live in ~/.zshrc. (Sourcing
-#    ~/.zshrc non-interactively is fine; its output is discarded.) Identity/ports/paths come
-#    from "$PROD/anamanti.json" (cwd is $PROD, so its convention anamanti.json is picked up).
-#    Detached, logging to the folder (the log is overwritten on each start).
-( source ~/.zshenv >/dev/null 2>&1; source ~/.zshrc >/dev/null 2>&1; cd "$PROD"; \
-  ./anamanti-core > "$PROD/anamanti-core.log" 2>&1 & )
+# 4. Restart from the production folder. Provider keys/tokens load from the settings
+#    JSON ("$PROD/anamanti_settings.json", plaintext 0600), which wins over the
+#    environment — so NO keys need to be in the env; do NOT source ~/.zshrc. Identity/
+#    ports/paths come from "$PROD/anamanti.json" (cwd is $PROD, so its convention
+#    anamanti.json is picked up). Detached, logging to the folder (overwritten each start).
+( cd "$PROD"; ./anamanti-core > "$PROD/anamanti-core.log" 2>&1 & )
 
 # 5. Verify. Startup takes ~10–20 s (models load before mDNS advertising), so wait for
 #    the advertise line rather than a fixed sleep. Expect instance_id=`anamanti-core`,
 #    the displays' music channels re-opening, and NO "API key absent/unset" warning for
-#    the configured LLM backend (if there is one, step 4 missed ~/.zshrc — redo it).
+#    the configured LLM backend (if there is one, the key is missing from
+#    anamanti_settings.json — set it on the config page, then restart).
 for _ in $(seq 1 90); do grep -q "advertising" "$PROD/anamanti-core.log" && break; sleep 0.5; done
 grep -v slatedb "$PROD/anamanti-core.log" \
   | grep -E "advertising|channel opened|API_KEY (absent|is unset)|ERROR" | head -10
@@ -733,8 +737,8 @@ keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias a
   AGP 8.7.3 / Gradle 8.14.3. Newer Flutter stable demands Gradle 9 / AGP 9 and breaks
   cargokit (see the locked decision above). `brew`'s floating `flutter` may have drifted
   — check `flutter --version`.
-- **Build output must go to the external drive** (see the section above): export
-  `CARGO_TARGET_DIR`, `GRADLE_USER_HOME`, `TMPDIR`, and symlink `anamanti-display/build`.
+- **Build output** (see the section above): don't set `CARGO_TARGET_DIR`/`GRADLE_USER_HOME`
+  (the shared build cache handles reuse); still export `TMPDIR` and symlink `anamanti-display/build`.
 - **32-bit only.** The Echo Show 8 (crown) is armeabi-v7a — build
   `--target-platform android-arm` (arm64 → `INSTALL_FAILED_NO_MATCHING_ABIS`).
 - The full build cross-compiles the Rust engine for armv7 (~3–11 min); run it backgrounded.
@@ -748,8 +752,6 @@ wrangler writes to a local simulator store and nothing publishes).
 
 ```bash
 cd anamanti-display
-export CARGO_TARGET_DIR=/Volumes/External/DeveloperSupport/ambient-build/cargo-target
-export GRADLE_USER_HOME=/Volumes/External/DeveloperSupport/mac-caches/gradle
 export TMPDIR=/Volumes/External/DeveloperSupport/ambient-build/tmp
 ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
 R2_BUCKET=immediacy-releases \

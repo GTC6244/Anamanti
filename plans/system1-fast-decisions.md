@@ -473,8 +473,8 @@ Resolve/Defer branch), `agents.md` (secrets list + the `system1` config block), 
 ## 14. Testing & QA notes
 
 ### 14.1 Automated coverage (already green)
-Run from the repo root (the `rust-toolchain.toml` selects rustc 1.92 automatically; set
-`CARGO_TARGET_DIR` to a writable dir if the external build drive isn't mounted):
+Run from the repo root (the `rust-toolchain.toml` selects rustc 1.92 automatically;
+output goes to the default `./target` on the external drive where the repo lives):
 
 ```bash
 cargo clippy --manifest-path anamanti-core/Cargo.toml --all-targets -- -D warnings
