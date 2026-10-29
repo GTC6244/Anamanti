@@ -2117,11 +2117,13 @@ impl Config {
             ),
             directions_provider: self.directions_provider.clone(),
             directions_imperial: imperial,
-            // Weather backend (Visual Crossing by default, keyless Open-Meteo fallback);
-            // present whenever enabled, and the tool/push still no-op gracefully until a
-            // home location is set. Rebuilt from the live provider label + key on every
-            // swap; `weather_enabled` gates it entirely.
-            weather: self.weather_provider(),
+            // Weather backend: left unbuilt here and constructed once from the *resolved*
+            // settings (config seed + persisted-JSON overlay) in `build_for`/`for_settings`
+            // below — so it honors a Visual Crossing key stored in the settings file, not
+            // just `VISUALCROSSING_API_KEY`, and no premature "key unset" warning is logged
+            // against the pre-overlay env seed. Rebuilt from the live provider label + key
+            // on every swap; `weather_enabled` gates it entirely.
+            weather: None,
             weather_imperial: imperial,
             weather_enabled: self.weather.enabled,
             // Places backend (Google Places API New); present only when enabled AND a key

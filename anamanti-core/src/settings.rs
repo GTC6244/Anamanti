@@ -3150,6 +3150,14 @@ impl SharedSettings {
         )
     }
 
+    /// The live Anthropic API key (the env seed overlaid by the persisted settings JSON /
+    /// config page), or `None` when unset. Used to seed subsystems built outside the LLM
+    /// factory — e.g. GraphRAG entity extraction — so they honor a key stored in the
+    /// settings file rather than only the environment.
+    pub fn current_anthropic_api_key(&self) -> Option<String> {
+        non_blank(&self.inner.read().unwrap().anthropic_api_key)
+    }
+
     /// Apply a weather-tool config change (provider label and/or Visual Crossing key),
     /// rebuild the LLM so `weather_lookup` reflects the new provider, and persist
     /// (best-effort, 0600). An empty key is treated as a clear. Like

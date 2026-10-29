@@ -462,7 +462,7 @@ lossless, but it's outside this plan's decisions.
 ## 9. Production rollout (not done — needs a go-ahead)
 
 1. Install `pt_BR-faber-medium.onnx` + `.onnx.json` (rhasspy/piper-voices) into the
-   production Piper voice folder (`ambient-services/models/piper`).
+   production Piper voice folder (`Anamanti Core/services/models/piper`).
 2. Start a second Piper on, say, `127.0.0.1:10201` with the same `--data-dir` and
    `--voice pt_BR-faber-medium` (and a launchd entry alongside the existing one).
 3. Add to production `anamanti.json`:
