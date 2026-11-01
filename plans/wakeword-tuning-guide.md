@@ -103,6 +103,59 @@ openWakeWord can fire on phonetically-similar speech and some noise.
 
 ---
 
+## Reading the wake log
+
+The device keeps an always-on log of wake-word activity, numbers only (no audio or
+transcripts), about the last day. See the newest lines in **Audio Diagnostics → Wake log**
+(the log button on the Readouts card), or fetch the whole thing:
+
+```bash
+adb pull /sdcard/Android/data/com.anamanti.anamanti_display/files/wake_trace
+```
+
+Lines are buffered for up to 30 s, and opening the Wake log flushes them. Each line
+starts with local time and `up=`, seconds on a clock that stops while the CPU is suspended.
+
+A summary line is written every second:
+
+| Field | Meaning |
+|---|---|
+| `dt` | Milliseconds this summary covers. Well over 1000 means the engine loop stalled |
+| `n` | Mic samples received. About 16000 a second; `0` means the mic stopped delivering |
+| `zero` | Samples that were exactly zero. Equal to `n` means Android has silenced the mic |
+| `rms`, `rms_max` | Mic level before gain: the average, and the loudest short block |
+| `scores` | Wake-word scores produced |
+| `peak`, `avg` | Highest raw score, and highest smoothed score (what the threshold tests) |
+| `thr` | Threshold in effect; the active value means a turn was running |
+| `pass_ms` | Longest single detector pass |
+| `backlog` | Samples queued in the capture ring; 96000 is full, and audio is then dropped |
+| `turn`, `fired` | Whether a turn was active, and detections in this second |
+| `near` | Appended when `peak` reached 0.3 without firing |
+
+A healthy Echo Show 8 in a quiet moment (measured 2026-11-01, on 1.0.30): `dt` about
+1020, `n` about 16640, `zero` around 5% of `n`, `scores` about 8, `pass_ms` around 57,
+`backlog` under 1300.
+
+Events: `detected`, `touch`, `screen_on`/`screen_off`, `activity_*`, `window_focus`,
+`mic_started`/`mic_stopped`/`mic_read_error`, `mic_silenced` (1 = silenced), `state`
+(phase, screen awake, presence, brightness, online), `engine_start` (the capture and
+gate settings in use), `engine_stop`, `engine_error`, `rust_panic`. `dropped=N` on a line
+means N lines were lost to a slow disk.
+
+**Finding a miss:** a miss has no event of its own, so look at the seconds before a
+`touch`, or at a time you noted.
+
+| In the seconds before | Likely cause |
+|---|---|
+| `zero` equals `n`, `n=0`, or `mic_silenced value=1` | The mic is blocked or stopped |
+| `rms_max` rises with your voice but `peak` stays low | Capture quality, distance, or audio processing |
+| `peak` near or over `thr`, with `near` and no `detected` | The smoothing gate; try fire-on-peak |
+| High `pass_ms`, growing `backlog`, or `dt` well over 1000 | CPU starvation |
+| A gap in the file | Wall clock and `up=` both jump: the process was starved. Only the wall clock jumps: the device was suspended |
+| `detected` is there | It fired, so follow the `state` lines that come after it |
+
+---
+
 ## Testing checklist
 
 - [ ] Test on a **`--release` APK** — debug Rust makes tract-onnx ~3.6× slower on the

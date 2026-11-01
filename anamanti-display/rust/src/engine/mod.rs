@@ -20,7 +20,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ringbuf::traits::Consumer;
+use ringbuf::traits::{Consumer, Observer};
 
 use crate::frb_generated::StreamSink;
 
@@ -35,8 +35,10 @@ use crate::wakeword::{WakeWordDetector, WakeWordModelPaths};
 mod gate;
 mod net;
 pub(crate) mod timer;
+pub mod wake_trace;
 use gate::DetectionGate;
 use net::Network;
+use wake_trace::TraceWindow;
 
 /// Ring capacity in samples (~2 s at 48 kHz; ≈192 KB of `i16`). Absorbs
 /// inference-thread scheduling jitter while staying tiny in the RAM budget.
@@ -321,6 +323,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                 Err(e) => {
                     crate::audio::mic_bridge::clear_producer();
                     log::error!("AudioRecord capture failed to start: {e:#}");
+                    wake_trace::note("engine_error audiorecord_start_failed");
                     let _ = sink.add(WakeWordEvent::error(format!(
                         "failed to start AudioRecord capture: {e}"
                     )));
@@ -342,6 +345,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                 capture_stream = Some(c);
             }
             Err(e) => {
+                wake_trace::note("engine_error capture_start_failed");
                 let _ = sink.add(WakeWordEvent::error(format!(
                     "failed to start audio capture: {e}"
                 )));
@@ -538,6 +542,17 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
     );
     let mut gate = DetectionGate::new(smoothing_window, DETECTION_COOLDOWN, config.fire_on_peak);
+    wake_trace::note(format!(
+        "engine_start rate={input_rate} source={} ns={} agc={} aec={} model_loaded={} thr={idle_threshold:.2} \
+         active_thr={active_threshold:.2} window={smoothing_window} peak={} gain_db={capture_gain_db_cfg:.1}",
+        config.mic_source,
+        config.platform_ns,
+        config.platform_agc,
+        config.platform_aec,
+        detector.is_some(),
+        config.fire_on_peak,
+        capture_gain_db_cfg = config.capture_gain_db,
+    ));
     // Rolling peak score between diagnostic log emissions, so the logcat trace shows
     // both that audio is flowing (rms) and how high the model scored (peak) even
     // when nothing crosses the detection threshold.
@@ -559,13 +574,26 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     // audio-diagnostics screen can adjust them on the running engine without a restart
     // (`update_tuning`); the loop re-reads them each block below.
     set_tuning(capture_gain_db, idle_threshold, active_threshold);
+    let mut trace = TraceWindow::new(Instant::now());
 
     while running.load(Ordering::SeqCst) {
+        // Ahead of the empty-ring `continue`, so a mic that stops delivering still
+        // writes a line (`n=0`) instead of a gap.
+        if let Some(line) = trace.take_line(
+            Instant::now(),
+            consumer.occupied_len(),
+            network.as_ref().is_some_and(Network::is_active),
+        ) {
+            wake_trace::note(line);
+        }
+
         let n = consumer.pop_slice(&mut scratch);
         if n == 0 {
             thread::sleep(IDLE_POLL);
             continue;
         }
+
+        trace.on_mic(&scratch[..n]);
 
         in_f32.clear();
         in_f32.extend(scratch[..n].iter().map(|&s| s as f32));
@@ -611,7 +639,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
         }
 
         match detector.as_mut() {
-            Some(d) => match d.push_audio(&resampled) {
+            Some(d) => match timed_push(d, &resampled, &mut trace) {
                 Ok(Some(score)) => {
                     // While a turn is active keep the raised active-threshold floor, but
                     // never below the live idle threshold the user may be tuning.
@@ -655,6 +683,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                     }
 
                     let fired = gate.observe(score, threshold, Instant::now());
+                    trace.on_score(score, gate.avg(), threshold);
 
                     // Live tuning trace: show the confidence climbing toward the
                     // wake word without flooding logcat (one line per drained block,
@@ -672,6 +701,10 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                             "WAKE WORD DETECTED '{}' (avg={avg:.3}, peak={score:.3})",
                             config.model_name
                         );
+                        trace.on_fire();
+                        wake_trace::note(format!(
+                            "detected avg={avg:.3} peak={score:.3} thr={threshold:.2}"
+                        ));
                         if sink
                             .add(WakeWordEvent::detected(config.model_name.clone(), avg))
                             .is_err()
@@ -689,6 +722,7 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
                 }
                 Ok(None) => {}
                 Err(e) => {
+                    wake_trace::note("engine_error inference_failed");
                     let _ = sink.add(WakeWordEvent::error(format!(
                         "wake-word inference error: {e}"
                     )));
@@ -728,7 +762,20 @@ fn run_loop(config: WakeWordConfig, sink: StreamSink<WakeWordEvent>, running: Ar
     }
     drop(capture_stream);
     running.store(false, Ordering::SeqCst);
+    wake_trace::note("engine_stop");
     let _ = sink.add(WakeWordEvent::stopped());
+}
+
+/// Run one block through the detector, recording how long the pass took.
+fn timed_push(
+    detector: &mut WakeWordDetector,
+    samples: &[f32],
+    trace: &mut TraceWindow,
+) -> Result<Option<f32>> {
+    let started = Instant::now();
+    let result = detector.push_audio(samples);
+    trace.on_pass(started.elapsed());
+    result
 }
 
 /// Measure the real rate at which mono samples arrive in the ring and snap it to

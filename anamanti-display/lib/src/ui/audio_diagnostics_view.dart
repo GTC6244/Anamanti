@@ -29,6 +29,7 @@ import 'package:flutter/services.dart';
 
 import 'package:anamanti_display/src/engine/assistant_controller.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
+import 'package:anamanti_display/src/ui/wake_log_view.dart';
 
 /// How many recent detections the history card keeps.
 const int _kMaxHistory = 4;
@@ -48,6 +49,7 @@ class AudioDiagnosticsView extends StatefulWidget {
     required this.onChanged,
     required this.onTune,
     required this.onActiveChanged,
+    this.loadWakeLog = loadWakeLogTail,
   });
 
   /// The live, already-running wake-word engine controller. Its [AssistantState]
@@ -71,6 +73,9 @@ class AudioDiagnosticsView extends StatefulWidget {
   /// `audio-start` so the Core transcribes and shows the words but never sends them to
   /// the LLM. Called with `true` on mount and `false` on dispose.
   final void Function(bool active) onActiveChanged;
+
+  /// Fetches the lines shown by the wake log; injectable for tests.
+  final Future<String> Function() loadWakeLog;
 
   @override
   State<AudioDiagnosticsView> createState() => _AudioDiagnosticsViewState();
@@ -241,6 +246,14 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
       const SnackBar(
         content: Text('Diagnostics config copied to clipboard'),
         duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _openWakeLog() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => WakeLogView(load: widget.loadWakeLog),
       ),
     );
   }
@@ -458,12 +471,24 @@ class _AudioDiagnosticsViewState extends State<AudioDiagnosticsView>
                       'Readouts',
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
-                    IconButton(
-                      key: const Key('diag-copy-config'),
-                      icon: const Icon(Icons.copy_all, size: 18),
-                      tooltip: 'Copy config to clipboard',
-                      visualDensity: VisualDensity.compact,
-                      onPressed: _copyConfig,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          key: const Key('diag-wake-log'),
+                          icon: const Icon(Icons.receipt_long, size: 18),
+                          tooltip: 'Open wake log',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: _openWakeLog,
+                        ),
+                        IconButton(
+                          key: const Key('diag-copy-config'),
+                          icon: const Icon(Icons.copy_all, size: 18),
+                          tooltip: 'Copy config to clipboard',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: _copyConfig,
+                        ),
+                      ],
                     ),
                   ],
                 ),

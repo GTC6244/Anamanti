@@ -78,6 +78,27 @@ void dismissTimer({required int id}) =>
 void noteUserActivity() =>
     RustLib.instance.api.crateApiEngineNoteUserActivity();
 
+/// Start the always-on wake-word trace, writing to `dir` (`engine/wake_trace.rs`).
+/// Call once at boot, before the engine starts. Later calls do nothing.
+void startWakeTrace({required String dir, required int utcOffsetMins}) =>
+    RustLib.instance.api.crateApiEngineStartWakeTrace(
+      dir: dir,
+      utcOffsetMins: utcOffsetMins,
+    );
+
+/// Add a line to the wake-word trace from the UI layer. `utc_offset_mins` keeps the
+/// trace's local timestamps right across a daylight-saving change.
+void noteWakeTrace({required String message, required int utcOffsetMins}) =>
+    RustLib.instance.api.crateApiEngineNoteWakeTrace(
+      message: message,
+      utcOffsetMins: utcOffsetMins,
+    );
+
+/// The newest `max_lines` lines of the wake-word trace, oldest first. Not `sync`: it
+/// flushes and reads files, so it must stay off the UI thread.
+Future<String> wakeTraceTail({required int maxLines}) =>
+    RustLib.instance.api.crateApiEngineWakeTraceTail(maxLines: maxLines);
+
 /// Report the recipe screen's state as the device's **display context** so the next
 /// voice turn's `audio-start` carries it to the orchestrator, letting the LLM know a
 /// recipe is up (and which tab / scroll position / highlighted step) so it can drive the

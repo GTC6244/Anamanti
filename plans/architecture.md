@@ -102,6 +102,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
   `covered` is a separate debounced check for a **covered lens** (privacy shutter /
   tape): frames with mean luma < 12 and stddev < 6 (0..255) held 10 s, cleared after
   2 s of normal frames (a pitch-black room can read as covered too).
+- **Wake-word trace** (`engine/wake_trace.rs`): an always-on, on-device record of the
+  engine loop (a summary line a second) and of OS events reported from `MicBridge.kt`
+  and `MainActivity`. Numbers only. A dedicated writer thread owns two rotating files,
+  and callers only `try_send`, so it can never stall the loop. See
+  `wakeword-tuning-guide.md` for reading it.
 
 ### 2.2 Flutter UI (Echo Show)
 

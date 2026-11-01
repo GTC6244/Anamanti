@@ -1,8 +1,10 @@
 package com.anamanti.anamanti_display
 
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -11,6 +13,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.MotionEvent
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -33,6 +36,17 @@ class MainActivity : FlutterActivity() {
     // The in-flight permission request's Dart reply, held between requestPermissions()
     // and onRequestPermissionsResult (only one request runs at a time).
     private var pendingPermissionResult: MethodChannel.Result? = null
+
+    // Whether Android actually turned the panel off, for the wake-word trace. A dim
+    // away face leaves the screen on; only a real sleep lands here.
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_ON -> MicBridge.trace(MicBridge.TRACE_SCREEN_ON)
+                Intent.ACTION_SCREEN_OFF -> MicBridge.trace(MicBridge.TRACE_SCREEN_OFF)
+            }
+        }
+    }
 
     companion object {
         private const val BRIGHTNESS_CHANNEL = "anamanti_display/brightness"
@@ -370,9 +384,46 @@ class MainActivity : FlutterActivity() {
             setReferenceCounted(false)
             acquire()
         }
+        registerReceiver(
+            screenStateReceiver,
+            IntentFilter(Intent.ACTION_SCREEN_ON).apply { addAction(Intent.ACTION_SCREEN_OFF) },
+        )
+    }
+
+    // The wake-word trace's view of the activity: a touch marks where a miss may have
+    // just happened, and losing the foreground is what blocks the mic.
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) MicBridge.trace(MicBridge.TRACE_TOUCH)
+        return super.dispatchTouchEvent(ev)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        MicBridge.trace(MicBridge.TRACE_ACTIVITY_START)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        MicBridge.trace(MicBridge.TRACE_ACTIVITY_RESUME)
+    }
+
+    override fun onPause() {
+        MicBridge.trace(MicBridge.TRACE_ACTIVITY_PAUSE)
+        super.onPause()
+    }
+
+    override fun onStop() {
+        MicBridge.trace(MicBridge.TRACE_ACTIVITY_STOP)
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        MicBridge.trace(MicBridge.TRACE_WINDOW_FOCUS, if (hasFocus) 1 else 0)
     }
 
     override fun onDestroy() {
+        unregisterReceiver(screenStateReceiver)
         multicastLock?.let { if (it.isHeld) it.release() }
         multicastLock = null
         updaterChannel = null

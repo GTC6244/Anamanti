@@ -83,6 +83,7 @@ pub fn init_app() {
     // the panic makes such crashes visible in logcat.
     std::panic::set_hook(Box::new(|info| {
         log::error!("rust panic: {info}");
+        crate::engine::wake_trace::note("rust_panic");
     }));
 }
 
@@ -738,6 +739,27 @@ pub fn dismiss_timer(id: u32) {
 pub fn note_user_activity() {
     #[cfg(target_os = "android")]
     crate::camera::bridge::note_activity();
+}
+
+/// Start the always-on wake-word trace, writing to `dir` (`engine/wake_trace.rs`).
+/// Call once at boot, before the engine starts. Later calls do nothing.
+#[frb(sync)]
+pub fn start_wake_trace(dir: String, utc_offset_mins: i32) -> anyhow::Result<()> {
+    crate::engine::wake_trace::start(&dir, utc_offset_mins)
+}
+
+/// Add a line to the wake-word trace from the UI layer. `utc_offset_mins` keeps the
+/// trace's local timestamps right across a daylight-saving change.
+#[frb(sync)]
+pub fn note_wake_trace(message: String, utc_offset_mins: i32) {
+    crate::engine::wake_trace::set_utc_offset_mins(utc_offset_mins);
+    crate::engine::wake_trace::note(message);
+}
+
+/// The newest `max_lines` lines of the wake-word trace, oldest first. Not `sync`: it
+/// flushes and reads files, so it must stay off the UI thread.
+pub fn wake_trace_tail(max_lines: u32) -> String {
+    crate::engine::wake_trace::tail(max_lines as usize)
 }
 
 /// Report the recipe screen's state as the device's **display context** so the next
