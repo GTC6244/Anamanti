@@ -32,6 +32,9 @@ speaks the reply back through the Echo Show's speakers.
   stops instantly and a fresh turn begins (the Anamanti Core also aborts the in-flight
   LLM + TTS via an `anamanti-interrupt` frame). The assistant remembers
   facts/preferences across sessions (stored on the Mac).
+- 🔎 **On-device wake log** — the display keeps about a day of wake-word numbers (no
+  audio or transcripts), so a missed wake word can be diagnosed afterwards
+  (`plans/wakeword-tuning-guide.md`).
 - 🗣️ **Knows who's talking** — with speaker ID on, each person's voiceprint scopes
   what the assistant remembers and recalls: "I like jazz" is remembered for the person
   who said it, "the wifi is FastNet" for the whole household, and something said by a

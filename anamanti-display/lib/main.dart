@@ -21,6 +21,7 @@ import 'package:anamanti_display/src/engine/notification_controller.dart';
 import 'package:anamanti_display/src/engine/update_controller.dart';
 import 'package:anamanti_display/src/engine/weather_channel_controller.dart';
 import 'package:anamanti_display/src/engine/screen_brightness.dart';
+import 'package:anamanti_display/src/engine/wake_trace.dart';
 import 'package:anamanti_display/src/update/updater_channel.dart';
 import 'package:anamanti_display/src/engine/wakeword_config.dart';
 import 'package:anamanti_display/src/settings/app_settings.dart';
@@ -41,12 +42,14 @@ import 'package:anamanti_display/src/rust/api/engine.dart'
         deviceHardwareId,
         dismissTimer,
         noteUserActivity,
+        noteWakeTrace,
         setCameraContext,
         setFontContext,
         setMusicContext,
         setPlaceContext,
         setRecipeContext,
         setWeatherContext,
+        startWakeTrace,
         updateDiagnosticsTuning;
 import 'package:anamanti_display/src/rust/api/settings.dart'
     show getCameraStream, musicControl;
@@ -129,6 +132,9 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// frame never goes stale (tokens + media URLs expire ~1 h).
   Timer? _photoRefreshTimer;
 
+  /// The last state line written to the wake-word trace, so it only logs changes.
+  String? _lastTraceState;
+
   @override
   void initState() {
     super.initState();
@@ -138,6 +144,7 @@ class _AmbientHomeState extends State<AmbientHome> {
   }
 
   Future<void> _boot() async {
+    await _startWakeTrace();
     _settings = await _store.load();
     // Apply this display's own photo-rotation cadence (device-local setting).
     _slideshow.setInterval(Duration(seconds: _settings.slideIntervalSecs));
@@ -287,7 +294,8 @@ class _AmbientHomeState extends State<AmbientHome> {
   Future<void> _syncDriveFromOrchestrator() async {
     try {
       final t = await _client.fetchDriveToken();
-      if (!t.configured) return; // orchestrator not set up for Drive; keep our values
+      if (!t.configured)
+        return; // orchestrator not set up for Drive; keep our values
       final next = _settings.copyWith(
         driveClientId: t.clientId,
         driveClientSecret: t.clientSecret,
@@ -356,18 +364,19 @@ class _AmbientHomeState extends State<AmbientHome> {
       // pinned Core (errors are logged, never surfaced to the UI). The returned future
       // completes with the round-trip so volume changes can coalesce; other callers
       // ignore it.
-      musicControl: ({required String action, int? value}) => musicControl(
-        orchestratorKey: _settings.orchestratorKey,
-        action: action,
-        value: value,
-        discoveryTimeoutSecs: BigInt.zero,
-      ).then(
-        (msg) {
-          if (msg.isNotEmpty) debugPrint('music control: $msg');
-        },
-        onError: (Object e, StackTrace _) =>
-            debugPrint('music control error: $e'),
-      ),
+      musicControl: ({required String action, int? value}) =>
+          musicControl(
+            orchestratorKey: _settings.orchestratorKey,
+            action: action,
+            value: value,
+            discoveryTimeoutSecs: BigInt.zero,
+          ).then(
+            (msg) {
+              if (msg.isNotEmpty) debugPrint('music control: $msg');
+            },
+            onError: (Object e, StackTrace _) =>
+                debugPrint('music control error: $e'),
+          ),
       // Tell the orchestrator what the music screen is showing (track + which view) so it
       // can drive it by voice (`music_screen`) and answer "what's this song?".
       setMusicContext: setMusicContext,
@@ -533,7 +542,9 @@ class _AmbientHomeState extends State<AmbientHome> {
     setState(() {
       _settings = next;
       // Re-pin the control client to the (possibly new) orchestrator selection.
-      _client = FrbOrchestratorClient(orchestratorKey: _settings.orchestratorKey);
+      _client = FrbOrchestratorClient(
+        orchestratorKey: _settings.orchestratorKey,
+      );
     });
     // A manual font-size change (the Settings slider) applies to the UI via the setState
     // above (the root MediaQuery re-reads `_settings.fontScale`); also mirror it to the
@@ -583,10 +594,33 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// the controller, so it's cheap to call on every state emit.
   void _applyBrightness(AssistantState? state) {
     if (state == null) return;
-    _brightness.apply(
-      state.screenAwake,
-      dark: _settings.nightDimEnabled && state.effectiveRoomDark,
+    final dark = _settings.nightDimEnabled && state.effectiveRoomDark;
+    _brightness.apply(state.screenAwake, dark: dark);
+    final line = wakeTraceStateLine(
+      state,
+      dark: dark,
+      brightness: _brightness.levelFor(state.screenAwake, dark: dark),
     );
+    if (line != _lastTraceState) {
+      _lastTraceState = line;
+      noteWakeTrace(
+        message: line,
+        utcOffsetMins: DateTime.now().timeZoneOffset.inMinutes,
+      );
+    }
+  }
+
+  /// Start the wake-word trace. Diagnostics only, so a failure here (no storage, say)
+  /// is logged and the app carries on without it.
+  Future<void> _startWakeTrace() async {
+    try {
+      startWakeTrace(
+        dir: await wakeTraceDir(),
+        utcOffsetMins: DateTime.now().timeZoneOffset.inMinutes,
+      );
+    } catch (e) {
+      debugPrint('wake trace unavailable: $e');
+    }
   }
 
   /// Apply a voice font-size command ("increase font" / "decrease font"): bump the global
@@ -595,7 +629,10 @@ class _AmbientHomeState extends State<AmbientHome> {
   /// next turn's context reports it. A no-op at the min/max bound.
   Future<void> _onFontAdjust(String direction) async {
     final step = direction == 'decrease' ? -kFontScaleStep : kFontScaleStep;
-    final next = (_settings.fontScale + step).clamp(kFontScaleMin, kFontScaleMax);
+    final next = (_settings.fontScale + step).clamp(
+      kFontScaleMin,
+      kFontScaleMax,
+    );
     if (next == _settings.fontScale) return; // already at the bound
     _settings = _settings.copyWith(fontScale: next);
     await _store.save(_settings);
@@ -667,9 +704,9 @@ class _AmbientHomeState extends State<AmbientHome> {
       // `SettingsScreen` is a separate `Navigator` route (see `_openSettings`), outside
       // this subtree, so it stays at the default size.
       content = MediaQuery(
-        data: MediaQuery.of(context).copyWith(
-          textScaler: TextScaler.linear(_settings.fontScale),
-        ),
+        data: MediaQuery.of(
+          context,
+        ).copyWith(textScaler: TextScaler.linear(_settings.fontScale)),
         child: AmbientScreen(
           assistant: assistant,
           slideshow: _slideshow,

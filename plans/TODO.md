@@ -148,7 +148,9 @@ far end — transparent to `AudioRecord`/AudioFlinger.
        `MainActivity` sets `FLAG_KEEP_SCREEN_ON` so the screen-off timeout can't sleep
        the device while the app is up (this was a cause of intermittently missed wake
        words); verify over a real idle→wake cycle without the `svc power stayon true`
-       test crutch.
+       test crutch. The on-device wake log records `screen_off`, activity changes and
+       `mic_silenced` (`wakeword-tuning-guide.md`), so this can now be read from a day's
+       trace. `stay_on_while_plugged_in=7` was still set on a display on 2026-11-01.
 3. [ ] 🚀 **Build the WebRTC AEC engine variant (38-50 dB)** via the LineageOS 18.1
        `crown` ROM tree (`m libamznaec_shim` against the ROM's `external/webrtc` +
        `libwebrtc_audio_preprocessing.so`). Needs a Linux host + ~150 GB tree. Much

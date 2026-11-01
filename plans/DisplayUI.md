@@ -743,6 +743,12 @@ and `settings_controller.dart`). Layout and rationale:
   from `WakeWordConfig` on each engine start); the in-turn threshold is
   `max(active, idle)`.
 
+**`WakeLogView`** — `lib/src/ui/wake_log_view.dart`
+- Opened by the log button (`diag-wake-log`) in the Readouts card header of Audio
+  Diagnostics. A read-only page with the newest 400 lines of the on-device wake-word
+  trace (`wakeTraceTail`, `rust/src/engine/wake_trace.rs`), opening at the newest line,
+  with a refresh button and the `adb pull` path for the full files.
+
 ---
 
 ## 10. People, voice enrollment & other sub-screens

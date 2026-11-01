@@ -119,6 +119,18 @@ pub fn stop() {
     }
 }
 
+/// JNI down-call: `MicBridge.nativeTraceEvent(int code, int value)`. Records an OS-side
+/// event in the wake-word trace; the codes are listed in `engine/wake_trace.rs`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_anamanti_anamanti_1display_MicBridge_nativeTraceEvent<'local>(
+    _env: jni::EnvUnowned<'local>,
+    _class: JObject<'local>,
+    code: jint,
+    value: jint,
+) {
+    crate::engine::wake_trace::note_event(code, value);
+}
+
 /// JNI down-call: `MicBridge.nativePush(short[] data, int len)`. Copies the first
 /// `len` samples into the capture ring (dropping on overrun, exactly like the cpal
 /// callback's `try_push`).

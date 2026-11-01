@@ -1,11 +1,15 @@
 package com.anamanti.anamanti_display
 
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.os.Build
 import android.util.Log
+import java.util.concurrent.Executor
 import kotlin.concurrent.thread
 
 /**
@@ -27,15 +31,46 @@ import kotlin.concurrent.thread
 object MicBridge {
     private const val TAG = "MicBridge"
 
+    // Wake-word trace event codes. Keep in step with `event_name` in
+    // `rust/src/engine/wake_trace.rs`.
+    const val TRACE_TOUCH = 1
+    const val TRACE_SCREEN_ON = 2
+    const val TRACE_SCREEN_OFF = 3
+    const val TRACE_ACTIVITY_START = 4
+    const val TRACE_ACTIVITY_RESUME = 5
+    const val TRACE_ACTIVITY_PAUSE = 6
+    const val TRACE_ACTIVITY_STOP = 7
+    const val TRACE_WINDOW_FOCUS = 8
+    private const val TRACE_MIC_STARTED = 9
+    private const val TRACE_MIC_STOPPED = 10
+    private const val TRACE_MIC_READ_ERROR = 11
+    private const val TRACE_MIC_SILENCED = 12
+
     @Volatile private var running = false
     private var record: AudioRecord? = null
     private var reader: Thread? = null
     private var aec: AcousticEchoCanceler? = null
     private var agc: AutomaticGainControl? = null
     private var ns: NoiseSuppressor? = null
+    private var silencedCallback: AudioManager.AudioRecordingCallback? = null
 
     /** Push one mono `i16` PCM chunk (first [len] samples of [data]) into the Rust ring. */
     @JvmStatic external fun nativePush(data: ShortArray, len: Int)
+
+    /** Record an OS-side event in the wake-word trace (a no-op until the trace starts). */
+    @JvmStatic external fun nativeTraceEvent(code: Int, value: Int)
+
+    /**
+     * [nativeTraceEvent], guarded: this runs on every touch and lifecycle change, so a
+     * tracing fault must never take the app down with it.
+     */
+    fun trace(code: Int, value: Int = 0) {
+        try {
+            nativeTraceEvent(code, value)
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "wake trace unavailable", e)
+        }
+    }
 
     /**
      * Hand the Rust side this class (resolved via the app class loader) so the
@@ -100,6 +135,7 @@ object MicBridge {
         }
 
         record = ar
+        watchSilenced(ar, sid)
         val actualRate = ar.sampleRate
         ar.startRecording()
         if (ar.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
@@ -116,12 +152,17 @@ object MicBridge {
                 val n = ar.read(buf, 0, buf.size)
                 when {
                     n > 0 -> nativePush(buf, n)
-                    n < 0 -> { Log.e(TAG, "AudioRecord.read error $n"); break }
+                    n < 0 -> {
+                        Log.e(TAG, "AudioRecord.read error $n")
+                        trace(TRACE_MIC_READ_ERROR, n)
+                        break
+                    }
                     // n == 0: no data yet, loop.
                 }
             }
         }
         Log.i(TAG, "started: source=$source rate=$actualRate (requested $sampleRate) session=$sid")
+        trace(TRACE_MIC_STARTED, actualRate)
         return actualRate
     }
 
@@ -131,6 +172,8 @@ object MicBridge {
         running = false
         reader?.join(500)
         reader = null
+        silencedCallback?.let { cb -> record?.unregisterAudioRecordingCallback(cb) }
+        silencedCallback = null
         aec?.release(); aec = null
         agc?.release(); agc = null
         ns?.release(); ns = null
@@ -144,6 +187,29 @@ object MicBridge {
         }
         record = null
         Log.i(TAG, "stopped")
+        trace(TRACE_MIC_STOPPED)
+    }
+
+    /**
+     * Trace when Android silences this recording: it keeps running and delivers zeros,
+     * with no error to the app, so this callback is the only direct sign of it.
+     */
+    private fun watchSilenced(ar: AudioRecord, session: Int) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val callback = object : AudioManager.AudioRecordingCallback() {
+            private var last: Boolean? = null
+
+            override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
+                val silenced = configs.firstOrNull { it.clientAudioSessionId == session }
+                    ?.isClientSilenced ?: return
+                if (silenced != last) {
+                    last = silenced
+                    trace(TRACE_MIC_SILENCED, if (silenced) 1 else 0)
+                }
+            }
+        }
+        ar.registerAudioRecordingCallback(Executor { it.run() }, callback)
+        silencedCallback = callback
     }
 
     private inline fun <T> attachEffect(

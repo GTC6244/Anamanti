@@ -802,12 +802,19 @@ wrangler writes to a local simulator store and nothing publishes).
 cd anamanti-display
 export TMPDIR=/Volumes/External/DeveloperSupport/ambient-build/tmp
 ln -sfn /Volumes/External/DeveloperSupport/ambient-display-build/build build
+GRADLE_OPTS="-Dorg.gradle.configuration-cache=false" \
 R2_BUCKET=immediacy-releases \
 UPDATE_BASE_URL=https://releases.immediacy.app/anamanti \
 NOTES="<user-facing release notes — shown in the device update banner>" \
 WRANGLER="npx -y wrangler" \
 ./scripts/release-r2.sh
 ```
+
+`GRADLE_OPTS` is needed on this Mac because `~/.gradle/gradle.properties` turns the Gradle
+configuration cache on, and it can't serialize the pinned Kotlin 2.1 plugin's state
+(`module java.base does not "opens java.lang.ref"`). `build` is not always a symlink; the
+two `DeveloperSupport/ambient-*` folders above may not exist, and a plain `build/` in the
+worktree works on the External drive.
 
 **Stale-UI guard (2026-10-14).** The script deletes `build/app` before building and,
 before uploading, compares the new APK's compiled Dart UI (`lib/armeabi-v7a/libapp.so`)
@@ -883,7 +890,9 @@ Android toolchain again.
   just-set timer (`timerSpotlight`) keeps the big form over the conversation panel). New dual-form widgets (e.g. the planned HA dashboard
   widget) follow the same shape, and are listed as a linked pair in `DisplayUI.md`.
 - **FRB:** change Rust signatures, then regenerate — never hand-edit generated
-  bindings.
+  bindings. Codegen 2.11.1 can't parse the `super let` that `pin!` expands to on Rust
+  1.92 (`Error: unexpected token, expected ';'`). Until that's fixed, change the `pin!`
+  in `wyoming/push_channel.rs` to `Box::pin` while generating, then restore it.
 - **Wyoming:** newline-delimited (`\n`) JSON control frames; raw PCM immediately
   after the metadata frame; one socket carries outbound audio and inbound
   transcript + TTS audio. Frame types/constructors/decoders are defined **once**, in
