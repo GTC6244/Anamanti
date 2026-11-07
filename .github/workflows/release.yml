@@ -33,9 +33,17 @@ env:
 
 jobs:
   build-release:
-    runs-on: ubuntu-latest
+    # Org self-hosted Windows Android runners (win-1 / win-2). The Android SDK is
+    # preinstalled on the host (C:\Android\Sdk, ANDROID_HOME set machine-wide,
+    # licenses accepted), so there is no setup-android step.
+    runs-on: [self-hosted, Windows, X64, android]
+    # Self-hosted default is 6h; a hung Gradle/cargokit build shouldn't hold a runner
+    # that long. A cold run (Flutter SDK + NDK + Rust toolchain download) is the slow case.
+    timeout-minutes: 60
     defaults:
       run:
+        # Git Bash, so the bash steps below (base64 --decode, grep/sed, $GITHUB_ENV) keep working.
+        shell: bash
         # The Flutter project lives in the anamanti-display/ subdirectory of the repo.
         working-directory: anamanti-display
     steps:
@@ -48,6 +56,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Install jq + unzip (needed by flutter-action)
+        # Not on the self-hosted Windows runners; installed once into the tool cache.
+        uses: ./.github/actions/windows-tools
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -58,21 +70,33 @@ jobs:
           # pinned AGP 8.7.3. Bump this deliberately alongside the Android toolchain.
           flutter-version: 3.44.1
           channel: stable
-          cache: true
+          # Off on self-hosted: the SDK already persists in the runner tool cache.
+          cache: false
 
       - name: Set up Rust (for the cargokit / flutter_rust_bridge build)
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Android NDK
         run: |
-          # sdkmanager is not on PATH in a plain run shell on ubuntu-latest; it lives
-          # under the SDK's cmdline-tools. Resolve it by full path (ANDROID_SDK_ROOT or
-          # ANDROID_HOME, whichever the runner exports).
-          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "ndk;${NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=${SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          # The SDK is shared by every job on the host, so the NDK usually persists from
+          # a previous run; only call sdkmanager when it is missing. On Windows sdkmanager
+          # is a .bat under the SDK's cmdline-tools (not on PATH). Resolve it by full path
+          # (ANDROID_SDK_ROOT or ANDROID_HOME, whichever the host exports).
+          set -euo pipefail
+          SDK_ROOT="$(cygpath -m "${ANDROID_SDK_ROOT:-$ANDROID_HOME}")"
+          NDK_DIR="${SDK_ROOT}/ndk/${NDK_VERSION}"
+          if [ ! -f "$NDK_DIR/source.properties" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager.bat"
+            if [ ! -f "$SDKMANAGER" ]; then
+              # No `latest` alias; fall back to any installed cmdline-tools version.
+              for candidate in "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager.bat; do
+                SDKMANAGER="$candidate"
+              done
+            fi
+            yes | "$SDKMANAGER" --licenses >/dev/null || true
+            "$SDKMANAGER" "ndk;${NDK_VERSION}"
+          fi
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
 
       - name: Decode release keystore
         env:
@@ -122,3 +146,8 @@ jobs:
           files: ${{ steps.apk.outputs.path }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      - name: Clean up release keystore
+        # Self-hosted workspaces persist between runs; don't leave the decoded keystore on disk.
+        if: always()
+        run: rm -f android/app/upload-keystore.jks

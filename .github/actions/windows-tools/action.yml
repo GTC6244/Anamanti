@@ -1,0 +1,41 @@
+# Puts the CLI tools subosito/flutter-action's setup.sh needs on PATH for the
+# self-hosted Windows runners (win-1 / win-2). GitHub-hosted images ship them;
+# these machines only have Git Bash. Installed into the persistent tool cache,
+# so each runner downloads them once.
+#   jq    — parses the Flutter release manifest
+#   unzip — extracts the Windows Flutter SDK .zip (shimmed onto Windows' bsdtar)
+name: Windows runner tools
+description: Ensure jq and unzip are available for flutter-action on self-hosted Windows runners
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        bin="$(cygpath -u "$RUNNER_TOOL_CACHE")/anamanti-bin"
+        mkdir -p "$bin"
+        if [ ! -x "$bin/jq.exe" ]; then
+          curl -fsSL --retry 5 -o "$bin/jq.exe" \
+            https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe
+        fi
+        if ! command -v unzip >/dev/null 2>&1 && [ ! -x "$bin/unzip" ]; then
+          # Only the form setup.sh uses: unzip -q -o <archive> -d <dir>
+          cat > "$bin/unzip" <<'EOF'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        archive= dest=.
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            -q|-o) ;;
+            -d) dest="$2"; shift ;;
+            *) archive="$1" ;;
+          esac
+          shift
+        done
+        mkdir -p "$dest"
+        /c/Windows/System32/tar.exe -xf "$archive" -C "$dest"
+        EOF
+          chmod +x "$bin/unzip"
+        fi
+        cygpath -w "$bin" >> "$GITHUB_PATH"
