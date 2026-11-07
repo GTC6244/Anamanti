@@ -40,10 +40,18 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, X64, Linux]   # org runner linux-1
+    timeout-minutes: 10   # self-hosted default is 6h
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        # wrangler-action installs wrangler with npm; the self-hosted host may not
+        # have Node on PATH (GitHub-hosted images do).
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
