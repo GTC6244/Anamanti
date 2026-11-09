@@ -41,12 +41,15 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # The `production` environment only deploys from `main` and `v*` tags, so the
+    # Cloudflare token stored there is unreachable from any other ref.
+    environment: production
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || 'f6a7e7d5c5e98d4f1905b95a0d098c1c' }}

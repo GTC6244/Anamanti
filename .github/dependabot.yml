@@ -1,0 +1,16 @@
+# Version updates for the GitHub Actions used by the workflows. They are pinned to
+# commit SHAs, and Dependabot keeps both the SHA and its `# vN` comment current.
+#
+# Cargo / pub / Gradle are deliberately NOT listed here: the Flutter, AGP and Rust
+# toolchains are pinned on purpose (see agents.md locked decisions), and routine
+# bump PRs would fight those pins. Dependabot *security* updates are enabled in the
+# repo settings and still open PRs for vulnerable dependencies in those ecosystems.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
