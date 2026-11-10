@@ -1,343 +1,420 @@
 # Anamanti
 
-An always-on, ambient voice assistant that turns a jailbroken **Echo Show 8**
-(running LineageOS) into a private smart display, backed by an **M4 Mac Mini**
-that does the heavy lifting (speech-to-text, an LLM brain, and text-to-speech).
+### The soul of your home, given a voice.
 
-Say a wake word → the display streams your voice to the Mac → your words appear
-live on screen → the assistant thinks, answers on screen token-by-token, and
-speaks the reply back through the Echo Show's speakers.
+**Private · Always on · Runs on hardware you own · Open source ([Apache 2.0](LICENSE))**
 
-> **Naming.** The project is **Anamanti** — from the Irish *anam an tí*, roughly
-> "soul of the home" (pronounced **"AN-um un TEE"**). Its two halves:
-> **Anamanti Core** is the Mac-side brain (STT ↔ LLM + memory ↔ TTS; the crate
-> `anamanti_core`, binary `anamanti-core`), and **Anamanti Display** is the app
-> that runs on the Echo Show (package `com.anamanti.anamanti_display`).
+Say the wake word and just talk. Anamanti hears you in every room, thinks on a Mac
+in your house, shows its answer on screen as it forms, and speaks it back a
+sentence at a time.
+
+From the Irish *anam an tí*, "the soul of the home" (pronounced **"AN-um un TEE"**).
+Every stage can run on your Mac, elsewhere on your network, or in the cloud. You
+choose, and it shows you exactly what leaves the house.
+
+🌐 **[anamanti.com](https://www.anamanti.com/)** ·
+[The Core](https://www.anamanti.com/core) ·
+[The Display](https://www.anamanti.com/display) ·
+[Hardware](https://www.anamanti.com/hardware) ·
+[Echo Show install guide](https://www.anamanti.com/install) ·
+[Technology](https://www.anamanti.com/technology)
+
+<p align="center">
+  <img src="website/assets/img/display-listening.webp" width="720"
+       alt="Anamanti Display listening on a repurposed Echo Show 8">
+</p>
+
+| **~0.5 s** | **0 model calls** | **24** | **1 Core** |
+| :---: | :---: | :---: | :---: |
+| end of speech → spoken reply for everyday requests (~2 s when the full model has to think) | for "turn off the kitchen lights", "show me the front door" or "remember that…" | voice tools: timers, weather, recipes, places, music, radio, camera, Home Assistant and more | serves every display in the house and replies on the screen that asked |
 
 ---
 
-## What it does
+## A screen in every room, one brain in the house
 
-- 🎙️ **On-device wake word** — fully offline detection via an openWakeWord
-  `.onnx` model, so no audio leaves the device until you summon it.
-- 🗣️ **Streaming STT** — audio streams over the [Wyoming Protocol](https://github.com/rhasspy/wyoming)
-  to a Whisper/CoreML server on the Mac; transcripts render as you speak.
-- 🧠 **Pluggable LLM brain** — swap between a local model (Ollama / llama.cpp) and
-  a cloud API (Claude / OpenAI) behind one interface.
-- 🔊 **Streaming spoken replies** — Piper (Wyoming TTS) synthesizes the answer
-  sentence-by-sentence *as the LLM generates it*, so the Echo Show starts speaking
-  after the first sentence instead of waiting for the whole reply (end of speech → spoken reply:
-  ~0.5 s median when System-1 answers, ~2 s median when the full LLM does; live install, 2026-10).
-- 💬 **Barge-in + memory** — say the wake word again mid-reply to interrupt: playback
-  stops instantly and a fresh turn begins (the Anamanti Core also aborts the in-flight
-  LLM + TTS via an `anamanti-interrupt` frame). The assistant remembers
-  facts/preferences across sessions (stored on the Mac).
-- 🔎 **On-device wake log** — the display keeps about a day of wake-word numbers (no
-  audio or transcripts), so a missed wake word can be diagnosed afterwards
-  (`plans/wakeword-tuning-guide.md`).
-- 🗣️ **Knows who's talking** — with speaker ID on, each person's voiceprint scopes
-  what the assistant remembers and recalls: "I like jazz" is remembered for the person
-  who said it, "the wifi is FastNet" for the whole household, and something said by a
-  voice it doesn't recognise is kept for review on the Mac but never treated as true for
-  anyone. "Who am I?" is answered from the voice, not from memory. Enroll on the
-  display under Settings → People → Add a voice.
-- 📺 **Anamanti Display** — a landscape Flutter UI tuned for the 8-inch screen,
-  with an idle photo slideshow from a Google Photos/Drive folder (how often the
-  photo changes is set per display, 3 s to 10 min, default 10 s). The front camera doubles as a
-  presence sensor (brightens when you walk up, dims when the room is empty) and as a
-  **light sensor**: when the lights go off at night the screen dims right down so it
-  doesn't light up a dark room (Settings → Display → Night). Close the privacy shutter
-  and you choose what that means: a dim clock, or awake by day and dim during your
-  night hours. Nothing from the camera is stored or leaves the device.
-- 🔔 **Proactive notifications** — the Mac can push a visual notification to the
-  display *without* you asking (a reminder, an alert), over a persistent connection
-  the device holds open to its pinned Anamanti Core. Visual-only today (no spoken
-  output); send a test one from the config page's **Music & Devices** page.
-- 🎵 **House music, by voice or touch** — "play some Radiohead" drives Spotify on the
-  house speakers (Snapcast + librespot on the Mac; no music audio passes through the
-  Echo Show). While a track plays, a compact control bar rides the idle screen; tap it
-  for a full now-playing screen (artwork, progress, transport, volume) and the up-next
-  queue (tap a queued track to jump straight to it) — or just say "show me what's playing" / "what's up next" / "hide the music".
-  The display you asked shows the music **full screen**; every other display shows the
-  small bar. Each display can switch on its own — the expand / minimize button, or say
-  "make the music full screen" / "use the small music player" to it — and Music & Devices
-  can pin any display to always full screen or always the small bar.
-- 📻 **Internet radio** — curate stations on the Core's **Music & Devices** page (paste a
-  stream URL, **Look up** fills the name + logo from the Radio Browser directory), then
-  say "play Dave Rocks" / "next station" / "stop the radio". It plays on the same
-  speakers as Spotify (mpv → Snapcast; starting one stops the other), and the display's
-  now-playing screen shows the station logo, a LIVE badge and the current song.
-- 🇧🇷 **Bilingual: English + Brazilian Portuguese** — turn it on under the config
-  page's **Voice → Languages** (or the `language` block in `anamanti.json`) and anyone
-  can speak either language on any turn: the assistant answers in the language that
-  turn was spoken in, with a Portuguese Piper voice for Portuguese
-  (`pt_BR-faber-medium`). Timers, the clock, "lembra que…", "esquece isso", "desliga a
-  luz do escritório" and "fala como um gângster" all work in Portuguese; English is
-  unchanged. The Display's own screens stay English (the live transcript and reply show
-  whatever was said). See [`plans/BilingualPlan.md`](plans/BilingualPlan.md).
-- 📹 **Front-door camera** — say "show me the front door" or "who's at the door?" and
-  the display you're talking to shows the live view from the Reolink NVR (video only,
-  ~1–3 s behind real time); "close it" or 60 s closes it. The NVR password stays on the
-  Mac (`REOLINK_PASSWORD`); the video goes straight from the NVR to the display and never
-  leaves the house. Set it up in the `camera` block of `anamanti.json`.
-- 🎭 **Personalities** — give the assistant a speaking voice (overly enthusiastic,
-  heavy sarcasm, depressed, 1940s gangster, Donald Trump, or normal). Pure *output
-  tuning* — it changes only how replies sound, never what the assistant knows or does.
-  Switch it on/off and pick one **by voice** ("talk like a 1940s gangster", "go back
-  to normal"); edit the catalog of personalities on the config page's **Personality** page.
-- 🖥️ **Admin console** — a loopback web console on the Mac (`http://127.0.0.1:8730/`)
-  laid out for a 1920×1080 desktop: an **Overview** of the whole voice pipeline that
-  marks every stage **On this Mac / Your network / Cloud** and lists exactly what leaves
-  the house, plus pages for Voice, Intelligence, Personality, Household, Integrations,
-  Music & Devices, Memory (including a switch for cloud entity extraction),
-  Conversations (per-turn latency + the exact prompt), Keys & Accounts and System.
+Anamanti has three parts. They find each other on your network automatically, so
+there are no IP addresses to type and no vendor account to create.
 
-## Architecture at a glance
+| | |
+| --- | --- |
+| **🧠 Anamanti Core** — *the brain, on a Mac* | Hears, thinks and speaks. End-of-speech detection, transcription, speaker ID, memory, the language model, tools and the voice, plus a console that shows every stage and where it runs. A Rust service (`anamanti-core/`). |
+| **📺 Anamanti Display** — *the face, in each room* | Your photos, the clock and the weather when idle. When you talk: the live conversation, then recipes, timers, music, places and the front-door camera. Flutter UI on a Rust real-time audio engine (`anamanti-display/`). |
+| **🎙️ Repurposed Echo Show 8** — *the ears* | A far-field mic array, a good speaker and an 8-inch screen, reflashed with LineageOS. Our favourite front end, but the Core works with any client that speaks its protocol. |
+
+There's also **Anamanti Companion** (`anamanti-companion/`, Android + iOS, in
+testing): status, now playing, every display's timers and memories on your phone
+while you're on the home network.
+
+## It doesn't just answer. It shows you.
+
+<table>
+  <tr>
+    <td><img src="website/assets/img/display-timers.webp" alt="Timers"><br><sub><b>Timers.</b> Toast, eggs and bacon, at a glance.</sub></td>
+    <td><img src="website/assets/img/display-recipe-steps.webp" alt="Recipe mode"><br><sub><b>Recipe mode.</b> "Next step", "how much lemon?", hands-free.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="website/assets/img/display-notification.webp" alt="Notification"><br><sub><b>Notifications.</b> Pushed from the Core, no wake word.</sub></td>
+    <td><img src="website/assets/img/display-place.webp" alt="Place card"><br><sub><b>Place cards.</b> Hours, open now, rating and phone.</sub></td>
+  </tr>
+</table>
+
+Every screenshot here comes from a running house with three displays.
+
+## What sets it apart
+
+**A real back-and-forth**
+- **Follow-ups without the wake word.** The mic reopens after each reply (10 s if
+  the answer ended in a question, 5 s otherwise) and stays open while you keep talking.
+- **Barge in any time.** Say the wake word mid-answer: playback stops at once and the
+  Core abandons the half-written reply (`anamanti-interrupt`).
+- **Bilingual (in testing).** Turn on English + Brazilian Portuguese and each turn is
+  answered in the language it was spoken in, with a matching Piper voice.
+
+**It knows who's talking**
+- **Voiceprints** (ECAPA-TDNN, on the Mac) tell household members apart on every turn.
+- **Per-person memory.** "I like jazz" is remembered for you; "the wifi is FastNet"
+  for the whole household; something said by an unknown voice is kept for review but
+  never treated as true for anyone. "Who am I?" is answered from your voice.
+- **A knowledge graph** of people, places and topics (embedded HelixDB) that you can
+  browse, rename and delete.
+
+**Fast where it counts**
+- **Zero-model fast paths** for lights, the camera and memory commands: plain code,
+  one direct call.
+- **A System-1 classifier** answers timers, weather, time and "I'm done" without the
+  big model, and defers to it below 0.85 confidence.
+- **Streaming throughout.** Text appears as it's written and Piper speaks each sentence
+  as soon as it's complete.
+
+**Around the house**
+- 🎵 **Music in every room** — "play some Radiohead" drives Spotify (librespot) in sync
+  across Snapcast speakers; music ducks while the assistant talks. Internet radio
+  plays through the same speakers. The display that asked goes full screen; other
+  rooms show a compact bar.
+- 🏠 **Home Assistant** — "turn off the lights" means *this* room. Matched against a
+  cached device list, no model in the loop; if it isn't sure, it asks the model.
+- 📹 **Front-door camera** — "who's at the door?" opens the Reolink NVR's live view on
+  the display that asked. The video never leaves the house.
+- 🍳 **Recipes, weather, places, directions, calendars, a shared shopping list and
+  messages to family phones** — each a voice tool, offered to the model only when
+  it's configured.
+- 🎭 **Personalities** — "talk like a 1940s gangster". Changes only how a reply sounds,
+  never what the assistant knows or does.
+- 🌙 **A calm room** — the front camera is used only as a presence and light sensor:
+  brighter when you walk up, dim when the room is empty or the lights go off. Nothing
+  from the camera is stored or sent.
+
+## You decide what leaves the house
+
+The wake word is detected **on the display**, so no audio leaves the room until you
+call it. After that, each stage is your choice: Whisper on your Mac or a cloud
+transcriber, Ollama or Claude, local embeddings or OpenAI.
+
+The Core's admin console (`http://127.0.0.1:8730/`, loopback only) labels every
+stage **On this Mac / Your network / Cloud** and lists exactly what is sent where.
+Keys stay in owner-only files on the Mac and are never shown back. There's no vendor
+account, no hard-coded server, and no always-open microphone to someone else's data
+centre.
+
+<p align="center">
+  <img src="website/assets/img/core-overview.webp" width="820" alt="Anamanti Core console overview">
+</p>
+
+---
+
+## Echo Show 8: the best ears in the house are already in a drawer
+
+Smart displays were built around one hard problem: hearing you from across a noisy
+room while they play music. The first-generation **Echo Show 8** solves it with a
+4-mic far-field array, a good speaker and an 8-inch screen, and it's cheap
+secondhand. Anamanti repurposes it: reflash with LineageOS, add echo cancellation,
+install Anamanti Display. No Amazon account, no Amazon cloud.
+
+| Echo Show 8 (1st gen) as we run it | |
+| --- | --- |
+| Model / codename | C7H6N3, product code AEOCW, **`crown`** (2nd/3rd gen are **not** supported) |
+| OS | LineageOS 18.1 (Android 11), unofficial community build |
+| CPU target | **32-bit ARM (`armeabi-v7a`)** |
+| Memory | ~1 GB, which is why the audio path is Rust (no GC pauses) |
+| Screen | 8″, 1280×800, landscape |
+| Microphones | 4-mic far-field array + DAC loopback, sample-aligned, 16 kHz |
+| Echo cancellation | SpeexDSP audio-HAL shim, ~16 dB, reversible (**required**) |
+| Camera | Presence and light only; nothing stored or sent |
+| Updates | The app updates itself (signed, SHA-256-verified) |
+
+### Why the loopback matters
+
+The Show delivers a hardware loopback of its own speaker output in the same capture
+stream as the mics. A small audio-driver shim
+([`EchoShow8gen1-aec-shim`](https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim),
+`libamznaec_shim.so`) runs echo cancellation against it *before* any app hears the
+mic, removing ~16 dB of the assistant's own voice while keeping yours. That's what
+makes barge-in produce clean transcripts. On top of that, the display raises the
+wake-word threshold while it's speaking (default 0.70 vs 0.50 idle) so it doesn't
+wake itself.
+
+### Turning an Echo Show into an Anamanti display
+
+> ⚠️ This replaces Amazon's software entirely (Alexa and Fire OS are gone, with no
+> documented way back), almost certainly voids the warranty, and a wrong wipe can
+> brick the device. Follow the community threads where they differ from this summary.
+> The full, sourced walkthrough is the **[install guide](https://www.anamanti.com/install)**.
+
+1. **Unlock + TWRP** — on supported Fire OS (reported 6.5.7.1–6.5.7.4, keep Wi-Fi off
+   so it can't update), run the `amonet-crown` bootrom/bootloader exploit over
+   micro-USB. No case opening. It reboots into TWRP.
+2. **LineageOS** — in TWRP wipe **only** System, Data and Cache, then install
+   `lineage-18.1-*-UNOFFICIAL-crown.zip` (Google apps are not needed).
+3. **ADB** — enable USB debugging, then optionally ADB over Wi-Fi:
+   ```bash
+   adb tcpip 5555 && adb connect <device-ip>:5555
+   ```
+4. **Echo cancellation** (required; needs root — see the shim's README first, a bad
+   install can wedge the audio path):
+   ```bash
+   git clone https://github.com/Brutus-GTC6245/EchoShow8gen1-aec-shim
+   cd EchoShow8gen1-aec-shim
+   ./scripts/install.sh --so prebuilt/libamznaec_shim.so   # pushes shim, reboots
+   adb logcat -d | grep amznaec                            # confirm it loaded
+   ./scripts/uninstall.sh                                  # to undo
+   ```
+   Tune the shim's post-cancellation makeup gain with
+   `anamanti-display/scripts/set-aec-gain.sh [GAIN_DB] [ADB_SERIAL]` (default 34 dB;
+   lower toward 30 if close speech clips).
+5. **Install Anamanti Display** — build the APK (below) and `adb install` it. It finds
+   the Core via mDNS; no IP to enter. Grant "install unknown apps" once so it can
+   update itself.
+
+Credit for the unlock and LineageOS work belongs to the Echo Show community — amonet
+by R0rt1z2 and k4y0z, the amazon-oss `crown` device tree, and the XDA threads linked
+from the install guide. Anamanti isn't affiliated with Amazon; Echo Show is a
+trademark of Amazon.
+
+### Tuned per room
+
+Each display has its own capture gain, idle and while-speaking wake-word sensitivity,
+smoothing, and a live **Audio diagnostics** screen (mic level + wake-word score) so
+you can tune a kitchen versus a front hall in seconds. It also keeps about a day of
+wake-word scores on device (numbers only, no audio) so a missed wake word can be
+diagnosed afterwards — see [`plans/wakeword-tuning-guide.md`](plans/wakeword-tuning-guide.md).
+The display never decides when you've stopped talking; the Mac does, with a neural
+VAD, so the memory-tight device isn't asked to do the hard part.
+
+### Bring your own screen
+
+The Echo Show isn't required. A client only has to capture audio, play audio and draw
+what it's told: a tablet, a TV, a Raspberry Pi with a mic HAT, or your own build.
+
+- **Discovery:** the Core advertises `_wyoming._tcp` over mDNS with TXT `role=core`
+  and a stable `instance_id`, so clients can find — and pin — a specific Core.
+- **Turns:** one socket per turn carries 16 kHz mono PCM up and transcript, reply text,
+  screen frames and spoken audio back, as newline-delimited JSON Wyoming frames + raw PCM.
+- **Push:** a second long-lived socket (`anamanti-hello role=notify`) lets the Core
+  send notifications, weather, music and camera requests any time.
+- Frame definitions live in one shared crate, [`anamanti-protocol/`](anamanti-protocol/).
 
 ```
-Echo Show 8 (LineageOS)                     M4 Mac Mini
-┌──────────────────────┐                    ┌────────────────────────┐
-│ Flutter UI  (Dart)   │                    │ Wyoming STT (Whisper)  │
-│   ▲ FRB v2 streams   │                    │        ▼               │
-│ Rust engine          │── TCP (Wyoming) ──►│ Anamanti Core (LLM)    │
-│  • capture (cpal)    │◄── transcript ─────│  (Ollama or cloud)     │
-│  • wake word (tract) │◄── TTS audio ──────│        ▼               │
-│  • Wyoming client    │                    │ Wyoming TTS (Piper)    │
-│  • playback (cpal)   │                    └────────────────────────┘
-└──────────────────────┘
-   mDNS: discovers _wyoming._tcp on the LAN
+→ audio-start     device_id, room
+→ audio-chunk …   16 kHz mono PCM
+← transcript      "is the pharmacy open?"
+← anamanti-place  a card to draw full screen
+← audio-chunk …   the spoken reply, sentence by sentence
+← anamanti-listen wait_secs: 10   # reopen the mic
 ```
 
-See [`architecture.md`](./plans/architecture.md) for the full design and
-[`agents.md`](./agents.md) for AI-agent / contributor build guidance.
+---
 
-## Tech stack
+## Architecture
+
+```
+Echo Show 8 (LineageOS)                     Mac (Apple Silicon)
+┌──────────────────────┐                    ┌───────────────────────────────┐
+│ Flutter UI  (Dart)   │                    │ Anamanti Core (Rust, tokio)   │
+│   ▲ FRB v2 streams   │                    │  • Silero VAD (end of speech) │
+│ Rust engine          │── Wyoming/TCP ────►│  • STT: faster-whisper /      │
+│  • capture (cpal)    │◄── transcript ─────│    whisper.cpp / ElevenLabs   │
+│  • wake word (tract) │◄── reply text ─────│  • speaker ID (ECAPA-TDNN)    │
+│  • Wyoming client    │◄── TTS audio ──────│  • fast paths → System-1 → LLM│
+│  • playback (cpal)   │◄── push frames ────│  • HelixDB graph + SQLite     │
+└──────────────────────┘                    │  • TTS: Piper (Wyoming)       │
+   mDNS: _wyoming._tcp, TXT role=core       │  • console :8730 (loopback)   │
+                                            └───────────────────────────────┘
+```
 
 | Layer | Technology |
 | --- | --- |
-| UI | Flutter (always-on landscape) |
-| Systems | Rust, cross-compiled for `aarch64-linux-android` |
-| Interop | `flutter_rust_bridge` v2 (zero-copy Dart↔Rust) |
-| Audio | `cpal` (capture + playback); Android backend is NDK AAudio |
-| Wake word | `tract-onnx` running an openWakeWord model |
-| Transport | Wyoming Protocol over `tokio` TCP |
-| Discovery | mDNS / Zeroconf (`_wyoming._tcp`) |
-| Mac services | STT — Whisper via Wyoming **or** in-process whisper.cpp (`stt.engine`) · LLM · Wyoming TTS (Piper) |
+| Core | Rust · `tokio` · `rig` agent framework |
+| Display | Flutter + Rust via `flutter_rust_bridge` v2 |
+| Wake word | openWakeWord ("Hey Jarvis") on `tract-onnx`, on device |
+| On-Mac inference | onnxruntime · whisper.cpp (Metal) · candle |
+| Memory | HelixDB (embedded graph + vector) · SQLite + FTS5 |
+| Transport | Wyoming over TCP · mDNS discovery |
+| Audio | `cpal` / AAudio on device · Snapcast in the house |
+| Console | Static HTML + Tailwind, compiled into the binary |
+
+Deeper reading: [`plans/architecture.md`](plans/architecture.md) (design),
+[`plans/Plan.MD`](plans/Plan.MD) (phases and decisions),
+[`agents.md`](agents.md) (contributor and AI-agent build guidance).
 
 ## Repository layout
 
 ```
-anamanti-display/   Anamanti Display — the Echo Show app: Flutter UI (`lib/`) +
-                    Rust device engine (`rust/`: audio, wake word, Wyoming client)
-anamanti-core/      Anamanti Core — the Mac Mini brain (STT ↔ LLM + memory ↔ TTS)
-anamanti-companion/ Anamanti Companion — Android + iOS phone app (Flutter + Rust):
-                    a scaled-back display showing system status, now playing, every
-                    display's timers, and memories (with delete). Home network only
-anamanti-protocol/  Shared Wyoming protocol crate used by Core, Display, and Companion
-plans/              Design + planning docs (architecture.md, Plan.MD, TODO.md, …)
-agents.md           Build guidance for AI agents & contributors
-README.md           You are here
+anamanti-core/       Anamanti Core — the Mac brain (STT ↔ LLM + memory ↔ TTS, console)
+anamanti-display/    Anamanti Display — Flutter UI (lib/) + Rust device engine (rust/)
+anamanti-companion/  Anamanti Companion — Android + iOS phone app (Flutter + Rust)
+anamanti-protocol/   Shared Wyoming/Anamanti frame definitions (Rust)
+website-src/         Source for anamanti.com (built into website/)
+plans/               Design and planning docs
 ```
 
-## Getting started
+---
 
-> Phases 1–4 are implemented (device engine + Mac Anamanti Core); the reactive UI
-> and settings phases are still in progress. See `Plan.MD` for current state.
+## Building & configuring
 
-### Prerequisites
+### 1. The Core (Mac)
 
-- Flutter SDK + Android SDK/NDK
-- Rust toolchain with the Android target. The Echo Show 8 (`crown`) LineageOS
-  build is **32-bit** (`armeabi-v7a`), so use the armv7 target:
-  ```bash
-  rustup target add armv7-linux-androideabi   # 32-bit Echo Show 8 (crown)
-  # rustup target add aarch64-linux-android   # only for a 64-bit device
-  ```
-- `flutter_rust_bridge_codegen`
-- An Echo Show 8 running LineageOS with `adb` access
-- An M4 Mac Mini on the same LAN running Wyoming STT + Piper TTS
-
-### Build & run (target)
+**Prerequisites:** an Apple Silicon Mac on the same LAN as your displays, a Rust
+toolchain (pinned by `rust-toolchain.toml`), and — unless you use the in-process STT
+engine — Python for the off-the-shelf Wyoming servers.
 
 ```bash
-# 1. (Re)generate FRB bindings after changing Rust signatures
+cd anamanti-core
+
+# Models the default build needs (each script defaults to ./models)
+scripts/fetch-vad-model.sh        # Silero VAD — required: a default boot fails loudly without it
+scripts/fetch-embed-model.sh      # nomic-embed-text — local, offline memory embeddings
+scripts/fetch-speaker-model.sh    # optional: ECAPA-TDNN voiceprints for speaker ID
+scripts/fetch-whisper-models.sh   # optional: whisper.cpp models for stt.engine=whisper-rs
+                                  #   (--multilingual for bilingual mode)
+
+cp anamanti.example.json anamanti.json   # per-instance config; edit to taste
+cargo run --release                      # or: cargo run --release -- --config <path>
+```
+
+**Speech services.** Piper (TTS) is an off-the-shelf Wyoming server the Core is a
+client to; STT can be one too, or run inside the Core:
+
+```bash
+# Example only — run these however you like (venv, launchd, …)
+python -m wyoming_faster_whisper --uri tcp://127.0.0.1:10300 --model base.en --data-dir ./whisper
+python -m wyoming_piper         --uri tcp://127.0.0.1:10200 --voice en_US-lessac-medium --data-dir ./piper
+```
+
+Set `"stt": { "engine": "whisper-rs" }` to skip the Whisper server entirely
+(whisper.cpp in-process), or `"elevenlabs"` for ElevenLabs Scribe in the cloud.
+
+**`anamanti.json` essentials** (see
+[`anamanti.example.json`](anamanti-core/anamanti.example.json) for every key):
+
+| Key | What it controls |
+| --- | --- |
+| `bind_addr` / `config_addr` | Device-facing Wyoming port (`0.0.0.0:10700`) and the loopback console (`127.0.0.1:8730`) |
+| `service_name` / `instance_id` | mDNS name and the stable id displays pin to |
+| `stt`, `stt_addr`, `tts_addr`, `tts_voice` | Speech engines and endpoints |
+| `llm.backend` | `ollama` (default, local), `anthropic`, `openai`, or `mock` (offline, no servers) |
+| `vad.engine` | `silero` (default) or `energy` |
+| `memory_backend`, `graphrag` | `helix` graph recall (default) or `sqlite` FTS; local vs OpenAI embeddings |
+| `speaker` | Turn on voiceprints: `{ "enabled": true, "model_path": "models/voxceleb_ECAPA512.onnx" }` |
+| `language`, `tts_voices`, `tts_addrs` | Bilingual mode (e.g. `["en", "pt-BR"]` + `pt_BR-faber-medium`); see [`plans/BilingualPlan.md`](plans/BilingualPlan.md) |
+| `system1` | Fast classifier backend (`none`, local Laya-Decision, or hosted Jev via OpenRouter) |
+| `home_assistant`, `camera`, `music`, `spotify`, `drive`, `weather`, `places`, `calendar`, … | Integrations |
+
+**Keys and accounts.** Paste provider keys (Anthropic, OpenAI, ElevenLabs, …) on the
+console's **Keys & Accounts** page; they apply without a restart and are stored 0600
+in `anamanti_settings.json`. Env vars such as `ANTHROPIC_API_KEY` only *seed* a key on
+first boot; a stored value always wins. Claude can authenticate with an API key or a
+Claude subscription token (`claude setup-token`). Model pickers list current
+Anthropic/OpenAI models live. Most options — STT engine, LLM and model, voices,
+embeddings, personalities, integrations — can be changed from the console, live.
+
+**Music.** House-wide audio (Snapcast + librespot + mpv, launchd units) has its own
+runbook: [`anamanti-core/deploy/snapcast/`](anamanti-core/deploy/snapcast/README.md).
+The Core only controls the players; music PCM never passes through it or the Echo Show.
+
+**Many displays, many Cores.** Any number of displays can share one Core (replies go
+to the display that asked; memory is one household pool, scoped per person). You can
+also run a test Core beside production: give it a distinct `service_name`,
+`bind_addr` and `config_addr`; its `instance_id` defaults to the git branch code.
+Use `memory_backend: "sqlite"` if it shares production's memory (SQLite is safe across
+processes; the embedded graph is not). On each display, **Settings → Anamanti Core**
+picks one — strictly, so a pinned display stays offline rather than silently switching.
+
+### 2. The Display (Echo Show / Android)
+
+**Prerequisites:** Flutter SDK, Android SDK + NDK, `flutter_rust_bridge_codegen`, and
+the 32-bit Android Rust target:
+
+```bash
+rustup target add armv7-linux-androideabi   # Echo Show 8 (crown) is armeabi-v7a
+```
+
+```bash
+cd anamanti-display
+
+# After changing any Rust API signature, regenerate the FRB bindings
 flutter_rust_bridge_codegen generate
 
-# 2. Build a device APK — cargokit cross-compiles the Rust engine into it.
-#    Echo Show 8 (crown) is 32-bit, so target android-arm (armeabi-v7a).
-#    A `distribution` flavor dimension exists (selfUpdate / fdroid, see below), so
-#    a flavor MUST be named. `selfUpdate` is the normal build.
+# Build — cargokit cross-compiles the Rust engine into the APK.
+# A `distribution` flavor must be named: `selfUpdate` (normal) or `fdroid` (no updater).
 flutter build apk --release --flavor selfUpdate --target-platform android-arm
 
-# 3. Deploy to the Echo Show (LineageOS) over adb
 adb install build/app/outputs/flutter-apk/app-selfUpdate-release.apk
-# ...or, for live development:
+# …or for live development:
 flutter run --flavor selfUpdate -d <echo-show-device>
 ```
 
-On first launch the device discovers the Mac's Wyoming service via mDNS. No
-static IP configuration is required.
+> **Toolchain pin:** AGP 8.7.3 / Kotlin 2.1.0 / Gradle 8.11.1 — the bundled cargokit
+> Gradle plugin doesn't support Gradle 9 / AGP 9 yet.
 
-### Releases & in-app updates
+On first launch the display discovers the Core over mDNS. On-device settings (six
+screens sized for the 8″ display, applied instantly) cover the assistant, listening
+and wake word, audio diagnostics, the photo source, household voices and memories,
+and updates. Anything sensitive, such as keys, lives only in the Mac console.
 
-The Display can update **itself** over the air: a built-in updater fetches a
-signed APK + a `latest.json` manifest from a **Cloudflare R2** bucket, verifies a
-SHA-256, and installs it via Android's `PackageInstaller`. (A GitHub Releases +
-Obtainium path also still runs — see `.github/workflows/release.yml`.) Full design:
-[`plans/UpdaterPlan.md`](plans/UpdaterPlan.md).
-
-Build flavors (same signing key + app id across both):
-- **`selfUpdate`** — ships the in-app updater (the normal build).
-- **`fdroid`** — ships *without* it (no install permission / UI), for F-Droid.
-
-To cut a release to R2:
+**Releases and over-the-air updates.** The `selfUpdate` build fetches a signed APK +
+`latest.json` from a Cloudflare R2 bucket, verifies its SHA-256 and installs via
+`PackageInstaller`. Bump `version:` in `anamanti-display/pubspec.yaml` (the `+N` build
+number must always increase), then:
 
 ```bash
-# One-time: a release keystore (android/key.properties or ANDROID_* env — never
-# commit it; the key must stay constant forever), an R2 bucket + custom domain with
-# a ~60s cache rule on latest.json, and `npx wrangler login`.
-
-# Bump `version:` in anamanti-display/pubspec.yaml first (X.Y.Z+N — the +N build
-# number is the Android versionCode and MUST increase every release). Then:
-R2_BUCKET=anamanti-dl \
-UPDATE_BASE_URL=https://dl.example.com \
-NOTES="Bug fixes" \
-anamanti-display/scripts/release-r2.sh
+R2_BUCKET=anamanti-dl UPDATE_BASE_URL=https://dl.example.com NOTES="Bug fixes" \
+  anamanti-display/scripts/release-r2.sh
 ```
 
-Point each device at your domain in **Settings → Device → Updates** (the Update URL
-field shows in Advanced mode; the default is a
-placeholder). On the LineageOS kiosk, grant the app "install unknown apps" once.
+Point each device at your domain under **Settings → Device → Updates** (Advanced
+mode). Signing-key setup and the GitHub Releases / Obtainium path are in
+[`RELEASING.md`](RELEASING.md); design in [`plans/UpdaterPlan.md`](plans/UpdaterPlan.md).
 
-### Run the Mac Mini Anamanti Core (the brain)
-
-The `/mac` crate (`anamanti_core`) is the Wyoming host the device
-discovers. It relays audio to a Whisper (STT) server, runs the pluggable LLM with
-persistent memory, and streams a Piper (TTS) reply back — advertising
-`_wyoming._tcp` over mDNS so the device finds it automatically.
+### 3. Testing
 
 ```bash
-# Point at your local Whisper + Piper Wyoming servers and pick an LLM backend.
-ANAMANTI_LLM_BACKEND=ollama \
-ANAMANTI_STT_ADDR=127.0.0.1:10300 \
-ANAMANTI_TTS_ADDR=127.0.0.1:10200 \
-cargo run --manifest-path anamanti-core/Cargo.toml --release
+cargo test --manifest-path anamanti-core/Cargo.toml
+cargo clippy --manifest-path anamanti-core/Cargo.toml --all-targets -- -D warnings
+(cd anamanti-display && flutter test)
 ```
 
-- `ANAMANTI_LLM_BACKEND` — `ollama` (default, local), `anthropic` (Claude; needs
-  `ANTHROPIC_API_KEY`), `openai` (GPT / o-series; needs `OPENAI_API_KEY`), or
-  `mock` (offline echo, no servers needed).
-- **Provider API keys at runtime:** you don't have to set the cloud key before
-  launch. The config page (`http://127.0.0.1:8730/`) has Anthropic / OpenAI API-key
-  fields — paste a key, pick the backend, and it applies **without a restart** (the
-  key is saved 0600 in `anamanti_settings.json`, so it survives reboots too). The env
-  vars are just the boot seed. For safety the key fields live only on the loopback
-  config page, not on the device settings screen.
-- **Model selection:** the settings screen and the config page
-  (`http://127.0.0.1:8730/`) show a **drop-down of specific Anthropic / OpenAI
-  models from the last 12 months** (fetched live from each provider's `/v1/models`,
-  with a curated built-in fallback). Picking one is saved on the Anamanti Core
-  (`anamanti_settings.json`) and used for every subsequent chat turn. Pin an initial
-  model with `ANAMANTI_ANTHROPIC_MODEL` / `ANAMANTI_OPENAI_MODEL`.
-- **Anthropic auth — API key or subscription:** a per-provider toggle chooses how
-  Claude authenticates. `ANAMANTI_ANTHROPIC_AUTH=apikey` (default) uses
-  `ANTHROPIC_API_KEY` (`x-api-key`). `ANAMANTI_ANTHROPIC_AUTH=subscription` uses a
-  Claude **subscription OAuth** token (`Authorization: Bearer` + the
-  `anthropic-beta: oauth-2025-04-20` header) — provide it via `ANTHROPIC_OAUTH_TOKEN`
-  (run **`claude setup-token`** once), or via `ANAMANTI_ANTHROPIC_TOKEN_CMD` (a command
-  that prints a fresh token, default `ant auth print-credentials --access-token`).
-  OpenAI is API-key-only (`OPENAI_API_KEY`) — its ChatGPT subscription does not grant
-  API access.
-- Piper (and, by default, Whisper) are off-the-shelf Wyoming servers the Anamanti
-  Core is a client to. STT can instead run **in-process** (whisper.cpp,
-  `stt.engine=whisper-rs`) with no separate server — see
-  `plans/python-to-rust-whisper.md`. See `anamanti-core/src/config.rs` for config.
-- **Bilingual (English + Brazilian Portuguese):** add to `anamanti.json` (or set it live
-  on the config page, Voice → Languages):
-
-  ```json
-  "language":   { "enabled": ["en", "pt-BR"], "default": "en" },
-  "tts_voices": { "pt-BR": "pt_BR-faber-medium" },
-  "tts_addrs":  { "pt-BR": "127.0.0.1:10201" }
-  ```
-
-  Install the `pt_BR` Piper voice where your Piper server keeps voices
-  (`pt_BR-faber-medium.onnx` + `.onnx.json` from `rhasspy/piper-voices`), and run a
-  **second Piper** for Portuguese on the `tts_addrs` port with the same `--data-dir` and
-  `--voice pt_BR-faber-medium`: wyoming-piper keeps one voice loaded, so a single shared
-  server reloads the model on every language switch (~0.5–1 s). `tts_addrs` is optional. The STT engine
-  stays whatever you use: ElevenLabs needs nothing more; whisper-rs needs a
-  multilingual model (`scripts/fetch-whisper-models.sh --multilingual`, then
-  `"stt": { "model": "small", "multilingual": true }`); a Wyoming faster-whisper server
-  must run with a multilingual model and no `--language`. Remove the `language` block to
-  go back to English-only. Design + measurements: `plans/BilingualPlan.md`.
-- **Multiple displays, one Anamanti Core:** N Echo Shows can share a single
-  Anamanti Core — each connection is handled independently and every reply is
-  routed back to the display that asked. Memory + settings are one shared
-  household pool (speaker ID scopes per person, not per device).
-- **Multiple Anamanti Cores (prod + test):** each Anamanti Core advertises a
-  friendly `name` and a stable `instance_id` over mDNS. The device settings screen
-  has an **Anamanti Core** dropdown to pick one; `"Auto"` uses the first available.
-  The pick is **strict** — a display pinned to one Anamanti Core stays offline if
-  it's unreachable rather than silently connecting to another.
-  - **Local production** is a copied release binary installed at
-    `/Volumes/External/Anamanti Core/`. It runs outside any
-    git checkout and pins its identity via `instance_id` (`anamanti-core`) in
-    that folder's `anamanti.json` (provider API keys are persisted in that folder's `anamanti_settings.json`, not the environment), using the default ports (10700 / config 8730) and the shared
-    runtime data under `.../anamanti-core/`.
-  - **Test copies** run straight from a git branch/worktree. `ANAMANTI_INSTANCE_ID`
-    is resolved from that env → the working dir's **git branch code** → the
-    sanitized service name, so a worktree copy is auto-named by its branch with no
-    extra config. Run one alongside production with distinct ports (and a distinct
-    service name to avoid an mDNS name clash); sharing production's memory means
-    `ANAMANTI_MEMORY_BACKEND=sqlite` (two processes can't share one embedded HelixDB
-    graph; SQLite is shared safely via WAL):
-
-    ```bash
-    # ANAMANTI_INSTANCE_ID is intentionally unset here → defaults to the branch code.
-    env -u ANAMANTI_INSTANCE_ID \
-      ANAMANTI_SERVICE_NAME="Anamanti Core (test)" \
-      ANAMANTI_BIND_ADDR=0.0.0.0:10701 ANAMANTI_CONFIG_ADDR=127.0.0.1:8731 \
-      ANAMANTI_MEMORY_BACKEND=sqlite \
-      cargo run --manifest-path anamanti-core/Cargo.toml --release
-    ```
-
-> **Android toolchain note:** the project pins **AGP 8.7.3 / Kotlin 2.1.0 /
-> Gradle 8.11.1** because the bundled cargokit Gradle plugin does not yet support
-> Gradle 9 / AGP 9. See `Plan.MD` Phase 1.
+---
 
 ## Status
 
-**Phase 1 complete — verified on real hardware.** The monorepo is scaffolded
-(`/lib` Flutter + `/rust` engine), `flutter_rust_bridge` v2 is wired, and a
-hello-world Rust API cross-compiles into an `armeabi-v7a` APK that installs, runs,
-and renders engine text over the FRB bridge on the physical Echo Show 8
-(LineageOS, Android 11).
+**A working build, not a concept.** Anamanti runs every day in our own house across
+three Echo Show displays: wake word, streaming STT, fast paths and System-1, the full
+LLM with tools, graph memory, speaker ID, music, the camera, Home Assistant and
+over-the-air updates. Some features — bilingual mode and the Companion phone app —
+are built and still being tested before they roll out. See [`plans/TODO.md`](plans/TODO.md)
+for what's next.
 
-**Phase 2 complete — native audio + on-device wake word.** The Rust engine now
-captures mic audio via `cpal`, decouples the real-time callback from inference
-through a pre-allocated lock-free ring buffer, resamples to 16 kHz, and scores
-wake-word confidence continuously and offline with the openWakeWord model chain on
-`tract-onnx` — all on one low-overhead background thread. Flutter starts/stops the
-engine over FRB and consumes a `Stream<WakeWordEvent>` (capture status, input
-level, detections).
+Want to run it at home? Everything you need to build it is in this repo. If you don't
+want to download and tinker yourself, **[join the waitlist](https://www.anamanti.com/join)**
+and we'll let you know when there's a ready-to-install version.
 
-**Phase 3 complete — Wyoming client + mDNS + turn state machine.** The device now
-discovers the Mac's `_wyoming._tcp` service, opens a `tokio` TCP connection on
-wake-word detection, and streams PCM through a pure, unit-tested turn state machine
-(`Idle → Triggered → Streaming → Closing`), rendering the server's transcript.
-Wake-word scoring keeps running during a turn (full-duplex), with a configurable
-raised confidence threshold as the interim self-trigger mitigation.
-
-**Phase 4 complete — Mac Mini assistant pipeline.** The new `/mac` Anamanti Core
-(`anamanti_core`) ties the brain together: a Wyoming server to the device
-and a Wyoming client to Whisper (STT; Core-side VAD — neural Silero by default, energy/RMS fallback) and Piper (TTS), with a
-**pluggable LLM** trait (Ollama / Claude / mock) and a **persistent SQLite + FTS5
-memory** store (explicit "remember…"/"forget…" commands plus inferred fact/pref
-extraction) in the middle. It advertises `_wyoming._tcp` over mDNS and streams the
-synthesized reply back to the device. Remaining phases (reactive UI + playback,
-settings) are planned — see the decision table and phases in `Plan.MD`.
+Security issues: see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-TBD.
+Anamanti is licensed under the [Apache License, Version 2.0](LICENSE).
+
+Third-party components keep their own licences: the vendored crates and packages
+under `anamanti-display/rust/vendor/` and `anamanti-display/third_party/`, the
+downloaded models (openWakeWord, Silero, nomic-embed-text, ECAPA-TDNN, Whisper,
+Piper voices), and the separate EchoShow8gen1-aec-shim project.
