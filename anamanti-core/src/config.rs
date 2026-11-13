@@ -248,7 +248,7 @@ pub struct Config {
     /// `REOLINK_PASSWORD`. Boot-time only (not runtime-settable yet).
     pub camera: crate::camera::CameraConfig,
     /// Per-tool response-cache TTLs (`tool_cache` in the file), keyed by tool name (e.g.
-    /// `weather_lookup`, default 3600 s). Installed process-wide at boot; see
+    /// `weather_lookup`, default 300 s). Installed process-wide at boot; see
     /// [`crate::cache`]. `0` disables caching for a tool.
     pub tool_cache: crate::cache::ToolCacheConfig,
 }
@@ -635,7 +635,7 @@ pub struct WeatherSettings {
     /// means Visual Crossing; an unknown value falls back to Open-Meteo.
     pub provider: String,
     /// How often (seconds) the ambient current-conditions push refreshes
-    /// (`weather.refresh_interval_secs`, default 1800 = 30 minutes). Clamped to a sane
+    /// (`weather.refresh_interval_secs`, default 300 = 5 minutes). Clamped to a sane
     /// floor so a misconfiguration can't hammer the API.
     pub refresh_interval_secs: u64,
 }
@@ -645,7 +645,7 @@ impl Default for WeatherSettings {
         Self {
             enabled: true,
             provider: "visualcrossing".to_string(),
-            refresh_interval_secs: 1800,
+            refresh_interval_secs: 300,
         }
     }
 }
@@ -2653,10 +2653,10 @@ mod tests {
         // VAD defaults to the neural Silero gate (committed default since 2026-09-30).
         assert_eq!(c.vad.engine, VadEngineKind::Silero);
         assert_eq!(c.vad.silero.threshold, 0.5);
-        // No tool_cache block ⇒ built-in defaults (weather cached 60 min).
+        // No tool_cache block ⇒ built-in defaults (weather cached 5 min).
         assert_eq!(
             c.tool_cache.ttl("weather_lookup"),
-            std::time::Duration::from_secs(3600)
+            std::time::Duration::from_secs(300)
         );
     }
 
