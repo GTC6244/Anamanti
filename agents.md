@@ -74,8 +74,9 @@ recalled for anyone; per-turn speaker resolution `identified|tentative|new|unkno
 fast path** — string-matched against a cached HA device catalog, one direct REST call, a fixed spoken
 confirmation, no model — plus the `home_control` rig tool as the LLM fallback; HA's Assist is
 deliberately not used. Part B, planned: an opt-in on-screen HA dashboard widget), and
-[`BilingualPlan.md`](./plans/BilingualPlan.md) (implemented 2026-10-20: a bilingual English + Brazilian
-Portuguese household, opt-in via the `language` block / Voice → Languages — replies follow the
+[`BilingualPlan.md`](./plans/BilingualPlan.md) (implemented 2026-10-20: a multilingual English + Brazilian
+Portuguese + Canadian French (fr-CA added 2026-11-13, §10) household, opt-in via the `language` block /
+Voice → Languages — replies follow the
 language spoken on each turn, via a per-turn `TurnLang` resolved
 after STT, with a per-language Piper voice and localized fast-path phrases/canned replies. It keeps the
 current STT engine and the current memory embedder, and English must not regress (every phase is gated
@@ -707,6 +708,7 @@ so this environment can live anywhere and is **not in git**:
 | ----- | ----------------------------- | ------------------------------------- |
 | 10200 | `wyoming-piper` TTS (English) | `en_US-lessac-medium`                 |
 | 10201 | `wyoming-piper` TTS (pt-BR)   | `pt_BR-faber-medium`                  |
+| 10202 | `wyoming-piper` TTS (fr-CA)   | `fr_FR-siwis-medium` (no fr_CA voice) |
 | 10300 | `wyoming-faster-whisper` STT  | `base-int8` (`--language en`)         |
 
 They live in **`/Volumes/External/Anamanti Core/services/`** (a Python 3.12 venv +

@@ -24,6 +24,7 @@ fn to_whatlang(l: Lang) -> whatlang::Lang {
     match l {
         Lang::En => whatlang::Lang::Eng,
         Lang::PtBr => whatlang::Lang::Por,
+        Lang::FrCa => whatlang::Lang::Fra,
     }
 }
 
@@ -31,6 +32,7 @@ fn from_whatlang(l: whatlang::Lang) -> Option<Lang> {
     match l {
         whatlang::Lang::Eng => Some(Lang::En),
         whatlang::Lang::Por => Some(Lang::PtBr),
+        whatlang::Lang::Fra => Some(Lang::FrCa),
         _ => None,
     }
 }
@@ -85,6 +87,18 @@ const FUNCTION_WORDS: &[(Lang, &[&str])] = &[
             "são", "ao", "à", "mais", "muito", "também", "tambem", "foi", "ser", "tem", "hoje",
             "amanhã", "amanha", "agora", "quanto", "quantos", "sobre", "seu", "sua", "ela", "ele",
             "nós", "gente",
+        ],
+    ),
+    (
+        Lang::FrCa,
+        &[
+            "je", "tu", "vous", "nous", "ils", "elles", "il", "elle", "est", "sont", "suis",
+            "êtes", "etes", "quoi", "quel", "quelle", "quels", "pourquoi", "parce", "avec",
+            "pour", "dans", "sur", "sous", "aussi", "très", "tres", "être", "etre", "avoir",
+            "fait", "faire", "aujourd", "demain", "maintenant", "combien", "mon", "ma", "mes",
+            "ton", "ta", "tes", "son", "sa", "ses", "notre", "votre", "leur", "qui", "ne",
+            "pas", "rien", "cette", "ces", "cet", "une", "des", "du", "au", "aux", "le", "les",
+            "ce", "la", "quelques", "quand", "comment", "vais", "peux", "peut", "dis", "dire",
         ],
     ),
 ];
@@ -205,6 +219,48 @@ const SHORT_PHRASES: &[(Lang, &[&str])] = &[
             "what time is it",
         ],
     ),
+    (
+        Lang::FrCa,
+        &[
+            "arrête",
+            "arrete",
+            "arrêter",
+            "arreter",
+            "annule",
+            "annuler",
+            "merci",
+            "merci beaucoup",
+            "au revoir",
+            "salut",
+            "oui",
+            "non",
+            "allô",
+            "allo",
+            "bonjour",
+            "bonne journée",
+            "bonne journee",
+            "bonne nuit",
+            "bonsoir",
+            "de rien",
+            "s'il te plaît",
+            "s'il te plait",
+            "s'il vous plaît",
+            "s'il vous plait",
+            "laisse tomber",
+            "laisse faire",
+            "c'est tout",
+            "rien d'autre",
+            "continuer",
+            "suivant",
+            "prochain",
+            "prochaine",
+            "allume",
+            "éteins",
+            "eteins",
+            "ferme",
+            "quelle heure est il",
+        ],
+    ),
 ];
 
 /// An exact whole-utterance match in [`SHORT_PHRASES`] for an enabled language
@@ -240,6 +296,14 @@ mod tests {
     use super::*;
 
     const BOTH: &[Lang] = &[Lang::En, Lang::PtBr];
+    const ALL: &[Lang] = &[Lang::En, Lang::PtBr, Lang::FrCa];
+
+    // `whatlang`'s trigram confidence for a short English sentence falls once a third
+    // language shares the allowlist, so `detect_text` is exercised pairwise against the
+    // default (English). In the live resolver a weak call declines to the `default`
+    // tie-break, which is English, so this never misroutes an English turn.
+    const EN_PT: &[Lang] = &[Lang::En, Lang::PtBr];
+    const EN_FR: &[Lang] = &[Lang::En, Lang::FrCa];
 
     #[test]
     fn detects_full_sentences_in_either_language() {
@@ -251,9 +315,12 @@ mod tests {
             "set a timer for ten minutes",
             "Hey Jarvis what is a samba",
         ] {
-            assert_eq!(
-                detect_text(s, BOTH, Lang::En).map(|d| d.0),
-                Some(Lang::En),
+            assert_eq!(detect_text(s, EN_PT, Lang::En).map(|d| d.0), Some(Lang::En), "{s}");
+            // With French in the mix `whatlang` may decline on weak English (→ the
+            // resolver's English default), but the MIN_CONFIDENCE gate guarantees it is
+            // never confidently mis-read as French.
+            assert!(
+                matches!(detect_text(s, EN_FR, Lang::En).map(|d| d.0), None | Some(Lang::En)),
                 "{s}"
             );
         }
@@ -265,18 +332,67 @@ mod tests {
             "o que é o Super Bowl",
         ] {
             assert_eq!(
-                detect_text(s, BOTH, Lang::En).map(|d| d.0),
+                detect_text(s, EN_PT, Lang::En).map(|d| d.0),
                 Some(Lang::PtBr),
+                "{s}"
+            );
+        }
+        for s in [
+            "raconte-moi une courte blague sur les chats",
+            "quelle est la météo pour demain",
+            "rappelle-toi que ma couleur préférée est le bleu",
+            "peux-tu me dire quelle heure il est maintenant",
+        ] {
+            assert_eq!(
+                detect_text(s, EN_FR, Lang::En).map(|d| d.0),
+                Some(Lang::FrCa),
                 "{s}"
             );
         }
     }
 
     #[test]
+    fn three_way_never_cross_detects_the_two_romance_languages() {
+        // The real production allowlist is all three, which puts Portuguese and French —
+        // the two Romance languages — in the same allowlist. `detect_text` may decline
+        // (→ the resolver's tie-breaks), but it must never confidently read one as the
+        // other, which would answer in the wrong language with the wrong voice.
+        for s in [
+            "me conta uma piada curta sobre gatos",
+            "qual é a previsão do tempo para amanhã",
+            "lembra que a minha cor favorita é azul",
+            "o que é o Super Bowl",
+        ] {
+            assert_ne!(
+                detect_text(s, ALL, Lang::En).map(|d| d.0),
+                Some(Lang::FrCa),
+                "pt read as fr: {s}"
+            );
+        }
+        for s in [
+            "raconte-moi une courte blague sur les chats",
+            "quelle est la météo pour demain",
+            "rappelle-toi que ma couleur préférée est le bleu",
+            "peux-tu me dire quelle heure il est maintenant",
+        ] {
+            assert_ne!(
+                detect_text(s, ALL, Lang::En).map(|d| d.0),
+                Some(Lang::PtBr),
+                "fr read as pt: {s}"
+            );
+        }
+    }
+
+    #[test]
     fn function_words_are_disjoint_and_decide_lopsided_transcripts() {
-        let (en, pt) = (FUNCTION_WORDS[0].1, FUNCTION_WORDS[1].1);
-        for w in pt {
-            assert!(!en.contains(w), "{w} is in both lists");
+        // Every language's function words must be disjoint from every other's, so a hit
+        // is evidence for exactly one language.
+        for (i, (li, a)) in FUNCTION_WORDS.iter().enumerate() {
+            for (lj, b) in FUNCTION_WORDS.iter().skip(i + 1) {
+                for w in *a {
+                    assert!(!b.contains(w), "{w} is in both {li} and {lj} lists");
+                }
+            }
         }
         let fw = |s| function_word_language(s, BOTH);
         // The live miss: English audio the engine labelled Portuguese.
@@ -287,6 +403,9 @@ mod tests {
         assert_eq!(fw("what is the capital of australia"), Some(Lang::En));
         assert_eq!(fw("Como se diz bom dia em inglês?"), Some(Lang::PtBr));
         assert_eq!(fw("o que é o Super Bowl"), Some(Lang::PtBr));
+        let fw3 = |s| function_word_language(s, ALL);
+        assert_eq!(fw3("comment dis-tu bonjour en anglais"), Some(Lang::FrCa));
+        assert_eq!(fw3("quelle est la capitale de la France"), Some(Lang::FrCa));
         assert_eq!(
             fw("Responde em inglês, qual é a capital do Brasil?"),
             Some(Lang::PtBr)
@@ -302,15 +421,21 @@ mod tests {
 
     #[test]
     fn short_phrases_are_disjoint_and_exact() {
-        let (pt, en) = (SHORT_PHRASES[0].1, SHORT_PHRASES[1].1);
-        for p in pt {
-            assert!(!en.contains(p), "{p} is in both lists");
+        for (i, (li, a)) in SHORT_PHRASES.iter().enumerate() {
+            for (lj, b) in SHORT_PHRASES.iter().skip(i + 1) {
+                for p in *a {
+                    assert!(!b.contains(p), "{p} is in both {li} and {lj} lists");
+                }
+            }
         }
         assert_eq!(short_phrase("Para.", BOTH), Some(Lang::PtBr));
         assert_eq!(short_phrase("Obrigado!", BOTH), Some(Lang::PtBr));
         assert_eq!(short_phrase("deixa pra lá", BOTH), Some(Lang::PtBr));
         assert_eq!(short_phrase("Stop.", BOTH), Some(Lang::En));
         assert_eq!(short_phrase("Thank you, Jarvis", BOTH), Some(Lang::En));
+        assert_eq!(short_phrase("Merci!", ALL), Some(Lang::FrCa));
+        assert_eq!(short_phrase("Arrête.", ALL), Some(Lang::FrCa));
+        assert_eq!(short_phrase("quelle heure est-il?", ALL), Some(Lang::FrCa));
         // Only whole utterances; and never in single-language mode.
         assert_eq!(short_phrase("para o timer", BOTH), None);
         assert_eq!(short_phrase("stop the music", BOTH), None);

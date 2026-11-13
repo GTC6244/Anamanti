@@ -21,6 +21,7 @@ pub fn okay(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Okay.",
         Lang::PtBr => "Tudo bem.",
+        Lang::FrCa => "D'accord.",
     }
 }
 
@@ -32,6 +33,7 @@ pub fn duration(lang: Lang, secs: u64) -> String {
     match lang {
         Lang::En => crate::speech::duration(secs as f64, crate::speech::DurationStyle::Exact),
         Lang::PtBr => pt_duration(secs).0,
+        Lang::FrCa => fr_duration(secs),
     }
 }
 
@@ -72,6 +74,41 @@ fn pt_duration(secs: u64) -> (String, bool) {
     (text, singular)
 }
 
+/// Canadian French "h heures, m minutes et s secondes". Only `1` is spelled ("une") so
+/// espeak's `fr` phonemizer reads the feminine noun (`1 heure` → "un heure"); other
+/// numbers are digits, which it reads correctly. Hour/minute/second nouns don't change
+/// with plurality the way Portuguese verbs do, so there's no singular flag.
+fn fr_duration(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    let mut parts: Vec<String> = Vec::new();
+    if h > 0 {
+        parts.push(match h {
+            1 => "une heure".to_string(),
+            n => format!("{n} heures"),
+        });
+    }
+    if m > 0 {
+        parts.push(match m {
+            1 => "une minute".to_string(),
+            n => format!("{n} minutes"),
+        });
+    }
+    if s > 0 {
+        parts.push(match s {
+            1 => "une seconde".to_string(),
+            n => format!("{n} secondes"),
+        });
+    }
+    match parts.len() {
+        0 => "0 seconde".to_string(),
+        1 => parts.remove(0),
+        _ => {
+            let last = parts.pop().unwrap();
+            format!("{} et {last}", parts.join(", "))
+        }
+    }
+}
+
 // ---------------------------------------------------------------- timers (System-1)
 
 /// "Timer set for 10 minutes."
@@ -79,6 +116,7 @@ pub fn timer_set(lang: Lang, secs: u64) -> String {
     match lang {
         Lang::En => format!("Timer set for {}.", duration(lang, secs)),
         Lang::PtBr => format!("Timer de {} iniciado.", duration(lang, secs)),
+        Lang::FrCa => format!("Minuterie réglée pour {}.", duration(lang, secs)),
     }
 }
 
@@ -89,6 +127,8 @@ pub fn timers_cancelled(lang: Lang, several: bool) -> &'static str {
         (Lang::En, false) => "Okay, I've cancelled your timer.",
         (Lang::PtBr, true) => "Tudo bem, cancelei os timers.",
         (Lang::PtBr, false) => "Tudo bem, cancelei o timer.",
+        (Lang::FrCa, true) => "D'accord, j'ai annulé vos minuteries.",
+        (Lang::FrCa, false) => "D'accord, j'ai annulé votre minuterie.",
     }
 }
 
@@ -106,6 +146,8 @@ pub fn timer_remaining(lang: Lang, secs: Option<u64>) -> String {
             }
         }
         (Lang::PtBr, _) => "O timer está quase acabando.".to_string(),
+        (Lang::FrCa, Some(s)) if s > 0 => format!("Il reste {}.", fr_duration(s)),
+        (Lang::FrCa, _) => "Votre minuterie est presque terminée.".to_string(),
     }
 }
 
@@ -117,6 +159,8 @@ pub fn timer_adjusted(lang: Lang, added: bool, secs: u64) -> String {
         (Lang::En, false) => format!("Took {d} off your timer."),
         (Lang::PtBr, true) => format!("Adicionei {d} ao timer."),
         (Lang::PtBr, false) => format!("Tirei {d} do timer."),
+        (Lang::FrCa, true) => format!("J'ai ajouté {d} à votre minuterie."),
+        (Lang::FrCa, false) => format!("J'ai retiré {d} de votre minuterie."),
     }
 }
 
@@ -152,6 +196,22 @@ where
                 n => format!("{verb} {hours} e {n} minutos."),
             }
         }
+        Lang::FrCa => {
+            let (h, m) = (now.hour(), now.minute());
+            // Digits elsewhere (espeak reads them as French cardinals); only the special
+            // noons/midnights and the feminine `1 heure` are spelled.
+            let hours = match h {
+                0 => "minuit".to_string(),
+                12 => "midi".to_string(),
+                1 => "une heure".to_string(),
+                n => format!("{n} heures"),
+            };
+            match m {
+                0 => format!("Il est {hours}."),
+                1 => format!("Il est {hours} une minute."),
+                n => format!("Il est {hours} {n} minutes."),
+            }
+        }
     }
 }
 
@@ -180,6 +240,31 @@ const PT_MONTHS: [&str; 12] = [
     "dezembro",
 ];
 
+const FR_WEEKDAYS: [&str; 7] = [
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+];
+
+const FR_MONTHS: [&str; 12] = [
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+];
+
 /// "Today is Monday, October 19." / "Hoje é segunda-feira, 19 de outubro."
 pub fn date_today<Tz: TimeZone>(lang: Lang, now: &DateTime<Tz>) -> String
 where
@@ -195,6 +280,17 @@ where
                 d => d.to_string(),
             };
             format!("Hoje é {wd}, {day} de {month}.")
+        }
+        Lang::FrCa => {
+            let wd = FR_WEEKDAYS[now.weekday().num_days_from_monday() as usize];
+            let month = FR_MONTHS[now.month0() as usize];
+            // Canadian French keeps the "jour le quantième" turn of phrase; the first of
+            // the month is "le premier", other days are ordinary cardinals.
+            let day = match now.day() {
+                1 => "premier".to_string(),
+                d => d.to_string(),
+            };
+            format!("Aujourd'hui, c'est {wd} le {day} {month}.")
         }
     }
 }
@@ -229,6 +325,29 @@ pub fn weather_description(lang: Lang, code: i32) -> &'static str {
             95 => "tempestade",
             96 | 99 => "tempestade com granizo",
             _ => "condições desconhecidas",
+        },
+        Lang::FrCa => match code {
+            0 => "ciel dégagé",
+            1 => "généralement dégagé",
+            2 => "partiellement nuageux",
+            3 => "nuageux",
+            45 | 48 => "brouillard",
+            51 | 53 | 55 => "bruine",
+            56 | 57 => "bruine verglaçante",
+            61 => "pluie faible",
+            63 => "pluie",
+            65 => "forte pluie",
+            66 | 67 => "pluie verglaçante",
+            71 => "neige faible",
+            73 => "neige",
+            75 => "neige abondante",
+            77 => "grains de neige",
+            80 | 81 => "averses de pluie",
+            82 => "fortes averses de pluie",
+            85 | 86 => "averses de neige",
+            95 => "orage",
+            96 | 99 => "orage avec grêle",
+            _ => "conditions inconnues",
         },
     }
 }
@@ -270,6 +389,19 @@ pub fn weather_summary(lang: Lang, report: &crate::weather::WeatherReport) -> St
                 c.temp, report.location_label, c.high, c.low
             )
         }
+        Lang::FrCa => {
+            let unit = if report.units == "imperial" {
+                " Fahrenheit"
+            } else {
+                ""
+            };
+            let desc = capitalize(weather_description(lang, c.weather_code));
+            format!(
+                "{desc}, il fait {} degrés{unit} à {}. Le maximum aujourd'hui est de {} degrés \
+                 et le minimum de {}.",
+                c.temp, report.location_label, c.high, c.low
+            )
+        }
     }
 }
 
@@ -288,6 +420,7 @@ pub fn remembered(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Okay, I'll remember that.",
         Lang::PtBr => "Tudo bem, vou lembrar disso.",
+        Lang::FrCa => "D'accord, je vais m'en souvenir.",
     }
 }
 
@@ -296,6 +429,7 @@ pub fn forgotten(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Okay, I've forgotten that.",
         Lang::PtBr => "Tudo bem, esqueci isso.",
+        Lang::FrCa => "D'accord, j'ai oublié ça.",
     }
 }
 
@@ -304,6 +438,7 @@ pub fn nothing_matched(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "I didn't have anything about that.",
         Lang::PtBr => "Eu não tinha nada sobre isso.",
+        Lang::FrCa => "Je n'avais rien à ce sujet.",
     }
 }
 
@@ -312,6 +447,7 @@ pub fn nothing_to_forget(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "There was nothing to forget.",
         Lang::PtBr => "Não havia nada para esquecer.",
+        Lang::FrCa => "Il n'y avait rien à oublier.",
     }
 }
 
@@ -320,6 +456,7 @@ pub fn name_fact(lang: Lang, name: &str) -> String {
     match lang {
         Lang::En => format!("The user's name is {name}"),
         Lang::PtBr => format!("O nome do usuário é {name}"),
+        Lang::FrCa => format!("Le nom de l'utilisateur est {name}"),
     }
 }
 
@@ -333,6 +470,10 @@ fn enroll_hint(lang: Lang) -> &'static str {
         Lang::PtBr => {
             "Na tela, vá em Settings, People, Add a voice, e escolha o seu nome para eu \
              reconhecer você."
+        }
+        Lang::FrCa => {
+            "Sur l'écran, allez dans Settings, People, Add a voice, et choisissez votre nom \
+             pour que je vous reconnaisse."
         }
     }
 }
@@ -391,6 +532,24 @@ pub fn name_reply(lang: Lang, r: NameReply<'_>) -> String {
              tela."
         ),
         (Lang::PtBr, NameReply::Named { name }) => format!("Prazer em conhecer você, {name}!"),
+        (Lang::FrCa, NameReply::UnknownVoice { display }) => {
+            format!("Quel plaisir de vous rencontrer, {display}. Je ne connais pas encore votre voix. {hint}")
+        }
+        (Lang::FrCa, NameReply::AlreadyKnown { known }) => format!("Oui, je sais. Bonjour, {known}!"),
+        (Lang::FrCa, NameReply::KnownAsOther { known }) => format!(
+            "Je reconnais votre voix comme étant {known}. Si c'est faux, vous pouvez la renommer \
+             dans Settings, People sur l'écran."
+        ),
+        (Lang::FrCa, NameReply::NotInHousehold { display }) => format!(
+            "Quel plaisir de vous rencontrer, {display}. Je ne vous ai pas trouvé dans la liste \
+             de la maison. {hint}"
+        ),
+        (Lang::FrCa, NameReply::NameTaken { name }) => format!(
+            "Je connais déjà quelqu'un qui s'appelle {name} avec une voix différente, alors je ne \
+             change rien pour l'instant. {name}, vous pouvez ajouter d'autres échantillons de \
+             voix dans Settings, People sur l'écran."
+        ),
+        (Lang::FrCa, NameReply::Named { name }) => format!("Quel plaisir de vous rencontrer, {name}!"),
     }
 }
 
@@ -424,6 +583,22 @@ pub fn who_am_i(lang: Lang, resolution: SpeakerResolution, name: Option<&str>) -
                 (New | Unknown, _) => format!("Ainda não reconheço a sua voz. {enroll}"),
             }
         }
+        Lang::FrCa => {
+            let enroll = "Pour m'apprendre, allez dans Settings, People, Add a voice sur l'écran.";
+            match (resolution, name) {
+                (Identified, Some(n)) => format!("Vous êtes {n}."),
+                (Tentative, Some(n)) => {
+                    format!("Je pense que vous êtes {n}, mais je n'en ai pas la certitude.")
+                }
+                (Identified, None) => {
+                    format!("Je reconnais votre voix, mais je ne connais pas encore votre nom. {enroll}")
+                }
+                (Tentative, None) => {
+                    format!("Je ne sais pas encore avec certitude qui vous êtes. {enroll}")
+                }
+                (New | Unknown, _) => format!("Je ne reconnais pas encore votre voix. {enroll}"),
+            }
+        }
     }
 }
 
@@ -437,6 +612,10 @@ pub fn personality_set(lang: Lang, label: Option<&str>) -> String {
         (Lang::En, None) => "Okay, back to my normal voice.".to_string(),
         (Lang::PtBr, Some(l)) => format!("Tudo bem, a partir de agora vou falar no modo {l}."),
         (Lang::PtBr, None) => "Tudo bem, voltei para a minha voz normal.".to_string(),
+        (Lang::FrCa, Some(l)) => {
+            format!("D'accord, à partir de maintenant je vais parler sur le mode {l}.")
+        }
+        (Lang::FrCa, None) => "D'accord, je reviens à ma voix normale.".to_string(),
     }
 }
 
@@ -445,6 +624,7 @@ pub fn personality_unknown(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "Sorry, I don't have a personality by that name.",
         Lang::PtBr => "Desculpe, não tenho uma personalidade com esse nome.",
+        Lang::FrCa => "Pardon, je n'ai pas de personnalité portant ce nom.",
     }
 }
 
@@ -558,6 +738,58 @@ mod tests {
             date_today(Lang::PtBr, &at(2026, 3, 1, 9, 0)),
             "Hoje é domingo, primeiro de março."
         );
+    }
+
+    #[test]
+    fn french_strings_render_naturally() {
+        assert_eq!(okay(Lang::FrCa), "D'accord.");
+        assert_eq!(duration(Lang::FrCa, 600), "10 minutes");
+        assert_eq!(duration(Lang::FrCa, 60), "une minute");
+        assert_eq!(duration(Lang::FrCa, 3600), "une heure");
+        assert_eq!(duration(Lang::FrCa, 7200), "2 heures");
+        assert_eq!(duration(Lang::FrCa, 5400), "une heure et 30 minutes");
+        assert_eq!(
+            duration(Lang::FrCa, 3661),
+            "une heure, une minute et une seconde"
+        );
+        assert_eq!(
+            timer_set(Lang::FrCa, 600),
+            "Minuterie réglée pour 10 minutes."
+        );
+        assert_eq!(timer_remaining(Lang::FrCa, Some(60)), "Il reste une minute.");
+        assert_eq!(
+            timers_cancelled(Lang::FrCa, false),
+            "D'accord, j'ai annulé votre minuterie."
+        );
+        assert_eq!(
+            time_now(Lang::FrCa, &at(2026, 10, 19, 15, 45)),
+            "Il est 15 heures 45 minutes."
+        );
+        assert_eq!(time_now(Lang::FrCa, &at(2026, 10, 19, 12, 0)), "Il est midi.");
+        assert_eq!(
+            time_now(Lang::FrCa, &at(2026, 10, 19, 1, 0)),
+            "Il est une heure."
+        );
+        assert_eq!(
+            date_today(Lang::FrCa, &at(2026, 10, 19, 9, 0)),
+            "Aujourd'hui, c'est lundi le 19 octobre."
+        );
+        assert_eq!(
+            date_today(Lang::FrCa, &at(2026, 3, 1, 9, 0)),
+            "Aujourd'hui, c'est dimanche le premier mars."
+        );
+        assert_eq!(remembered(Lang::FrCa), "D'accord, je vais m'en souvenir.");
+        assert_eq!(name_fact(Lang::FrCa, "Sam"), "Le nom de l'utilisateur est Sam");
+        assert_eq!(
+            who_am_i(Lang::FrCa, SpeakerResolution::Identified, Some("Sam")),
+            "Vous êtes Sam."
+        );
+        // Every WMO code has a French description.
+        for code in [
+            0, 1, 2, 3, 45, 51, 56, 61, 63, 65, 66, 71, 73, 75, 77, 80, 82, 85, 95, 96,
+        ] {
+            assert_ne!(weather_description(Lang::FrCa, code), "conditions inconnues");
+        }
     }
 
     #[test]

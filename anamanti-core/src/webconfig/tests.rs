@@ -1085,7 +1085,7 @@ fn language_save_round_trips_through_the_route() {
     let gv: Value = serde_json::from_slice(&g).unwrap();
     assert_eq!(gv["enabled"], serde_json::json!(["en"]));
     assert_eq!(gv["bilingual"], Value::Bool(false));
-    assert_eq!(gv["supported"].as_array().unwrap().len(), 2);
+    assert_eq!(gv["supported"].as_array().unwrap().len(), 3);
 
     let body =
         br#"{"enabled":["en","pt-BR"],"default":"en","voices":{"pt-BR":"pt_BR-faber-medium"}}"#;

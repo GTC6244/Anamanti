@@ -27,25 +27,29 @@ pub enum Lang {
     En,
     /// Brazilian Portuguese.
     PtBr,
+    /// Canadian French.
+    FrCa,
 }
 
 impl Lang {
     /// Every supported language, in display order.
-    pub const ALL: [Lang; 2] = [Lang::En, Lang::PtBr];
+    pub const ALL: [Lang; 3] = [Lang::En, Lang::PtBr, Lang::FrCa];
 
-    /// The canonical BCP-47 code used in config and the UI (`en`, `pt-BR`).
+    /// The canonical BCP-47 code used in config and the UI (`en`, `pt-BR`, `fr-CA`).
     pub fn code(self) -> &'static str {
         match self {
             Lang::En => "en",
             Lang::PtBr => "pt-BR",
+            Lang::FrCa => "fr-CA",
         }
     }
 
-    /// ISO 639-1 (`en`, `pt`) — what STT engines take as a decode language.
+    /// ISO 639-1 (`en`, `pt`, `fr`) — what STT engines take as a decode language.
     pub fn iso639_1(self) -> &'static str {
         match self {
             Lang::En => "en",
             Lang::PtBr => "pt",
+            Lang::FrCa => "fr",
         }
     }
 
@@ -54,6 +58,7 @@ impl Lang {
         match self {
             Lang::En => "English",
             Lang::PtBr => "Brazilian Portuguese",
+            Lang::FrCa => "Canadian French",
         }
     }
 
@@ -62,26 +67,32 @@ impl Lang {
         match self {
             Lang::En => "English",
             Lang::PtBr => "Português (Brasil)",
+            Lang::FrCa => "Français (Canada)",
         }
     }
 
-    /// The Piper voice-name locale prefix (`en_US-amy-medium` → `en_US`).
+    /// The Piper voice-name locale prefix (`en_US-amy-medium` → `en_US`). Canadian French
+    /// maps to `fr_FR`: Piper ships no `fr_CA` voice, so Canadian French is spoken by a
+    /// European French voice (vocabulary/spelling stay Canadian via the prompt + phrases).
     pub fn piper_locale(self) -> &'static str {
         match self {
             Lang::En => "en_US",
             Lang::PtBr => "pt_BR",
+            Lang::FrCa => "fr_FR",
         }
     }
 
     /// Parse a language label leniently: BCP-47 / ISO 639-1 / ISO 639-3 / Piper-style
     /// locales and English names, case-insensitive (`en`, `en-US`, `eng`, `english`,
-    /// `pt`, `pt-BR`, `pt_BR`, `por`, `portuguese`). `None` for anything else.
+    /// `pt`, `pt-BR`, `pt_BR`, `por`, `portuguese`, `fr`, `fr-CA`, `fr_FR`, `fra`,
+    /// `french`). `None` for anything else.
     pub fn parse(s: &str) -> Option<Lang> {
         let l = s.trim().to_lowercase().replace('_', "-");
         let base = l.split('-').next().unwrap_or_default();
         match base {
             "en" | "eng" | "english" => Some(Lang::En),
             "pt" | "por" | "portuguese" | "português" | "portugues" => Some(Lang::PtBr),
+            "fr" | "fra" | "fre" | "french" | "français" | "francais" => Some(Lang::FrCa),
             _ => None,
         }
     }
@@ -109,7 +120,9 @@ impl<'de> Deserialize<'de> for Lang {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         Lang::parse(&s).ok_or_else(|| {
-            serde::de::Error::custom(format!("unknown language `{s}` (expected `en` or `pt-BR`)"))
+            serde::de::Error::custom(format!(
+                "unknown language `{s}` (expected `en`, `pt-BR` or `fr-CA`)"
+            ))
         })
     }
 }
@@ -333,6 +346,11 @@ pub fn prompt_block(cfg: &LanguageSettings, turn: &TurnLang) -> String {
                        Tool results and memories may be in English; still answer in Brazilian \
                        Portuguese."
             .to_string(),
+        Lang::FrCa => "\n\n# Language\nThe person spoke French. Reply in Canadian French \
+                       (fr-CA) — Québécois/Canadian vocabulary and spelling, not European \
+                       French — unless they explicitly ask for another language. Tool results \
+                       and memories may be in English; still answer in Canadian French."
+            .to_string(),
     }
 }
 
@@ -401,6 +419,9 @@ mod tests {
         }
         for s in ["pt", "pt-BR", "pt_BR", "por", "Portuguese", "português"] {
             assert_eq!(Lang::parse(s), Some(Lang::PtBr), "{s}");
+        }
+        for s in ["fr", "fr-CA", "fr_CA", "fr_FR", "fra", "French", "français"] {
+            assert_eq!(Lang::parse(s), Some(Lang::FrCa), "{s}");
         }
         assert_eq!(Lang::parse("de"), None);
         assert_eq!(Lang::parse(""), None);

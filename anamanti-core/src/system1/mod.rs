@@ -468,6 +468,7 @@ pub fn ready_for(lang: crate::lang::Lang, intent: Intent) -> bool {
     match lang {
         crate::lang::Lang::En => true,
         crate::lang::Lang::PtBr => PT_BR_READY.contains(&intent),
+        crate::lang::Lang::FrCa => FR_CA_READY.contains(&intent),
     }
 }
 
@@ -494,11 +495,21 @@ pub const PT_BR_READY: &[Intent] = &[
     Intent::StopDismiss,
 ];
 
+/// System-1 intents enabled for Canadian-French turns. **Empty until the French cases in
+/// `tests/system1_calibration.rs` have been run against the active backend** (the same
+/// precision-first bar pt-BR cleared: at least one French case resolves correctly and
+/// nothing resolves into an intent wrongly). Until then every French turn defers to
+/// System-2, which answers correctly in French — it only costs latency, never a wrong
+/// fast answer (`plans/BilingualPlan.md` §2.7). The French duration/timer parsers below
+/// are already in place, so enabling an intent here is a one-line change once calibrated.
+pub const FR_CA_READY: &[Intent] = &[];
+
 /// [`parse_duration_secs`] for the turn's language (`plans/BilingualPlan.md` §2.6).
 pub fn parse_duration_in(lang: crate::lang::Lang, text: &str) -> Option<u64> {
     match lang {
         crate::lang::Lang::En => parse_duration_secs(text),
         crate::lang::Lang::PtBr => parse_duration_secs_pt(text),
+        crate::lang::Lang::FrCa => parse_duration_secs_fr(text),
     }
 }
 
@@ -507,6 +518,7 @@ pub fn parse_timer_adjust_in(lang: crate::lang::Lang, text: &str) -> Option<i64>
     match lang {
         crate::lang::Lang::En => parse_timer_adjust(text),
         crate::lang::Lang::PtBr => parse_timer_adjust_pt(text),
+        crate::lang::Lang::FrCa => parse_timer_adjust_fr(text),
     }
 }
 
@@ -651,6 +663,197 @@ pub fn parse_timer_adjust_pt(text: &str) -> Option<i64> {
         _ => return None,
     };
     let secs = parse_duration_secs_pt(&normalized)? as i64;
+    Some(sign * secs)
+}
+
+/// Canadian-French [`parse_duration_secs`]: digits and number words with a unit ("dix
+/// minutes", "1 heure et 30 minutes", "vingt cinq minutes"), "une demi-heure" / "une
+/// demie heure" (half an hour) and a trailing "et demie" / "et demi" (half of the unit
+/// just said — "une heure et demie", "une minute et demie"). Conservative like the
+/// others: no unit ⇒ `None`. "un"/"une" is also the article ("une minuterie de dix
+/// minutes"), so it only counts as a number when a unit follows.
+///
+/// French numbers are compositional, so 70/80/90 and the hundreds are built, not looked
+/// up: "soixante-dix" is `60 + 10`, "quatre-vingt(s)" is a fixed 80 (a `quatre` directly
+/// before `vingt`), "quatre-vingt-dix" is `80 + 10`, and `cent(s)` scales what precedes
+/// it ("deux cents" → 200, "cent cinquante" → 150).
+pub fn parse_duration_secs_fr(text: &str) -> Option<u64> {
+    fn word_value(tok: &str) -> Option<f64> {
+        Some(match tok {
+            "deux" => 2.0,
+            "trois" => 3.0,
+            "quatre" => 4.0,
+            "cinq" => 5.0,
+            "six" => 6.0,
+            "sept" => 7.0,
+            "huit" => 8.0,
+            "neuf" => 9.0,
+            "dix" => 10.0,
+            "onze" => 11.0,
+            "douze" => 12.0,
+            "treize" => 13.0,
+            "quatorze" | "catorze" => 14.0,
+            "quinze" => 15.0,
+            "seize" => 16.0,
+            "trente" => 30.0,
+            "quarante" => 40.0,
+            "cinquante" => 50.0,
+            "soixante" => 60.0,
+            _ => return None,
+        })
+    }
+    fn unit_secs(tok: &str) -> Option<f64> {
+        Some(match tok {
+            "heure" | "heures" | "h" => 3600.0,
+            "minute" | "minutes" | "min" => 60.0,
+            "seconde" | "secondes" | "sec" => 1.0,
+            _ => return None,
+        })
+    }
+
+    // "demi-heure"/"demi-minute" arrive as one token after the global `-`→` ` normalize;
+    // split them so the half and the unit are seen separately.
+    let normalized = text
+        .to_lowercase()
+        .replace("demi-heure", "demi heure")
+        .replace("demi-minute", "demi minute")
+        .replace('-', " ");
+    let toks: Vec<&str> = normalized
+        .split_whitespace()
+        .map(|raw| raw.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut total = 0.0f64;
+    let mut current = 0.0f64;
+    let mut have_current = false;
+    let mut saw_unit = false;
+    let mut last_unit = 0.0f64;
+    let mut skip_next = false;
+
+    for (i, tok) in toks.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let next = toks.get(i + 1).copied();
+        let next_is_unit = next.is_some_and(|n| unit_secs(n).is_some());
+        if let Ok(n) = tok.parse::<f64>() {
+            current += n;
+            have_current = true;
+        } else if matches!(*tok, "un" | "une") {
+            if next_is_unit {
+                current += 1.0;
+                have_current = true;
+            }
+        } else if matches!(*tok, "demi" | "demie" | "demies") {
+            if next_is_unit {
+                // "une demi heure" — half of the following unit.
+                current += 0.5;
+                have_current = true;
+            } else if saw_unit && !have_current {
+                // "une heure et demie" — half of the unit just said.
+                total += 0.5 * last_unit;
+            }
+        } else if *tok == "quatre" && matches!(next, Some("vingt") | Some("vingts")) {
+            // "quatre-vingt(s)" = 80; consume the following "vingt".
+            current += 80.0;
+            have_current = true;
+            skip_next = true;
+        } else if matches!(*tok, "vingt" | "vingts") {
+            current += 20.0;
+            have_current = true;
+        } else if matches!(*tok, "cent" | "cents") {
+            // A scale word: multiply what precedes it (bare "cent" = 100), then keep
+            // accumulating ("cent cinquante" = 150, "deux cents" = 200).
+            let mult = if have_current && current > 0.0 {
+                current
+            } else {
+                1.0
+            };
+            current = mult * 100.0;
+            have_current = true;
+        } else if let Some(v) = word_value(tok) {
+            current += v;
+            have_current = true;
+        } else if let Some(u) = unit_secs(tok) {
+            let n = if have_current { current } else { 1.0 };
+            total += n * u;
+            current = 0.0;
+            have_current = false;
+            saw_unit = true;
+            last_unit = u;
+        }
+        // Anything else ("mets", "minuterie", "de", "et", "pour", …) is ignored.
+    }
+
+    if !saw_unit {
+        return None;
+    }
+    let secs = total.round();
+    if secs < 1.0 {
+        None
+    } else {
+        Some(secs as u64)
+    }
+}
+
+/// Canadian-French [`parse_timer_adjust`]: exactly one direction keyword (an explicit
+/// verb — "ajoute"/"rajoute"/"prolonge" vs "enlève"/"retire"/"diminue" — or the idiom
+/// "… de plus" / "… de moins") plus a clear duration.
+///
+/// "plus"/"moins" are only a direction in the postfixed idiom ("deux minutes **de plus**"),
+/// not in "**plus de** dix minutes" (*more than* ten), so they count only when **not**
+/// immediately followed by "de" — otherwise a "set timer" phrasing would read as an adjust.
+pub fn parse_timer_adjust_fr(text: &str) -> Option<i64> {
+    let normalized = text.to_lowercase().replace('-', " ");
+    let toks: Vec<&str> = normalized
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |kw: &str| toks.contains(&kw);
+    // "plus"/"moins" as a direction only when it isn't the "plus de"/"moins de"
+    // ("more/less than") comparative.
+    let adverb = |word: &str| {
+        toks.iter()
+            .enumerate()
+            .any(|(i, w)| *w == word && toks.get(i + 1) != Some(&"de"))
+    };
+    const ADD: [&str; 11] = [
+        "ajoute",
+        "ajouter",
+        "rajoute",
+        "rajouter",
+        "augmente",
+        "augmenter",
+        "prolonge",
+        "prolonger",
+        "allonge",
+        "allonger",
+        "additionne",
+    ];
+    const REMOVE: [&str; 12] = [
+        "enlève",
+        "enleve",
+        "enlever",
+        "retire",
+        "retirer",
+        "diminue",
+        "diminuer",
+        "réduis",
+        "reduis",
+        "réduire",
+        "reduire",
+        "soustrais",
+    ];
+    let adds = ADD.iter().any(|k| has(k)) || adverb("plus");
+    let removes = REMOVE.iter().any(|k| has(k)) || adverb("moins");
+    let sign = match (adds, removes) {
+        (true, false) => 1i64,
+        (false, true) => -1i64,
+        _ => return None,
+    };
+    let secs = parse_duration_secs_fr(&normalized)? as i64;
     Some(sign * secs)
 }
 
@@ -1422,5 +1625,70 @@ mod tests {
         assert_eq!(parse_timer_adjust_pt("diminui 30 segundos"), Some(-30));
         assert_eq!(parse_timer_adjust_pt("muda o timer para dez minutos"), None);
         assert_eq!(parse_timer_adjust_pt("tira mais um minuto"), None);
+    }
+
+    #[test]
+    fn parse_duration_fr_handles_common_phrasings() {
+        assert_eq!(
+            parse_duration_secs_fr("mets une minuterie de dix minutes"),
+            Some(600)
+        );
+        assert_eq!(
+            parse_duration_secs_fr("Minuterie de 10 minutes."),
+            Some(600)
+        );
+        assert_eq!(
+            parse_duration_secs_fr("une heure et 30 minutes"),
+            Some(5400)
+        );
+        assert_eq!(parse_duration_secs_fr("une heure et demie"), Some(5400));
+        assert_eq!(parse_duration_secs_fr("une minute et demie"), Some(90));
+        assert_eq!(parse_duration_secs_fr("une demi-heure"), Some(1800));
+        assert_eq!(parse_duration_secs_fr("vingt cinq minutes"), Some(1500));
+        assert_eq!(parse_duration_secs_fr("vingt et une minutes"), Some(1260));
+        assert_eq!(parse_duration_secs_fr("deux heures"), Some(7200));
+        // Compositional 70/80/90 and hundreds.
+        assert_eq!(parse_duration_secs_fr("soixante-dix secondes"), Some(70));
+        assert_eq!(parse_duration_secs_fr("soixante-quinze secondes"), Some(75));
+        assert_eq!(parse_duration_secs_fr("quatre-vingts minutes"), Some(4800));
+        assert_eq!(parse_duration_secs_fr("quatre-vingt-dix secondes"), Some(90));
+        assert_eq!(parse_duration_secs_fr("quatre-vingt-cinq secondes"), Some(85));
+        assert_eq!(parse_duration_secs_fr("cent vingt secondes"), Some(120));
+        assert_eq!(parse_duration_secs_fr("cent cinquante secondes"), Some(150));
+        assert_eq!(parse_duration_secs_fr("deux cents secondes"), Some(200));
+        // No unit → defer.
+        assert_eq!(parse_duration_secs_fr("mets une minuterie"), None);
+        assert_eq!(parse_duration_secs_fr("annule la minuterie"), None);
+        assert_eq!(parse_duration_secs_fr(""), None);
+        use crate::lang::Lang;
+        assert_eq!(
+            parse_duration_in(Lang::FrCa, "minuterie de dix minutes"),
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn parse_timer_adjust_fr_signs_the_delta() {
+        assert_eq!(
+            parse_timer_adjust_fr("ajoute cinq minutes à la minuterie"),
+            Some(300)
+        );
+        assert_eq!(
+            parse_timer_adjust_fr("donne-moi deux minutes de plus"),
+            Some(120)
+        );
+        assert_eq!(
+            parse_timer_adjust_fr("enlève une minute de la minuterie"),
+            Some(-60)
+        );
+        assert_eq!(parse_timer_adjust_fr("diminue de 30 secondes"), Some(-30));
+        assert_eq!(parse_timer_adjust_fr("mets la minuterie à dix minutes"), None);
+        // "plus de"/"moins de" (more/less *than*) is a comparative, not an adjust — it
+        // must not be read as "add"/"remove".
+        assert_eq!(
+            parse_timer_adjust_fr("mets une minuterie de plus de dix minutes"),
+            None
+        );
+        assert_eq!(parse_timer_adjust_fr("une minuterie de moins de deux minutes"), None);
     }
 }

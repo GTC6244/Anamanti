@@ -246,6 +246,7 @@ pub fn parse_command_in(
         match l {
             Lang::En => parse_command(text),
             Lang::PtBr => parse_command_pt(text),
+            Lang::FrCa => parse_command_fr(text),
         }
         .map(|c| (c, l))
     })
@@ -259,6 +260,7 @@ pub fn infer_memories_in(text: &str, langs: &[crate::lang::Lang]) -> Vec<(Memory
         let found = match l {
             Lang::En => infer_memories(text),
             Lang::PtBr => infer_memories_pt(text),
+            Lang::FrCa => infer_memories_fr(text),
         };
         if !found.is_empty() {
             return found;
@@ -512,6 +514,243 @@ pub fn infer_memories_pt(text: &str) -> Vec<(MemoryKind, String)> {
     out
 }
 
+// -------------------------------------------------------------------- Canadian French
+//
+// `plans/BilingualPlan.md` §2.6: the same commands and inferred patterns in Canadian
+// French, mirroring the English/Portuguese rules. Phrases are listed with hyphens and
+// with spaces, and with and without accents, because STT output varies on both. Content
+// is **stored as spoken** (owner decision) — inferred facts use French templates.
+
+/// Canadian-French who-am-I questions (whole utterance, fillers stripped).
+const WHO_AM_I_FR: &[&str] = &[
+    "qui suis-je",
+    "qui suis je",
+    "qui je suis",
+    "c'est quoi mon nom",
+    "quel est mon nom",
+    "quel est mon prénom",
+    "quel est mon prenom",
+    "tu sais qui je suis",
+    "sais-tu qui je suis",
+    "sais tu qui je suis",
+    "est-ce que tu sais qui je suis",
+    "est ce que tu sais qui je suis",
+    "tu me reconnais",
+    "est-ce que tu me reconnais",
+    "est ce que tu me reconnais",
+    "tu reconnais ma voix",
+    "est-ce que tu reconnais ma voix",
+    "qui parle",
+    "qui est-ce qui parle",
+    "qui est ce qui parle",
+    "tu connais mon nom",
+    "tu sais mon nom",
+    "est-ce que tu connais mon nom",
+];
+
+fn is_who_am_i_fr(lead_clean: &str) -> bool {
+    let mut q = lead_clean.replace(',', "");
+    for filler in [
+        "hé ",
+        "he ",
+        "salut ",
+        "ok ",
+        "jarvis ",
+        "dis-moi ",
+        "dis moi ",
+        "s'il te plaît ",
+        "s'il te plait ",
+    ] {
+        while let Some(rest) = q.strip_prefix(filler) {
+            q = rest.trim_start().to_string();
+        }
+    }
+    let q = q
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .trim_end_matches(" jarvis")
+        .trim();
+    WHO_AM_I_FR.contains(&q)
+}
+
+/// Parse an explicit Canadian-French memory command ("rappelle-toi que …", "oublie ça",
+/// "je m'appelle …", "qui suis-je?").
+pub fn parse_command_fr(text: &str) -> Option<MemoryCommand> {
+    // Fold the typographic apostrophe STT emits (U+2019) to ASCII so the apostrophe-heavy
+    // French prefixes ("je m'appelle", "n'oublie pas que", "c'est quoi mon nom") match.
+    // Done on a working copy so prefix-matching (`lead`) and tail recovery (`text`) stay
+    // byte-aligned — the content captured for a memory then uses the ASCII apostrophe too.
+    let folded = text.replace('\u{2019}', "'");
+    let text = folded.as_str();
+    let lead = normalize_lead(text);
+    let lead_clean = clean(&lead);
+
+    if is_who_am_i_fr(lead_clean) {
+        return Some(MemoryCommand::WhoAmI);
+    }
+
+    // "oublie ça" (bare) → drop the last entry.
+    const FORGET_LAST: &[&str] = &[
+        "oublie ça",
+        "oublie ca",
+        "oublie cela",
+        "oublie le dernier",
+        "oublie la dernière",
+        "oublie la derniere",
+        "oublie la dernière chose",
+        "oublie la derniere chose",
+        "oublie ce que j'ai dit",
+        "oublie ce que je viens de dire",
+    ];
+    if FORGET_LAST.contains(&lead_clean) {
+        return Some(MemoryCommand::ForgetLast);
+    }
+    // Longest phrasings first so "oublie que" wins over bare "oublie".
+    for p in [
+        "oublie à propos de ",
+        "oublie a propos de ",
+        "oublie au sujet de ",
+        "oublie le fait que ",
+        "oublie que ",
+        "oublie ",
+    ] {
+        if let Some(rest) = lead.strip_prefix(p) {
+            let rest = clean(rest);
+            if !rest.is_empty() {
+                return Some(MemoryCommand::ForgetMatching(rest.to_string()));
+            }
+        }
+    }
+
+    // "je m'appelle …" / "mon nom est …" / "appelle-moi …" → name the speaker. "appelle-moi
+    // un taxi" / "appelle-moi quand c'est prêt" are not names, so a first token that is a
+    // French article/stopword is rejected (the turn then falls through, not stored).
+    const NON_NAMES: &[&str] = &[
+        "un", "une", "le", "la", "les", "des", "du", "de", "mon", "ma", "mes", "quand", "si",
+        "dès", "des", "plus", "tard", "que", "quoi", "comment", "où", "ou", "moi", "nous",
+        "vous", "ça", "ca",
+    ];
+    for p in [
+        "je m'appelle ",
+        "mon nom est ",
+        "appelle-moi ",
+        "appelle moi ",
+        "tu peux m'appeler ",
+    ] {
+        if let Some(tail) = tail_after_prefix(text, &lead, p) {
+            if let Some(name) = first_name_token(tail) {
+                if !NON_NAMES.contains(&name.to_lowercase().as_str()) {
+                    return Some(MemoryCommand::NameSpeaker(name));
+                }
+            }
+        }
+    }
+
+    // "rappelle-toi que …" → store, as spoken. Longest phrasings first.
+    for p in [
+        "n'oublie pas que ",
+        "n'oublie pas de ",
+        "rappelle-toi que ",
+        "rappelle toi que ",
+        "rappelle-toi de ",
+        "rappelle toi de ",
+        "souviens-toi que ",
+        "souviens toi que ",
+        "souviens-toi de ",
+        "souviens toi de ",
+        "rappelle-toi ",
+        "rappelle toi ",
+        "souviens-toi ",
+        "souviens toi ",
+        "note que ",
+        "retiens que ",
+    ] {
+        if let Some(rest) = tail_after_prefix(text, &lead, p) {
+            let kind = kind_of_fr(&rest.to_lowercase());
+            return Some(MemoryCommand::Remember {
+                kind,
+                content: rest.to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// Classify a Canadian-French snippet as a preference when it expresses liking/preferring.
+fn kind_of_fr(lower: &str) -> MemoryKind {
+    const PREF_HINTS: [&str; 10] = [
+        "j'aime",
+        "j'adore",
+        "je préfère",
+        "je prefere",
+        "préféré",
+        "prefere",
+        "préférée",
+        "je déteste",
+        "je deteste",
+        "je n'aime pas",
+    ];
+    if PREF_HINTS.iter().any(|h| lower.contains(h)) {
+        MemoryKind::Preference
+    } else {
+        MemoryKind::Fact
+    }
+}
+
+/// Canadian-French inferred capture (stored as spoken, in French templates).
+pub fn infer_memories_fr(text: &str) -> Vec<(MemoryKind, String)> {
+    // Fold U+2019 → ASCII apostrophe (see [`parse_command_fr`]) so "j'habite", "j'aime"
+    // etc. match whichever apostrophe STT produced; keeps `lead`/`text` byte-aligned.
+    let folded = text.replace('\u{2019}', "'");
+    let text = folded.as_str();
+    let lead = normalize_lead(text);
+    let mut out = Vec::new();
+    let rules: &[(&str, MemoryKind, &str)] = &[
+        ("mon nom est ", MemoryKind::Fact, "Le nom de l'utilisateur est {}"),
+        ("je m'appelle ", MemoryKind::Fact, "Le nom de l'utilisateur est {}"),
+        ("j'habite à ", MemoryKind::Fact, "L'utilisateur habite à {}"),
+        ("j'habite ", MemoryKind::Fact, "L'utilisateur habite à {}"),
+        ("je vis à ", MemoryKind::Fact, "L'utilisateur habite à {}"),
+        ("je viens de ", MemoryKind::Fact, "L'utilisateur vient de {}"),
+        ("je suis de ", MemoryKind::Fact, "L'utilisateur vient de {}"),
+        ("mon travail est ", MemoryKind::Fact, "Le travail de l'utilisateur est {}"),
+        ("je travaille comme ", MemoryKind::Fact, "L'utilisateur travaille comme {}"),
+        ("je travaille à ", MemoryKind::Fact, "L'utilisateur travaille à {}"),
+        ("je n'aime pas ", MemoryKind::Preference, "L'utilisateur n'aime pas {}"),
+        ("je déteste ", MemoryKind::Preference, "L'utilisateur déteste {}"),
+        ("je deteste ", MemoryKind::Preference, "L'utilisateur déteste {}"),
+        ("j'adore ", MemoryKind::Preference, "L'utilisateur adore {}"),
+        ("j'aime ", MemoryKind::Preference, "L'utilisateur aime {}"),
+        ("je préfère ", MemoryKind::Preference, "L'utilisateur préfère {}"),
+        ("je prefere ", MemoryKind::Preference, "L'utilisateur préfère {}"),
+    ];
+    for (prefix, kind, template) in rules {
+        if let Some(tail) = tail_after_prefix(text, &lead, prefix) {
+            out.push((*kind, template.replace("{}", tail)));
+            return out; // one inference per utterance, like English
+        }
+    }
+    // "ma couleur préférée est le bleu": the noun comes before "préféré(e)", so keep the
+    // whole statement.
+    let lc = clean(&lead);
+    if (lc.starts_with("mon ") || lc.starts_with("ma ") || lc.starts_with("mes "))
+        && (lc.contains(" préféré est ")
+            || lc.contains(" préférée est ")
+            || lc.contains(" prefere est ")
+            || lc.contains(" préférés est ")
+            || lc.contains(" préférées est "))
+    {
+        let original = clean(
+            text.trim()
+                .trim_start_matches(|c: char| !c.is_alphanumeric()),
+        );
+        out.push((
+            MemoryKind::Preference,
+            format!("Préférence de l'utilisateur : {original}"),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,5 +946,96 @@ mod tests {
         );
         assert!(infer_memories_pt("que horas são").is_empty());
         assert!(infer_memories_pt("I live in Austin").is_empty());
+    }
+
+    #[test]
+    fn parses_french_commands() {
+        use crate::lang::Lang;
+        assert_eq!(
+            parse_command_fr("Rappelle-toi que le dentiste est mardi"),
+            Some(MemoryCommand::Remember {
+                kind: MemoryKind::Fact,
+                content: "le dentiste est mardi".to_string()
+            })
+        );
+        assert_eq!(
+            parse_command_fr("souviens-toi que j'aime le café noir"),
+            Some(MemoryCommand::Remember {
+                kind: MemoryKind::Preference,
+                content: "j'aime le café noir".to_string()
+            })
+        );
+        assert_eq!(
+            parse_command_fr("Oublie ça."),
+            Some(MemoryCommand::ForgetLast)
+        );
+        assert_eq!(
+            parse_command_fr("oublie que le dentiste est mardi"),
+            Some(MemoryCommand::ForgetMatching("le dentiste est mardi".to_string()))
+        );
+        assert_eq!(
+            parse_command_fr("Je m'appelle Paul."),
+            Some(MemoryCommand::NameSpeaker("Paul".to_string()))
+        );
+        // Typographic apostrophe (U+2019), as STT emits, matches the same prefixes.
+        assert_eq!(
+            parse_command_fr("Je m\u{2019}appelle Paul."),
+            Some(MemoryCommand::NameSpeaker("Paul".to_string()))
+        );
+        assert_eq!(
+            parse_command_fr("N\u{2019}oublie pas que le dentiste est mardi"),
+            Some(MemoryCommand::Remember {
+                kind: MemoryKind::Fact,
+                content: "le dentiste est mardi".to_string()
+            })
+        );
+        // "appelle-moi …" + a non-name is not a naming command.
+        assert_eq!(parse_command_fr("appelle-moi un taxi"), None);
+        assert_eq!(parse_command_fr("appelle-moi quand c'est prêt"), None);
+        assert_eq!(parse_command_fr("Qui suis-je?"), Some(MemoryCommand::WhoAmI));
+        assert_eq!(
+            parse_command_fr("Hé, est-ce que tu sais qui je suis?"),
+            Some(MemoryCommand::WhoAmI)
+        );
+        // Questions and ordinary speech don't match.
+        for s in [
+            "Est-ce que tu te souviens de ce que j'ai dit?",
+            "quelle heure est-il",
+            "quel est le nom de ce film",
+        ] {
+            assert_eq!(parse_command_fr(s), None, "{s}");
+        }
+        // Cross-language isolation.
+        assert_eq!(parse_command_fr("remember that I like tea"), None);
+        assert_eq!(
+            parse_command_in("rappelle-toi que j'aime le thé", &[Lang::En]),
+            None
+        );
+    }
+
+    #[test]
+    fn french_inferred_capture_is_stored_as_spoken() {
+        assert_eq!(
+            infer_memories_fr("J'habite à Montréal."),
+            vec![(MemoryKind::Fact, "L'utilisateur habite à Montréal".to_string())]
+        );
+        // Typographic apostrophe folds to ASCII before matching.
+        assert_eq!(
+            infer_memories_fr("J\u{2019}habite à Québec."),
+            vec![(MemoryKind::Fact, "L'utilisateur habite à Québec".to_string())]
+        );
+        assert_eq!(
+            infer_memories_fr("J'aime la poutine"),
+            vec![(MemoryKind::Preference, "L'utilisateur aime la poutine".to_string())]
+        );
+        assert_eq!(
+            infer_memories_fr("Ma couleur préférée est le bleu."),
+            vec![(
+                MemoryKind::Preference,
+                "Préférence de l'utilisateur : Ma couleur préférée est le bleu".to_string()
+            )]
+        );
+        assert!(infer_memories_fr("quelle heure est-il").is_empty());
+        assert!(infer_memories_fr("I live in Austin").is_empty());
     }
 }

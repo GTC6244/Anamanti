@@ -588,6 +588,7 @@ pub fn detect_personality_switch_in(
         match l {
             Lang::En => detect_personality_switch(transcript, p),
             Lang::PtBr => detect_personality_switch_pt(transcript, p),
+            Lang::FrCa => detect_personality_switch_fr(transcript, p),
         }
         .map(|t| (t, l))
     })
@@ -683,6 +684,86 @@ pub fn detect_personality_switch_pt(transcript: &str, p: &Personality) -> Option
         }
     }
     PERSONALITY_ALIASES_PT
+        .iter()
+        .find(|(alias, key)| t.contains(alias) && defs.iter().any(|d| d.key.trim() == *key))
+        .map(|(_, key)| key.to_string())
+}
+
+/// Canadian-French aliases for the built-in personality keys (the catalog labels are
+/// English). Only applied when that key is in the live catalog.
+const PERSONALITY_ALIASES_FR: &[(&str, &str)] = &[
+    ("enthousiaste", "enthusiastic"),
+    ("excité", "enthusiastic"),
+    ("excite", "enthusiastic"),
+    ("sarcastique", "sarcastic"),
+    ("sarcasme", "sarcastic"),
+    ("déprimé", "depressed"),
+    ("deprime", "depressed"),
+    ("déprimée", "depressed"),
+    ("gangster", "gangster"),
+    ("mafieux", "gangster"),
+    ("trump", "trump"),
+];
+
+/// The Canadian-French personality switch ("parle comme un gangster", "reviens à la
+/// normale"): the same shape as the English detector — a switch trigger, then an off
+/// intent or a catalog name (its key/label, or a French alias of a built-in). Imperative
+/// and infinitive forms are both listed since STT returns either.
+pub fn detect_personality_switch_fr(transcript: &str, p: &Personality) -> Option<String> {
+    let t = transcript.to_lowercase();
+    const TRIGGERS: &[&str] = &[
+        "personnalité",
+        "personnalite",
+        "parle comme",
+        "parler comme",
+        "agis comme",
+        "agir comme",
+        "fais comme si",
+        "prends la voix",
+        "prends une voix",
+        "change pour",
+        "change de personnalité",
+        "change de personnalite",
+        "changer de personnalité",
+        "change ta personnalité",
+        "deviens",
+        "reviens au normal",
+        "reviens à la normale",
+        "reviens a la normale",
+        "retourne au normal",
+        "retourne à la normale",
+        "retourne a la normale",
+        "désactive",
+        "desactive",
+        "désactiver",
+        "desactiver",
+    ];
+    if !TRIGGERS.iter().any(|k| t.contains(k)) {
+        return None;
+    }
+    const OFF: &[&str] = &[
+        "normal",
+        "normale",
+        "désactive",
+        "desactive",
+        "sans personnalité",
+        "sans personnalite",
+        "arrête ça",
+        "arrete ca",
+    ];
+    if OFF.iter().any(|k| t.contains(k)) {
+        return Some("normal".to_string());
+    }
+    let mut defs: Vec<&PersonalityDef> = p.definitions.iter().collect();
+    defs.sort_by_key(|d| std::cmp::Reverse(d.label.trim().len().max(d.key.trim().len())));
+    for d in &defs {
+        let key = d.key.trim().to_lowercase();
+        let label = d.label.trim().to_lowercase();
+        if (!key.is_empty() && t.contains(&key)) || (!label.is_empty() && t.contains(&label)) {
+            return Some(d.key.clone());
+        }
+    }
+    PERSONALITY_ALIASES_FR
         .iter()
         .find(|(alias, key)| t.contains(alias) && defs.iter().any(|d| d.key.trim() == *key))
         .map(|(_, key)| key.to_string())

@@ -897,7 +897,7 @@ fn sanitize_id(name: &str) -> String {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileLanguage {
-    /// Enabled language codes, in order (`en`, `pt-BR`). Empty/absent ⇒ just `default`.
+    /// Enabled language codes, in order (`en`, `pt-BR`, `fr-CA`). Empty/absent ⇒ just `default`.
     #[serde(default)]
     pub enabled: Vec<String>,
     /// The household default (defaults to the first enabled language, else `en`).
@@ -914,7 +914,7 @@ fn resolve_language(
     use crate::lang::{Lang, LanguageSettings};
     let parse = |code: &str, what: &str| {
         Lang::parse(code).with_context(|| {
-            format!("unknown language `{code}` in {what} (supported: `en`, `pt-BR`)")
+            format!("unknown language `{code}` in {what} (supported: `en`, `pt-BR`, `fr-CA`)")
         })
     };
     let fl = language.unwrap_or_default();
@@ -948,7 +948,7 @@ fn resolve_tts_addrs(
     let mut out = std::collections::BTreeMap::new();
     for (code, addr) in raw.unwrap_or_default() {
         let lang = crate::lang::Lang::parse(&code).with_context(|| {
-            format!("unknown language `{code}` in tts_addrs (supported: `en`, `pt-BR`)")
+            format!("unknown language `{code}` in tts_addrs (supported: `en`, `pt-BR`, `fr-CA`)")
         })?;
         out.insert(lang, addr);
     }
