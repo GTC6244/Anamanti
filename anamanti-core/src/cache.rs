@@ -37,9 +37,10 @@ use serde_json::Value;
 /// growing without limit. Eviction is oldest-first (see [`ToolCache::put`]).
 const DEFAULT_MAX_ENTRIES: usize = 256;
 
-/// The built-in weather TTL (60 minutes) used when the `tool_cache` config omits it.
-/// Weather changes slowly; a manual re-ask still reflects reality within the hour.
-pub const DEFAULT_WEATHER_TTL_SECS: u64 = 3600;
+/// The built-in weather TTL (5 minutes) used when the `tool_cache` config omits it.
+/// Short enough that the ambient push and a manual re-ask reflect current conditions
+/// promptly, while still collapsing bursts of lookups onto one fetch.
+pub const DEFAULT_WEATHER_TTL_SECS: u64 = 300;
 
 /// The built-in calendar TTL (5 minutes) used when neither `calendar.cache_ttl_secs` nor
 /// `tool_cache.calendar_lookup` is set. The feed fetch dominates a lookup's cost and
@@ -277,9 +278,9 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_weather_to_an_hour_and_overlays_file_entries() {
+    fn config_defaults_weather_to_five_minutes_and_overlays_file_entries() {
         let mut cfg = ToolCacheConfig::default();
-        assert_eq!(cfg.ttl("weather_lookup"), Duration::from_secs(3600));
+        assert_eq!(cfg.ttl("weather_lookup"), Duration::from_secs(300));
         assert_eq!(cfg.ttl("calendar_lookup"), Duration::from_secs(300));
         assert_eq!(
             cfg.ttl("directions_lookup"),
