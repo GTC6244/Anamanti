@@ -54,7 +54,8 @@ pub(super) fn language_save_json(settings: &SharedSettings, data: &Value) -> Str
 fn parse(data: &Value) -> Result<LanguageSettings, String> {
     let code = |v: &Value| -> Result<Lang, String> {
         let s = v.as_str().unwrap_or_default();
-        Lang::parse(s).ok_or_else(|| format!("unknown language `{s}` (supported: en, pt-BR)"))
+        Lang::parse(s)
+            .ok_or_else(|| format!("unknown language `{s}` (supported: en, pt-BR, fr-CA)"))
     };
     let enabled = data
         .get("enabled")

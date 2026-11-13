@@ -1,4 +1,10 @@
-# Bilingual Plan: English + Brazilian Portuguese (pt-BR)
+# Multilingual Plan: English + Brazilian Portuguese (pt-BR) + Canadian French (fr-CA)
+
+> **Canadian French (fr-CA) added 2026-11-13 — see §10.** The design below was written
+> for two languages (en + pt-BR); the `Lang` enum and every per-language table it
+> describes now carry a third variant. The architecture is unchanged — a third language is
+> data, not new machinery.
+
 
 **Target:** M4 Mac Mini (Anamanti Core). **The Anamanti Display is unchanged**: no
 Display code or APK release is needed.
@@ -471,4 +477,76 @@ lossless, but it's outside this plan's decisions.
    `"tts_addrs": {"pt-BR": "127.0.0.1:10201"}` — or set Languages on the Voice page.
 4. Redeploy the Core with the runbook in agents.md. The Display needs nothing.
 5. Rollback: remove the `language` block (or untick Português on the Voice page).
+
+## 10. Canadian French (fr-CA) — added 2026-11-13
+
+A third language, Canadian French, added by extending the existing machinery. Core-only,
+like pt-BR; the Display is untouched.
+
+### 10.1 What shipped
+
+| Piece | Where |
+| --- | --- |
+| `Lang::FrCa` (codes `fr-CA`/`fr`/`fra`, Piper locale `fr_FR`, lenient `parse`), the `# Language` prompt block, STT lookalike/`from_stt_code` | `src/lang/mod.rs` |
+| French trigram ID (`whatlang::Lang::Fra`), French function-word + short-phrase tables (kept **string-disjoint** from en + pt) | `src/lang/detect.rs` |
+| Every spoken canned reply in Canadian French: durations (gendered `une`), 24-h clock ("Il est 15 heures 45 minutes."), dates ("Aujourd'hui, c'est lundi le 19 octobre."), the WMO weather table, memory/personality/name/"who am I" lines | `src/lang/phrases.rs` |
+| French memory commands + inferred capture (`parse_command_fr`, `infer_memories_fr`) | `src/memory/extract.rs` |
+| French personality switch (`detect_personality_switch_fr` + `PERSONALITY_ALIASES_FR`) | `src/orchestrator/prompt.rs` |
+| French duration/timer-adjust parsers (`parse_duration_secs_fr`, `parse_timer_adjust_fr`) and the `FR_CA_READY` gate | `src/system1/mod.rs` |
+| `tts_addrs`/config language keys accept `fr-CA`; the Voice → Languages card lists it (it's built from `Lang::ALL`) | `src/config.rs`, `src/webconfig/language.rs` |
+| Unit tests per module (detection disjointness across all three lists, French phrases, memory commands, duration parsers) | |
+
+### 10.2 Deliberate deviations (this pass)
+
+1. **TTS voice is European French.** Piper ships no `fr_CA` voice, so `Lang::FrCa`'s
+   `piper_locale` is `fr_FR` and fr-CA is spoken by a European French voice (e.g.
+   `fr_FR-siwis-medium`). Vocabulary, spelling and all canned replies are Canadian French
+   (the prompt names fr-CA explicitly, as pt-BR names Brazilian). Sourcing a true fr-CA
+   Piper voice is a follow-up — only `piper_locale` and the installed voice change.
+2. **Home Assistant fast path falls through to the LLM** `home_control` tool for French
+   (`orchestrator/home.rs` `Lang::FrCa => None`), exactly as pt-BR did before its Phase-2
+   grammar. HA still works in French via the tool, answered in French; a French sibling of
+   `home_assistant/pt.rs` is the follow-up.
+3. **`FR_CA_READY` is empty** — System-1 defers every French turn to System-2 (answered
+   correctly in French, just slower) until the French cases in
+   `tests/system1_calibration.rs` have been run against the active backend and pass the
+   same precision-first bar pt-BR cleared. The French duration/timer parsers are already
+   in place, so enabling an intent is then a one-line change.
+4. **`detect_text` is tested pairwise, not three-way.** `whatlang`'s trigram confidence
+   for a short English sentence falls once a third language shares the allowlist; the
+   `MIN_CONFIDENCE` gate still blocks a confident *wrong*-language read, and the resolver's
+   English `default` catches a decline — so no English turn is misrouted.
+
+### 10.3 Production rollout — DONE 2026-11-13
+
+Deployed to the local production Core (`/Volumes/External/Anamanti Core`, instance
+`anamanti-core` on :10700). What was done:
+
+1. Added a third Piper to `services/start.sh` — `piper-frca` on `127.0.0.1:10202` with
+   `--voice fr_FR-siwis-medium` (auto-downloaded from rhasspy/piper-voices on first
+   start; no fr_CA voice exists) — and added `:10202` to the `restart` free-port list.
+2. Added to production `anamanti.json`: `language.enabled = ["en","pt-BR","fr-CA"]`,
+   `tts_voices["fr-CA"] = "fr_FR-siwis-medium"`, `tts_addrs["fr-CA"] = "127.0.0.1:10202"`.
+3. Rebuilt the Core from this branch and redeployed per the agents.md runbook (backup +
+   swap on :10700). Boot logged `bilingual mode: en + pt-BR + fr-CA` and warmed the
+   French voice (~617 ms). The Display needed nothing.
+4. **STT switched from Wyoming to ElevenLabs** (`POST /stt/save {"engine":"elevenlabs"}`,
+   no restart). This was **required**: production Wyoming ran `base-int8 --language en`,
+   which transcribes every language as English, so neither fr-CA nor pt-BR could actually
+   be heard. ElevenLabs Scribe v2 Realtime is the plan's validated multilingual engine and
+   the key was already configured. **Operational consequence: household audio now goes to
+   the ElevenLabs cloud (per-use cost), where before it was transcribed on-device.**
+5. Verified end to end: "Quelle est la capitale de la France ?" → STT `lang=fr` →
+   `turn language: fr-CA (via stt)` → French reply "La capitale de la France est Paris."
+   with the French voice.
+
+Still outstanding (unchanged by this rollout): `FR_CA_READY` is empty, so French
+time/date/timer/etc. are answered by System-2 (correctly, in French) rather than the
+System-1 fast path, until the French calibration in `tests/system1_calibration.rs` is run
+against `jev`; and the Home Assistant fast path falls through to the LLM `home_control`
+tool for French.
+
+Rollback: untick Français on the Voice page (or drop `fr-CA` from the `language` block in
+`anamanti.json`) and redeploy; optionally stop `piper-frca` and switch STT back with
+`POST /stt/save {"engine":"wyoming"}`.
 

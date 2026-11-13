@@ -32,6 +32,10 @@ impl Pipeline {
             let said = match lang {
                 Lang::En => hub.handle_utterance(transcript, room.as_deref()).await,
                 Lang::PtBr => hub.handle_utterance_pt(transcript, room.as_deref()).await,
+                // No French command grammar yet: French home commands fall through to the
+                // LLM `home_control` tool (answered in French), as pt-BR did before its
+                // Phase-2 grammar landed (plans/BilingualPlan.md §2.6).
+                Lang::FrCa => None,
             };
             if let Some(text) = said {
                 answered = Some((text, lang));
