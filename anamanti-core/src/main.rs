@@ -462,6 +462,7 @@ async fn run() -> Result<()> {
     // the voice tools also record play requests in (plans/MusicDisplayStylePlan.md).
     let music_svc = Arc::new(
         NowPlayingService::with_radio(radio.clone())
+            .with_librespot(pipeline.settings().librespot_account())
             .with_display(pipeline.settings().music_display_router()),
     );
     if config.music.enabled {

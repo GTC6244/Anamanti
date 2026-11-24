@@ -4,7 +4,7 @@
 //! This is control-only, exactly like the rest of `crate::music`: it never
 //! touches audio PCM. The music itself is produced by the **librespot** sibling
 //! process (the Spotify Connect device named by `music.spotify_device_name`,
-//! default `"Ambient"`) whose PCM Snapcast routes to the speakers. Here we only
+//! default `"Spotify Home"`) whose PCM Snapcast routes to the speakers. Here we only
 //! issue Web API calls — search, start/resume, pause, skip, queue, volume —
 //! **targeting that librespot device** so a spoken "play some Radiohead" turns
 //! into music on the house speakers.
@@ -19,6 +19,7 @@
 //! (`crate::llm::rig`) depends on, so the tool is unit-testable without hitting
 //! the network — mirroring how `InternetSearch` holds a `SearchProvider`.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -26,6 +27,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
+
+use super::librespot::LibrespotAccount;
 
 /// What kind of Spotify entity a `play`/`queue` search should resolve to. The
 /// model picks this: a specific song is a `Track`; "some Radiohead" / a vibe is
@@ -238,10 +241,26 @@ pub struct SpotifyWebApi {
     /// one. librespot's id is stable for a given name; a command that fails against a
     /// cached id drops it and retries once against a fresh lookup.
     device: Mutex<Option<(String, Instant)>>,
+    /// librespot's credentials cache, when the Core may take the device back
+    /// ([`LibrespotAccount`]): pinned while it is on the Core's account, restored (and
+    /// librespot restarted) when a command can't find the device.
+    librespot: Option<Arc<LibrespotAccount>>,
+    /// The Core's own Spotify user id (`GET /v1/me`), fetched once for pinning.
+    account_id: Mutex<Option<String>>,
+    /// Serializes reclaims so a burst of commands restarts librespot only once.
+    reclaiming: Mutex<()>,
+    /// How long a reclaim waits for the device to reappear ([`RECLAIM_WAIT`]).
+    reclaim_wait: Duration,
 }
 
 /// How long a resolved Connect device id is reused before it is looked up again.
 const DEVICE_ID_TTL: Duration = Duration::from_secs(300);
+
+/// How long a reclaim waits for the restarted librespot to show up in the device list.
+const RECLAIM_WAIT: Duration = Duration::from_secs(15);
+
+/// How often a reclaim re-checks the device list while waiting.
+const RECLAIM_POLL: Duration = Duration::from_millis(1000);
 
 impl SpotifyWebApi {
     pub fn new(
@@ -278,7 +297,18 @@ impl SpotifyWebApi {
             api_base: api_base.into().trim_end_matches('/').to_string(),
             token: Mutex::new(None),
             device: Mutex::new(None),
+            librespot: None,
+            account_id: Mutex::new(None),
+            reclaiming: Mutex::new(()),
+            reclaim_wait: RECLAIM_WAIT,
         }
+    }
+
+    /// Let this client keep the librespot device on the Core's account (see
+    /// [`LibrespotAccount`]). `None` leaves a missing device as a plain error.
+    pub fn with_librespot(mut self, librespot: Option<Arc<LibrespotAccount>>) -> Self {
+        self.librespot = librespot;
+        self
     }
 
     /// The target device id from the cache when fresh (`true` = it came from the
@@ -328,10 +358,104 @@ impl SpotifyWebApi {
         Ok(access)
     }
 
-    /// Resolve the target Connect device's id by name (case-insensitive). Errors
-    /// with a speakable message when the device is not present (e.g. librespot is
-    /// down or the speaker is asleep).
+    /// Resolve the target Connect device's id by name. When it is missing and the
+    /// librespot cache is known, reclaim it — restore the Core's pinned credentials,
+    /// restart librespot, and wait for it to reappear. Errors with a speakable message
+    /// when it still isn't there.
     async fn device_id(&self, token: &str) -> Result<String> {
+        if let Some(id) = self.find_device(token).await? {
+            self.pin_account(token).await;
+            return Ok(id);
+        }
+        let Some(librespot) = &self.librespot else {
+            anyhow::bail!(self.unavailable());
+        };
+        let _one_at_a_time = self.reclaiming.lock().await;
+        // Another command may have reclaimed it while this one waited for the lock.
+        if let Some(id) = self.find_device(token).await? {
+            return Ok(id);
+        }
+        let restored = librespot.reclaim(&self.device_name).await?;
+        log::info!(
+            "spotify: \"{}\" not on this account (librespot signed in as {:?}); restarted \
+             librespot{}",
+            self.device_name,
+            librespot.cached_username(),
+            if restored {
+                " with the Core's pinned login"
+            } else {
+                " (no pinned login yet)"
+            },
+        );
+        let deadline = Instant::now() + self.reclaim_wait;
+        while Instant::now() < deadline {
+            tokio::time::sleep(RECLAIM_POLL).await;
+            if let Some(id) = self.find_device(token).await? {
+                log::info!("spotify: \"{}\" is back", self.device_name);
+                return Ok(id);
+            }
+        }
+        if restored {
+            anyhow::bail!(self.unavailable());
+        }
+        anyhow::bail!(
+            "the \"{0}\" speaker isn't on your Spotify account right now — pick \"{0}\" once \
+             in the Spotify app on your phone, then ask again",
+            self.device_name
+        )
+    }
+
+    fn unavailable(&self) -> String {
+        format!(
+            "the \"{}\" speaker isn't available right now — is it powered on?",
+            self.device_name
+        )
+    }
+
+    /// Best-effort: pin librespot's credentials while they are the Core's own account,
+    /// so a later reclaim can restore them. No-op without a librespot cache.
+    async fn pin_account(&self, token: &str) {
+        let Some(librespot) = &self.librespot else {
+            return;
+        };
+        let account = match self.account_id(token).await {
+            Ok(id) => id,
+            Err(e) => {
+                log::warn!("spotify: couldn't read the account id to pin librespot: {e:#}");
+                return;
+            }
+        };
+        match librespot.remember(&account) {
+            Ok(true) => log::info!("spotify: pinned librespot's login for account {account}"),
+            Ok(false) => {}
+            Err(e) => log::warn!("spotify: couldn't pin librespot's login: {e:#}"),
+        }
+    }
+
+    /// The Core's Spotify user id, fetched once.
+    async fn account_id(&self, token: &str) -> Result<String> {
+        let mut cached = self.account_id.lock().await;
+        if let Some(id) = cached.as_ref() {
+            return Ok(id.clone());
+        }
+        let me: Value = crate::http::send_json(
+            crate::http::get(format!("{}/v1/me", self.api_base), COMPONENT).bearer_auth(token),
+            SPOTIFY_TIMEOUT,
+            "Spotify profile",
+        )
+        .await?;
+        let id = me
+            .get("id")
+            .and_then(Value::as_str)
+            .context("Spotify profile had no id")?
+            .to_string();
+        *cached = Some(id.clone());
+        Ok(id)
+    }
+
+    /// Look the target Connect device up by name (case-insensitive) in the account's
+    /// device list; `None` when it isn't listed.
+    async fn find_device(&self, token: &str) -> Result<Option<String>> {
         let resp: Value = crate::http::send_json(
             crate::http::get(format!("{}/v1/me/player/devices", self.api_base), COMPONENT)
                 .bearer_auth(token),
@@ -346,7 +470,7 @@ impl SpotifyWebApi {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let want = self.device_name.to_lowercase();
-        devices
+        Ok(devices
             .iter()
             .find(|d| {
                 d.get("name")
@@ -355,13 +479,7 @@ impl SpotifyWebApi {
                     .unwrap_or(false)
             })
             .and_then(|d| d.get("id").and_then(Value::as_str))
-            .map(str::to_string)
-            .with_context(|| {
-                format!(
-                    "the \"{}\" speaker isn't available right now — is it powered on?",
-                    self.device_name
-                )
-            })
+            .map(str::to_string))
     }
 
     /// Search for the top matching entity of `kind`.
@@ -723,6 +841,16 @@ impl SpotifyController for SpotifyWebApi {
         let Some(state) = self.player_get(&token, "").await? else {
             return Ok(None); // 204 / empty body → nothing loaded
         };
+        // Our account is playing on librespot → its cached login is ours: pin it, so a
+        // later reclaim works even if the Core never had to look the device up.
+        let on_our_device = state
+            .get("device")
+            .and_then(|d| d.get("name"))
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.eq_ignore_ascii_case(&self.device_name));
+        if on_our_device {
+            self.pin_account(&token).await;
+        }
         let Some(item) = state.get("item").filter(|v| v.is_object()) else {
             return Ok(None); // playing an ad / local file with no track object
         };
@@ -835,7 +963,7 @@ mod tests {
                     let body = if first.starts_with("POST /api/token") {
                         r#"{"access_token":"tok-123","expires_in":3600}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player/devices") {
-                        r#"{"devices":[{"id":"dev-1","name":"Ambient"},{"id":"other","name":"Phone"}]}"#.to_string()
+                        r#"{"devices":[{"id":"dev-1","name":"Spotify Home"},{"id":"other","name":"Phone"}]}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player/queue") {
                         r#"{"queue":[{"uri":"spotify:track:letdown","name":"Let Down","artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/let-down.jpg"}]}}]}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player ")
@@ -869,7 +997,8 @@ mod tests {
     #[tokio::test]
     async fn play_query_searches_then_starts_on_the_named_device() {
         let (base, seen) = spawn_fake_spotify().await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
 
         let msg = api
             .command(SpotifyCommand::Play {
@@ -907,7 +1036,8 @@ mod tests {
     #[tokio::test]
     async fn volume_is_clamped_and_targets_the_device() {
         let (base, seen) = spawn_fake_spotify().await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
         let msg = api
             .command(SpotifyCommand::SetVolume { percent: 250 })
             .await
@@ -923,7 +1053,8 @@ mod tests {
     async fn device_id_is_cached_across_commands() {
         // A volume drag is a burst of commands: only the first looks the device up.
         let (base, seen) = spawn_fake_spotify().await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
         for pct in [10, 20, 30] {
             api.command(SpotifyCommand::SetVolume { percent: pct })
                 .await
@@ -946,7 +1077,8 @@ mod tests {
     #[tokio::test]
     async fn access_token_is_cached_across_commands() {
         let (base, seen) = spawn_fake_spotify().await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
         api.command(SpotifyCommand::Pause).await.unwrap();
         api.command(SpotifyCommand::Next).await.unwrap();
         let token_calls = seen
@@ -971,7 +1103,8 @@ mod tests {
     #[tokio::test]
     async fn skip_to_with_no_offsetable_context_skips_index_plus_one_times() {
         let (base, seen) = spawn_fake_spotify().await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
         let msg = api
             .command(SpotifyCommand::SkipTo { index: 0 })
             .await
@@ -990,7 +1123,8 @@ mod tests {
     #[tokio::test]
     async fn skip_to_in_a_playlist_jumps_with_one_offset_play() {
         let (base, seen) = spawn_fake_spotify_with(PLAYLIST_STATE, false).await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
         let msg = api
             .command(SpotifyCommand::SkipTo { index: 0 })
             .await
@@ -1012,7 +1146,8 @@ mod tests {
     async fn skip_to_falls_back_to_skipping_when_the_offset_play_fails() {
         // e.g. a user-queued track that isn't part of the playlist.
         let (base, seen) = spawn_fake_spotify_with(PLAYLIST_STATE, true).await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
         api.command(SpotifyCommand::SkipTo { index: 0 })
             .await
             .unwrap();
@@ -1039,7 +1174,8 @@ mod tests {
     #[tokio::test]
     async fn skip_to_past_the_queue_end_errors_without_skipping() {
         let (base, seen) = spawn_fake_spotify().await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
         // The fake queue holds one track; a stale tap on a later row must not skip.
         let err = api
             .command(SpotifyCommand::SkipTo { index: 4 })
@@ -1055,7 +1191,8 @@ mod tests {
     #[tokio::test]
     async fn now_playing_reads_track_and_queue() {
         let (base, seen) = spawn_fake_spotify().await;
-        let api = SpotifyWebApi::with_bases("cid", "secret", "refresh", "Ambient", &base, &base);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
 
         let np = api
             .now_playing()
@@ -1081,5 +1218,139 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.starts_with("GET /v1/me/player/queue")));
+    }
+
+    /// A fake Spotify whose device list is empty until `missing_for` lookups have
+    /// happened (librespot signed in to another account, then reclaimed), and whose
+    /// `/v1/me` is account `me`.
+    async fn spawn_fake_spotify_missing_device(
+        missing_for: usize,
+        device: &str,
+    ) -> (String, StdArc<TokioMutex<Vec<String>>>) {
+        let listed: &'static str = Box::leak(
+            format!(r#"{{"devices":[{{"id":"dev-1","name":"{device}"}}]}}"#).into_boxed_str(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = StdArc::new(TokioMutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let lookups = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let (sink, lookups) = (sink.clone(), lookups.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first = req.lines().next().unwrap_or_default().to_string();
+                    let request_line = first.rsplit_once(' ').map(|(a, _)| a).unwrap_or(&first);
+                    sink.lock().await.push(request_line.to_string());
+                    let body = if first.starts_with("POST /api/token") {
+                        r#"{"access_token":"tok-123","expires_in":3600}"#
+                    } else if first.starts_with("GET /v1/me/player/devices") {
+                        let seen = lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if seen < missing_for {
+                            r#"{"devices":[{"id":"tv","name":"Home Theater"}]}"#
+                        } else {
+                            listed
+                        }
+                    } else if first.starts_with("GET /v1/me ") {
+                        r#"{"id":"me"}"#
+                    } else {
+                        ""
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// A librespot cache signed in as `cached`, with (when `pinned`) the Core's login
+    /// `me` pinned. Device name unique to this process so the restart's `pkill` can't
+    /// match a real librespot.
+    fn librespot_fixture(
+        name: &str,
+        cached: &str,
+        pinned: Option<&str>,
+    ) -> StdArc<LibrespotAccount> {
+        let dir =
+            std::env::temp_dir().join(format!("ambient-spotify-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cache")).unwrap();
+        let creds = |u: &str| format!(r#"{{"username":"{u}","auth_type":1,"auth_data":"x"}}"#);
+        std::fs::write(dir.join("cache/credentials.json"), creds(cached)).unwrap();
+        if let Some(p) = pinned {
+            std::fs::write(dir.join("pin.json"), creds(p)).unwrap();
+        }
+        StdArc::new(LibrespotAccount::new(
+            dir.join("cache"),
+            dir.join("pin.json"),
+        ))
+    }
+
+    /// A device name unique to this test process: a reclaim `pkill`s
+    /// `librespot --name <it>`, which must never match the real librespot.
+    fn test_device(name: &str) -> String {
+        format!("Spotify Home {name}-test-{}", std::process::id())
+    }
+
+    fn reclaiming_api(
+        base: &str,
+        device: &str,
+        librespot: StdArc<LibrespotAccount>,
+    ) -> SpotifyWebApi {
+        let mut api = SpotifyWebApi::with_bases("cid", "secret", "refresh", device, base, base)
+            .with_librespot(Some(librespot));
+        api.reclaim_wait = Duration::from_millis(1500);
+        api
+    }
+
+    #[tokio::test]
+    async fn missing_device_is_reclaimed_with_the_pinned_login() {
+        let device = test_device("reclaim");
+        let (base, seen) = spawn_fake_spotify_missing_device(2, &device).await;
+        let librespot = librespot_fixture("reclaim", "someone-else", Some("me"));
+        let api = reclaiming_api(&base, &device, librespot.clone());
+
+        let msg = api.command(SpotifyCommand::Pause).await.unwrap();
+        assert_eq!(msg, "Paused.");
+        // The Core's login was put back into librespot's cache.
+        assert_eq!(librespot.cached_username().as_deref(), Some("me"));
+        let calls = seen.lock().await;
+        assert!(calls
+            .iter()
+            .any(|c| c.starts_with("PUT /v1/me/player/pause?device_id=dev-1")));
+    }
+
+    #[tokio::test]
+    async fn found_device_pins_the_cores_login() {
+        let device = test_device("pin");
+        let (base, _seen) = spawn_fake_spotify_missing_device(0, &device).await;
+        let librespot = librespot_fixture("pin", "me", None);
+        let api = reclaiming_api(&base, &device, librespot.clone());
+
+        api.command(SpotifyCommand::Pause).await.unwrap();
+        assert!(librespot.has_pin());
+    }
+
+    #[tokio::test]
+    async fn missing_device_without_a_pin_asks_to_cast_once() {
+        let device = test_device("nopin");
+        let (base, _seen) = spawn_fake_spotify_missing_device(usize::MAX, &device).await;
+        let librespot = librespot_fixture("nopin", "someone-else", None);
+        let api = reclaiming_api(&base, &device, librespot);
+
+        let err = format!(
+            "{:#}",
+            api.command(SpotifyCommand::Pause).await.unwrap_err()
+        );
+        assert!(err.contains(&format!("pick \"{device}\" once")), "{err}");
     }
 }

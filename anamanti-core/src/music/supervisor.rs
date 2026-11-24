@@ -25,7 +25,7 @@ use super::{apply_client_volume, MpvControl, MusicDucker, SnapcastClient};
 /// Best-effort and fire-and-forget: a non-zero exit (pkill returns 1 when
 /// nothing matched) or a missing `pkill` is not an error. Used to clear stale,
 /// untracked siblings before spawning a fresh one. `pattern` must be specific
-/// enough (e.g. `librespot --name Ambient`) that it cannot match this Core
+/// enough (e.g. `librespot --name Spotify Home`) that it cannot match this Core
 /// process or an unrelated program.
 fn reap_stale(pattern: &str, key: &str) {
     match std::process::Command::new("pkill")

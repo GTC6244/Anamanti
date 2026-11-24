@@ -1365,6 +1365,7 @@ mod tests {
                 places_enabled: true,
                 places_provider: "google".to_string(),
                 radio: None,
+                librespot: None,
                 home_assistant: None,
                 camera: None,
                 music_display: Default::default(),

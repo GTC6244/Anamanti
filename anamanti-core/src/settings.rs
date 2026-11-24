@@ -32,8 +32,8 @@ use crate::llm::{
     LlmBackend,
 };
 use crate::music::{
-    MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, RadioCatalog, RadioPlayer,
-    RoutedSpotify, SpotifyController, SpotifyWebApi,
+    LibrespotAccount, MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, RadioCatalog,
+    RadioPlayer, RoutedSpotify, SpotifyController, SpotifyWebApi,
 };
 
 /// Which implementation drives the local/cloud LLM backends: the hand-rolled HTTP
@@ -442,7 +442,7 @@ pub struct SpotifyConfig {
     /// Long-lived refresh token minted by consent. `None` = not linked.
     #[serde(default)]
     pub refresh_token: Option<String>,
-    /// librespot Connect device to target (default `"Ambient"` when unset).
+    /// librespot Connect device to target (default `"Spotify Home"` when unset).
     #[serde(default)]
     pub device_name: Option<String>,
     /// OAuth **redirect URL** the consent flow listens on and sends to Spotify. `None`/
@@ -466,13 +466,13 @@ impl SpotifyConfig {
         self.configured() && is_set(&self.refresh_token)
     }
 
-    /// The device name to target, defaulting to `"Ambient"` (matches librespot).
+    /// The device name to target, defaulting to `"Spotify Home"` (matches librespot).
     pub fn device_label(&self) -> String {
         self.device_name
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or("Ambient")
+            .unwrap_or("Spotify Home")
             .to_string()
     }
 
@@ -490,15 +490,27 @@ impl SpotifyConfig {
     /// Build the live controller when fully linked, else `None` (so the
     /// `spotify_control` tool simply isn't advertised).
     pub fn controller(&self) -> Option<Arc<dyn SpotifyController>> {
+        self.controller_with(None)
+    }
+
+    /// [`Self::controller`] that can also take the librespot device back for the Core's
+    /// account when it goes missing ([`LibrespotAccount`]).
+    pub fn controller_with(
+        &self,
+        librespot: Option<Arc<LibrespotAccount>>,
+    ) -> Option<Arc<dyn SpotifyController>> {
         if !self.linked() {
             return None;
         }
-        Some(Arc::new(SpotifyWebApi::new(
-            self.client_id.clone().unwrap_or_default(),
-            self.client_secret.clone().unwrap_or_default(),
-            self.refresh_token.clone().unwrap_or_default(),
-            self.device_label(),
-        )))
+        Some(Arc::new(
+            SpotifyWebApi::new(
+                self.client_id.clone().unwrap_or_default(),
+                self.client_secret.clone().unwrap_or_default(),
+                self.refresh_token.clone().unwrap_or_default(),
+                self.device_label(),
+            )
+            .with_librespot(librespot),
+        ))
     }
 }
 
@@ -1384,6 +1396,10 @@ pub struct LlmFactory {
     /// [`SharedSettings::apply_radio`]. Also wraps the Spotify controller
     /// ([`RoutedSpotify`]) so the two sources hand off cleanly.
     pub radio: Option<Arc<RadioPlayer>>,
+    /// librespot's credentials cache, so the Spotify controller can take the Connect
+    /// device back for the Core's account ([`LibrespotAccount`]); `None` when snapserver
+    /// doesn't own librespot. Built once at boot, like `radio`.
+    pub librespot: Option<Arc<LibrespotAccount>>,
     /// The Home Assistant hub (`plans/HomeAssistantPlan.md`) for the `home_control` tool
     /// and the pipeline's fast path, or `None` when HA isn't configured. Built once at
     /// boot (like `radio`) so its cached device catalog survives LLM rebuilds.
@@ -1410,10 +1426,13 @@ impl LlmFactory {
         let mut f = self.clone();
         f.anthropic_api_key = non_blank(&s.anthropic_api_key);
         f.openai_api_key = non_blank(&s.openai_api_key);
-        f.spotify = s.spotify.controller().map(|c| match &f.radio {
-            Some(radio) => RoutedSpotify::wrap(c, radio.clone()),
-            None => c,
-        });
+        f.spotify = s
+            .spotify
+            .controller_with(f.librespot.clone())
+            .map(|c| match &f.radio {
+                Some(radio) => RoutedSpotify::wrap(c, radio.clone()),
+                None => c,
+            });
         f.cadora = s.cadora.controller();
         // The household hub is shared, so it is pointed at the live links in place.
         if let Some(hub) = &f.household_apps {
@@ -2529,6 +2548,7 @@ impl SharedSettings {
             places_enabled: true,
             places_provider: "google".to_string(),
             radio: None,
+            librespot: None,
             home_assistant: None,
             camera: None,
             music_display: Default::default(),
@@ -2848,6 +2868,11 @@ impl SharedSettings {
     /// The shared radio player, or `None` when music routing / the mpv IPC is off.
     pub fn radio_player(&self) -> Option<Arc<RadioPlayer>> {
         self.factory.radio.clone()
+    }
+
+    /// librespot's credentials cache (`None` when snapserver doesn't own librespot).
+    pub fn librespot_account(&self) -> Option<Arc<LibrespotAccount>> {
+        self.factory.librespot.clone()
     }
 
     /// Replace the whole station catalog (a full-record save from the config page) and
@@ -3373,6 +3398,7 @@ mod tests {
             places_enabled: true,
             places_provider: "google".to_string(),
             radio: None,
+            librespot: None,
             home_assistant: None,
             camera: None,
             music_display: Default::default(),
@@ -4244,7 +4270,7 @@ mod tests {
     fn spotify_config_controller_only_builds_when_linked() {
         let mut c = SpotifyConfig::default();
         assert!(!c.configured() && !c.linked() && c.controller().is_none());
-        assert_eq!(c.device_label(), "Ambient"); // default device name
+        assert_eq!(c.device_label(), "Spotify Home"); // default device name
         c.client_id = Some("cid".into());
         c.client_secret = Some("sec".into());
         assert!(c.configured() && !c.linked() && c.controller().is_none());
