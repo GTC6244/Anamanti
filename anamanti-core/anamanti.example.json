@@ -111,7 +111,7 @@
     "run_dir": "/opt/homebrew/var/run/ambient",
     "log_dir": "/opt/homebrew/var/log",
     "conf": "/opt/homebrew/etc/snapserver.conf",
-    "spotify_device_name": "Spotify Home",
+    "spotify_device_name": "Home Speakers",
     "autostart": true,
     "players_in_snapserver": true,
     "nowplaying_refresh_secs": 5
@@ -156,7 +156,7 @@
     "client_id": null,
     "client_secret": null,
     "refresh_token": null,
-    "device_name": "Spotify Home",
+    "device_name": "Home Speakers",
     "redirect_url": "http://127.0.0.1:8888/callback"
   },
 

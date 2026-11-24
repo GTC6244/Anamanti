@@ -4,7 +4,7 @@
 //! This is control-only, exactly like the rest of `crate::music`: it never
 //! touches audio PCM. The music itself is produced by the **librespot** sibling
 //! process (the Spotify Connect device named by `music.spotify_device_name`,
-//! default `"Spotify Home"`) whose PCM Snapcast routes to the speakers. Here we only
+//! default `"Home Speakers"`) whose PCM Snapcast routes to the speakers. Here we only
 //! issue Web API calls — search, start/resume, pause, skip, queue, volume —
 //! **targeting that librespot device** so a spoken "play some Radiohead" turns
 //! into music on the house speakers.
@@ -219,6 +219,32 @@ const SPOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
 /// `User-Agent` component label for Spotify requests.
 const COMPONENT: &str = "spotify";
 
+/// Send a Spotify request within [`SPOTIFY_TIMEOUT`]. A non-2xx carries Spotify's own
+/// error message ([`crate::http::send_ok_with_reason`]): a bare "403 Forbidden" is
+/// undiagnosable, and Spotify uses it for everything from "Premium required" to an
+/// unregistered development-mode user.
+async fn spotify_send(req: reqwest::RequestBuilder, what: &str) -> Result<reqwest::Response> {
+    crate::http::send_ok_with_reason(req, SPOTIFY_TIMEOUT, what).await
+}
+
+/// [`spotify_send`], then decode the body as JSON.
+async fn spotify_json(req: reqwest::RequestBuilder, what: &str) -> Result<Value> {
+    spotify_send(req, what)
+        .await?
+        .json()
+        .await
+        .map_err(|e| crate::http::redacted(format!("parsing the {what} response"), e))
+}
+
+/// [`spotify_send`], then read the body as text.
+async fn spotify_text(req: reqwest::RequestBuilder, what: &str) -> Result<String> {
+    spotify_send(req, what)
+        .await?
+        .text()
+        .await
+        .map_err(|e| crate::http::redacted(format!("reading the {what} response"), e))
+}
+
 /// Live Spotify Web API implementation of [`SpotifyController`].
 ///
 /// Holds long-lived credentials (client id/secret + refresh token) and caches a
@@ -333,14 +359,13 @@ impl SpotifyWebApi {
                 return Ok(tok.clone());
             }
         }
-        let resp: Value = crate::http::send_json(
+        let resp: Value = spotify_json(
             crate::http::post(format!("{}/api/token", self.accounts_base), COMPONENT)
                 .basic_auth(&self.client_id, Some(&self.client_secret))
                 .form(&[
                     ("grant_type", "refresh_token"),
                     ("refresh_token", self.refresh_token.as_str()),
                 ]),
-            SPOTIFY_TIMEOUT,
             "Spotify token endpoint (check client id/secret/refresh token)",
         )
         .await?;
@@ -438,9 +463,8 @@ impl SpotifyWebApi {
         if let Some(id) = cached.as_ref() {
             return Ok(id.clone());
         }
-        let me: Value = crate::http::send_json(
+        let me: Value = spotify_json(
             crate::http::get(format!("{}/v1/me", self.api_base), COMPONENT).bearer_auth(token),
-            SPOTIFY_TIMEOUT,
             "Spotify profile",
         )
         .await?;
@@ -456,10 +480,9 @@ impl SpotifyWebApi {
     /// Look the target Connect device up by name (case-insensitive) in the account's
     /// device list; `None` when it isn't listed.
     async fn find_device(&self, token: &str) -> Result<Option<String>> {
-        let resp: Value = crate::http::send_json(
+        let resp: Value = spotify_json(
             crate::http::get(format!("{}/v1/me/player/devices", self.api_base), COMPONENT)
                 .bearer_auth(token),
-            SPOTIFY_TIMEOUT,
             "Spotify devices",
         )
         .await?;
@@ -484,11 +507,10 @@ impl SpotifyWebApi {
 
     /// Search for the top matching entity of `kind`.
     async fn search(&self, token: &str, query: &str, kind: SearchKind) -> Result<SearchHit> {
-        let resp: Value = crate::http::send_json(
+        let resp: Value = spotify_json(
             crate::http::get(format!("{}/v1/search", self.api_base), COMPONENT)
                 .bearer_auth(token)
                 .query(&[("q", query), ("type", kind.as_query()), ("limit", "1")]),
-            SPOTIFY_TIMEOUT,
             "Spotify search",
         )
         .await?;
@@ -538,12 +560,7 @@ impl SpotifyWebApi {
             // Spotify's play/pause endpoints want a JSON content-type even empty.
             req = req.header(reqwest::header::CONTENT_LENGTH, "0");
         }
-        crate::http::send_ok(
-            req,
-            SPOTIFY_TIMEOUT,
-            &format!("Spotify player endpoint {path}"),
-        )
-        .await?;
+        spotify_send(req, &format!("Spotify player endpoint {path}")).await?;
         Ok(())
     }
 
@@ -553,10 +570,9 @@ impl SpotifyWebApi {
     /// take no `device_id`.
     async fn player_get(&self, token: &str, path: &str) -> Result<Option<Value>> {
         let what = format!("Spotify player read {path}");
-        let body = crate::http::send_text(
+        let body = spotify_text(
             crate::http::get(format!("{}/v1/me/player{path}", self.api_base), COMPONENT)
                 .bearer_auth(token),
-            SPOTIFY_TIMEOUT,
             &what,
         )
         .await?;
@@ -963,7 +979,7 @@ mod tests {
                     let body = if first.starts_with("POST /api/token") {
                         r#"{"access_token":"tok-123","expires_in":3600}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player/devices") {
-                        r#"{"devices":[{"id":"dev-1","name":"Spotify Home"},{"id":"other","name":"Phone"}]}"#.to_string()
+                        r#"{"devices":[{"id":"dev-1","name":"Home Speakers"},{"id":"other","name":"Phone"}]}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player/queue") {
                         r#"{"queue":[{"uri":"spotify:track:letdown","name":"Let Down","artists":[{"name":"Radiohead"}],"album":{"name":"OK Computer","images":[{"url":"http://img/let-down.jpg"}]}}]}"#.to_string()
                     } else if first.starts_with("GET /v1/me/player ")
@@ -998,7 +1014,7 @@ mod tests {
     async fn play_query_searches_then_starts_on_the_named_device() {
         let (base, seen) = spawn_fake_spotify().await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
 
         let msg = api
             .command(SpotifyCommand::Play {
@@ -1034,10 +1050,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rejected_call_reports_spotifys_reason() {
+        // 2026-11-24: every call 403'd for hours and the log said only "403 Forbidden".
+        let (base, server) = crate::http::test_support::serve_statuses(vec![
+            (
+                "200 OK",
+                r#"{"access_token":"tok-123","expires_in":3600}"#.into(),
+            ),
+            (
+                "403 Forbidden",
+                r#"{"error":{"status":403,"message":"Check settings on developer.spotify.com/dashboard, the user may not be registered."}}"#.into(),
+            ),
+        ]);
+        let api =
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
+        let err = format!(
+            "{:#}",
+            api.command(SpotifyCommand::Pause).await.unwrap_err()
+        );
+        assert!(err.contains("Spotify devices"), "{err}");
+        assert!(err.contains("403 Forbidden"), "{err}");
+        assert!(err.contains("the user may not be registered"), "{err}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn volume_is_clamped_and_targets_the_device() {
         let (base, seen) = spawn_fake_spotify().await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
         let msg = api
             .command(SpotifyCommand::SetVolume { percent: 250 })
             .await
@@ -1054,7 +1095,7 @@ mod tests {
         // A volume drag is a burst of commands: only the first looks the device up.
         let (base, seen) = spawn_fake_spotify().await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
         for pct in [10, 20, 30] {
             api.command(SpotifyCommand::SetVolume { percent: pct })
                 .await
@@ -1078,7 +1119,7 @@ mod tests {
     async fn access_token_is_cached_across_commands() {
         let (base, seen) = spawn_fake_spotify().await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
         api.command(SpotifyCommand::Pause).await.unwrap();
         api.command(SpotifyCommand::Next).await.unwrap();
         let token_calls = seen
@@ -1104,7 +1145,7 @@ mod tests {
     async fn skip_to_with_no_offsetable_context_skips_index_plus_one_times() {
         let (base, seen) = spawn_fake_spotify().await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
         let msg = api
             .command(SpotifyCommand::SkipTo { index: 0 })
             .await
@@ -1124,7 +1165,7 @@ mod tests {
     async fn skip_to_in_a_playlist_jumps_with_one_offset_play() {
         let (base, seen) = spawn_fake_spotify_with(PLAYLIST_STATE, false).await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
         let msg = api
             .command(SpotifyCommand::SkipTo { index: 0 })
             .await
@@ -1147,7 +1188,7 @@ mod tests {
         // e.g. a user-queued track that isn't part of the playlist.
         let (base, seen) = spawn_fake_spotify_with(PLAYLIST_STATE, true).await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
         api.command(SpotifyCommand::SkipTo { index: 0 })
             .await
             .unwrap();
@@ -1175,7 +1216,7 @@ mod tests {
     async fn skip_to_past_the_queue_end_errors_without_skipping() {
         let (base, seen) = spawn_fake_spotify().await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
         // The fake queue holds one track; a stale tap on a later row must not skip.
         let err = api
             .command(SpotifyCommand::SkipTo { index: 4 })
@@ -1192,7 +1233,7 @@ mod tests {
     async fn now_playing_reads_track_and_queue() {
         let (base, seen) = spawn_fake_spotify().await;
         let api =
-            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Spotify Home", &base, &base);
+            SpotifyWebApi::with_bases("cid", "secret", "refresh", "Home Speakers", &base, &base);
 
         let np = api
             .now_playing()
@@ -1298,7 +1339,7 @@ mod tests {
     /// A device name unique to this test process: a reclaim `pkill`s
     /// `librespot --name <it>`, which must never match the real librespot.
     fn test_device(name: &str) -> String {
-        format!("Spotify Home {name}-test-{}", std::process::id())
+        format!("Home Speakers {name}-test-{}", std::process::id())
     }
 
     fn reclaiming_api(

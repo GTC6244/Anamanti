@@ -119,6 +119,62 @@ pub async fn send_ok(req: RequestBuilder, timeout: Duration, what: &str) -> Resu
         .map_err(|e| redacted(format!("{what} returned an error status"), e))
 }
 
+/// [`send_ok`] that also says *why*: on a non-2xx it reads the error body and appends the
+/// provider's own message (`"… (403 Forbidden): Player command failed: …"`), so a
+/// rejection is diagnosable from the log. Opt-in, for providers whose error bodies are
+/// known not to echo credentials (Spotify); the appended text is still truncated to
+/// [`REASON_MAX_CHARS`] and run through [`redact_secrets`].
+pub async fn send_ok_with_reason(
+    req: RequestBuilder,
+    timeout: Duration,
+    what: &str,
+) -> Result<Response> {
+    let resp = send(req, timeout, what).await?;
+    let status = match resp.error_for_status_ref() {
+        Ok(_) => return Ok(resp),
+        Err(e) => redacted(format!("{what} returned an error status"), e),
+    };
+    let reason = resp
+        .text()
+        .await
+        .map(|body| error_reason(&body))
+        .unwrap_or_default();
+    if reason.is_empty() {
+        return Err(status);
+    }
+    Err(anyhow::anyhow!(redact_secrets(&format!(
+        "{status}: {reason}"
+    ))))
+}
+
+/// Longest provider error message [`send_ok_with_reason`] appends.
+const REASON_MAX_CHARS: usize = 200;
+
+/// The human-readable message in an error body: a JSON API's `error.message` (Spotify
+/// Web API), `error_description` / `error` (OAuth token endpoints) or `message`, else
+/// the raw text. Whitespace collapsed, capped at [`REASON_MAX_CHARS`]; empty for an
+/// empty body.
+fn error_reason(body: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let from_json = parsed.as_ref().and_then(|v| {
+        [
+            v.pointer("/error/message"),
+            v.get("error_description"),
+            v.get("error"),
+            v.get("message"),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|m| m.as_str().filter(|s| !s.trim().is_empty()))
+    });
+    let text = from_json.unwrap_or(body);
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match collapsed.char_indices().nth(REASON_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &collapsed[..cut]),
+        None => collapsed,
+    }
+}
+
 /// [`send_ok`], then decode the body as JSON into `T` — a typed response struct, or
 /// [`serde_json::Value`] for free-form bodies. A decode failure becomes
 /// `"parsing the {what} response: …"`.
@@ -289,6 +345,56 @@ mod tests {
             assert!(!text.contains(&base), "{text}");
         }
         assert!(format!("{err}").contains("401"), "{err}");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn error_reason_prefers_the_api_message() {
+        let spotify =
+            r#"{"error":{"status":403,"message":"Player command failed: Restriction violated"}}"#;
+        assert_eq!(
+            error_reason(spotify),
+            "Player command failed: Restriction violated"
+        );
+        let oauth = r#"{"error":"invalid_grant","error_description":"Refresh token revoked"}"#;
+        assert_eq!(error_reason(oauth), "Refresh token revoked");
+        assert_eq!(
+            error_reason(r#"{"error":"invalid_client"}"#),
+            "invalid_client"
+        );
+        assert_eq!(error_reason("  plain\n text  "), "plain text");
+        assert_eq!(error_reason(""), "");
+        let long = "é".repeat(REASON_MAX_CHARS + 50);
+        assert_eq!(error_reason(&long).chars().count(), REASON_MAX_CHARS + 1);
+    }
+
+    #[tokio::test]
+    async fn status_error_with_reason_appends_the_body_message() {
+        let (base, server) = serve_statuses(vec![
+            (
+                "403 Forbidden",
+                r#"{"error":{"status":403,"message":"bad key=TOPSECRET"}}"#.into(),
+            ),
+            ("204 No Content", String::new()),
+        ]);
+        let err = send_ok_with_reason(
+            get(format!("{base}/x?key=TOPSECRET"), "test"),
+            Duration::from_secs(5),
+            "Test API",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("403 Forbidden"), "{text}");
+        assert!(text.contains("bad key=REDACTED"), "{text}");
+        assert!(
+            !text.contains("TOPSECRET") && !text.contains(&base),
+            "{text}"
+        );
+        // A 2xx passes straight through.
+        send_ok_with_reason(get(&base, "test"), Duration::from_secs(5), "Test API")
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 

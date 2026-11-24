@@ -569,7 +569,7 @@ pub struct MusicConfig {
     /// snapserver config path (`music.conf`).
     pub snapserver_conf: PathBuf,
     /// librespot Spotify Connect device name (`music.spotify_device_name`,
-    /// default `Spotify Home`; the shared instance MusicPlan.md's tool targets).
+    /// default `Home Speakers`; the shared instance MusicPlan.md's tool targets).
     pub spotify_device_name: String,
     /// Auto-start the managed processes (snapserver/librespot/mpv) when the
     /// orchestrator boots, and stop them on shutdown (`music.autostart`,
@@ -609,7 +609,7 @@ impl Default for MusicConfig {
             run_dir: PathBuf::from("/opt/homebrew/var/run/ambient"),
             log_dir: PathBuf::from("/opt/homebrew/var/log"),
             snapserver_conf: PathBuf::from("/opt/homebrew/etc/snapserver.conf"),
-            spotify_device_name: "Spotify Home".to_string(),
+            spotify_device_name: "Home Speakers".to_string(),
             autostart: true,
             players_in_snapserver: true,
             nowplaying_refresh_secs: 5,

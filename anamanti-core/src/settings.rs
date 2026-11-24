@@ -442,7 +442,7 @@ pub struct SpotifyConfig {
     /// Long-lived refresh token minted by consent. `None` = not linked.
     #[serde(default)]
     pub refresh_token: Option<String>,
-    /// librespot Connect device to target (default `"Spotify Home"` when unset).
+    /// librespot Connect device to target (default `"Home Speakers"` when unset).
     #[serde(default)]
     pub device_name: Option<String>,
     /// OAuth **redirect URL** the consent flow listens on and sends to Spotify. `None`/
@@ -466,13 +466,13 @@ impl SpotifyConfig {
         self.configured() && is_set(&self.refresh_token)
     }
 
-    /// The device name to target, defaulting to `"Spotify Home"` (matches librespot).
+    /// The device name to target, defaulting to `"Home Speakers"` (matches librespot).
     pub fn device_label(&self) -> String {
         self.device_name
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or("Spotify Home")
+            .unwrap_or("Home Speakers")
             .to_string()
     }
 
@@ -4270,7 +4270,7 @@ mod tests {
     fn spotify_config_controller_only_builds_when_linked() {
         let mut c = SpotifyConfig::default();
         assert!(!c.configured() && !c.linked() && c.controller().is_none());
-        assert_eq!(c.device_label(), "Spotify Home"); // default device name
+        assert_eq!(c.device_label(), "Home Speakers"); // default device name
         c.client_id = Some("cid".into());
         c.client_secret = Some("sec".into());
         assert!(c.configured() && !c.linked() && c.controller().is_none());

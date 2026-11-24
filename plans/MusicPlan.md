@@ -55,7 +55,7 @@ If a task seems to require changing one of these, stop and confirm first.
   "play X" ──▶ Anamanti Core (LLM + spotify_control tool) ──Web API──▶ Spotify
                         │ targets device_id                              │
                         ▼                                                ▼
-                 librespot (Connect device "Spotify Home") ──raw PCM──▶ snapfifo
+                 librespot (Connect device "Home Speakers") ──raw PCM──▶ snapfifo
                                                                          │
                                                               snapserver (sync hub)
                                                                │        │        │
@@ -72,7 +72,7 @@ call → Web API starts playback on the librespot device → librespot PCM → s
 (ducking the music briefly if enabled).
 
 **Decoupling:** the two halves are independent. librespot + snapserver can land
-and be tested (queue a track from a phone onto the "Spotify Home" Connect device)
+and be tested (queue a track from a phone onto the "Home Speakers" Connect device)
 *before* the voice tool exists. The tool only adds hands-free control on top.
 
 ---
@@ -106,7 +106,7 @@ it is unit-tested with a fake, no network).
   then issue playback — a `track` plays as `uris`, an artist/album/playlist as a
   `context_uri`. `play` with no `query` resumes.
 - **Target device:** resolved by name from `spotify.device_name` (default
-  `"Spotify Home"`) via `GET /v1/me/player/devices`; every control call passes that
+  `"Home Speakers"`) via `GET /v1/me/player/devices`; every control call passes that
   `device_id`. The access token is refreshed from the refresh token and cached
   until ~30 s before expiry.
 - **Errors surface as speech:** device not present ("is it powered on?"), nothing
@@ -129,7 +129,7 @@ parsed by `config.rs` → `FileSpotify` and seeded into `settings::SpotifyConfig
   "client_id": "…",                                 // Spotify developer app (Premium account)
   "client_secret": "…",
   "refresh_token": "…",                             // minted by the one-time consent (§8)
-  "device_name": "Spotify Home",                         // librespot Connect device to target (shared with librespot)
+  "device_name": "Home Speakers",                         // librespot Connect device to target (shared with librespot)
   "redirect_url": "http://127.0.0.1:8888/callback"  // OAuth callback; must match a Redirect URI registered in the Spotify app
 }
 ```
@@ -160,7 +160,7 @@ who started playback — no extra work here.
 ## 5. Phases / status
 
 1. **P1 — librespot + Snapcast bring-up.** ✅ **Done (PR 38).** librespot Connect
-   device "Spotify Home" → snapfifo → snapserver, supervised by the Anamanti Core.
+   device "Home Speakers" → snapfifo → snapserver, supervised by the Anamanti Core.
 2. **P2 — OAuth consent + token.** ✅ **Done (config-page UI + manual runbook).**
    The **Music tab** of the config page has a "Connect Spotify" flow
    (`spotify_consent.rs`, loopback Authorization-Code + PKCE) that stores the
@@ -219,7 +219,7 @@ who started playback — no extra work here.
 
 - **One librespot instance, shared.** `spotify_control` targets the device named
   by `spotify.device_name`, which **must equal** the `--name` PR 38's
-  supervisor launches librespot with (default `"Spotify Home"` on both — keep them in
+  supervisor launches librespot with (default `"Home Speakers"` on both — keep them in
   sync if either changes).
 - **Token refresh lifetime / launchd:** the client refreshes the access token
   from the stored refresh token and caches it; confirm this coexists with the
@@ -283,13 +283,13 @@ environment variable.
      "client_id": "…",
      "client_secret": "…",
      "refresh_token": "…",                             // from step 3
-     "device_name": "Spotify Home",                         // defaults to "Spotify Home" (matches librespot)
+     "device_name": "Home Speakers",                         // defaults to "Home Speakers" (matches librespot)
      "redirect_url": "http://127.0.0.1:8888/callback"  // must match step 1's Redirect URI
    }
    ```
 
    Restart the Anamanti Core. On boot it logs `spotify_control: enabled, targeting
-   Connect device "Spotify Home"`, and the tool is advertised to the rig LLM engine.
+   Connect device "Home Speakers"`, and the tool is advertised to the rig LLM engine.
 
 5. **Verify by voice:** with `ANAMANTI_MUSIC=on` and librespot running, say
    *"play some Radiohead"* → music on the speakers + a spoken confirmation.
