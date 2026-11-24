@@ -40,7 +40,7 @@ cp "$CONF_SRC" "$CONF_DST"
 cat <<EOF
 
 Done. Next (manual — see deploy/snapcast/README.md):
-  1. Start snapserver (it launches librespot "Spotify Home" + the idle mpv itself):
+  1. Start snapserver (it launches librespot "Home Speakers" + the idle mpv itself):
        snapserver -c "$CONF_DST"
      or let the Anamanti Core start it ("music": {"enabled": true, "autostart": true}).
   2. Point a snapclient at this Mac (Linux unit in deploy/snapcast/linux/).

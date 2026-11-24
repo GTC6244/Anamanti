@@ -371,7 +371,7 @@ ui.hydrate();
     np = j.now_playing || null;
     if (!np) {
       const why = j.linked
-        ? 'Nothing playing. Start a station below, ask by voice, or pick <b>Spotify Home</b> in the Spotify app.'
+        ? 'Nothing playing. Start a station below, ask by voice, or pick <b>Home Speakers</b> in the Spotify app.'
         : 'Nothing playing. Start a station below' + (j.radio ? '' : ' (needs the mpv player)') + ', or <a href="/integrations#spotify">link Spotify</a>.';
       box.innerHTML = '<div class="dv-np-empty">' + why + '</div>';
       return;

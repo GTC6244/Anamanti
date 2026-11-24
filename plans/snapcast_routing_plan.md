@@ -43,7 +43,7 @@ If a task seems to require changing one of these, stop and confirm first.
                  │   └─ url_play tool ──IPC──▶ url-player                       │
                  │            control only — NEVER PCM                         │
                  │                                                             │
-                 │  librespot ("Spotify Home")      ──PCM──▶ /tmp/snap-spotify ┐    │
+                 │  librespot ("Home Speakers")      ──PCM──▶ /tmp/snap-spotify ┐    │
                  │  url-player (mpv/ffmpeg)     ──PCM──▶ /tmp/snap-web     ┤    │
                  │                                                        ▼    │
                  │                                        snapserver (2 streams,│
@@ -61,7 +61,7 @@ If a task seems to require changing one of these, stop and confirm first.
 ```
 
 **Decoupling (matches MusicPlan.md L58–60):** the routing layer can land and be
-tested — queue a track from a phone onto the "Spotify Home" Connect device and hear it
+tested — queue a track from a phone onto the "Home Speakers" Connect device and hear it
 in sync across speakers — **before** any Anamanti Core tool exists. The tools only
 add hands-free control on top.
 
@@ -89,7 +89,7 @@ Two stream sources declared in `snapserver.conf`, each reading a named fifo the
 source process writes:
 
 ```ini
-# Spotify (librespot) — the SAME "Spotify Home" Connect device MusicPlan.md targets.
+# Spotify (librespot) — the SAME "Home Speakers" Connect device MusicPlan.md targets.
 # Either snapserver's librespot source type (snapserver spawns librespot) OR an
 # external librespot writing the fifo. Prefer the external process so MusicPlan's
 # Web API device_id and this fifo point at one instance (MusicPlan §6 "one
@@ -157,7 +157,7 @@ ANAMANTI_MUSIC_WEB_IPC=/tmp/mpv-web.sock   # mpv IPC socket for url_play
 
 1. **P1 — snapserver + one source on the Mac.** Stand up `snapserver` with the
    Spotify pipe source + a `snapclient` on the Linux main speaker; verify sync by
-   queuing to the "Spotify Home" Connect device from a phone. **Unblocks MusicPlan.md P1.**
+   queuing to the "Home Speakers" Connect device from a phone. **Unblocks MusicPlan.md P1.**
 2. **P2 — multi-room.** Add room snapclients (+ systemd units); verify lockstep
    playback across all speakers. launchd unit for snapserver on the Mac (coexists
    with the Anamanti Core launchd item in `TODO.md §4`).
@@ -194,7 +194,7 @@ ANAMANTI_MUSIC_WEB_IPC=/tmp/mpv-web.sock   # mpv IPC socket for url_play
   from source via snapcast's `client/build_android.sh` (targets
   `arm-linux-androideabi`). So P6 is unblocked when we get to it.
 - **One shared librespot instance** (MusicPlan.md §6): this plan and
-  `spotify_control` must target the same "Spotify Home" device — coordinate naming/launch
+  `spotify_control` must target the same "Home Speakers" device — coordinate naming/launch
   ownership so we don't stand up two.
 - **Ducking lever:** Snapcast **group volume** (this plan's default) vs. Spotify
   Web API volume (MusicPlan). Group volume also covers the web-URL source, so it's
