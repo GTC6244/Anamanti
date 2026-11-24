@@ -7,7 +7,7 @@ Companion source/control plan: `plans/MusicPlan.md` (on the
 
 ```
 Mac (hub)                                                   Speakers
-  snapserver ─┬─ spawns librespot "Ambient" (stdout PCM) ┐
+  snapserver ─┬─ spawns librespot "Spotify Home" (stdout PCM) ┐
               └─ spawns mpv (idle, IPC socket)  (stdout) ┴─▶ snapclients:
   Anamanti Core ──JSON-RPC :1705 (duck/select/volume)          (Linux main, rooms, Echo Show*)
                └─ mpv IPC /tmp/ambient-mpv.sock (radio play/stop/volume)
@@ -40,14 +40,14 @@ below are the manual/launchd equivalents.
 ./setup-mac.sh          # installs snapcast+librespot+mpv, the librespot cache dir, snapserver.conf
 ```
 
-Then start the hub — it launches librespot ("Ambient") and the idle mpv itself:
+Then start the hub — it launches librespot ("Spotify Home") and the idle mpv itself:
 
 ```bash
 snapserver -c /opt/homebrew/etc/snapserver.conf         # the hub + control :1705
 ```
 
 Validate:
-- **Spotify:** open Spotify on a phone on the same LAN → pick the **Ambient** device
+- **Spotify:** open Spotify on a phone on the same LAN → pick the **Spotify Home** device
   → play. You should hear it on the connected snapclients, in sync.
 - **Web:** `echo '{"command":["loadfile","https://stream-url"]}' | socat - /tmp/ambient-mpv.sock`
   (or let the Anamanti Core's future `url_play` tool do it) → audio on the speakers.

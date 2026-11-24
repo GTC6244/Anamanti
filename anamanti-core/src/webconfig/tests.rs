@@ -637,7 +637,7 @@ fn spotify_status_reports_unconfigured_by_default() {
     assert_eq!(v["linked"], false);
     assert_eq!(v["has_refresh_token"], false);
     // The device name defaults to the librespot device name.
-    assert_eq!(v["device_name"], "Ambient");
+    assert_eq!(v["device_name"], "Spotify Home");
 }
 
 #[test]

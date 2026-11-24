@@ -20,12 +20,14 @@
 //! (`TurnEvent::Speaking` → duck, `TurnEvent::Finished` → restore).
 
 pub mod display_style;
+pub mod librespot;
 pub mod nowplaying_service;
 pub mod radio;
 pub mod radio_browser;
 pub mod spotify;
 pub mod supervisor;
 pub use display_style::{MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, PlayRequest};
+pub use librespot::LibrespotAccount;
 pub use nowplaying_service::NowPlayingService;
 pub use radio::{RadioCatalog, RadioPlayer, RadioStation, RoutedSpotify};
 pub use spotify::{

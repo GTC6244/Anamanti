@@ -569,7 +569,7 @@ pub struct MusicConfig {
     /// snapserver config path (`music.conf`).
     pub snapserver_conf: PathBuf,
     /// librespot Spotify Connect device name (`music.spotify_device_name`,
-    /// default `Ambient`; the shared instance MusicPlan.md's tool targets).
+    /// default `Spotify Home`; the shared instance MusicPlan.md's tool targets).
     pub spotify_device_name: String,
     /// Auto-start the managed processes (snapserver/librespot/mpv) when the
     /// orchestrator boots, and stop them on shutdown (`music.autostart`,
@@ -609,7 +609,7 @@ impl Default for MusicConfig {
             run_dir: PathBuf::from("/opt/homebrew/var/run/ambient"),
             log_dir: PathBuf::from("/opt/homebrew/var/log"),
             snapserver_conf: PathBuf::from("/opt/homebrew/etc/snapserver.conf"),
-            spotify_device_name: "Ambient".to_string(),
+            spotify_device_name: "Spotify Home".to_string(),
             autostart: true,
             players_in_snapserver: true,
             nowplaying_refresh_secs: 5,
@@ -2142,7 +2142,22 @@ impl Config {
             // Built once; its catalog is seeded in `shared_settings` and refreshed by
             // `apply_radio`.
             radio: self.radio_player(),
+            librespot: self.librespot_account(),
         }
+    }
+
+    /// librespot's credentials cache plus the Core's pinned copy of its own login
+    /// ([`crate::music::LibrespotAccount`]), so a voice request can take the Spotify
+    /// Connect device back after another household account cast to it. Only when music
+    /// is on and snapserver owns librespot (it respawns the process the Core restarts).
+    pub fn librespot_account(&self) -> Option<Arc<crate::music::LibrespotAccount>> {
+        if !self.music.enabled || !self.music.players_in_snapserver {
+            return None;
+        }
+        Some(Arc::new(crate::music::LibrespotAccount::new(
+            self.music.run_dir.join("librespot-cache"),
+            self.music.run_dir.join("librespot-core-login.json"),
+        )))
     }
 
     /// Build the internet-radio player (`plans/RadioPlan.md`) over the mpv web player +

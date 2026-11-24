@@ -34,8 +34,8 @@ use serde_json::{to_value as json_to_value, Value};
 use tokio::sync::mpsc;
 
 use crate::music::{
-    MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, NowPlaying, RadioPlayer,
-    RoutedSpotify, SpotifyCommand, SpotifyController,
+    LibrespotAccount, MusicDisplayPins, MusicDisplayRouter, MusicDisplayStyle, NowPlaying,
+    RadioPlayer, RoutedSpotify, SpotifyCommand, SpotifyController,
 };
 use crate::notify::{ChannelRegistry, ConnectedDevice};
 use crate::settings::{SharedSettings, SpotifyConfig};
@@ -77,6 +77,9 @@ pub struct NowPlayingService {
     controller: Mutex<Option<(SpotifyConfig, Arc<dyn SpotifyController>)>>,
     /// The internet-radio player, when music routing is on.
     radio: Option<Arc<RadioPlayer>>,
+    /// librespot's credentials cache, so the controller can take the device back for
+    /// the Core's account ([`LibrespotAccount`]).
+    librespot: Option<Arc<LibrespotAccount>>,
     /// The per-display style session (shared with the voice tools and the settings,
     /// which own the one per-Core instance; a bare `new()` gets its own).
     display: Arc<MusicDisplayRouter>,
@@ -96,6 +99,13 @@ impl NowPlayingService {
             radio,
             ..Self::default()
         }
+    }
+
+    /// Let the controller take the librespot device back for the Core's account (from
+    /// [`SharedSettings::librespot_account`]).
+    pub fn with_librespot(mut self, librespot: Option<Arc<LibrespotAccount>>) -> Self {
+        self.librespot = librespot;
+        self
     }
 
     /// Share the per-Core display-style session (from
@@ -224,10 +234,12 @@ impl NowPlayingService {
                 return Some(ctrl.clone());
             }
         }
-        let ctrl = cfg.controller().map(|c| match &self.radio {
-            Some(radio) => RoutedSpotify::wrap(c, radio.clone()),
-            None => c,
-        });
+        let ctrl = cfg
+            .controller_with(self.librespot.clone())
+            .map(|c| match &self.radio {
+                Some(radio) => RoutedSpotify::wrap(c, radio.clone()),
+                None => c,
+            });
         *cached = ctrl.map(|ctrl| (cfg, ctrl));
         cached.as_ref().map(|(_, ctrl)| ctrl.clone())
     }
