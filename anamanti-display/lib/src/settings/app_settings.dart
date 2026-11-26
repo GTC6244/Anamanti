@@ -96,6 +96,7 @@ class AppSettings {
     this.ambientLinked = false,
     this.driveRefreshToken = '',
     this.driveFolderIds = const <String>[],
+    this.driveFoldersLocal = false,
     this.driveLinked = false,
     this.driveClientId = '',
     this.driveClientSecret = '',
@@ -274,6 +275,11 @@ class AppSettings {
   /// Drive folder IDs the slideshow pulls images from (owned or "Shared with me").
   final List<String> driveFolderIds;
 
+  /// True once [driveFolderIds] was chosen on this display (folder picker or the
+  /// manual field). The Core's folder list is then only a default: syncing the
+  /// Drive bundle from the Core keeps this display's own choice.
+  final bool driveFoldersLocal;
+
   /// Whether Google Drive has been linked (a refresh token is held).
   final bool driveLinked;
 
@@ -348,6 +354,7 @@ class AppSettings {
     bool? ambientLinked,
     String? driveRefreshToken,
     List<String>? driveFolderIds,
+    bool? driveFoldersLocal,
     bool? driveLinked,
     String? driveClientId,
     String? driveClientSecret,
@@ -392,6 +399,7 @@ class AppSettings {
       ambientLinked: ambientLinked ?? this.ambientLinked,
       driveRefreshToken: driveRefreshToken ?? this.driveRefreshToken,
       driveFolderIds: driveFolderIds ?? this.driveFolderIds,
+      driveFoldersLocal: driveFoldersLocal ?? this.driveFoldersLocal,
       driveLinked: driveLinked ?? this.driveLinked,
       driveClientId: driveClientId ?? this.driveClientId,
       driveClientSecret: driveClientSecret ?? this.driveClientSecret,
@@ -438,6 +446,7 @@ class AppSettings {
     'ambientLinked': ambientLinked,
     'driveRefreshToken': driveRefreshToken,
     'driveFolderIds': driveFolderIds,
+    'driveFoldersLocal': driveFoldersLocal,
     'driveLinked': driveLinked,
     'driveClientId': driveClientId,
     'driveClientSecret': driveClientSecret,
@@ -588,6 +597,7 @@ class AppSettings {
                 .where((s) => s.isNotEmpty)
                 .toList()
           : const <String>[],
+      driveFoldersLocal: json['driveFoldersLocal'] == true,
       driveLinked: json['driveLinked'] == true,
       driveClientId: json['driveClientId'] is String
           ? json['driveClientId'] as String
@@ -654,6 +664,7 @@ class AppSettings {
       ambientLinked == other.ambientLinked &&
       driveRefreshToken == other.driveRefreshToken &&
       listEquals(driveFolderIds, other.driveFolderIds) &&
+      driveFoldersLocal == other.driveFoldersLocal &&
       driveLinked == other.driveLinked &&
       driveClientId == other.driveClientId &&
       driveClientSecret == other.driveClientSecret &&
@@ -700,6 +711,7 @@ class AppSettings {
     Object.hashAll(driveFolderIds),
     driveLinked,
     Object.hash(
+      driveFoldersLocal,
       driveClientId,
       driveClientSecret,
       listeningRingEnabled,
