@@ -152,7 +152,9 @@ events; nothing here touches audio buffers or sockets directly.
 - `AmbientPhotoSource` — Google Photos via the Ambient API (device-code + QR);
   scope `photosambient.mediaitems`. Backend: `lib/src/slideshow/ambient_photos.dart`.
 - `DrivePhotoSource` — Google Drive folders (interim source), Bearer-auth image
-  listing. Backend: `lib/src/slideshow/drive_photos.dart` (`listDrivePhotos`).
+  listing. Searches each chosen folder and its subfolders up to 3 levels down
+  (bounded: 300 folders, 500 photos, parents batched 40 per query). Backend:
+  `lib/src/slideshow/drive_photos.dart` (`listDrivePhotos`).
 - `photoSourceFromSettings(...)` picks by `PhotoSourceKind` (`local` / `ambient` /
   `drive`), falling back to local when unlinked or tokenless. OAuth client config:
   `lib/src/slideshow/google_oauth_config.dart`.
@@ -663,7 +665,8 @@ and `settings_controller.dart`). Layout and rationale:
   - **Photos** — idle photo source (segmented Gradients · Google Photos · Drive,
     `settings-photo-source`); Google Photos (Ambient API) link via QR
     (`settings-ambient-link`); Google Drive: Sync from Core (`settings-drive-sync`) +
-    Choose folders (`settings-drive-pick`); *Adv*: raw folder-ID field
+    Choose folders (`settings-drive-pick`; afterwards a snackbar reports how many
+    photos were found, or that there are none); *Adv*: raw folder-ID field
     (`settings-drive-folders`). Links apply as soon as they complete. **Change photo
     every** (chips 5s…10m, `settings-slide-interval`, each
     `settings-slide-interval-<secs>`; an off-preset stored value shows the nearest) —

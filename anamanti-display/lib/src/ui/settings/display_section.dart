@@ -713,12 +713,13 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
       ),
     );
     List<DriveFolder> folders;
+    String token;
     final client = AmbientApiClient(
       clientId: s.driveClientId,
       clientSecret: s.driveClientSecret,
     );
     try {
-      final token = (await client.refresh(s.driveRefreshToken)).accessToken;
+      token = (await client.refresh(s.driveRefreshToken)).accessToken;
       folders = await listDriveFolders(accessToken: token);
     } catch (e) {
       if (mounted) Navigator.of(context, rootNavigator: true).pop();
@@ -744,7 +745,23 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
         chosen.toList(),
       ).copyWith(photoSource: PhotoSourceKind.drive),
     );
-    _snack('${chosen.length} folder(s) selected.');
+    _snack('${chosen.length} folder(s) selected. Counting photos…');
+    // Report what the slideshow will find (subfolders included), so a folder that
+    // holds only out-of-reach subfolders doesn't just leave the screen dark.
+    String result;
+    try {
+      final photos = await listDrivePhotos(
+        accessToken: token,
+        folderIds: chosen.toList(),
+      );
+      result = photos.isEmpty
+          ? 'No photos found in those folders or their subfolders '
+                '(up to $kDriveMaxDepth levels down).'
+          : '${photos.length}${photos.length >= kDriveMaxPhotos ? '+' : ''} photo(s) found.';
+    } catch (e) {
+      result = 'Could not count photos: $e';
+    }
+    if (mounted) _snack(result);
   }
 
   void _showQrDialog({
