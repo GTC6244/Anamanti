@@ -1779,6 +1779,13 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
         "200 OK",
         JSON,
     ),
+    (
+        "POST",
+        "/conversations/share",
+        r#"{"id":"r-1","shared":true}"#,
+        "200 OK",
+        JSON,
+    ),
     // … and with a malformed one (only /config answers 400; the page handlers
     // report the parse error in-band with a 200).
     ("POST", "/config", "not json", "400 Bad Request", JSON),
@@ -1818,6 +1825,7 @@ const ROUTE_INVENTORY: &[(&str, &str, &str, &str, &str)] = &[
         "200 OK",
         JSON,
     ),
+    ("POST", "/conversations/share", "not json", "200 OK", JSON),
     // Not routes.
     ("GET", "/nope", "", "404 Not Found", TEXT),
     ("GET", "/household/save", "", "404 Not Found", TEXT),
@@ -2240,7 +2248,8 @@ mod speaker_tagging {
         s.memory().set_turn_override("t-1", &brendon).unwrap();
 
         let dir = SpeakerDirectory::build(&s);
-        let v: Value = serde_json::from_str(&chatlog_json(&s.debug, &dir, 10)).unwrap();
+        let v: Value =
+            serde_json::from_str(&chatlog_json(&s.debug, &dir, &Default::default(), 10)).unwrap();
         let recs = v["records"].as_array().unwrap();
         let by = |t: &str| recs.iter().find(|r| r["turn_id"] == t).unwrap().clone();
 
@@ -2461,6 +2470,57 @@ mod speaker_tagging {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn conversations_share_toggles_a_turn_and_chatlog_reports_it() {
+        let mut d = debug();
+        let mut legacy = record("t-9", "household", None);
+        legacy.id = "r-legacy".into();
+        legacy.turn_id = None; // logged before turn ids: keyed by record id
+        d.chatlog_path = temp_log("share", &[legacy]);
+        let s = speaker_services(settings(), d);
+        let post = |body: Value| -> Value {
+            serde_json::from_str(&super::super::speakers::conversations_share_json(&s, &body))
+                .unwrap()
+        };
+        let shared_flag = || -> Value {
+            let dir = SpeakerDirectory::build(&s);
+            let shared = s.memory().shared_turns().unwrap();
+            let v: Value =
+                serde_json::from_str(&chatlog_json(&s.debug, &dir, &shared, 10)).unwrap();
+            v["records"][0]["shared"].clone()
+        };
+        assert_eq!(shared_flag(), false);
+
+        let r = post(json!({ "id": "r-legacy", "shared": true }));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["shared"], true);
+        assert!(s.memory().shared_turns().unwrap().contains("r-legacy"));
+        assert_eq!(shared_flag(), true);
+        // Who said it is untouched: still the unknown (legacy) speaker.
+        let dir = SpeakerDirectory::build(&s);
+        let v: Value = serde_json::from_str(&chatlog_json(
+            &s.debug,
+            &dir,
+            &s.memory().shared_turns().unwrap(),
+            10,
+        ))
+        .unwrap();
+        assert_eq!(v["records"][0]["speaker"]["kind"], "unknown");
+
+        assert_eq!(
+            post(json!({ "id": "r-legacy", "shared": false }))["ok"],
+            true
+        );
+        assert_eq!(shared_flag(), false);
+        // Bad input is refused in-band.
+        assert_eq!(post(json!({ "shared": true }))["ok"], false);
+        assert_eq!(post(json!({ "id": "r-legacy" }))["ok"], false);
+        assert_eq!(
+            post(json!({ "id": "r-legacy", "shared": "yes" }))["ok"],
+            false
+        );
     }
 
     fn raw_post(path: &str, host: &str, extra: &str, body: &str) -> String {

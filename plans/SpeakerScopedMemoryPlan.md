@@ -18,11 +18,20 @@
 | 1. Scope model + SQLite | **Done**: `memory/scope.rs`, scope + provenance columns, one-time classification, scoped forget, `unassign → unknown`, `turn_attribution_overrides` |
 | 2. Prompt + who-am-I | **Done**: resolution-driven identity line, person/household blocks, identity-fact filter, `MemoryCommand::WhoAmI`, labelled follow-up history (D3), restricted voice naming (D7) |
 | 3. Short-utterance identification | **Done**: `speaker.min_identify_ms` (600) + `short_clip_margin` (0.10), follow-up inheritance |
-| 4. Helix graph | **Done**: `unknown` user, `in_scope` excludes it, ingester attributes only identified turns + honours corrections, marker-guarded `household → unknown` migration, `reattribute_turn` / `retag_memory` |
+| 4. Helix graph | **Done**: `unknown` user, `in_scope` excludes it, ingester attributes only identified turns + honours corrections, marker-guarded `household → unknown` migration, `reattribute_turn` / `retag_memory`; **2026-11-26** admin **Share with household** for a turn (`Turn.shared`, SQLite `shared_turns`, `POST /conversations/share`) — see below |
 | 5. System-1 + tools | **Done**: `DecisionRequest.speaker`; "me" handled via the identity line + `send_phone_message` guidance; `pending_unknown` on the enroll result |
 | 6a/6b. Core UI tagging + review | **Done**: `webconfig/speakers.rs` (`SpeakerDirectory`, `/speakers.json`), `speaker`/`said_by`/scope on `/sqlite.json`, `/chatlog.json`, `/prompts.json`, `/helix.json`, `/overview.json`; For/Said-by columns, the Unknown-speaker review tab with bulk confirm, turn correction, the Speaker block. `POST /memory/attribute`, `/memory/delete`, `/conversations/attribute` update SQLite **and** the live GraphRAG store (`Recall::{retag_memory, forget_memory, reattribute_turn}`). Voice-clip playback stays on the device People screen (there is no web clip endpoint). |
 
 **Where the implementation differs from the text below (deliberately):**
+- **Sharing a turn with the household (added 2026-11-26).** The `household → unknown`
+  migration left everything told *before* voice ID unrecallable (the household's cats were
+  the reported case). Per D5 household is never inferred, so the fix is a deliberate admin
+  action rather than a reclassification: the Conversations page's **Share with household**
+  sets `shared` on the graph `Turn` (recalled for every reader and presented as household
+  knowledge; `speaker_id` is untouched, so un-sharing is exact). It is keyed by chat-log
+  record id (legacy turns have no `turn_id`), persisted in SQLite `shared_turns`, read by
+  the ingester and replayed onto a store when it becomes active. The facts the turn wrote
+  keep their own scopes (use the review queue for those).
 - **No tentative cap for spoken names** (§4a.2, last bullet). Personal writes are keyed by
   voiceprint *id*, not by name, so a spoken-named profile that matches confidently is still
   that person. The real risk, enrollment folding into the wrong profile, is closed by

@@ -330,6 +330,47 @@ hardware:
       resolution + confidence).
 - [ ] Review the unknown-speaker queue on the Memory page after deploying (the legacy
       "The user's name is Brendan" row migrates there).
+- [ ] **Rescue pre-voice-ID household knowledge.** The marker-guarded `household → unknown`
+      graph migration moved every turn logged before voice ID to the unknown speaker
+      (never recalled), so things told back then (e.g. the cats Magoo and Jeans, ~2026-10-01)
+      stopped being recalled. On the Conversations page, open each such turn and use
+      **Share with household** (`POST /conversations/share`, keyed by chat-log record id
+      so turns without a `turn_id` work). The shared flag rides on the graph `Turn`
+      (`shared`), is persisted in SQLite `shared_turns`, and is replayed onto a store
+      whenever it becomes active.
+
+### 5.1 Voice-ID fragmentation (investigated 2026-11-26)
+
+Production had **108 speaker records** for a household of four: Kristina (609 turns),
+Brendon (277), 6 larger unnamed clusters (7–130 turns, likely the kids, who have no
+voiceprint) and **100 clusters with 1–2 samples** (98 with exactly one), still growing by
+~8–40 a week. Since 2026-10-14: identified 56%, tentative 23%, unknown 14%, **new 7%**.
+Root cause: any ≥1.2 s utterance scoring < `new_threshold` (0.40) against every voiceprint
+mints a permanent one-sample cluster (`speaker/registry.rs` `identify_or_create`), and
+nothing merges, trains or expires it. The one-sample clusters look like the low tail of
+known voices plus noise (median best match 0.37 to other voiceprints; near-random to
+each other), with radio, TTS echo and chatter among the transcripts. Two mid-size clusters
+already score 0.59–0.65 against Kristina's centroid. The 2026-11-26 cat conversation:
+turn 2 ("don't you know about the cats?", 2.36 s) scored < 0.40 and became a new cluster.
+
+Admin (no code): on the device People screen, link the Kristina-like clusters and the two
+large unnamed clusters after listening to their clips; enroll Isabelle Adia and Mathew;
+forget the one-sample clusters. Code options, highest impact first:
+- [ ] **Pending pool for unmatched voices**: a < `new_threshold` utterance resolves as
+      unknown and waits; a cluster is created only when 2–3 utterances from different turns
+      agree. Changes the 2026-10-11 decision that unknown voices passively auto-cluster —
+      **ask the owner first**.
+- [ ] Longer floor for creating a cluster (~2.5 s) than for matching.
+- [ ] A follow-up inside an identified turn's history window must not mint a cluster.
+- [ ] Merge suggestions (unnamed centroid ≥ `match_threshold` to a person) + a merge
+      action on the Mac console (today merges are device-only) — see §6c.
+- [ ] Log the best/runner-up score on `new` (today it records 0.00), then calibrate on the
+      stored clips (§5.0).
+- [ ] Don't identify or train on TTS echo / playback audio.
+- [ ] Expire never-matched one-sample clusters after N days (§6c retention).
+- [ ] Check `speaker/features.rs` (Hamming window, 7600 Hz top, no DC removal) against
+      WeSpeaker's Kaldi fbank (Povey, 8000 Hz, DC removal) — a mismatch would depress
+      every score.
 
 ### 6a. Real embedding model (Phase E — the blocker for accuracy)
 

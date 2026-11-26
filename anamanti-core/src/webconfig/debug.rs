@@ -1,6 +1,8 @@
 //! The read-only debug views (chat log, prompts, SQLite, HelixDB) and the one debug
 //! mutation, renaming a GraphRAG entity.
 
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
 use super::speakers::{tag_graph_nodes, SpeakerDirectory};
@@ -26,12 +28,27 @@ pub(super) fn limit_param(target: &str) -> usize {
 }
 
 /// `{ ok, records: [ChatLogRecord…] }` for the newest `limit` turns. Each record
-/// keeps every raw field and adds the resolved `speaker` tag, `speaker_override` and
-/// `memories_tagged` ([`SpeakerDirectory::chatlog_record_json`]).
-pub(super) fn chatlog_json(debug: &DebugSources, dir: &SpeakerDirectory, limit: usize) -> String {
+/// keeps every raw field and adds the resolved `speaker` tag, `speaker_override`,
+/// `memories_tagged` ([`SpeakerDirectory::chatlog_record_json`]) and `shared` (whether
+/// the turn is in `shared`, the record ids shared with the household).
+pub(super) fn chatlog_json(
+    debug: &DebugSources,
+    dir: &SpeakerDirectory,
+    shared: &HashSet<String>,
+    limit: usize,
+) -> String {
     match chatlog::read_tail(&debug.chatlog_path, limit) {
         Ok(records) => {
-            let records: Vec<Value> = records.iter().map(|r| dir.chatlog_record_json(r)).collect();
+            let records: Vec<Value> = records
+                .iter()
+                .map(|r| {
+                    let mut v = dir.chatlog_record_json(r);
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("shared".into(), json!(shared.contains(&r.id)));
+                    }
+                    v
+                })
+                .collect();
             json!({ "ok": true, "records": records }).to_string()
         }
         Err(e) => fail(format!("{e:#}")),

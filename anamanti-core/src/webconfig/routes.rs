@@ -32,8 +32,8 @@ use super::music::{
     spotify_save_json, spotify_status_json,
 };
 use super::speakers::{
-    conversations_attribute_async, memory_attribute_async, memory_delete_async, speakers_json,
-    SpeakerDirectory,
+    conversations_attribute_async, conversations_share_async, memory_attribute_async,
+    memory_delete_async, speakers_json, SpeakerDirectory,
 };
 use super::system::{
     extraction_save_json, extraction_status_json, keys_json, overview_json, system_json,
@@ -501,7 +501,8 @@ pub(super) static ROUTES: &[Route] = &[
         "/chatlog.json",
         Sync(|s, r| {
             let dir = SpeakerDirectory::build(s);
-            Reply::json(chatlog_json(&s.debug, &dir, limit_param(r.target)))
+            let shared = s.memory().shared_turns().unwrap_or_default();
+            Reply::json(chatlog_json(&s.debug, &dir, &shared, limit_param(r.target)))
         }),
     ),
     get(
@@ -558,6 +559,17 @@ pub(super) static ROUTES: &[Route] = &[
             Box::pin(async move {
                 Reply::json(match super::parse_json_body(r.body) {
                     Ok(data) => conversations_attribute_async(s, &data).await,
+                    Err(invalid) => invalid,
+                })
+            })
+        }),
+    ),
+    post(
+        "/conversations/share",
+        Async(|s, r| {
+            Box::pin(async move {
+                Reply::json(match super::parse_json_body(r.body) {
+                    Ok(data) => conversations_share_async(s, &data).await,
                     Err(invalid) => invalid,
                 })
             })

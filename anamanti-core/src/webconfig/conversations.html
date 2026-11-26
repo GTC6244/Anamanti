@@ -295,6 +295,29 @@ async function fixSpeaker(r){
     await load();
   } catch (e) { ui.toast(false, 'Could not re-attribute: ' + errMsg(e)); btn.disabled = false; }
 }
+// "Share with household": recall uses this turn for everyone, whoever said it. The way
+// to rescue things told before voice ID (those turns are the unknown speaker's, never
+// recalled). Keyed by the chat-log record id, so it works for turns without a turn_id.
+function shareBlock(r){
+  if (!r.id) return '';
+  return '<div class="cv-section"><div class="section-label">Household</div><div class="cv-fix">'
+    + (r.shared
+      ? '<span class="chip ok">' + ui.icon('users') + 'Shared with the household</span>'
+        + '<button type="button" class="sm ghost" id="cvShare">Stop sharing</button>'
+      : '<button type="button" class="sm" id="cvShare">' + ui.icon('users') + 'Share with household</button>')
+    + '<span class="hint">' + (r.shared
+      ? 'Everyone\'s recall can use this turn.'
+      : 'Lets everyone\'s recall use this turn — e.g. something told before voice ID. Who said it stays the same.')
+    + '</span></div></div>';
+}
+async function shareTurn(r){
+  const btn = $('cvShare'); btn.disabled = true;
+  try {
+    const j = await ui.req(postJSON('/conversations/share', { id: r.id, shared: !r.shared }));
+    ui.toast(true, j.message || 'Updated.');
+    await load();
+  } catch (e) { ui.toast(false, 'Could not update sharing: ' + errMsg(e)); btn.disabled = false; }
+}
 // Escape the system prompt and highlight the speaker sections that were sent: the
 // identity line ("# Who is speaking"), "# About this person", "# Household facts" and
 // "# Earlier conversations".
@@ -329,6 +352,7 @@ function renderDetail(){
     + (model ? '<span class="chip neutral mono">' + esc(model) + '</span>' : '')
     + loc
     + (path ? '<span class="chip">' + esc(path) + ' path</span>' : '')
+    + (r.shared ? '<span class="chip ok" title="Shared with the household: everyone\'s recall can use this turn">' + ui.icon('users') + 'Shared</span>' : '')
     // Bilingual mode (plans/BilingualPlan.md): the turn's language and how it was decided.
     + (t && t.lang ? '<span class="chip neutral" title="Spoken (and answered) in ' + escAttr(t.lang) + ' — decided by ' + escAttr(t.lang_source || '?') + (t.reply_lang ? '; the reply came back in ' + escAttr(t.reply_lang) : '') + '">' + ui.icon('text') + esc(t.lang) + ' · ' + esc(t.lang_source || '?') + (t.reply_lang ? ' → ' + esc(t.reply_lang) : '') + '</span>' : '')
     + (t && t.total_ms != null ? '<span class="chip tnum ' + latClass(t.total_ms) + '">' + ui.icon('clock') + esc(ui.fmtMs(t.total_ms)) + '</span>' : '')
@@ -336,6 +360,7 @@ function renderDetail(){
   h += '<div class="bubble-label">Heard</div><div class="bubble user">' + esc(r.transcript || '—') + '</div>';
   h += '<div class="bubble-label">Replied</div><div class="bubble bot">' + esc(r.reply || '—') + '</div>';
   h += speakerBlock(r);
+  h += shareBlock(r);
   // Each memory with who it is FOR (person / Household / Unknown); records that
   // predate scoped memories only have the text.
   const mems = r.memories_tagged || (r.memories_written || []).map(c => ({ content: c, for: null }));
@@ -363,6 +388,8 @@ function renderDetail(){
   d.scrollTop = 0;
   const fix = $('cvFix');
   if (fix) fix.addEventListener('click', () => fixSpeaker(r));
+  const share = $('cvShare');
+  if (share) share.addEventListener('click', () => shareTurn(r));
   const copy = $('cvCopy');
   if (copy) copy.addEventListener('click', async (e) => {
     e.preventDefault(); e.stopPropagation();

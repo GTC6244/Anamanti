@@ -82,6 +82,9 @@ impl Recall for SwappableRecall {
     async fn reattribute_turn(&self, ext_id: &str, to: &str) -> Result<u64> {
         self.current().reattribute_turn(ext_id, to).await
     }
+    async fn share_turn(&self, ext_id: &str, shared: bool) -> Result<u64> {
+        self.current().share_turn(ext_id, shared).await
+    }
     async fn retag_memory(&self, content: &str, from: &str, to: &str) -> Result<u64> {
         self.current().retag_memory(content, from, to).await
     }
@@ -568,6 +571,24 @@ async fn build_backend(
             Err(e) => log::warn!(
                 "memory store {sig}: loading speaker aliases failed ({e:#}); serving the \
                  store as-is, will retry on the next boot"
+            ),
+        }
+        // Likewise the turns the admin shared with the household (or stopped sharing)
+        // while this store was inactive.
+        match aliases.load_shared_turns() {
+            Ok(shared) => match helix.sync_shared_turns(&shared).await {
+                Ok(n) if n > 0 => {
+                    log::info!("memory store {sig}: updated household sharing on {n} turn(s)")
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!(
+                    "memory store {sig}: syncing household-shared turns failed ({e:#}); \
+                     will retry on the next boot"
+                ),
+            },
+            Err(e) => log::warn!(
+                "memory store {sig}: loading household-shared turns failed ({e:#}); \
+                 will retry on the next boot"
             ),
         }
     }

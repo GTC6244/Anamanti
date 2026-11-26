@@ -187,6 +187,10 @@ impl MemoryStore {
                 speaker_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS shared_turns (
+                record_id  TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL
+            );
             "#,
         )
         .context("initializing memory schema")?;
@@ -538,6 +542,35 @@ impl MemoryStore {
         let mut stmt =
             conn.prepare("SELECT turn_id, speaker_id FROM turn_attribution_overrides")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Share (or stop sharing) the conversation turn with chat-log record id
+    /// `record_id` with the household — the conversations page's "Share with
+    /// household". A shared turn is recalled for everyone while keeping who said it;
+    /// this is the deliberate way to rescue turns told before voice ID (decision D5:
+    /// household is never inferred). Returns whether anything changed.
+    pub fn set_turn_shared(&self, record_id: &str, shared: bool) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = if shared {
+            conn.execute(
+                "INSERT OR IGNORE INTO shared_turns (record_id, created_at) VALUES (?1, ?2)",
+                params![record_id, crate::clock::now_secs()],
+            )?
+        } else {
+            conn.execute(
+                "DELETE FROM shared_turns WHERE record_id = ?1",
+                params![record_id],
+            )?
+        };
+        Ok(n > 0)
+    }
+
+    /// The chat-log record ids of every turn shared with the household.
+    pub fn shared_turns(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT record_id FROM shared_turns")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1076,6 +1109,33 @@ mod tests {
         store.set_turn_override("t-1", "spk-b").unwrap();
         store.set_turn_override("t-1", "spk-k").unwrap();
         assert_eq!(store.turn_overrides().unwrap()["t-1"], "spk-k");
+    }
+
+    #[test]
+    fn turns_can_be_shared_and_unshared() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        assert!(store.shared_turns().unwrap().is_empty());
+        assert!(store.set_turn_shared("r-1", true).unwrap());
+        assert!(
+            !store.set_turn_shared("r-1", true).unwrap(),
+            "already shared"
+        );
+        store.set_turn_shared("r-2", true).unwrap();
+        let shared = store.shared_turns().unwrap();
+        assert!(shared.contains("r-1") && shared.contains("r-2"));
+        assert!(store.set_turn_shared("r-1", false).unwrap());
+        assert!(
+            !store.set_turn_shared("r-1", false).unwrap(),
+            "already unshared"
+        );
+        assert_eq!(
+            store
+                .shared_turns()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["r-2".to_string()]
+        );
     }
 
     #[test]

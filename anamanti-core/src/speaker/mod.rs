@@ -1278,6 +1278,7 @@ mod tests {
                 entities: &[],
                 speaker_id: &drop.speaker_id,
                 speaker_name: None,
+                shared: false,
             })
             .await
             .unwrap();
