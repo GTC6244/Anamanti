@@ -81,6 +81,7 @@ class SettingsScreen extends StatefulWidget {
     this.assistant,
     this.updates,
     this.onRequestEngineRestart,
+    this.onReloadPhotos,
     this.onLiveTune,
     this.clientForCore,
     this.onDiagnosticsActive = _nativeDiagnosticsContext,
@@ -121,6 +122,11 @@ class SettingsScreen extends StatefulWidget {
   /// Force an engine restart — after a newly granted Camera permission, so the
   /// proximity sensor + auto-brightness start without a relaunch.
   final VoidCallback? onRequestEngineRestart;
+
+  /// Re-list the slideshow's photos from the current source — after the Drive
+  /// folder picker is confirmed without changing the selection (e.g. the folder's
+  /// contents or sharing changed in Drive), which no settings diff would catch.
+  final VoidCallback? onReloadPhotos;
 
   /// Push capture gain + wake-word thresholds to the running engine as they change
   /// (no restart). Null in tests.
@@ -307,8 +313,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _diagnosticsPage();
       case SettingsSection.display:
         return switch (tab) {
-          'photos' => DisplayPhotosTab(controller: _c),
-          'night' => DisplayNightTab(controller: _c, assistant: widget.assistant),
+          'photos' => DisplayPhotosTab(
+            controller: _c,
+            onReloadPhotos: widget.onReloadPhotos,
+          ),
+          'night' => DisplayNightTab(
+            controller: _c,
+            assistant: widget.assistant,
+          ),
           _ => DisplayScreenTab(controller: _c),
         };
       case SettingsSection.household:

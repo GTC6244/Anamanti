@@ -666,7 +666,9 @@ and `settings_controller.dart`). Layout and rationale:
     `settings-photo-source`); Google Photos (Ambient API) link via QR
     (`settings-ambient-link`); Google Drive: Sync from Core (`settings-drive-sync`) +
     Choose folders (`settings-drive-pick`; afterwards a snackbar reports how many
-    photos were found, or that there are none); *Adv*: raw folder-ID field
+    photos were found, or that there are none; confirming an unchanged selection
+    re-lists the slideshow, for folders filled or re-shared in Drive); *Adv*: raw
+    folder-ID field
     (`settings-drive-folders`). Links apply as soon as they complete. **Change photo
     every** (chips 5s…10m, `settings-slide-interval`, each
     `settings-slide-interval-<secs>`; an off-preset stored value shows the nearest) —
