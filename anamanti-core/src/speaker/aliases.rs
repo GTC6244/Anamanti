@@ -21,7 +21,7 @@
 //! before it serves recall. The table is created idempotently; an install without it
 //! simply has no aliases.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -145,6 +145,27 @@ impl SpeakerAliases {
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// The chat-log record ids the admin console shared with the household (the memory
+    /// store's `shared_turns` table in the same database). Empty when the table does
+    /// not exist yet.
+    pub fn load_shared_turns(&self) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'shared_turns'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)?;
+        if !exists {
+            return Ok(HashSet::new());
+        }
+        let mut stmt = conn.prepare("SELECT record_id FROM shared_turns")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
 }
 
 #[cfg(test)]
@@ -188,5 +209,31 @@ mod tests {
         let m = load(&conn).unwrap();
         assert_eq!(m, map(&[("a", None), ("b", None), ("c", None)]));
         assert_eq!(m.resolve("a"), UNKNOWN_SPEAKER);
+    }
+
+    /// The alias handle reads the memory store's `shared_turns` from the same file —
+    /// empty (not an error) on a database the memory store has not created it in yet.
+    #[test]
+    fn shared_turns_load_from_the_shared_database() {
+        let dir = std::env::temp_dir().join(format!(
+            "anamanti-aliases-shared-{}-{}",
+            std::process::id(),
+            crate::clock::now_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("anamanti_memory.sqlite");
+        let aliases = SpeakerAliases::open(&db).unwrap();
+        assert!(
+            aliases.load_shared_turns().unwrap().is_empty(),
+            "no table yet"
+        );
+
+        let memory = crate::memory::MemoryStore::open(&db).unwrap();
+        memory.share_turn("r-1", None).unwrap();
+        memory.share_turn("r-2", Some("spk-a")).unwrap();
+        let shared = aliases.load_shared_turns().unwrap();
+        assert_eq!(shared.len(), 2);
+        assert!(shared.contains("r-1") && shared.contains("r-2"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

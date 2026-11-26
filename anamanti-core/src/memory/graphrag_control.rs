@@ -14,6 +14,7 @@
 //! source of truth) are never touched, so **no memory is ever lost** — only the
 //! derived vector index differs per backend.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -81,6 +82,12 @@ impl Recall for SwappableRecall {
     }
     async fn reattribute_turn(&self, ext_id: &str, to: &str) -> Result<u64> {
         self.current().reattribute_turn(ext_id, to).await
+    }
+    async fn share_turn(&self, ext_id: &str, shared: bool) -> Result<u64> {
+        self.current().share_turn(ext_id, shared).await
+    }
+    async fn sync_shared_turns(&self, shared: &HashSet<String>) -> Result<u64> {
+        self.current().sync_shared_turns(shared).await
     }
     async fn retag_memory(&self, content: &str, from: &str, to: &str) -> Result<u64> {
         self.current().retag_memory(content, from, to).await
@@ -570,6 +577,18 @@ async fn build_backend(
                  store as-is, will retry on the next boot"
             ),
         }
+        // Likewise the turns the admin shared with the household (or stopped sharing)
+        // while this store was inactive.
+        match apply_shared_turns(&helix, aliases).await {
+            Ok(n) if n > 0 => {
+                log::info!("memory store {sig}: updated household sharing on {n} turn(s)")
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!(
+                "memory store {sig}: syncing household-shared turns failed ({e:#}); will \
+                 retry on the next boot"
+            ),
+        }
     }
     let ingester = Arc::new(
         MemoryIngester::new_with_offset(
@@ -609,6 +628,17 @@ async fn apply_speaker_aliases(helix: &HelixMemory, aliases: &AliasMap) -> Resul
         };
     }
     Ok(moved)
+}
+
+/// Replay the household-shared turns (SQLite `shared_turns`, read through the alias
+/// handle on the same database) onto `helix`: a store that was inactive when a turn was
+/// shared, un-shared, or un-shared by a speaker forget catches up. Idempotent. Returns
+/// the number of turns changed.
+async fn apply_shared_turns(helix: &HelixMemory, aliases: &SpeakerAliases) -> Result<u64> {
+    let shared = aliases
+        .load_shared_turns()
+        .context("loading household-shared turns")?;
+    helix.sync_shared_turns(&shared).await
 }
 
 fn build_embedder(cfg: &GraphRagConfig, backend: EmbedBackend) -> Result<Arc<dyn Embedder>> {
@@ -906,6 +936,49 @@ mod tests {
             assert!(turns_of(&after_forget, &h.keep).await.is_empty());
             assert!(turns_of(&after_forget, &h.drop).await.is_empty());
             assert_eq!(turns_of(&after_forget, "unknown").await.len(), 2);
+            std::fs::remove_dir_all(&h.dir).ok();
+        });
+    }
+
+    /// Household sharing reaches every store: the ingester stamps a turn shared before
+    /// it was ingested, the activation replay catches up a store that was inactive when
+    /// a turn was shared, and forgetting the speaker un-shares their turn in the live
+    /// graph (and in SQLite, so later ingests and activations agree).
+    #[test]
+    fn shared_turns_reach_every_store_and_a_forget_unshares_them() {
+        on_big_stack(async {
+            let h = household("share");
+            // The production layout: the memory store shares the alias handle's file.
+            let memory = MemoryStore::open(h.dir.join("anamanti_memory.sqlite")).unwrap();
+            let only_t1: HashSet<String> = ["t1".to_string()].into();
+
+            let inactive = ingested_store(&h, "openai-8").await;
+            memory.share_turn("t1", Some(&h.keep)).unwrap();
+
+            // Ingested after the share: stamped shared at ingest (sync has nothing to do).
+            let active = ingested_store(&h, "nomic-8").await;
+            assert_eq!(active.sync_shared_turns(&only_t1).await.unwrap(), 0);
+            // Ingested before it: the activation replay catches it up, once.
+            assert_eq!(apply_shared_turns(&inactive, &h.aliases).await.unwrap(), 1);
+            assert_eq!(apply_shared_turns(&inactive, &h.aliases).await.unwrap(), 0);
+
+            // Forget Ann: her share goes from SQLite and from the live graph.
+            let graph = HelixRecall::new(active.clone(), Arc::new(MockEmbedder::new(8)), 8);
+            let change = h
+                .service
+                .delete(&h.keep, &memory, Some(&graph))
+                .await
+                .unwrap()
+                .expect("deleted");
+            assert!(change.warnings.is_empty(), "{:?}", change.warnings);
+            assert!(memory.shared_turns().unwrap().is_empty());
+            assert_eq!(
+                active.sync_shared_turns(&HashSet::new()).await.unwrap(),
+                0,
+                "the live graph was already un-shared"
+            );
+            // The inactive store un-shares when it next becomes active.
+            assert_eq!(apply_shared_turns(&inactive, &h.aliases).await.unwrap(), 1);
             std::fs::remove_dir_all(&h.dir).ok();
         });
     }

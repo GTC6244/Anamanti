@@ -78,6 +78,9 @@ const L_META: &str = "Meta";
 const META_SCOPE_MIGRATION: &str = "speaker_scope_v1";
 // Property on a tombstoned `User`: the speaker id it was merged into.
 const P_MERGED_INTO: &str = "merged_into";
+// Property on a `Turn` the admin shared with the household: recalled for everyone,
+// whoever said it (its `speaker_id` is left alone). Absent = not shared.
+const P_SHARED: &str = "shared";
 // The node id pseudo-property in a projection.
 const P_ID: &str = "$id";
 
@@ -93,6 +96,7 @@ const TURN_PROPS: &[&str] = &[
     "transcript",
     "reply",
     "speaker_id",
+    P_SHARED,
 ];
 const MEMORY_PROPS: &[&str] = &[P_ID, "ext_id", "kind", "content", "speaker_id"];
 const ENTITY_PROPS: &[&str] = &[P_ID, "name", "kind"];
@@ -121,6 +125,8 @@ pub struct NewTurn<'a> {
     /// `spk-…`, or `unknown` when unattributed.
     pub speaker_id: &'a str,
     pub speaker_name: Option<&'a str>,
+    /// Shared with the household by the admin (see [`HelixMemory::set_turn_shared`]).
+    pub shared: bool,
 }
 
 /// The combined turn text that is embedded, extracted from and stored as
@@ -327,6 +333,7 @@ impl HelixMemory {
                     ("transcript", PropertyInput::from(turn.transcript)),
                     ("reply", PropertyInput::from(turn.reply)),
                     ("speaker_id", PropertyInput::from(speaker_id.as_str())),
+                    (P_SHARED, PropertyInput::from(turn.shared)),
                     ("embedding", PropertyInput::from(turn.embedding)),
                 ],
             ),
@@ -634,6 +641,79 @@ impl HelixMemory {
             batch::write_batch()
                 .var_as("_d", g().n(NodeRef::ids(ids.clone())).drop())
                 .returning(["_d"]),
+        )
+        .await?;
+        self.flush().await?;
+        Ok(ids.len() as u64)
+    }
+
+    /// Share (or stop sharing) one conversation turn (chat-log record `ext_id`) with the
+    /// household — the admin console's "Share with household". A shared turn is recalled
+    /// for every reader, the unknown speaker's included; who said it is unchanged, so
+    /// un-sharing is exact. The facts the turn wrote keep their own scopes. Returns the
+    /// number of turns changed (0 when the turn was never ingested, e.g. a non-answer).
+    pub async fn set_turn_shared(&self, ext_id: &str, shared: bool) -> Result<u64> {
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "t",
+                        g().n_with_label(L_TURN)
+                            .where_(Predicate::eq("ext_id", ext_id))
+                            .value_map(Some(vec![P_ID])),
+                    )
+                    .returning(["t"]),
+            )
+            .await?;
+        self.set_shared_of(&ids_of(&found, "t"), shared).await
+    }
+
+    /// Make the store's shared turns exactly `shared` (chat-log record ids) — replayed
+    /// each time a store becomes active, so a store that was inactive when a turn was
+    /// shared or un-shared catches up. Returns the number of turns changed.
+    pub async fn sync_shared_turns(&self, shared: &HashSet<String>) -> Result<u64> {
+        let found = self
+            .read(
+                batch::read_batch()
+                    .var_as(
+                        "t",
+                        g().n_with_label(L_TURN)
+                            .value_map(Some(vec![P_ID, "ext_id", P_SHARED])),
+                    )
+                    .returning(["t"]),
+            )
+            .await?;
+        let (mut on, mut off) = (Vec::new(), Vec::new());
+        for item in items_of(&found, "t") {
+            let Some(id) = item.get(P_ID).and_then(Value::as_u64) else {
+                continue;
+            };
+            let want = item
+                .get("ext_id")
+                .and_then(Value::as_str)
+                .is_some_and(|e| shared.contains(e));
+            match (is_shared(item), want) {
+                (false, true) => on.push(id),
+                (true, false) => off.push(id),
+                _ => {}
+            }
+        }
+        Ok(self.set_shared_of(&on, true).await? + self.set_shared_of(&off, false).await?)
+    }
+
+    /// Set the shared flag on the `Turn` nodes `ids`; returns how many.
+    async fn set_shared_of(&self, ids: &[u64], shared: bool) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.write(
+            batch::write_batch()
+                .var_as(
+                    "_s",
+                    g().n(NodeRef::ids(ids.to_vec()))
+                        .set_property(P_SHARED, shared),
+                )
+                .returning(["_s"]),
         )
         .await?;
         self.flush().await?;
@@ -1022,7 +1102,7 @@ impl HelixMemory {
                     .var_as(
                         "t",
                         g().vector_search_nodes(L_TURN, "embedding", query.clone(), fetch, None)
-                            .value_map(Some(vec![P_ID, "text", "speaker_id"])),
+                            .value_map(Some(vec![P_ID, "text", "speaker_id", P_SHARED])),
                     )
                     .var_as(
                         "m",
@@ -1036,8 +1116,9 @@ impl HelixMemory {
         let mut out: Vec<String> = Vec::new();
         let mut household: Vec<String> = Vec::new();
         let mut turns: Vec<String> = Vec::new();
-        let is_household =
-            |i: &Value| i.get("speaker_id").and_then(Value::as_str) == Some(HOUSEHOLD);
+        let is_household = |i: &Value| {
+            i.get("speaker_id").and_then(Value::as_str) == Some(HOUSEHOLD) || is_shared(i)
+        };
         let mut turn_ids: Vec<u64> = Vec::new();
         for item in items_of(&hits, "t")
             .iter()
@@ -1777,10 +1858,19 @@ fn first_id(value: &Value, var: &str) -> Option<u64> {
     items_of(value, var).first()?.get(P_ID)?.as_u64()
 }
 
+/// Whether a turn was shared with the household by the admin ([`P_SHARED`]).
+fn is_shared(item: &Value) -> bool {
+    item.get(P_SHARED).and_then(Value::as_bool) == Some(true)
+}
+
 /// Whether a node is in scope for `want`: a specific speaker sees their own nodes plus
-/// shared (`household`) ones; `None` (household scope) sees only shared. A node missing
-/// a `speaker_id` property is treated as shared (covers pre-Phase-D nodes).
+/// household ones; `None` (household scope) sees only household. A turn the admin
+/// shared is in scope for everyone, whoever said it. A node missing a `speaker_id` was
+/// never attributed and is the unknown speaker's (never in scope).
 fn in_scope(item: &Value, want: Option<&str>) -> bool {
+    if is_shared(item) {
+        return true;
+    }
     // A node without a speaker was never attributed: the unknown speaker's.
     let sid = item
         .get("speaker_id")
@@ -1886,6 +1976,7 @@ mod tests {
 
     use super::{turn_text, HelixMemory, NewTurn};
     use crate::memory::entity::Entity;
+    use std::collections::HashSet;
 
     fn ent(name: &str, kind: &str) -> Entity {
         Entity {
@@ -1933,6 +2024,7 @@ mod tests {
             entities,
             speaker_id,
             speaker_name,
+            shared: false,
         }
     }
 
@@ -2147,6 +2239,89 @@ mod tests {
     /// recall finds the dropped speaker's history), re-points SAID, and leaves a
     /// tombstone so a late ingest under the old id lands on the kept speaker. A forget
     /// moves the person's nodes to the household.
+    /// "Share with household": an unknown-speaker turn (told before voice ID) becomes
+    /// recalled for every reader as household knowledge while keeping its speaker;
+    /// un-sharing, and the activation-time sync, put it back exactly.
+    #[test]
+    fn shared_turns_are_recalled_for_everyone() {
+        on_big_stack(shared_turns_body());
+    }
+
+    async fn shared_turns_body() {
+        let mem = HelixMemory::open_in_memory("shared", 3).await.unwrap();
+        let emb = vec![1.0f32, 0.0, 0.0];
+        mem.ingest_turn(turn(
+            "r-cats",
+            1,
+            "our cats are Magoo and Jeans",
+            "Lovely names!",
+            emb.clone(),
+            &[],
+            "unknown",
+            None,
+        ))
+        .await
+        .unwrap();
+        mem.ingest_turn(turn(
+            "r-private",
+            2,
+            "my favourite cat is Magoo",
+            "Noted.",
+            emb.clone(),
+            &[],
+            "spk-a",
+            None,
+        ))
+        .await
+        .unwrap();
+        mem.flush().await.unwrap();
+        let scoped = |who: Option<&'static str>| {
+            let mem = &mem;
+            let emb = emb.clone();
+            async move { mem.recall_scoped(emb, who, 10, 20).await.unwrap() }
+        };
+        for who in [Some("spk-a"), Some("spk-b"), None] {
+            let (hits, _, _) = scoped(who).await;
+            assert!(
+                !hits.iter().any(|h| h.contains("Jeans")),
+                "{who:?}: {hits:?}"
+            );
+        }
+
+        assert_eq!(mem.set_turn_shared("r-cats", true).await.unwrap(), 1);
+        for who in [Some("spk-a"), Some("spk-b"), None] {
+            let (hits, household, _) = scoped(who).await;
+            assert!(
+                hits.iter().any(|h| h.contains("Jeans")),
+                "{who:?}: {hits:?}"
+            );
+            assert!(
+                household.iter().any(|h| h.contains("Jeans")),
+                "a shared turn is presented as household knowledge"
+            );
+        }
+        // Sharing one turn widens nothing else: spk-a's own turn stays private.
+        let (b, _, _) = scoped(Some("spk-b")).await;
+        assert!(!b.iter().any(|h| h.contains("favourite")));
+        // Who said it is unchanged.
+        let turns = mem.list_turns(None, None, None, 10, 0).await.unwrap();
+        let cats = turns.turns.iter().find(|t| t.ext_id == "r-cats").unwrap();
+        assert_eq!(cats.speaker_id, "unknown");
+
+        // Un-share → gone again; unknown ids are a no-op.
+        assert_eq!(mem.set_turn_shared("r-cats", false).await.unwrap(), 1);
+        assert!(!scoped(None).await.0.iter().any(|h| h.contains("Jeans")));
+        assert_eq!(mem.set_turn_shared("r-missing", true).await.unwrap(), 0);
+
+        // The activation-time sync makes the store match the persisted set exactly.
+        let want: HashSet<String> = ["r-cats".to_string()].into();
+        assert_eq!(mem.sync_shared_turns(&want).await.unwrap(), 1);
+        assert_eq!(mem.sync_shared_turns(&want).await.unwrap(), 0, "idempotent");
+        assert!(scoped(None).await.0.iter().any(|h| h.contains("Jeans")));
+        assert_eq!(mem.sync_shared_turns(&HashSet::new()).await.unwrap(), 1);
+        assert!(!scoped(None).await.0.iter().any(|h| h.contains("Jeans")));
+    }
+
     /// The admin console's corrections reach the graph: a turn (and its personal
     /// facts) re-attributed, an unknown fact attributed, a fact deleted — and recall
     /// follows.

@@ -18,6 +18,9 @@
 //!   ("This was → person"): records a turn-attribution override and re-scopes the
 //!   person/unknown memories that turn wrote. Voiceprints are **never** trained from a
 //!   correction (decision D6).
+//! - `POST /conversations/share` — `{ "id": "<chat-log record id>", "shared": true }`
+//!   ("Share with household"): the turn is recalled for everyone while keeping who said
+//!   it — the deliberate way to rescue turns told before voice ID.
 //!
 //! The mutations update the SQLite store of record. The live HelixDB graph is not
 //! reachable from here (the GraphRAG controller only exposes the recall / graph-view
@@ -722,6 +725,73 @@ fn conversations_attribute(s: &AppServices, data: &Value, ops: &mut Vec<GraphOp>
     .to_string()
 }
 
+/// `POST /conversations/share` — `{ id, shared }` with `id` = the chat-log record id:
+/// share the turn with the household (recalled for everyone, whoever said it) or stop
+/// sharing it. Keyed by record id, not `turn_id`, so turns logged before turn ids — the
+/// ones told before voice ID, now the unknown speaker's — can be rescued. Who said the
+/// turn and the facts it wrote are untouched.
+///
+/// Sharing refuses an id that is not in the chat log, and a turn recall never keeps (a
+/// non-answer the ingester withholds), which would otherwise show as shared while
+/// recall can never use it. The share records who said the turn, so forgetting that
+/// person un-shares it. Un-sharing always succeeds. Replies
+/// `{ ok, id, shared, graph_updated }`.
+fn conversations_share(s: &AppServices, data: &Value, ops: &mut Vec<GraphOp>) -> String {
+    let Some(id) = super::str_field(data, "id") else {
+        return fail("`id` is required");
+    };
+    let Some(shared) = data.get("shared").and_then(Value::as_bool) else {
+        return fail("`shared` must be true or false");
+    };
+    let stored = if shared {
+        // The whole log (not a tail): the turns worth rescuing are the oldest ones.
+        let record = match crate::memory::chatlog::read_tail(&s.debug.chatlog_path, usize::MAX) {
+            Ok(all) => all.into_iter().find(|r| r.id == id),
+            Err(e) => return fail(format!("{e:#}")),
+        };
+        let Some(record) = record else {
+            return fail(format!("no conversation turn `{id}` in the chat log"));
+        };
+        if !crate::memory::ingester::is_recallable_turn(&record) {
+            return fail(
+                "this turn is not kept for recall (its reply was a non-answer), so sharing \
+                 it would have no effect",
+            );
+        }
+        let said_by = SpeakerDirectory::build(s).turn_tag(&record).id;
+        s.memory().share_turn(&id, said_by.as_deref())
+    } else {
+        s.memory().unshare_turn(&id)
+    };
+    if let Err(e) = stored {
+        return fail(format!("{e:#}"));
+    }
+    log::info!(
+        "admin console: turn {id} {} the household",
+        if shared {
+            "shared with"
+        } else {
+            "no longer shared with"
+        }
+    );
+    ops.push(GraphOp::Share {
+        ext_id: id.clone(),
+        shared,
+    });
+    json!({
+        "ok": true,
+        "id": id,
+        "shared": shared,
+        "graph_updated": false,
+        "message": if shared {
+            "Shared with the household: everyone's recall can use this turn."
+        } else {
+            "No longer shared with the household."
+        },
+    })
+    .to_string()
+}
+
 /// Add a resolved `$speaker` tag to every sampled graph node that carries a
 /// `speaker_id` (User / Turn / Memory), so the graph view shows names, not ids.
 pub(super) fn tag_graph_nodes(dir: &SpeakerDirectory, nodes: &mut Value) {
@@ -768,6 +838,10 @@ pub(super) enum GraphOp {
         ext_id: String,
         to: String,
     },
+    Share {
+        ext_id: String,
+        shared: bool,
+    },
 }
 
 /// Apply `ops` to the live recall backend (a no-op on SQLite-only recall). Returns
@@ -786,6 +860,7 @@ async fn apply_graph_ops(s: &AppServices, ops: &[GraphOp]) -> bool {
             GraphOp::Retag { content, from, to } => recall.retag_memory(content, from, to).await,
             GraphOp::Forget { content, owner } => recall.forget_memory(content, owner).await,
             GraphOp::Turn { ext_id, to } => recall.reattribute_turn(ext_id, to).await,
+            GraphOp::Share { ext_id, shared } => recall.share_turn(ext_id, *shared).await,
         };
         if let Err(e) = res {
             log::warn!("admin console: graph update {op:?} failed: {e:#}");
@@ -827,6 +902,17 @@ pub(super) async fn memory_delete_async(s: &AppServices, data: &Value) -> String
 /// `POST /conversations/attribute`, applied to SQLite and the live graph.
 pub(super) async fn conversations_attribute_async(s: &AppServices, data: &Value) -> String {
     with_graph(s, data, conversations_attribute).await
+}
+
+/// `POST /conversations/share`, applied to SQLite and the live graph.
+pub(super) async fn conversations_share_async(s: &AppServices, data: &Value) -> String {
+    with_graph(s, data, conversations_share).await
+}
+
+/// The SQLite side of `POST /conversations/share`, without the graph (tests).
+#[cfg(test)]
+pub(super) fn conversations_share_json(s: &AppServices, data: &Value) -> String {
+    conversations_share(s, data, &mut Vec::new())
 }
 
 /// The SQLite side of `POST /memory/attribute`, without the graph (tests).

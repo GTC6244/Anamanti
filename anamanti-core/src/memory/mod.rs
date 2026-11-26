@@ -187,6 +187,11 @@ impl MemoryStore {
                 speaker_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS shared_turns (
+                record_id  TEXT PRIMARY KEY,
+                speaker_id TEXT,
+                created_at INTEGER NOT NULL
+            );
             "#,
         )
         .context("initializing memory schema")?;
@@ -493,6 +498,10 @@ impl MemoryStore {
             "UPDATE memories SET said_by_speaker_id = ?1 WHERE said_by_speaker_id = ?2",
             params![to, from],
         )?;
+        conn.execute(
+            "UPDATE shared_turns SET speaker_id = ?1 WHERE speaker_id = ?2",
+            params![to, from],
+        )?;
         Ok(conn.execute(
             "UPDATE memories SET speaker_id = ?1 WHERE speaker_id = ?2",
             params![to, from],
@@ -502,9 +511,14 @@ impl MemoryStore {
     /// Detach every memory owned by `id` from that person — used when their voiceprint
     /// is forgotten. Their memories are kept but move to the **unknown** scope (never
     /// recalled), not the household: a forgotten person's private facts must not
-    /// become everyone's. Returns the number of owned rows changed.
+    /// become everyone's — so the turns of theirs the admin had shared with the
+    /// household stop being shared too. Returns the number of owned rows changed.
     pub fn unassign_speaker(&self, id: &str) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM shared_turns WHERE speaker_id = ?1",
+            params![id],
+        )?;
         conn.execute(
             "UPDATE memories SET candidate_speaker_id = NULL WHERE candidate_speaker_id = ?1",
             params![id],
@@ -538,6 +552,39 @@ impl MemoryStore {
         let mut stmt =
             conn.prepare("SELECT turn_id, speaker_id FROM turn_attribution_overrides")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Share the conversation turn with chat-log record id `record_id` with the
+    /// household — the conversations page's "Share with household". A shared turn is
+    /// recalled for everyone while keeping who said it; this is the deliberate way to
+    /// rescue turns told before voice ID (decision D5: household is never inferred).
+    /// `said_by` is the person who said it (`None` = an unattributed voice): forgetting
+    /// that person un-shares it ([`unassign_speaker`](Self::unassign_speaker)), and a
+    /// merge carries it over. Returns whether it was newly shared.
+    pub fn share_turn(&self, record_id: &str, said_by: Option<&str>) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "INSERT OR IGNORE INTO shared_turns (record_id, speaker_id, created_at) \
+             VALUES (?1, ?2, ?3)",
+            params![record_id, said_by, crate::clock::now_secs()],
+        )? > 0)
+    }
+
+    /// Stop sharing a turn with the household. Returns whether it had been shared.
+    pub fn unshare_turn(&self, record_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "DELETE FROM shared_turns WHERE record_id = ?1",
+            params![record_id],
+        )? > 0)
+    }
+
+    /// The chat-log record ids of every turn shared with the household.
+    pub fn shared_turns(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT record_id FROM shared_turns")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1076,6 +1123,52 @@ mod tests {
         store.set_turn_override("t-1", "spk-b").unwrap();
         store.set_turn_override("t-1", "spk-k").unwrap();
         assert_eq!(store.turn_overrides().unwrap()["t-1"], "spk-k");
+    }
+
+    #[test]
+    fn turns_can_be_shared_and_unshared() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        assert!(store.shared_turns().unwrap().is_empty());
+        assert!(store.share_turn("r-1", None).unwrap());
+        assert!(!store.share_turn("r-1", None).unwrap(), "already shared");
+        store.share_turn("r-2", Some("spk-b")).unwrap();
+        let shared = store.shared_turns().unwrap();
+        assert!(shared.contains("r-1") && shared.contains("r-2"));
+        assert!(store.unshare_turn("r-1").unwrap());
+        assert!(!store.unshare_turn("r-1").unwrap(), "already unshared");
+        assert_eq!(
+            store
+                .shared_turns()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["r-2".to_string()]
+        );
+    }
+
+    /// Review finding: a forgotten person's shared turns must stop being shared (their
+    /// history must not become the household's); a merge carries the share over.
+    #[test]
+    fn forget_unshares_a_persons_turns_and_merge_carries_them() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.share_turn("r-legacy", None).unwrap();
+        store.share_turn("r-a", Some("spk-a")).unwrap();
+        store.share_turn("r-b", Some("spk-b")).unwrap();
+
+        // spk-a merged into spk-b: their share now follows spk-b.
+        store.reassign_speaker("spk-a", "spk-b").unwrap();
+        assert_eq!(store.shared_turns().unwrap().len(), 3);
+
+        // Forgetting spk-b un-shares both of its turns; the unattributed one stays.
+        store.unassign_speaker("spk-b").unwrap();
+        assert_eq!(
+            store
+                .shared_turns()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["r-legacy".to_string()]
+        );
     }
 
     #[test]

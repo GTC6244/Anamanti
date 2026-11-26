@@ -768,25 +768,30 @@ fn voiced_chunk_bytes(hz: f32, ms: usize) -> Vec<u8> {
 
 /// Like [`drive_device`] but streams a single ~1.5 s voiced chunk at pitch `hz`
 /// (so speaker ID runs), returning `(transcript_seen, reply_text)`.
-async fn drive_device_voiced(io: DuplexStream, hz: f32) -> (String, String) {
+async fn drive_device_voiced(io: DuplexStream, hz: f32, followup_depth: u32) -> (String, String) {
     let (r, w) = split(io);
     let mut reader = BufReader::new(r);
     let mut writer = w;
     let fmt = AudioFormat::PCM_16K_MONO;
 
-    write_event(&mut writer, &WyomingEvent::audio_start(fmt, 0))
-        .await
-        .unwrap();
+    let mut start = WyomingEvent::audio_start(fmt, 0);
+    if followup_depth > 0 {
+        if let serde_json::Value::Object(map) = &mut start.data {
+            map.insert("followup".into(), json!(true));
+            map.insert("followup_depth".into(), json!(followup_depth));
+        }
+    }
+    write_event(&mut writer, &start).await.unwrap();
     write_event(
         &mut writer,
-        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(hz, 1500)),
+        &WyomingEvent::audio_chunk(fmt, 0, voiced_chunk_bytes(hz, 2600)),
     )
     .await
     .unwrap();
 
     let ev = read_event(&mut reader).await.unwrap().unwrap();
     let transcript = ev.transcript_text().unwrap_or_default().to_string();
-    write_event(&mut writer, &WyomingEvent::audio_stop(1520))
+    write_event(&mut writer, &WyomingEvent::audio_stop(2620))
         .await
         .unwrap();
 
@@ -809,11 +814,21 @@ async fn run_voiced_turn(
     transcript: &str,
     hz: f32,
 ) -> (String, Vec<TurnEvent>) {
+    run_voiced_turn_at_depth(pipeline, transcript, hz, 0).await
+}
+
+/// [`run_voiced_turn`] as a follow-up turn of the given `followup_depth`.
+async fn run_voiced_turn_at_depth(
+    pipeline: &Pipeline,
+    transcript: &str,
+    hz: f32,
+    followup_depth: u32,
+) -> (String, Vec<TurnEvent>) {
     let connector = MockConnector::new(transcript);
     let (dev_pipeline, dev_test) = tokio::io::duplex(256 * 1024);
     let (pr, pw) = split(dev_pipeline);
     let mut device = DynConnection::from_io(pr, pw);
-    let device_task = tokio::spawn(drive_device_voiced(dev_test, hz));
+    let device_task = tokio::spawn(drive_device_voiced(dev_test, hz, followup_depth));
 
     let mut events = Vec::new();
     {
@@ -835,6 +850,51 @@ fn speaker_of(events: &[TurnEvent]) -> SpeakerContext {
             _ => None,
         })
         .expect("a Speaker event was emitted")
+}
+
+/// TODO.md §5.1: an unmatched voice on a follow-up turn is unknown — it never mints a
+/// new anonymous cluster — while the same voice on a fresh turn does.
+#[tokio::test]
+async fn follow_up_turn_never_mints_a_new_voice() {
+    let memory = Arc::new(MemoryStore::open_in_memory().unwrap());
+    let speaker = Arc::new(SpeakerService::new(
+        Arc::new(MockSpeakerEmbedder::default()),
+        SpeakerRegistry::open_in_memory().unwrap(),
+        SpeakerThresholds::default(),
+    ));
+    let pipeline = Pipeline::new(
+        Arc::new(MockLlm::new("ok")),
+        memory,
+        "test persona",
+        None,
+        Duration::from_secs(5),
+    )
+    .with_speaker(speaker.clone());
+
+    let (_, ev) = run_voiced_turn(&pipeline, "what's the weather", 150.0).await;
+    assert!(speaker_of(&ev).is_new);
+    assert_eq!(speaker.registry().count().unwrap(), 1);
+
+    // A follow-up in a voice that matches nobody: unknown, nothing minted, and the
+    // nearest score is still recorded.
+    let (_, ev) = run_voiced_turn_at_depth(&pipeline, "and tomorrow?", 600.0, 1).await;
+    let s = speaker_of(&ev);
+    assert!(s.is_unknown(), "{s:?}");
+    assert!(
+        !s.inherited,
+        "a compared, unmatched voice is never inherited"
+    );
+    assert_eq!(s.confidence, 0.0, "no score for an unattributed voice");
+    assert!(
+        s.nearest.is_some(),
+        "the nearest voiceprint's score is kept"
+    );
+    assert_eq!(speaker.registry().count().unwrap(), 1);
+
+    // The same voice opening a fresh turn is a new voice.
+    let (_, ev) = run_voiced_turn(&pipeline, "hello", 600.0).await;
+    assert!(speaker_of(&ev).is_new);
+    assert_eq!(speaker.registry().count().unwrap(), 2);
 }
 
 #[tokio::test]

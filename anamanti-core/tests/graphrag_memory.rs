@@ -71,6 +71,7 @@ fn turn<'a>(
         entities,
         speaker_id: "spk-test",
         speaker_name: None,
+        shared: false,
     }
 }
 

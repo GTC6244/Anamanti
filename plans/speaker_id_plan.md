@@ -70,12 +70,20 @@ env vars are retired):**
   "match_threshold": 0.55,
   "new_threshold": 0.40,
   "min_speech_ms": 1200,
+  "min_create_ms": 2500,
+  "min_identify_ms": 600,
+  "short_clip_margin": 0.10,
+  "min_margin": 0.05,
+  "clear_margin": 0.20,
   "embed_dims": 192
 }
 ```
 `enabled` defaults `false` (opt-in). With no `model_path` it degrades to the dev-only mock
 embedder (logged loudly). Fetch the model with `scripts/fetch-speaker-model.sh`. Thresholds
-are placeholders pending far-field calibration.
+are placeholders pending far-field calibration. `min_speech_ms` is the floor for a clip to
+train a voiceprint; `min_create_ms` (2026-11-26) the stricter floor for an unmatched voice to
+mint a new anonymous cluster (never on a follow-up turn) — see `Plan.MD` "Voice-ID: one
+utterance no longer mints a person". The other keys are SpeakerScopedMemoryPlan.md §4.
 
 ---
 

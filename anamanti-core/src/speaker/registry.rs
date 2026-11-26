@@ -154,11 +154,17 @@ impl SpeakerRegistry {
     /// - [`Attribution::Tentative`] / [`Attribution::Distinct`]: attributed, centroid
     ///   untouched;
     /// - otherwise (or no profiles) ⇒ [`Attribution::Created`]: a new anonymous
-    ///   cluster seeded with `embedding`.
+    ///   cluster seeded with `embedding` — only when `create` is set; without it
+    ///   [`Attribution::Unmatched`] and nothing is written (the caller decided this
+    ///   utterance may not mint a voice: too short, or a follow-up turn).
+    ///
+    /// When nothing matched, `nearest` reports the nearest existing profile's cosine, so
+    /// the reason a voice was called new or unmatched can be calibrated.
     pub fn identify_or_create(
         &self,
         embedding: &[f32],
         policy: &MatchPolicy,
+        create: bool,
     ) -> Result<Identified> {
         let mut conn = self.conn.lock().unwrap();
         // IMMEDIATE takes the write lock up front, so another process sharing the
@@ -180,19 +186,34 @@ impl SpeakerRegistry {
                     name,
                     name_source,
                     score: r.score,
+                    nearest: None,
                     attribution,
                 }
             }
-            _ => {
-                let id = self.next_id();
-                insert_cluster(&tx, &id, embedding)?;
-                Identified {
-                    id,
-                    name: None,
-                    name_source: None,
-                    score: 0.0,
-                    margin: None,
-                    attribution: Attribution::Created,
+            (nearest, _) => {
+                let nearest = nearest.map(|r| r.score);
+                if create {
+                    let id = self.next_id();
+                    insert_cluster(&tx, &id, embedding)?;
+                    Identified {
+                        id,
+                        name: None,
+                        name_source: None,
+                        score: 0.0,
+                        margin: None,
+                        nearest,
+                        attribution: Attribution::Created,
+                    }
+                } else {
+                    Identified {
+                        id: super::UNKNOWN_SPEAKER.to_string(),
+                        name: None,
+                        name_source: None,
+                        score: 0.0,
+                        margin: None,
+                        nearest,
+                        attribution: Attribution::Unmatched,
+                    }
                 }
             }
         };
@@ -455,21 +476,29 @@ pub enum Attribution {
     Distinct,
     /// No usable match; a new anonymous cluster was created.
     Created,
+    /// No usable match and creating was not allowed: nothing was written and the
+    /// utterance is unattributed ([`super::UNKNOWN_SPEAKER`]).
+    Unmatched,
 }
 
 /// The outcome of [`SpeakerRegistry::identify_or_create`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Identified {
-    /// The attributed profile's id.
+    /// The attributed profile's id ([`super::UNKNOWN_SPEAKER`] when `Unmatched`).
     pub id: String,
     /// Its name, if the cluster has been named.
     pub name: Option<String>,
     /// Where that name came from.
     pub name_source: Option<NameSource>,
-    /// Cosine similarity to the matched centroid (`0.0` for a new cluster).
+    /// Cosine similarity to the matched centroid (`0.0` for `Created` / `Unmatched`).
     pub score: f32,
-    /// Lead over the closest other named person (`None` with no rival or a new cluster).
+    /// Lead over the closest other named person (`None` with no rival, or when nothing
+    /// matched).
     pub margin: Option<f32>,
+    /// When nothing matched (`Created` / `Unmatched`): the cosine to the nearest
+    /// existing profile — why the voice was called new — for calibration. `None` when
+    /// something matched or there were no profiles.
+    pub nearest: Option<f32>,
     pub attribution: Attribution,
 }
 
@@ -906,13 +935,13 @@ mod tests {
         let reg = SpeakerRegistry::open_in_memory().unwrap();
         let a = l2_normalize(vec![1.0, 0.0]);
         let first = reg
-            .identify_or_create(&a, &MatchPolicy::absolute(0.9, 0.5))
+            .identify_or_create(&a, &MatchPolicy::absolute(0.9, 0.5), true)
             .unwrap();
         assert_eq!(first.attribution, Attribution::Created);
 
         reg.rename(&first.id, "Sam").unwrap();
         let again = reg
-            .identify_or_create(&a, &MatchPolicy::absolute(0.9, 0.5))
+            .identify_or_create(&a, &MatchPolicy::absolute(0.9, 0.5), true)
             .unwrap();
         assert_eq!(again.attribution, Attribution::Matched);
         assert_eq!(again.id, first.id);
@@ -924,6 +953,7 @@ mod tests {
             .identify_or_create(
                 &l2_normalize(vec![1.0, 1.0]),
                 &MatchPolicy::absolute(0.9, 0.5),
+                true,
             )
             .unwrap();
         assert_eq!(near.attribution, Attribution::Tentative);
@@ -934,10 +964,52 @@ mod tests {
             .identify_or_create(
                 &l2_normalize(vec![-1.0, 0.2]),
                 &MatchPolicy::absolute(0.9, 0.5),
+                true,
             )
             .unwrap();
         assert_eq!(other.attribution, Attribution::Created);
         assert_eq!(reg.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn no_match_reports_the_nearest_score_and_create_false_writes_nothing() {
+        let reg = SpeakerRegistry::open_in_memory().unwrap();
+        let p = MatchPolicy::absolute(0.9, 0.5);
+        // No profiles at all: nothing to compare against.
+        let none = reg.identify_or_create(&at(0.0), &p, false).unwrap();
+        assert_eq!(none.attribution, Attribution::Unmatched);
+        assert_eq!(none.id, super::super::UNKNOWN_SPEAKER);
+        assert_eq!(none.nearest, None, "nothing to compare against");
+        assert_eq!(reg.count().unwrap(), 0);
+
+        let first = reg.identify_or_create(&at(0.0), &p, true).unwrap();
+        assert_eq!(first.attribution, Attribution::Created);
+        assert_eq!(reg.count().unwrap(), 1);
+
+        // 80° away: cos ≈ 0.17 < 0.5 — the nearest score is reported either way.
+        let held = reg.identify_or_create(&at(80.0), &p, false).unwrap();
+        assert_eq!(held.attribution, Attribution::Unmatched);
+        let cos80 = 80f32.to_radians().cos();
+        assert!((held.nearest.unwrap() - cos80).abs() < 1e-4, "{held:?}");
+        assert_eq!(held.score, 0.0);
+        assert_eq!(reg.count().unwrap(), 1, "create = false mints nothing");
+        assert_eq!(reg.get(&first.id).unwrap().unwrap().samples, 1);
+
+        let minted = reg.identify_or_create(&at(80.0), &p, true).unwrap();
+        assert_eq!(minted.attribution, Attribution::Created);
+        assert!((minted.nearest.unwrap() - cos80).abs() < 1e-4, "{minted:?}");
+        assert_eq!(
+            minted.score, 0.0,
+            "the new cluster's own score is not a match"
+        );
+        assert_eq!(minted.margin, None);
+        assert_eq!(reg.count().unwrap(), 2);
+
+        // A usable match is unaffected by `create`.
+        let again = reg.identify_or_create(&at(0.0), &p, false).unwrap();
+        assert_eq!(again.attribution, Attribution::Matched);
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.nearest, None);
     }
 
     /// A unit vector at `deg` degrees in the plane (cosine between two = cos of the gap).
@@ -1043,7 +1115,7 @@ mod tests {
         };
 
         // Halfway between them: cos 30° ≈ 0.87 to both — above match, but a tie.
-        let tie = reg.identify_or_create(&at(30.0), &p).unwrap();
+        let tie = reg.identify_or_create(&at(30.0), &p, true).unwrap();
         assert_eq!(tie.attribution, Attribution::Tentative);
         assert!(tie.margin.unwrap().abs() < 1e-4);
         assert_eq!(reg.get(&sam).unwrap().unwrap().samples, 5);
@@ -1051,7 +1123,7 @@ mod tests {
 
         // 40° away from Sam on the far side: cos 40° ≈ 0.77 (below match) vs Dana
         // cos 100° ≈ -0.17 — a clear household winner.
-        let clear = reg.identify_or_create(&at(-40.0), &p).unwrap();
+        let clear = reg.identify_or_create(&at(-40.0), &p, true).unwrap();
         assert_eq!(clear.attribution, Attribution::Distinct);
         assert_eq!(clear.id, sam);
         assert_eq!(clear.name.as_deref(), Some("Sam"));

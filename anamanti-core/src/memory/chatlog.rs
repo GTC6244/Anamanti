@@ -68,6 +68,11 @@ pub struct ChatLogRecord {
     /// scoring). Absent with no rival, or on records logged before the field shipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_margin: Option<f32>,
+    /// A new or unmatched voice: the cosine to the **nearest existing** voiceprint (why
+    /// it was called new), for threshold calibration — not a score for `speaker_id`.
+    /// Absent when the voice matched, nothing was compared, or on older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_nearest: Option<f32>,
     /// The speaker was carried over from the previous follow-up turn (this turn was
     /// too short to identify on its own).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

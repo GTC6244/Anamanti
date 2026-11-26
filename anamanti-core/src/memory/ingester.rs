@@ -30,7 +30,7 @@ use super::chatlog::{self, ChatLogRecord, LogCursor};
 use super::embed::Embedder;
 use super::entity::EntityExtractor;
 use super::helix::{turn_text, HelixMemory, NewTurn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::chatlog::WrittenMemory;
 use crate::speaker::{AliasMap, SpeakerAliases, HOUSEHOLD_SPEAKER, UNKNOWN_SPEAKER};
@@ -171,13 +171,15 @@ impl MemoryIngester {
         // that commits mid-run is still honoured for this batch. A read failure fails the
         // run (the offset is not advanced, so it retries) rather than ingesting under
         // stale ids.
-        let (aliases, overrides) = match &self.aliases {
+        let (aliases, overrides, shared) = match &self.aliases {
             Some(a) => (
                 a.load().context("loading speaker aliases")?,
                 a.load_turn_overrides()
                     .context("loading turn speaker corrections")?,
+                a.load_shared_turns()
+                    .context("loading household-shared turns")?,
             ),
-            None => (AliasMap::default(), HashMap::new()),
+            None => (AliasMap::default(), HashMap::new(), HashSet::new()),
         };
 
         // 2 + 3. Extract entities and upsert, in log order.
@@ -202,6 +204,7 @@ impl MemoryIngester {
                             entities: &entities,
                             speaker_id,
                             speaker_name,
+                            shared: shared.contains(&r.id),
                         })
                         .await
                         .with_context(|| format!("ingesting turn {}", r.id))?;
@@ -427,7 +430,7 @@ fn is_non_answer(reply: &str) -> bool {
 /// Whether a turn should be ingested as a recallable `Turn` node. False for non-answers,
 /// which would otherwise prime the model to repeat the failure (see the gate in
 /// [`MemoryIngester::run_once`]).
-fn is_recallable_turn(r: &ChatLogRecord) -> bool {
+pub(crate) fn is_recallable_turn(r: &ChatLogRecord) -> bool {
     !is_non_answer(&r.reply)
 }
 

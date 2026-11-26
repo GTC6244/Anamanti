@@ -1,6 +1,8 @@
 //! The read-only debug views (chat log, prompts, SQLite, HelixDB) and the one debug
 //! mutation, renaming a GraphRAG entity.
 
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
 use super::speakers::{tag_graph_nodes, SpeakerDirectory};
@@ -25,13 +27,77 @@ pub(super) fn limit_param(target: &str) -> usize {
         .unwrap_or(DEFAULT_LOG_LIMIT)
 }
 
-/// `{ ok, records: [ChatLogRecord…] }` for the newest `limit` turns. Each record
-/// keeps every raw field and adds the resolved `speaker` tag, `speaker_override` and
-/// `memories_tagged` ([`SpeakerDirectory::chatlog_record_json`]).
-pub(super) fn chatlog_json(debug: &DebugSources, dir: &SpeakerDirectory, limit: usize) -> String {
-    match chatlog::read_tail(&debug.chatlog_path, limit) {
+/// The decoded `?q=` search parameter (`+` and `%XX` URL-decoded, trimmed); `None`
+/// when absent or blank.
+pub(super) fn query_param(target: &str) -> Option<String> {
+    let raw = target
+        .split(['?', '#'])
+        .nth(1)?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("q="))?;
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = match bytes.get(i..i + 3) {
+            Some([b'%', hi, lo]) => hex(*hi).zip(hex(*lo)).map(|(h, l)| h << 4 | l),
+            _ => None,
+        };
+        match (escaped, bytes[i]) {
+            (Some(b), _) => {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+            (None, b'+') => out.push(b' '),
+            (None, b) => out.push(b),
+        }
+        i += 1;
+    }
+    let q = String::from_utf8_lossy(&out).trim().to_string();
+    (!q.is_empty()).then_some(q)
+}
+
+/// `{ ok, records: [ChatLogRecord…] }` for the newest `limit` turns — or, with a
+/// `query`, the newest `limit` turns **anywhere in the log** whose transcript or reply
+/// contains it (case-insensitive), so turns older than the page's window (e.g. ones
+/// told before voice ID) can be found and shared. Each record keeps every raw field
+/// and adds the resolved `speaker` tag, `speaker_override`, `memories_tagged`
+/// ([`SpeakerDirectory::chatlog_record_json`]) and `shared` (whether the turn is in
+/// `shared`, the record ids shared with the household).
+pub(super) fn chatlog_json(
+    debug: &DebugSources,
+    dir: &SpeakerDirectory,
+    shared: &HashSet<String>,
+    limit: usize,
+    query: Option<&str>,
+) -> String {
+    let read = match query {
+        // Loopback admin page: scanning the whole log for a search is fine.
+        Some(q) => chatlog::read_tail(&debug.chatlog_path, usize::MAX).map(|all| {
+            let q = q.to_lowercase();
+            all.into_iter()
+                .filter(|r| {
+                    r.transcript.to_lowercase().contains(&q) || r.reply.to_lowercase().contains(&q)
+                })
+                .take(limit)
+                .collect::<Vec<_>>()
+        }),
+        None => chatlog::read_tail(&debug.chatlog_path, limit),
+    };
+    match read {
         Ok(records) => {
-            let records: Vec<Value> = records.iter().map(|r| dir.chatlog_record_json(r)).collect();
+            let records: Vec<Value> = records
+                .iter()
+                .map(|r| {
+                    let mut v = dir.chatlog_record_json(r);
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("shared".into(), json!(shared.contains(&r.id)));
+                    }
+                    v
+                })
+                .collect();
             json!({ "ok": true, "records": records }).to_string()
         }
         Err(e) => fail(format!("{e:#}")),

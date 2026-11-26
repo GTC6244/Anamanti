@@ -44,7 +44,7 @@
     <!-- Master: turn list -->
     <section class="card fill cv-card">
       <div class="cv-tb">
-        <input type="search" id="cvSearch" placeholder="Search transcript or reply…" aria-label="Search turns">
+        <input type="search" id="cvSearch" placeholder="Search transcript or reply… (Enter: all history)" aria-label="Search turns" title="Filters the loaded turns as you type; press Enter to search the whole chat log">
         <select id="cvSpeaker" aria-label="Filter by speaker"><option value="">Everyone</option></select>
         <select id="cvLimit" aria-label="Number of turns to load">
           <option value="50">50</option><option value="100" selected>100</option><option value="250">250</option><option value="1000">1000</option>
@@ -262,10 +262,14 @@ function speakerBlock(r){
   if (cfg.new_threshold != null) th.push('new < ' + cfg.new_threshold);
   if (cfg.min_identify_ms != null) th.push('min identify ' + cfg.min_identify_ms + ' ms');
   if (cfg.min_speech_ms != null) th.push('min enroll ' + cfg.min_speech_ms + ' ms');
+  if (cfg.min_create_ms != null) th.push('min new voice ' + cfg.min_create_ms + ' ms');
   let h = '<div class="cv-section"><div class="section-label">Speaker</div><dl class="cv-spk">'
     + '<dt>Speaker</dt><dd>' + ui.speakerChip(t) + '</dd>'
     + '<dt>Resolution</dt><dd>' + (t.resolution ? ui.resolutionBadge(t) + ' <span class="hint">' + esc(RES_TEXT[t.resolution] || t.resolution) + '</span>' : '<span class="muted">not recorded</span>') + '</dd>'
     + '<dt>Confidence</dt><dd>' + (conf != null && t.resolution !== 'unknown' ? '<span class="mono">' + esc(conf) + '</span>' : '<span class="muted">—</span>') + (th.length ? ' <span class="hint">(' + esc(th.join(', ')) + ')</span>' : '') + '</dd>'
+    // A new or unmatched voice: how close the nearest *existing* voiceprint came (why it
+    // was called new). Not a score for this turn's speaker.
+    + (r.speaker_nearest != null ? '<dt>Nearest voiceprint</dt><dd><span class="mono">' + esc(Number(r.speaker_nearest).toFixed(3)) + '</span> <span class="hint">closest existing voice; below the new threshold</span></dd>' : '')
     + '<dt>Inherited</dt><dd>' + (t.inherited ? 'Yes — too short to identify, carried over from the follow-up conversation' : '<span class="muted">No</span>') + '</dd>'
     + '<dt>Short clip</dt><dd>' + (t.short_clip ? 'Yes — matched by the read-only short-clip path' : '<span class="muted">No</span>') + '</dd>';
   if (r.speaker_override) {
@@ -294,6 +298,29 @@ async function fixSpeaker(r){
     ui.toast(true, j.message || 'Re-attributed.');
     await load();
   } catch (e) { ui.toast(false, 'Could not re-attribute: ' + errMsg(e)); btn.disabled = false; }
+}
+// "Share with household": recall uses this turn for everyone, whoever said it. The way
+// to rescue things told before voice ID (those turns are the unknown speaker's, never
+// recalled). Keyed by the chat-log record id, so it works for turns without a turn_id.
+function shareBlock(r){
+  if (!r.id) return '';
+  return '<div class="cv-section"><div class="section-label">Household</div><div class="cv-fix">'
+    + (r.shared
+      ? '<span class="chip ok">' + ui.icon('users') + 'Shared with the household</span>'
+        + '<button type="button" class="sm ghost" id="cvShare">Stop sharing</button>'
+      : '<button type="button" class="sm" id="cvShare">' + ui.icon('users') + 'Share with household</button>')
+    + '<span class="hint">' + (r.shared
+      ? 'Everyone\'s recall can use this turn.'
+      : 'Lets everyone\'s recall use this turn — e.g. something told before voice ID. Who said it stays the same.')
+    + '</span></div></div>';
+}
+async function shareTurn(r){
+  const btn = $('cvShare'); btn.disabled = true;
+  try {
+    const j = await ui.req(postJSON('/conversations/share', { id: r.id, shared: !r.shared }));
+    ui.toast(true, j.message || 'Updated.');
+    await load();
+  } catch (e) { ui.toast(false, 'Could not update sharing: ' + errMsg(e)); btn.disabled = false; }
 }
 // Escape the system prompt and highlight the speaker sections that were sent: the
 // identity line ("# Who is speaking"), "# About this person", "# Household facts" and
@@ -329,6 +356,7 @@ function renderDetail(){
     + (model ? '<span class="chip neutral mono">' + esc(model) + '</span>' : '')
     + loc
     + (path ? '<span class="chip">' + esc(path) + ' path</span>' : '')
+    + (r.shared ? '<span class="chip ok" title="Shared with the household: everyone\'s recall can use this turn">' + ui.icon('users') + 'Shared</span>' : '')
     // Bilingual mode (plans/BilingualPlan.md): the turn's language and how it was decided.
     + (t && t.lang ? '<span class="chip neutral" title="Spoken (and answered) in ' + escAttr(t.lang) + ' — decided by ' + escAttr(t.lang_source || '?') + (t.reply_lang ? '; the reply came back in ' + escAttr(t.reply_lang) : '') + '">' + ui.icon('text') + esc(t.lang) + ' · ' + esc(t.lang_source || '?') + (t.reply_lang ? ' → ' + esc(t.reply_lang) : '') + '</span>' : '')
     + (t && t.total_ms != null ? '<span class="chip tnum ' + latClass(t.total_ms) + '">' + ui.icon('clock') + esc(ui.fmtMs(t.total_ms)) + '</span>' : '')
@@ -336,6 +364,7 @@ function renderDetail(){
   h += '<div class="bubble-label">Heard</div><div class="bubble user">' + esc(r.transcript || '—') + '</div>';
   h += '<div class="bubble-label">Replied</div><div class="bubble bot">' + esc(r.reply || '—') + '</div>';
   h += speakerBlock(r);
+  h += shareBlock(r);
   // Each memory with who it is FOR (person / Household / Unknown); records that
   // predate scoped memories only have the text.
   const mems = r.memories_tagged || (r.memories_written || []).map(c => ({ content: c, for: null }));
@@ -363,6 +392,8 @@ function renderDetail(){
   d.scrollTop = 0;
   const fix = $('cvFix');
   if (fix) fix.addEventListener('click', () => fixSpeaker(r));
+  const share = $('cvShare');
+  if (share) share.addEventListener('click', () => shareTurn(r));
   const copy = $('cvCopy');
   if (copy) copy.addEventListener('click', async (e) => {
     e.preventDefault(); e.stopPropagation();
@@ -373,12 +404,14 @@ function renderDetail(){
 }
 
 // ---------------------------------------------------------------- Load
+// The whole-history search term (Enter in the search box), or '' for the newest turns.
+let cvAll = '';
 async function load(){
   const n = $('cvLimit').value;
   const btn = $('cvRefresh'); btn.disabled = true;
   try {
     const [cl, pr, sys, sp] = await Promise.all([
-      getJSON('/chatlog.json?limit=' + n),
+      getJSON('/chatlog.json?limit=' + n + (cvAll ? '&q=' + encodeURIComponent(cvAll) : '')),
       getJSON('/prompts.json?limit=' + n).catch(() => ({ ok: false })),
       cvFirst ? getJSON('/system.json').catch(() => null) : Promise.resolve(null),
       getJSON('/speakers.json').catch(() => null),
@@ -413,7 +446,19 @@ async function load(){
 
 $('cvRefresh').addEventListener('click', load);
 $('cvLimit').addEventListener('change', load);
-$('cvSearch').addEventListener('input', renderList);
+$('cvSearch').addEventListener('input', () => {
+  // Clearing the box leaves a whole-history search: back to the newest turns.
+  if (cvAll && !$('cvSearch').value.trim()) { cvAll = ''; load(); return; }
+  renderList();
+});
+$('cvSearch').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const q = $('cvSearch').value.trim();
+  if (q === cvAll) return;
+  cvAll = q;
+  load();
+});
 $('cvSpeaker').addEventListener('change', renderList);
 $('cvList').addEventListener('click', (e) => {
   const row = e.target.closest('.turn-row'); if (row) select(row.dataset.key, false);
