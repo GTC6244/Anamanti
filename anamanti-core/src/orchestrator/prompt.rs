@@ -972,6 +972,21 @@ mod household_tests {
         assert!(m.turns.is_empty());
     }
 
+    /// A turn shared with the household is reported by recall as both a turn and a
+    /// household hit. It must render as an earlier conversation ("context only, not facts
+    /// about this person"), never as a household *fact*: its "I/my" belongs to whoever
+    /// said it, not to the current speaker.
+    #[test]
+    fn shared_turns_render_as_earlier_conversations_not_household_facts() {
+        let shared = "My cats are Magoo and Jeans\nLovely names!".to_string();
+        let hits = vec![shared.clone(), "The wifi is FastNet".to_string()];
+        let household = vec![shared.clone(), "The wifi is FastNet".to_string()];
+        let m = RecalledMemory::split(&hits, &household, std::slice::from_ref(&shared));
+        assert_eq!(m.turns, vec![shared]);
+        assert_eq!(m.household, vec!["The wifi is FastNet".to_string()]);
+        assert!(m.personal.is_empty());
+    }
+
     #[test]
     fn past_turns_get_their_own_section_not_about_this_person() {
         let turn =

@@ -430,7 +430,7 @@ fn is_non_answer(reply: &str) -> bool {
 /// Whether a turn should be ingested as a recallable `Turn` node. False for non-answers,
 /// which would otherwise prime the model to repeat the failure (see the gate in
 /// [`MemoryIngester::run_once`]).
-fn is_recallable_turn(r: &ChatLogRecord) -> bool {
+pub(crate) fn is_recallable_turn(r: &ChatLogRecord) -> bool {
     !is_non_answer(&r.reply)
 }
 

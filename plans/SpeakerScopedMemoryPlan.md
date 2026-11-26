@@ -29,9 +29,14 @@
   action rather than a reclassification: the Conversations page's **Share with household**
   sets `shared` on the graph `Turn` (recalled for every reader and presented as household
   knowledge; `speaker_id` is untouched, so un-sharing is exact). It is keyed by chat-log
-  record id (legacy turns have no `turn_id`), persisted in SQLite `shared_turns`, read by
-  the ingester and replayed onto a store when it becomes active. The facts the turn wrote
-  keep their own scopes (use the review queue for those).
+  record id (legacy turns have no `turn_id`), persisted in SQLite `shared_turns` (with who
+  said it), read by the ingester and replayed onto a store when it becomes active. Old
+  turns are found with the page's whole-history search (Enter in the search box,
+  `GET /chatlog.json?q=`). Sharing refuses ids not in the chat log and non-answer turns
+  (never recalled). Shared turns reach the prompt as *earlier conversations* (context
+  only), never as household facts. **Forgetting a voice un-shares that person's turns**
+  (§2: a forgotten person's history must not become the household's); a merge carries
+  them over. The facts the turn wrote keep their own scopes (use the review queue).
 - **No tentative cap for spoken names** (§4a.2, last bullet). Personal writes are keyed by
   voiceprint *id*, not by name, so a spoken-named profile that matches confidently is still
   that person. The real risk, enrollment folding into the wrong profile, is closed by

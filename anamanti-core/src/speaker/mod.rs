@@ -109,6 +109,11 @@ pub struct SpeakerContext {
     pub is_new: bool,
     /// Cosine similarity to the matched profile (0.0 for a new cluster/unknown).
     pub confidence: f32,
+    /// When the voice was compared but matched nobody (a new cluster, or an unmatched
+    /// unknown voice): the cosine to the **nearest existing** voiceprint — why it was
+    /// called new — for threshold calibration. It is *not* a score for `speaker_id`.
+    /// `None` when something matched or nothing was compared.
+    pub nearest: Option<f32>,
     /// How far `confidence` leads the closest **other named person** (household-
     /// relative scoring); `None` when there is no such rival or nothing was compared.
     pub margin: Option<f32>,
@@ -131,6 +136,7 @@ impl SpeakerContext {
             name_source: None,
             is_new: false,
             confidence: 0.0,
+            nearest: None,
             margin: None,
             resolution: SpeakerResolution::Unknown,
             inherited: false,
@@ -152,6 +158,7 @@ impl SpeakerContext {
             name_source: None,
             is_new: resolution == SpeakerResolution::New,
             confidence,
+            nearest: None,
             margin: None,
             resolution,
             inherited: false,
@@ -270,7 +277,9 @@ impl Default for SpeakerThresholds {
 
 impl SpeakerThresholds {
     /// Build thresholds, treating a non-positive `min_speech_ms` as the default. The
-    /// short-clip path keeps its defaults (see [`with_short_clip`](Self::with_short_clip)).
+    /// short-clip path keeps its defaults (see [`with_short_clip`](Self::with_short_clip)),
+    /// and the cluster-creation floor its 2500 ms default, lifted to `min_speech_ms` if
+    /// that is longer (see [`with_min_create`](Self::with_min_create)).
     pub fn from_ms(match_threshold: f32, new_threshold: f32, min_speech_ms: u32) -> Self {
         let d = Self::default();
         let min_speech_samples = if min_speech_ms == 0 {
@@ -541,6 +550,16 @@ impl SpeakerService {
                 Ok(n) => change.graph_nodes = n,
                 Err(e) => change.warn(format!("detaching graph memory of {id}: {e:#}")),
             }
+            // `unassign_speaker` un-shared their turns; mirror that in the live graph
+            // (inactive stores catch up when they next become active).
+            match memory.shared_turns() {
+                Ok(shared) => {
+                    if let Err(e) = graph.sync_shared_turns(&shared).await {
+                        change.warn(format!("un-sharing graph turns of {id}: {e:#}"));
+                    }
+                }
+                Err(e) => change.warn(format!("reading shared turns: {e:#}")),
+            }
         }
         Ok(Some(change))
     }
@@ -714,8 +733,9 @@ impl SpeakerService {
     ///   almost always the person who just spoke, so a low score there is bad audio,
     ///   not a new voice.)
     ///
-    /// A new or unmatched voice still reports the nearest voiceprint's cosine as
-    /// `confidence` (and its `margin`), so thresholds can be calibrated from the log.
+    /// A new or unmatched voice reports the nearest voiceprint's cosine as `nearest`
+    /// (never as `confidence`, which is always a score for `speaker_id`), so thresholds
+    /// can be calibrated from the log.
     ///
     /// Both paths also score against the **household** ([`MatchPolicy`]): a match that
     /// barely leads another named person (`min_margin`) is only tentative and trains
@@ -749,8 +769,7 @@ impl SpeakerService {
             // Compared and matched nobody, but may not mint a voice: unattributed, with
             // the nearest score kept for calibration. No clip (there is no profile).
             let mut ctx = SpeakerContext::unknown();
-            ctx.confidence = found.score;
-            ctx.margin = found.margin;
+            ctx.nearest = found.nearest;
             return Ok(ctx);
         }
         // Keep this utterance in the rolling clip window so a human can play the
@@ -769,6 +788,7 @@ impl SpeakerService {
             name_source: found.name_source,
             is_new: resolution == SpeakerResolution::New,
             confidence: found.score,
+            nearest: found.nearest,
             margin: found.margin,
             resolution,
             inherited: false,
@@ -791,6 +811,7 @@ impl SpeakerService {
                 let mut ctx = SpeakerContext::unknown();
                 ctx.short_clip = true;
                 ctx.confidence = ranked.score;
+                ctx.nearest = Some(ranked.score);
                 ctx.margin = margin;
                 return Ok(ctx);
             }
@@ -802,6 +823,7 @@ impl SpeakerService {
             speaker_id: ranked.id,
             is_new: false,
             confidence: ranked.score,
+            nearest: None,
             margin,
             resolution,
             inherited: false,
@@ -1000,7 +1022,7 @@ mod tests {
             .identify_and_attribute(&tone(150.0, 1500), true)
             .unwrap();
         assert!(short.is_unknown(), "{short:?}");
-        assert_eq!(short.confidence, 0.0, "no profiles yet: nothing compared");
+        assert_eq!(short.nearest, None, "no profiles yet: nothing compared");
         assert_eq!(svc.registry().count().unwrap(), 0);
 
         let sam = svc
@@ -1023,11 +1045,11 @@ mod tests {
             .unwrap();
         for ctx in [&other_short, &follow_up] {
             assert!(ctx.is_unknown(), "{ctx:?}");
-            assert!(ctx.confidence < svc.thresholds.new_threshold);
-            assert_ne!(
-                ctx.confidence, 0.0,
-                "the nearest score is kept for calibration"
-            );
+            assert_eq!(ctx.confidence, 0.0, "no score for an unattributed voice");
+            let nearest = ctx
+                .nearest
+                .expect("the nearest score is kept for calibration");
+            assert!(nearest < svc.thresholds.new_threshold);
         }
         assert_eq!(svc.registry().count().unwrap(), 1, "nothing minted");
         assert!(svc
@@ -1035,15 +1057,20 @@ mod tests {
             .unwrap_or_default()
             .is_empty());
 
-        // … and minted (reporting the nearest score, not 0.00) when long and allowed.
+        // … and minted when long and allowed. Its `confidence` is not a score against
+        // the new cluster; the nearest *other* voiceprint is reported separately.
         let dana = svc
             .identify_and_attribute(&tone(600.0, 2600), true)
             .unwrap();
         assert!(dana.is_new);
+        assert_eq!(dana.confidence, 0.0);
+        assert_eq!(dana.margin, None);
         assert!(
-            (dana.confidence - follow_up.confidence).abs() < 1e-4,
+            (dana.nearest.unwrap() - follow_up.nearest.unwrap()).abs() < 1e-4,
             "{dana:?}"
         );
+        // A matched voice carries no `nearest`.
+        assert_eq!(again.nearest, None);
         assert_eq!(svc.registry().count().unwrap(), 2);
     }
 

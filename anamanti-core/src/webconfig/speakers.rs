@@ -729,7 +729,13 @@ fn conversations_attribute(s: &AppServices, data: &Value, ops: &mut Vec<GraphOp>
 /// share the turn with the household (recalled for everyone, whoever said it) or stop
 /// sharing it. Keyed by record id, not `turn_id`, so turns logged before turn ids — the
 /// ones told before voice ID, now the unknown speaker's — can be rescued. Who said the
-/// turn and the facts it wrote are untouched. Replies `{ ok, id, shared, graph_updated }`.
+/// turn and the facts it wrote are untouched.
+///
+/// Sharing refuses an id that is not in the chat log, and a turn recall never keeps (a
+/// non-answer the ingester withholds), which would otherwise show as shared while
+/// recall can never use it. The share records who said the turn, so forgetting that
+/// person un-shares it. Un-sharing always succeeds. Replies
+/// `{ ok, id, shared, graph_updated }`.
 fn conversations_share(s: &AppServices, data: &Value, ops: &mut Vec<GraphOp>) -> String {
     let Some(id) = super::str_field(data, "id") else {
         return fail("`id` is required");
@@ -737,7 +743,27 @@ fn conversations_share(s: &AppServices, data: &Value, ops: &mut Vec<GraphOp>) ->
     let Some(shared) = data.get("shared").and_then(Value::as_bool) else {
         return fail("`shared` must be true or false");
     };
-    if let Err(e) = s.memory().set_turn_shared(&id, shared) {
+    let stored = if shared {
+        // The whole log (not a tail): the turns worth rescuing are the oldest ones.
+        let record = match crate::memory::chatlog::read_tail(&s.debug.chatlog_path, usize::MAX) {
+            Ok(all) => all.into_iter().find(|r| r.id == id),
+            Err(e) => return fail(format!("{e:#}")),
+        };
+        let Some(record) = record else {
+            return fail(format!("no conversation turn `{id}` in the chat log"));
+        };
+        if !crate::memory::ingester::is_recallable_turn(&record) {
+            return fail(
+                "this turn is not kept for recall (its reply was a non-answer), so sharing \
+                 it would have no effect",
+            );
+        }
+        let said_by = SpeakerDirectory::build(s).turn_tag(&record).id;
+        s.memory().share_turn(&id, said_by.as_deref())
+    } else {
+        s.memory().unshare_turn(&id)
+    };
+    if let Err(e) = stored {
         return fail(format!("{e:#}"));
     }
     log::info!(

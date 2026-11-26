@@ -210,4 +210,30 @@ mod tests {
         assert_eq!(m, map(&[("a", None), ("b", None), ("c", None)]));
         assert_eq!(m.resolve("a"), UNKNOWN_SPEAKER);
     }
+
+    /// The alias handle reads the memory store's `shared_turns` from the same file —
+    /// empty (not an error) on a database the memory store has not created it in yet.
+    #[test]
+    fn shared_turns_load_from_the_shared_database() {
+        let dir = std::env::temp_dir().join(format!(
+            "anamanti-aliases-shared-{}-{}",
+            std::process::id(),
+            crate::clock::now_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("anamanti_memory.sqlite");
+        let aliases = SpeakerAliases::open(&db).unwrap();
+        assert!(
+            aliases.load_shared_turns().unwrap().is_empty(),
+            "no table yet"
+        );
+
+        let memory = crate::memory::MemoryStore::open(&db).unwrap();
+        memory.share_turn("r-1", None).unwrap();
+        memory.share_turn("r-2", Some("spk-a")).unwrap();
+        let shared = aliases.load_shared_turns().unwrap();
+        assert_eq!(shared.len(), 2);
+        assert!(shared.contains("r-1") && shared.contains("r-2"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

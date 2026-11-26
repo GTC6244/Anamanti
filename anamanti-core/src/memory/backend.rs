@@ -15,6 +15,7 @@
 //! through the concrete [`MemoryStore`] regardless of which recall backend is
 //! selected, so nothing about settings/voice management changes.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -110,6 +111,14 @@ pub trait Recall: Send + Sync {
     /// household". Returns how many stored items changed.
     async fn share_turn(&self, ext_id: &str, shared: bool) -> Result<u64> {
         let _ = (ext_id, shared);
+        Ok(0)
+    }
+
+    /// Make this backend's shared turns exactly `shared` (chat-log record ids) — after
+    /// a speaker forget un-shared some (SQLite `shared_turns` is the source of truth).
+    /// Returns how many stored items changed.
+    async fn sync_shared_turns(&self, shared: &HashSet<String>) -> Result<u64> {
+        let _ = shared;
         Ok(0)
     }
 
@@ -244,6 +253,10 @@ impl Recall for HelixRecall {
 
     async fn share_turn(&self, ext_id: &str, shared: bool) -> Result<u64> {
         self.helix.set_turn_shared(ext_id, shared).await
+    }
+
+    async fn sync_shared_turns(&self, shared: &HashSet<String>) -> Result<u64> {
+        self.helix.sync_shared_turns(shared).await
     }
 
     async fn retag_memory(&self, content: &str, from: &str, to: &str) -> Result<u64> {

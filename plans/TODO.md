@@ -333,7 +333,8 @@ hardware:
 - [ ] **Rescue pre-voice-ID household knowledge.** The marker-guarded `household → unknown`
       graph migration moved every turn logged before voice ID to the unknown speaker
       (never recalled), so things told back then (e.g. the cats Magoo and Jeans, ~2026-10-01)
-      stopped being recalled. On the Conversations page, open each such turn and use
+      stopped being recalled. On the Conversations page, type e.g. "Magoo" in the search
+      box and press **Enter** (searches the whole chat log), open each such turn and use
       **Share with household** (`POST /conversations/share`, keyed by chat-log record id
       so turns without a `turn_id` work). The shared flag rides on the graph `Turn`
       (`shared`), is persisted in SQLite `shared_turns`, and is replayed onto a store
@@ -366,8 +367,9 @@ forget the one-sample clusters. Code options, highest impact first:
       follow-up voice is unknown (and, being compared, is not inherited).
 - [ ] Merge suggestions (unnamed centroid ≥ `match_threshold` to a person) + a merge
       action on the Mac console (today merges are device-only) — see §6c.
-- [x] Log the nearest voiceprint's score + margin on `new` / unmatched (was 0.00); the
-      Conversations page shows it as "nearest voiceprint".
+- [x] Log the nearest voiceprint's score on `new` / unmatched (`speaker_nearest` in the
+      chat log; `confidence` stays a score for the turn's own speaker); the Conversations
+      page shows it as "Nearest voiceprint".
 - [ ] Calibrate on the stored clips with those scores (§5.0).
 - [ ] Don't identify or train on TTS echo / playback audio.
 - [ ] Expire never-matched one-sample clusters after N days (§6c retention).

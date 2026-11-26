@@ -8,7 +8,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::debug::{
-    chatlog_json, helix_json, helix_rename_json, limit_param, prompts_json, sqlite_json,
+    chatlog_json, helix_json, helix_rename_json, limit_param, prompts_json, query_param,
+    sqlite_json,
 };
 use super::drive::{drive_folders_json, drive_link_json, drive_save_json, drive_status_json};
 use super::general::{
@@ -502,7 +503,14 @@ pub(super) static ROUTES: &[Route] = &[
         Sync(|s, r| {
             let dir = SpeakerDirectory::build(s);
             let shared = s.memory().shared_turns().unwrap_or_default();
-            Reply::json(chatlog_json(&s.debug, &dir, &shared, limit_param(r.target)))
+            let q = query_param(r.target);
+            Reply::json(chatlog_json(
+                &s.debug,
+                &dir,
+                &shared,
+                limit_param(r.target),
+                q.as_deref(),
+            ))
         }),
     ),
     get(

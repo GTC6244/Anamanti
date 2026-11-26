@@ -158,8 +158,8 @@ impl SpeakerRegistry {
     ///   [`Attribution::Unmatched`] and nothing is written (the caller decided this
     ///   utterance may not mint a voice: too short, or a follow-up turn).
     ///
-    /// When nothing matched, `score`/`margin` still report the nearest existing
-    /// profile, so the reason a voice was called new or unmatched can be calibrated.
+    /// When nothing matched, `nearest` reports the nearest existing profile's cosine, so
+    /// the reason a voice was called new or unmatched can be calibrated.
     pub fn identify_or_create(
         &self,
         embedding: &[f32],
@@ -186,13 +186,12 @@ impl SpeakerRegistry {
                     name,
                     name_source,
                     score: r.score,
+                    nearest: None,
                     attribution,
                 }
             }
             (nearest, _) => {
-                let (score, margin) = nearest
-                    .as_ref()
-                    .map_or((0.0, None), |r| (r.score, r.margin()));
+                let nearest = nearest.map(|r| r.score);
                 if create {
                     let id = self.next_id();
                     insert_cluster(&tx, &id, embedding)?;
@@ -200,8 +199,9 @@ impl SpeakerRegistry {
                         id,
                         name: None,
                         name_source: None,
-                        score,
-                        margin,
+                        score: 0.0,
+                        margin: None,
+                        nearest,
                         attribution: Attribution::Created,
                     }
                 } else {
@@ -209,8 +209,9 @@ impl SpeakerRegistry {
                         id: super::UNKNOWN_SPEAKER.to_string(),
                         name: None,
                         name_source: None,
-                        score,
-                        margin,
+                        score: 0.0,
+                        margin: None,
+                        nearest,
                         attribution: Attribution::Unmatched,
                     }
                 }
@@ -489,12 +490,15 @@ pub struct Identified {
     pub name: Option<String>,
     /// Where that name came from.
     pub name_source: Option<NameSource>,
-    /// Cosine similarity to the matched centroid — for `Created` / `Unmatched`, to the
-    /// nearest existing one (`0.0` when there were no profiles).
+    /// Cosine similarity to the matched centroid (`0.0` for `Created` / `Unmatched`).
     pub score: f32,
-    /// Lead of the nearest profile over the closest other named person (`None` with no
-    /// rival or no profiles).
+    /// Lead over the closest other named person (`None` with no rival, or when nothing
+    /// matched).
     pub margin: Option<f32>,
+    /// When nothing matched (`Created` / `Unmatched`): the cosine to the nearest
+    /// existing profile — why the voice was called new — for calibration. `None` when
+    /// something matched or there were no profiles.
+    pub nearest: Option<f32>,
     pub attribution: Attribution,
 }
 
@@ -975,7 +979,7 @@ mod tests {
         let none = reg.identify_or_create(&at(0.0), &p, false).unwrap();
         assert_eq!(none.attribution, Attribution::Unmatched);
         assert_eq!(none.id, super::super::UNKNOWN_SPEAKER);
-        assert_eq!(none.score, 0.0);
+        assert_eq!(none.nearest, None, "nothing to compare against");
         assert_eq!(reg.count().unwrap(), 0);
 
         let first = reg.identify_or_create(&at(0.0), &p, true).unwrap();
@@ -985,25 +989,27 @@ mod tests {
         // 80° away: cos ≈ 0.17 < 0.5 — the nearest score is reported either way.
         let held = reg.identify_or_create(&at(80.0), &p, false).unwrap();
         assert_eq!(held.attribution, Attribution::Unmatched);
-        assert!(
-            (held.score - 80f32.to_radians().cos()).abs() < 1e-4,
-            "{held:?}"
-        );
+        let cos80 = 80f32.to_radians().cos();
+        assert!((held.nearest.unwrap() - cos80).abs() < 1e-4, "{held:?}");
+        assert_eq!(held.score, 0.0);
         assert_eq!(reg.count().unwrap(), 1, "create = false mints nothing");
         assert_eq!(reg.get(&first.id).unwrap().unwrap().samples, 1);
 
         let minted = reg.identify_or_create(&at(80.0), &p, true).unwrap();
         assert_eq!(minted.attribution, Attribution::Created);
-        assert!(
-            (minted.score - 80f32.to_radians().cos()).abs() < 1e-4,
-            "{minted:?}"
+        assert!((minted.nearest.unwrap() - cos80).abs() < 1e-4, "{minted:?}");
+        assert_eq!(
+            minted.score, 0.0,
+            "the new cluster's own score is not a match"
         );
+        assert_eq!(minted.margin, None);
         assert_eq!(reg.count().unwrap(), 2);
 
         // A usable match is unaffected by `create`.
         let again = reg.identify_or_create(&at(0.0), &p, false).unwrap();
         assert_eq!(again.attribution, Attribution::Matched);
         assert_eq!(again.id, first.id);
+        assert_eq!(again.nearest, None);
     }
 
     /// A unit vector at `deg` degrees in the plane (cosine between two = cos of the gap).

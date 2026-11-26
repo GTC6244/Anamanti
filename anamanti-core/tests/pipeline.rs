@@ -791,7 +791,7 @@ async fn drive_device_voiced(io: DuplexStream, hz: f32, followup_depth: u32) -> 
 
     let ev = read_event(&mut reader).await.unwrap().unwrap();
     let transcript = ev.transcript_text().unwrap_or_default().to_string();
-    write_event(&mut writer, &WyomingEvent::audio_stop(1520))
+    write_event(&mut writer, &WyomingEvent::audio_stop(2620))
         .await
         .unwrap();
 
@@ -884,7 +884,11 @@ async fn follow_up_turn_never_mints_a_new_voice() {
         !s.inherited,
         "a compared, unmatched voice is never inherited"
     );
-    assert_ne!(s.confidence, 0.0);
+    assert_eq!(s.confidence, 0.0, "no score for an unattributed voice");
+    assert!(
+        s.nearest.is_some(),
+        "the nearest voiceprint's score is kept"
+    );
     assert_eq!(speaker.registry().count().unwrap(), 1);
 
     // The same voice opening a fresh turn is a new voice.

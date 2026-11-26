@@ -2249,7 +2249,8 @@ mod speaker_tagging {
 
         let dir = SpeakerDirectory::build(&s);
         let v: Value =
-            serde_json::from_str(&chatlog_json(&s.debug, &dir, &Default::default(), 10)).unwrap();
+            serde_json::from_str(&chatlog_json(&s.debug, &dir, &Default::default(), 10, None))
+                .unwrap();
         let recs = v["records"].as_array().unwrap();
         let by = |t: &str| recs.iter().find(|r| r["turn_id"] == t).unwrap().clone();
 
@@ -2475,52 +2476,134 @@ mod speaker_tagging {
     #[test]
     fn conversations_share_toggles_a_turn_and_chatlog_reports_it() {
         let mut d = debug();
+        let s0 = speaker_services(settings(), debug());
+        let brendon = reg(&s0).create_labeled("Brendon", &[1.0, 0.0], 3).unwrap();
         let mut legacy = record("t-9", "household", None);
         legacy.id = "r-legacy".into();
         legacy.turn_id = None; // logged before turn ids: keyed by record id
-        d.chatlog_path = temp_log("share", &[legacy]);
-        let s = speaker_services(settings(), d);
+        legacy.transcript = "our cats are Magoo and Jeans".into();
+        let mut his = record("t-10", &brendon, Some("Brendon"));
+        his.id = "r-his".into();
+        his.speaker_resolution = Some("identified".into());
+        let mut refusal = record("t-11", "unknown", None);
+        refusal.id = "r-refusal".into();
+        refusal.reply = "I don't know your cats' names.".into();
+        d.chatlog_path = temp_log("share", &[legacy, his, refusal]);
+        let s = AppServices {
+            debug: d.clone(),
+            ..s0
+        };
         let post = |body: Value| -> Value {
             serde_json::from_str(&super::super::speakers::conversations_share_json(&s, &body))
                 .unwrap()
         };
-        let shared_flag = || -> Value {
+        let listed = |q: Option<&str>| -> Vec<Value> {
             let dir = SpeakerDirectory::build(&s);
             let shared = s.memory().shared_turns().unwrap();
             let v: Value =
-                serde_json::from_str(&chatlog_json(&s.debug, &dir, &shared, 10)).unwrap();
-            v["records"][0]["shared"].clone()
+                serde_json::from_str(&chatlog_json(&s.debug, &dir, &shared, 10, q)).unwrap();
+            v["records"].as_array().unwrap().clone()
         };
-        assert_eq!(shared_flag(), false);
+        let flag = |id: &str| -> Value {
+            listed(None).into_iter().find(|r| r["id"] == id).unwrap()["shared"].clone()
+        };
+        assert_eq!(flag("r-legacy"), false);
 
         let r = post(json!({ "id": "r-legacy", "shared": true }));
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(r["shared"], true);
-        assert!(s.memory().shared_turns().unwrap().contains("r-legacy"));
-        assert_eq!(shared_flag(), true);
+        assert_eq!(flag("r-legacy"), true);
         // Who said it is untouched: still the unknown (legacy) speaker.
-        let dir = SpeakerDirectory::build(&s);
-        let v: Value = serde_json::from_str(&chatlog_json(
-            &s.debug,
-            &dir,
-            &s.memory().shared_turns().unwrap(),
-            10,
-        ))
-        .unwrap();
-        assert_eq!(v["records"][0]["speaker"]["kind"], "unknown");
+        let legacy = listed(None)
+            .into_iter()
+            .find(|r| r["id"] == "r-legacy")
+            .unwrap();
+        assert_eq!(legacy["speaker"]["kind"], "unknown");
+
+        // A person's shared turn is un-shared when that person is forgotten.
+        assert_eq!(post(json!({ "id": "r-his", "shared": true }))["ok"], true);
+        s.memory().unassign_speaker(&brendon).unwrap();
+        assert_eq!(
+            flag("r-his"),
+            false,
+            "forgetting Brendon un-shares his turn"
+        );
+        assert_eq!(flag("r-legacy"), true, "the unattributed share stays");
 
         assert_eq!(
             post(json!({ "id": "r-legacy", "shared": false }))["ok"],
             true
         );
-        assert_eq!(shared_flag(), false);
-        // Bad input is refused in-band.
+        assert_eq!(flag("r-legacy"), false);
+
+        // Refused in-band: unknown ids, non-answer turns (never recalled), bad input.
+        let r = post(json!({ "id": "r-nope", "shared": true }));
+        assert_eq!(r["ok"], false, "{r}");
+        let r = post(json!({ "id": "r-refusal", "shared": true }));
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r["message"].as_str().unwrap().contains("non-answer"), "{r}");
+        assert!(s.memory().shared_turns().unwrap().is_empty());
         assert_eq!(post(json!({ "shared": true }))["ok"], false);
         assert_eq!(post(json!({ "id": "r-legacy" }))["ok"], false);
         assert_eq!(
             post(json!({ "id": "r-legacy", "shared": "yes" }))["ok"],
             false
         );
+        // Un-sharing an unknown id is harmless.
+        assert_eq!(post(json!({ "id": "r-nope", "shared": false }))["ok"], true);
+    }
+
+    /// `?q=` searches the whole chat log (case-insensitive), not just the newest page,
+    /// so old turns can be found and shared.
+    #[test]
+    fn chatlog_json_query_searches_the_whole_log() {
+        let mut d = debug();
+        let mut recs: Vec<ChatLogRecord> = (0..30)
+            .map(|i| record(&format!("t-{i}"), "unknown", None))
+            .collect();
+        recs[0].transcript = "Actually, that's MAGOO, not Smigoo".into();
+        recs[1].reply = "You have two cats: Magoo and Jeans!".into();
+        d.chatlog_path = temp_log("search", &recs);
+        let s = speaker_services(settings(), d);
+        let dir = SpeakerDirectory::build(&s);
+        let get = |limit: usize, q: Option<&str>| -> Vec<Value> {
+            let v: Value =
+                serde_json::from_str(&chatlog_json(&s.debug, &dir, &Default::default(), limit, q))
+                    .unwrap();
+            v["records"].as_array().unwrap().clone()
+        };
+        // The newest 10 do not reach the two oldest turns …
+        assert!(!get(10, None).iter().any(|r| r["turn_id"] == "t-0"));
+        // … a search does, newest first, and honours the limit.
+        let hits = get(10, Some("magoo"));
+        let ids: Vec<&str> = hits
+            .iter()
+            .map(|r| r["turn_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["t-1", "t-0"]);
+        assert_eq!(get(1, Some("magoo")).len(), 1);
+        assert!(get(10, Some("no such words")).is_empty());
+    }
+
+    #[test]
+    fn query_param_decodes_and_ignores_blank() {
+        use super::super::debug::query_param;
+        assert_eq!(
+            query_param("/chatlog.json?limit=5&q=magoo").as_deref(),
+            Some("magoo")
+        );
+        assert_eq!(
+            query_param("/chatlog.json?q=my+cats%20are%3F").as_deref(),
+            Some("my cats are?")
+        );
+        assert_eq!(query_param("/c?q=caf%C3%A9").as_deref(), Some("café"));
+        // Malformed / truncated escapes are kept literally; never a panic.
+        assert_eq!(query_param("/c?q=100%").as_deref(), Some("100%"));
+        assert_eq!(query_param("/c?q=%zz%4").as_deref(), Some("%zz%4"));
+        assert_eq!(query_param("/c?q=é%").as_deref(), Some("é%"));
+        assert_eq!(query_param("/c?q=+%20+"), None);
+        assert_eq!(query_param("/c?limit=5"), None);
+        assert_eq!(query_param("/c"), None);
     }
 
     fn raw_post(path: &str, host: &str, extra: &str, body: &str) -> String {
@@ -2534,9 +2617,11 @@ mod speaker_tagging {
     async fn attribute_endpoints_reject_non_json_and_non_loopback() {
         let body = r#"{"id":1,"to":"household"}"#;
         let turn = r#"{"turn_id":"t-1","to":"unknown"}"#;
+        let share = r#"{"id":"rec-t-1","shared":false}"#;
         for (path, body) in [
             ("/memory/attribute", body),
             ("/conversations/attribute", turn),
+            ("/conversations/share", share),
         ] {
             // Form content type → 415, nothing moved.
             let (resp, mem) = serve_with(add_unknown, |p| {

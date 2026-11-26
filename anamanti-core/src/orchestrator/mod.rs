@@ -1104,6 +1104,7 @@ impl Pipeline {
             speaker_resolution: Some(speaker.resolution.as_str().to_string()),
             speaker_confidence: Some(speaker.confidence),
             speaker_margin: speaker.margin,
+            speaker_nearest: speaker.nearest,
             speaker_inherited: speaker.inherited,
             speaker_short_clip: speaker.short_clip,
             timing: Some(timing),
@@ -1449,7 +1450,10 @@ impl Pipeline {
             *self.last_speaker.lock().unwrap() = Some((speaker.clone(), now));
             return speaker;
         }
-        let uncompared = speaker.is_unknown() && speaker.confidence == 0.0;
+        // Compared-and-unmatched voices carry `nearest` (and short-clip misses also a
+        // confidence); only a turn with neither was never compared.
+        let uncompared =
+            speaker.is_unknown() && speaker.confidence == 0.0 && speaker.nearest.is_none();
         if followup_depth == 0 || !uncompared {
             return speaker;
         }

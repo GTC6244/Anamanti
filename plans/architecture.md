@@ -203,7 +203,10 @@ predictable memory use and no GC pauses under the 1 GB limit.
   (deliberately true for everyone, recalled for every speaker), or `unknown` (said about
   themselves by a voice that could not be confirmed — **kept but never recalled**, shown
   in the admin console's review queue for attribution). An unattributed turn is the
-  `unknown` speaker, never the household. Each turn's speaker has a **resolution** —
+  `unknown` speaker, never the household — unless the admin deliberately **shares** it
+  (Conversations → *Share with household*): a shared `Turn` is recalled for every reader
+  as an earlier conversation while keeping its speaker, and is un-shared if that person's
+  voice is forgotten (`shared_turns` in SQLite). Each turn's speaker has a **resolution** —
   `identified` (match ≥ `match_threshold`), `tentative` (between the thresholds, or a
   short follow-up turn inheriting the previous identified speaker), `new` (a fresh
   anonymous cluster) or `unknown`: identified/tentative speakers *read* their own +
@@ -218,7 +221,7 @@ predictable memory use and no GC pauses under the 1 GB limit.
   from a clip of at least `speaker.min_create_ms` (default 2500 ms, stricter than the
   1200 ms `min_speech_ms` that lets a clip train an existing voiceprint) and never on a
   follow-up turn; otherwise it is `unknown`. New and unmatched voices log the nearest
-  voiceprint's cosine as their confidence, for calibration. Matching is also **household-relative**: each score is compared
+  existing voiceprint's cosine separately (`speaker_nearest`), for calibration. Matching is also **household-relative**: each score is compared
   with the closest *other named* voiceprint (anonymous clusters are not rivals — they are
   often fragments of a known voice). A match that barely leads another person
   (`speaker.min_margin`, 0.05) is only tentative and trains nobody; a tentative-band match
