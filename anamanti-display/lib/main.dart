@@ -661,6 +661,7 @@ class _AmbientHomeState extends State<AmbientHome> {
           // Restart the engine after a Camera grant so the proximity sensor +
           // auto-brightness start immediately (Settings → Permissions).
           onRequestEngineRestart: _startEngine,
+          onReloadPhotos: _reloadPhotos,
         ),
       ),
     );

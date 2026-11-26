@@ -425,9 +425,16 @@ class _NightReadout extends StatelessWidget {
 
 /// Display → Photos: the idle slideshow source and Google linking.
 class DisplayPhotosTab extends StatefulWidget {
-  const DisplayPhotosTab({super.key, required this.controller});
+  const DisplayPhotosTab({
+    super.key,
+    required this.controller,
+    this.onReloadPhotos,
+  });
 
   final SettingsController controller;
+
+  /// See [SettingsScreen.onReloadPhotos].
+  final VoidCallback? onReloadPhotos;
 
   @override
   State<DisplayPhotosTab> createState() => _DisplayPhotosTabState();
@@ -739,12 +746,18 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
       ),
     );
     if (chosen == null || !mounted) return;
+    // Re-picking the same folders applies no settings change, so ask for a reload
+    // directly: the user may have just filled or re-shared the folder in Drive.
+    final unchanged =
+        setEquals(chosen, _c.settings.driveFolderIds.toSet()) &&
+        _c.settings.photoSource == PhotoSourceKind.drive;
     _c.updateLocal(
       _withLocalFolders(
         _c.settings,
         chosen.toList(),
       ).copyWith(photoSource: PhotoSourceKind.drive),
     );
+    if (unchanged) widget.onReloadPhotos?.call();
     _snack('${chosen.length} folder(s) selected. Counting photos…');
     // Report what the slideshow will find (subfolders included), so a folder that
     // holds only out-of-reach subfolders doesn't just leave the screen dark.
