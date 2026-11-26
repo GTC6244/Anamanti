@@ -7,6 +7,7 @@
 // production [FrbOrchestratorClient] is the only place that talks to FRB.
 
 import 'package:anamanti_display/src/rust/api/settings.dart' as frb;
+import 'package:anamanti_display/src/settings/app_settings.dart';
 
 /// The orchestrator's current runtime settings.
 class OrchestratorSettingsView {
@@ -104,6 +105,19 @@ class DriveTokenView {
   final String refreshToken;
   final List<String> folderIds;
   final String scope;
+
+  /// [s] with this synced bundle applied. The Core's folder list is only a
+  /// default: it never replaces folders chosen on this display
+  /// ([AppSettings.driveFoldersLocal]), nor clears them when the Core has none.
+  AppSettings applyTo(AppSettings s) => s.copyWith(
+    driveClientId: clientId,
+    driveClientSecret: clientSecret,
+    driveRefreshToken: refreshToken,
+    driveFolderIds: s.driveFoldersLocal || folderIds.isEmpty
+        ? s.driveFolderIds
+        : folderIds,
+    driveLinked: linked,
+  );
 }
 
 /// One capability in the Core's read-only "functions" snapshot, shown on the

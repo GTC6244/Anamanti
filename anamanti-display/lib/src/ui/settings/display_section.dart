@@ -33,16 +33,7 @@ const List<int> kDimDelayPresets = <int>[
 
 /// The fixed "change photo every" choices (seconds): 5s … 10m, ascending. Includes
 /// the 10 s default ([kDefaultSlideIntervalSecs]).
-const List<int> kSlideIntervalPresets = <int>[
-  5,
-  10,
-  15,
-  30,
-  60,
-  120,
-  300,
-  600,
-];
+const List<int> kSlideIntervalPresets = <int>[5, 10, 15, 30, 60, 120, 300, 600];
 
 /// The entry of [presets] closest to [seconds], so a persisted value that predates
 /// the preset list (or an out-of-range one) still shows a valid selection.
@@ -605,11 +596,11 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
           helper: 'Filled by “Choose folders”, or paste manually.',
           onChanged: (v) => _c.setLocalDraft(
             'driveFolderIds',
-            (s) => s.copyWith(driveFolderIds: parseDriveFolderIds(v)),
+            (s) => _withLocalFolders(s, parseDriveFolderIds(v)),
           ),
           onCommit: (v) => _c.commitLocalText(
             'driveFolderIds',
-            (s) => s.copyWith(driveFolderIds: parseDriveFolderIds(v)),
+            (s) => _withLocalFolders(s, parseDriveFolderIds(v)),
           ),
         ),
       ),
@@ -690,18 +681,8 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
       );
       return;
     }
-    final s = _c.settings;
     _c.updateLocal(
-      s.copyWith(
-        photoSource: PhotoSourceKind.drive,
-        driveClientId: token.clientId,
-        driveClientSecret: token.clientSecret,
-        driveRefreshToken: token.refreshToken,
-        driveFolderIds: token.folderIds.isNotEmpty
-            ? token.folderIds
-            : s.driveFolderIds,
-        driveLinked: token.linked,
-      ),
+      token.applyTo(_c.settings).copyWith(photoSource: PhotoSourceKind.drive),
     );
     _snack(
       token.linked
@@ -758,10 +739,10 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
     );
     if (chosen == null || !mounted) return;
     _c.updateLocal(
-      _c.settings.copyWith(
-        photoSource: PhotoSourceKind.drive,
-        driveFolderIds: chosen.toList(),
-      ),
+      _withLocalFolders(
+        _c.settings,
+        chosen.toList(),
+      ).copyWith(photoSource: PhotoSourceKind.drive),
     );
     _snack('${chosen.length} folder(s) selected.');
   }
@@ -827,6 +808,11 @@ class _DisplayPhotosTabState extends State<DisplayPhotosTab> {
     }
   }
 }
+
+/// [s] with Drive folders chosen on this display, so a later Core sync keeps
+/// them. Clearing the choice hands the folder list back to the Core's default.
+AppSettings _withLocalFolders(AppSettings s, List<String> ids) =>
+    s.copyWith(driveFolderIds: ids, driveFoldersLocal: ids.isNotEmpty);
 
 /// Parse a folder field into Drive folder IDs. Accepts bare IDs or folder share links
 /// (`.../folders/<id>` or `?id=<id>`), comma / space / newline separated.

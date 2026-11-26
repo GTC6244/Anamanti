@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:anamanti_display/src/settings/app_settings.dart';
+import 'package:anamanti_display/src/settings/orchestrator_client.dart';
 import 'package:anamanti_display/src/slideshow/photo_source.dart';
 
 Future<List<PhotoItem>> _ambientLister({required String accessToken}) async {
@@ -207,6 +208,7 @@ void main() {
         ambientLinked: true,
         driveRefreshToken: 'd-rt',
         driveFolderIds: ['abc', 'def'],
+        driveFoldersLocal: true,
         driveLinked: true,
       );
       expect(AppSettings.fromJson(s.toJson()), s);
@@ -216,8 +218,51 @@ void main() {
       final r = AppSettings.fromJson({'photoSource': 'drive'});
       expect(r.photoSource, PhotoSourceKind.drive);
       expect(r.driveFolderIds, isEmpty);
+      expect(r.driveFoldersLocal, isFalse);
       expect(r.ambientLinked, isFalse);
       expect(r.driveLinked, isFalse);
+    });
+  });
+
+  group('DriveTokenView.applyTo', () {
+    const core = DriveTokenView(
+      linked: true,
+      configured: true,
+      clientId: 'cid',
+      clientSecret: 'secret',
+      refreshToken: 'rt',
+      folderIds: ['core-1'],
+      scope: 'drive.readonly',
+    );
+
+    test('takes the Core folders when this display chose none', () {
+      final r = core.applyTo(const AppSettings(driveFolderIds: ['old']));
+      expect(r.driveFolderIds, ['core-1']);
+      expect(r.driveRefreshToken, 'rt');
+      expect(r.driveLinked, isTrue);
+    });
+
+    test('keeps folders chosen on this display', () {
+      final r = core.applyTo(
+        const AppSettings(driveFolderIds: ['mine'], driveFoldersLocal: true),
+      );
+      expect(r.driveFolderIds, ['mine']);
+      expect(r.driveFoldersLocal, isTrue);
+      expect(r.driveClientId, 'cid');
+    });
+
+    test('keeps existing folders when the Core has none', () {
+      const empty = DriveTokenView(
+        linked: true,
+        configured: true,
+        clientId: 'cid',
+        clientSecret: 'secret',
+        refreshToken: 'rt',
+        folderIds: [],
+        scope: 'drive.readonly',
+      );
+      final r = empty.applyTo(const AppSettings(driveFolderIds: ['old']));
+      expect(r.driveFolderIds, ['old']);
     });
   });
 }
