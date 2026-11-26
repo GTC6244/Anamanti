@@ -668,6 +668,47 @@ void main() {
     },
   );
 
+  testWidgets(
+    're-syncing Drive from the Core keeps folders chosen on this display',
+    (tester) async {
+      final h = _Harness(
+        client: FakeOrchestratorClient(
+          driveToken: const DriveTokenView(
+            linked: true,
+            configured: true,
+            clientId: 'cid.apps',
+            clientSecret: 'gocspx-secret',
+            refreshToken: '1//refresh',
+            folderIds: <String>['1AbC'],
+            scope: 'drive.readonly',
+          ),
+        ),
+      );
+      await h.pump(
+        tester,
+        initial: const AppSettings(
+          advancedMode: true,
+          photoSource: PhotoSourceKind.drive,
+        ),
+      );
+
+      await open(tester, 'display', 'photos');
+      await tester.enterText(
+        find.byKey(const Key('settings-drive-folders')),
+        '1Kitchen',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await settle(tester);
+      expect(h.store.value.driveFolderIds, <String>['1Kitchen']);
+
+      await tester.tap(find.byKey(const Key('settings-drive-sync')));
+      await settle(tester);
+
+      expect(h.store.value.driveRefreshToken, '1//refresh');
+      expect(h.store.value.driveFolderIds, <String>['1Kitchen']);
+    },
+  );
+
   testWidgets('photo source switches by touch and applies', (tester) async {
     final h = _Harness();
     await h.pump(tester);

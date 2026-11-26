@@ -296,13 +296,7 @@ class _AmbientHomeState extends State<AmbientHome> {
       final t = await _client.fetchDriveToken();
       if (!t.configured)
         return; // orchestrator not set up for Drive; keep our values
-      final next = _settings.copyWith(
-        driveClientId: t.clientId,
-        driveClientSecret: t.clientSecret,
-        driveRefreshToken: t.refreshToken,
-        driveFolderIds: t.folderIds,
-        driveLinked: t.linked,
-      );
+      final next = t.applyTo(_settings);
       if (next != _settings) {
         _settings = next;
         await _store.save(_settings);
