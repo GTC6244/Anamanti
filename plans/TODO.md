@@ -360,12 +360,15 @@ forget the one-sample clusters. Code options, highest impact first:
       unknown and waits; a cluster is created only when 2–3 utterances from different turns
       agree. Changes the 2026-10-11 decision that unknown voices passively auto-cluster —
       **ask the owner first**.
-- [ ] Longer floor for creating a cluster (~2.5 s) than for matching.
-- [ ] A follow-up inside an identified turn's history window must not mint a cluster.
+- [x] Longer floor for creating a cluster than for matching: `speaker.min_create_ms`
+      (default 2500; `0` = `min_speech_ms`). Unmatched shorter clips are unknown.
+- [x] A follow-up turn (`followup_depth > 0`) never mints a cluster: an unmatched
+      follow-up voice is unknown (and, being compared, is not inherited).
 - [ ] Merge suggestions (unnamed centroid ≥ `match_threshold` to a person) + a merge
       action on the Mac console (today merges are device-only) — see §6c.
-- [ ] Log the best/runner-up score on `new` (today it records 0.00), then calibrate on the
-      stored clips (§5.0).
+- [x] Log the nearest voiceprint's score + margin on `new` / unmatched (was 0.00); the
+      Conversations page shows it as "nearest voiceprint".
+- [ ] Calibrate on the stored clips with those scores (§5.0).
 - [ ] Don't identify or train on TTS echo / playback audio.
 - [ ] Expire never-matched one-sample clusters after N days (§6c retention).
 - [ ] Check `speaker/features.rs` (Hamming window, 7600 Hz top, no DC removal) against

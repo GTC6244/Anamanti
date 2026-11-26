@@ -267,6 +267,12 @@ pub struct SpeakerConfig {
     pub new_threshold: f32,
     /// Minimum voiced audio (ms) before a turn may **create or update** a voiceprint.
     pub min_speech_ms: u32,
+    /// Minimum voiced audio (ms) before an unmatched voice may **mint a new anonymous
+    /// cluster** — stricter than `min_speech_ms`, because one short noisy utterance
+    /// otherwise becomes a permanent "person" (TODO.md §5.1). Between the two, a turn
+    /// can still match and train an existing voiceprint; unmatched it is unknown.
+    /// Clamped to at least `min_speech_ms`; `0` = `min_speech_ms` (the old behaviour).
+    pub min_create_ms: u32,
     /// Minimum voiced audio (ms) for a **read-only** short-clip match ("who am I?" is
     /// well under `min_speech_ms`). Below it the speaker is unknown. `0` disables the
     /// short-clip path. See SpeakerScopedMemoryPlan.md §4.
@@ -294,6 +300,7 @@ impl Default for SpeakerConfig {
             match_threshold: 0.55,
             new_threshold: 0.40,
             min_speech_ms: 1200,
+            min_create_ms: 2500,
             min_identify_ms: 600,
             short_clip_margin: 0.10,
             min_margin: 0.05,
@@ -1107,6 +1114,7 @@ pub struct FileSpeaker {
     pub match_threshold: Option<f32>,
     pub new_threshold: Option<f32>,
     pub min_speech_ms: Option<u32>,
+    pub min_create_ms: Option<u32>,
     pub min_identify_ms: Option<u32>,
     pub short_clip_margin: Option<f32>,
     pub min_margin: Option<f32>,
@@ -1515,6 +1523,7 @@ impl Config {
             match_threshold: fc.speaker.match_threshold.unwrap_or(sd.match_threshold),
             new_threshold: fc.speaker.new_threshold.unwrap_or(sd.new_threshold),
             min_speech_ms: fc.speaker.min_speech_ms.unwrap_or(sd.min_speech_ms),
+            min_create_ms: fc.speaker.min_create_ms.unwrap_or(sd.min_create_ms),
             min_identify_ms: fc.speaker.min_identify_ms.unwrap_or(sd.min_identify_ms),
             short_clip_margin: fc.speaker.short_clip_margin.unwrap_or(sd.short_clip_margin),
             min_margin: fc.speaker.min_margin.unwrap_or(sd.min_margin),
@@ -2531,7 +2540,8 @@ impl Config {
             self.speaker.min_speech_ms,
         )
         .with_short_clip(self.speaker.min_identify_ms, self.speaker.short_clip_margin)
-        .with_household_margins(self.speaker.min_margin, self.speaker.clear_margin);
+        .with_household_margins(self.speaker.min_margin, self.speaker.clear_margin)
+        .with_min_create(self.speaker.min_create_ms);
         let embedder: Arc<dyn SpeakerEmbedder> = match &self.speaker.model_path {
             Some(path) => {
                 use crate::speaker::embed::OnnxSpeakerEmbedder;
@@ -2814,7 +2824,7 @@ mod tests {
                     "openai": { "model": "gpt-x", "max_tokens": 512 }
                 },
                 "graphrag": { "embed_dims": 256, "ingest_interval_secs": 10, "recall_k": 9 },
-                "speaker": { "enabled": true, "match_threshold": 0.7, "min_margin": 0.08, "clear_margin": 0 },
+                "speaker": { "enabled": true, "match_threshold": 0.7, "min_margin": 0.08, "clear_margin": 0, "min_create_ms": 3000 },
                 "music": { "enabled": true, "duck_percent": 250, "group": "g1" },
                 "calendar": {
                     "subscriptions": [ { "url": "https://ex.com/a.ics" }, { "name": "Work", "url": "https://ex.com/w.ics" } ],
@@ -2872,6 +2882,8 @@ mod tests {
         assert_eq!(c.speaker.match_threshold, 0.7);
         assert_eq!(c.speaker.min_margin, 0.08);
         assert_eq!(c.speaker.clear_margin, 0.0);
+        assert_eq!(c.speaker.min_create_ms, 3000);
+        assert_eq!(c.speaker.min_speech_ms, 1200, "unset keys keep defaults");
         assert!(c.music.enabled);
         assert_eq!(c.music.duck_percent, 100); // capped at 100
                                                // Calendar: bare URL auto-named, explicit name kept.

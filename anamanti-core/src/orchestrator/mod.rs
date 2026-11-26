@@ -521,7 +521,11 @@ impl Pipeline {
         // 2. Identify who is speaking (and how sure we are), so memory writes/recall and
         //    the reply are per-person. A follow-up turn too short to identify may
         //    inherit the previous turn's identified speaker as tentative.
-        let speaker = self.identify_speaker(&voiced_pcm).await;
+        // A follow-up turn is almost always the person who just spoke: it may match a
+        // voiceprint but never mints a new one (TODO.md §5.1).
+        let speaker = self
+            .identify_speaker(&voiced_pcm, ctx.followup_depth == 0)
+            .await;
         let speaker = self.with_follow_up_continuity(speaker, ctx.followup_depth);
         log::info!(
             "speaker: {} {} ({:.2}{}{}{})",
@@ -1466,12 +1470,14 @@ impl Pipeline {
     /// Identify the turn's speaker via the [`SpeakerService`], degrading gracefully
     /// to the unknown speaker on any failure (or when identification is disabled).
     /// Runs on the blocking pool (feature extraction + embedding + SQLite + clip write).
-    async fn identify_speaker(&self, voiced_pcm: &[i16]) -> SpeakerContext {
+    /// `allow_create = false` (a follow-up turn) lets the voice match but never mint a
+    /// new anonymous cluster.
+    async fn identify_speaker(&self, voiced_pcm: &[i16], allow_create: bool) -> SpeakerContext {
         let Some(svc) = &self.speaker else {
             return SpeakerContext::unknown();
         };
         match svc
-            .identify_and_attribute_blocking(voiced_pcm.to_vec())
+            .identify_and_attribute_blocking(voiced_pcm.to_vec(), allow_create)
             .await
         {
             Ok(ctx) => ctx,

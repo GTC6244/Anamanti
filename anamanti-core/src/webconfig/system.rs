@@ -131,6 +131,7 @@ impl BootInfo {
                 "match_threshold": c.speaker.match_threshold,
                 "new_threshold": c.speaker.new_threshold,
                 "min_speech_ms": c.speaker.min_speech_ms,
+                "min_create_ms": c.speaker.min_create_ms,
                 "min_identify_ms": c.speaker.min_identify_ms,
                 "short_clip_margin": c.speaker.short_clip_margin,
                 "min_margin": c.speaker.min_margin,

@@ -214,7 +214,11 @@ predictable memory use and no GC pauses under the 1 GB limit.
   records provenance (`said_by_speaker_id`, resolution, confidence, `turn_id`). A
   **read-only short-clip match** (`speaker.min_identify_ms`, default 600 ms, plus
   `short_clip_margin`) identifies short questions like "who am I?" without creating or
-  updating voiceprints. Matching is also **household-relative**: each score is compared
+  updating voiceprints. A voice that matches nobody mints a new anonymous cluster only
+  from a clip of at least `speaker.min_create_ms` (default 2500 ms, stricter than the
+  1200 ms `min_speech_ms` that lets a clip train an existing voiceprint) and never on a
+  follow-up turn; otherwise it is `unknown`. New and unmatched voices log the nearest
+  voiceprint's cosine as their confidence, for calibration. Matching is also **household-relative**: each score is compared
   with the closest *other named* voiceprint (anonymous clusters are not rivals — they are
   often fragments of a known voice). A match that barely leads another person
   (`speaker.min_margin`, 0.05) is only tentative and trains nobody; a tentative-band match

@@ -262,10 +262,12 @@ function speakerBlock(r){
   if (cfg.new_threshold != null) th.push('new < ' + cfg.new_threshold);
   if (cfg.min_identify_ms != null) th.push('min identify ' + cfg.min_identify_ms + ' ms');
   if (cfg.min_speech_ms != null) th.push('min enroll ' + cfg.min_speech_ms + ' ms');
+  if (cfg.min_create_ms != null) th.push('min new voice ' + cfg.min_create_ms + ' ms');
   let h = '<div class="cv-section"><div class="section-label">Speaker</div><dl class="cv-spk">'
     + '<dt>Speaker</dt><dd>' + ui.speakerChip(t) + '</dd>'
     + '<dt>Resolution</dt><dd>' + (t.resolution ? ui.resolutionBadge(t) + ' <span class="hint">' + esc(RES_TEXT[t.resolution] || t.resolution) + '</span>' : '<span class="muted">not recorded</span>') + '</dd>'
-    + '<dt>Confidence</dt><dd>' + (conf != null && t.resolution !== 'unknown' ? '<span class="mono">' + esc(conf) + '</span>' : '<span class="muted">—</span>') + (th.length ? ' <span class="hint">(' + esc(th.join(', ')) + ')</span>' : '') + '</dd>'
+    // A new or unmatched voice records the nearest voiceprint's score (0 = nothing compared).
+    + '<dt>Confidence</dt><dd>' + (conf != null && (t.resolution !== 'unknown' || Number(t.confidence) !== 0) ? '<span class="mono">' + esc(conf) + '</span>' + (t.resolution === 'new' || t.resolution === 'unknown' ? ' <span class="hint">nearest voiceprint</span>' : '') : '<span class="muted">—</span>') + (th.length ? ' <span class="hint">(' + esc(th.join(', ')) + ')</span>' : '') + '</dd>'
     + '<dt>Inherited</dt><dd>' + (t.inherited ? 'Yes — too short to identify, carried over from the follow-up conversation' : '<span class="muted">No</span>') + '</dd>'
     + '<dt>Short clip</dt><dd>' + (t.short_clip ? 'Yes — matched by the read-only short-clip path' : '<span class="muted">No</span>') + '</dd>';
   if (r.speaker_override) {
